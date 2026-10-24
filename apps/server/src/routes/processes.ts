@@ -8,7 +8,7 @@ import { createStoryProcess, estimateStory, recoverStory, retryStory, runStory }
 import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
 import { describeProcess } from '../services/guidance.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
-import { applyChanges, checkStaleChanges, mergeBranch, pushBranches, runVerification } from '../services/repoWrite.ts';
+import { applyChanges, checkStaleChanges, mergeBranch, pushBranches, remoteInfo, runVerification } from '../services/repoWrite.ts';
 import { addManualItem, estimateExtraction, extractBacklogWithAI, importBacklogFromKnowledge, resetStory } from '../services/backlog.ts';
 import { backlogRepo } from '../db/workspace.ts';
 
@@ -117,6 +117,18 @@ export async function processRoutes(app: FastifyInstance) {
     const { slug, projectId, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ skipQa: z.boolean().optional() }).safeParse(req.body ?? {});
     try { return createStoryProcess(slug, projectId, id, { skipQa: body.success ? !!body.data.skipQa : false }); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+
+  // ---- Prueba manual: el propietario marca cada paso probado ----
+  app.post('/api/workspaces/:slug/processes/:id/manual-test', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ checks: z.array(z.boolean()).max(20), note: z.string().max(500).nullable().optional() }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'Datos no válidos' });
+    const procs = processesRepo(slug); const proc = procs.get(id);
+    if (!proc?.result?.manualTest) return reply.code(404).send({ error: 'Este proceso no tiene prueba manual.' });
+    const mt = proc.result.manualTest; const checks = mt.steps.map((_, i) => !!body.data.checks[i]);
+    procs.setResult(id, { ...proc.result, manualTest: { ...mt, checks, note: body.data.note === undefined ? mt.note : body.data.note } });
+    return withGuidance(slug, procs.get(id)!);
   });
 
   // ---- Rechazar el diff de un proceso (la historia vuelve a pendiente) / devolver una historia a pendiente ----
@@ -259,6 +271,8 @@ Proceso: ${proc.id}`);
     if (!body.data?.force) {
       if (!r?.applied) return reply.code(409).send({ error: 'La historia no tiene cambios aplicados. Ejecútala y aplica su diff, o ciérrala como «resuelta fuera del flujo».', code: 'not_applied' });
       if (!r.merged) return reply.code(409).send({ error: `Los cambios están en la rama ${r.applied.branch} pero no integrados en la rama principal. Intégralos desde el proceso antes de cerrar la historia.`, code: 'not_merged' });
+      if (r.manualTest && r.manualTest.checks.some(c => !c)) { const n = r.manualTest.checks.filter(Boolean).length; return reply.code(409).send({ error: `Falta probar la historia: ${n} de ${r.manualTest.steps.length} pasos marcados. Sigue la lista «Qué probar» en el proceso y marca cada paso; si no puedes probarla, ciérrala como «resuelta fuera del flujo» indicando por qué.`, code: 'not_tested' }); }
+      if (!r.published) { const repo = projectsRepo(slug).repository(item.projectId); const { remote } = repo ? await remoteInfo(repo.path) : { remote: null }; if (remote) return reply.code(409).send({ error: 'Falta publicar: pulsa «Publicar en el remoto» en el proceso antes de cerrar la historia.', code: 'not_published' }); }
     }
     backlogRepo(slug).setStatus(id, 'done');
     app.log.info({ story: item.storyId, force: !!body.data?.force, reason: body.data?.reason }, 'historia cerrada');

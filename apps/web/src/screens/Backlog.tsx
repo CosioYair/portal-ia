@@ -140,7 +140,7 @@ export function Backlog() {
                     <td className="med" style={{ verticalAlign: 'top' }}>{it.estimate ?? '—'}</td>
                     <td style={{ verticalAlign: 'top' }}><Chip tone={blocked && it.status === 'pending' ? 'err' : st.tone} xs dot={it.status === 'in_progress' ? 'pulse' : undefined}>{blocked && it.status === 'pending' ? `Espera ${it.dependsOn}` : st.label}</Chip>{it.status === 'review' && g && <div className="small muted" style={{ marginTop: 4, maxWidth: '24ch' }}>{g.phase}</div>}</td>
                     <td style={{ whiteSpace: 'nowrap', verticalAlign: 'top' }}>
-                      {it.status === 'review' && lp?.result?.merged && <button className="btn btn-primary btn-sm" onClick={() => closeStory(it, false)} disabled={busy}>Cerrar historia</button>}
+                      {it.status === 'review' && lp?.result?.merged && lp.guidance?.phase.startsWith('Paso 7') && <button className="btn btn-primary btn-sm" onClick={() => closeStory(it, false)} disabled={busy}>Cerrar historia</button>}
                       {it.status === 'review' && lp && <button className="btn btn-secondary btn-sm" style={{ marginLeft: 6 }} onClick={() => navigate(`/procesos/${lp.id}`)}>{lp.result?.applied ? 'Continuar' : 'Revisar diff'}</button>}
                       {it.status === 'review' && lp && !lp.result?.applied && <button className="btn btn-ghost btn-sm" style={{ marginLeft: 6 }} title="Rechaza el diff pendiente y deja la historia lista para ejecutarse de nuevo" onClick={() => resetItem(it)} disabled={busy}>Devolver a pendiente</button>}
                       {it.status === 'in_progress' && lp && <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/procesos/${lp.id}`)}>Ver proceso</button>}

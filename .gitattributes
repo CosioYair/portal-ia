@@ -1,0 +1,5 @@
+# Normaliza finales de línea en el repositorio (LF); el árbol de trabajo puede usar CRLF en Windows.
+* text=auto
+*.png binary
+*.jpg binary
+*.ico binary

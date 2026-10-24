@@ -39,6 +39,7 @@ export function Dashboard() {
   const active = agents.filter(a => a.status === 'active').length;
   const synthesis = docs.find(d => d.title.startsWith('Síntesis')) ?? null;
   const running = procs.filter(p => p.status === 'running');
+  const integrated = procs.filter(p => p.kind === 'story_execution' && p.result?.merged).slice(0, 6);
   const row = (a: Agent) => (
     <button key={a.id} className="arow" onClick={() => navigate(`/equipo/${a.id}`)}>
       <Avatar initials={a.template.initials} ws={a.scope === 'workspace'} />
@@ -90,6 +91,17 @@ export function Dashboard() {
             {project && !synthesis && <AssessmentCard projectId={project.id} hasRepo={!!project.repository} compact />}
 
             {project && <RepoCard project={project} onPick={() => setPicker(true)} onChanged={load} />}
+
+            {integrated.length > 0 && <section className="card">
+              <div className="card-h"><div><div className="h3">Novedades integradas</div><div className="small muted">Qué aportó cada historia integrada en la rama principal y en qué paso de cierre va.</div></div><Link className="lnk sm13" to="/actividad">Ver actividad</Link></div>
+              <div style={{ display: 'flex', flexDirection: 'column' }}>
+                {integrated.map(p => { const r = p.result!; const mt = r.manualTest; const tested = mt ? mt.checks.filter(Boolean).length : 0; const g = p.guidance; return <div key={p.id} style={{ padding: '12px 18px', borderTop: '1px solid #EEECE6', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><span style={{ fontWeight: 600 }}>{p.title}</span>{g && <Chip tone={g.tone === 'ok' ? 'ok' : g.tone === 'err' ? 'err' : 'warn'} xs>{g.phase}</Chip>}{mt && <Chip xs tone={tested === mt.steps.length ? 'ok' : ''}>probado {tested}/{mt.steps.length}</Chip>}</div>
+                  <div className="sm13" style={{ lineHeight: 1.55 }}>{r.userFacing ? <Markdown text={r.userFacing} /> : <span className="muted">Sin explicación para el propietario (historia anterior a v0.11). Archivos: {r.changes.slice(0, 5).map(c => c.path).join(', ')}.</span>}</div>
+                  <div><button className="lnk sm13" onClick={() => navigate(`/procesos/${p.id}`)}>Abrir el proceso → {g?.next}</button></div>
+                </div>; })}
+              </div>
+            </section>}
 
             <section className="card">
               <div className="card-h"><div><div className="h3">Backlog y solicitudes</div><div className="small muted">Historias del plan y peticiones tuyas. Se ejecutan una a una con tu autorización.</div></div><Link className="lnk sm13" to="/backlog">Abrir backlog</Link></div>

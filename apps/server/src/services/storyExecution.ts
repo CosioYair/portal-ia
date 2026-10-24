@@ -68,12 +68,16 @@ const FILE_FORMAT = `=== RESUMEN ===
 === ARCHIVO: ruta/a/borrar.ts | delete ===
 === FIN ARCHIVO ===
 === VERIFICAR: typecheck, test, build ===
+=== PARA EL PROPIETARIO ===
+(OBLIGATORIO, en lenguaje llano y sin tecnicismos, 3-8 líneas: qué cambia para quien usa el Portal y DÓNDE lo verá —menú, botón, pantalla o ruta exacta— tras integrar y reconstruir. Si no hay nada visible, dilo: "sin cambios visibles; afecta a X por dentro".)
+=== PRUEBA MANUAL ===
+(OBLIGATORIO: lista numerada de 3-10 pasos concretos que el propietario seguirá en el Portal para comprobar que la historia funciona. Cada paso: acción + resultado esperado. Ej.: "1. Abre Backlog y pulsa «Ejecutar» en una historia pendiente. Esperado: se abre el diálogo con la estimación.")
 === NOTAS ===
 (opcional: decisiones, riesgos, pasos manuales)
-Reglas: la acción es create, modify, patch o delete; PREFIERE patch para modificar archivos existentes (mucho más rápido y barato) y modify solo para archivos pequeños; cada archivo abre con "=== ARCHIVO:" y cierra con "=== FIN ARCHIVO ==="; nada fuera de estos bloques salvo RESUMEN, VERIFICAR y NOTAS. Para renombrar: delete del antiguo + create del nuevo. Puedes tocar cualquier archivo del repositorio salvo .git, data/, node_modules y archivos de secretos (.env reales, claves).`;
+Reglas: la acción es create, modify, patch o delete; PREFIERE patch para modificar archivos existentes (mucho más rápido y barato) y modify solo para archivos pequeños; cada archivo abre con "=== ARCHIVO:" y cierra con "=== FIN ARCHIVO ==="; nada fuera de estos bloques salvo RESUMEN, PARA EL PROPIETARIO, PRUEBA MANUAL, VERIFICAR y NOTAS. Para renombrar: delete del antiguo + create del nuevo. Puedes tocar cualquier archivo del repositorio salvo .git, data/, node_modules y archivos de secretos (.env reales, claves).`;
 
 /** Lee la respuesta del Desarrollador en formato de bloques; detecta un archivo cortado (abierto sin cierre). */
-export function parseFileBlocks(text: string): { summary: string; notes: string; verify: string[]; changes: RawChange[]; truncatedFile: string | null } {
+export function parseFileBlocks(text: string): { summary: string; notes: string; userFacing: string; manualSteps: string[]; verify: string[]; changes: RawChange[]; truncatedFile: string | null } {
   const changes: RawChange[] = [];
   const re = /^[ \t]*={3,}\s*ARCHIVO:\s*(.+?)\s*\|\s*(create|modify|patch|delete)\s*={3,}[ \t]*\r?\n?([\s\S]*?)(?:^[ \t]*={3,}\s*FIN ARCHIVO\s*={3,}[ \t]*$|(?![\s\S]))/gmi;
   let truncatedFile: string | null = null; let m: RegExpExecArray | null;
@@ -91,9 +95,10 @@ export function parseFileBlocks(text: string): { summary: string; notes: string;
     }
     changes.push({ path, action, content: action === 'delete' ? null : content.replace(/^\n/, '') });
   }
-  const section = (name: string) => text.match(new RegExp(`^[ \\t]*={3,}\\s*${name}\\s*={3,}[ \\t]*\\r?\\n([\\s\\S]*?)(?=^[ \\t]*={3,}\\s*(?:ARCHIVO:|VERIFICAR:|NOTAS|RESUMEN)|(?![\\s\\S]))`, 'mi'))?.[1]?.trim() ?? '';
+  const section = (name: string) => text.match(new RegExp(`^[ \\t]*={3,}\\s*${name}\\s*={3,}[ \\t]*\\r?\\n([\\s\\S]*?)(?=^[ \\t]*={3,}\\s*(?:ARCHIVO:|VERIFICAR:|NOTAS|RESUMEN|PARA EL PROPIETARIO|PRUEBA MANUAL)|(?![\\s\\S]))`, 'mi'))?.[1]?.trim() ?? '';
   const verify = (text.match(/^[ \t]*={3,}\s*VERIFICAR:\s*(.*?)\s*={3,}/mi)?.[1] ?? '').split(/[\s,]+/).map(v => v.trim().toLowerCase()).filter(Boolean);
-  return { summary: section('RESUMEN'), notes: section('NOTAS'), verify, changes, truncatedFile };
+  const manualSteps = section('PRUEBA MANUAL').split(/\r?\n/).map(l => l.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, '').trim()).filter(l => l.length > 3).slice(0, 12);
+  return { summary: section('RESUMEN'), notes: section('NOTAS'), userFacing: section('PARA EL PROPIETARIO'), manualSteps, verify, changes, truncatedFile };
 }
 
 /** Lee el veredicto de QA; si el JSON llegó cortado (max_tokens) rescata lo legible y lo señala. */
@@ -256,6 +261,8 @@ ${FILE_FORMAT}`;
     else result.implementationSummary = '';
     if (invalid.length) result.implementationSummary += `⚠ ${invalid.length} cambio(s) no aplicables (se muestran marcados y no se escribirán): ${invalid.map(c => c.path).join(', ')}.\n\n`;
     result.implementationSummary += parsed.summary + (parsed.notes ? `\n\n${parsed.notes}` : '');
+    result.userFacing = parsed.userFacing || null;
+    result.manualTest = parsed.manualSteps.length ? { steps: parsed.manualSteps, checks: parsed.manualSteps.map(() => false), note: null } : null;
     result.verifyCommands = parsed.verify.filter(c => ['typecheck', 'test', 'build'].includes(c));
     if (!result.verifyCommands.length) result.verifyCommands = ['typecheck'];
     procs.setResult(processId, result);
@@ -319,7 +326,7 @@ export async function recoverStory(slug: string, processId: string): Promise<Pro
   const planJson = proc.steps[0]?.outputMd ? extractJson(proc.steps[0].outputMd) : null;
   const plan: StoryPlan | null = planJson ? { summary: String(planJson.summary ?? ''), tasks: planJson.tasks ?? [], filesToRead: planJson.filesToRead ?? [], filesToChange: planJson.filesToChange ?? [], acceptance: planJson.acceptance ?? [], risks: planJson.risks ?? [] } : proc.result?.plan ?? null;
   const invalid = changes.filter(c => c.error);
-  const result: ExecutionResult = { plan, implementationSummary: `♻ Resultado recuperado sin IA de la salida del Desarrollador (el proceso había fallado por: ${proc.error ?? 'error posterior'}).${parsed.truncatedFile ? ` ⚠ La salida se cortó a mitad de «${parsed.truncatedFile}»; ese archivo no está incluido.` : ''}${invalid.length ? ` ⚠ ${invalid.length} cambio(s) no aplicables: ${invalid.map(c => c.path).join(', ')}.` : ''}\n\n${parsed.summary}${parsed.notes ? `\n\n${parsed.notes}` : ''}`, changes, verifyCommands: parsed.verify.filter(c => ['install', 'typecheck', 'test', 'build'].includes(c)).length ? parsed.verify : ['typecheck'], review: null, applied: null, verifications: [] };
+  const result: ExecutionResult = { plan, implementationSummary: `♻ Resultado recuperado sin IA de la salida del Desarrollador (el proceso había fallado por: ${proc.error ?? 'error posterior'}).${parsed.truncatedFile ? ` ⚠ La salida se cortó a mitad de «${parsed.truncatedFile}»; ese archivo no está incluido.` : ''}${invalid.length ? ` ⚠ ${invalid.length} cambio(s) no aplicables: ${invalid.map(c => c.path).join(', ')}.` : ''}\n\n${parsed.summary}${parsed.notes ? `\n\n${parsed.notes}` : ''}`, changes, verifyCommands: parsed.verify.filter(c => ['install', 'typecheck', 'test', 'build'].includes(c)).length ? parsed.verify : ['typecheck'], review: null, applied: null, verifications: [], userFacing: parsed.userFacing || null, manualTest: parsed.manualSteps.length ? { steps: parsed.manualSteps, checks: parsed.manualSteps.map(() => false), note: null } : null };
   procs.setResult(processId, result);
   procs.finish(processId, 'done', null);
   if (proc.backlogItemId) backlogRepo(slug).setStatus(proc.backlogItemId, 'review', processId);

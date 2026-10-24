@@ -7,7 +7,7 @@ import { createAgent, deleteAgent, draftAgent, estimateDraft } from '../services
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, projectsRepo } from '../db/workspace.ts';
 import { expandHome, gitInfo, isAllowed } from './fs.ts';
-import { initMainBranch, repoStatus, setRemote } from '../services/repoStatus.ts';
+import { initMainBranch, normalizeEol, repoStatus, setRemote } from '../services/repoStatus.ts';
 import { pushBranches } from '../services/repoWrite.ts';
 import { REPO_ROOT } from '../config.ts';
 
@@ -127,6 +127,12 @@ export async function workspaceRoutes(app: FastifyInstance) {
     const body = z.object({ authorized: z.literal(true), url: z.string().trim().min(8).max(300) }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere la URL del remoto y autorización explícita.' });
     try { const res = await setRemote(r.path, body.data.url); app.log.info({ path: r.path, url: res.url }, 'remoto configurado'); return res; } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+  app.post('/api/workspaces/:slug/projects/:projectId/repository/normalize-eol', async (req, reply) => {
+    const r = await withRepo(req, reply); if (!r) return;
+    const body = z.object({ authorized: z.literal(true) }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita.' });
+    try { const res = await normalizeEol(r.path); app.log.info({ path: r.path, ...res }, 'finales de línea normalizados'); return res; } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   app.post('/api/workspaces/:slug/projects/:projectId/repository/publish-main', async (req, reply) => {
     const r = await withRepo(req, reply); if (!r) return;

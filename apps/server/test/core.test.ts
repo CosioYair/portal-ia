@@ -344,7 +344,7 @@ test('flujo git: estado del repositorio, crear main, remoto, preflight del proye
   const r2 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/backlog/${it.id}/done`, payload: { force: true, reason: 'ya implementada en v0.8' } });
   assert.equal(r2.statusCode, 200); assert.equal(r2.json().status, 'done');
   const r3 = await app.inject({ method: 'GET', url: '/api/system/status' });
-  assert.equal(r3.statusCode, 200); assert.ok(/^0\.(8|9|10)/.test(r3.json().version));
+  assert.equal(r3.statusCode, 200); assert.ok(/^0\.(8|9|1\d)/.test(r3.json().version));
   await app.close();
 });
 
@@ -488,4 +488,29 @@ test('v0.10: devolver a pendiente / rechazar diff, replanteo por encargo, y prot
   // Aviso por borrado masivo en un modify completo
   fs.writeFileSync(path.join(dir, 'big.ts'), Array.from({ length: 60 }, (_, i) => `l${i}`).join('\n') + '\n');
   const big = annotateChanges(dir, [{ path: 'big.ts', action: 'modify', content: 'solo\n' }]); assert.match(big[0].warning!, /reemplazo completo/);
+});
+
+test('v0.11: sección PARA EL PROPIETARIO y PRUEBA MANUAL, regla de cierre con prueba, orden de cierre, EOL', async () => {
+  const { parseFileBlocks } = await import('../src/services/storyExecution.ts');
+  const { describeProcess } = await import('../src/services/guidance.ts');
+  const { repoStatus, normalizeEol } = await import('../src/services/repoStatus.ts');
+  const { annotateChanges, applyChanges } = await import('../src/services/repoWrite.ts');
+  const { execSync } = await import('node:child_process');
+  const p = parseFileBlocks('=== RESUMEN ===\nx\n=== PARA EL PROPIETARIO ===\nVerás un botón **Nuevo** en Backlog.\n=== ARCHIVO: a.ts | create ===\nexport {};\n=== FIN ARCHIVO ===\n=== PRUEBA MANUAL ===\n1. Abre Backlog. Esperado: botón Nuevo.\n2. Pulsa Nuevo. Esperado: se abre el diálogo.\n=== VERIFICAR: typecheck ===\n=== NOTAS ===\nn');
+  assert.equal(p.userFacing, 'Verás un botón **Nuevo** en Backlog.'); assert.deepEqual(p.manualSteps, ['Abre Backlog. Esperado: botón Nuevo.', 'Pulsa Nuevo. Esperado: se abre el diálogo.']); assert.equal(p.changes.length, 1); assert.equal(p.notes, 'n');
+  const base: any = { id: 'p', kind: 'story_execution', status: 'done', steps: [], spentUsd: 0, budgetUsd: 1, error: null, delegation: null };
+  const mt = { steps: ['a', 'b'], checks: [true, false], note: null };
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [], verifications: [], manualTest: mt } }).phase, /falta probar \(1 de 2/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [], verifications: [], manualTest: { ...mt, checks: [true, true] } } }).phase, /falta publicar/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: { remote: 'origin', branches: [] }, review: null, verifyCommands: [], verifications: [], manualTest: { ...mt, checks: [true, true] } } }).phase, /Listo para cerrar/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: null, merged: null, published: null, review: { approve: false, issues: ['x', 'y'], summary: 's', suggestedTests: [] }, verifyCommands: [], verifications: [] } }).phase, /QA NO aprueba \(2/);
+  // EOL: archivo CRLF, contenido nuevo LF → diff limpio y escritura en CRLF; cambios solo-EOL detectados y normalizados
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-eol-'));
+  fs.writeFileSync(path.join(dir, 'w.ts'), 'a\r\nb\r\n'); execSync('git init -q -b main && git -c core.autocrlf=false add -A && git -c user.email=t@t -c user.name=t commit -qm i', { cwd: dir });
+  const ann = annotateChanges(dir, [{ path: 'w.ts', action: 'modify', content: 'a\nb\nc\n' }]);
+  assert.equal(ann[0].before, 3); assert.ok(!(ann[0].diff ?? '').includes('-a'), 'las líneas iguales no aparecen como cambiadas por el CRLF');
+  await applyChanges(dir, 'portal-ia/hu-eol', ann, 'eol'); assert.equal(fs.readFileSync(path.join(dir, 'w.ts'), 'utf8'), 'a\r\nb\r\nc\r\n');
+  execSync('git checkout -q main', { cwd: dir }); fs.writeFileSync(path.join(dir, 'w.ts'), 'a\nb\n');
+  let st = await repoStatus(dir); assert.equal(st.dirty, true); assert.equal(st.eolOnly, true);
+  const n = await normalizeEol(dir); assert.ok(n.commit); st = await repoStatus(dir); assert.equal(st.dirty, false);
 });

@@ -307,6 +307,10 @@ export interface VerificationRun { command: string; exitCode: number | null; out
 export interface ExecutionResult {
   plan: StoryPlan | null;
   implementationSummary: string | null;
+  /** Explicación para el propietario, sin tecnicismos: qué verá tras integrar y reconstruir, y dónde (menú, botón, ruta). */
+  userFacing?: string | null;
+  /** Prueba manual paso a paso que el propietario sigue y marca; la historia no se cierra hasta que todos los pasos estén probados. */
+  manualTest?: { steps: string[]; checks: boolean[]; note: string | null } | null;
   changes: ProposedChange[];
   verifyCommands: string[];
   review: ReviewVerdict | null;
@@ -329,6 +333,8 @@ export interface RepoStatus {
   isPortalRuntime: boolean;
   branch: string | null; mainBranch: string | null; hasMain: boolean; hasCommits: boolean;
   dirty: boolean; dirtyFiles: number;
+  /** Los cambios sin confirmar son solo de finales de línea (CRLF/LF): se normalizan con un clic. */
+  eolOnly: boolean;
   remote: string | null; remoteUrl: string | null;
   /** Commits de main por delante / por detrás de origin/main según las referencias locales; -1 = main nunca publicada; null = sin remoto. */
   aheadOfRemote: number | null; behindRemote: number | null;

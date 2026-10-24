@@ -122,9 +122,10 @@ export function annotateChanges(repoPath: string, changes: RawChange[]): Propose
     const relDisplay = c.path.replace(/\\/g, '/');
     let rel: string;
     try { rel = safeRelPath(c.path); } catch (e: any) { return { path: relDisplay, action: c.action === 'delete' ? 'delete' : 'modify', content: null, diff: '', before: 0, after: 0, error: e.message } as ProposedChange; }
-    const existing = readRepoFile(repoPath, rel, 400_000);
+    const existingRaw = readRepoFile(repoPath, rel, 400_000);
+    const existing = existingRaw === null ? null : existingRaw.replace(/\r\n/g, '\n'); // comparar siempre en LF (Windows suele guardar CRLF)
     const before = existing ?? '';
-    let after = c.action === 'delete' ? '' : (c.content ?? '');
+    let after = c.action === 'delete' ? '' : (c.content ?? '').replace(/\r\n/g, '\n');
     let error: string | null = null;
     if (c.action === 'patch') {
       if (existing === null) error = 'El archivo a parchear no existe en el repositorio.';
@@ -172,7 +173,13 @@ export async function applyChanges(repoPath: string, branch: string, changes: Pr
       if (c.error) continue; // cambios inválidos: se muestran en la revisión pero no se escriben
       const abs = path.join(cwd, safeRelPath(c.path));
       if (c.action === 'delete') { if (fs.existsSync(abs)) fs.rmSync(abs); }
-      else { fs.mkdirSync(path.dirname(abs), { recursive: true }); fs.writeFileSync(abs, c.content ?? '', 'utf8'); }
+      else {
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        let content = c.content ?? '';
+        // Conservar el estilo de fin de línea del archivo existente (CRLF en Windows) para no ensuciar el diff.
+        try { if (fs.existsSync(abs) && /\r\n/.test(fs.readFileSync(abs, 'utf8').slice(0, 4000))) content = content.replace(/\r?\n/g, '\r\n'); } catch { /* se escribe tal cual */ }
+        fs.writeFileSync(abs, content, 'utf8');
+      }
       files.push(c.path);
     }
     await git(cwd, ['add', '-A']);

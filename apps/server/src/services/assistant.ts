@@ -13,6 +13,8 @@ import { createCompany, createProject } from './companies.ts';
 import { createStoryProcess, estimateStory } from './storyExecution.ts';
 import { createDelegation, estimateDelegation } from './delegation.ts';
 import { describeProcess } from './guidance.ts';
+import { systemStatus } from './system.ts';
+import { repoStatus } from './repoStatus.ts';
 
 /**
  * Asistente global (lo encarna el «Asistente de Empresa» del espacio interno).
@@ -74,21 +76,50 @@ export function assistantInfo() {
   return { agentId: a.id, name: a.config.name, model: a.config.model, provider: a.config.provider, monthlyLimitUsd: a.config.monthlyLimitUsd, spentThisMonthUsd: spent, estimatedPerMessageUsd: (7000 * p.inPerM + 900 * p.outPerM) / 1_000_000 };
 }
 
-function platformSnapshot(): string {
+/** Mapa de pantallas del Portal, para poder decir DÓNDE está cada cosa. */
+const SCREEN_MAP = `# Pantallas del Portal (menú izquierdo salvo que se indique)
+- Asistente (/asistente): este chat a pantalla completa; también como panel flotante «Asistente» abajo a la derecha en todas las pantallas.
+- Panel (/panel): contexto del proyecto, dirección, tarjeta Repositorio (estado git, crear main, remoto, publicar main, «Usar la carpeta de esta instalación»), backlog resumido, equipo.
+- Equipo de IA (/equipo): agentes, organigrama, crear agente especializado, configurar cada agente (modelo, límites).
+- Backlog (/backlog): historias por secciones (en curso/para revisar, pendientes por prioridad, completadas, descartadas), buscar/filtrar, «Ejecutar», «Devolver a pendiente», «Cerrar», aviso «Pendientes de tu decisión», «Nueva solicitud», «Encargo al equipo».
+- Actividad (/actividad): lista de procesos; cada proceso (/procesos/<id>) muestra pasos, costo, orientación «Siguiente paso», y para historias: Resumen (qué cambia y dónde, orden de cierre, prueba manual paso a paso), diff por archivo, revisión QA, Aplicar, Verificar, Integrar, Publicar, Rechazar, Recuperar/Volver a ejecutar.
+- Conocimiento (/conocimiento): documentos generados (evaluación, planes, encargos).
+- Autorizaciones (/autorizaciones, lanzador «Autorizaciones» abajo a la izquierda; HU-009): bandeja de decisiones pendientes.
+- Barra amarilla superior: aparece cuando el código del Portal cambió respecto al que arrancó; «Reconstruir y reiniciar» con autorización.
+Herramientas y MCP, Presupuestos, Organización: marcadas «próx.», aún no existen.`;
+
+async function platformSnapshot(): Promise<string> {
   const lines: string[] = [];
+  // Estado del propio Portal en marcha
+  try {
+    const sys = await systemStatus();
+    lines.push(`# Portal en marcha: versión ${sys.version}, arrancado ${sys.startedAt} con el commit ${sys.startCommit ?? '?'}; HEAD actual de la carpeta: ${sys.headCommit ?? '?'} (rama ${sys.branch ?? '?'}). ${sys.action === 'none' ? 'El código en marcha es el actual.' : `⚠ Hay código integrado que NO está en marcha (${sys.changedFiles.length} archivos${sys.stories.length ? `, historias ${sys.stories.join(', ')}` : ''}): el propietario debe pulsar «Reconstruir y reiniciar» en la barra amarilla; hasta entonces esas mejoras no se ven aunque estén en main.`}`);
+  } catch { /* sin git */ }
   for (const ws of workspacesRepo.list()) {
-    lines.push(`- Empresa «${ws.name}» (slug: ${ws.slug}${ws.kind === 'internal' ? ', espacio interno: aquí vive el propio Portal IA' : ''})`);
+    lines.push(`\n# Empresa «${ws.name}» (slug: ${ws.slug}${ws.kind === 'internal' ? ', espacio interno: aquí vive el propio Portal IA' : ''})`);
     const projects = projectsRepo(ws.slug); const agents = agentsRepo(ws.slug).list();
-    lines.push(`  agentes de espacio: ${agents.filter(a => a.scope === 'workspace').map(a => a.config.name).join(', ') || 'ninguno'}`);
+    lines.push(`Agentes de espacio: ${agents.filter(a => a.scope === 'workspace').map(a => `${a.config.name} (${a.key})`).join(', ') || 'ninguno'}`);
     for (const p of projects.list()) {
       const bl = backlogRepo(ws.slug).list(p.id); const procs = processesRepo(ws.slug).list(p.id); const repo = projects.repository(p.id);
       const foreign = repo && ws.kind === 'internal' && path.resolve(expandHome(repo.path)).toLowerCase() !== path.resolve(REPO_ROOT).toLowerCase();
-      lines.push(`  · Proyecto «${p.name}» (slug: ${p.slug}) — repositorio: ${repo ? `${repo.path} (rama ${repo.branch ?? '?'})${foreign ? ` ⚠ NO es la carpeta desde la que corre este Portal (${REPO_ROOT}): las historias están detenidas hasta que el propietario pulse «Usar la carpeta de esta instalación» en el Panel` : ws.kind === 'internal' ? ' ✓ es la carpeta de este Portal (automejora real)' : ''}` : 'NO registrado (sin él no se pueden ejecutar historias)'}; agentes: ${agents.filter(a => a.projectId === p.id).map(a => a.config.name).join(', ') || 'ninguno'}`);
-      lines.push(`    backlog (${bl.length}): ${bl.map(b => `${b.storyId} [${b.status}] ${b.title}`).join(' | ') || 'vacío'}`);
-      const review = procs.filter(x => x.kind === 'story_execution' && x.status === 'done' && x.result && !x.result.applied && x.result.changes.length);
+      let repoLine = repo ? `${repo.path}${foreign ? ` ⚠ NO es la carpeta desde la que corre este Portal (${REPO_ROOT}): historias detenidas hasta pulsar «Usar la carpeta de esta instalación» en el Panel` : ws.kind === 'internal' ? ' ✓ carpeta de este Portal (automejora real)' : ''}` : 'NO registrado (sin él no se pueden ejecutar historias)';
+      if (repo) { try { const st = await repoStatus(repo.path); repoLine += ` · rama activa ${st.branch ?? '?'}, principal ${st.mainBranch ?? 'NO EXISTE'}, ${st.dirty ? `${st.dirtyFiles} archivo(s) sin confirmar (bloquea aplicar)` : 'árbol limpio'}, remoto ${st.remoteUrl ?? 'sin configurar'}${st.aheadOfRemote === -1 ? ' (main nunca publicada)' : st.aheadOfRemote ? ` (${st.aheadOfRemote} commit(s) por publicar)` : ''}`; } catch { /* sin estado */ } }
+      lines.push(`## Proyecto «${p.name}» (slug: ${p.slug}) — repositorio: ${repoLine}; agentes: ${agents.filter(a => a.projectId === p.id).map(a => `${a.config.name} (${a.key})`).join(', ') || 'ninguno'}`);
+      const lastProc = (b: { id: string; lastProcessId: string | null }) => (b.lastProcessId ? procs.find(x => x.id === b.lastProcessId) : undefined) ?? procs.find(x => x.backlogItemId === b.id && x.kind === 'story_execution');
+      const open = bl.filter(b => b.status !== 'done' && b.status !== 'discarded');
+      lines.push(`Backlog abierto (${open.length} de ${bl.length}), en orden de prioridad:`);
+      for (const b of open) {
+        const lp = lastProc(b); const g = lp ? describeProcess(lp, { isPortalRepo: ws.kind === 'internal' }) : null; const mt = lp?.result?.manualTest;
+        lines.push(`- ${b.storyId} [${b.status}] ${b.title}${b.criterion ? ` — criterio: ${b.criterion.slice(0, 160)}` : ''}${g ? ` — proceso ${lp!.id}: ${g.phase}. Siguiente: ${g.next}` : ''}${mt ? ` Prueba manual: ${mt.checks.filter(Boolean).length}/${mt.steps.length} pasos.` : ''}`);
+      }
+      const done = bl.filter(b => b.status === 'done').slice(-6);
+      if (done.length) lines.push(`Completadas recientes: ${done.map(b => `${b.storyId} ${b.title}`).join(' | ')}`);
+      // Qué aportó cada historia integrada (para responder «dónde veo X»)
+      const integrated = procs.filter(x => x.kind === 'story_execution' && x.result?.merged).slice(0, 8);
+      if (integrated.length) lines.push(`Historias integradas en main y qué cambian para el propietario:\n${integrated.map(x => `  · ${x.title} (integrada ${x.result!.merged!.mergedAt.slice(0, 16)}${x.result!.published ? ', publicada' : ', SIN publicar'}${x.result!.manualTest ? `, prueba manual ${x.result!.manualTest.checks.filter(Boolean).length}/${x.result!.manualTest.steps.length}` : ''}): ${x.result!.userFacing ? x.result!.userFacing.replace(/\s+/g, ' ').slice(0, 400) : `sin explicación para el propietario; archivos: ${x.result!.changes.map(c => c.path).slice(0, 6).join(', ')}`}`).join('\n')}`);
       const encargos = procs.filter(x => x.kind === 'delegated_task');
-      if (encargos.length) lines.push(`    encargos: ${encargos.map(x => `${x.title} [${x.status}${x.delegation?.backlogOps.length ? `, ${x.delegation.backlogOps.length} propuestas al backlog${x.delegation.opsApplied ? ' aplicadas' : ' sin aplicar'}` : ''}]`).join(' | ')}`);
-      lines.push(`    procesos: ${procs.length} (${procs.filter(x => x.status === 'running').length} en ejecución; ${review.length} con cambios pendientes de aplicar${review.length ? ': ' + review.map(x => `${x.title} (id ${x.id})`).join(', ') : ''}); conocimiento: ${knowledgeRepo(ws.slug).list(p.id).length} documentos`);
+      if (encargos.length) lines.push(`Encargos: ${encargos.map(x => `${x.title} [${x.status}${x.delegation?.backlogOps.length ? `, ${x.delegation.backlogOps.length} propuestas ${x.delegation.opsApplied ? 'aplicadas' : 'SIN aplicar'}` : ''}]`).join(' | ')}`);
+      lines.push(`Procesos: ${procs.length} (${procs.filter(x => x.status === 'running').length} en ejecución); conocimiento: ${knowledgeRepo(ws.slug).list(p.id).length} documentos`);
     }
   }
   return lines.join('\n');
@@ -216,11 +247,13 @@ export async function chat(userText: string, images: { mediaType: string; data: 
   const system = `Eres «${a.config.name}», ${a.template.role.toLowerCase()} de Portal IA, una plataforma local para gestionar empresas operadas por agentes de IA. Hablas con el propietario.
 ${a.config.specialization}
 Qué es Portal IA: su primer cliente es él mismo; el proyecto «Desarrollo del Portal» del espacio interno tiene registrado el repositorio del propio Portal, y su equipo (Coordinador, Arquitecto, Desarrollador, Diseñador, QA) implementa mejoras ejecutando historias del backlog: producen un diff que el propietario aprueba y se aplica en una rama git. Por tanto, cualquier mejora del Portal (incluido este chat) se consigue añadiendo la historia y ejecutándola.
-Principios: respuestas breves y concretas en español; nunca inventes datos: usa solo el estado real de abajo; nada con costo sin autorización (tú propones, el propietario autoriza en la tarjeta); si algo no existe aún, dilo y conviértelo en historia.
+Principios: nunca inventes datos: usa solo el estado real de abajo (tienes visibilidad completa del Portal: versión en marcha, git, cada historia con su fase y siguiente paso, qué aportó cada historia integrada y dónde se ve); cuando el propietario pregunte «dónde veo X» o «ya está hecho», responde con el estado real y la pantalla exacta; si algo está integrado pero el Portal en marcha es anterior, dilo claramente; nada con costo sin autorización (tú propones, el propietario autoriza en la tarjeta); si algo no existe aún, dilo y conviértelo en historia o encargo.
+Formato de respuesta: claro y aireado. Empieza con una frase de respuesta directa; luego, si hace falta, 2-4 apartados cortos con título en negrita, viñetas de una línea y pasos numerados cuando haya un orden; sin párrafos largos; máximo ~200 palabras salvo que pidan detalle.
+${SCREEN_MAP}
 ${ACTION_SCHEMA}
 
 # Estado real de la plataforma
-${platformSnapshot()}`;
+${await platformSnapshot()}`;
   const prompt = `${history ? `# Conversación reciente\n${history}\n\n` : ''}Propietario: ${userText}${images.length ? `\n(adjunta ${images.length} imagen(es))` : ''}`;
   const startedAt = new Date().toISOString();
   try {

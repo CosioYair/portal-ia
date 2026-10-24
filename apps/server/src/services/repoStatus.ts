@@ -13,7 +13,7 @@ export async function repoStatus(repoPath: string): Promise<RepoStatus> {
   const cwd = repoRoot(repoPath);
   const isGit = fs.existsSync(path.join(cwd, '.git'));
   const isPortalRuntime = path.resolve(cwd).toLowerCase() === path.resolve(REPO_ROOT).toLowerCase();
-  if (!isGit) return { path: cwd, isGit: false, isPortalRuntime, branch: null, mainBranch: null, hasMain: false, hasCommits: false, dirty: false, dirtyFiles: 0, remote: null, remoteUrl: null, aheadOfRemote: null, behindRemote: null, headCommit: null, storyBranches: [] };
+  if (!isGit) return { path: cwd, isGit: false, isPortalRuntime, branch: null, mainBranch: null, hasMain: false, hasCommits: false, dirty: false, dirtyFiles: 0, eolOnly: false, remote: null, remoteUrl: null, aheadOfRemote: null, behindRemote: null, headCommit: null, storyBranches: [] };
   const branch = await git(cwd, ['symbolic-ref', '--short', '-q', 'HEAD']).catch(() => null) || null;
   const hasCommits = await git(cwd, ['rev-parse', '--verify', '-q', 'HEAD']).then(() => true).catch(() => false);
   const all = (await git(cwd, ['branch', '--format=%(refname:short)']).catch(() => '')).split('\n').map(s => s.trim()).filter(Boolean);
@@ -21,6 +21,9 @@ export async function repoStatus(repoPath: string): Promise<RepoStatus> {
   const main = hasMain ? await mainBranch(cwd) : null;
   const porcelain = await git(cwd, ['status', '--porcelain']).catch(() => '');
   const dirtyFiles = porcelain ? porcelain.split('\n').filter(Boolean).length : 0;
+  // ¿Los cambios sin confirmar son solo finales de línea (CRLF/LF)? Entonces se pueden normalizar con un clic.
+  let eolOnly = false;
+  if (dirtyFiles > 0 && !porcelain.split('\n').some(l => /^\?\?/.test(l))) { const real = await git(cwd, ['diff', '--ignore-all-space', '--ignore-blank-lines', '--numstat']).catch(() => 'x'); eolOnly = real.trim() === ''; }
   const { remote, url } = await remoteInfo(cwd);
   let ahead: number | null = null, behind: number | null = null;
   if (main && remote) {
@@ -29,7 +32,7 @@ export async function repoStatus(repoPath: string): Promise<RepoStatus> {
     else { ahead = -1; } // la rama principal nunca se publicó
   }
   const headCommit = hasCommits ? await git(cwd, ['rev-parse', '--short', 'HEAD']).catch(() => null) : null;
-  return { path: cwd, isGit, isPortalRuntime, branch, mainBranch: main, hasMain, hasCommits, dirty: dirtyFiles > 0, dirtyFiles, remote, remoteUrl: url, aheadOfRemote: ahead, behindRemote: behind, headCommit, storyBranches: all.filter(b => b.startsWith('portal-ia/')) };
+  return { path: cwd, isGit, isPortalRuntime, branch, mainBranch: main, hasMain, hasCommits, dirty: dirtyFiles > 0, dirtyFiles, eolOnly, remote, remoteUrl: url, aheadOfRemote: ahead, behindRemote: behind, headCommit, storyBranches: all.filter(b => b.startsWith('portal-ia/')) };
 }
 
 /** Crea la rama principal `main` a partir de la rama activa (repositorios que nacieron sin main) y la deja activa. */
@@ -54,4 +57,17 @@ export async function setRemote(repoPath: string, url: string): Promise<{ remote
   const { remote } = await remoteInfo(cwd);
   if (remote) await git(cwd, ['remote', 'set-url', remote, clean]); else await git(cwd, ['remote', 'add', 'origin', clean]);
   return { remote: remote ?? 'origin', url: clean };
+}
+
+/** Normaliza finales de línea: fija .gitattributes (text=auto), renormaliza el índice y confirma. Deja el árbol limpio. */
+export async function normalizeEol(repoPath: string): Promise<{ commit: string | null; files: number }> {
+  const cwd = repoRoot(repoPath);
+  const ga = path.join(cwd, '.gitattributes');
+  if (!fs.existsSync(ga) || !/text=auto/.test(fs.readFileSync(ga, 'utf8'))) fs.appendFileSync(ga, `${fs.existsSync(ga) ? '\n' : ''}# Normaliza finales de línea en el repositorio (LF); el árbol de trabajo puede usar CRLF en Windows.\n* text=auto\n*.png binary\n*.jpg binary\n*.ico binary\n`);
+  await git(cwd, ['add', '--renormalize', '.']);
+  await git(cwd, ['add', '.gitattributes']);
+  const staged = (await git(cwd, ['diff', '--cached', '--name-only'])).split('\n').filter(Boolean);
+  if (!staged.length) return { commit: null, files: 0 };
+  await git(cwd, ['-c', 'user.name=Portal IA', '-c', 'user.email=portal-ia@local', 'commit', '-q', '-m', 'Normaliza finales de línea (.gitattributes text=auto)']);
+  return { commit: await git(cwd, ['rev-parse', '--short', 'HEAD']), files: staged.length };
 }

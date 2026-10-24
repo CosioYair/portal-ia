@@ -4,6 +4,7 @@ import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, KV, Notice } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
+import { StoryOverview } from './StoryOverview.tsx';
 
 /** Resultado de la ejecución de una historia: plan, cambios propuestos (diff), revisión QA, aplicar en rama y verificar. */
 export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: Process) => void }) {
@@ -24,7 +25,6 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
 
   const apply = async () => { if (!authApply) return; setBusy('apply'); setErr(null); try { const p = await api.applyChanges(slug, proc.id, branch.trim() || undefined); onChange(p); flash(`Cambios aplicados en la rama ${p.result?.applied?.branch} · commit ${p.result?.applied?.commit}`); } catch (e: any) { setErr(e.message); } finally { setBusy(null); setAuthApply(false); } };
   const verify = async (cmd: 'install' | 'typecheck' | 'test' | 'build') => { if (!authVerify) return; setBusy(cmd); setErr(null); try { const p = await api.verifyProcess(slug, proc.id, cmd); onChange(p); const last = p.result?.verifications.at(-1); flash(last?.exitCode === 0 ? `${last.command}: correcto` : `${last?.command}: terminó con código ${last?.exitCode}`, last?.exitCode === 0 ? 'ok' : 'err'); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } };
-  const markDone = async () => { if (!proc.backlogItemId) return; setBusy('done'); setGitErr(null); try { await api.markStoryDone(slug, proc.backlogItemId); flash('Historia marcada como completada'); } catch (e: any) { setGitErr(e.message); } finally { setBusy(null); } };
 
   const added = r.changes.reduce((a, c) => a + Math.max(0, c.after - c.before), 0);
   const applicable = r.changes.filter(c => !c.error).length;
@@ -33,6 +33,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {proc.status === 'done' && <StoryOverview proc={proc} onChange={onChange} onClose={async () => { if (!proc.backlogItemId) return; await api.markStoryDone(slug, proc.backlogItemId); }} />}
       {err && busy === null && !canApply && <Notice kind="err">{err}</Notice>}
       {r.plan && <section className="card"><div className="card-h"><div className="h3">Plan técnico</div><Chip xs>{r.plan.tasks.length} tareas</Chip></div>
         <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -62,11 +63,11 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
         </div>
       </section>}
 
-      {r.review && <section className="card"><div className="card-h"><div className="h3">Revisión de calidad</div><Chip tone={r.review.approve ? 'ok' : 'warn'} xs>{r.review.approve ? 'aprobado' : 'con observaciones'}</Chip></div>
-        <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <p className="med" style={{ lineHeight: 1.5 }}>{r.review.summary}</p>
-          {r.review.issues.length > 0 && <div><div className="eyebrow" style={{ marginBottom: 6 }}>Observaciones</div><ul style={{ paddingLeft: 20 }}>{r.review.issues.map((t, i) => <li key={i}>{t}</li>)}</ul></div>}
-          {r.review.suggestedTests.length > 0 && <div><div className="eyebrow" style={{ marginBottom: 6 }}>Pruebas sugeridas</div><ul style={{ paddingLeft: 20 }}>{r.review.suggestedTests.map((t, i) => <li key={i}>{t}</li>)}</ul></div>}
+      {r.review && <section className="card"><div className="card-h"><div><div className="h3">Revisión de calidad</div><div className="small muted">Lo que QA revisó del diff antes de que decidas</div></div><Chip tone={r.review.approve ? 'ok' : 'warn'} xs>{r.review.approve ? 'aprobado' : `no aprueba · ${r.review.issues.length} observaciones`}</Chip></div>
+        <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <Notice kind={r.review.approve ? 'ok' : 'warn'}><div><strong>{r.review.approve ? 'QA aprueba el diff.' : 'QA no aprueba el diff tal cual.'}</strong> <Markdown text={r.review.summary} /></div></Notice>
+          {r.review.issues.length > 0 && <div><div className="eyebrow" style={{ marginBottom: 8 }}>Observaciones ({r.review.issues.length})</div><ol style={{ margin: 0, paddingLeft: 22, display: 'flex', flexDirection: 'column', gap: 10, lineHeight: 1.55 }}>{r.review.issues.map((t, i) => <li key={i}>{t}</li>)}</ol></div>}
+          {r.review.suggestedTests.length > 0 && <div><div className="eyebrow" style={{ marginBottom: 8 }}>Pruebas que QA sugiere</div><ul style={{ margin: 0, paddingLeft: 22, display: 'flex', flexDirection: 'column', gap: 8, lineHeight: 1.55 }}>{r.review.suggestedTests.map((t, i) => <li key={i}>{t}</li>)}</ul></div>}
         </div></section>}
 
       {r.rejected && !r.applied && <Notice kind="warn"><strong>Diff rechazado</strong> ({new Date(r.rejected.at).toLocaleString()}): {r.rejected.reason}. La historia volvió a pendiente; puedes ejecutarla de nuevo desde Backlog o con «Volver a ejecutar».</Notice>}
@@ -96,8 +97,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
           <label className="ck"><input className="cb" type="checkbox" checked={authVerify} onChange={e => setAuthVerify(e.target.checked)} /><span>Autorizo ejecutar comandos <span className="mono">npm</span> permitidos (install, typecheck, test, build) en la carpeta del repositorio. Nada más se ejecuta.</span></label>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {(['install', 'typecheck', 'test', 'build'] as const).map(c => <button key={c} className="btn btn-secondary btn-sm" onClick={() => verify(c)} disabled={!authVerify || busy !== null}>{busy === c ? <span className="spin" /> : null}{c === 'install' ? 'npm install' : `npm run ${c}`}</button>)}
-            {proc.backlogItemId && <button className="btn btn-primary btn-sm" onClick={markDone} disabled={busy !== null || !r.merged} title={r.merged ? '' : 'Primero integra la rama en la rama principal'}>{Icon.check()}Marcar historia como completada</button>}
-            {proc.backlogItemId && !r.merged && <span className="small muted" style={{ alignSelf: 'center' }}>Se puede cerrar cuando los cambios estén integrados en la rama principal (sección de abajo).</span>}
+
           </div>
           {r.verifications.map((v, i) => <div key={i} className="card" style={{ background: '#FAF9F6' }}>
             <div className="card-h" style={{ padding: '10px 14px' }}><span className="mono sm13">{v.command}</span><Chip tone={v.exitCode === 0 ? 'ok' : 'err'} xs>{v.exitCode === 0 ? 'correcto' : `código ${v.exitCode ?? '?'}`} · {(v.durationMs / 1000).toFixed(1)} s</Chip></div>
