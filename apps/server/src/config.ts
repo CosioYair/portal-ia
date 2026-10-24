@@ -19,10 +19,19 @@ function resolveDataDir(v: string | undefined): string {
   return path.isAbsolute(raw) ? raw : path.resolve(REPO_ROOT, raw);
 }
 
+/** Rama principal configurada. Valida el nombre (sin espacios, sin «..», sin guion inicial) y cae a «main» si no es válido. */
+function resolveMainBranch(v: string | undefined): string {
+  const raw = v && v.trim() ? v.trim() : 'main';
+  const ok = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw) && !raw.includes('..') && !raw.endsWith('/') && !raw.endsWith('.lock');
+  return ok ? raw : 'main';
+}
+
 export const config = {
   port: Number(process.env.PORTAL_PORT ?? 4310),
   host: process.env.PORTAL_HOST ?? '127.0.0.1',
   dataDir: resolveDataDir(process.env.PORTAL_DATA_DIR),
+  /** Rama destino de toda integración (HU-143). Nunca se deduce de la rama activa. */
+  mainBranch: resolveMainBranch(process.env.PORTAL_MAIN_BRANCH),
   webDist: path.join(REPO_ROOT, 'apps/web/dist')
 };
 
