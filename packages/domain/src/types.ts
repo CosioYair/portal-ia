@@ -368,3 +368,19 @@ export interface GitActionableError {
   cause: string;
   solution: string;
 }
+
+// ---- HU-144 · Reinicio / apagado del servidor ----
+/**
+ * Resultado de «Reiniciar» el servidor desde el Portal.
+ * - `restarting`: hay un supervisor externo que relanzará el proceso en el mismo puerto.
+ * - `shutdown`: el proceso termina por completo (puerto libre) y el propietario debe arrancarlo con `commands`.
+ */
+export interface ServerLifecycleOutcome {
+  mode: 'restarting' | 'shutdown';
+  port: number;
+  /** Directorio absoluto donde ejecutar `commands`. */
+  cwd: string;
+  /** Comandos exactos y en orden (vacío si el reinicio es automático). */
+  commands: string[];
+  reason: string;
+}
