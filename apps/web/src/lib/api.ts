@@ -68,7 +68,7 @@ export const api = {
   createWorkspace: (name: string) => request<Workspace>('/api/workspaces', { method: 'POST', body: JSON.stringify({ name }) }),
   createProject: (slug: string, name: string, description?: string) => request<Project>(`/api/workspaces/${slug}/projects`, { method: 'POST', body: JSON.stringify({ name, description }) }),
   assistant: () => request<{ info: AssistantInfo; messages: AssistantMessage[] }>('/api/assistant'),
-  sendAssistant: (text: string, images: AssistantImage[] = []) => request<{ user: AssistantMessage; assistant: AssistantMessage; info: AssistantInfo }>('/api/assistant/messages', { method: 'POST', body: JSON.stringify({ text, images: images.length ? images : undefined }) }),
+  sendAssistant: (text: string, images: AssistantImage[] = [], files: AssistantAttachment[] = []) => request<{ user: AssistantMessage; assistant: AssistantMessage; info: AssistantInfo }>('/api/assistant/messages', { method: 'POST', body: JSON.stringify({ text, images: images.length ? images : undefined, files: files.length ? files : undefined }) }),
   resolveAssistantProposal: (messageId: string, processId: string, status: 'done' | 'failed', detail?: string) => request<{ message: AssistantMessage }>(`/api/assistant/messages/${messageId}/resolve`, { method: 'POST', body: JSON.stringify({ processId, status, detail }) }),
   clearAssistant: () => request<{ ok: boolean }>('/api/assistant/messages', { method: 'DELETE' }),
   addBacklogItem: (slug: string, projectId: string, input: { title: string; description?: string; criterion?: string; ownerKey?: string | null; estimate?: 'S' | 'M' | 'L' | null }) => request<BacklogItem>(`/api/workspaces/${slug}/projects/${projectId}/backlog`, { method: 'POST', body: JSON.stringify(input) }),

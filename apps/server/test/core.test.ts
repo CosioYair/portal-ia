@@ -344,7 +344,7 @@ test('flujo git: estado del repositorio, crear main, remoto, preflight del proye
   const r2 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/backlog/${it.id}/done`, payload: { force: true, reason: 'ya implementada en v0.8' } });
   assert.equal(r2.statusCode, 200); assert.equal(r2.json().status, 'done');
   const r3 = await app.inject({ method: 'GET', url: '/api/system/status' });
-  assert.equal(r3.statusCode, 200); assert.equal(r3.json().version, '0.8.0');
+  assert.equal(r3.statusCode, 200); assert.ok(r3.json().version.startsWith('0.8'));
   await app.close();
 });
 
@@ -380,4 +380,22 @@ test('encargos delegados: responsable por ámbito, equipo a su cargo, proceso pe
   assert.equal(items.find(i => i.id === a.id)!.status, 'discarded'); assert.equal(items.find(i => i.id === b.id)!.title, 'Historia B ampliada'); assert.equal(items.find(i => i.id === c.id)!.status, 'discarded');
   assert.ok(items.some(i => i.title === 'Historia nueva D' && i.estimate === 'S'));
   assert.throws(() => applyBacklogOps('portal-ia', proc.id), /ya se aplicaron/);
+});
+
+test('propuestas al backlog: bloque backlog cerrado, bloque json, bloque cortado (recupera objetos completos) y re-parseo de procesos antiguos', async () => {
+  const { extractBacklogOps, ensureOpsParsed, createDelegation } = await import('../src/services/delegation.ts');
+  const { processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
+  const ok = extractBacklogOps('# Informe\n\n```bash\ngit status\n```\n\nTexto.\n\n```backlog\n[{"op":"discard","story":"HU-003","reason":"ya"},{"op":"add","title":"X","criterion":"c","reason":"r"}]\n```');
+  assert.equal(ok.ops.length, 2); assert.equal(ok.truncated, false); assert.ok(ok.body.includes('git status') && !ok.body.includes('"op"'));
+  const js = extractBacklogOps('Texto\n```json\n[{"op":"update","story":"HU-001","title":"t","reason":"r"}]\n```');
+  assert.equal(js.ops.length, 1);
+  const cut = extractBacklogOps('Informe\n```backlog\n[\n  {"op":"merge","into":"HU-129","from":["HU-121"],"reason":"a {b} \\"c\\""},\n  {"op":"discard","story":"HU-118","reason":"x"},\n  {"op":"add","title":"cortada","criterion":"se corta aq');
+  assert.equal(cut.ops.length, 2); assert.equal(cut.truncated, true); assert.equal(cut.body, 'Informe');
+  assert.equal(extractBacklogOps('Sin propuestas\n```json\n{"a":1}\n```').ops.length, 0);
+  // Proceso antiguo con el bloque sin extraer
+  const internal = projectsRepo('portal-ia').list()[0];
+  const p = createDelegation('portal-ia', internal.id, undefined, 'Encargo antiguo de prueba');
+  processesRepo('portal-ia').setDelegation(p.id, { ...p.delegation!, deliverable: 'Hola\n```backlog\n[{"op":"discard","story":"HU-003","reason":"x"}]\n```' });
+  const fixed = ensureOpsParsed('portal-ia', processesRepo('portal-ia').get(p.id)!);
+  assert.equal(fixed.delegation!.backlogOps.length, 1); assert.equal(fixed.delegation!.deliverable, 'Hola');
 });

@@ -4,7 +4,7 @@ import { workspacesRepo } from '../db/platform.ts';
 import { knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { cancelProcess, clearCancel, createAssessment, estimateAssessment, isCancelled, runAssessment } from '../services/assessment.ts';
 import { createStoryProcess, estimateStory, runStory } from '../services/storyExecution.ts';
-import { applyBacklogOps, createDelegation, estimateDelegation, runDelegation } from '../services/delegation.ts';
+import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
 import { applyChanges, mergeBranch, pushBranches, runVerification } from '../services/repoWrite.ts';
 import { addManualItem, estimateExtraction, extractBacklogWithAI, importBacklogFromKnowledge } from '../services/backlog.ts';
 import { backlogRepo } from '../db/workspace.ts';
@@ -29,12 +29,13 @@ export async function processRoutes(app: FastifyInstance) {
 
   app.get('/api/workspaces/:slug/projects/:projectId/processes', async (req, reply) => {
     const { slug, projectId } = req.params as any; if (!guard(slug, reply)) return;
-    return processesRepo(slug).list(projectId);
+    return processesRepo(slug).list(projectId).map(p => p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p);
   });
 
   app.get('/api/workspaces/:slug/processes/:id', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    return processesRepo(slug).get(id) ?? reply.code(404).send({ error: 'Proceso no encontrado' });
+    const p = processesRepo(slug).get(id); if (!p) return reply.code(404).send({ error: 'Proceso no encontrado' });
+    return p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p;
   });
 
   // Autorización explícita: aquí y solo aquí empieza el consumo de IA.

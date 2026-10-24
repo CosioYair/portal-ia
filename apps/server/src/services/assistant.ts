@@ -176,7 +176,7 @@ export function performActions(actionsReq: any[]): AssistantAction[] {
   return actions;
 }
 
-export async function chat(userText: string, images: { mediaType: string; data: string; name?: string }[] = []): Promise<{ user: AssistantMessage; assistant: AssistantMessage }> {
+export async function chat(userText: string, images: { mediaType: string; data: string; name?: string }[] = [], files: AssistantAttachment[] = []): Promise<{ user: AssistantMessage; assistant: AssistantMessage }> {
   const a = assistantAgent();
   const info = assistantInfo();
   if (info.spentThisMonthUsd >= info.monthlyLimitUsd) throw Object.assign(new Error(`El Asistente alcanzó su límite mensual (${info.monthlyLimitUsd.toFixed(2)} USD). Puedes ampliarlo en su ficha de Equipo de IA.`), { statusCode: 409 });
@@ -184,7 +184,7 @@ export async function chat(userText: string, images: { mediaType: string; data: 
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
   if (!cred || prow.status !== 'connected') throw Object.assign(new Error('El proveedor del Asistente no está conectado.'), { statusCode: 409 });
   const models: ModelInfo[] = JSON.parse(prow.models_json);
-  const attachments: AssistantAttachment[] = images.map((im, i) => ({ name: im.name ?? `imagen-${i + 1}`, mediaType: im.mediaType, bytes: Math.round(im.data.length * 0.75) }));
+  const attachments: AssistantAttachment[] = [...images.map((im, i) => ({ name: im.name ?? `imagen-${i + 1}`, mediaType: im.mediaType, bytes: Math.round(im.data.length * 0.75) })), ...files];
   const user = assistantRepo.add({ role: 'user', content: userText, actions: [], attachments, tokensIn: 0, tokensOut: 0, costUsd: 0, model: null });
   const history = assistantRepo.list(16).filter(m => m.id !== user.id).slice(-12).map(m => `${m.role === 'user' ? 'Propietario' : 'Asistente'}: ${m.content.slice(0, 1200)}${m.actions.length ? ` [acciones: ${m.actions.map(x => `${x.type}:${x.status}`).join(', ')}]` : ''}`).join('\n');
   const system = `Eres «${a.config.name}», ${a.template.role.toLowerCase()} de Portal IA, una plataforma local para gestionar empresas operadas por agentes de IA. Hablas con el propietario.

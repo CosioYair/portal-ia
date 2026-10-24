@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type ChangeEvent } from 'react';
+import React, { useEffect, useRef, useState, type ClipboardEvent, type ChangeEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { api, type AssistantAction, type AssistantImage, type AssistantInfo, type AssistantMessage } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
@@ -7,16 +7,22 @@ import { Chip, Icon, KV, Notice } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
 
 const MAX_IMAGES = 4;
+const MAX_FILES = 6;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_TEXT_CHARS = 120_000;
 const ACCEPTED = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+const TEXT_EXT = /\.(txt|md|markdown|json|csv|tsv|log|yaml|yml|xml|html?|css|js|mjs|cjs|ts|tsx|jsx|py|sql|sh|ps1|ini|toml|env\.example)$/i;
+const ACCEPT_ATTR = [...ACCEPTED, '.txt', '.md', '.markdown', '.json', '.csv', '.tsv', '.log', '.yaml', '.yml', '.xml', '.html', '.css', '.js', '.ts', '.tsx', '.jsx', '.py', '.sql', '.sh', '.ini', '.toml'].join(',');
 
-type Pending = AssistantImage & { preview: string; bytes: number };
+type Pending = (AssistantImage & { kind: 'image'; preview: string; bytes: number }) | { kind: 'text'; name: string; text: string; bytes: number; mediaType: string };
+const isTextFile = (f: File) => f.type.startsWith('text/') || f.type === 'application/json' || TEXT_EXT.test(f.name);
+function readText(f: File): Promise<string> { return new Promise((resolve, reject) => { const r = new FileReader(); r.onerror = () => reject(new Error(`No se pudo leer ${f.name}`)); r.onload = () => resolve(String(r.result)); r.readAsText(f); }); }
 
 function fileToPending(f: File): Promise<Pending> {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
     r.onerror = () => reject(new Error(`No se pudo leer ${f.name}`));
-    r.onload = () => { const url = String(r.result); resolve({ mediaType: f.type, data: url.slice(url.indexOf(',') + 1), name: f.name || 'imagen', preview: url, bytes: f.size }); };
+    r.onload = () => { const url = String(r.result); resolve({ kind: 'image', mediaType: f.type, data: url.slice(url.indexOf(',') + 1), name: f.name || 'imagen', preview: url, bytes: f.size }); };
     r.readAsDataURL(f);
   });
 }
@@ -92,6 +98,8 @@ export function AssistantChat({ compact = false, onInfo, onPending }: { compact?
   const [error, setError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   useEffect(() => { api.assistant().then(r => { setInfo(r.info); onInfo?.(r.info); setMsgs(r.messages); }).catch(e => setError(e.message)); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -100,18 +108,24 @@ export function AssistantChat({ compact = false, onInfo, onPending }: { compact?
   useEffect(() => { onPending?.(pendingCount); }, [pendingCount, onPending]);
 
   const addFiles = async (files: FileList | File[]) => {
-    const list = Array.from(files).filter(f => f.type.startsWith('image/'));
+    const list = Array.from(files);
     if (!list.length) return;
     const errs: string[] = []; const next = [...images];
     for (const f of list) {
-      if (next.length >= MAX_IMAGES) { errs.push(`Máximo ${MAX_IMAGES} imágenes por mensaje.`); break; }
-      if (!ACCEPTED.includes(f.type)) { errs.push(`${f.name}: formato no soportado (PNG, JPEG, WebP o GIF).`); continue; }
-      if (f.size > MAX_IMAGE_BYTES) { errs.push(`${f.name}: supera 5 MB.`); continue; }
-      try { next.push(await fileToPending(f)); } catch (e: any) { errs.push(e.message); }
+      if (f.type.startsWith('image/')) {
+        if (next.filter(x => x.kind === 'image').length >= MAX_IMAGES) { errs.push(`Máximo ${MAX_IMAGES} imágenes por mensaje.`); continue; }
+        if (!ACCEPTED.includes(f.type)) { errs.push(`${f.name}: formato de imagen no soportado (PNG, JPEG, WebP o GIF).`); continue; }
+        if (f.size > MAX_IMAGE_BYTES) { errs.push(`${f.name}: supera 5 MB.`); continue; }
+        try { next.push(await fileToPending(f)); } catch (e: any) { errs.push(e.message); }
+      } else if (isTextFile(f)) {
+        if (next.filter(x => x.kind === 'text').length >= MAX_FILES) { errs.push(`Máximo ${MAX_FILES} archivos de texto por mensaje.`); continue; }
+        try { let text = await readText(f); if (text.length > MAX_TEXT_CHARS) { text = text.slice(0, MAX_TEXT_CHARS) + '\n… (recortado a 120 000 caracteres)'; errs.push(`${f.name}: se recortó a 120 000 caracteres.`); } next.push({ kind: 'text', name: f.name, text, bytes: f.size, mediaType: f.type || 'text/plain' }); } catch (e: any) { errs.push(e.message); }
+      } else errs.push(`${f.name}: solo se admiten imágenes (PNG, JPEG, WebP, GIF) y archivos de texto (.md, .txt, .json, .csv, código…).`);
     }
     setImages(next);
     if (errs.length) setError(errs.join(' ')); else setError(null);
   };
+  const onDrop = (e: React.DragEvent) => { e.preventDefault(); setDragging(false); if (e.dataTransfer?.files?.length) void addFiles(e.dataTransfer.files); };
   const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(e.clipboardData?.files ?? []).filter(f => f.type.startsWith('image/'));
     if (files.length) { e.preventDefault(); void addFiles(files); }
@@ -120,17 +134,21 @@ export function AssistantChat({ compact = false, onInfo, onPending }: { compact?
 
   const send = async () => {
     const t = text.trim(); if ((!t && !images.length) || busy) return;
-    const content = t || `(${images.length} imagen(es) adjunta(s))`;
-    const imgs = images;
+    const imgs = images.filter((x): x is Extract<Pending, { kind: 'image' }> => x.kind === 'image');
+    const texts = images.filter((x): x is Extract<Pending, { kind: 'text' }> => x.kind === 'text');
+    const base = t || (imgs.length ? `(${imgs.length} imagen(es) adjunta(s))` : 'Revisa el archivo adjunto.');
+    // Los archivos de texto viajan dentro del mensaje, delimitados, para que el modelo los lea íntegros.
+    const content = base + texts.map(f => `\n\n--- Adjunto «${f.name}» ---\n${f.text}\n--- Fin de «${f.name}» ---`).join('');
+    const all = images;
     setBusy(true); setError(null); setText(''); setImages([]);
-    setMsgs(m => [...m, { id: 'tmp', role: 'user', content, actions: [], attachments: imgs.map(i => ({ name: i.name ?? 'imagen', mediaType: i.mediaType, bytes: i.bytes })), tokensIn: 0, tokensOut: 0, costUsd: 0, model: null, createdAt: new Date().toISOString() }]);
+    setMsgs(m => [...m, { id: 'tmp', role: 'user', content, actions: [], attachments: all.map(i => ({ name: i.name ?? 'adjunto', mediaType: i.mediaType, bytes: i.bytes })), tokensIn: 0, tokensOut: 0, costUsd: 0, model: null, createdAt: new Date().toISOString() }]);
     try {
-      const r = await api.sendAssistant(content, imgs.map(({ mediaType, data, name }) => ({ mediaType, data, name })));
+      const r = await api.sendAssistant(content, imgs.map(({ mediaType, data, name }) => ({ mediaType, data, name })), texts.map(f => ({ name: f.name, mediaType: f.mediaType, bytes: f.bytes })));
       setMsgs(m => [...m.filter(x => x.id !== 'tmp'), r.user, r.assistant]); setInfo(r.info); onInfo?.(r.info);
       if (r.assistant.actions.some(a => a.status === 'done' && (a.type === 'create_company' || a.type === 'create_project'))) await refreshStructure();
       const done = r.assistant.actions.filter(a => a.status === 'done' && a.type !== 'info').length; const pend = r.assistant.actions.filter(a => a.status === 'pending').length;
       if (done || pend) flash([done ? `${done} acción(es) realizadas` : '', pend ? `${pend} propuesta(s) esperan tu autorización` : ''].filter(Boolean).join(' · '));
-    } catch (e: any) { setError(e.message); setMsgs(m => m.filter(x => x.id !== 'tmp')); setText(t); setImages(imgs); }
+    } catch (e: any) { setError(e.message); setMsgs(m => m.filter(x => x.id !== 'tmp')); setText(t); setImages(all); }
     finally { setBusy(false); }
   };
   const replaceMsg = (m: AssistantMessage) => setMsgs(list => list.map(x => x.id === m.id ? m : x));
@@ -145,9 +163,11 @@ export function AssistantChat({ compact = false, onInfo, onPending }: { compact?
           {!compact && <div className="small muted" style={{ marginTop: 6 }}>Ejemplos: «añade una historia para que el chat soporte adjuntar imágenes y ejecútala» · «ejecuta la siguiente historia pendiente del portal» · «crea la empresa Panadería Luna con un proyecto Tienda en línea» · «¿qué historias quedan por revisar?»</div>}
         </div></div>}
         {msgs.map(m => <div key={m.id} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start', gap: 6 }}>
-          <div style={{ maxWidth: 760, padding: '10px 14px', borderRadius: 12, background: m.role === 'user' ? '#1A1B1E' : '#FAF9F6', color: m.role === 'user' ? '#fff' : '#1A1B1E', border: m.role === 'user' ? 0 : '1px solid #E5E3DC' }}>
-            {m.role === 'user' ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content}</span> : <Markdown text={m.content} />}
-            {m.attachments?.length > 0 && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>{m.attachments.map((at, i) => <span key={i} className="chip chip-xs" style={{ background: 'rgba(255,255,255,.12)', color: '#fff', border: 0 }}>🖼 {at.name} · {Math.round(at.bytes / 1024)} KB</span>)}</div>}
+          <div className="msg-bubble" style={{ padding: '10px 14px', borderRadius: 12, background: m.role === 'user' ? '#1A1B1E' : '#FAF9F6', color: m.role === 'user' ? '#fff' : '#1A1B1E', border: m.role === 'user' ? 0 : '1px solid #E5E3DC' }}>
+            {m.role === 'user'
+              ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content.length > 900 && !expanded[m.id] ? m.content.slice(0, 900) + '…' : m.content}{m.content.length > 900 && <> <button type="button" className="lnk" style={{ color: '#9BD5CC' }} onClick={() => setExpanded(x => ({ ...x, [m.id]: !x[m.id] }))}>{expanded[m.id] ? 'ver menos' : `ver todo (${m.content.length.toLocaleString()} caracteres)`}</button></>}</span>
+              : <Markdown text={m.content} />}
+            {m.attachments?.length > 0 && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>{m.attachments.map((at, i) => <span key={i} className="chip chip-xs" style={{ background: 'rgba(255,255,255,.12)', color: '#fff', border: 0 }}>{at.mediaType.startsWith('image/') ? '🖼' : '📄'} {at.name} · {Math.max(1, Math.round(at.bytes / 1024))} KB</span>)}</div>}
           </div>
           {m.actions.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', maxWidth: 760 }}>
             {m.actions.map((a, i) => a.status === 'pending' && (a.type === 'propose_execution' || a.type === 'propose_apply' || a.type === 'propose_delegation')
@@ -159,18 +179,18 @@ export function AssistantChat({ compact = false, onInfo, onPending }: { compact?
         {busy && <div style={{ display: 'flex', gap: 8, alignItems: 'center' }} className="muted sm13"><span className="spin" /> El asistente está pensando…</div>}
         <div ref={endRef} />
       </div>
-      <form style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: compact ? 10 : 12, borderTop: '1px solid #EEECE6' }} onSubmit={e => { e.preventDefault(); void send(); }}>
+      <form style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: compact ? 10 : 12, borderTop: '1px solid #EEECE6', background: dragging ? '#E3F1EF' : undefined }} onSubmit={e => { e.preventDefault(); void send(); }} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
         {images.length > 0 && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {images.map((im, i) => <div key={i} style={{ position: 'relative', width: 72, height: 72, borderRadius: 8, overflow: 'hidden', border: '1px solid #E5E3DC', background: '#FAF9F6' }}>
+          {images.map((im, i) => im.kind === 'image' ? <div key={i} style={{ position: 'relative', width: 72, height: 72, borderRadius: 8, overflow: 'hidden', border: '1px solid #E5E3DC', background: '#FAF9F6' }}>
             <img src={im.preview} alt={im.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
             <button type="button" className="xbtn" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label={`Quitar ${im.name}`} style={{ position: 'absolute', top: 2, right: 2, background: '#fff', borderRadius: 999, width: 22, height: 22, display: 'grid', placeItems: 'center' }}>{Icon.x(12)}</button>
-          </div>)}
-          <span className="small muted" style={{ alignSelf: 'center' }}>{images.length}/{MAX_IMAGES} · las imágenes se envían al modelo del asistente (aumentan el costo del mensaje)</span>
+          </div> : <span key={i} className="chip" style={{ height: 'auto', padding: '4px 6px 4px 10px', gap: 8 }}>📄 {im.name} · {im.text.length.toLocaleString()} caracteres<button type="button" className="xbtn" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label={`Quitar ${im.name}`}>{Icon.x(12)}</button></span>)}
+          <span className="small muted" style={{ alignSelf: 'center' }}>Los adjuntos se envían al modelo del asistente y aumentan el costo del mensaje.</span>
         </div>}
         <div style={{ display: 'flex', gap: 8 }}>
-          <input ref={fileRef} type="file" accept={ACCEPTED.join(',')} multiple hidden onChange={onPick} />
-          <button type="button" className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy || images.length >= MAX_IMAGES} title="Adjuntar imagen (también puedes pegarla con Ctrl+V)" aria-label="Adjuntar imagen">📎</button>
-          <textarea className="input" value={text} onChange={e => setText(e.target.value)} onPaste={onPaste} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} placeholder={compact ? 'Pídele algo al asistente…' : 'Escribe tu petición o pega una captura… (Enter envía · Shift+Enter salto de línea)'} aria-label="Mensaje para el asistente" style={{ minHeight: 48, height: 48, flex: 1 }} disabled={busy} />
+          <input ref={fileRef} type="file" accept={ACCEPT_ATTR} multiple hidden onChange={onPick} />
+          <button type="button" className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy} title="Adjuntar imagen o archivo de texto (también puedes pegar o arrastrar)" aria-label="Adjuntar archivo">📎</button>
+          <textarea className="input" value={text} onChange={e => setText(e.target.value)} onPaste={onPaste} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} placeholder={compact ? 'Pídele algo al asistente… (arrastra o pega archivos)' : 'Escribe tu petición, pega una captura o arrastra un archivo .md/.txt… (Enter envía · Shift+Enter salto de línea)'} aria-label="Mensaje para el asistente" style={{ minHeight: 48, height: 48, flex: 1 }} disabled={busy} />
           <button className="btn btn-primary" type="submit" disabled={busy || (!text.trim() && !images.length)}>{Icon.arrow()}{compact ? '' : 'Enviar'}</button>
         </div>
         {compact && info && <div className="small muted" style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>≈ {fmtUsd(info.estimatedPerMessageUsd)} por mensaje · mes {fmtUsd(info.spentThisMonthUsd)} de {fmtUsd(info.monthlyLimitUsd)}</span><button type="button" className="lnk" onClick={clear}>limpiar</button></div>}

@@ -9,15 +9,17 @@ export async function assistantRoutes(app: FastifyInstance) {
   // Enviar un mensaje = una llamada real al modelo del Asistente. El propio envío es la autorización (costo visible en la UI).
   app.post('/api/assistant/messages', async (req, reply) => {
     const body = z.object({
-      text: z.string().trim().min(1).max(6000),
+      text: z.string().trim().min(1, 'El mensaje está vacío.').max(400_000, 'El mensaje supera los 400 000 caracteres.'),
       images: z.array(z.object({
-        mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp', 'image/gif']),
-        data: z.string().min(1).max(7_000_000), // base64 (≈5 MB por imagen)
+        mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp', 'image/gif'], { message: 'Formato de imagen no soportado (PNG, JPEG, WebP o GIF).' }),
+        data: z.string().min(1).max(7_000_000, 'Una imagen supera 5 MB.'), // base64 (≈5 MB por imagen)
         name: z.string().max(200).optional()
-      })).max(4).optional()
+      })).max(4, 'Máximo 4 imágenes por mensaje.').optional(),
+      /** Adjuntos de texto ya incorporados al mensaje por el cliente; aquí solo se registran. */
+      files: z.array(z.object({ name: z.string().max(200), mediaType: z.string().max(100), bytes: z.number().int().nonnegative() })).max(6).optional()
     }).safeParse(req.body);
-    if (!body.success) return reply.code(400).send({ error: 'Mensaje no válido (texto vacío, más de 4 imágenes, o alguna imagen supera 5 MB / formato no soportado: PNG, JPEG, WebP, GIF).' });
-    try { const r = await chat(body.data.text, body.data.images ?? []); app.log.info({ cost: r.assistant.costUsd.toFixed(4), actions: r.assistant.actions.length, images: body.data.images?.length ?? 0 }, 'asistente respondió'); return { ...r, info: assistantInfo() }; }
+    if (!body.success) return reply.code(400).send({ error: `Mensaje no válido: ${body.error.issues.map(i => i.message).join(' ')}` });
+    try { const r = await chat(body.data.text, body.data.images ?? [], body.data.files ?? []); app.log.info({ cost: r.assistant.costUsd.toFixed(4), actions: r.assistant.actions.length, images: body.data.images?.length ?? 0 }, 'asistente respondió'); return { ...r, info: assistantInfo() }; }
     catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   // Marca una propuesta (ejecutar historia / aplicar cambios) como resuelta tras autorizarla desde la tarjeta del chat.

@@ -63,6 +63,14 @@ export function Backlog() {
     if (force) { const reason = prompt(`Cerrar ${it.storyId} como resuelta fuera del flujo (sin ejecutarla ni integrar cambios). Indica brevemente por qué:`); if (reason === null) return; setBusy(true); try { await api.markStoryDone(ws.slug, it.id, { force: true, reason: reason.trim() || 'resuelta fuera del flujo' }); flash(`${it.storyId} cerrada`); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } return; }
     setBusy(true); try { await api.markStoryDone(ws.slug, it.id); flash(`${it.storyId} completada`); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); }
   };
+  const decisions = procs.flatMap(p => {
+    if (p.kind === 'delegated_task' && p.status === 'done' && p.delegation && p.delegation.backlogOps.length && !p.delegation.opsApplied) return [{ id: p.id, text: `${p.title}: ${p.delegation.backlogOps.length} propuestas al backlog esperan tu aprobación.`, cta: 'Revisar y aplicar' }];
+    if (p.kind === 'story_execution' && p.status === 'done' && p.result) {
+      if (p.result.changes.length && !p.result.applied) return [{ id: p.id, text: `${p.title}: diff de ${p.result.changes.length} archivo(s) listo para revisar.`, cta: 'Revisar diff' }];
+      if (p.result.applied && !p.result.merged) return [{ id: p.id, text: `${p.title}: aplicada en ${p.result.applied.branch}, falta integrar en la rama principal.`, cta: 'Integrar' }];
+    }
+    return [];
+  });
   const owner = (k: string | null) => agents.find(a => a.key === k);
   const running = procs.find(p => p.status === 'running');
   const lastProc = (it: BacklogItem) => procs.find(p => p.id === it.lastProcessId) ?? procs.find(p => p.backlogItemId === it.id);
@@ -87,6 +95,9 @@ export function Backlog() {
 
         {aiOffer && <Notice kind="warn"><strong>No encontré historias estructuradas en «{aiOffer.source}».</strong> El {aiOffer.byAgent ?? 'Coordinador del Proyecto'} puede extraerlas con una llamada ({aiOffer.model && <span className="mono">{aiOffer.model}</span>}, costo estimado <strong>≈ {fmtUsd(aiOffer.estimatedUsd)}</strong>). <button className="btn btn-primary btn-sm" style={{ marginLeft: 8 }} onClick={() => importPlan(true)} disabled={busy}>{busy ? 'Extrayendo…' : 'Autorizar y extraer con IA'}</button></Notice>}
         {!project?.repository && <Notice kind="warn">Para ejecutar historias hace falta el repositorio registrado (los agentes leen el código y proponen cambios sobre él). <Link className="lnk" to="/panel">Registrarlo desde el panel</Link>.</Notice>}
+        {decisions.length > 0 && <Notice kind="warn"><div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}><strong>Pendientes de tu decisión ({decisions.length})</strong>
+          {decisions.map(d => <div key={d.id} style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><span>{d.text}</span><button className="btn btn-primary btn-sm" onClick={() => navigate(`/procesos/${d.id}`)}>{d.cta}</button></div>)}
+        </div></Notice>}
         {running && <Notice kind="info">Hay un proceso en ejecución: <button className="lnk" onClick={() => navigate(`/procesos/${running.id}`)}>{running.title}</button>. Las historias se ejecutan de una en una.</Notice>}
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>

@@ -13,7 +13,51 @@ import { addManualItem } from './backlog.ts';
  * propietario aplica con un clic. No todo se resuelve con historias de desarrollo: esto es el resto del trabajo.
  */
 const MAX_CONSULTS = 3;
-const TOKENS = { triage: 2000, consult: 3000, synthesis: 7000 } as const;
+const TOKENS = { triage: 2000, consult: 3000, synthesis: 12000 } as const;
+const isTruncated = (stop: string | null) => stop === 'max_tokens' || stop === 'length';
+
+/**
+ * Extrae las propuestas al backlog de un entregable: bloque ```backlog (o ```json con objetos {op}), cerrado o no.
+ * Si el JSON llegó cortado, recupera los objetos completos y señala el corte. Devuelve también el texto sin el bloque.
+ */
+export function extractBacklogOps(text: string): { ops: BacklogOp[]; body: string; truncated: boolean } {
+  const re = /```(\w*)[ \t]*\r?\n([\s\S]*?)(?:\r?\n[ \t]*```|$(?![\s\S]))/g; // cualquier cerca; se filtra por nombre o contenido
+  let m: RegExpExecArray | null; let found: { start: number; end: number; raw: string; closed: boolean } | null = null;
+  while ((m = re.exec(text))) {
+    if (!m[0].length) { re.lastIndex++; continue; }
+    const lang = (m[1] ?? '').toLowerCase(); const raw = m[2]; const closed = /```\s*$/.test(m[0]);
+    if (lang === 'backlog' || ((lang === 'json' || lang === '') && /^\s*\[\s*\{\s*"op"\s*:/.test(raw))) { found = { start: m.index, end: m.index + m[0].length, raw, closed }; if (lang === 'backlog') break; }
+  }
+  if (!found) return { ops: [], body: text.trim(), truncated: false };
+  let ops: any[] = []; let truncated = !found.closed;
+  try { const v = JSON.parse(found.raw); ops = Array.isArray(v) ? v : []; }
+  catch {
+    truncated = true;
+    // Recuperar objetos completos de un array cortado: equilibrio de llaves fuera de cadenas.
+    const src = found.raw; let depth = 0, start = -1, inStr = false, esc = false;
+    for (let i = 0; i < src.length; i++) {
+      const ch = src[i];
+      if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
+      if (ch === '"') inStr = true;
+      else if (ch === '{') { if (depth === 0) start = i; depth++; }
+      else if (ch === '}') { depth--; if (depth === 0 && start >= 0) { try { ops.push(JSON.parse(src.slice(start, i + 1))); } catch { /* objeto ilegible */ } start = -1; } }
+    }
+  }
+  const valid = ops.filter((o: any) => o && typeof o.op === 'string' && ['add', 'update', 'discard', 'merge', 'reprioritize'].includes(o.op)) as BacklogOp[];
+  const body = (text.slice(0, found.start) + text.slice(found.end)).trim();
+  return { ops: valid, body, truncated };
+}
+
+/** Procesos antiguos: si el entregable aún contiene el bloque de propuestas sin extraer, lo extrae y lo persiste. */
+export function ensureOpsParsed(slug: string, proc: Process): Process {
+  const d = proc.delegation;
+  if (!d || d.backlogOps.length || !d.deliverable || !/```(backlog|json)/i.test(d.deliverable)) return proc;
+  const { ops, body, truncated } = extractBacklogOps(d.deliverable);
+  if (!ops.length) return proc;
+  d.backlogOps = ops; d.deliverable = body + (truncated ? '\n\n> ⚠ La respuesta se cortó por longitud: se recuperaron las propuestas completas; puede faltar alguna.' : '');
+  processesRepo(slug).setDelegation(proc.id, d);
+  return processesRepo(slug).get(proc.id)!;
+}
 
 export function pickLeadAgent(slug: string, projectId: string | null, ref: any): Agent {
   const all = agentsRepo(slug).list();
@@ -100,7 +144,7 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
   involved.forEach(id => agents.setStatus(id, 'active'));
   let finalStatus: Process['status'] = 'done'; let finalError: string | null = null;
 
-  const call = async (stepIdx: number, system: string, user: string, maxTokens: number) => {
+  const call = async (stepIdx: number, system: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[]) => {
     const step = proc.steps[stepIdx]; const agent = agents.get(step.agentId)!;
     const providerId = agent.config.provider as ProviderId;
     const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
@@ -111,9 +155,10 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
     if (cur.spentUsd + stepEst * 0.5 > cur.budgetUsd) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${cur.spentUsd.toFixed(2)} de ${cur.budgetUsd.toFixed(2)} USD).`), { budget: true });
     procs.stepStart(step.id); const startedAt = new Date().toISOString();
     try {
-      const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
+      const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history });
       const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
-      procs.stepFinish(step.id, 'done', { tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, outputMd: res.text });
+      const prev = procs.get(processId)!.steps[stepIdx]; const acc = history?.length ? prev : { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+      procs.stepFinish(step.id, 'done', { tokensIn: acc.inputTokens + res.inputTokens, tokensOut: acc.outputTokens + res.outputTokens, cost: acc.costUsd + cost, outputMd: history?.length ? `${history.filter(h => h.role === 'assistant').map(h => h.content).join('')}${res.text}` : res.text });
       procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'delegated_step', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
       log({ step: step.title, tokens: res.inputTokens + res.outputTokens, cost: cost.toFixed(4) }, 'paso completado');
@@ -171,24 +216,31 @@ Responde en markdown breve y útil (máx. 500 palabras), con recomendaciones con
       }
       // 3 · Entregable y propuestas
       if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
-      const synRes = await call(proc.steps.length - 1, sys(lead, slug), `Encargo del propietario: «${d.request}»
+      const synPrompt = `Encargo del propietario: «${d.request}»
 Tu validación previa: ${d.triage.understanding}
 ${d.consulted.length ? `# Aportaciones de tu equipo\n${d.consulted.map(c => `## ${c.agentName} — pregunta: ${c.question}\n${c.answer}`).join('\n\n')}` : ''}
 
 # Estado real
 ${ctx}
 
-Entrega el resultado del encargo en markdown claro para el propietario (diagnóstico, decisiones, y qué cambia). Si el encargo implica cambios en el backlog (replantear, fusionar, descartar, repriorizar, añadir), NO los apliques: propónlos al final en UN bloque \`\`\`backlog con un array JSON de operaciones, usando exactamente estos formatos:
+Entrega el resultado del encargo en markdown claro y conciso para el propietario (diagnóstico, decisiones, qué cambia; máx. ~900 palabras). Si el encargo implica cambios en el backlog (replantear, fusionar, descartar, repriorizar, añadir), NO los apliques: propónlos al final en UN bloque \`\`\`backlog con un array JSON de operaciones (máx. 30; "reason" en una frase), usando exactamente estos formatos:
 {"op":"add","title":string,"criterion":string,"description":string,"estimate":"S"|"M"|"L","dependsOn":"HU-xxx"|null,"reason":string}
 {"op":"update","story":"HU-xxx","title"?:string,"criterion"?:string,"description"?:string,"estimate"?:"S"|"M"|"L","dependsOn"?:"HU-xxx"|null,"reason":string}
 {"op":"discard","story":"HU-xxx","reason":string}
 {"op":"merge","into":"HU-xxx","from":["HU-yyy"],"title"?:string,"criterion"?:string,"reason":string}
 {"op":"reprioritize","order":["HU-xxx", ...] (ids en el nuevo orden, solo los que cambian de sitio o todos),"reason":string}
-Usa solo ids de historias que existen en el estado real. Si no hay cambios al backlog, omite el bloque.`, TOKENS.synthesis);
-      const m = synRes.text.match(/```backlog\s*([\s\S]*?)```/i);
-      let ops: BacklogOp[] = [];
-      if (m) { try { const v = JSON.parse(m[1]); ops = Array.isArray(v) ? v.filter((o: any) => o && typeof o.op === 'string') : []; } catch { /* bloque ilegible: sin propuestas */ } }
-      d.deliverable = synRes.text.replace(/```backlog\s*[\s\S]*?```/i, '').trim();
+Usa solo ids de historias que existen en el estado real. Cierra el bloque con \`\`\`. Si no hay cambios al backlog, omite el bloque.`;
+      let synRes = await call(proc.steps.length - 1, sys(lead, slug), synPrompt, TOKENS.synthesis);
+      let synText = synRes.text;
+      for (let i = 0; i < 2 && isTruncated(synRes.stopReason); i++) {
+        if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
+        log({ step: 'Entregable', continuation: i + 1 }, 'respuesta cortada: se pide continuación');
+        synRes = await call(proc.steps.length - 1, sys(lead, slug), 'Tu respuesta anterior se cortó por el límite de longitud. Continúa EXACTAMENTE desde el último carácter que escribiste, sin repetir nada, sin saludos, manteniendo el formato (si estabas dentro del bloque backlog, continúa el JSON y ciérralo con ```).', TOKENS.synthesis, [{ role: 'user', content: synPrompt }, { role: 'assistant', content: synText }]);
+        synText += synRes.text;
+      }
+      const ex = extractBacklogOps(synText);
+      const ops = ex.ops;
+      d.deliverable = ex.body + (ex.truncated ? '\n\n> ⚠ La respuesta se cortó por longitud: se recuperaron las propuestas completas; puede faltar alguna.' : '');
       d.backlogOps = ops;
       const doc = knowledge.add({ projectId: proc.projectId, title: `Encargo · ${d.request.slice(0, 70)}${d.request.length > 70 ? '…' : ''}`, body: `# Encargo\n${d.request}\n\n# Responsable\n${lead.config.name}\n\n${d.consulted.length ? `# Consultas al equipo\n${d.consulted.map(c => `## ${c.agentName}\n**Pregunta:** ${c.question}\n\n${c.answer}`).join('\n\n')}\n\n` : ''}# Entregable\n${d.deliverable}${ops.length ? `\n\n# Propuestas al backlog (${ops.length})\n${ops.map(o => '- ' + JSON.stringify(o)).join('\n')}` : ''}`, authorAgentId: lead.id, authorAgentName: lead.config.name, processId });
       d.knowledgeDocId = doc.id;
