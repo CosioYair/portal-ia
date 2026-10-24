@@ -13,6 +13,7 @@ import {
   ProcessOutputSchema,
   RequestCreateInputSchema,
   RequestOutputSchema,
+  RuntimeLocationCheckSchema,
   UsageOutputSchema,
   UsageRecordInputSchema,
   isApiError,
@@ -288,4 +289,45 @@ test('ApiErrorSchema valida el error estructurado y es coherente con isApiError'
   assert.equal(validate(ApiErrorSchema, { ...valido, step: 'otro' }).ok, false);
   assert.equal(isApiError({ ...valido, step: 'otro' }), false);
   assert.equal(validate(ApiErrorSchema, { ...valido, extra: 1 }).ok, false);
+});
+
+test('RuntimeLocationCheck: valida todos los estados y rechaza estados o campos desconocidos', () => {
+  const base = {
+    estado: 'coincide',
+    ejecucion: { ruta: '/home/ana/portal', rama: 'main', headDesacoplado: false },
+    registrado: { ruta: '/home/ana/portal', rama: 'main' },
+    historiasCompletadas: [
+      { id: 'HU-1', titulo: 'Inicial', sha: 'a'.repeat(40), contenida: true },
+      { id: 'HU-2', titulo: 'Sin SHA', sha: null, contenida: null }
+    ],
+    pasos: [],
+    verificadoEn: FECHA
+  };
+  for (const estado of [
+    'coincide',
+    'carpeta-distinta',
+    'rama-distinta',
+    'carpeta-y-rama-distintas',
+    'no-verificable'
+  ]) {
+    assert.equal(validate(RuntimeLocationCheckSchema, { ...base, estado }).ok, true, estado);
+  }
+  assert.equal(validate(RuntimeLocationCheckSchema, { ...base, estado: 'otro' }).ok, false);
+  assert.equal(validate(RuntimeLocationCheckSchema, { ...base, extra: 1 }).ok, false);
+  assert.equal(validate(RuntimeLocationCheckSchema, { ...base, verificadoEn: 'ayer' }).ok, false);
+
+  const desacoplado = {
+    ...base,
+    estado: 'no-verificable',
+    ejecucion: { ruta: '/home/ana/portal', rama: null, headDesacoplado: true },
+    motivoNoVerificable: 'HEAD desacoplado'
+  };
+  assert.equal(validate(RuntimeLocationCheckSchema, desacoplado).ok, true);
+  assert.equal(
+    validate(RuntimeLocationCheckSchema, {
+      ...base,
+      historiasCompletadas: [{ id: 'HU-1', titulo: 'x', sha: 'a'.repeat(40), contenida: 'si' }]
+    }).ok,
+    false
+  );
 });

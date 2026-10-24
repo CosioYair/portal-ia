@@ -80,3 +80,40 @@ La historia **no se puede cerrar** sin visto bueno, integración y publicación 
 4. Si todo es correcto, da el visto bueno y autoriza la integración y la publicación. Si no, indica qué corregir y se sigue en la misma rama.
 5. El equipo integra la rama en `main`, publica `main` y cierra la historia.
 6. Al cerrar, el Portal muestra: «Cambia a main y actualízalo localmente (`git checkout main && git pull`) antes de empezar la siguiente historia». Hazlo y confirma antes de empezar la siguiente.
+
+## El Portal corre desde otra carpeta o rama (HU-124)
+
+Si el equipo aplica los cambios en una carpeta o rama distinta de la que tú estás ejecutando, no verás esos cambios aunque las historias figuren como completadas. Es lo que ocurrió con HU-122: se completó, pero el Portal se ejecutaba desde otra carpeta y la historia no era visible.
+
+### Qué comprueba el Portal
+
+- Al iniciar y en la vista del proyecto, el Portal compara la **carpeta raíz del repositorio git desde el que corre** y su **rama activa** con el **repositorio registrado** del proyecto (ruta y rama).
+- Muestra siempre la rama en la que corre, también cuando todo coincide.
+- Indica qué historias completadas **no están contenidas** en la rama en ejecución (se comprueba con `git merge-base --is-ancestor`, solo sobre las historias más recientes). Las historias sin SHA de cierre registrado figuran como «desconocido».
+- La comparación de rutas ignora la barra final, los separadores y, en Windows y macOS, las mayúsculas.
+- Es de solo lectura: no ejecuta `fetch`, no cambia de rama, no llama a modelos y no tiene coste. Al arrancar, el servidor escribe una advertencia en el log (solo rutas y ramas) si no coinciden.
+
+### Estados
+
+| Estado | Significado |
+| --- | --- |
+| `coincide` | Carpeta y rama son las del repositorio registrado. |
+| `carpeta-distinta` | El Portal corre desde otra carpeta. |
+| `rama-distinta` | Misma carpeta, pero otra rama. |
+| `carpeta-y-rama-distintas` | Ambas difieren. |
+| `no-verificable` | No hay git, la carpeta no es un repositorio, el proyecto no tiene repositorio registrado o HEAD está desacoplado. Se muestra el motivo. |
+
+### Pasos de corrección
+
+La alerta muestra los pasos con las rutas y ramas reales. En general:
+
+1. Detén el Portal, abre una terminal en la **carpeta registrada** y ejecútalo desde ahí con `npm run dev`.
+2. Si la rama en ejecución no es la registrada, ejecuta `git -C <ruta> switch <rama registrada>` o fusiona la rama en ejecución en la rama registrada.
+3. Si en realidad la carpeta o la rama correctas son las que están en ejecución, actualiza el repositorio registrado del proyecto para que apunte a ellas.
+4. Reinicia el Portal y pulsa «Volver a comprobar»: la alerta debe pasar a «coincide».
+
+### Limitaciones
+
+- La comprobación toma como referencia el proceso del **servidor** (`process.cwd()`): se asume que el servidor representa la instalación en ejecución. Si la web se sirve desde otra carpeta, no se detecta.
+- Si el proyecto no tiene repositorio registrado, la alerta indicará siempre «no verificable».
+- Si el cierre de una historia no guarda el SHA del commit, la contención de esa historia queda como «desconocido».
