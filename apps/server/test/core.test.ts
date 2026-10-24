@@ -432,3 +432,25 @@ test('v0.9: parches buscar/reemplazar, rutas protegidas sin tumbar el proceso, .
   assert.match(describeProcess({ ...base, status: 'failed', error: 'X', result: null }).phase, /Falló/);
   assert.equal(describeProcess({ ...base, status: 'pending_authorization', result: null }).settled, false);
 });
+
+test('recuperar sin IA un proceso fallido con salida del Desarrollador, y reintentar', async () => {
+  const { recoverStory, retryStory, createStoryProcess } = await import('../src/services/storyExecution.ts');
+  const { processesRepo, projectsRepo, backlogRepo } = await import('../src/db/workspace.ts');
+  const { addManualItem } = await import('../src/services/backlog.ts');
+  const { execSync } = await import('node:child_process');
+  const internal = projectsRepo('portal-ia').list()[0];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-recover-')); fs.writeFileSync(path.join(dir, 'x.ts'), 'export const x = 1;\n'); execSync('git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm i', { cwd: dir });
+  projectsRepo('portal-ia').setRepository(internal.id, dir, 'main');
+  const it = addManualItem('portal-ia', internal.id, { title: 'Historia recuperable' });
+  const proc = createStoryProcess('portal-ia', internal.id, it.id);
+  const procs = processesRepo('portal-ia');
+  procs.authorize(proc.id, 1);
+  procs.stepFinish(proc.steps[0].id, 'done', { outputMd: '{"summary":"plan","tasks":["t"],"filesToRead":[],"filesToChange":["x.ts"],"acceptance":[],"risks":[]}' });
+  procs.stepFinish(proc.steps[1].id, 'done', { outputMd: '=== RESUMEN ===\nhecho\n=== ARCHIVO: x.ts | patch ===\n<<<< BUSCAR\nexport const x = 1;\n==== REEMPLAZAR\nexport const x = 2;\n>>>> FIN\n=== FIN ARCHIVO ===\n=== ARCHIVO: .env | create ===\nA=1\n=== FIN ARCHIVO ===\n=== VERIFICAR: typecheck ===' });
+  procs.finish(proc.id, 'failed', 'Ruta protegida: .env'); backlogRepo('portal-ia').setStatus(it.id, 'pending', proc.id);
+  const r = recoverStory('portal-ia', proc.id);
+  assert.equal(r.status, 'done'); assert.equal(r.result!.changes.length, 2); assert.equal(r.result!.changes.filter(c => !c.error).length, 1);
+  assert.equal(r.result!.changes[0].content, 'export const x = 2;\n'); assert.equal(r.result!.plan?.summary, 'plan');
+  assert.equal(backlogRepo('portal-ia').get(it.id)!.status, 'review');
+  const again = retryStory('portal-ia', proc.id); // una historia en revisión también puede relanzarse (diff flojo) assert.equal(again.status, 'pending_authorization'); assert.notEqual(again.id, proc.id);
+});

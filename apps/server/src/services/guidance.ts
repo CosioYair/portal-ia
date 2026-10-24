@@ -8,9 +8,12 @@ export function describeProcess(p: Process, opts: { isPortalRepo?: boolean } = {
   const done = p.steps.filter(s => s.status === 'done').length;
   if (p.status === 'pending_authorization') return { phase: 'Pendiente de autorización', next: 'Nada se ha gastado. Autoriza el proceso con un presupuesto para que empiece.', tone: 'warn', settled: false };
   if (p.status === 'running') { const cur = p.steps.find(s => s.status === 'running'); return { phase: `En ejecución · paso ${Math.min(done + 1, p.steps.length)} de ${p.steps.length}${cur ? ` (${cur.title})` : ''}`, next: 'Espera a que termine; puedes cancelarlo entre pasos.', tone: 'info', settled: false }; }
-  if (p.status === 'cancelled') return { phase: 'Cancelado', next: 'Si quieres retomarlo, vuelve a ejecutarlo desde el backlog.', tone: 'warn', settled: true };
-  if (p.status === 'budget_exceeded') return { phase: 'Detenido por presupuesto', next: `Gastó ${p.spentUsd.toFixed(2)} de ${p.budgetUsd.toFixed(2)} USD. Vuelve a ejecutarlo con más presupuesto o acota la historia.`, tone: 'warn', settled: true };
-  if (p.status === 'failed') return { phase: 'Falló', next: p.error ? `Motivo: ${p.error} Corrige la causa (o acota la historia) y vuelve a ejecutar.` : 'Revisa el error del paso fallido y vuelve a ejecutar.', tone: 'err', settled: true };
+  if (p.status === 'cancelled') return { phase: 'Cancelado', next: 'Si quieres retomarlo, pulsa «Volver a ejecutar».', tone: 'warn', settled: true };
+  if (p.status === 'budget_exceeded') return { phase: 'Detenido por presupuesto', next: `Gastó ${p.spentUsd.toFixed(2)} de ${p.budgetUsd.toFixed(2)} USD. ${p.kind === 'story_execution' && p.steps[1]?.outputMd?.trim() ? 'El Desarrollador sí entregó: puedes «Recuperar el resultado» sin IA, o ' : ''}«Volver a ejecutar» con más presupuesto o una historia más acotada.`, tone: 'warn', settled: true };
+  if (p.status === 'failed') {
+    const recoverable = p.kind === 'story_execution' && !!p.steps[1]?.outputMd?.trim() && !p.result?.applied;
+    return { phase: 'Falló', next: `${p.error ? `Motivo: ${p.error} ` : ''}${recoverable ? 'El Desarrollador sí entregó su trabajo: puedes «Recuperar el resultado» sin gastar IA, o «Volver a ejecutar».' : 'Pulsa «Volver a ejecutar» (acotando la historia si hizo falta).'}`, tone: 'err', settled: true };
+  }
   // status === 'done'
   if (p.kind === 'initial_assessment') return { phase: 'Evaluación completada', next: 'Importa las historias de la síntesis en Backlog y ejecuta la primera.', tone: 'ok', settled: true };
   if (p.kind === 'delegated_task') {

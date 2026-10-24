@@ -292,3 +292,45 @@ Responde SOLO con JSON: {"approve": boolean, "summary": string, "issues": string
     log({ processId, status: finalStatus, spent: procs.get(processId)?.spentUsd.toFixed(4) }, 'historia finalizada');
   }
 }
+
+/**
+ * Recuperar sin IA un proceso fallido: si el Desarrollador ya entregó su salida (paso 2) pero el proceso cayó después
+ * (p. ej. una ruta que antes se consideraba protegida), se vuelve a leer esa salida con las reglas actuales y, si hay
+ * cambios aplicables, el proceso pasa a «terminado» con su diff listo para revisar. No se gasta nada.
+ */
+export function recoverStory(slug: string, processId: string): Process {
+  const procs = processesRepo(slug); const proc = procs.get(processId);
+  if (!proc || proc.kind !== 'story_execution') throw Object.assign(new Error('Proceso de historia no encontrado'), { statusCode: 404 });
+  if (proc.status === 'running' || proc.status === 'pending_authorization') throw Object.assign(new Error('El proceso no ha terminado.'), { statusCode: 409 });
+  if (proc.result?.applied) throw Object.assign(new Error('Los cambios de este proceso ya se aplicaron.'), { statusCode: 409 });
+  const dev = proc.steps[1]; const text = dev?.outputMd ?? '';
+  if (!text.trim()) throw Object.assign(new Error('El Desarrollador no llegó a entregar nada en este proceso: no hay salida que recuperar. Vuelve a ejecutar la historia.'), { statusCode: 409 });
+  const repo = projectsRepo(slug).repository(proc.projectId);
+  if (!repo) throw Object.assign(new Error('No hay repositorio registrado.'), { statusCode: 409 });
+  const parsed = parseFileBlocks(text);
+  if (!parsed.changes.length) { const legacy = extractJson(text); if (legacy && Array.isArray(legacy.changes)) parsed.changes = legacy.changes.filter((c: any) => c && typeof c.path === 'string').map((c: any) => ({ path: c.path, action: c.action, content: typeof c.content === 'string' ? c.content : null })); }
+  if (!parsed.changes.length) throw Object.assign(new Error('La salida del Desarrollador no contiene archivos en un formato reconocible. Vuelve a ejecutar la historia.'), { statusCode: 409 });
+  const changes = annotateChanges(repo.path, parsed.changes);
+  const applicable = changes.filter(c => !c.error);
+  if (!applicable.length) throw Object.assign(new Error(`Ningún cambio es aplicable: ${changes.map(c => `${c.path}: ${c.error}`).join(' · ')}`), { statusCode: 409 });
+  const planJson = proc.steps[0]?.outputMd ? extractJson(proc.steps[0].outputMd) : null;
+  const plan: StoryPlan | null = planJson ? { summary: String(planJson.summary ?? ''), tasks: planJson.tasks ?? [], filesToRead: planJson.filesToRead ?? [], filesToChange: planJson.filesToChange ?? [], acceptance: planJson.acceptance ?? [], risks: planJson.risks ?? [] } : proc.result?.plan ?? null;
+  const invalid = changes.filter(c => c.error);
+  const result: ExecutionResult = { plan, implementationSummary: `♻ Resultado recuperado sin IA de la salida del Desarrollador (el proceso había fallado por: ${proc.error ?? 'error posterior'}).${parsed.truncatedFile ? ` ⚠ La salida se cortó a mitad de «${parsed.truncatedFile}»; ese archivo no está incluido.` : ''}${invalid.length ? ` ⚠ ${invalid.length} cambio(s) no aplicables: ${invalid.map(c => c.path).join(', ')}.` : ''}\n\n${parsed.summary}${parsed.notes ? `\n\n${parsed.notes}` : ''}`, changes, verifyCommands: parsed.verify.filter(c => ['install', 'typecheck', 'test', 'build'].includes(c)).length ? parsed.verify : ['typecheck'], review: null, applied: null, verifications: [] };
+  procs.setResult(processId, result);
+  procs.finish(processId, 'done', null);
+  if (proc.backlogItemId) backlogRepo(slug).setStatus(proc.backlogItemId, 'review', processId);
+  return procs.get(processId)!;
+}
+
+/** Volver a ejecutar la historia de un proceso terminado (nuevo proceso pendiente de autorización). */
+export function retryStory(slug: string, processId: string, opts: StoryOptions = {}): Process {
+  const proc = processesRepo(slug).get(processId);
+  if (!proc || proc.kind !== 'story_execution' || !proc.backlogItemId) throw Object.assign(new Error('Proceso de historia no encontrado'), { statusCode: 404 });
+  if (proc.status === 'running' || proc.status === 'pending_authorization') throw Object.assign(new Error('El proceso sigue activo.'), { statusCode: 409 });
+  const item = backlogRepo(slug).get(proc.backlogItemId);
+  if (!item) throw Object.assign(new Error('La historia ya no existe en el backlog.'), { statusCode: 404 });
+  if (item.status === 'done' || item.status === 'discarded') throw Object.assign(new Error(`La historia está ${item.status === 'done' ? 'completada' : 'descartada'}; reábrela desde el backlog si quieres repetirla.`), { statusCode: 409 });
+  if (item.status === 'in_progress') throw Object.assign(new Error('La historia ya está en ejecución.'), { statusCode: 409 });
+  return createStoryProcess(slug, proc.projectId, item.id, opts);
+}

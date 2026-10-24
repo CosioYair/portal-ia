@@ -21,7 +21,7 @@ const P_LABEL: Record<Process['status'], { label: string; tone: '' | 'ok' | 'war
 
 export function ProcessView() {
   const { processId } = useParams();
-  const { status, flash } = useApp();
+  const { status, flash, navigate } = useApp();
   const slug = status.workspace!.slug;
   const [proc, setProc] = useState<Process | null>(null);
   const [open, setOpen] = useState<string | null>(null);
@@ -37,6 +37,10 @@ export function ProcessView() {
   useEffect(() => { if (proc && !open) { const last = [...proc.steps].reverse().find(s => s.status === 'done' || s.status === 'running'); if (last) setOpen(last.id); } }, [proc, open]);
 
   const cancel = async () => { if (!proc || !confirm('¿Cancelar el proceso? Se detendrá al terminar el paso en curso.')) return; await api.cancelProcess(slug, proc.id); flash('Cancelación solicitada'); };
+  const [fixBusy, setFixBusy] = useState<'recover' | 'retry' | null>(null);
+  const [fixErr, setFixErr] = useState<string | null>(null);
+  const recover = async () => { if (!proc) return; setFixBusy('recover'); setFixErr(null); try { const p = await api.recoverProcess(slug, proc.id); setProc(p); flash(`Resultado recuperado: ${p.result?.changes.filter(c => !c.error).length ?? 0} cambio(s) listos para revisar`); } catch (e: any) { setFixErr(e.message); } finally { setFixBusy(null); } };
+  const retry = async () => { if (!proc) return; setFixBusy('retry'); setFixErr(null); try { const p = await api.retryProcess(slug, proc.id); flash('Nuevo proceso creado: autorízalo con un presupuesto'); navigate(`/procesos/${p.id}`); setProc(p); setBudget(''); } catch (e: any) { setFixErr(e.message); } finally { setFixBusy(null); } };
   const [budget, setBudget] = useState('');
   const [auth, setAuth] = useState(false);
   const [authBusy, setAuthBusy] = useState(false);
@@ -68,7 +72,14 @@ export function ProcessView() {
           </div>
         </div>
 
-        {proc.guidance && proc.status !== 'pending_authorization' && <Notice kind={proc.guidance.tone}><div><strong>{proc.guidance.phase}.</strong> <span style={{ fontWeight: 600 }}>Siguiente paso:</span> {proc.guidance.next}</div></Notice>}
+        {proc.guidance && proc.status !== 'pending_authorization' && <Notice kind={proc.guidance.tone}><div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
+          <div><strong>{proc.guidance.phase}.</strong> <span style={{ fontWeight: 600 }}>Siguiente paso:</span> {proc.guidance.next}</div>
+          {proc.kind === 'story_execution' && (proc.status === 'failed' || proc.status === 'cancelled' || proc.status === 'budget_exceeded') && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            {!!proc.steps[1]?.outputMd && !proc.result?.applied && <button className="btn btn-primary btn-sm" onClick={recover} disabled={fixBusy !== null}>{fixBusy === 'recover' ? <span className="spin spin-light" /> : Icon.check()}Recuperar el resultado (sin IA)</button>}
+            <button className="btn btn-secondary btn-sm" onClick={retry} disabled={fixBusy !== null}>{fixBusy === 'retry' ? <span className="spin" /> : Icon.arrow()}Volver a ejecutar la historia</button>
+            {fixErr && <span className="sm13" style={{ color: '#9A1F18' }}>{fixErr}</span>}
+          </div>}
+        </div></Notice>}
         {proc.status === 'pending_authorization' && <section className="card" style={{ borderColor: '#F0C66B', background: '#FFFBF0' }}>
           <div className="card-h"><div><div className="h3">Autorizar este proceso</div><div className="small muted">Consume IA. Nada se ha gastado todavía. Costo estimado ≈ {fmtUsd(proc.estimatedUsd)}.</div></div><Chip tone="warn" xs>requiere tu autorización</Chip></div>
           <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>

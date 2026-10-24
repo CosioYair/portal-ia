@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
 import { knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { cancelProcess, clearCancel, createAssessment, estimateAssessment, isCancelled, runAssessment } from '../services/assessment.ts';
-import { createStoryProcess, estimateStory, runStory } from '../services/storyExecution.ts';
+import { createStoryProcess, estimateStory, recoverStory, retryStory, runStory } from '../services/storyExecution.ts';
 import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
 import { describeProcess } from '../services/guidance.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
@@ -117,6 +117,17 @@ export async function processRoutes(app: FastifyInstance) {
     const { slug, projectId, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ skipQa: z.boolean().optional() }).safeParse(req.body ?? {});
     try { return createStoryProcess(slug, projectId, id, { skipQa: body.success ? !!body.data.skipQa : false }); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+
+  // ---- Recuperar (sin IA) o reintentar un proceso de historia ----
+  app.post('/api/workspaces/:slug/processes/:id/recover', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    try { const p = recoverStory(slug, id); app.log.info({ processId: id, changes: p.result?.changes.length }, 'proceso recuperado sin IA'); return withGuidance(slug, p); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+  app.post('/api/workspaces/:slug/processes/:id/retry', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ skipQa: z.boolean().optional() }).safeParse(req.body ?? {});
+    try { const p = retryStory(slug, id, { skipQa: body.success ? !!body.data.skipQa : false }); app.log.info({ from: id, processId: p.id }, 'historia relanzada (pendiente de autorización)'); return reply.code(201).send(withGuidance(slug, p)); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
 
   // ---- Encargos delegados a un agente responsable (sin IA hasta autorizar) ----

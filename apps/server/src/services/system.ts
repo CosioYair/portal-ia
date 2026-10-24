@@ -5,7 +5,7 @@ import type { SystemStatus } from '@portal-ia/domain';
 import { REPO_ROOT } from '../config.ts';
 import { git } from './repoWrite.ts';
 
-export const VERSION = '0.9.0';
+export const VERSION = '0.9.1';
 const startedAt = new Date().toISOString();
 let startCommit: string | null = null;
 const isGit = fs.existsSync(path.join(REPO_ROOT, '.git'));
