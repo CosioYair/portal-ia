@@ -4,8 +4,16 @@ import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLOSURE_REASONS, evaluateStoryClosure } from '@portal/domain';
-import type { StoryClosureFacts } from '@portal/domain';
+import {
+  CLOSE_NEXT_STEP_NOTICE,
+  CLOSURE_REASONS,
+  checkStoryBranchBase,
+  evaluateStoryClosure,
+  evaluateStoryLifecycle,
+  isValidBranchName,
+  storyBranchName
+} from '@portal/domain';
+import type { StoryClosureFacts, StoryLifecycleFacts } from '@portal/domain';
 import { completeStory, getStoryClosureStatus } from '../src/services/story-closure.ts';
 import type {
   RepositoryRecord,
@@ -51,6 +59,75 @@ for (const [nombre, facts, canClose, reason, indicator] of tabla) {
     assert.equal(result.indicator, indicator);
   });
 }
+
+// (a2) Ciclo de la historia con rama propia (HU-125)
+
+const ciclo: StoryLifecycleFacts = {
+  branchCreated: true,
+  manualTestRequested: true,
+  ownerApproved: false,
+  mergedIntoMain: false,
+  pushedToRemote: false,
+  completed: false
+};
+
+test('ciclo: rechaza el cierre sin visto bueno del propietario', () => {
+  const result = evaluateStoryLifecycle({ ...ciclo, mergedIntoMain: true, pushedToRemote: true });
+  assert.equal(result.canClose, false);
+  assert.equal(result.reason, CLOSURE_REASONS.sinVistoBueno);
+  assert.equal(result.nextStepNotice, null);
+});
+
+test('ciclo: rechaza el cierre sin publicación', () => {
+  const result = evaluateStoryLifecycle({ ...ciclo, ownerApproved: true, mergedIntoMain: true });
+  assert.equal(result.canClose, false);
+  assert.equal(result.reason, CLOSURE_REASONS.noPublicada);
+  assert.equal(result.stage, 'integrada_en_main');
+  assert.equal(result.nextStepNotice, null);
+});
+
+test('ciclo: un cierre válido incluye la instrucción de volver a main actualizado', () => {
+  const result = evaluateStoryLifecycle({
+    ...ciclo,
+    ownerApproved: true,
+    mergedIntoMain: true,
+    pushedToRemote: true
+  });
+  assert.equal(result.canClose, true);
+  assert.equal(result.reason, null);
+  assert.equal(result.stage, 'publicada');
+  assert.equal(result.nextStepNotice, CLOSE_NEXT_STEP_NOTICE);
+  assert.match(result.nextStepNotice ?? '', /git checkout main && git pull/);
+});
+
+test('ciclo: las etapas avanzan en orden y una completada queda cerrada', () => {
+  assert.equal(evaluateStoryLifecycle({ ...ciclo, branchCreated: false, manualTestRequested: false }).stage, null);
+  assert.equal(evaluateStoryLifecycle({ ...ciclo, manualTestRequested: false }).stage, 'rama_creada');
+  assert.equal(evaluateStoryLifecycle(ciclo).stage, 'prueba_manual_pendiente');
+  assert.equal(evaluateStoryLifecycle({ ...ciclo, ownerApproved: true }).stage, 'visto_bueno');
+  const cerrada = evaluateStoryLifecycle({
+    ...ciclo,
+    ownerApproved: true,
+    mergedIntoMain: true,
+    pushedToRemote: true,
+    completed: true
+  });
+  assert.equal(cerrada.stage, 'cerrada');
+  assert.equal(cerrada.canClose, false);
+  assert.equal(cerrada.reason, CLOSURE_REASONS.yaCompletada);
+});
+
+test('rama por historia: nombre derivado válido y base obligatoria en main actualizado', () => {
+  assert.equal(storyBranchName('HU-125', 'Rama por cambio'), 'hu-125/rama-por-cambio');
+  assert.equal(storyBranchName('hu-124', 'Aviso: carpeta ≠ repositorio'), 'hu-124/aviso-carpeta-repositorio');
+  assert.equal(isValidBranchName(storyBranchName('HU-126', 'Revisión del backlog') ?? ''), true);
+  assert.equal(storyBranchName('125', 'x'), null);
+  assert.equal(storyBranchName('HU-125', '***'), null);
+
+  assert.equal(checkStoryBranchBase({ baseBranch: 'main', behindRemoteMain: 0 }).ok, true);
+  assert.match(checkStoryBranchBase({ baseBranch: 'hu-124/x', behindRemoteMain: 0 }).reason ?? '', /desde main/);
+  assert.match(checkStoryBranchBase({ baseBranch: 'main', behindRemoteMain: 2 }).reason ?? '', /por detrás/);
+});
 
 // Utilidades de contexto
 
