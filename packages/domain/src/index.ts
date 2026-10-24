@@ -1,6 +1,7 @@
 // Dominio compartido: tipos y plantillas puras, sin IO ni dependencias externas.
 
 export * from './git-branch.ts';
+export * from './story-closure.ts';
 
 declare const companyIdBrand: unique symbol;
 
