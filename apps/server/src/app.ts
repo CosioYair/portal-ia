@@ -17,6 +17,7 @@ import { VERSION } from './services/system.ts';
 export async function buildApp() {
   const app = Fastify({
     bodyLimit: 25 * 1024 * 1024, // adjuntos (imágenes) del asistente
+    forceCloseConnections: true, // HU-144: al cerrar, no esperar a conexiones keep-alive/SSE (el puerto debe liberarse)
     logger: { level: process.env.LOG_LEVEL ?? 'info', redact: ['req.headers.authorization', 'req.body.apiKey'] }
   });
 
