@@ -198,7 +198,12 @@ export interface Process {
   /** Resultado de un encargo delegado (kind = delegated_task). */
   delegation: DelegationResult | null;
   backlogItemId: string | null;
+  /** Descripción de «qué pasa y qué hacer» calculada por el servidor al servir el proceso (no se persiste). */
+  guidance?: ProcessGuidance;
 }
+
+/** Guía de estado de un proceso (la forma la define services/guidance.ts del servidor). */
+export type ProcessGuidance = Record<string, any>;
 
 export interface KnowledgeDoc {
   id: string;
@@ -297,6 +302,8 @@ export interface ExecutionResult {
   merged?: { into: string; commit: string; mergedAt: string } | null;
   /** Publicación en el remoto (git push), autorizada por el propietario. */
   published?: { remote: string; url: string | null; branches: string[]; pushedAt: string } | null;
+  /** HU-146 · Intentos de «Corregir y revalidar» dentro de esta misma historia. */
+  repairs?: ValidationRepairAttempt[];
 }
 
 /** Estado del repositorio registrado (solo lectura, sin red). */
@@ -383,4 +390,51 @@ export interface ServerLifecycleOutcome {
   /** Comandos exactos y en orden (vacío si el reinicio es automático). */
   commands: string[];
   reason: string;
+}
+
+// ---- HU-146 · Corregir y revalidar ----
+/** Máximo de intentos de autocorrección por proceso; cada uno requiere autorización del propietario. */
+export const MAX_REPAIR_ATTEMPTS = 3;
+
+export type RepairAttemptStatus = 'esperando_autorizacion' | 'corrigiendo' | 'revision_qa' | 'revalidando' | 'resuelto' | 'fallido';
+
+/** Resultado de un comando de validación (salida ya redactada de secretos y truncada). */
+export interface RepairCommandResult { command: string; exitCode: number | null; output: string; }
+
+export interface ValidationRepairAttempt {
+  id: string;
+  processId: string;
+  /** 1–MAX_REPAIR_ATTEMPTS */
+  attemptNumber: number;
+  failedCommands: RepairCommandResult[];
+  /** Hash normalizado del error: la autorización solo vale mientras el error siga siendo el mismo. */
+  errorSignature: string;
+  /** Token de un solo uso que el propietario debe presentar para ejecutar el intento. */
+  authorizationId: string;
+  budgetUsd: number | null;
+  estimatedCost: number;
+  actualCost: number;
+  qaVerdict: { approve: boolean; summary: string; issues: string[] } | null;
+  diff: string | null;
+  files: string[];
+  /** Causa del error según el Desarrollador. */
+  cause: string | null;
+  rerunResults: RepairCommandResult[];
+  status: RepairAttemptStatus;
+  error: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+}
+
+export interface ValidationRepairOverview {
+  attempts: ValidationRepairAttempt[];
+  failedCommands: RepairCommandResult[];
+  used: number;
+  remaining: number;
+  maxAttempts: number;
+  running: boolean;
+  waiting: ValidationRepairAttempt | null;
+  resolved: boolean;
+  stopped: boolean;
+  lastError: string | null;
 }
