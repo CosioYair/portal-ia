@@ -1,15 +1,21 @@
-// Contratos compartidos entre servidor y web. Solo puede depender de @portal/domain.
+// Contratos compartidos entre servidor y web. Solo puede depender de @portal/domain (y de zod).
 
 import type { CompanyId } from '@portal/domain';
+import { API_ERROR_STEPS } from './common.ts';
+
+export * from './common.ts';
+export * from './company.ts';
+export * from './agent.ts';
+export * from './process.ts';
+export * from './request.ts';
+export * from './authorization.ts';
+export * from './usage.ts';
 
 /** Referencia mínima a una empresa en las respuestas de la API. */
 export interface CompanyRef {
   readonly id: CompanyId;
   readonly name: string;
 }
-
-/** Fases en las que puede fallar una operación: validación, arranque, proceso o comunicación (red). */
-export const API_ERROR_STEPS = ['validacion', 'arranque', 'proceso', 'red'] as const;
 
 export type ApiErrorStep = (typeof API_ERROR_STEPS)[number];
 

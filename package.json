@@ -15,8 +15,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test:rules": "node --test scripts/dependency-rules.test.mjs",
-    "test": "npm run test:rules",
-    "check": "npm run typecheck && npm run lint && npm run test:rules"
+    "test:contracts": "npm run test --workspace @portal/contracts",
+    "test": "npm run test:rules && npm run test:contracts",
+    "check": "npm run typecheck && npm run lint && npm run test:rules && npm run test:contracts"
   },
   "devDependencies": {
     "eslint": "^9.17.0",

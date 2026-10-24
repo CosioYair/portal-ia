@@ -4,7 +4,11 @@
   "private": true,
   "type": "module",
   "exports": "./src/index.ts",
+  "scripts": {
+    "test": "node --experimental-strip-types --test \"test/*.test.ts\""
+  },
   "dependencies": {
-    "@portal/domain": "*"
+    "@portal/domain": "*",
+    "zod": "3.24.1"
   }
 }
