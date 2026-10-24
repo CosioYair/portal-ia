@@ -23,6 +23,61 @@ export function isValidBranchName(name: string): boolean {
   return name.split('/').every((tramo) => !tramo.startsWith('.') && !tramo.endsWith('.lock'));
 }
 
+/** Rama principal sobre la que se crea cada rama de historia. */
+export const MAIN_BRANCH = 'main';
+
+const MAX_SLUG_LENGTH = 40;
+
+/**
+ * Deriva el nombre de la rama de una historia con la convención «hu-NNN/descripcion»
+ * (por ejemplo, «hu-125/rama-por-cambio»). Devuelve null si el identificador o la
+ * descripción no permiten construir un nombre válido.
+ */
+export function storyBranchName(storyId: string, description: string): string | null {
+  const match = /^HU-(\d+)$/i.exec(storyId.trim());
+  if (match === null) return null;
+  const number = Number(match[1] ?? '');
+  if (!Number.isSafeInteger(number) || number <= 0) return null;
+  const slug = description
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, MAX_SLUG_LENGTH)
+    .replace(/-+$/g, '');
+  if (slug.length === 0) return null;
+  const name = `hu-${number}/${slug}`;
+  return isValidBranchName(name) ? name : null;
+}
+
+export interface StoryBranchBaseFacts {
+  /** Rama desde la que se creó (o se va a crear) la rama de la historia. */
+  readonly baseBranch: string;
+  /** Commits de origin/main que la main local aún no tiene (0 = al día). */
+  readonly behindRemoteMain: number;
+}
+
+export interface StoryBranchBaseCheck {
+  readonly ok: boolean;
+  /** Motivo en español (null si la base es correcta). */
+  readonly reason: string | null;
+}
+
+/** Comprueba que la rama de la historia parte de main y que main está actualizada. */
+export function checkStoryBranchBase(facts: StoryBranchBaseFacts): StoryBranchBaseCheck {
+  if (facts.baseBranch !== MAIN_BRANCH) {
+    return { ok: false, reason: `La rama debe crearse desde ${MAIN_BRANCH}, no desde «${facts.baseBranch}»` };
+  }
+  if (facts.behindRemoteMain > 0) {
+    return {
+      ok: false,
+      reason: `main local está ${facts.behindRemoteMain} commit(s) por detrás de origin/main: actualízala antes de crear la rama`
+    };
+  }
+  return { ok: true, reason: null };
+}
+
 const PATRONES_SECRETOS: ReadonlyArray<readonly [RegExp, string]> = [
   // https://usuario:token@host y https://token@host
   [/(https?:\/\/)[^\s/@]+@/gi, '$1***@'],

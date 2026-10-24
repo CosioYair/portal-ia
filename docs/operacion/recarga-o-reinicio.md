@@ -51,3 +51,32 @@ Si el servidor se ejecuta con recarga en caliente (por ejemplo `tsx watch`), el 
   - `pendiente`: falta integrar, falta publicar o no se puede confirmar (por ejemplo, sin remoto).
   - `divergente`: el commit está en `origin/main` pero no en `main`, o `main` y `origin/main` han divergido.
 - No llama a modelos, no accede a la red, no tiene coste y no bloquea ni revierte la publicación: solo observa y registra.
+
+## Flujo de una rama por cambio (HU-125)
+
+`main` contiene siempre el código real y completo del Portal (carpeta de trabajo `C:\Mis Proyectos\Portal IA`). Cada historia se desarrolla en su propia rama y solo llega a `main` con la aprobación del propietario.
+
+### Convención
+
+- La rama se crea **desde `main` actualizado** y se llama `hu-NNN/descripcion-corta` (por ejemplo, `hu-125/rama-por-cambio`). La función `storyBranchName` de `packages/domain/src/git-branch.ts` deriva el nombre y `checkStoryBranchBase` comprueba que la base es `main` y está al día.
+- Los commits citan el identificador de la historia (`HU-NNN`) para que el aviso de reinicio los reconozca.
+
+### Etapas
+
+1. **Rama creada**: el equipo crea la rama desde `main` actualizado.
+2. **Prueba manual pendiente**: el propietario recibe la rama para probarla.
+3. **Visto bueno**: el propietario aprueba tras probar.
+4. **Integrada en main**: con autorización explícita, se integra la rama en `main`.
+5. **Publicada**: con autorización explícita, se publica `main` en el remoto.
+6. **Cerrada**: se marca la historia como completada.
+
+La historia **no se puede cerrar** sin visto bueno, integración y publicación (regla de cierre de HU-120). Esta regla la implementa `evaluateStoryLifecycle` en `packages/domain/src/story-closure.ts`.
+
+### Pasos para el propietario
+
+1. Cambia a la rama de la historia: `git checkout hu-NNN/descripcion-corta`.
+2. Reinicia el servidor local para cargar el código de esa rama. Si solo cambió la web, basta recargar la página (ver las reglas de arriba).
+3. Prueba la funcionalidad y comprueba los criterios de aceptación.
+4. Si todo es correcto, da el visto bueno y autoriza la integración y la publicación. Si no, indica qué corregir y se sigue en la misma rama.
+5. El equipo integra la rama en `main`, publica `main` y cierra la historia.
+6. Al cerrar, el Portal muestra: «Cambia a main y actualízalo localmente (`git checkout main && git pull`) antes de empezar la siguiente historia». Hazlo y confirma antes de empezar la siguiente.
