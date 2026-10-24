@@ -1,7 +1,10 @@
 {
-  "name": "@portal/domain",
-  "version": "0.0.0",
+  "name": "@portal-ia/domain",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": "./src/index.ts"
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": { "typecheck": "tsc -p tsconfig.json" }
 }

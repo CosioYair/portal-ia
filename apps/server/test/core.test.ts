@@ -1,0 +1,383 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+// Datos de prueba aislados en una carpeta temporal.
+process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-test-'));
+process.env.PORTAL_ALLOW_FOREIGN_REPO = '1'; // las pruebas usan repositorios temporales para el proyecto interno
+
+const { encryptSecret, decryptSecret, credentialHint } = await import('../src/security/crypto.ts');
+const { classifyModel, pickByTier, AGENT_TEMPLATES } = await import('@portal-ia/domain');
+const { providersRepo } = await import('../src/db/platform.ts');
+const { runBootstrap } = await import('../src/routes/bootstrap.ts');
+const { agentsRepo } = await import('../src/db/workspace.ts');
+const { buildApp } = await import('../src/app.ts');
+
+test('cifrado AES-GCM: ida y vuelta, y la pista no revela la clave', () => {
+  const secret = 'sk-ant-api03-EJEMPLO-no-real-0123456789';
+  const enc = encryptSecret(secret);
+  assert.notEqual(enc, secret);
+  assert.equal(decryptSecret(enc), secret);
+  const hint = credentialHint(secret);
+  assert.ok(hint.includes('…') && hint.length < 16);
+});
+
+test('clasificación de modelos por heurística', () => {
+  assert.equal(classifyModel('anthropic', 'claude-opus-4-1-20250805', 'Claude Opus 4.1').tier, 'top');
+  assert.equal(classifyModel('anthropic', 'claude-haiku-4-5', 'Claude Haiku 4.5').tier, 'low');
+  assert.equal(classifyModel('anthropic', 'claude-sonnet-4-5', 'Claude Sonnet 4.5').supportsEffort, true);
+  assert.equal(classifyModel('openai', 'gpt-5-mini').tier, 'low');
+  assert.equal(classifyModel('openai', 'gpt-5').supportsEffort, true);
+  const list = ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5'].map(id => classifyModel('anthropic', id));
+  assert.equal(pickByTier(list, 'mid')!.id, 'claude-sonnet-4-5');
+});
+
+test('bootstrap exige proveedor conectado, es idempotente y crea 8 agentes inactivos', async () => {
+  assert.throws(() => runBootstrap(), /Conecta y verifica un proveedor/);
+  providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');
+  providersRepo.setConnected('anthropic', ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5'].map(id => classifyModel('anthropic', id)));
+  const r1 = runBootstrap();
+  assert.equal(r1.alreadyInitialized, false);
+  assert.equal(r1.agentsCreated, AGENT_TEMPLATES.length);
+  assert.equal(r1.aiCalls, 0);
+  const r2 = runBootstrap();
+  assert.equal(r2.alreadyInitialized, true);
+  assert.equal(r2.agentsCreated, 0);
+  const agents = agentsRepo(r1.workspace.slug).list();
+  assert.equal(agents.length, 8);
+  assert.ok(agents.every(a => a.status === 'inactive'));
+  const arq = agents.find(a => a.key === 'pj-arquitecto')!;
+  assert.equal(arq.config.model, 'claude-opus-4-1');
+  assert.equal(agents.filter(a => a.scope === 'workspace').length, 3);
+});
+
+test('API: la credencial nunca se devuelve y la verificación sin red falla de forma controlada', async () => {
+  const app = await buildApp();
+  const put = await app.inject({ method: 'PUT', url: '/api/providers/openai/credential', payload: { apiKey: 'sk-test-no-real-000000' } });
+  assert.equal(put.statusCode, 200);
+  const body = put.json();
+  assert.equal(JSON.stringify(body).includes('sk-test-no-real'), false);
+  assert.ok(body.credentialHint.includes('…'));
+  const verify = await app.inject({ method: 'POST', url: '/api/providers/openai/verify' });
+  assert.ok([401, 502].includes(verify.statusCode));
+  assert.equal(verify.json().status, 'failed');
+  await app.close();
+});
+
+test('evaluación inicial: estimación, autorización explícita y fallo controlado sin red', async () => {
+  const { estimateAssessment, createAssessment, runAssessment } = await import('../src/services/assessment.ts');
+  const { workspacesRepo } = await import('../src/db/platform.ts');
+  const { projectsRepo, processesRepo } = await import('../src/db/workspace.ts');
+  const ws = workspacesRepo.get('portal-ia')!;
+  const project = projectsRepo(ws.slug).list()[0];
+  const est = estimateAssessment(ws.slug, project.id);
+  assert.equal(est.steps.length, 4);
+  assert.ok(est.estimatedUsd > 0 && est.suggestedBudgetUsd >= est.estimatedUsd);
+  const proc = createAssessment(ws.slug, project.id);
+  assert.equal(proc.status, 'pending_authorization');
+  assert.equal(createAssessment(ws.slug, project.id).id, proc.id, 'no duplica procesos pendientes');
+  processesRepo(ws.slug).authorize(proc.id, 1);
+  await runAssessment(ws.slug, proc.id, () => {});
+  const done = processesRepo(ws.slug).get(proc.id)!;
+  assert.equal(done.status, 'failed');            // clave de prueba → el proveedor rechaza o no hay red
+  assert.equal(done.spentUsd, 0);
+  assert.ok(agentsRepo(ws.slug).list().every(a => a.status === 'inactive'), 'agentes vuelven a inactivo');
+});
+
+test('agentes especializados: crear, relaciones inversas, validaciones y eliminar', async () => {
+  const { createAgent, deleteAgent } = await import('../src/services/agentFactory.ts');
+  const { workspacesRepo } = await import('../src/db/platform.ts');
+  const { projectsRepo } = await import('../src/db/workspace.ts');
+  const ws = workspacesRepo.get('portal-ia')!;
+  const project = projectsRepo(ws.slug).list()[0];
+  const agents = agentsRepo(ws.slug);
+  const input = {
+    scope: 'project' as const, projectId: project.id, name: 'Documentador Técnico', role: 'Documentación técnica', reportsTo: 'pj-coordinador', collaborates: ['pj-dev'],
+    evaluation: ['Documentación actualizada por cambio.'],
+    config: { name: 'Documentador Técnico', specialization: 'Mantiene la documentación.', responsibilities: ['Documentar módulos.'], provider: 'anthropic' as const, model: 'claude-haiku-4-5', fallbacks: ['claude-haiku-4-5'], effort: 'low' as const, tools: { read_repo: true }, knowledge: { repo: true }, monthlyLimitUsd: 5, perTaskAuthUsd: 1 }
+  };
+  const a = createAgent(ws.slug, input);
+  assert.equal(a.key, 'pj-documentador-tecnico');
+  assert.equal(a.status, 'inactive');
+  assert.equal(a.templateId, 'tpl.custom@1');
+  assert.deepEqual(a.config.fallbacks, [], 'el preferido no puede ser alternativo');
+  assert.equal(a.template.initials, 'DT');
+  const boss = agents.list().find(x => x.key === 'pj-coordinador')!;
+  assert.ok(boss.template.supervises.includes(a.key), 'el supervisor lo incluye en supervisa');
+  const b = createAgent(ws.slug, input);
+  assert.equal(b.key, 'pj-documentador-tecnico-2', 'claves únicas');
+  assert.throws(() => createAgent(ws.slug, { ...input, reportsTo: 'no-existe' }), /no existe/);
+  assert.throws(() => createAgent(ws.slug, { ...input, config: { ...input.config, model: 'modelo-inventado' } }), /no está disponible/);
+  assert.throws(() => deleteAgent(ws.slug, boss.id), /equipo inicial/);
+  deleteAgent(ws.slug, a.id); deleteAgent(ws.slug, b.id);
+  assert.equal(agents.list().length, 8);
+  assert.ok(!agents.list().find(x => x.key === 'pj-coordinador')!.template.supervises.includes('pj-documentador-tecnico'), 'relación inversa limpiada');
+});
+
+test('backlog: parseo de la síntesis, importación idempotente y solicitud manual', async () => {
+  const { parseBacklogFromMarkdown, importBacklogFromKnowledge, addManualItem } = await import('../src/services/backlog.ts');
+  const { workspacesRepo } = await import('../src/db/platform.ts');
+  const { projectsRepo, knowledgeRepo, backlogRepo } = await import('../src/db/workspace.ts');
+  const md = 'Texto previo\n```json\n[{"id":"HU-005","titulo":"Solicitudes de desarrollo","responsable":"Coordinador del Proyecto","dependeDe":"ninguna","estimacion":"M","criterio":"Se crean tareas"},{"id":"HU-006","titulo":"Sandbox","responsable":"pj-dev","dependeDe":"HU-005","estimacion":"L","criterio":"Comandos aislados"}]\n```';
+  const parsed = parseBacklogFromMarkdown(md);
+  assert.equal(parsed.length, 2); assert.equal(parsed[0].dependsOn, null); assert.equal(parsed[1].dependsOn, 'HU-005'); assert.equal(parsed[1].estimate, 'L');
+  const ws = workspacesRepo.get('portal-ia')!; const project = projectsRepo(ws.slug).list()[0];
+  knowledgeRepo(ws.slug).add({ projectId: project.id, title: 'Síntesis y backlog inicial priorizado — Coordinador del Proyecto', body: md, authorAgentId: null, authorAgentName: 'Coordinador', processId: null });
+  const r1 = importBacklogFromKnowledge(ws.slug, project.id);
+  assert.equal(r1.imported, 2);
+  const items = backlogRepo(ws.slug).list(project.id);
+  assert.equal(items[0].ownerKey, 'pj-coordinador', 'resuelve responsable por nombre');
+  assert.equal(items[1].ownerKey, 'pj-dev', 'resuelve responsable por key');
+  assert.equal(importBacklogFromKnowledge(ws.slug, project.id).imported, 0, 'idempotente');
+  const manual = addManualItem(ws.slug, project.id, { title: 'Arreglar el selector' });
+  assert.match(manual.storyId, /^HU-\d{3}$/); assert.equal(manual.status, 'pending');
+});
+
+test('escritura en repositorio: rutas seguras, diff y aplicación real en rama git', async () => {
+  const { safeRelPath, unifiedDiff, annotateChanges, applyChanges } = await import('../src/services/repoWrite.ts');
+  const { execFileSync } = await import('node:child_process');
+  assert.throws(() => safeRelPath('../fuera.ts'), /no permitida/);
+  assert.throws(() => safeRelPath('data/platform.sqlite'), /protegida/);
+  assert.throws(() => safeRelPath('.env'), /protegida/);
+  assert.equal(safeRelPath('./apps/web/src/x.tsx'), 'apps/web/src/x.tsx');
+  const d = unifiedDiff('a\nb\nc\n', 'a\nB\nc\n', 'f.txt');
+  assert.ok(d.includes('-b') && d.includes('+B'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-repo-'));
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: dir }).toString().trim();
+  git('init', '-q', '-b', 'main'); fs.writeFileSync(path.join(dir, 'README.md'), 'hola\n'); git('add', '-A'); git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'init');
+  const changes = annotateChanges(dir, [{ path: 'src/nuevo.ts', action: 'create', content: 'export const x = 1;\n' }, { path: 'README.md', action: 'modify', content: 'hola\nmundo\n' }]);
+  assert.equal(changes[0].action, 'create'); assert.equal(changes[1].before, 2); assert.equal(changes[1].after, 3);
+  const applied = await applyChanges(dir, 'portal-ia/hu-999', changes, 'HU-999: prueba');
+  assert.equal(applied.branch, 'portal-ia/hu-999'); assert.equal(applied.files.length, 2);
+  assert.equal(git('rev-parse', '--abbrev-ref', 'HEAD'), 'portal-ia/hu-999');
+  assert.equal(fs.readFileSync(path.join(dir, 'src/nuevo.ts'), 'utf8'), 'export const x = 1;\n');
+  assert.equal(git('status', '--porcelain'), '', 'árbol limpio tras el commit');
+  // Con cambios sin confirmar debe negarse
+  fs.writeFileSync(path.join(dir, 'sucio.txt'), 'x');
+  await assert.rejects(applyChanges(dir, 'portal-ia/otra', changes, 'x'), /sin confirmar/);
+});
+
+test('parser de backlog robusto: tabla markdown, lista y JSON sin etiqueta', async () => {
+  const { parseBacklogFromMarkdown } = await import('../src/services/backlog.ts');
+  const table = `| ID | Título | Responsable | Depende de | Estimación | Criterio |\n|---|---|---|---|---|---|\n| HU-005 | **Solicitudes** | Coordinador | — | M | Se crean tareas |\n| HU-006 | Sandbox | Desarrollador | HU-005 | L | Aislado |`;
+  const t = parseBacklogFromMarkdown(table);
+  assert.equal(t.length, 2); assert.equal(t[0].title, 'Solicitudes'); assert.equal(t[1].dependsOn, 'HU-005'); assert.equal(t[1].estimate, 'L');
+  const list = `### Semana 1\n- **HU-005 — Solicitudes de desarrollo** (Coordinador, M)\n- HU-006: Sandbox de ejecución\n`;
+  const l = parseBacklogFromMarkdown(list);
+  assert.equal(l.length, 2); assert.ok(l[0].title.startsWith('Solicitudes'));
+  const plain = 'Backlog:\n```\n[{"id":"HU-010","titulo":"Exportar","estimacion":"S"}]\n```';
+  assert.equal(parseBacklogFromMarkdown(plain)[0].storyId, 'HU-010');
+  const wrapped = '```json\n{"backlog":[{"id":"HU-011","title":"Otra","estimate":"M","dependeDe":"HU-010"}]}\n```';
+  assert.equal(parseBacklogFromMarkdown(wrapped)[0].dependsOn, 'HU-010');
+});
+
+test('empresas y proyectos: creación con agentes de plantilla; asistente persiste mensajes', async () => {
+  const { createCompany, createProject } = await import('../src/services/companies.ts');
+  const { assistantRepo, assistantInfo } = await import('../src/services/assistant.ts');
+  const ws = createCompany('Panadería Luna');
+  assert.equal(ws.slug, 'panaderia-luna'); assert.equal(ws.kind, 'company');
+  assert.equal(agentsRepo(ws.slug).list().length, 3, '3 agentes de espacio');
+  const p = createProject(ws.slug, 'Tienda en línea', 'Vender pan por internet', ['Catálogo', 'Pedidos']);
+  assert.equal(agentsRepo(ws.slug).list().filter(a => a.projectId === p.id).length, 5, '5 agentes de proyecto');
+  const ws2 = createCompany('Panadería Luna');
+  assert.equal(ws2.slug, 'panaderia-luna-2', 'slug único');
+  const info = assistantInfo();
+  assert.equal(info.name, 'Asistente de Empresa'); assert.ok(info.monthlyLimitUsd > 0);
+  assistantRepo.add({ role: 'user', content: 'hola', actions: [], attachments: [{ name: 'captura.png', mediaType: 'image/png', bytes: 1200 }], tokensIn: 0, tokensOut: 0, costUsd: 0, model: null });
+  assert.equal(assistantRepo.list().length, 1);
+  assert.equal(assistantRepo.list()[0].attachments[0].name, 'captura.png', 'adjuntos persistidos');
+  assistantRepo.clear(); assert.equal(assistantRepo.list().length, 0);
+});
+
+test('asistente: parseo de respuesta (bloque actions, JSON legado, texto plano) y propuestas con autorización', async () => {
+  const { parseResponse, performActions, assistantRepo, resolveProposal } = await import('../src/services/assistant.ts');
+  const { backlogRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
+  const { execSync } = await import('node:child_process');
+  // Repositorio git temporal registrado en el proyecto interno (la estimación lo requiere).
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-repo-'));
+  fs.writeFileSync(path.join(repoDir, 'README.md'), '# demo\n');
+  execSync('git init -q && git -c user.email=t@t -c user.name=t add -A && git -c user.email=t@t -c user.name=t commit -qm init', { cwd: repoDir });
+  const internal = projectsRepo('portal-ia').list()[0];
+  projectsRepo('portal-ia').setRepository(internal.id, repoDir, 'main');
+  // 1) Formato nuevo: markdown + bloque ```actions
+  const r1 = parseResponse('Claro, **la añado**.\n\n```actions\n[{"type":"add_backlog_item","company":"portal-ia","project":"Desarrollo del Portal","title":"Soportar imágenes en el chat","criterion":"Se pueden adjuntar PNG/JPEG"}]\n```');
+  assert.equal(r1.reply, 'Claro, **la añado**.'); assert.equal(r1.actions.length, 1);
+  // 2) JSON legado completo
+  const r2 = parseResponse('{"reply":"Hecho","actions":[]}'); assert.equal(r2.reply, 'Hecho');
+  // 3) Texto plano con JSON colado al final → se recorta
+  const r3 = parseResponse('Respuesta normal.\n{"reply":"duplicado"}'); assert.equal(r3.reply, 'Respuesta normal.'); assert.equal(r3.actions.length, 0);
+  // 4) Bloque truncado → no rompe
+  const r4 = parseResponse('Texto\n```actions\n[{"type":"add_'); assert.equal(r4.actions.length, 0);
+
+  // Acciones: añadir historia (local) y proponer su ejecución (pendiente de autorización, sin IA)
+  const acts = performActions([
+    { type: 'add_backlog_item', company: 'portal-ia', project: 'Desarrollo del Portal', title: 'Soportar imágenes en el chat', criterion: 'Se pueden adjuntar PNG/JPEG' },
+    { type: 'execute_story', company: 'portal-ia', project: 'Desarrollo del Portal', story: 'Soportar imágenes en el chat' },
+    { type: 'apply_changes', company: 'portal-ia', processId: 'no-existe' }
+  ]);
+  assert.equal(acts[0].type, 'add_backlog_item'); assert.equal(acts[0].status, 'done');
+  assert.equal(acts[1].type, 'propose_execution'); assert.equal(acts[1].status, 'pending'); assert.ok(acts[1].processId); assert.ok((acts[1].estimatedUsd ?? 0) > 0);
+  assert.equal(acts[2].type, 'propose_apply'); assert.equal(acts[2].status, 'failed');
+  const proc = processesRepo('portal-ia').get(acts[1].processId!);
+  assert.equal(proc?.status, 'pending_authorization', 'el proceso espera autorización: no se gastó IA');
+  const items = backlogRepo('portal-ia').list(acts[1].projectId!);
+  assert.ok(items.some(i => i.title === 'Soportar imágenes en el chat'));
+  // Resolver la propuesta desde la tarjeta
+  const msg = assistantRepo.add({ role: 'assistant', content: 'Propongo ejecutarla.', actions: acts, attachments: [], tokensIn: 10, tokensOut: 5, costUsd: 0.001, model: 'x' });
+  resolveProposal(msg.id, acts[1].processId!, 'done', 'Autorizada');
+  assert.equal(assistantRepo.get(msg.id)!.actions[1].status, 'done');
+  assert.equal(assistantRepo.get(msg.id)!.actions[1].detail, 'Autorizada');
+  assistantRepo.clear();
+});
+
+test('aplicar cambios en un repositorio recién creado (sin commits) y rescate del veredicto de QA cortado', async () => {
+  const { applyChanges } = await import('../src/services/repoWrite.ts');
+  const { parseReview } = await import('../src/services/storyExecution.ts');
+  const { execSync } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-empty-'));
+  execSync('git init -q', { cwd: dir });
+  const r = await applyChanges(dir, 'portal-ia/hu-001', [{ path: 'README.md', action: 'create', content: '# Hola\n' }, { path: 'src/index.ts', action: 'create', content: 'export {};\n' }].map(c => ({ ...c, diff: '', before: 0, after: 1 })) as any, 'HU-001: inicio');
+  assert.equal(r.branch, 'portal-ia/hu-001'); assert.ok(r.commit.length >= 7); assert.equal(r.files.length, 2);
+  assert.equal(execSync('git rev-parse --abbrev-ref HEAD', { cwd: dir }).toString().trim(), 'portal-ia/hu-001');
+  assert.equal(execSync('git status --porcelain', { cwd: dir }).toString().trim(), '', 'árbol limpio tras el commit');
+  // Fallo controlado: ruta protegida → se deshace y el repo queda sin restos
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-empty2-'));
+  execSync('git init -q', { cwd: dir2 });
+  await assert.rejects(applyChanges(dir2, 'x', [{ path: 'ok.txt', action: 'create', content: 'a' }, { path: '.git/config', action: 'create', content: 'x' }].map(c => ({ ...c, diff: '', before: 0, after: 1 })) as any, 'm'));
+  assert.equal(fs.existsSync(path.join(dir2, 'ok.txt')), false, 'archivo revertido');
+  // QA cortado por max_tokens
+  const v = parseReview('{"approve": false, "summary": "El esqueleto es coherente. Sin embargo no hay evidencia de ejecución", "issues": ["Nada se ha ejecutado", "Falta package-lock', 'max_tokens');
+  assert.equal(v.approve, false); assert.ok(v.summary.startsWith('El esqueleto es coherente')); assert.ok(v.summary.includes('se cortó'));
+  assert.deepEqual(v.issues, ['Nada se ha ejecutado']);
+  const ok = parseReview('```json\n{"approve": true, "summary": "Bien", "issues": [], "suggestedTests": ["npm test"]}\n```', 'end_turn');
+  assert.equal(ok.approve, true); assert.deepEqual(ok.suggestedTests, ['npm test']);
+});
+
+test('desarrollador: formato de bloques de archivo, detección de archivo cortado y tolerancia a cercas', async () => {
+  const { parseFileBlocks } = await import('../src/services/storyExecution.ts');
+  const ok = parseFileBlocks(`=== RESUMEN ===\nSe añade contracts.\n=== ARCHIVO: packages/contracts/package.json | create ===\n{\n  "name": "@portal/contracts"\n}\n=== FIN ARCHIVO ===\n=== ARCHIVO: src/old.ts | delete ===\n=== FIN ARCHIVO ===\n=== ARCHIVO: eslint.config.js | modify ===\n\`\`\`js\nconst a = "=== no es marcador ===";\n\`\`\`\n=== FIN ARCHIVO ===\n=== VERIFICAR: typecheck, test ===\n=== NOTAS ===\nFalta lock.\n`);
+  assert.equal(ok.changes.length, 3); assert.equal(ok.changes[0].content, '{\n  "name": "@portal/contracts"\n}\n'); assert.equal(ok.changes[1].action, 'delete');
+  assert.equal(ok.changes[2].content, 'const a = "=== no es marcador ===";\n'); assert.deepEqual(ok.verify, ['typecheck', 'test']); assert.equal(ok.summary, 'Se añade contracts.'); assert.equal(ok.notes, 'Falta lock.'); assert.equal(ok.truncatedFile, null);
+  const cut = parseFileBlocks(`=== RESUMEN ===\nX\n=== ARCHIVO: a.ts | create ===\nexport const a = 1;\n=== FIN ARCHIVO ===\n=== ARCHIVO: b.ts | create ===\nexport const b = `);
+  assert.equal(cut.changes.length, 1); assert.equal(cut.truncatedFile, 'b.ts');
+  assert.equal(parseFileBlocks('{"summary":"json"}').changes.length, 0);
+});
+
+test('git: integrar en la rama principal y publicar en un remoto local; numeración continua y referencias del asistente', async () => {
+  const { applyChanges, mergeBranch, pushBranches, remoteInfo } = await import('../src/services/repoWrite.ts');
+  const { parseResponse } = await import('../src/services/assistant.ts');
+  const { addManualItem } = await import('../src/services/backlog.ts');
+  const { backlogRepo, projectsRepo } = await import('../src/db/workspace.ts');
+  const { execSync } = await import('node:child_process');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-merge-'));
+  execSync('git init -q -b main && echo base > base.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm base', { cwd: dir });
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-remote-')); execSync('git init -q --bare', { cwd: bare });
+  execSync(`git remote add origin "${bare}"`, { cwd: dir });
+  const a = await applyChanges(dir, 'portal-ia/hu-002', [{ path: 'src/x.ts', action: 'create', content: 'export const x = 2;\n', diff: '', before: 0, after: 1 } as any], 'HU-002');
+  const m = await mergeBranch(dir, a.branch);
+  assert.equal(m.into, 'main'); assert.equal(execSync('git rev-parse --abbrev-ref HEAD', { cwd: dir }).toString().trim(), 'main');
+  assert.ok(execSync('git log --oneline', { cwd: dir }).toString().includes('Integra portal-ia/hu-002 en main'));
+  assert.ok(fs.existsSync(path.join(dir, 'src/x.ts')), 'archivo integrado en main');
+  await assert.rejects(mergeBranch(dir, a.branch, a.branch), /misma rama/); // destino inválido
+  await assert.rejects(mergeBranch(dir, a.branch, 'no-existe'), /no existe/);
+  const info = await remoteInfo(dir); assert.equal(info.remote, 'origin');
+  const p = await pushBranches(dir, [a.branch, 'main']);
+  assert.equal(p.branches.length, 2);
+  assert.ok(execSync('git branch', { cwd: bare }).toString().includes('portal-ia/hu-002'), 'rama publicada en el remoto');
+  const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-noremote-')); execSync('git init -q', { cwd: dir2 });
+  await assert.rejects(pushBranches(dir2, ['main']), /no tiene un remoto/);
+  // Numeración continua de historias manuales
+  const internal = projectsRepo('portal-ia').list()[0];
+  const before = backlogRepo('portal-ia').list(internal.id);
+  const maxN = Math.max(0, ...before.map(b => parseInt(b.storyId.replace(/\D+/g, ''), 10)));
+  const it = addManualItem('portal-ia', internal.id, { title: 'Numeración continua' });
+  assert.equal(it.storyId, `HU-${String(maxN + 1).padStart(3, '0')}`);
+  // JSON legado cortado → texto legible
+  const r = parseResponse('{"reply":"Hecho.\\n- **Una**\\n- Dos","actions":[{"type":"add_backlog_item","title":"El');
+  assert.equal(r.reply, 'Hecho.\n- **Una**\n- Dos'); assert.equal(r.actions.length, 0);
+});
+
+test('flujo git: estado del repositorio, crear main, remoto, preflight del proyecto interno, impacto de cambios y regla de cierre', async () => {
+  const { repoStatus, initMainBranch, setRemote } = await import('../src/services/repoStatus.ts');
+  const { applyChanges } = await import('../src/services/repoWrite.ts');
+  const { preflightRepo } = await import('../src/services/storyExecution.ts');
+  const { classifyImpact } = await import('../src/services/system.ts');
+  const { REPO_ROOT } = await import('../src/config.ts');
+  const { execSync } = await import('node:child_process');
+  // Repositorio que nació sin main (como el del propietario): solo ramas portal-ia/hu-xxx
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-nomain-'));
+  execSync('git init -q', { cwd: dir });
+  await applyChanges(dir, 'portal-ia/hu-001', [{ path: 'a.txt', action: 'create', content: 'a', diff: '', before: 0, after: 1 } as any], 'HU-001');
+  let st = await repoStatus(dir);
+  assert.equal(st.hasMain, false); assert.equal(st.branch, 'portal-ia/hu-001'); assert.deepEqual(st.storyBranches, ['portal-ia/hu-001']); assert.equal(st.remote, null); assert.equal(st.isPortalRuntime, false);
+  const im = await initMainBranch(dir); assert.equal(im.mainBranch, 'main'); assert.equal(im.from, 'portal-ia/hu-001');
+  st = await repoStatus(dir); assert.equal(st.hasMain, true); assert.equal(st.branch, 'main');
+  await assert.rejects(initMainBranch(dir), /ya existe/);
+  await assert.rejects(setRemote(dir, 'ftp://malo'), /no válida/);
+  const r = await setRemote(dir, 'https://github.com/CosioYair/portal-ia.git'); assert.equal(r.remote, 'origin');
+  st = await repoStatus(dir); assert.equal(st.remoteUrl, 'https://github.com/CosioYair/portal-ia.git'); assert.equal(st.aheadOfRemote, -1, 'main nunca publicada');
+  // Las historias nuevas parten de main aunque la rama activa sea otra
+  execSync('git checkout -q portal-ia/hu-001', { cwd: dir });
+  await applyChanges(dir, 'portal-ia/hu-002', [{ path: 'b.txt', action: 'create', content: 'b', diff: '', before: 0, after: 1 } as any], 'HU-002');
+  assert.equal(execSync('git log --format=%s -n 2', { cwd: dir }).toString().trim().split('\n')[1], 'HU-001', 'hu-002 parte de main (que contiene HU-001)');
+  // Preflight: el proyecto interno exige la carpeta de esta instalación
+  delete process.env.PORTAL_ALLOW_FOREIGN_REPO;
+  assert.throws(() => preflightRepo('portal-ia', dir), /no es la carpeta desde la que corre este Portal/);
+  assert.doesNotThrow(() => preflightRepo('portal-ia', REPO_ROOT));
+  assert.doesNotThrow(() => preflightRepo('otra-empresa', dir));
+  process.env.PORTAL_ALLOW_FOREIGN_REPO = '1';
+  // Clasificación del impacto de los cambios
+  assert.equal(classifyImpact(['docs/x.md', 'apps/server/test/a.test.ts']), 'none');
+  assert.equal(classifyImpact(['apps/web/src/screens/Backlog.tsx']), 'reload');
+  assert.equal(classifyImpact(['apps/web/src/a.tsx', 'apps/server/src/app.ts']), 'restart');
+  assert.equal(classifyImpact(['package.json']), 'restart');
+  // Regla de cierre vía API: sin cambios integrados → 409; con force → cerrada
+  const { addManualItem } = await import('../src/services/backlog.ts');
+  const { projectsRepo } = await import('../src/db/workspace.ts');
+  const internal = projectsRepo('portal-ia').list()[0];
+  const it = addManualItem('portal-ia', internal.id, { title: 'Historia resuelta fuera del flujo' });
+  const app = await buildApp();
+  const r1 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/backlog/${it.id}/done`, payload: {} });
+  assert.equal(r1.statusCode, 409); assert.equal(r1.json().code, 'not_applied');
+  const r2 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/backlog/${it.id}/done`, payload: { force: true, reason: 'ya implementada en v0.8' } });
+  assert.equal(r2.statusCode, 200); assert.equal(r2.json().status, 'done');
+  const r3 = await app.inject({ method: 'GET', url: '/api/system/status' });
+  assert.equal(r3.statusCode, 200); assert.equal(r3.json().version, '0.8.0');
+  await app.close();
+});
+
+test('encargos delegados: responsable por ámbito, equipo a su cargo, proceso pendiente sin IA y aplicación de propuestas al backlog', async () => {
+  const { pickLeadAgent, teamOf, createDelegation, estimateDelegation, applyBacklogOps } = await import('../src/services/delegation.ts');
+  const { backlogRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
+  const { addManualItem } = await import('../src/services/backlog.ts');
+  const internal = projectsRepo('portal-ia').list()[0];
+  const coord = pickLeadAgent('portal-ia', internal.id, undefined); assert.equal(coord.key, 'pj-coordinador');
+  const gestor = pickLeadAgent('portal-ia', null, undefined); assert.equal(gestor.key, 'ws-gestor');
+  assert.equal(pickLeadAgent('portal-ia', internal.id, 'arquitecto').key, 'pj-arquitecto');
+  assert.equal(pickLeadAgent('portal-ia', internal.id, 'Agente de Onboarding').key, 'ws-onboarding');
+  const team = teamOf('portal-ia', coord).map(a => a.key).sort(); assert.deepEqual(team, ['pj-arquitecto', 'pj-dev', 'pj-qa', 'pj-ux']);
+  const est = estimateDelegation('portal-ia', internal.id, undefined, 'Revisa y replantea el backlog');
+  assert.equal(est.steps.length, 1 + 3 + 1, 'validación + hasta 3 consultas + entregable'); assert.ok(est.estimatedUsd > 0);
+  const proc = createDelegation('portal-ia', internal.id, undefined, 'Revisa y replantea el backlog');
+  assert.equal(proc.kind, 'delegated_task'); assert.equal(proc.status, 'pending_authorization'); assert.equal(proc.delegation?.leadAgentName, 'Coordinador del Proyecto'); assert.equal(proc.spentUsd, 0);
+  // Propuestas al backlog aplicadas con aprobación
+  const a = addManualItem('portal-ia', internal.id, { title: 'Historia A (solapada)' });
+  const b = addManualItem('portal-ia', internal.id, { title: 'Historia B (ancla)' });
+  const c = addManualItem('portal-ia', internal.id, { title: 'Historia C (resuelta)' });
+  processesRepo('portal-ia').setDelegation(proc.id, { ...proc.delegation!, deliverable: 'ok', backlogOps: [
+    { op: 'merge', into: b.storyId, from: [a.storyId], title: 'Historia B ampliada', reason: 'solapamiento' },
+    { op: 'discard', story: c.storyId, reason: 'ya resuelta en v0.8' },
+    { op: 'add', title: 'Historia nueva D', criterion: 'criterio D', estimate: 'S', reason: 'hueco detectado' },
+    { op: 'update', story: 'HU-999', title: 'no existe', reason: 'x' },
+    { op: 'reprioritize', order: [b.storyId], reason: 'primero lo ancla' }
+  ] });
+  const d = applyBacklogOps('portal-ia', proc.id);
+  assert.ok(d.opsApplied); assert.equal(d.opsApplied!.summary.length, 5);
+  assert.ok(d.opsApplied!.summary[3].startsWith('✖'), 'historia inexistente informada, no rompe');
+  const items = backlogRepo('portal-ia').list(internal.id);
+  assert.equal(items.find(i => i.id === a.id)!.status, 'discarded'); assert.equal(items.find(i => i.id === b.id)!.title, 'Historia B ampliada'); assert.equal(items.find(i => i.id === c.id)!.status, 'discarded');
+  assert.ok(items.some(i => i.title === 'Historia nueva D' && i.estimate === 'S'));
+  assert.throws(() => applyBacklogOps('portal-ia', proc.id), /ya se aplicaron/);
+});

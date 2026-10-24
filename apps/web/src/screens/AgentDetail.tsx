@@ -1,0 +1,188 @@
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
+import type { Agent, AgentConfig, ProviderId } from '@portal-ia/domain';
+import { KNOWLEDGE, TOOLS } from '@portal-ia/domain';
+import { api } from '../lib/api.ts';
+import { useApp } from '../lib/store.ts';
+import { EFFORT_LABELS, KNOWLEDGE_LABELS, TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
+import { Shell } from '../components/Shell.tsx';
+import { Avatar, Chip, Icon, KV, Notice } from '../components/ui.tsx';
+
+export function AgentDetail() {
+  const { agentId } = useParams();
+  const { status, providers, flash, navigate } = useApp();
+  const ws = status.workspace!;
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [draft, setDraft] = useState<AgentConfig | null>(null);
+  const [newResp, setNewResp] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const load = () => api.agents(ws.slug).then(list => setAgents(list.filter(a => a.scope === 'workspace' || a.projectId === status.project?.id)));
+  useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ws.slug]);
+  useEffect(() => { setDraft(null); setNewResp(''); }, [agentId]);
+
+  const agent = agents.find(a => a.id === agentId);
+  const cfg = draft ?? agent?.config ?? null;
+  const dirty = !!draft && !!agent && JSON.stringify(draft) !== JSON.stringify(agent.config);
+  const edit = (patch: Partial<AgentConfig>) => cfg && setDraft({ ...cfg, ...patch });
+
+  const prov = useMemo(() => providers.find(p => p.id === cfg?.provider), [providers, cfg?.provider]);
+  const model = prov?.models.find(m => m.id === cfg?.model);
+  const byKey = (k: string) => agents.find(a => a.key === k);
+  const nameOf = (k: string) => byKey(k)?.config.name ?? k;
+  const openKey = (k: string) => { const a = byKey(k); if (a) navigate(`/equipo/${a.id}`); };
+
+  if (!agent || !cfg) return <Shell crumb="Equipo de IA"><main className="page"><span className="spin" aria-label="Cargando" /></main></Shell>;
+  const wsScope = agent.scope === 'workspace';
+
+  const save = async () => {
+    if (!dirty || !draft) return;
+    setSaving(true);
+    try { await api.updateAgentConfig(ws.slug, agent.id, draft); await load(); setDraft(null); flash(`Configuración de ${draft.name} guardada`); }
+    catch (e: any) { flash(e.message, 'err'); } finally { setSaving(false); }
+  };
+  const changeProvider = (pid: ProviderId) => {
+    const p = providers.find(x => x.id === pid); if (!p) return;
+    const tierModel = p.models.find(m => m.tier === agent.template.tier) ?? p.models[0];
+    edit({ provider: pid, model: tierModel?.id ?? '', fallbacks: [] });
+  };
+
+  const rail = (a: Agent) => <button key={a.id} className={`rail-i ${a.id === agent.id ? 'is-active' : ''}`} onClick={() => navigate(`/equipo/${a.id}`)} aria-pressed={a.id === agent.id}>
+    <Avatar initials={a.template.initials} ws={a.scope === 'workspace'} /><span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{a.config.name}</span><span className="small muted">{a.template.role}</span></span></button>;
+  const chipLink = (k: string) => <button key={k} className="chip" style={{ cursor: 'pointer', font: 'inherit', fontSize: 12, fontWeight: 500 }} onClick={() => openKey(k)}>{nameOf(k)}</button>;
+  const toolsOn = TOOLS.filter(t => cfg.tools[t.id]).length;
+  const knowOn = KNOWLEDGE.filter(k => cfg.knowledge[k.id]).length;
+  const fbCount = cfg.fallbacks.filter(f => f !== cfg.model).length;
+
+  return (
+    <Shell crumb={<>Equipo de IA / {cfg.name}</>}>
+      <main style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'stretch', flex: 1 }}>
+        <aside style={{ flex: '1 1 260px', maxWidth: 290, borderRight: '1px solid #E5E3DC', padding: '16px 12px 24px', background: '#FAF9F6', display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <Link className="btn btn-ghost btn-sm" to="/equipo" style={{ justifyContent: 'flex-start', marginBottom: 6 }}>{Icon.back()}Equipo de IA</Link>
+          <div className="side-sec">Agentes del espacio</div>{agents.filter(a => a.scope === 'workspace').map(rail)}
+          <div className="side-sec">Proyecto · {status.project!.name}</div>{agents.filter(a => a.scope === 'project').map(rail)}
+        </aside>
+        <div className="page" style={{ flex: '999 1 560px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20, maxWidth: 'none' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+            <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
+              <Avatar initials={agent.template.initials} ws={wsScope} lg />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <h1 className="h1" style={{ fontSize: 24 }}>{cfg.name}</h1><div className="med">{agent.template.role}</div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone={wsScope ? 'accent' : ''} xs>{wsScope ? 'Ámbito: espacio de trabajo' : 'Ámbito: proyecto'}</Chip><Chip xs dot={agent.status === 'active' ? 'ok' : ''}>Configurado · {agent.status === 'active' ? 'Activo' : 'Inactivo'}</Chip><Chip xs className="mono">{agent.templateId === 'tpl.custom@1' ? 'personalizado' : agent.templateId}</Chip></div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              {agent.templateId === 'tpl.custom@1' && <button className="btn btn-ghost" style={{ color: '#B3261E' }} disabled={saving} onClick={async () => { if (!confirm(`¿Eliminar el agente «${agent.config.name}»? Esta acción no se puede deshacer.`)) return; try { await api.deleteAgent(ws.slug, agent.id); flash('Agente eliminado'); navigate('/equipo'); } catch (e: any) { flash(e.message, 'err'); } }}>Eliminar</button>}
+              <button className="btn btn-ghost" onClick={() => setDraft(null)} disabled={!dirty || saving}>Descartar</button>
+              <button className="btn btn-primary" onClick={save} disabled={!dirty || saving}>{saving ? 'Guardando…' : 'Guardar cambios'}</button>
+            </div>
+          </div>
+          {dirty && <Notice kind="warn">Hay cambios sin guardar. Al guardar se actualiza la configuración del agente en la base local del espacio; no se activa ni realiza ninguna llamada a modelos.</Notice>}
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(420px, 100%), 1fr))', gap: 20, alignItems: 'start' }}>
+            <section className="card"><div className="card-h"><div className="h3">Identidad y rol</div></div>
+              <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <div><label className="label" htmlFor="ag-name">Nombre</label><input id="ag-name" className="input" value={cfg.name} onChange={e => edit({ name: e.target.value })} /></div>
+                <div><label className="label" htmlFor="ag-role">Rol organizacional</label><input id="ag-role" className="input" value={agent.template.role} disabled /><div className="help">Definido por la plantilla aprobada.</div></div>
+                <div><label className="label" htmlFor="ag-spec">Especialización</label><textarea id="ag-spec" className="input" value={cfg.specialization} onChange={e => edit({ specialization: e.target.value })} /></div>
+              </div></section>
+
+            <section className="card"><div className="card-h"><div className="h3">Responsabilidades</div><span className="small muted">{cfg.responsibilities.length} definida{cfg.responsibilities.length === 1 ? '' : 's'}</span></div>
+              <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <ul style={{ listStyle: 'none', padding: 0, display: 'flex', flexDirection: 'column' }}>
+                  {cfg.responsibilities.map((t, i) => <li key={i} className="rrow"><span className="mono small muted">{String(i + 1).padStart(2, '0')}</span><span style={{ flex: 1 }}>{t}</span><button className="xbtn" onClick={() => edit({ responsibilities: cfg.responsibilities.filter((_, j) => j !== i) })} aria-label="Quitar responsabilidad">{Icon.x()}</button></li>)}
+                </ul>
+                <form style={{ display: 'flex', gap: 8 }} onSubmit={e => { e.preventDefault(); const t = newResp.trim(); if (!t) return; edit({ responsibilities: [...cfg.responsibilities, t] }); setNewResp(''); }}>
+                  <input className="input" value={newResp} onChange={e => setNewResp(e.target.value)} placeholder="Añadir una responsabilidad…" aria-label="Nueva responsabilidad" style={{ flex: 1 }} />
+                  <button className="btn btn-secondary" type="submit" disabled={!newResp.trim()}>Añadir</button>
+                </form>
+              </div></section>
+
+            <section className="card"><div className="card-h"><div className="h3">Relaciones organizacionales</div></div>
+              <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <div><div className="label">Reporta a</div><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{agent.template.reportsTo === 'owner' ? <Chip>Tú · propietario del espacio</Chip> : chipLink(agent.template.reportsTo)}</div></div>
+                <div><div className="label">Supervisa</div><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{agent.template.supervises.length ? agent.template.supervises.map(chipLink) : <span className="sm13 muted">No supervisa a otros agentes.</span>}</div></div>
+                <div><div className="label">Colabora con</div><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{agent.template.collaborates.map(chipLink)}</div></div>
+              </div></section>
+
+            <section className="card"><div className="card-h"><div className="h3">Ámbito asignado</div><Chip tone={wsScope ? 'accent' : ''} xs>{wsScope ? 'Espacio de trabajo' : 'Proyecto'}</Chip></div>
+              <div className="card-b">
+                <KV k="Espacio de trabajo">{ws.name} · interno</KV>
+                <KV k="Proyecto">{wsScope ? 'Todos los proyectos del espacio' : status.project!.name}</KV>
+                <KV k="Fuera del ámbito"><Chip tone="err" xs>sin acceso</Chip></KV>
+                <div className="help" style={{ marginTop: 10 }}>El ámbito limita el conocimiento, las herramientas y los agentes con los que puede interactuar. Se define al crear el agente y no es editable aquí.</div>
+              </div></section>
+
+            <section className="card"><div className="card-h"><div className="h3">Modelo preferido</div></div>
+              <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                <div><label className="label" htmlFor="ag-prov">Proveedor</label>
+                  <select id="ag-prov" className="input" value={cfg.provider} onChange={e => changeProvider(e.target.value as ProviderId)}>
+                    {providers.map(p => <option key={p.id} value={p.id} disabled={p.status !== 'connected'}>{p.name} · {p.status === 'connected' ? 'conectado' : 'no conectado'}</option>)}
+                  </select></div>
+                <div><label className="label" htmlFor="ag-model">Modelo</label>
+                  <select id="ag-model" className="input mono" value={cfg.model} onChange={e => edit({ model: e.target.value, fallbacks: cfg.fallbacks.filter(f => f !== e.target.value) })}>
+                    {(prov?.models ?? []).map(m => <option key={m.id} value={m.id}>{m.name}  ·  {m.id}</option>)}
+                  </select>
+                  <div className="help">{model ? `${model.description} ${model.supportsEffort ? 'Admite esfuerzo de razonamiento ajustable.' : 'No admite ajuste de esfuerzo.'}` : 'Modelo no disponible en el proveedor conectado.'}</div></div>
+              </div></section>
+
+            <section className="card"><div className="card-h"><div className="h3">Modelos alternativos autorizados</div><span className="small muted">{fbCount} autorizado{fbCount === 1 ? '' : 's'}</span></div>
+              <div className="card-b" style={{ display: 'flex', flexDirection: 'column', maxHeight: 360, overflow: 'auto' }}>
+                {providers.flatMap(p => p.models.map(m => { const pref = m.id === cfg.model; const disc = p.status !== 'connected' || p.id !== cfg.provider;
+                  return <label key={p.id + m.id} className="krow"><input className="cb" type="checkbox" checked={cfg.fallbacks.includes(m.id) && !pref} disabled={pref || disc}
+                    onChange={e => edit({ fallbacks: e.target.checked ? [...cfg.fallbacks, m.id] : cfg.fallbacks.filter(f => f !== m.id) })} />
+                    <span style={{ flex: 1, display: 'flex', flexDirection: 'column' }}><span>{m.name}</span><span className="small muted">{pref ? 'modelo preferido' : p.status !== 'connected' ? 'proveedor no conectado' : p.id !== cfg.provider ? 'otro proveedor (próximamente)' : m.description}</span></span><span className="mono small muted">{p.name}</span></label>; }))}
+                <div className="help" style={{ marginTop: 10 }}>Se usan solo si el modelo preferido no está disponible. Requieren un proveedor conectado.</div>
+              </div></section>
+
+            <section className="card"><div className="card-h"><div className="h3">Esfuerzo de razonamiento</div></div>
+              <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div className="seg seg-lg" role="group" aria-label="Esfuerzo de razonamiento">
+                  {(['low', 'medium', 'high'] as const).map(k => <button key={k} aria-pressed={cfg.effort === k} disabled={!model?.supportsEffort} onClick={() => edit({ effort: k })}>{EFFORT_LABELS[k]}</button>)}
+                </div>
+                <div className="help">{model?.supportsEffort ? `${model.name} admite esfuerzo ajustable. Un esfuerzo mayor mejora el razonamiento y aumenta el consumo de tokens.` : `${model?.name ?? 'El modelo'} no admite ajuste de esfuerzo; se usará su comportamiento predeterminado.`}</div>
+              </div></section>
+
+            <section className="card"><div className="card-h"><div className="h3">Límites de gasto</div></div>
+              <div className="card-b" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(160px, 100%), 1fr))', gap: 14 }}>
+                <div><label className="label" htmlFor="ag-limit">Límite mensual (USD)</label><input id="ag-limit" className="input mono" type="number" min={0} step={1} value={cfg.monthlyLimitUsd} onChange={e => edit({ monthlyLimitUsd: Number(e.target.value) })} /></div>
+                <div><label className="label" htmlFor="ag-pertask">Autorización por encima de (USD por tarea)</label><input id="ag-pertask" className="input mono" type="number" min={0} step={0.5} value={cfg.perTaskAuthUsd} onChange={e => edit({ perTaskAuthUsd: Number(e.target.value) })} /></div>
+                <div className="help" style={{ gridColumn: '1 / -1' }}>Los límites se aplican por agente y se combinan con los presupuestos por proceso (próximamente). Al alcanzarlos, el agente se detiene y solicita autorización.</div>
+              </div></section>
+
+            <section className="card" style={{ gridColumn: '1 / -1' }}><div className="card-h"><div className="h3">Herramientas y permisos</div><span className="small muted">{toolsOn} de {TOOLS.length} habilitadas</span></div>
+              <div className="card-b" style={{ display: 'flex', flexDirection: 'column' }}>
+                {TOOLS.map(t => <div key={t.id} className="trow"><input className="sw" type="checkbox" id={`tool-${t.id}`} checked={!!cfg.tools[t.id]} onChange={e => edit({ tools: { ...cfg.tools, [t.id]: e.target.checked } })} aria-label={TOOL_LABELS[t.id].name} />
+                  <label htmlFor={`tool-${t.id}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2, cursor: 'pointer', minWidth: 0 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{TOOL_LABELS[t.id].name}</span><span className="small muted">{TOOL_LABELS[t.id].desc}</span></label>
+                  <Chip tone={t.risk === 'auth' ? 'warn' : ''} xs>{t.risk === 'auth' ? 'requiere autorización' : 'local'}</Chip></div>)}
+                <div style={{ marginTop: 14 }}><Notice kind="warn">Las herramientas marcadas con <strong>«requiere autorización»</strong> nunca se ejecutan de forma autónoma: cada uso se detiene hasta que lo apruebes, aunque el agente esté activo. Habilitarlas aquí solo las añade a su configuración.</Notice></div>
+              </div></section>
+
+            <section className="card"><div className="card-h"><div className="h3">Acceso a conocimiento</div><span className="small muted">{knowOn} de {KNOWLEDGE.length}</span></div>
+              <div className="card-b" style={{ display: 'flex', flexDirection: 'column' }}>
+                {KNOWLEDGE.map(k => <label key={k.id} className="krow"><input className="cb" type="checkbox" checked={!!cfg.knowledge[k.id]} onChange={e => edit({ knowledge: { ...cfg.knowledge, [k.id]: e.target.checked } })} /><span style={{ flex: 1 }}>{KNOWLEDGE_LABELS[k.id]}</span></label>)}
+                <div className="help" style={{ marginTop: 10 }}>Solo conocimiento dentro de su ámbito. El repositorio se ofrece en modo lectura; su escritura es una herramienta aparte.</div>
+              </div></section>
+
+            <section className="card"><div className="card-h"><div className="h3">Criterios de evaluación</div><Chip tone="soon" xs>edición próximamente</Chip></div>
+              <div className="card-b"><ul style={{ listStyle: 'none', padding: 0, display: 'flex', flexDirection: 'column' }}>{agent.template.evaluation.map((t, i) => <li key={i} className="rrow"><span className="mono small muted">{String(i + 1).padStart(2, '0')}</span><span>{t}</span></li>)}</ul>
+                <div className="help" style={{ marginTop: 10 }}>Se usarán para medir el rendimiento del agente cuando existan ejecuciones.</div></div></section>
+
+            <section className="card" style={{ gridColumn: '1 / -1' }}><div className="card-h"><div className="h3">Estado</div><Chip dot={agent.status === 'active' ? 'ok' : ''}>{agent.status === 'active' ? 'Activo' : 'Inactivo'} · configurado</Chip></div>
+              <div className="card-b" style={{ display: 'flex', justifyContent: 'space-between', gap: 20, flexWrap: 'wrap', alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><span className="small muted">Última actividad</span><span className="mono sm13">ninguna</span></div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><span className="small muted">Llamadas a modelos</span><span className="mono sm13">0</span></div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><span className="small muted">Costo acumulado</span><span className="mono sm13">{fmtUsd(0)}</span></div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><span className="small muted">Configuración</span><span className="mono sm13">{agent.configEdited ? `editada · ${new Date(agent.updatedAt).toLocaleString('es-MX')}` : 'plantilla sin cambios'}</span></div>
+                </div>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}><span className="small muted" style={{ maxWidth: '36ch' }}>La activación requiere autorización de ejecución y un presupuesto aprobado. Se habilita en la siguiente historia de usuario.</span><button className="btn btn-secondary" disabled>Activar agente</button></div>
+              </div></section>
+          </div>
+          <div><Link className="btn btn-ghost" to="/panel">Volver al panel</Link></div>
+        </div>
+      </main>
+    </Shell>
+  );
+}

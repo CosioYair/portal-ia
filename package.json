@@ -1,29 +1,26 @@
 {
   "name": "portal-ia",
-  "version": "0.0.0",
   "private": true,
+  "version": "0.8.0",
+  "description": "Portal IA — sistema operativo empresarial multiagente, local-first (nombre provisional)",
   "type": "module",
-  "description": "Portal IA: plataforma local-first para crear y operar empresas con agentes de IA.",
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.13.0"
   },
   "workspaces": [
     "packages/*",
     "apps/*"
   ],
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "eslint .",
-    "test:rules": "node --test scripts/dependency-rules.test.mjs",
-    "test:contracts": "npm run test --workspace @portal/contracts",
-    "test:server": "npm run test --workspace @portal/server",
-    "test": "npm run test:rules && npm run test:contracts && npm run test:server",
-    "check": "npm run typecheck && npm run lint && npm run test:rules && npm run test:contracts && npm run test:server"
+    "dev": "npm run dev --workspace apps/server & npm run dev --workspace apps/web & wait",
+    "dev:server": "npm run dev --workspace apps/server",
+    "dev:web": "npm run dev --workspace apps/web",
+    "build": "npm run build --workspace apps/web",
+    "start": "npm run start --workspace apps/server",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
-    "eslint": "^9.17.0",
-    "typescript": "^5.7.2",
-    "typescript-eslint": "^8.18.0"
+    "typescript": "^5.9.3"
   }
 }
