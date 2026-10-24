@@ -26,12 +26,24 @@ function resolveMainBranch(v: string | undefined): string {
   return ok ? raw : 'main';
 }
 
+/**
+ * Directorio de worktrees por proceso (HU-011). Por defecto es un hermano del repositorio
+ * (`<repo>-worktrees`), nunca dentro de él, para no ensuciar `git status`.
+ */
+function resolveWorktreesDir(v: string | undefined): string {
+  const raw = v && v.trim() ? v.trim() : '';
+  if (!raw) return path.join(path.dirname(REPO_ROOT), `${path.basename(REPO_ROOT)}-worktrees`);
+  return path.isAbsolute(raw) ? raw : path.resolve(REPO_ROOT, raw);
+}
+
 export const config = {
   port: Number(process.env.PORTAL_PORT ?? 4310),
   host: process.env.PORTAL_HOST ?? '127.0.0.1',
   dataDir: resolveDataDir(process.env.PORTAL_DATA_DIR),
   /** Rama destino de toda integración (HU-143). Nunca se deduce de la rama activa. */
   mainBranch: resolveMainBranch(process.env.PORTAL_MAIN_BRANCH),
+  /** Carpeta donde se crea el worktree aislado de cada proceso (HU-011). Se crea bajo demanda. */
+  worktreesDir: resolveWorktreesDir(process.env.PORTAL_WORKTREES_DIR),
   webDist: path.join(REPO_ROOT, 'apps/web/dist')
 };
 
