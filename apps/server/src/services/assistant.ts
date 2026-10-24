@@ -12,6 +12,7 @@ import { addManualItem } from './backlog.ts';
 import { createCompany, createProject } from './companies.ts';
 import { createStoryProcess, estimateStory } from './storyExecution.ts';
 import { createDelegation, estimateDelegation } from './delegation.ts';
+import { describeProcess } from './guidance.ts';
 
 /**
  * Asistente global (lo encarna el «Asistente de Empresa» del espacio interno).
@@ -30,6 +31,8 @@ platform.exec(`CREATE TABLE IF NOT EXISTS assistant_messages (
 export type AssistantActionType = 'create_company' | 'create_project' | 'add_backlog_item' | 'propose_execution' | 'propose_apply' | 'propose_delegation' | 'info';
 export interface AssistantAction {
   type: AssistantActionType; status: 'done' | 'failed' | 'pending'; label: string; detail?: string; link?: string;
+  /** Estado real del proceso asociado, calculado al leer (no se persiste). */
+  live?: { status: string; phase: string; next: string; tone: 'info' | 'warn' | 'ok' | 'err'; settled: boolean };
   /** propose_execution / propose_apply */
   processId?: string; workspaceSlug?: string; projectId?: string; storyId?: string; estimatedUsd?: number; suggestedBudgetUsd?: number; changes?: number;
 }
@@ -40,6 +43,13 @@ const mapMsg = (r: any): AssistantMessage => ({ id: r.id, role: r.role, content:
 
 export const assistantRepo = {
   list(limit = 80): AssistantMessage[] { return (platform.prepare(`SELECT * FROM (SELECT * FROM assistant_messages ORDER BY created_at DESC LIMIT ?) ORDER BY created_at`).all(limit) as any[]).map(mapMsg); },
+  /** Mensajes con el estado real de los procesos que crearon sus acciones (para que el chat no diga «en ejecución» cuando ya terminó). */
+  listLive(limit = 80): AssistantMessage[] {
+    return this.list(limit).map(m => m.actions.some(a => a.processId && a.workspaceSlug) ? { ...m, actions: m.actions.map(a => {
+      if (!a.processId || !a.workspaceSlug) return a;
+      try { const p = processesRepo(a.workspaceSlug).get(a.processId); if (!p) return a; const g = describeProcess(p, { isPortalRepo: a.workspaceSlug === INTERNAL_WORKSPACE.slug }); return { ...a, live: { status: p.status, ...g } }; } catch { return a; }
+    }) } : m);
+  },
   add(m: Omit<AssistantMessage, 'id' | 'createdAt'>): AssistantMessage {
     const id = crypto.randomUUID(); const ts = new Date().toISOString();
     platform.prepare(`INSERT INTO assistant_messages (id, role, content, actions_json, attachments_json, tokens_in, tokens_out, cost_usd, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, m.role, m.content, JSON.stringify(m.actions), JSON.stringify(m.attachments), m.tokensIn, m.tokensOut, m.costUsd, m.model, ts);

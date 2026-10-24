@@ -230,7 +230,7 @@ export function backlogRepo(slug: string) {
   const db = workspaceDb(slug);
   const map = (r: any): BacklogItem => ({ id: r.id, projectId: r.project_id, storyId: r.story_id, title: r.title, ownerKey: r.owner_key, dependsOn: r.depends_on, estimate: r.estimate, criterion: r.criterion, description: r.description, status: r.status, position: r.position, sourceProcessId: r.source_process_id, lastProcessId: r.last_process_id, createdAt: r.created_at, updatedAt: r.updated_at });
   return {
-    list(projectId: string): BacklogItem[] { return (db.prepare(`SELECT * FROM backlog_items WHERE project_id = ? ORDER BY CASE WHEN source_process_id IS NULL THEN 1 ELSE 0 END, position`).all(projectId) as any[]).map(map); },
+    list(projectId: string): BacklogItem[] { return (db.prepare(`SELECT * FROM backlog_items WHERE project_id = ? ORDER BY position, created_at`).all(projectId) as any[]).map(map); },
     get(id: string): BacklogItem | undefined { const r = db.prepare(`SELECT * FROM backlog_items WHERE id = ?`).get(id); return r ? map(r) : undefined; },
     count(projectId: string): number { return (db.prepare(`SELECT COUNT(*) AS n FROM backlog_items WHERE project_id = ?`).get(projectId) as any).n; },
     nextPosition(projectId: string): number { return ((db.prepare(`SELECT COALESCE(MAX(position), -1) AS m FROM backlog_items WHERE project_id = ?`).get(projectId) as any).m as number) + 1; },

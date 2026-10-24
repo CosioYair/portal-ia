@@ -344,7 +344,7 @@ test('flujo git: estado del repositorio, crear main, remoto, preflight del proye
   const r2 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/backlog/${it.id}/done`, payload: { force: true, reason: 'ya implementada en v0.8' } });
   assert.equal(r2.statusCode, 200); assert.equal(r2.json().status, 'done');
   const r3 = await app.inject({ method: 'GET', url: '/api/system/status' });
-  assert.equal(r3.statusCode, 200); assert.ok(r3.json().version.startsWith('0.8'));
+  assert.equal(r3.statusCode, 200); assert.ok(/^0\.(8|9)/.test(r3.json().version));
   await app.close();
 });
 
@@ -398,4 +398,37 @@ test('propuestas al backlog: bloque backlog cerrado, bloque json, bloque cortado
   processesRepo('portal-ia').setDelegation(p.id, { ...p.delegation!, deliverable: 'Hola\n```backlog\n[{"op":"discard","story":"HU-003","reason":"x"}]\n```' });
   const fixed = ensureOpsParsed('portal-ia', processesRepo('portal-ia').get(p.id)!);
   assert.equal(fixed.delegation!.backlogOps.length, 1); assert.equal(fixed.delegation!.deliverable, 'Hola');
+});
+
+test('v0.9: parches buscar/reemplazar, rutas protegidas sin tumbar el proceso, .env.example permitido, secretos, orientación', async () => {
+  const { applyPatch, annotateChanges, scanSecrets, safeRelPath } = await import('../src/services/repoWrite.ts');
+  const { parseFileBlocks } = await import('../src/services/storyExecution.ts');
+  const { describeProcess } = await import('../src/services/guidance.ts');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-patch-'));
+  fs.writeFileSync(path.join(dir, 'a.ts'), 'const a = 1;\nconst b = 2;\nexport { a, b };\n');
+  // applyPatch exacto y tolerante a espacios finales
+  assert.equal(applyPatch('x\ny\nz', [{ search: 'y', replace: 'Y' }]).text, 'x\nY\nz');
+  assert.match(applyPatch('x\ny\nz', [{ search: 'q', replace: 'Q' }]).error!, /no aparece/);
+  assert.match(applyPatch('y\ny', [{ search: 'y', replace: 'Q' }]).error!, /más de una vez/);
+  assert.equal(applyPatch('a  \nb\n', [{ search: 'a\nb', replace: 'c' }]).text, 'c\n', 'tolera espacios finales');
+  // Formato con patch
+  const parsed = parseFileBlocks('=== RESUMEN ===\nok\n=== ARCHIVO: a.ts | patch ===\n<<<< BUSCAR\nconst b = 2;\n==== REEMPLAZAR\nconst b = 3;\n>>>> FIN\n=== FIN ARCHIVO ===\n=== ARCHIVO: .env.example | create ===\nPORT=4310\n=== FIN ARCHIVO ===\n=== ARCHIVO: .env | create ===\nSECRET=x\n=== FIN ARCHIVO ===\n=== ARCHIVO: k.ts | create ===\nconst key = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890";\n=== FIN ARCHIVO ===');
+  assert.equal(parsed.changes.length, 4); assert.equal(parsed.changes[0].action, 'patch'); assert.equal(parsed.changes[0].edits!.length, 1);
+  const ann = annotateChanges(dir, parsed.changes);
+  assert.equal(ann[0].content, 'const a = 1;\nconst b = 3;\nexport { a, b };\n'); assert.equal(ann[0].action, 'modify'); assert.equal(ann[0].error ?? null, null);
+  assert.equal(ann[1].error ?? null, null, '.env.example se permite');
+  assert.match(ann[2].error!, /protegida/, '.env real se bloquea pero no tumba el resto');
+  assert.match(ann[3].warning!, /Anthropic/, 'aviso de secreto');
+  assert.doesNotThrow(() => safeRelPath('.env.sample')); assert.throws(() => safeRelPath('.env.local'));
+  assert.equal(scanSecrets('const x = 1;'), null);
+  // Parche que no encaja → error en ese cambio
+  const bad = annotateChanges(dir, [{ path: 'a.ts', action: 'patch', content: null, edits: [{ search: 'no existe', replace: 'x' }] }]);
+  assert.match(bad[0].error!, /no aparece/);
+  // Orientación
+  const base: any = { id: 'p', kind: 'story_execution', status: 'done', steps: [], spentUsd: 0.5, budgetUsd: 2, error: null, delegation: null };
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a', error: null }], applied: null, merged: null, published: null, review: null, verifyCommands: [] } }).phase, /Diff listo/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: null, published: null, review: null, verifyCommands: [] } }).phase, /falta integrar/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [] } }, { isPortalRepo: true }).next, /Publicar/);
+  assert.match(describeProcess({ ...base, status: 'failed', error: 'X', result: null }).phase, /Falló/);
+  assert.equal(describeProcess({ ...base, status: 'pending_authorization', result: null }).settled, false);
 });

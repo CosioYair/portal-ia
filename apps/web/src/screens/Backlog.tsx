@@ -25,6 +25,11 @@ export function Backlog() {
   const [newTitle, setNewTitle] = useState('');
   const [newCrit, setNewCrit] = useState('');
   const [aiOffer, setAiOffer] = useState<{ source: string; model: string | null; byAgent: string | null; estimatedUsd: number } | null>(null);
+  const [skipQa, setSkipQa] = useState(false);
+  const [q, setQ] = useState('');
+  const [filter, setFilter] = useState<'open' | 'all' | 'done' | 'discarded'>('open');
+  const [openSec, setOpenSec] = useState<Record<string, boolean>>(() => { try { return JSON.parse(localStorage.getItem('portal-ia.backlog.sec') ?? '{}'); } catch { return {}; } });
+  const toggleSec = (k: string) => setOpenSec(o => { const n = { ...o, [k]: !(o[k] ?? true) }; try { localStorage.setItem('portal-ia.backlog.sec', JSON.stringify(n)); } catch { /* sin almacenamiento */ } return n; });
 
   const load = async () => {
     const [b, a, p, ps] = await Promise.all([api.backlog(ws.slug, projectId), api.agents(ws.slug), api.processes(ws.slug, projectId), api.projects(ws.slug)]);
@@ -36,8 +41,8 @@ export function Backlog() {
   useEffect(() => {
     setEst(null); setEstError(null); setExecError(null); setAuth(false);
     if (!sel) return;
-    api.storyEstimate(ws.slug, projectId, sel.id).then(e => { setEst(e); setBudget(e.suggestedBudgetUsd.toFixed(2)); }).catch(e => setEstError(e.message));
-  }, [sel, ws.slug, projectId]);
+    api.storyEstimate(ws.slug, projectId, sel.id, skipQa).then(e => { setEst(e); setBudget(e.suggestedBudgetUsd.toFixed(2)); }).catch(e => setEstError(e.message));
+  }, [sel, ws.slug, projectId, skipQa]);
 
   const importPlan = async (useAI = false) => {
     setBusy(true);
@@ -53,7 +58,7 @@ export function Backlog() {
   const addItem = async () => { if (newTitle.trim().length < 3) return; setBusy(true); try { await api.addBacklogItem(ws.slug, projectId, { title: newTitle.trim(), criterion: newCrit.trim() || undefined }); setNewTitle(''); setNewCrit(''); flash('Solicitud añadida al backlog'); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   const execute = async () => {
     if (!sel || !auth) return; setBusy(true); setExecError(null);
-    try { const p = await api.executeStory(ws.slug, projectId, sel.id); const a = await api.authorizeProcess(ws.slug, p.id, Number(budget)); flash(`Historia ${sel.storyId} en ejecución · presupuesto ${fmtUsd(a.budgetUsd)}`); navigate(`/procesos/${a.id}`); }
+    try { const p = await api.executeStory(ws.slug, projectId, sel.id, skipQa); const a = await api.authorizeProcess(ws.slug, p.id, Number(budget)); flash(`Historia ${sel.storyId} en ejecución · presupuesto ${fmtUsd(a.budgetUsd)}`); navigate(`/procesos/${a.id}`); }
     catch (e: any) { setExecError(e.message); flash(e.message, 'err'); } finally { setBusy(false); }
   };
 
@@ -74,9 +79,18 @@ export function Backlog() {
   const owner = (k: string | null) => agents.find(a => a.key === k);
   const running = procs.find(p => p.status === 'running');
   const lastProc = (it: BacklogItem) => procs.find(p => p.id === it.lastProcessId) ?? procs.find(p => p.backlogItemId === it.id);
-  const depOk = (it: BacklogItem) => !it.dependsOn || items?.find(x => x.storyId === it.dependsOn)?.status === 'done' || !items?.some(x => x.storyId === it.dependsOn);
-  const pending = items?.filter(i => i.status !== 'done') ?? [];
+  const depOk = (it: BacklogItem) => { if (!it.dependsOn) return true; const d = items?.find(x => x.storyId === it.dependsOn); return !d || d.status === 'done' || d.status === 'discarded'; };
+  const pending = items?.filter(i => i.status !== 'done' && i.status !== 'discarded') ?? [];
   const next = pending.find(i => i.status === 'pending' && depOk(i));
+  const match = (it: BacklogItem) => !q.trim() || `${it.storyId} ${it.title} ${it.criterion ?? ''}`.toLowerCase().includes(q.trim().toLowerCase());
+  const all = (items ?? []).filter(match);
+  const sections: { key: string; title: string; hint: string; rows: BacklogItem[]; defaultOpen: boolean }[] = [
+    { key: 'active', title: 'En curso y para revisar', hint: 'Requieren tu atención', rows: all.filter(i => i.status === 'in_progress' || i.status === 'review'), defaultOpen: true },
+    { key: 'pending', title: 'Pendientes (por prioridad)', hint: 'La primera ejecutable es la siguiente', rows: all.filter(i => i.status === 'pending' || i.status === 'blocked'), defaultOpen: true },
+    { key: 'done', title: 'Completadas', hint: '', rows: all.filter(i => i.status === 'done'), defaultOpen: false },
+    { key: 'discarded', title: 'Descartadas y fusionadas', hint: 'Conservadas como historial', rows: all.filter(i => i.status === 'discarded'), defaultOpen: false }
+  ].filter(sec => filter === 'all' || (filter === 'open' && (sec.key === 'active' || sec.key === 'pending')) || (filter === 'done' && sec.key === 'done') || (filter === 'discarded' && sec.key === 'discarded'));
+  const isOpen = (sec: { key: string; defaultOpen: boolean }) => openSec[sec.key] ?? sec.defaultOpen;
 
   return (
     <Shell crumb="Backlog">
@@ -85,7 +99,7 @@ export function Backlog() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div className="eyebrow">Backlog</div>
             <h1 className="h1" style={{ fontSize: 26 }}>Plan del proyecto y solicitudes</h1>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip>{items?.length ?? 0} historias</Chip><Chip tone="ok">{items?.filter(i => i.status === 'done').length ?? 0} completadas</Chip><Chip tone="accent">{items?.filter(i => i.status === 'review').length ?? 0} para revisar</Chip>{running && <Chip tone="warn" dot="pulse">1 en ejecución</Chip>}</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip>{items?.length ?? 0} historias</Chip><Chip tone="ok">{items?.filter(i => i.status === 'done').length ?? 0} completadas</Chip><Chip tone="accent">{items?.filter(i => i.status === 'review').length ?? 0} para revisar</Chip><Chip>{pending.length} abiertas</Chip>{running && <Chip tone="warn" dot="pulse">1 en ejecución</Chip>}</div>
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <button className="btn btn-secondary" onClick={() => importPlan(false)} disabled={busy}>{Icon.book()}Importar historias de la síntesis</button>
@@ -103,28 +117,37 @@ export function Backlog() {
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
           <div style={{ flex: '999 1 560px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
             <section className="card">
-              <div className="card-h"><div className="h3">Historias</div><span className="small muted">Ordenadas por prioridad del plan</span></div>
+              <div className="card-h" style={{ gap: 12, flexWrap: 'wrap' }}><div className="h3">Historias</div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <input className="input" value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por id o texto…" aria-label="Buscar historias" style={{ height: 32, width: 220 }} />
+                  <div style={{ display: 'flex', gap: 4 }}>{([['open', 'Abiertas'], ['all', 'Todas'], ['done', 'Completadas'], ['discarded', 'Descartadas']] as const).map(([k, l]) => <button key={k} className={`btn btn-sm ${filter === k ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setFilter(k)}>{l}</button>)}</div>
+                </div></div>
               {items && items.length === 0 && <div className="card-b"><Empty icon={Icon.inbox()} title="El backlog está vacío" hint="Importa las historias de la síntesis de la evaluación inicial o añade una solicitud a la derecha." style={{ padding: '24px 0 8px' }} /></div>}
-              {items && items.length > 0 && <div style={{ overflowX: 'auto' }}><table className="tbl">
-                <thead><tr><th>ID</th><th>Historia</th><th>Responsable</th><th>Depende de</th><th>Tamaño</th><th>Estado</th><th></th></tr></thead>
-                <tbody>{items.map(it => { const st = BACKLOG_STATUS[it.status]; const o = owner(it.ownerKey); const lp = lastProc(it); const blocked = !depOk(it); return <tr key={it.id} style={sel?.id === it.id ? { background: '#F3FAF9' } : undefined}>
-                  <td className="mono" style={{ fontSize: 12 }}>{it.storyId}</td>
-                  <td><div style={{ fontWeight: 500 }}>{it.title}</div>{it.criterion && <div className="small muted" style={{ maxWidth: '52ch' }}>{it.criterion}</div>}</td>
-                  <td className="med">{o?.config.name ?? it.ownerKey ?? '—'}</td>
-                  <td className="mono" style={{ fontSize: 12 }}>{it.dependsOn ?? '—'}</td>
-                  <td className="med">{it.estimate ?? '—'}</td>
-                  <td><Chip tone={blocked && it.status === 'pending' ? 'err' : st.tone} xs dot={it.status === 'in_progress' ? 'pulse' : undefined}>{blocked && it.status === 'pending' ? `Espera ${it.dependsOn}` : st.label}</Chip></td>
-                  <td style={{ whiteSpace: 'nowrap' }}>
-                    {it.status === 'review' && lp?.result?.applied && !lp.result.merged && <Chip tone="warn" xs>aplicada · falta integrar</Chip>}
-                    {it.status === 'review' && lp?.result?.merged && !lp.result.published && <Chip tone="accent" xs>integrada · falta publicar</Chip>}
-                    {it.status === 'review' && lp?.result?.merged && <button className="btn btn-primary btn-sm" style={{ marginLeft: 6 }} onClick={() => closeStory(it, false)} disabled={busy}>Cerrar historia</button>}
-                    {it.status === 'review' && lp && <button className="btn btn-secondary btn-sm" style={{ marginLeft: 6 }} onClick={() => navigate(`/procesos/${lp.id}`)}>{lp.result?.applied ? 'Ver proceso' : 'Revisar cambios'}</button>}
-                    {it.status === 'in_progress' && lp && <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/procesos/${lp.id}`)}>Ver proceso</button>}
-                    {(it.status === 'pending' || it.status === 'blocked') && <button className="btn btn-primary btn-sm" onClick={() => setSel(it)} disabled={!!running || !project?.repository}>Ejecutar</button>}
-                    {it.status === 'done' && lp && <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/procesos/${lp.id}`)}>Ver</button>}
-                    {it.status !== 'done' && it.status !== 'in_progress' && <button className="btn btn-ghost btn-sm" style={{ marginLeft: 6 }} title="Cerrar sin ejecutar: la historia ya está resuelta por otra vía" onClick={() => closeStory(it, true)} disabled={busy}>Cerrar</button>}
-                  </td></tr>; })}</tbody>
-              </table></div>}
+              {items && items.length > 0 && sections.map(sec => <div key={sec.key} style={{ borderTop: '1px solid #EEECE6' }}>
+                <button className="arow" style={{ borderRadius: 0, padding: '10px 18px', background: '#FAF9F6' }} onClick={() => toggleSec(sec.key)} aria-expanded={isOpen(sec)}>
+                  <span style={{ display: 'inline-block', transform: isOpen(sec) ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>{Icon.chevR()}</span>
+                  <span style={{ flex: 1, textAlign: 'left', fontWeight: 600, fontSize: 13 }}>{sec.title} <span className="muted" style={{ fontWeight: 400 }}>· {sec.rows.length}</span></span>
+                  {sec.hint && <span className="small muted">{sec.hint}</span>}
+                </button>
+                {isOpen(sec) && sec.rows.length === 0 && <div className="small muted" style={{ padding: '8px 18px 12px' }}>Nada aquí{q ? ' con ese filtro' : ''}.</div>}
+                {isOpen(sec) && sec.rows.length > 0 && <div style={{ overflowX: 'auto' }}><table className="tbl">
+                  <thead><tr><th style={{ width: 70 }}>ID</th><th>Historia</th><th style={{ width: 150 }}>Responsable</th><th style={{ width: 70 }}>Tam.</th><th style={{ width: 150 }}>Estado</th><th style={{ width: 280 }}></th></tr></thead>
+                  <tbody>{sec.rows.map(it => { const st = BACKLOG_STATUS[it.status]; const o = owner(it.ownerKey); const lp = lastProc(it); const blocked = !depOk(it); const g = lp?.guidance; return <tr key={it.id} style={sel?.id === it.id ? { background: '#F3FAF9' } : it.id === next?.id ? { background: '#FFFBF0' } : undefined}>
+                    <td className="mono" style={{ fontSize: 12, verticalAlign: 'top' }}>{it.storyId}</td>
+                    <td style={{ verticalAlign: 'top' }}><div style={{ fontWeight: 500 }}>{it.title}{it.id === next?.id && <Chip tone="warn" xs className="" >siguiente</Chip>}</div>{it.criterion && <div className="small muted" style={{ maxWidth: '70ch', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{it.criterion}</div>}{it.dependsOn && <div className="small muted mono">depende de {it.dependsOn}</div>}</td>
+                    <td className="med" style={{ verticalAlign: 'top', fontSize: 13 }}>{o?.config.name ?? it.ownerKey ?? '—'}</td>
+                    <td className="med" style={{ verticalAlign: 'top' }}>{it.estimate ?? '—'}</td>
+                    <td style={{ verticalAlign: 'top' }}><Chip tone={blocked && it.status === 'pending' ? 'err' : st.tone} xs dot={it.status === 'in_progress' ? 'pulse' : undefined}>{blocked && it.status === 'pending' ? `Espera ${it.dependsOn}` : st.label}</Chip>{it.status === 'review' && g && <div className="small muted" style={{ marginTop: 4, maxWidth: '24ch' }}>{g.phase}</div>}</td>
+                    <td style={{ whiteSpace: 'nowrap', verticalAlign: 'top' }}>
+                      {it.status === 'review' && lp?.result?.merged && <button className="btn btn-primary btn-sm" onClick={() => closeStory(it, false)} disabled={busy}>Cerrar historia</button>}
+                      {it.status === 'review' && lp && <button className="btn btn-secondary btn-sm" style={{ marginLeft: 6 }} onClick={() => navigate(`/procesos/${lp.id}`)}>{lp.result?.applied ? 'Continuar' : 'Revisar diff'}</button>}
+                      {it.status === 'in_progress' && lp && <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/procesos/${lp.id}`)}>Ver proceso</button>}
+                      {(it.status === 'pending' || it.status === 'blocked') && <button className="btn btn-primary btn-sm" onClick={() => setSel(it)} disabled={!!running || !project?.repository}>Ejecutar</button>}
+                      {(it.status === 'done' || it.status === 'discarded') && lp && <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/procesos/${lp.id}`)}>Ver</button>}
+                      {it.status !== 'done' && it.status !== 'in_progress' && it.status !== 'discarded' && <button className="btn btn-ghost btn-sm" style={{ marginLeft: 6 }} title="Cerrar sin ejecutar: la historia ya está resuelta por otra vía" onClick={() => closeStory(it, true)} disabled={busy}>Cerrar</button>}
+                    </td></tr>; })}</tbody>
+                </table></div>}
+              </div>)}
             </section>
 
           </div>
@@ -145,8 +168,9 @@ export function Backlog() {
                   </div>}
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))', gap: 14, alignItems: 'end' }}>
                     <div><label className="label" htmlFor="st-budget">Presupuesto máximo (USD)</label><input id="st-budget" className="input mono" type="number" min={0.1} step={0.5} value={budget} onChange={e => setBudget(e.target.value)} /></div>
-                    <div className="help" style={{ paddingBottom: 26 }}>Si el gasto se acerca al límite, el proceso se detiene entre pasos. El Desarrollador genera archivos completos, así que es el paso más caro.</div>
+                    <div className="help" style={{ paddingBottom: 26 }}>Si el gasto se acerca al límite, el proceso se detiene entre pasos. El Desarrollador modifica archivos con parches y crea los nuevos completos; es el paso más caro.</div>
                   </div>
+                  <label className="ck"><input className="cb" type="checkbox" checked={!skipQa} onChange={e => setSkipQa(!e.target.checked)} /><span>Incluir la <strong>revisión de QA</strong> (recomendado). Sin ella la historia termina antes y cuesta menos; el diff lo revisas tú.</span></label>
                   <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo que los agentes del proyecto trabajen en la historia <strong>{sel.storyId}</strong> con lectura del repositorio, hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. Los cambios resultantes serán <strong>propuestas</strong> que revisaré antes de aplicarse en una rama git.</span></label>
                 </div>
                 <div className="modal-f">
@@ -180,7 +204,7 @@ export function Backlog() {
             </section>
             <section className="card card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <div className="h3">Cómo funciona</div>
-              <p className="sm13 med" style={{ lineHeight: 1.5 }}>1 · Ejecutas una historia con presupuesto. 2 · Los agentes entregan un <strong>diff</strong> y una revisión de QA. 3 · Lo revisas y, si apruebas, se aplica en una rama <span className="mono">portal-ia/hu-xxx</span> con un commit. 4 · Ejecutas la verificación (typecheck / test / build) y marcas la historia como completada. Integrar la rama en <span className="mono">main</span> es decisión tuya (git).</p>
+              <p className="sm13 med" style={{ lineHeight: 1.5 }}>1 · Ejecutas una historia con presupuesto. 2 · Los agentes entregan un <strong>diff</strong> (y una revisión de QA si la incluyes). 3 · Lo revisas y, si apruebas, se aplica en una rama <span className="mono">portal-ia/hu-xxx</span>. 4 · Verificas (install / typecheck / test / build), <strong>integras en main</strong> y <strong>publicas</strong> desde el mismo proceso. 5 · Si es el propio Portal, la barra amarilla reconstruye y reinicia. 6 · Cierras la historia. Cada proceso te dice su «siguiente paso».</p>
             </section>
           </aside>
         </div>

@@ -84,7 +84,12 @@ function ProposalCard({ msgId, action, onResolved }: { msgId: string; action: As
 
 function ActionRow({ a }: { a: AssistantAction }) {
   const ok = a.status === 'done';
-  return <div className={`notice ${ok ? 'notice-ok' : 'notice-err'}`} style={{ padding: '8px 12px' }}>{ok ? Icon.okc() : Icon.alert()}<div><strong>{a.label}</strong>{a.detail && <> — {a.detail}</>}{a.link && ok && <> · <Link className="lnk" to={a.link}>abrir</Link></>}</div></div>;
+  const live = a.live;
+  const tone = live ? (live.tone === 'err' ? 'notice-err' : live.tone === 'warn' ? 'notice-warn' : live.tone === 'ok' ? 'notice-ok' : 'notice-info') : ok ? 'notice-ok' : 'notice-err';
+  return <div className={`notice ${tone}`} style={{ padding: '8px 12px' }}>{live ? (live.tone === 'err' ? Icon.alert() : live.tone === 'ok' ? Icon.okc() : live.tone === 'warn' ? Icon.warn() : Icon.info()) : ok ? Icon.okc() : Icon.alert()}<div>
+    <strong>{a.label}</strong>
+    {live ? <div style={{ marginTop: 2 }}><span style={{ fontWeight: 600 }}>{live.phase}.</span> {live.next}{a.link && <> <Link className="lnk" to={a.link}>{live.settled ? 'ver' : 'ir al proceso'}</Link></>}</div> : <>{a.detail && <> — {a.detail}</>}{a.link && ok && <> · <Link className="lnk" to={a.link}>abrir</Link></>}</>}
+  </div></div>;
 }
 
 /** Conversación con el Asistente de Empresa (compartida por la pantalla Asistente y el dock flotante). */
@@ -104,6 +109,8 @@ export function AssistantChat({ compact = false, onInfo, onPending }: { compact?
   useEffect(() => { api.assistant().then(r => { setInfo(r.info); onInfo?.(r.info); setMsgs(r.messages); }).catch(e => setError(e.message)); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [msgs.length, busy]);
+  const unsettled = msgs.some(m => m.actions.some(a => a.live && !a.live.settled));
+  useEffect(() => { if (!unsettled) return; const t = setInterval(() => { api.assistant().then(r => { setMsgs(r.messages); setInfo(r.info); }).catch(() => null); }, 10_000); return () => clearInterval(t); }, [unsettled]);
   const pendingCount = msgs.reduce((n, m) => n + m.actions.filter(a => a.status === 'pending').length, 0);
   useEffect(() => { onPending?.(pendingCount); }, [pendingCount, onPending]);
 

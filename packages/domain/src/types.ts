@@ -197,6 +197,8 @@ export interface Process {
   result: ExecutionResult | null;
   /** Resultado de un encargo delegado (kind = delegated_task). */
   delegation: DelegationResult | null;
+  /** Orientación calculada por el servidor: en qué fase está el proceso y cuál es el siguiente paso del propietario. */
+  guidance?: ProcessGuidance;
   backlogItemId: string | null;
 }
 
@@ -279,6 +281,10 @@ export interface ProposedChange {
   path: string;
   action: 'create' | 'modify' | 'delete';
   content: string | null;
+  /** Problema que impide aplicar este cambio (ruta protegida, parche que no encaja…); el resto sí se aplica. */
+  error?: string | null;
+  /** Aviso no bloqueante (posible secreto en el contenido, archivo grande…). */
+  warning?: string | null;
   /** Diff unificado (texto) calculado por el servidor para revisión humana. */
   diff: string | null;
   before: number; after: number; // líneas
@@ -345,4 +351,14 @@ export interface DelegationResult {
   knowledgeDocId: string | null;
   backlogOps: BacklogOp[];
   opsApplied: { at: string; summary: string[] } | null;
+}
+
+export interface ProcessGuidance {
+  /** Fase legible: «Pendiente de autorización», «En ejecución», «Diff listo para revisar», «Aplicado · falta integrar», «Integrado · falta publicar», «Publicado», «Falló», … */
+  phase: string;
+  /** Qué debe hacer ahora el propietario (una frase). */
+  next: string;
+  tone: 'info' | 'warn' | 'ok' | 'err';
+  /** Si el proceso ya no requiere acción del propietario. */
+  settled: boolean;
 }

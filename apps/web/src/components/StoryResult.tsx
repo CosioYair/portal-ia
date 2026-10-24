@@ -23,11 +23,12 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
   const publish = async () => { if (!authGit) return; setBusy('publish'); setGitErr(null); try { const p = await api.publishProcess(slug, proc.id); onChange(p); flash(`Publicado en ${p.result?.published?.remote}: ${p.result?.published?.branches.join(', ')}`); } catch (e: any) { setGitErr(e.message); } finally { setBusy(null); } };
 
   const apply = async () => { if (!authApply) return; setBusy('apply'); setErr(null); try { const p = await api.applyChanges(slug, proc.id, branch.trim() || undefined); onChange(p); flash(`Cambios aplicados en la rama ${p.result?.applied?.branch} · commit ${p.result?.applied?.commit}`); } catch (e: any) { setErr(e.message); } finally { setBusy(null); setAuthApply(false); } };
-  const verify = async (cmd: 'typecheck' | 'test' | 'build') => { if (!authVerify) return; setBusy(cmd); setErr(null); try { const p = await api.verifyProcess(slug, proc.id, cmd); onChange(p); const last = p.result?.verifications.at(-1); flash(last?.exitCode === 0 ? `${last.command}: correcto` : `${last?.command}: terminó con código ${last?.exitCode}`, last?.exitCode === 0 ? 'ok' : 'err'); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } };
+  const verify = async (cmd: 'install' | 'typecheck' | 'test' | 'build') => { if (!authVerify) return; setBusy(cmd); setErr(null); try { const p = await api.verifyProcess(slug, proc.id, cmd); onChange(p); const last = p.result?.verifications.at(-1); flash(last?.exitCode === 0 ? `${last.command}: correcto` : `${last?.command}: terminó con código ${last?.exitCode}`, last?.exitCode === 0 ? 'ok' : 'err'); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } };
   const markDone = async () => { if (!proc.backlogItemId) return; setBusy('done'); setGitErr(null); try { await api.markStoryDone(slug, proc.backlogItemId); flash('Historia marcada como completada'); } catch (e: any) { setGitErr(e.message); } finally { setBusy(null); } };
 
   const added = r.changes.reduce((a, c) => a + Math.max(0, c.after - c.before), 0);
-  const canApply = proc.status === 'done' && !r.applied && r.changes.length > 0;
+  const applicable = r.changes.filter(c => !c.error).length;
+  const canApply = proc.status === 'done' && !r.applied && applicable > 0;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -47,11 +48,13 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
         <div style={{ display: 'flex', flexDirection: 'column' }}>
           {r.changes.map(c => <div key={c.path}>
             <button className="arow" style={{ borderRadius: 0, padding: '10px 18px' }} onClick={() => setOpen(open === c.path ? null : c.path)} aria-expanded={open === c.path}>
-              <Chip tone={c.action === 'create' ? 'ok' : c.action === 'delete' ? 'err' : 'accent'} xs>{c.action === 'create' ? 'nuevo' : c.action === 'delete' ? 'eliminar' : 'modificar'}</Chip>
-              <span className="mono sm13" style={{ flex: 1, textAlign: 'left' }}>{c.path}</span>
+              <Chip tone={c.error ? 'err' : c.action === 'create' ? 'ok' : c.action === 'delete' ? 'err' : 'accent'} xs>{c.error ? 'no aplicable' : c.action === 'create' ? 'nuevo' : c.action === 'delete' ? 'eliminar' : 'modificar'}</Chip>
+              <span className="mono sm13" style={{ flex: 1, textAlign: 'left', textDecoration: c.error ? 'line-through' : undefined }}>{c.path}</span>
+              {c.warning && <Chip tone="warn" xs>⚠ posible secreto</Chip>}
               <span className="small mono muted">{c.before} → {c.after} líneas</span>{Icon.chevR()}
             </button>
-            {open === c.path && <pre className="mono" style={{ margin: 0, padding: '12px 18px', background: '#FAF9F6', borderTop: '1px solid #EEECE6', borderBottom: '1px solid #EEECE6', fontSize: 12, lineHeight: 1.5, overflow: 'auto', maxHeight: 480, whiteSpace: 'pre' }}>
+            {open === c.path && (c.error || c.warning) && <div className="card-b" style={{ padding: '8px 18px', borderTop: '1px solid #EEECE6' }}>{c.error && <Notice kind="err">{c.error} Este cambio no se escribirá; el resto sí.</Notice>}{c.warning && <Notice kind="warn">{c.warning}</Notice>}</div>}
+            {open === c.path && !c.error && <pre className="mono" style={{ margin: 0, padding: '12px 18px', background: '#FAF9F6', borderTop: '1px solid #EEECE6', borderBottom: '1px solid #EEECE6', fontSize: 12, lineHeight: 1.5, overflow: 'auto', maxHeight: 480, whiteSpace: 'pre' }}>
               {(c.diff ?? '').split('\n').map((l, i) => <div key={i} style={{ color: l.startsWith('+') && !l.startsWith('+++') ? '#166534' : l.startsWith('-') && !l.startsWith('---') ? '#9A1F18' : l.startsWith('@@') ? '#686B72' : '#1A1B1E', background: l.startsWith('+') && !l.startsWith('+++') ? '#E4F3EA' : l.startsWith('-') && !l.startsWith('---') ? '#FBE7E5' : 'transparent' }}>{l || ' '}</div>)}
             </pre>}
           </div>)}
@@ -78,16 +81,16 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
             <div><label className="label" htmlFor="branch">Rama de trabajo</label><input id="branch" className="input mono" value={branch} onChange={e => setBranch(e.target.value)} /><div className="help">Se crea desde la rama actual del repositorio (debe estar sin cambios pendientes). Si ya existe, se reutiliza.</div></div>
             <label className="ck"><input className="cb" type="checkbox" checked={authApply} onChange={e => setAuthApply(e.target.checked)} /><span>He revisado los cambios y <strong>autorizo escribirlos</strong> en la rama indicada del repositorio registrado, con un commit a nombre de Portal IA.</span></label>
             {err && <Notice kind="err"><strong>No se pudo aplicar.</strong> {err}</Notice>}
-            <button className="btn btn-primary" style={{ alignSelf: 'flex-start' }} onClick={apply} disabled={!authApply || busy !== null}>{busy === 'apply' ? <span className="spin spin-light" /> : Icon.git()}{busy === 'apply' ? 'Aplicando…' : `Aplicar ${r.changes.length} cambio${r.changes.length === 1 ? '' : 's'} en la rama`}</button>
+            <button className="btn btn-primary" style={{ alignSelf: 'flex-start' }} onClick={apply} disabled={!authApply || busy !== null}>{busy === 'apply' ? <span className="spin spin-light" /> : Icon.git()}{busy === 'apply' ? 'Aplicando…' : `Aplicar ${applicable} cambio${applicable === 1 ? '' : 's'} en la rama`}</button>
           </>}
         </div></section>}
 
       {r.applied && <section className="card">
         <div className="card-h"><div><div className="h3">Verificación</div><div className="small muted">Ejecución <strong>local</strong> en el repositorio (sin sandbox en esta versión). Herramienta «Ejecución» · requiere tu autorización por uso.</div></div>{r.verifyCommands.length > 0 && <Chip xs>sugerido: {r.verifyCommands.join(', ')}</Chip>}</div>
         <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <label className="ck"><input className="cb" type="checkbox" checked={authVerify} onChange={e => setAuthVerify(e.target.checked)} /><span>Autorizo ejecutar comandos <span className="mono">npm run</span> permitidos (typecheck, test, build) en la carpeta del repositorio. Nada más se ejecuta.</span></label>
+          <label className="ck"><input className="cb" type="checkbox" checked={authVerify} onChange={e => setAuthVerify(e.target.checked)} /><span>Autorizo ejecutar comandos <span className="mono">npm</span> permitidos (install, typecheck, test, build) en la carpeta del repositorio. Nada más se ejecuta.</span></label>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {(['typecheck', 'test', 'build'] as const).map(c => <button key={c} className="btn btn-secondary btn-sm" onClick={() => verify(c)} disabled={!authVerify || busy !== null}>{busy === c ? <span className="spin" /> : null}npm run {c}</button>)}
+            {(['install', 'typecheck', 'test', 'build'] as const).map(c => <button key={c} className="btn btn-secondary btn-sm" onClick={() => verify(c)} disabled={!authVerify || busy !== null}>{busy === c ? <span className="spin" /> : null}{c === 'install' ? 'npm install' : `npm run ${c}`}</button>)}
             {proc.backlogItemId && <button className="btn btn-primary btn-sm" onClick={markDone} disabled={busy !== null || !r.merged} title={r.merged ? '' : 'Primero integra la rama en la rama principal'}>{Icon.check()}Marcar historia como completada</button>}
             {proc.backlogItemId && !r.merged && <span className="small muted" style={{ alignSelf: 'center' }}>Se puede cerrar cuando los cambios estén integrados en la rama principal (sección de abajo).</span>}
           </div>

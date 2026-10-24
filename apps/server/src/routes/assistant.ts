@@ -5,7 +5,7 @@ import { createCompany, createProject } from '../services/companies.ts';
 import { workspacesRepo } from '../db/platform.ts';
 
 export async function assistantRoutes(app: FastifyInstance) {
-  app.get('/api/assistant', async (_req, reply) => { try { return { info: assistantInfo(), messages: assistantRepo.list() }; } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); } });
+  app.get('/api/assistant', async (_req, reply) => { try { return { info: assistantInfo(), messages: assistantRepo.listLive() }; } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); } });
   // Enviar un mensaje = una llamada real al modelo del Asistente. El propio envío es la autorización (costo visible en la UI).
   app.post('/api/assistant/messages', async (req, reply) => {
     const body = z.object({
@@ -29,7 +29,7 @@ export async function assistantRoutes(app: FastifyInstance) {
     if (!body.success) return reply.code(400).send({ error: 'Datos no válidos' });
     if (!assistantRepo.get(id)) return reply.code(404).send({ error: 'Mensaje no encontrado' });
     resolveProposal(id, body.data.processId, body.data.status, body.data.detail);
-    return { message: assistantRepo.get(id) };
+    return { message: assistantRepo.listLive().find(m => m.id === id) ?? assistantRepo.get(id) };
   });
   app.delete('/api/assistant/messages', async () => { assistantRepo.clear(); return { ok: true }; });
 

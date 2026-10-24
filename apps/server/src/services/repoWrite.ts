@@ -12,7 +12,39 @@ const execFileP = promisify(execFile);
  * (herramientas de riesgo `auth`). Las escrituras van a una rama de trabajo propia y se confirman en git para que
  * todo cambio sea revisable y reversible. Nunca se toca `.git`, `data/`, `node_modules/`, ni archivos con secretos.
  */
-const FORBIDDEN = [/^\.git(\/|$)/, /^data(\/|$)/, /^node_modules(\/|$)/, /(^|\/)\.env(\..*)?$/i, /\.(key|pem)$/i, /(^|\/)\.master\.key$/];
+const FORBIDDEN = [/^\.git(\/|$)/, /^data(\/|$)/, /^node_modules(\/|$)/, /(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?$/i, /\.(key|pem|p12|pfx)$/i, /(^|\/)\.master\.key$/];
+
+/** Patrones de secretos que no deben entrar en un repositorio (aviso, no bloqueo: el propietario decide). */
+const SECRET_PATTERNS: [RegExp, string][] = [
+  [/sk-ant-[A-Za-z0-9_-]{20,}/, 'clave de API de Anthropic'], [/\bsk-[A-Za-z0-9]{32,}\b/, 'clave de API (sk-…)'], [/\bAKIA[0-9A-Z]{16}\b/, 'clave de acceso AWS'],
+  [/\bgh[pousr]_[A-Za-z0-9]{30,}\b/, 'token de GitHub'], [/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/, 'clave privada'], [/\b(password|passwd|contraseña|secret|api[_-]?key)\s*[:=]\s*['"][^'"\s]{8,}['"]/i, 'credencial literal']
+];
+export function scanSecrets(text: string): string | null {
+  for (const [re, label] of SECRET_PATTERNS) if (re.test(text)) return `Posible ${label} en el contenido: revísalo antes de aplicar o publicar.`;
+  return null;
+}
+
+/** Aplica bloques buscar/reemplazar a un texto. Cada búsqueda debe aparecer exactamente una vez (tolerando espacios finales). */
+export function applyPatch(original: string, edits: { search: string; replace: string }[]): { text: string; error: string | null } {
+  let text = original;
+  const norm = (t: string) => t.replace(/\r\n/g, '\n').split('\n').map(l => l.trimEnd()).join('\n');
+  for (let i = 0; i < edits.length; i++) {
+    const { search, replace } = edits[i];
+    if (!search.trim()) return { text: original, error: `Bloque ${i + 1}: la búsqueda está vacía.` };
+    let idx = text.indexOf(search); let len = search.length;
+    if (idx < 0) { // tolerancia a espacios finales / saltos de línea
+      const nt = norm(text), ns = norm(search); const j = nt.indexOf(ns);
+      if (j < 0) return { text: original, error: `Bloque ${i + 1}: el texto a buscar no aparece en el archivo (primera línea: «${search.split('\n')[0].slice(0, 80)}»).` };
+      if (nt.indexOf(ns, j + 1) >= 0) return { text: original, error: `Bloque ${i + 1}: el texto a buscar aparece más de una vez; amplía el contexto.` };
+      // mapear posiciones normalizadas → originales recorriendo líneas
+      const lines = text.replace(/\r\n/g, '\n').split('\n'); const nLines = ns.split('\n').length; const startLine = nt.slice(0, j).split('\n').length - 1;
+      const before = lines.slice(0, startLine).join('\n'); const target = lines.slice(startLine, startLine + nLines).join('\n');
+      idx = (startLine ? before.length + 1 : 0); len = target.length; text = text.replace(/\r\n/g, '\n');
+    } else if (text.indexOf(search, idx + 1) >= 0) return { text: original, error: `Bloque ${i + 1}: el texto a buscar aparece más de una vez; amplía el contexto.` };
+    text = text.slice(0, idx) + replace + text.slice(idx + len);
+  }
+  return { text, error: null };
+}
 
 export function safeRelPath(p: string): string {
   const norm = p.replace(/\\/g, '/').replace(/^\.\//, '');
@@ -49,15 +81,29 @@ export function readRepoFile(repoPath: string, rel: string, maxChars = 60_000): 
   try { const c = fs.readFileSync(path.join(repoRoot(repoPath), safeRelPath(rel)), 'utf8'); return c.length > maxChars ? c.slice(0, maxChars) + '\n… (truncado)' : c; } catch { return null; }
 }
 
-/** Enriquecer cambios propuestos con diff y métricas, sin escribir nada. */
-export function annotateChanges(repoPath: string, changes: { path: string; action: 'create' | 'modify' | 'delete'; content: string | null }[]): ProposedChange[] {
+export interface RawChange { path: string; action: 'create' | 'modify' | 'delete' | 'patch'; content: string | null; edits?: { search: string; replace: string }[] }
+
+/**
+ * Enriquecer cambios propuestos con diff y métricas, sin escribir nada. Un cambio inválido (ruta protegida, parche que
+ * no encaja) no invalida el resto: queda marcado con `error` y se excluye al aplicar.
+ */
+export function annotateChanges(repoPath: string, changes: RawChange[]): ProposedChange[] {
   return changes.map(c => {
-    const rel = safeRelPath(c.path);
+    const relDisplay = c.path.replace(/\\/g, '/');
+    let rel: string;
+    try { rel = safeRelPath(c.path); } catch (e: any) { return { path: relDisplay, action: c.action === 'delete' ? 'delete' : 'modify', content: null, diff: '', before: 0, after: 0, error: e.message } as ProposedChange; }
     const existing = readRepoFile(repoPath, rel, 400_000);
     const before = existing ?? '';
-    const after = c.action === 'delete' ? '' : (c.content ?? '');
+    let after = c.action === 'delete' ? '' : (c.content ?? '');
+    let error: string | null = null;
+    if (c.action === 'patch') {
+      if (existing === null) error = 'El archivo a parchear no existe en el repositorio.';
+      else { const r = applyPatch(existing, c.edits ?? []); after = r.text; error = r.error; }
+    }
+    if (c.action === 'modify' && existing === null && !c.content) error = 'El archivo no existe y no se entregó contenido.';
     const action: ProposedChange['action'] = c.action === 'delete' ? 'delete' : existing === null ? 'create' : 'modify';
-    return { path: rel, action, content: c.action === 'delete' ? null : after, diff: unifiedDiff(before, after, rel), before: existing === null ? 0 : before.split('\n').length, after: action === 'delete' ? 0 : after.split('\n').length };
+    const warning = action !== 'delete' ? scanSecrets(after) : null;
+    return { path: rel, action, content: action === 'delete' ? null : after, diff: error ? '' : unifiedDiff(before, after, rel), before: existing === null ? 0 : before.split('\n').length, after: action === 'delete' ? 0 : after.split('\n').length, error, warning };
   });
 }
 
@@ -89,6 +135,7 @@ export async function applyChanges(repoPath: string, branch: string, changes: Pr
   const files: string[] = [];
   try {
     for (const c of changes) {
+      if (c.error) continue; // cambios inválidos: se muestran en la revisión pero no se escriben
       const abs = path.join(cwd, safeRelPath(c.path));
       if (c.action === 'delete') { if (fs.existsSync(abs)) fs.rmSync(abs); }
       else { fs.mkdirSync(path.dirname(abs), { recursive: true }); fs.writeFileSync(abs, c.content ?? '', 'utf8'); }
@@ -160,13 +207,14 @@ export async function pushBranches(repoPath: string, branches: string[]): Promis
   if (!remote) throw Object.assign(new Error('El repositorio no tiene un remoto configurado. Añádelo con «git remote add origin <url>» y vuelve a intentarlo.'), { statusCode: 409 });
   for (const b of branches) {
     if (!/^[A-Za-z0-9._\/-]{1,80}$/.test(b)) throw Object.assign(new Error(`Nombre de rama no válido: ${b}`), { statusCode: 400 });
+    if (!(await git(cwd, ['branch', '--list', b])).trim()) throw Object.assign(new Error(`La rama «${b}» no existe en el repositorio local (quizá se borró o se renombró). Nada que publicar.`), { statusCode: 409 });
     try { await execFileP('git', ['push', '-u', remote, b], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, timeout: 120_000 }); }
     catch (e: any) { throw Object.assign(new Error(`git push ${remote} ${b} falló: ${(e.stderr || e.message || '').toString().trim().split('\n').slice(-3).join(' ')}. Si pide credenciales, inicia sesión en git (gestor de credenciales o SSH) y vuelve a intentarlo.`), { statusCode: 502 }); }
   }
   return { remote, url, branches };
 }
 
-const ALLOWED_COMMANDS: Record<string, string[]> = { typecheck: ['run', 'typecheck'], test: ['run', 'test'], build: ['run', 'build'] };
+const ALLOWED_COMMANDS: Record<string, string[]> = { install: ['install', '--no-audit', '--no-fund'], typecheck: ['run', 'typecheck'], test: ['run', 'test'], build: ['run', 'build'] };
 
 /** Ejecuta un comando npm permitido en el repositorio (ejecución local, sin sandbox; requiere autorización por uso). */
 export function runVerification(repoPath: string, command: string, timeoutMs = 10 * 60_000): Promise<VerificationRun> {

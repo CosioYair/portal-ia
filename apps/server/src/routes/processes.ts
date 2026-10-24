@@ -1,10 +1,13 @@
 import type { FastifyInstance } from 'fastify';
+import type { Process } from '@portal-ia/domain';
 import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
 import { knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { cancelProcess, clearCancel, createAssessment, estimateAssessment, isCancelled, runAssessment } from '../services/assessment.ts';
 import { createStoryProcess, estimateStory, runStory } from '../services/storyExecution.ts';
 import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
+import { describeProcess } from '../services/guidance.ts';
+import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { applyChanges, mergeBranch, pushBranches, runVerification } from '../services/repoWrite.ts';
 import { addManualItem, estimateExtraction, extractBacklogWithAI, importBacklogFromKnowledge } from '../services/backlog.ts';
 import { backlogRepo } from '../db/workspace.ts';
@@ -14,6 +17,7 @@ import { backlogRepo } from '../db/workspace.ts';
  * IA cuando el usuario lo autoriza con un presupuesto (POST /authorize). Puede cancelarse; se detiene entre pasos.
  */
 export async function processRoutes(app: FastifyInstance) {
+  const withGuidance = (slug: string, p: Process): Process => ({ ...p, guidance: describeProcess(p, { isPortalRepo: slug === INTERNAL_WORKSPACE.slug }) });
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
 
   app.get('/api/workspaces/:slug/projects/:projectId/assessment/estimate', async (req, reply) => {
@@ -29,13 +33,13 @@ export async function processRoutes(app: FastifyInstance) {
 
   app.get('/api/workspaces/:slug/projects/:projectId/processes', async (req, reply) => {
     const { slug, projectId } = req.params as any; if (!guard(slug, reply)) return;
-    return processesRepo(slug).list(projectId).map(p => p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p);
+    return processesRepo(slug).list(projectId).map(p => withGuidance(slug, p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p));
   });
 
   app.get('/api/workspaces/:slug/processes/:id', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const p = processesRepo(slug).get(id); if (!p) return reply.code(404).send({ error: 'Proceso no encontrado' });
-    return p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p;
+    return withGuidance(slug, p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p);
   });
 
   // Autorización explícita: aquí y solo aquí empieza el consumo de IA.
@@ -105,12 +109,14 @@ export async function processRoutes(app: FastifyInstance) {
   });
   app.get('/api/workspaces/:slug/projects/:projectId/backlog/:id/estimate', async (req, reply) => {
     const { slug, projectId, id } = req.params as any; if (!guard(slug, reply)) return;
-    try { return estimateStory(slug, projectId, id); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    const skipQa = String((req.query as any)?.skipQa ?? '') === '1';
+    try { return estimateStory(slug, projectId, id, { skipQa }); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   // Crea el proceso de ejecución (pendiente de autorización). El consumo empieza en /authorize.
   app.post('/api/workspaces/:slug/projects/:projectId/backlog/:id/execute', async (req, reply) => {
     const { slug, projectId, id } = req.params as any; if (!guard(slug, reply)) return;
-    try { return createStoryProcess(slug, projectId, id); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    const body = z.object({ skipQa: z.boolean().optional() }).safeParse(req.body ?? {});
+    try { return createStoryProcess(slug, projectId, id, { skipQa: body.success ? !!body.data.skipQa : false }); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
 
   // ---- Encargos delegados a un agente responsable (sin IA hasta autorizar) ----
@@ -199,7 +205,7 @@ Proceso: ${proc.id}`);
   // ---- Verificación local (sandbox_exec · requiere autorización por uso; ejecución local sin sandbox) ----
   app.post('/api/workspaces/:slug/processes/:id/verify', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ authorized: z.literal(true), command: z.enum(['typecheck', 'test', 'build']) }).safeParse(req.body);
+    const body = z.object({ authorized: z.literal(true), command: z.enum(['install', 'typecheck', 'test', 'build']) }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita y un comando permitido.' });
     const procs = processesRepo(slug); const proc = procs.get(id);
     if (!proc || !proc.result) return reply.code(404).send({ error: 'Proceso no encontrado' });
