@@ -15,10 +15,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test:rules": "node --test scripts/dependency-rules.test.mjs",
-    "test": "npm run test:rules",
-    "check": "npm run typecheck && npm run lint && npm run test:rules"
+    "test:contracts": "npm run test --workspace @portal/contracts",
+    "test:server": "npm run test --workspace @portal/server",
+    "test": "npm run test:rules && npm run test:contracts && npm run test:server",
+    "check": "npm run typecheck && npm run lint && npm run test:rules && npm run test:contracts && npm run test:server"
   },
   "devDependencies": {
+    "@types/node": "^22.10.0",
     "eslint": "^9.17.0",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.0"

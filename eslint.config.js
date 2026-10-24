@@ -87,7 +87,7 @@ export default tseslint.config(
     )
   },
 
-  // contracts: solo puede depender de @portal/domain.
+  // contracts: solo puede depender de @portal/domain (y de zod, como librería de validación).
   {
     files: ['packages/contracts/**/*.{ts,tsx}'],
     rules: restringir(
@@ -98,6 +98,21 @@ export default tseslint.config(
       {
         group: MODULOS_IO,
         message: 'packages/contracts no admite IO ni módulos de Node.'
+      },
+      {
+        group: ['fastify', 'fastify/*', '@fastify/*', 'react', 'react/*', 'react-dom', 'react-dom/*'],
+        message: 'packages/contracts no puede depender de frameworks de servidor ni de interfaz.'
+      }
+    )
+  },
+
+  // Pruebas de contracts: pueden usar node:test y node:assert; el código fuente sigue sin IO.
+  {
+    files: ['packages/contracts/test/**/*.{ts,tsx}'],
+    rules: restringir(
+      {
+        regex: '^@portal/(?!domain$)',
+        message: 'packages/contracts solo puede depender de @portal/domain (y solo por su entrada pública).'
       },
       {
         group: ['fastify', 'fastify/*', '@fastify/*', 'react', 'react/*', 'react-dom', 'react-dom/*'],
