@@ -12,6 +12,7 @@ export * from './authorization.ts';
 export * from './usage.ts';
 export * from './activity.ts';
 export * from './story-closure.ts';
+export * from './portal-sync.ts';
 
 /** Referencia mínima a una empresa en las respuestas de la API. */
 export interface CompanyRef {
