@@ -1,6 +1,8 @@
 // Reglas puras para comparar la carpeta y la rama en ejecución del Portal con el repositorio
 // registrado del proyecto. Sin IO: recibe hechos ya obtenidos y decide.
 
+import { MAIN_BRANCH, isValidBranchName } from './git-branch.ts';
+
 export const RUNTIME_LOCATION_STATES = [
   'coincide',
   'carpeta-distinta',
@@ -163,3 +165,154 @@ export function construirPasosCorreccion(entrada: PasosEntrada): string[] {
   pasos.push('Reinicia el Portal y pulsa «Volver a comprobar» para confirmar que ya coincide.');
   return pasos;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Comprobación previa a toda ejecución (HU-129): el Portal debe correr desde main actualizado y la
+// rama por defecto del remoto debe ser main. Regla «denegar por defecto»: lo que no se puede
+// determinar bloquea igual que un fallo.
+// ---------------------------------------------------------------------------------------------
+
+export const PREFLIGHT_CHECK_IDS = [
+  'rama-actual',
+  'main-actualizado',
+  'rama-por-defecto-remoto'
+] as const;
+
+export type PreflightCheckId = (typeof PREFLIGHT_CHECK_IDS)[number];
+
+export const PREFLIGHT_CHECK_STATES = ['ok', 'fallo', 'indeterminado'] as const;
+
+export type PreflightCheckState = (typeof PREFLIGHT_CHECK_STATES)[number];
+
+export interface ExecutionPreflightInput {
+  /** Rama activa del Portal (null si HEAD está desacoplado o no se pudo leer). */
+  readonly currentBranch: string | null;
+  /** SHA de HEAD (null si no se pudo leer). */
+  readonly headSha: string | null;
+  /** SHA de origin/main tras consultar el remoto (null si no se pudo obtener). */
+  readonly originMainSha: string | null;
+  /** Rama por defecto del remoto (null si no se pudo consultar). */
+  readonly remoteDefaultBranch: string | null;
+}
+
+export interface PreflightCheck {
+  readonly id: PreflightCheckId;
+  readonly estado: PreflightCheckState;
+  /** Detalle en español. */
+  readonly detalle: string;
+}
+
+export interface ExecutionPreflightEvaluation {
+  readonly ok: boolean;
+  readonly checks: PreflightCheck[];
+  /** Motivo en español del bloqueo; null cuando ok es true. */
+  readonly motivo: string | null;
+}
+
+function checkRamaActual(currentBranch: string | null): PreflightCheck {
+  if (currentBranch === null) {
+    return {
+      id: 'rama-actual',
+      estado: 'indeterminado',
+      detalle: 'No se pudo determinar la rama en ejecución (HEAD desacoplado o repositorio ilegible).'
+    };
+  }
+  if (currentBranch !== MAIN_BRANCH) {
+    return {
+      id: 'rama-actual',
+      estado: 'fallo',
+      detalle: `El Portal corre desde «${currentBranch}», no desde ${MAIN_BRANCH}.`
+    };
+  }
+  return { id: 'rama-actual', estado: 'ok', detalle: `El Portal corre desde ${MAIN_BRANCH}.` };
+}
+
+function checkMainActualizado(headSha: string | null, originMainSha: string | null): PreflightCheck {
+  if (headSha === null || originMainSha === null) {
+    return {
+      id: 'main-actualizado',
+      estado: 'indeterminado',
+      detalle:
+        headSha === null
+          ? 'No se pudo leer el commit actual (HEAD).'
+          : 'No se pudo actualizar ni leer origin/main: no se puede confirmar que main esté al día.'
+    };
+  }
+  if (headSha !== originMainSha) {
+    return {
+      id: 'main-actualizado',
+      estado: 'fallo',
+      detalle: `HEAD (${headSha.slice(0, 7)}) no coincide con origin/main (${originMainSha.slice(0, 7)}).`
+    };
+  }
+  return {
+    id: 'main-actualizado',
+    estado: 'ok',
+    detalle: `HEAD coincide con origin/main (${headSha.slice(0, 7)}).`
+  };
+}
+
+function checkRamaPorDefectoRemoto(remoteDefaultBranch: string | null): PreflightCheck {
+  if (remoteDefaultBranch === null) {
+    return {
+      id: 'rama-por-defecto-remoto',
+      estado: 'indeterminado',
+      detalle: 'No se pudo consultar la rama por defecto del remoto.'
+    };
+  }
+  if (remoteDefaultBranch !== MAIN_BRANCH) {
+    return {
+      id: 'rama-por-defecto-remoto',
+      estado: 'fallo',
+      detalle: `La rama por defecto del remoto es «${remoteDefaultBranch}», no ${MAIN_BRANCH}.`
+    };
+  }
+  return {
+    id: 'rama-por-defecto-remoto',
+    estado: 'ok',
+    detalle: `La rama por defecto del remoto es ${MAIN_BRANCH}.`
+  };
+}
+
+/** Decide si una historia puede empezar a ejecutarse. Denegar por defecto: un dato ausente bloquea. */
+export function evaluateExecutionPreflight(input: ExecutionPreflightInput): ExecutionPreflightEvaluation {
+  const checks: PreflightCheck[] = [
+    checkRamaActual(input.currentBranch),
+    checkMainActualizado(input.headSha, input.originMainSha),
+    checkRamaPorDefectoRemoto(input.remoteDefaultBranch)
+  ];
+  const problemas = checks.filter((check) => check.estado !== 'ok');
+  if (problemas.length === 0) return { ok: true, checks, motivo: null };
+
+  const hayFallo = problemas.some((check) => check.estado === 'fallo');
+  const cabecera = hayFallo
+    ? 'Detenido: el Portal no corre desde main actualizado.'
+    : 'Detenido: no se pudo verificar que el Portal corra desde main actualizado.';
+  const motivo = `${cabecera} ${problemas.map((check) => check.detalle).join(' ')}`;
+  return { ok: false, checks, motivo };
+}
+
+/**
+ * Extrae la rama por defecto de la salida de «git ls-remote --symref <remoto> HEAD»
+ * (línea «ref: refs/heads/<rama>\tHEAD»). Devuelve null si no se reconoce.
+ */
+export function parseRemoteDefaultBranch(output: string): string | null {
+  for (const line of output.split(/\r?\n/)) {
+    const match = /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/.exec(line.trim());
+    const branch = match?.[1];
+    if (branch !== undefined) return isValidBranchName(branch) ? branch : null;
+  }
+  return null;
+}
+
+/** Heurística mínima: un SHA de git completo en hexadecimal minúscula. */
+export function isFullGitSha(value: string): boolean {
+  return /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(value);
+}
+
+/** Instrucciones para el propietario cuando el remoto no tiene main como rama por defecto. */
+export const OWNER_DEFAULT_BRANCH_STEPS: readonly string[] = [
+  'En GitHub abre Settings → Branches → Default branch y elige main (requiere permisos de administrador del repositorio).',
+  'En local ejecuta git fetch origin && git remote set-head origin -a.',
+  'Cambia a main (git switch main && git pull) y reinicia el Portal desde ahí.'
+];

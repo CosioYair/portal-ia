@@ -36,7 +36,7 @@ El indicador se actualiza al enfocar la ventana y cada 30 segundos. Consultarlo 
 
 ## Limitación: el remoto es la última referencia conocida
 
-El indicador **no ejecuta `git fetch` ni usa la red**. El estado del remoto se calcula con la referencia local `origin/main`, que puede estar desactualizada si alguien publicó desde otra máquina. Un `fetch` explícito requeriría autorización y queda fuera de este alcance.
+El indicador **no ejecuta `git fetch` ni usa la red**. El estado del remoto se calcula con la referencia local `origin/main`, que puede estar desactualizada si alguien publicó desde otra máquina. Un `fetch` explícito requeriría autorización y queda fuera de este alcance. (La comprobación previa a ejecutar una historia, descrita al final de este documento, sí consulta el remoto.)
 
 ## Servidor con recarga en caliente
 
@@ -117,3 +117,19 @@ La alerta muestra los pasos con las rutas y ramas reales. En general:
 - La comprobación toma como referencia el proceso del **servidor** (`process.cwd()`): se asume que el servidor representa la instalación en ejecución. Si la web se sirve desde otra carpeta, no se detecta.
 - Si el proyecto no tiene repositorio registrado, la alerta indicará siempre «no verificable».
 - Si el cierre de una historia no guarda el SHA del commit, la contención de esa historia queda como «desconocido».
+
+## Comprobación previa a ejecutar una historia (HU-129)
+
+Antes de ejecutar cualquier historia, el Portal comprueba que corre desde `main` actualizado y que la rama por defecto del remoto es `main`. Si no, la historia queda **detenida** con el motivo en español, sin reservar presupuesto, sin llamar a modelos y sin registrar consumo.
+
+| Comprobación | Condición |
+| --- | --- |
+| `rama-actual` | La rama en ejecución es `main`. |
+| `main-actualizado` | `HEAD` coincide con `origin/main` tras `git fetch origin main`. |
+| `rama-por-defecto-remoto` | `git ls-remote --symref origin HEAD` indica `main`. |
+
+Regla «denegar por defecto»: si algo no se puede determinar (remoto inaccesible, HEAD desacoplado, timeout) se considera «indeterminado» y bloquea igualmente.
+
+Qué hacer si se detiene: cambia a `main` y actualízala (`git switch main && git pull`), y si la rama por defecto del remoto no es `main`, el propietario debe cambiarla en GitHub (**Settings → Branches → Default branch → main**) y después ejecutar `git fetch origin && git remote set-head origin -a`.
+
+Lecciones y motivo completo: [Lecciones: ramas, main y ejecuciones desde el sitio equivocado](../conocimiento/lecciones-ramas-y-main.md).
