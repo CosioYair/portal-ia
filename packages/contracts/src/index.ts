@@ -10,6 +10,7 @@ export * from './process.ts';
 export * from './request.ts';
 export * from './authorization.ts';
 export * from './usage.ts';
+export * from './activity.ts';
 
 /** Referencia mínima a una empresa en las respuestas de la API. */
 export interface CompanyRef {
