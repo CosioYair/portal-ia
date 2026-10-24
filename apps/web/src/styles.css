@@ -224,3 +224,10 @@ button.chip:hover{border-color:#B8B5AC}
 .dock-h .xbtn{flex:none}
 .msg-bubble{max-width:min(760px,100%);min-width:0;overflow-wrap:anywhere}
 .msg-bubble pre{max-width:100%;overflow:auto}
+
+/* Bandeja de autorizaciones (HU-009) */
+.inbox-list{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:12px}
+.inbox-card[aria-busy="true"]{opacity:.8}
+.inbox-fab{position:fixed;left:16px;bottom:16px;z-index:31;display:inline-flex;align-items:center;gap:8px;height:44px;padding:0 16px 0 12px;border-radius:999px;border:1px solid #CFCCC3;background:#fff;color:#1A1B1E;font:inherit;font-size:13.5px;font-weight:600;box-shadow:0 12px 32px rgba(26,27,30,.16);cursor:pointer}
+.inbox-fab:hover{background:#F7F6F2}
+.inbox-fab:focus-visible{outline:2px solid #0F6E6A;outline-offset:2px}

@@ -16,6 +16,7 @@ import { Backlog } from './screens/Backlog.tsx';
 import { Assistant } from './screens/Assistant.tsx';
 import { CompanyHome } from './screens/CompanyHome.tsx';
 import { Icon } from './components/ui.tsx';
+import { InboxLauncher, InboxScreen } from './screens/InboxScreen.tsx';
 
 const SEL_KEY = 'portal-ia.seleccion';
 type Selection = { ws: string; project: string | null };
@@ -97,6 +98,7 @@ export default function App() {
     <AppContext.Provider value={{ status, providers, connected, refresh, flash, navigate, workspaces, projects, select, refreshStructure }}>
       <div className="app">
         {toast && <div className="toast" role="status">{toast.tone === 'ok' ? Icon.okc() : Icon.alert()} {toast.message}</div>}
+        {ready && <InboxLauncher />}
         <Routes>
           <Route path="/" element={ready ? <Navigate to="/panel" replace /> : <Welcome />} />
           <Route path="/configuracion/proveedor" element={<ProviderSetup />} />
@@ -112,6 +114,7 @@ export default function App() {
           <Route path="/procesos/:processId" element={guard(<ProcessView />)} />
           <Route path="/conocimiento" element={guard(<Knowledge />)} />
           <Route path="/backlog" element={guard(<Backlog />)} />
+          <Route path="/autorizaciones" element={ready ? <InboxScreen /> : <Navigate to={home} replace />} />
           <Route path="*" element={<Navigate to={home} replace />} />
         </Routes>
       </div>

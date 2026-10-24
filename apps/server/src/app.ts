@@ -12,6 +12,7 @@ import { processRoutes } from './routes/processes.ts';
 import { assistantRoutes } from './routes/assistant.ts';
 import { systemRoutes } from './routes/system.ts';
 import { integrationRoutes } from './routes/integration.ts';
+import { inboxRoutes } from './routes/inbox.ts';
 import { VERSION } from './services/system.ts';
 
 export async function buildApp() {
@@ -34,6 +35,7 @@ export async function buildApp() {
   await app.register(assistantRoutes);
   await app.register(systemRoutes);
   await app.register(integrationRoutes);
+  await app.register(inboxRoutes);
 
   // Producción local: sirve apps/web/dist si existe (npm run build). SPA fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {

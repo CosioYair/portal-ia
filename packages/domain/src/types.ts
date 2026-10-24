@@ -454,3 +454,38 @@ export interface ValidationRepairOverview {
   stopped: boolean;
   lastError: string | null;
 }
+
+// ---- HU-009 / HU-137 · Bandeja de autorizaciones ----
+/** Clases de decisión que esperan al propietario. */
+export const PENDING_DECISION_KINDS = ['process_authorization', 'apply_diff', 'integrate', 'publish', 'backlog_proposal'] as const;
+export type PendingDecisionKind = typeof PENDING_DECISION_KINDS[number];
+export type DecisionVerdict = 'approve' | 'deny';
+
+/** Decisión pendiente normalizada para la bandeja. Se calcula al vuelo a partir de los procesos; no se persiste. */
+export interface PendingDecision {
+  /** `${kind}:${processId}`; estable mientras la decisión siga pendiente. */
+  id: string;
+  kind: PendingDecisionKind;
+  title: string;
+  workspaceSlug: string;
+  projectId: string;
+  processId: string;
+  requestedBy: string;
+  createdAt: string;
+  /** Costo de IA que implica aprobar; null si aprobar no consume IA. */
+  estimatedCost: { usd: number; budgetUsd: number } | null;
+  /** Resumen legible del impacto (archivos y líneas, rama, alcance, historias propuestas…). */
+  impact: string;
+  /** Qué ocurre al aprobar. */
+  approveEffect: string;
+  /** Qué ocurre al denegar; null si el proceso original no tiene una acción de denegar (la decisión solo se puede aprobar o dejar pendiente). */
+  denyEffect: string | null;
+}
+
+export interface InboxDecisionResult {
+  ok: true;
+  kind: PendingDecisionKind;
+  processId: string;
+  verdict: DecisionVerdict;
+  processStatus: string | null;
+}
