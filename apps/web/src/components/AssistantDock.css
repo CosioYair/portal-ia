@@ -1,0 +1,247 @@
+/*
+ * Escala de capas del Portal:
+ *   contenido normal < asistente (900) < diálogos modales de autorización (>= 1000).
+ * Los modales de autorización existentes deben usar un z-index >= --capa-modal.
+ */
+:root {
+  --capa-asistente: 900;
+  --capa-modal: 1000;
+  --asistente-margen: 1rem;
+  --asistente-espacio-reservado: 5.5rem;
+}
+
+/* Aplicar al contenedor común de contenido para que el botón no tape acciones finales. */
+.con-asistente-dock {
+  padding-bottom: calc(var(--asistente-espacio-reservado) + env(safe-area-inset-bottom, 0px));
+}
+
+.asistente-dock {
+  position: fixed;
+  right: calc(var(--asistente-margen) + env(safe-area-inset-right, 0px));
+  bottom: calc(var(--asistente-margen) + env(safe-area-inset-bottom, 0px));
+  z-index: var(--capa-asistente);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.75rem;
+  pointer-events: none;
+}
+
+.asistente-dock > * {
+  pointer-events: auto;
+}
+
+.asistente-dock__boton {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 3.5rem;
+  height: 3.5rem;
+  border: none;
+  border-radius: 50%;
+  background: #2f4fd8;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+
+.asistente-dock__boton:focus-visible,
+.asistente-dock__minimizar:focus-visible {
+  outline: 3px solid #ffbf47;
+  outline-offset: 2px;
+}
+
+.asistente-dock__indicador {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+  background: #ffbf47;
+  border: 2px solid #fff;
+  animation: asistente-pulso 1.2s ease-in-out infinite;
+}
+
+@keyframes asistente-pulso {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .asistente-dock__indicador {
+    animation: none;
+  }
+}
+
+.asistente-dock__panel {
+  display: flex;
+  flex-direction: column;
+  width: 380px;
+  height: 560px;
+  max-width: calc(100vw - 2 * var(--asistente-margen));
+  max-height: calc(100dvh - 2 * var(--asistente-margen) - 4.5rem);
+  background: #fff;
+  color: #1b1b1b;
+  border: 1px solid #c9c9c9;
+  border-radius: 0.75rem;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.3);
+  overflow: hidden;
+}
+
+.asistente-dock__panel[hidden] {
+  display: none;
+}
+
+.asistente-dock__cabecera {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  background: #f1f3f9;
+  border-bottom: 1px solid #d9d9d9;
+}
+
+.asistente-dock__titulo {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.asistente-dock__cuerpo {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.asistente-chat {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.asistente-chat__mensajes {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0.75rem;
+  list-style: none;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.asistente-chat__vacio {
+  color: #555;
+  font-size: 0.9rem;
+}
+
+.asistente-chat__mensaje {
+  display: flex;
+  flex-direction: column;
+  max-width: 90%;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.asistente-chat__mensaje--usuario {
+  align-self: flex-end;
+  background: #e3e9ff;
+}
+
+.asistente-chat__mensaje--asistente {
+  align-self: flex-start;
+  background: #f1f1f1;
+}
+
+.asistente-chat__autor {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #444;
+}
+
+.asistente-chat__aviso,
+.asistente-chat__error,
+.asistente-chat__estado {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  border-top: 1px solid #d9d9d9;
+}
+
+.asistente-chat__aviso {
+  background: #fff7e0;
+}
+
+.asistente-chat__error {
+  background: #fde8e8;
+  color: #7a1010;
+}
+
+.asistente-chat__aviso p,
+.asistente-chat__error p {
+  margin: 0 0 0.5rem;
+}
+
+.asistente-chat__acciones {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.asistente-chat__formulario {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+  padding: 0.5rem 0.75rem calc(0.5rem + env(safe-area-inset-bottom, 0px));
+  border-top: 1px solid #d9d9d9;
+}
+
+.asistente-chat__campo {
+  flex: 1 1 auto;
+  min-width: 0;
+  resize: none;
+  font: inherit;
+  /* 16px evita el zoom automático al enfocar en iOS */
+  font-size: 1rem;
+}
+
+/* Pantallas pequeñas: hoja a ancho completo. */
+@media (max-width: 639px) {
+  .asistente-dock {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    align-items: stretch;
+  }
+
+  .asistente-dock__panel {
+    width: 100%;
+    max-width: 100%;
+    height: 85dvh;
+    max-height: 85dvh;
+    border-radius: 0.75rem 0.75rem 0 0;
+  }
+
+  .asistente-dock__boton {
+    align-self: flex-end;
+    margin-right: calc(var(--asistente-margen) + env(safe-area-inset-right, 0px));
+    margin-bottom: var(--asistente-margen);
+  }
+
+  /* Con la hoja abierta el botón quedaría tapado; se cierra con «Minimizar» o Escape. */
+  .asistente-dock__panel:not([hidden]) + .asistente-dock__boton {
+    display: none;
+  }
+}
