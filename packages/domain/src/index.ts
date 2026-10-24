@@ -3,6 +3,7 @@
 export * from './git-branch.ts';
 export * from './story-closure.ts';
 export * from './portal-sync.ts';
+export * from './runtime-location.ts';
 
 declare const companyIdBrand: unique symbol;
 
