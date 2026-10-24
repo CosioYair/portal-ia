@@ -1,7 +1,11 @@
 // Contratos de la verificación de ubicación en ejecución del Portal (carpeta y rama).
 
 import { z } from 'zod';
-import { RUNTIME_LOCATION_STATES } from '@portal/domain';
+import {
+  PREFLIGHT_CHECK_IDS,
+  PREFLIGHT_CHECK_STATES,
+  RUNTIME_LOCATION_STATES
+} from '@portal/domain';
 import { EntityIdSchema, IsoDateTimeSchema } from './common.ts';
 
 const RutaSchema = z.string().min(1).max(1000);
@@ -40,6 +44,30 @@ export const RuntimeLocationCheckSchema = z
   })
   .strict();
 
+/** Una comprobación individual del preflight de ejecución. */
+export const ExecutionPreflightCheckSchema = z
+  .object({
+    id: z.enum(PREFLIGHT_CHECK_IDS),
+    estado: z.enum(PREFLIGHT_CHECK_STATES),
+    detalle: z.string().min(1).max(1000)
+  })
+  .strict();
+
+/**
+ * Resultado de la comprobación previa a toda ejecución (HU-129): el Portal corre desde main
+ * actualizado y la rama por defecto del remoto es main. Si ok es false, la ejecución se detiene.
+ */
+export const ExecutionPreflightResultSchema = z
+  .object({
+    ok: z.boolean(),
+    checks: z.array(ExecutionPreflightCheckSchema).min(1).max(10),
+    /** Motivo en español del bloqueo; null cuando ok es true. */
+    motivo: z.string().min(1).max(2000).nullable()
+  })
+  .strict();
+
 export type RuntimeLocationParams = z.infer<typeof RuntimeLocationParamsSchema>;
 export type RuntimeLocationStoryStatus = z.infer<typeof RuntimeLocationStoryStatusSchema>;
 export type RuntimeLocationCheck = z.infer<typeof RuntimeLocationCheckSchema>;
+export type ExecutionPreflightCheck = z.infer<typeof ExecutionPreflightCheckSchema>;
+export type ExecutionPreflightResult = z.infer<typeof ExecutionPreflightResultSchema>;
