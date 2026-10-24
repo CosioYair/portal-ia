@@ -150,3 +150,19 @@ export function addManualItem(slug: string, projectId: string, input: { title: s
   const hasCoord = agentsRepo(slug).list().some(a => a.key === 'pj-coordinador' && (a.projectId === projectId || a.projectId === null));
   return repo.add({ projectId, storyId, title: input.title, ownerKey: input.ownerKey ?? (hasCoord ? 'pj-coordinador' : null), dependsOn: null, estimate: input.estimate ?? null, criterion: input.criterion ?? '', description: input.description ?? '', sourceProcessId: null });
 }
+
+/**
+ * Devuelve una historia a «pendiente» (p. ej. se rechaza el diff en revisión o se replantea). El proceso anterior se
+ * conserva y queda marcado como superado; la historia vuelve a ser ejecutable.
+ */
+export function resetStory(slug: string, itemId: string, reason: string): BacklogItem {
+  const repo = backlogRepo(slug); const it = repo.get(itemId);
+  if (!it) throw Object.assign(new Error('Historia no encontrada'), { statusCode: 404 });
+  if (it.status === 'in_progress') throw Object.assign(new Error('La historia está en ejecución; cancela el proceso primero.'), { statusCode: 409 });
+  const procs = processesRepo(slug);
+  const last = (it.lastProcessId ? procs.get(it.lastProcessId) : undefined) ?? procs.list(it.projectId).find(p => p.backlogItemId === it.id && p.kind === 'story_execution');
+  if (last?.result && !last.result.applied && !last.result.rejected) procs.setResult(last.id, { ...last.result, rejected: { at: new Date().toISOString(), reason } });
+  repo.update(it.id, { description: `${it.description ? it.description + '\n' : ''}[${new Date().toISOString().slice(0, 10)}] Devuelta a pendiente: ${reason}` });
+  repo.setStatus(it.id, 'pending', last?.id ?? null);
+  return repo.get(it.id)!;
+}

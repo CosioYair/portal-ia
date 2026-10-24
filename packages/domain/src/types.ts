@@ -202,8 +202,16 @@ export interface Process {
   guidance?: ProcessGuidance;
 }
 
-/** Guía de estado de un proceso (la forma la define services/guidance.ts del servidor). */
-export type ProcessGuidance = Record<string, any>;
+/** Orientación calculada por el servidor (services/guidance.ts): en qué fase está el proceso y cuál es el siguiente paso del propietario. */
+export interface ProcessGuidance {
+  /** Fase legible: «Pendiente de autorización», «En ejecución», «Diff listo para revisar», «Aplicado · falta integrar», «Integrado · falta publicar», «Publicado», «Falló», … */
+  phase: string;
+  /** Qué debe hacer ahora el propietario (una frase). */
+  next: string;
+  tone: 'info' | 'warn' | 'ok' | 'err';
+  /** Si el proceso ya no requiere acción del propietario. */
+  settled: boolean;
+}
 
 export interface KnowledgeDoc {
   id: string;
@@ -284,6 +292,12 @@ export interface ProposedChange {
   path: string;
   action: 'create' | 'modify' | 'delete';
   content: string | null;
+  /** Problema que impide aplicar este cambio (ruta protegida, parche que no encaja, archivo cambiado desde que se leyó…); el resto sí se aplica. */
+  error?: string | null;
+  /** Aviso no bloqueante (posible secreto, borrado masivo de líneas, copia posiblemente desactualizada…). */
+  warning?: string | null;
+  /** Hash (sha1) del archivo tal como lo leyó el Desarrollador; al aplicar se comprueba que no haya cambiado. */
+  baseHash?: string | null;
   /** Diff unificado (texto) calculado por el servidor para revisión humana. */
   diff: string | null;
   before: number; after: number; // líneas
@@ -304,6 +318,8 @@ export interface ExecutionResult {
   published?: { remote: string; url: string | null; branches: string[]; pushedAt: string } | null;
   /** HU-146 · Intentos de «Corregir y revalidar» dentro de esta misma historia. */
   repairs?: ValidationRepairAttempt[];
+  /** El propietario rechazó este diff (o replanteó la historia): no se aplicará; la historia volvió a pendiente. */
+  rejected?: { at: string; reason: string } | null;
 }
 
 /** Estado del repositorio registrado (solo lectura, sin red). */
@@ -329,7 +345,7 @@ export interface SystemStatus {
   /** Acción necesaria para ver los cambios: ninguna, recargar el navegador o reconstruir y reiniciar. */
   action: 'none' | 'reload' | 'restart';
   stories: string[];
-  update: { status: 'idle' | 'running' | 'done' | 'failed'; log: string; startedAt: string | null; finishedAt: string | null } | null;
+  update: { status: 'idle' | 'running' | 'done' | 'failed'; log: string; startedAt: string | null; finishedAt: string | null; /** Qué pasará al terminar: reinicio automático (supervisor) o apagado con comandos para arrancar a mano. */ outcome?: ServerLifecycleOutcome | null } | null;
 }
 
 /** Operación propuesta sobre el backlog por un agente (se aplica solo con aprobación del propietario). */

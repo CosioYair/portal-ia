@@ -8,7 +8,7 @@ import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@por
 import { platform, providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
-import { addManualItem } from './backlog.ts';
+import { addManualItem, resetStory } from './backlog.ts';
 import { createCompany, createProject } from './companies.ts';
 import { createStoryProcess, estimateStory } from './storyExecution.ts';
 import { createDelegation, estimateDelegation } from './delegation.ts';
@@ -103,6 +103,8 @@ Acciones locales (gratis, se ejecutan al instante):
 - {"type":"create_company","name":string}
 - {"type":"create_project","company":slug,"name":string,"description":string,"objectives":string[]}
 - {"type":"add_backlog_item","company":slug,"project":slug,"title":string,"criterion":string,"description":string}
+- {"type":"update_backlog_item","company":slug,"project":slug,"story":"HU-xxx","title"?:string,"criterion"?:string,"description"?:string,"estimate"?:"S"|"M"|"L","dependsOn"?:"HU-xxx"|null} → edita una historia existente (SÍ puedes). Si estaba en revisión y cambias título o criterio, vuelve a pendiente (su diff anterior queda superado).
+- {"type":"reset_story","company":slug,"project":slug,"story":"HU-xxx","reason":string} → rechaza el diff pendiente de una historia en revisión y la devuelve a pendiente para ejecutarla de nuevo.
 Acciones que requieren autorización del propietario (tú las PROPONES; el chat le muestra una tarjeta para autorizar con presupuesto):
 - {"type":"execute_story","company":slug,"project":slug,"story":"HU-0xx"} → el equipo del proyecto (Coordinador, Desarrollador, QA) implementa la historia y entrega un diff.
 - {"type":"apply_changes","company":slug,"processId":string} → escribe en una rama git los cambios de un proceso terminado.
@@ -148,6 +150,20 @@ export function performActions(actionsReq: any[]): AssistantAction[] {
       if (act.type === 'create_company') { const ws = createCompany(String(act.name ?? '')); actions.push({ type: 'create_company', status: 'done', label: `Empresa «${ws.name}» creada`, detail: 'Con sus 3 agentes de espacio, inactivos.', link: `/empresa/${ws.slug}/panel` }); }
       else if (act.type === 'create_project') { const ws = resolveCompany(act.company); const p = createProject(ws.slug, String(act.name ?? ''), String(act.description ?? ''), Array.isArray(act.objectives) ? act.objectives.map(String) : []); actions.push({ type: 'create_project', status: 'done', label: `Proyecto «${p.name}» creado en ${ws.name}`, detail: 'Con sus 5 agentes de proyecto, inactivos. Registra su repositorio para poder ejecutar historias.', link: `/empresa/${ws.slug}/proyecto/${p.id}/panel` }); }
       else if (act.type === 'add_backlog_item') { const ws = resolveCompany(act.company); const p = resolveProject(ws.slug, act.project); const it = addManualItem(ws.slug, p.id, { title: String(act.title ?? ''), criterion: act.criterion ? String(act.criterion) : undefined, description: act.description ? String(act.description) : undefined }); actions.push({ type: 'add_backlog_item', status: 'done', label: `${it.storyId} añadida al backlog de «${p.name}»`, detail: it.title, link: `/empresa/${ws.slug}/proyecto/${p.id}/backlog`, storyId: it.storyId, workspaceSlug: ws.slug, projectId: p.id }); }
+      else if (act.type === 'update_backlog_item') {
+        const ws = resolveCompany(act.company); const p = resolveProject(ws.slug, act.project); const story = resolveStory(ws.slug, p.id, act.story);
+        const patch: any = {}; for (const k of ['title', 'criterion', 'description', 'estimate', 'dependsOn'] as const) if (act[k] !== undefined) patch[k] = act[k];
+        backlogRepo(ws.slug).update(story.id, patch);
+        const reformulated = (patch.title && patch.title !== story.title) || (patch.criterion && patch.criterion !== story.criterion);
+        let detail = Object.keys(patch).join(', ');
+        if (reformulated && (story.status === 'review' || story.status === 'blocked')) { resetStory(ws.slug, story.id, 'replanteada desde el asistente'); detail += ' · devuelta a pendiente (el diff anterior queda superado)'; }
+        actions.push({ type: 'add_backlog_item', status: 'done', label: `${story.storyId} actualizada`, detail, link: `/empresa/${ws.slug}/proyecto/${p.id}/backlog`, storyId: story.storyId, workspaceSlug: ws.slug, projectId: p.id });
+      }
+      else if (act.type === 'reset_story') {
+        const ws = resolveCompany(act.company); const p = resolveProject(ws.slug, act.project); const story = resolveStory(ws.slug, p.id, act.story);
+        resetStory(ws.slug, story.id, String(act.reason ?? 'rechazada desde el asistente'));
+        actions.push({ type: 'info', status: 'done', label: `${story.storyId} devuelta a pendiente`, detail: 'El diff anterior queda superado; puedes ejecutarla de nuevo.', link: `/empresa/${ws.slug}/proyecto/${p.id}/backlog` });
+      }
       else if (act.type === 'execute_story') {
         const ws = resolveCompany(act.company); const p = resolveProject(ws.slug, act.project);
         // Si la historia se acaba de crear en esta misma respuesta, resuélvela por título.

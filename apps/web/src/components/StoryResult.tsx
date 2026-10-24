@@ -28,7 +28,8 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
 
   const added = r.changes.reduce((a, c) => a + Math.max(0, c.after - c.before), 0);
   const applicable = r.changes.filter(c => !c.error).length;
-  const canApply = proc.status === 'done' && !r.applied && applicable > 0;
+  const canApply = proc.status === 'done' && !r.applied && !r.rejected && applicable > 0;
+  const reject = async () => { const reason = prompt('¿Por qué rechazas este diff? (la historia vuelve a pendiente y podrás ejecutarla de nuevo)', 'alcance replanteado'); if (reason === null) return; setBusy('reject'); setErr(null); try { const p = await api.rejectProcess(slug, proc.id, reason.trim() || undefined); onChange(p); flash('Diff rechazado: la historia vuelve a pendiente'); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -68,6 +69,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
           {r.review.suggestedTests.length > 0 && <div><div className="eyebrow" style={{ marginBottom: 6 }}>Pruebas sugeridas</div><ul style={{ paddingLeft: 20 }}>{r.review.suggestedTests.map((t, i) => <li key={i}>{t}</li>)}</ul></div>}
         </div></section>}
 
+      {r.rejected && !r.applied && <Notice kind="warn"><strong>Diff rechazado</strong> ({new Date(r.rejected.at).toLocaleString()}): {r.rejected.reason}. La historia volvió a pendiente; puedes ejecutarla de nuevo desde Backlog o con «Volver a ejecutar».</Notice>}
       {(canApply || r.applied) && <section className="card">
         <div className="card-h"><div><div className="h3">Aplicar en el repositorio</div><div className="small muted">Escritura en rama de trabajo + commit. Herramienta «Escritura en el repositorio» · requiere tu autorización por uso.</div></div>{r.applied ? <Chip tone="ok" dot="ok">aplicado</Chip> : <Chip tone="warn" xs>pendiente de tu aprobación</Chip>}</div>
         <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -81,7 +83,10 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
             <div><label className="label" htmlFor="branch">Rama de trabajo</label><input id="branch" className="input mono" value={branch} onChange={e => setBranch(e.target.value)} /><div className="help">Se crea desde la rama actual del repositorio (debe estar sin cambios pendientes). Si ya existe, se reutiliza.</div></div>
             <label className="ck"><input className="cb" type="checkbox" checked={authApply} onChange={e => setAuthApply(e.target.checked)} /><span>He revisado los cambios y <strong>autorizo escribirlos</strong> en la rama indicada del repositorio registrado, con un commit a nombre de Portal IA.</span></label>
             {err && <Notice kind="err"><strong>No se pudo aplicar.</strong> {err}</Notice>}
-            <button className="btn btn-primary" style={{ alignSelf: 'flex-start' }} onClick={apply} disabled={!authApply || busy !== null}>{busy === 'apply' ? <span className="spin spin-light" /> : Icon.git()}{busy === 'apply' ? 'Aplicando…' : `Aplicar ${applicable} cambio${applicable === 1 ? '' : 's'} en la rama`}</button>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button className="btn btn-primary" onClick={apply} disabled={!authApply || busy !== null}>{busy === 'apply' ? <span className="spin spin-light" /> : Icon.git()}{busy === 'apply' ? 'Aplicando…' : `Aplicar ${applicable} cambio${applicable === 1 ? '' : 's'} en la rama`}</button>
+              <button className="btn btn-ghost" onClick={reject} disabled={busy !== null}>{busy === 'reject' ? <span className="spin" /> : null}Rechazar el diff y devolver la historia a pendiente</button>
+            </div>
           </>}
         </div></section>}
 

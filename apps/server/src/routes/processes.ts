@@ -8,8 +8,8 @@ import { createStoryProcess, estimateStory, recoverStory, retryStory, runStory }
 import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
 import { describeProcess } from '../services/guidance.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
-import { applyChanges, mergeBranch, pushBranches, runVerification } from '../services/repoWrite.ts';
-import { addManualItem, estimateExtraction, extractBacklogWithAI, importBacklogFromKnowledge } from '../services/backlog.ts';
+import { applyChanges, checkStaleChanges, mergeBranch, pushBranches, runVerification } from '../services/repoWrite.ts';
+import { addManualItem, estimateExtraction, extractBacklogWithAI, importBacklogFromKnowledge, resetStory } from '../services/backlog.ts';
 import { backlogRepo } from '../db/workspace.ts';
 
 /**
@@ -119,10 +119,25 @@ export async function processRoutes(app: FastifyInstance) {
     try { return createStoryProcess(slug, projectId, id, { skipQa: body.success ? !!body.data.skipQa : false }); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
 
+  // ---- Rechazar el diff de un proceso (la historia vuelve a pendiente) / devolver una historia a pendiente ----
+  app.post('/api/workspaces/:slug/processes/:id/reject', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ reason: z.string().trim().max(300).optional() }).safeParse(req.body ?? {});
+    const proc = processesRepo(slug).get(id);
+    if (!proc || proc.kind !== 'story_execution') return reply.code(404).send({ error: 'Proceso de historia no encontrado' });
+    if (proc.result?.applied) return reply.code(409).send({ error: 'Los cambios ya se aplicaron en una rama; si no los quieres, borra la rama con git.' });
+    try { if (proc.backlogItemId) resetStory(slug, proc.backlogItemId, body.success && body.data.reason ? body.data.reason : 'diff rechazado por el propietario'); else processesRepo(slug).setResult(id, { ...(proc.result ?? { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [] }), rejected: { at: new Date().toISOString(), reason: 'rechazado' } }); app.log.info({ processId: id }, 'diff rechazado'); return withGuidance(slug, processesRepo(slug).get(id)!); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+  app.post('/api/workspaces/:slug/backlog/:id/reset', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ reason: z.string().trim().max(300).optional() }).safeParse(req.body ?? {});
+    try { return resetStory(slug, id, body.success && body.data.reason ? body.data.reason : 'devuelta a pendiente por el propietario'); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+
   // ---- Recuperar (sin IA) o reintentar un proceso de historia ----
   app.post('/api/workspaces/:slug/processes/:id/recover', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    try { const p = recoverStory(slug, id); app.log.info({ processId: id, changes: p.result?.changes.length }, 'proceso recuperado sin IA'); return withGuidance(slug, p); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    try { const p = await recoverStory(slug, id); app.log.info({ processId: id, changes: p.result?.changes.length }, 'proceso recuperado sin IA'); return withGuidance(slug, p); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   app.post('/api/workspaces/:slug/processes/:id/retry', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
@@ -165,6 +180,11 @@ export async function processRoutes(app: FastifyInstance) {
     const item = proc.backlogItemId ? backlogRepo(slug).get(proc.backlogItemId) : undefined;
     const branch = body.data.branch ?? `portal-ia/${(item?.storyId ?? 'cambio').toLowerCase()}`;
     try {
+      // Última comprobación: ningún «modify» completo sobre un archivo que cambió después de leerse.
+      const checked = checkStaleChanges(repo.path, proc.result.changes);
+      if (checked.some((c, i) => c.error && !proc.result!.changes[i].error)) { procs.setResult(id, { ...proc.result, changes: checked }); }
+      if (!checked.some(c => !c.error)) return reply.code(409).send({ error: `Ningún cambio es aplicable ya: ${checked.filter(c => c.error).map(c => `${c.path}: ${c.error}`).join(' · ')}` });
+      proc.result.changes = checked;
       const applied = await applyChanges(repo.path, branch, proc.result.changes, `${item?.storyId ?? 'Portal IA'}: ${item?.title ?? proc.title}
 
 Cambios propuestos por el equipo de agentes de Portal IA y aprobados por el propietario.

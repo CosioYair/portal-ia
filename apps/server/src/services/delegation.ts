@@ -4,7 +4,7 @@ import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { buildRepoContext } from './repoContext.ts';
-import { addManualItem } from './backlog.ts';
+import { addManualItem, resetStory } from './backlog.ts';
 
 /**
  * Encargos delegados: el Asistente (o el propietario) encarga una tarea a un agente responsable —revisar y replantear
@@ -267,7 +267,13 @@ export function applyBacklogOps(slug: string, processId: string): DelegationResu
   for (const op of d.backlogOps) {
     try {
       if (op.op === 'add') { const it = addManualItem(slug, proc.projectId, { title: op.title, criterion: op.criterion, description: [op.description, op.reason ? `Motivo: ${op.reason}` : ''].filter(Boolean).join('\n'), ownerKey: op.ownerKey ?? undefined, estimate: op.estimate ?? null }); if (op.dependsOn) repo.update(it.id, { dependsOn: op.dependsOn }); summary.push(`${it.storyId} añadida: ${it.title}`); }
-      else if (op.op === 'update') { const it = find(op.story); if (!it) throw new Error(`${op.story} no existe`); const patch: any = {}; for (const k of ['title', 'criterion', 'description', 'ownerKey', 'estimate', 'dependsOn'] as const) if (op[k] !== undefined) patch[k] = op[k]; repo.update(it.id, patch); summary.push(`${it.storyId} actualizada${op.reason ? ` (${op.reason})` : ''}`); }
+      else if (op.op === 'update') {
+        const it = find(op.story); if (!it) throw new Error(`${op.story} no existe`); const patch: any = {}; for (const k of ['title', 'criterion', 'description', 'ownerKey', 'estimate', 'dependsOn'] as const) if (op[k] !== undefined) patch[k] = op[k]; repo.update(it.id, patch);
+        // Replantear una historia que estaba en revisión (con un diff pendiente) la devuelve a pendiente: el diff anterior queda superado.
+        const reformulated = (op.title !== undefined && op.title !== it.title) || (op.criterion !== undefined && op.criterion !== it.criterion);
+        if (reformulated && (it.status === 'review' || it.status === 'blocked')) { resetStory(slug, it.id, `replanteada por encargo: ${op.reason ?? 'nuevo alcance'}`); summary.push(`${it.storyId} actualizada y devuelta a pendiente (el diff anterior queda superado)${op.reason ? ` — ${op.reason}` : ''}`); }
+        else summary.push(`${it.storyId} actualizada${op.reason ? ` (${op.reason})` : ''}`);
+      }
       else if (op.op === 'discard') { const it = find(op.story); if (!it) throw new Error(`${op.story} no existe`); if (it.status === 'in_progress') throw new Error(`${it.storyId} está en ejecución`); repo.update(it.id, { description: `${it.description ? it.description + '\n' : ''}Descartada: ${op.reason}` }); repo.setStatus(it.id, 'discarded'); summary.push(`${it.storyId} descartada: ${op.reason}`); }
       else if (op.op === 'merge') { const into = find(op.into); if (!into) throw new Error(`${op.into} no existe`); const from = op.from.map(f => find(f)).filter(Boolean) as BacklogItem[]; repo.update(into.id, { title: op.title ?? into.title, criterion: op.criterion ?? into.criterion, description: `${into.description ? into.description + '\n' : ''}Incluye: ${from.map(f => `${f.storyId} (${f.title})`).join(', ')}` }); for (const f of from) { if (f.status !== 'in_progress') { repo.update(f.id, { description: `${f.description ? f.description + '\n' : ''}Fusionada en ${into.storyId}` }); repo.setStatus(f.id, 'discarded'); } } summary.push(`${from.map(f => f.storyId).join(', ')} fusionadas en ${into.storyId}`); }
       else if (op.op === 'reprioritize') { const items = op.order.map(o => find(o)).filter(Boolean) as BacklogItem[]; const positions = items.map(i => i.position).sort((a, b) => a - b); items.forEach((it, i) => repo.setPosition(it.id, positions[i])); summary.push(`Reordenadas ${items.length} historias`); }

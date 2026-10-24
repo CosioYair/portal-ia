@@ -1,7 +1,7 @@
 {
   "name": "portal-ia",
   "private": true,
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "Portal IA — sistema operativo empresarial multiagente, local-first (nombre provisional)",
   "type": "module",
   "engines": {
@@ -16,7 +16,8 @@
     "dev:server": "npm run dev --workspace apps/server",
     "dev:web": "npm run dev --workspace apps/web",
     "build": "npm run build --workspace apps/web",
-    "start": "npm run start --workspace apps/server",
+    "start": "node scripts/portal-start.mjs",
+    "start:server": "npm run start --workspace apps/server",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present"
   },

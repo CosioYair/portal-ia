@@ -4,8 +4,14 @@ import { spawn } from 'node:child_process';
 import type { SystemStatus } from '@portal-ia/domain';
 import { REPO_ROOT } from '../config.ts';
 import { git } from './repoWrite.ts';
+import { buildOutcome, RESTART_EXIT_CODE, shutdown } from './lifecycle.ts';
+import type { FastifyInstance } from 'fastify';
 
-export const VERSION = '0.9.1';
+let appRef: FastifyInstance | null = null;
+/** La aplicación en marcha, para poder apagarla limpiamente al reiniciar (HU-144). */
+export function attachApp(app: FastifyInstance) { appRef = app; }
+
+export const VERSION = '0.10.0';
 const startedAt = new Date().toISOString();
 let startCommit: string | null = null;
 const isGit = fs.existsSync(path.join(REPO_ROOT, '.git'));
@@ -54,7 +60,8 @@ function run(cmd: string, args: string[], onLine: (l: string) => void): Promise<
  */
 export async function startUpdate(opts: { install: boolean; restart: boolean }, log: (o: any, m: string) => void) {
   if (update?.status === 'running') throw Object.assign(new Error('Ya hay una actualización en curso.'), { statusCode: 409 });
-  update = { status: 'running', log: '', startedAt: new Date().toISOString(), finishedAt: null };
+  const outcome = opts.restart ? buildOutcome() : null;
+  update = { status: 'running', log: '', startedAt: new Date().toISOString(), finishedAt: null, outcome };
   const append = (l: string) => { if (update) update.log = (update.log + l).slice(-20_000); };
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   (async () => {
@@ -63,7 +70,12 @@ export async function startUpdate(opts: { install: boolean; restart: boolean }, 
       append('\n> npm run build\n'); const b = await run(npm, ['run', 'build'], append); if (b !== 0) throw new Error(`npm run build terminó con código ${b}`);
       update = { ...update!, status: 'done', finishedAt: new Date().toISOString() };
       log({ restart: opts.restart }, 'actualización completada');
-      if (opts.restart) setTimeout(restartSelf, 800);
+      if (opts.restart) setTimeout(() => {
+        // Con supervisor (npm start → scripts/portal-start.mjs): apagado limpio con código 75 y relanzamiento automático.
+        // Sin supervisor: apagado limpio; la interfaz ya mostró los comandos para arrancar a mano.
+        if (appRef) void shutdown(appRef, 'actualización del Portal', outcome?.mode === 'restarting' ? RESTART_EXIT_CODE : 0);
+        else restartSelf();
+      }, 800);
     } catch (e: any) { append(`\n✖ ${e.message}\n`); update = { ...update!, status: 'failed', finishedAt: new Date().toISOString() }; log({ err: e.message }, 'actualización fallida'); }
   })();
   return update;

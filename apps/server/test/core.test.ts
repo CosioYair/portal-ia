@@ -344,7 +344,7 @@ test('flujo git: estado del repositorio, crear main, remoto, preflight del proye
   const r2 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/backlog/${it.id}/done`, payload: { force: true, reason: 'ya implementada en v0.8' } });
   assert.equal(r2.statusCode, 200); assert.equal(r2.json().status, 'done');
   const r3 = await app.inject({ method: 'GET', url: '/api/system/status' });
-  assert.equal(r3.statusCode, 200); assert.ok(/^0\.(8|9)/.test(r3.json().version));
+  assert.equal(r3.statusCode, 200); assert.ok(/^0\.(8|9|10)/.test(r3.json().version));
   await app.close();
 });
 
@@ -448,9 +448,44 @@ test('recuperar sin IA un proceso fallido con salida del Desarrollador, y reinte
   procs.stepFinish(proc.steps[0].id, 'done', { outputMd: '{"summary":"plan","tasks":["t"],"filesToRead":[],"filesToChange":["x.ts"],"acceptance":[],"risks":[]}' });
   procs.stepFinish(proc.steps[1].id, 'done', { outputMd: '=== RESUMEN ===\nhecho\n=== ARCHIVO: x.ts | patch ===\n<<<< BUSCAR\nexport const x = 1;\n==== REEMPLAZAR\nexport const x = 2;\n>>>> FIN\n=== FIN ARCHIVO ===\n=== ARCHIVO: .env | create ===\nA=1\n=== FIN ARCHIVO ===\n=== VERIFICAR: typecheck ===' });
   procs.finish(proc.id, 'failed', 'Ruta protegida: .env'); backlogRepo('portal-ia').setStatus(it.id, 'pending', proc.id);
-  const r = recoverStory('portal-ia', proc.id);
+  const r = await recoverStory('portal-ia', proc.id);
   assert.equal(r.status, 'done'); assert.equal(r.result!.changes.length, 2); assert.equal(r.result!.changes.filter(c => !c.error).length, 1);
   assert.equal(r.result!.changes[0].content, 'export const x = 2;\n'); assert.equal(r.result!.plan?.summary, 'plan');
   assert.equal(backlogRepo('portal-ia').get(it.id)!.status, 'review');
   const again = retryStory('portal-ia', proc.id); // una historia en revisión también puede relanzarse (diff flojo) assert.equal(again.status, 'pending_authorization'); assert.notEqual(again.id, proc.id);
+});
+
+test('v0.10: devolver a pendiente / rechazar diff, replanteo por encargo, y protección contra archivos desactualizados', async () => {
+  const { resetStory, addManualItem } = await import('../src/services/backlog.ts');
+  const { createStoryProcess } = await import('../src/services/storyExecution.ts');
+  const { applyBacklogOps, createDelegation } = await import('../src/services/delegation.ts');
+  const { checkStaleChanges, annotateChanges, fileChangedSince } = await import('../src/services/repoWrite.ts');
+  const { processesRepo, projectsRepo, backlogRepo } = await import('../src/db/workspace.ts');
+  const { execSync } = await import('node:child_process');
+  const internal = projectsRepo('portal-ia').list()[0];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-stale-')); fs.writeFileSync(path.join(dir, 'f.ts'), 'v1\n'); execSync('git init -q && git add -A && git -c user.email=t@t -c user.name=t commit -qm i', { cwd: dir });
+  projectsRepo('portal-ia').setRepository(internal.id, dir, 'main');
+  // Historia en revisión con diff pendiente → reset
+  const it = addManualItem('portal-ia', internal.id, { title: 'Historia replanteable', criterion: 'c1' });
+  const proc = createStoryProcess('portal-ia', internal.id, it.id); const procs = processesRepo('portal-ia');
+  procs.authorize(proc.id, 1); procs.setResult(proc.id, { plan: null, implementationSummary: 'x', changes: annotateChanges(dir, [{ path: 'f.ts', action: 'modify', content: 'v2\n' }]), verifyCommands: [], review: null, applied: null, verifications: [] }); procs.finish(proc.id, 'done'); backlogRepo('portal-ia').setStatus(it.id, 'review', proc.id);
+  const r = resetStory('portal-ia', it.id, 'alcance nuevo');
+  assert.equal(r.status, 'pending'); assert.ok(procs.get(proc.id)!.result!.rejected); assert.match(r.description, /Devuelta a pendiente: alcance nuevo/);
+  assert.throws(() => { backlogRepo('portal-ia').setStatus(it.id, 'in_progress', proc.id); resetStory('portal-ia', it.id, 'x'); }, /en ejecución/);
+  backlogRepo('portal-ia').setStatus(it.id, 'review', proc.id);
+  // Encargo que replantea (update de título/criterio) una historia en revisión → vuelve a pendiente
+  const d = createDelegation('portal-ia', internal.id, undefined, 'Replantea la historia');
+  procs.setDelegation(d.id, { ...d.delegation!, deliverable: 'ok', backlogOps: [{ op: 'update', story: it.storyId, title: 'Historia replanteada', criterion: 'c2', reason: 'nuevo alcance' }] });
+  const applied = applyBacklogOps('portal-ia', d.id);
+  assert.match(applied.opsApplied!.summary[0], /devuelta a pendiente/);
+  assert.equal(backlogRepo('portal-ia').get(it.id)!.status, 'pending'); assert.equal(backlogRepo('portal-ia').get(it.id)!.title, 'Historia replanteada');
+  // Archivo cambiado después de leerse → el modify completo se bloquea al aplicar
+  const ch = annotateChanges(dir, [{ path: 'f.ts', action: 'modify', content: 'v2\n' }]); assert.ok(ch[0].baseHash);
+  fs.writeFileSync(path.join(dir, 'f.ts'), 'v1 editado después\n'); execSync('git add -A && git -c user.email=t@t -c user.name=t commit -qm later', { cwd: dir });
+  const checked = checkStaleChanges(dir, ch); assert.match(checked[0].error!, /cambió en el repositorio/);
+  assert.equal(await fileChangedSince(dir, 'f.ts', new Date(Date.now() - 60_000).toISOString()), true);
+  assert.equal(await fileChangedSince(dir, 'f.ts', new Date(Date.now() + 60_000).toISOString()), false);
+  // Aviso por borrado masivo en un modify completo
+  fs.writeFileSync(path.join(dir, 'big.ts'), Array.from({ length: 60 }, (_, i) => `l${i}`).join('\n') + '\n');
+  const big = annotateChanges(dir, [{ path: 'big.ts', action: 'modify', content: 'solo\n' }]); assert.match(big[0].warning!, /reemplazo completo/);
 });

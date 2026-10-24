@@ -64,6 +64,7 @@ export function Backlog() {
 
   const [delegText, setDelegText] = useState('');
   const delegate = async () => { if (delegText.trim().length < 8) return; setBusy(true); try { const p = await api.createDelegation(ws.slug, { projectId, request: delegText.trim() }); setDelegText(''); flash('Encargo creado: autorízalo con un presupuesto'); navigate(`/procesos/${p.id}`); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
+  const resetItem = async (it: BacklogItem) => { const reason = prompt(`Devolver ${it.storyId} a pendiente (su diff pendiente queda rechazado). Motivo:`, 'alcance replanteado'); if (reason === null) return; setBusy(true); try { await api.resetStory(ws.slug, it.id, reason.trim() || undefined); flash(`${it.storyId} devuelta a pendiente`); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   const closeStory = async (it: BacklogItem, force: boolean) => {
     if (force) { const reason = prompt(`Cerrar ${it.storyId} como resuelta fuera del flujo (sin ejecutarla ni integrar cambios). Indica brevemente por qué:`); if (reason === null) return; setBusy(true); try { await api.markStoryDone(ws.slug, it.id, { force: true, reason: reason.trim() || 'resuelta fuera del flujo' }); flash(`${it.storyId} cerrada`); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } return; }
     setBusy(true); try { await api.markStoryDone(ws.slug, it.id); flash(`${it.storyId} completada`); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); }
@@ -141,6 +142,7 @@ export function Backlog() {
                     <td style={{ whiteSpace: 'nowrap', verticalAlign: 'top' }}>
                       {it.status === 'review' && lp?.result?.merged && <button className="btn btn-primary btn-sm" onClick={() => closeStory(it, false)} disabled={busy}>Cerrar historia</button>}
                       {it.status === 'review' && lp && <button className="btn btn-secondary btn-sm" style={{ marginLeft: 6 }} onClick={() => navigate(`/procesos/${lp.id}`)}>{lp.result?.applied ? 'Continuar' : 'Revisar diff'}</button>}
+                      {it.status === 'review' && lp && !lp.result?.applied && <button className="btn btn-ghost btn-sm" style={{ marginLeft: 6 }} title="Rechaza el diff pendiente y deja la historia lista para ejecutarse de nuevo" onClick={() => resetItem(it)} disabled={busy}>Devolver a pendiente</button>}
                       {it.status === 'in_progress' && lp && <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/procesos/${lp.id}`)}>Ver proceso</button>}
                       {(it.status === 'pending' || it.status === 'blocked') && <button className="btn btn-primary btn-sm" onClick={() => setSel(it)} disabled={!!running || !project?.repository}>Ejecutar</button>}
                       {(it.status === 'done' || it.status === 'discarded') && lp && <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/procesos/${lp.id}`)}>Ver</button>}

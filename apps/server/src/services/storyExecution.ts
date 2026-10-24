@@ -4,7 +4,7 @@ import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { buildRepoContext } from './repoContext.ts';
-import { annotateChanges, readRepoFile, type RawChange } from './repoWrite.ts';
+import { annotateChanges, fileChangedSince, readRepoFile, type RawChange } from './repoWrite.ts';
 import path from 'node:path';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { REPO_ROOT } from '../config.ts';
@@ -298,7 +298,7 @@ Responde SOLO con JSON: {"approve": boolean, "summary": string, "issues": string
  * (p. ej. una ruta que antes se consideraba protegida), se vuelve a leer esa salida con las reglas actuales y, si hay
  * cambios aplicables, el proceso pasa a «terminado» con su diff listo para revisar. No se gasta nada.
  */
-export function recoverStory(slug: string, processId: string): Process {
+export async function recoverStory(slug: string, processId: string): Promise<Process> {
   const procs = processesRepo(slug); const proc = procs.get(processId);
   if (!proc || proc.kind !== 'story_execution') throw Object.assign(new Error('Proceso de historia no encontrado'), { statusCode: 404 });
   if (proc.status === 'running' || proc.status === 'pending_authorization') throw Object.assign(new Error('El proceso no ha terminado.'), { statusCode: 409 });
@@ -311,6 +311,9 @@ export function recoverStory(slug: string, processId: string): Process {
   if (!parsed.changes.length) { const legacy = extractJson(text); if (legacy && Array.isArray(legacy.changes)) parsed.changes = legacy.changes.filter((c: any) => c && typeof c.path === 'string').map((c: any) => ({ path: c.path, action: c.action, content: typeof c.content === 'string' ? c.content : null })); }
   if (!parsed.changes.length) throw Object.assign(new Error('La salida del Desarrollador no contiene archivos en un formato reconocible. Vuelve a ejecutar la historia.'), { statusCode: 409 });
   const changes = annotateChanges(repo.path, parsed.changes);
+  // El Desarrollador leyó los archivos cuando empezó su paso: si alguno cambió después, un «modify» completo lo machacaría.
+  const readAt = dev.startedAt ?? proc.createdAt;
+  for (const c of changes) { if (!c.error && c.action === 'modify' && await fileChangedSince(repo.path, c.path, readAt)) c.error = `El archivo cambió en el repositorio después de que el Desarrollador lo leyera (${new Date(readAt).toLocaleString()}): aplicar esta versión completa sobrescribiría ese trabajo. Si necesitas el cambio, vuelve a ejecutar la historia.`; }
   const applicable = changes.filter(c => !c.error);
   if (!applicable.length) throw Object.assign(new Error(`Ningún cambio es aplicable: ${changes.map(c => `${c.path}: ${c.error}`).join(' · ')}`), { statusCode: 409 });
   const planJson = proc.steps[0]?.outputMd ? extractJson(proc.steps[0].outputMd) : null;

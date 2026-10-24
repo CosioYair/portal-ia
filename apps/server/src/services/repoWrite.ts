@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -87,6 +88,35 @@ export interface RawChange { path: string; action: 'create' | 'modify' | 'delete
  * Enriquecer cambios propuestos con diff y métricas, sin escribir nada. Un cambio inválido (ruta protegida, parche que
  * no encaja) no invalida el resto: queda marcado con `error` y se excluye al aplicar.
  */
+export const hashText = (t: string) => crypto.createHash('sha1').update(t).digest('hex');
+/** Hash actual de un archivo del repositorio (null si no existe). */
+export function fileHash(repoPath: string, rel: string): string | null { const c = readRepoFile(repoPath, rel, 50_000_000); return c === null ? null : hashText(c); }
+
+/**
+ * Comprueba, justo antes de aplicar, que cada archivo a modificar sigue siendo el que leyó el Desarrollador.
+ * Un cambio «modify» completo sobre un archivo que cambió después machacaría trabajo posterior: se marca y no se escribe.
+ */
+export function checkStaleChanges(repoPath: string, changes: ProposedChange[]): ProposedChange[] {
+  return changes.map(c => {
+    if (c.error || c.action === 'delete' || !c.baseHash) return c;
+    const now = fileHash(repoPath, c.path);
+    if (now === null && c.action === 'modify') return { ...c, error: 'El archivo ya no existe en el repositorio (se leyó cuando existía).' };
+    if (now !== null && now !== c.baseHash) return { ...c, error: 'El archivo cambió en el repositorio después de que el Desarrollador lo leyera: aplicar esta versión completa sobrescribiría ese trabajo. Vuelve a ejecutar la historia sobre el código actual.' };
+    return c;
+  });
+}
+
+/** ¿El archivo tiene commits (o cambios sin confirmar) posteriores a la fecha dada? Para resultados recuperados tarde. */
+export async function fileChangedSince(repoPath: string, rel: string, sinceIso: string): Promise<boolean> {
+  const cwd = repoRoot(repoPath);
+  try {
+    const last = await git(cwd, ['log', '-1', '--format=%cI', '--', rel]);
+    if (last && new Date(last).getTime() > new Date(sinceIso).getTime()) return true;
+    const dirty = await git(cwd, ['status', '--porcelain', '--', rel]);
+    return !!dirty.trim();
+  } catch { return false; }
+}
+
 export function annotateChanges(repoPath: string, changes: RawChange[]): ProposedChange[] {
   return changes.map(c => {
     const relDisplay = c.path.replace(/\\/g, '/');
@@ -102,8 +132,12 @@ export function annotateChanges(repoPath: string, changes: RawChange[]): Propose
     }
     if (c.action === 'modify' && existing === null && !c.content) error = 'El archivo no existe y no se entregó contenido.';
     const action: ProposedChange['action'] = c.action === 'delete' ? 'delete' : existing === null ? 'create' : 'modify';
-    const warning = action !== 'delete' ? scanSecrets(after) : null;
-    return { path: rel, action, content: action === 'delete' ? null : after, diff: error ? '' : unifiedDiff(before, after, rel), before: existing === null ? 0 : before.split('\n').length, after: action === 'delete' ? 0 : after.split('\n').length, error, warning };
+    const beforeLines = existing === null ? 0 : before.split('\n').length; const afterLines = action === 'delete' ? 0 : after.split('\n').length;
+    const warnings: string[] = [];
+    const secret = action !== 'delete' ? scanSecrets(after) : null; if (secret) warnings.push(secret);
+    // Un «modify» completo que borra muchas líneas suele ser una copia desactualizada del archivo: avisar.
+    if (action === 'modify' && c.action === 'modify' && beforeLines >= 40 && afterLines < beforeLines * 0.8) warnings.push(`Este reemplazo completo deja el archivo con ${afterLines} líneas (tenía ${beforeLines}): comprueba en el diff que las líneas en rojo no sean trabajo reciente que el Desarrollador no vio.`);
+    return { path: rel, action, content: action === 'delete' ? null : after, diff: error ? '' : unifiedDiff(before, after, rel), before: beforeLines, after: afterLines, error, warning: warnings.join(' ') || null, baseHash: existing === null ? null : hashText(existing) };
   });
 }
 

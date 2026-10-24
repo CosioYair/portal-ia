@@ -25,6 +25,7 @@ export function describeProcess(p: Process, opts: { isPortalRepo?: boolean } = {
   const r = p.result;
   if (!r) return { phase: 'Terminado', next: '—', tone: 'ok', settled: true };
   const applicable = r.changes.filter(c => !c.error).length;
+  if (r.rejected && !r.applied) return { phase: 'Diff rechazado', next: `Motivo: ${r.rejected.reason}. La historia volvió a pendiente; ejecútala de nuevo cuando quieras.`, tone: 'warn', settled: true };
   if (!r.applied) {
     if (!applicable) return { phase: 'Terminado sin cambios aplicables', next: 'El Desarrollador no entregó cambios válidos. Acota la historia y vuelve a ejecutarla.', tone: 'err', settled: true };
     return { phase: `Diff listo para revisar (${applicable} archivo(s)${r.review ? r.review.approve ? ', QA aprobó' : ', QA con observaciones' : ''})`, next: 'Revisa los cambios y, si estás conforme, pulsa «Aplicar» para escribirlos en una rama.', tone: 'warn', settled: false };
