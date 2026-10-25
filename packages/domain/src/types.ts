@@ -461,6 +461,35 @@ export interface ValidationRepairOverview {
   lastError: string | null;
 }
 
+// ---- HU-007 · Libro de presupuesto con reserva y corte duro ----
+// Todos los importes son enteros en micro-USD (1 USD = 1_000_000) para evitar errores de coma flotante.
+export interface BudgetScope {
+  /** Clave de ámbito (hoy un espacio/proyecto; extensible a empresa > proyecto > proceso sin migrar). */
+  scopeId: string;
+  limitMicros: number;
+}
+
+export type BudgetReservationStatus = 'active' | 'settled' | 'released';
+
+export interface BudgetReservation {
+  id: string;
+  scopeId: string;
+  estimatedMicros: number;
+  status: BudgetReservationStatus;
+  /** Coste real; solo presente cuando la reserva está liquidada. */
+  actualMicros?: number;
+}
+
+export interface BudgetSnapshot {
+  limitMicros: number;
+  /** Suma del coste real de las reservas liquidadas. */
+  spentMicros: number;
+  /** Suma de las estimaciones de las reservas activas. */
+  reservedMicros: number;
+  /** límite − gastado − reservado; puede ser negativo si el coste real superó la estimación. */
+  availableMicros: number;
+}
+
 // ---- HU-009 / HU-137 · Bandeja de autorizaciones ----
 /** Clases de decisión que esperan al propietario. */
 export const PENDING_DECISION_KINDS = ['process_authorization', 'apply_diff', 'integrate', 'publish', 'backlog_proposal'] as const;
