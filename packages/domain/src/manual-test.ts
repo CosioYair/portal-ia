@@ -1,4 +1,4 @@
-import { manualTestStepKey } from './templates.ts';
+import { manualTestStepKey } from './types.ts';
 
 /** Resultado del feedback de un paso de la prueba manual (contrato vigente del endpoint). */
 export type ManualTestResult = 'ok' | 'fail' | 'observation';

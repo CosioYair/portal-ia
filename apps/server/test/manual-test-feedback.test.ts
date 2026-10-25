@@ -8,7 +8,7 @@ process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-m
 process.env.PORTAL_ALLOW_FOREIGN_REPO = '1';
 
 const { encryptSecret } = await import('../src/security/crypto.ts');
-const { classifyModel, manualTestStepKey } = await import('@portal-ia/domain');
+const { classifyModel, manualTestStepKey, buildManualTestSteps, buildFailureBlock, countDoneManualSteps } = await import('@portal-ia/domain');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { projectsRepo } = await import('../src/db/workspace.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
@@ -138,4 +138,77 @@ test('resultado null con comentario vacío elimina la entrada; null con comentar
   const end = await app.inject({ method: 'GET', url: url(procA.id) });
   assert.ok(!end.json().items.some((i: { stepKey: string }) => i.stepKey === 'p9-del'), 'la fila se borró');
   await app.close();
+});
+
+test('buildManualTestSteps: cada ítem lleva su propio estado y comentario, y OK cuenta como realizado', () => {
+  const steps = ['Abre Backlog', 'Pulsa Ejecutar', 'Revisa el diff', 'Cierra'];
+  const fb = [
+    { stepKey: manualTestStepKey(0, steps[0]), result: 'ok' as const, comment: 'Bien' },
+    { stepKey: manualTestStepKey(1, steps[1]), result: 'fail' as const, comment: 'No abre' },
+    { stepKey: manualTestStepKey(2, steps[2]), result: 'observation' as const, comment: 'Lento' }
+  ];
+  const items = buildManualTestSteps(steps, fb, [false, true, true, false]);
+  assert.equal(items.length, 4);
+  assert.deepEqual(items.map(i => i.text), steps, 'el texto de cada paso va completo');
+  assert.equal(items[0].result, 'ok');
+  assert.equal(items[0].comment, 'Bien');
+  assert.equal(items[0].done, true, 'OK implica realizado aunque la casilla no esté marcada');
+  assert.equal(items[1].result, 'fail');
+  assert.equal(items[1].comment, 'No abre');
+  assert.equal(items[1].done, false, 'Falla explícita prevalece sobre la casilla antigua');
+  assert.equal(items[2].result, 'observation');
+  assert.equal(items[2].comment, 'Lento');
+  assert.equal(items[3].result, null);
+  assert.equal(items[3].comment, '');
+  assert.equal(items[3].done, false);
+  const legacy = buildManualTestSteps(['A', 'B'], [], [true, false]);
+  assert.equal(legacy[0].done, true, 'sin feedback, la casilla antigua sigue contando');
+  assert.equal(countDoneManualSteps(items), 1);
+});
+
+test('buildFailureBlock: agrupa solo los pasos en Falla, en orden y con su comentario', () => {
+  const steps = ['Uno', 'Dos', 'Tres', 'Cuatro'];
+  const fb = [
+    { stepKey: manualTestStepKey(0, 'Uno'), result: 'ok' as const, comment: 'ok' },
+    { stepKey: manualTestStepKey(1, 'Dos'), result: 'fail' as const, comment: 'rompe al guardar' },
+    { stepKey: manualTestStepKey(2, 'Tres'), result: 'observation' as const, comment: 'solo una nota' },
+    { stepKey: manualTestStepKey(3, 'Cuatro'), result: 'fail' as const, comment: '' }
+  ];
+  const block = buildFailureBlock(buildManualTestSteps(steps, fb));
+  assert.equal(block, 'Pasos con falla (2):\n\n2. Dos\n   Comentario: rompe al guardar\n\n4. Cuatro\n   Comentario: (sin comentario)');
+  assert.ok(!block.includes('solo una nota'));
+  assert.equal(buildFailureBlock(buildManualTestSteps(steps, fb.filter(f => f.result !== 'fail'))), '', 'sin fallas, cadena vacía');
+});
+
+test('el feedback se guarda por paso y reaparece asociado a cada ítem al reabrir', async () => {
+  const steps = ['Abre Backlog', 'Pulsa Ejecutar', 'Revisa el diff'];
+  const keys = steps.map((t, i) => manualTestStepKey(i, t));
+  const payloads = [
+    { result: 'ok', comment: 'Bien' },
+    { result: 'fail', comment: 'No abre el diálogo' },
+    { result: 'observation', comment: 'Texto largo' }
+  ];
+  const app1 = await buildApp();
+  for (let i = 0; i < steps.length; i++) {
+    const put = await app1.inject({ method: 'PUT', url: url(procB.id, keys[i]), payload: payloads[i] });
+    assert.equal(put.statusCode, 200);
+  }
+  await app1.close();
+  closeManualTestFeedbackDbs();
+
+  const app2 = await buildApp();
+  const get = await app2.inject({ method: 'GET', url: url(procB.id) });
+  assert.equal(get.statusCode, 200);
+  const items = buildManualTestSteps(steps, get.json().items, [false, false, false]);
+  assert.deepEqual(items.map(i => [i.result, i.comment]), [['ok', 'Bien'], ['fail', 'No abre el diálogo'], ['observation', 'Texto largo']]);
+  assert.deepEqual(items.map(i => i.done), [true, false, false]);
+  const block = buildFailureBlock(items);
+  assert.ok(block.includes('No abre el diálogo'));
+  assert.ok(!block.includes('Bien'));
+
+  const invalid = await app2.inject({ method: 'PUT', url: url(procB.id, keys[0]), payload: { result: 'falla', comment: '' } });
+  assert.equal(invalid.statusCode, 400, 'un estado fuera de ok|fail|observation se rechaza');
+  const after = await app2.inject({ method: 'GET', url: url(procB.id) });
+  assert.equal(buildManualTestSteps(steps, after.json().items)[0].result, 'ok', 'el rechazo no altera lo guardado');
+  await app2.close();
 });

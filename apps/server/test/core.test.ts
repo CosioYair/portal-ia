@@ -540,3 +540,29 @@ test('v0.11.1: lista de prueba a mano para historias antiguas, estimación de ge
   assert.equal(r5.statusCode, 200); assert.equal(r5.json().status, 'done');
   await app.close();
 });
+
+test('v0.11.2: el hash de archivo ignora CRLF (no marca como cambiado lo que no cambió) y no se integra sin typecheck', async () => {
+  const { fileHash, annotateChanges, checkStaleChanges } = await import('../src/services/repoWrite.ts');
+  const { processesRepo, projectsRepo, backlogRepo } = await import('../src/db/workspace.ts');
+  const { addManualItem } = await import('../src/services/backlog.ts');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-crlf-'));
+  fs.writeFileSync(path.join(dir, 't.ts'), 'a\r\nb\r\n');
+  const ann = annotateChanges(dir, [{ path: 't.ts', action: 'patch', content: null, edits: [{ search: 'b', replace: 'c' }] }]);
+  assert.equal(ann[0].baseHash, fileHash(dir, 't.ts'), 'misma huella con CRLF en disco');
+  assert.equal(checkStaleChanges(dir, ann)[0].error ?? null, null, 'no se bloquea un archivo que no cambió');
+  // Integrar sin typecheck → 409 con código claro
+  const internal = projectsRepo('portal-ia').list()[0];
+  const it = addManualItem('portal-ia', internal.id, { title: 'Sin verificar' });
+  const procs = processesRepo('portal-ia');
+  const proc = procs.create({ projectId: internal.id, kind: 'story_execution', title: 'HU-nv', estimatedUsd: 1, backlogItemId: it.id, steps: [] });
+  procs.authorize(proc.id, 1);
+  procs.setResult(proc.id, { plan: null, implementationSummary: 'x', changes: [], verifyCommands: [], review: null, applied: { branch: 'b', commit: 'c', files: [], appliedAt: new Date().toISOString() }, merged: null, published: null, verifications: [] });
+  procs.finish(proc.id, 'done'); backlogRepo('portal-ia').setStatus(it.id, 'review', proc.id);
+  const app = await buildApp();
+  const r1 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/processes/${proc.id}/merge`, payload: { authorized: true } });
+  assert.equal(r1.statusCode, 409); assert.equal(r1.json().code, 'verification_required');
+  procs.setResult(proc.id, { ...procs.get(proc.id)!.result!, verifications: [{ command: 'typecheck', exitCode: 1, output: 'error TS', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), durationMs: 1 }] });
+  const r2 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/processes/${proc.id}/merge`, payload: { authorized: true } });
+  assert.equal(r2.json().code, 'verification_failed');
+  await app.close();
+});

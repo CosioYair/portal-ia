@@ -1,9 +1,32 @@
 .mtf-panel { margin: 16px 24px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
 .mtf-step { display: flex; flex-direction: column; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid rgba(128, 128, 128, 0.25); }
-.mtf-text { white-space: pre-wrap; }
+.mtf-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .mtf-options { display: flex; flex-wrap: wrap; gap: 8px; }
 .mtf-comment { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; padding: 8px; }
 .mtf-status { min-height: 1.25em; font-size: 0.875em; opacity: 0.85; }
 .mtf-summary { display: flex; flex-direction: column; gap: 8px; }
 .mtf-summary-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .mtf-summary-head h3 { margin: 0; }
+
+/* HU-147 · Lista «Qué probar, paso a paso» con feedback dentro de cada ítem */
+.mts { display: flex; flex-direction: column; gap: 12px; min-width: 0; max-width: 100%; }
+.mts-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; min-width: 0; }
+.mts-item { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 12px 0; border-top: 1px solid #EEECE6; }
+.mts-item:first-child { border-top: 0; padding-top: 0; }
+.mts-item.is-done { background: linear-gradient(to right, #E4F3EA, transparent 40%); }
+.mts-item.is-fail { background: linear-gradient(to right, #FBE7E5, transparent 40%); }
+.mts-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 12px; min-width: 0; }
+.mts-num { flex: none; font-weight: 600; color: #4F5259; }
+.mts-text { flex: 1 1 260px; min-width: 0; margin: 0; white-space: normal; overflow-wrap: anywhere; word-break: break-word; text-overflow: clip; overflow: visible; }
+.mts-actions { flex: 0 1 auto; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.mts-opt[aria-pressed="true"] { color: #fff; border-color: transparent; }
+.mts-opt-ok[aria-pressed="true"] { background: #166534; }
+.mts-opt-fail[aria-pressed="true"] { background: #9A1F18; }
+.mts-opt-observation[aria-pressed="true"] { background: #7A4A00; }
+.mts-comment { width: 100%; max-width: 100%; min-width: 0; min-height: 52px; }
+.mts-status { min-height: 1.25em; color: #4F5259; overflow-wrap: anywhere; }
+.mts-error { color: #9A1F18; }
+.mts-failures { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 12px; border: 1px solid #F2C7C3; border-radius: 8px; background: #FBE7E5; }
+.mts-failures-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.mts-failures-head h3 { margin: 0; }
+.mts-failures-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; font: inherit; }

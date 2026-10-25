@@ -11,7 +11,7 @@ let appRef: FastifyInstance | null = null;
 /** La aplicación en marcha, para poder apagarla limpiamente al reiniciar (HU-144). */
 export function attachApp(app: FastifyInstance) { appRef = app; }
 
-export const VERSION = '0.11.1';
+export const VERSION = '0.11.2';
 const startedAt = new Date().toISOString();
 let startCommit: string | null = null;
 const isGit = fs.existsSync(path.join(REPO_ROOT, '.git'));

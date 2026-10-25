@@ -90,7 +90,8 @@ export interface RawChange { path: string; action: 'create' | 'modify' | 'delete
  */
 export const hashText = (t: string) => crypto.createHash('sha1').update(t).digest('hex');
 /** Hash actual de un archivo del repositorio (null si no existe). */
-export function fileHash(repoPath: string, rel: string): string | null { const c = readRepoFile(repoPath, rel, 50_000_000); return c === null ? null : hashText(c); }
+/** El hash se calcula siempre sobre LF para que un archivo CRLF (Windows) no parezca «cambiado». */
+export function fileHash(repoPath: string, rel: string): string | null { const c = readRepoFile(repoPath, rel, 50_000_000); return c === null ? null : hashText(c.replace(/\r\n/g, '\n')); }
 
 /**
  * Comprueba, justo antes de aplicar, que cada archivo a modificar sigue siendo el que leyó el Desarrollador.

@@ -20,6 +20,9 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
   const [authGit, setAuthGit] = useState(false);
   const [gitErr, setGitErr] = useState<string | null>(null);
   const isPortalRepo = slug === 'portal-ia';
+  const appliedAt = r.applied ? new Date(r.applied.appliedAt).getTime() : 0;
+  const typecheckOk = r.verifications.some(v => v.command === 'typecheck' && v.exitCode === 0 && new Date(v.startedAt).getTime() >= appliedAt - 1000);
+  const lastFailed = ['typecheck', 'build', 'test'].map(c => r.verifications.filter(v => v.command === c).at(-1)).filter(v => v && v.exitCode !== 0).map(v => v!.command).join(', ');
   const merge = async () => { if (!authGit) return; setBusy('merge'); setGitErr(null); try { const p = await api.mergeProcess(slug, proc.id); onChange(p); flash(`Rama integrada en ${p.result?.merged?.into} · commit ${p.result?.merged?.commit}`); } catch (e: any) { setGitErr(e.message); } finally { setBusy(null); } };
   const publish = async () => { if (!authGit) return; setBusy('publish'); setGitErr(null); try { const p = await api.publishProcess(slug, proc.id); onChange(p); flash(`Publicado en ${p.result?.published?.remote}: ${p.result?.published?.branches.join(', ')}`); } catch (e: any) { setGitErr(e.message); } finally { setBusy(null); } };
 
@@ -114,7 +117,8 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
           {gitErr && <Notice kind="err"><strong>No se pudo completar.</strong> {gitErr}</Notice>}
           <label className="ck"><input className="cb" type="checkbox" checked={authGit} onChange={e => setAuthGit(e.target.checked)} /><span>Autorizo <strong>integrar</strong> la rama <span className="mono">{r.applied.branch}</span> en la rama principal del repositorio (merge con commit) y/o <strong>publicarla</strong> en el remoto configurado (<span className="mono">git push</span>, con las credenciales git de este equipo).</span></label>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {!r.merged && <button className="btn btn-primary btn-sm" onClick={merge} disabled={!authGit || busy !== null}>{busy === 'merge' ? <span className="spin spin-light" /> : Icon.git()}{busy === 'merge' ? 'Integrando…' : 'Integrar en la rama principal'}</button>}
+            {!r.merged && <button className="btn btn-primary btn-sm" onClick={merge} disabled={!authGit || busy !== null || !typecheckOk} title={typecheckOk ? '' : 'Primero ejecuta npm run typecheck en Verificación'}>{busy === 'merge' ? <span className="spin spin-light" /> : Icon.git()}{busy === 'merge' ? 'Integrando…' : 'Integrar en la rama principal'}</button>}
+            {!r.merged && !typecheckOk && <span className="small muted" style={{ alignSelf: 'center' }}>{lastFailed ? `La última verificación falló (${lastFailed}); corrige en la rama o rechaza el diff.` : 'Para integrar hace falta que «npm run typecheck» pase en Verificación (y «build» si es el Portal).'}</span>}
             <button className="btn btn-secondary btn-sm" onClick={publish} disabled={!authGit || busy !== null}>{busy === 'publish' ? <span className="spin" /> : null}{r.published ? 'Volver a publicar (git push)' : 'Publicar en el remoto (git push)'}</button>
           </div>
           {isPortalRepo && r.merged && <Notice kind="info">Esta rama modifica el propio Portal IA. Para que los cambios integrados entren en funcionamiento: detén el servidor, ejecuta <span className="mono">npm install</span> (si cambió package.json), <span className="mono">npm run build</span> y vuelve a arrancar con <span className="mono">npm start</span>.</Notice>}

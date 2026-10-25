@@ -225,11 +225,19 @@ Proceso: ${proc.id}`);
   // ---- Integrar en la rama principal (merge --no-ff · requiere autorización por uso) ----
   app.post('/api/workspaces/:slug/processes/:id/merge', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ authorized: z.literal(true), into: z.string().trim().min(1).max(80).optional() }).safeParse(req.body);
+    const body = z.object({ authorized: z.literal(true), into: z.string().trim().min(1).max(80).optional(), skipVerification: z.boolean().optional() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita.' });
     const procs = processesRepo(slug); const proc = procs.get(id);
     if (!proc?.result?.applied) return reply.code(409).send({ error: 'Primero aplica los cambios en la rama.' });
     if (proc.result.merged) return reply.code(409).send({ error: `Ya integrada en ${proc.result.merged.into}.` });
+    // Orden de cierre: no se integra sin que typecheck haya pasado en esta rama (salvo que el propietario lo fuerce a sabiendas).
+    const after = new Date(proc.result.applied.appliedAt).getTime();
+    const okTypecheck = proc.result.verifications.some(v => v.command === 'typecheck' && v.exitCode === 0 && new Date(v.startedAt).getTime() >= after - 1000);
+    const failedLast = ['typecheck', 'build', 'test'].map(c => proc.result!.verifications.filter(v => v.command === c).at(-1)).filter(v => v && v.exitCode !== 0);
+    if (!body.data.skipVerification) {
+      if (failedLast.length) return reply.code(409).send({ error: `La última verificación falló (${failedLast.map(v => v!.command).join(', ')}). Corrige en la rama o rechaza el diff; integrar código roto dejaría el Portal sin compilar.`, code: 'verification_failed' });
+      if (!okTypecheck) return reply.code(409).send({ error: 'Antes de integrar ejecuta «npm run typecheck» en la sección Verificación (y «build» si es el propio Portal). Así nunca se integra código que no compila.', code: 'verification_required' });
+    }
     const repo = projectsRepo(slug).repository(proc.projectId); if (!repo) return reply.code(409).send({ error: 'No hay repositorio registrado.' });
     try {
       const m = await mergeBranch(repo.path, proc.result.applied.branch, body.data.into);

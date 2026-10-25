@@ -490,6 +490,44 @@ export interface BudgetSnapshot {
   availableMicros: number;
 }
 
+// ---- HU-133 / HU-138 · Presupuestos jerárquicos empresa > proyecto > proceso ----
+// Mismos importes enteros en micro-USD que HU-007. Periodo mensual en UTC con formato 'YYYY-MM'.
+// (BudgetScope y BudgetReservation ya existen en HU-007; aquí se usan nombres distintos para no colisionar.)
+export type BudgetLevel = 'company' | 'project';
+
+export interface MonthlyBudget {
+  scope: BudgetLevel;
+  /** Empresa: slug del espacio. Proyecto: id del proyecto. */
+  scopeId: string;
+  period: string;
+  limitMicros: number;
+}
+
+export type ProcessReservationStatus = 'active' | 'settled' | 'released';
+
+/** Reserva de presupuesto de un proceso en curso (se descuenta del saldo del proyecto y de la empresa). */
+export interface ProcessBudgetReservation {
+  processId: string;
+  projectId: string;
+  amountMicros: number;
+  status: ProcessReservationStatus;
+}
+
+export interface BudgetBalance {
+  level: BudgetLevel;
+  scopeId: string;
+  period: string;
+  /** false si no hay presupuesto definido para el ámbito y el periodo (la autorización se deniega por defecto). */
+  configured: boolean;
+  limitMicros: number;
+  /** Gasto real del periodo en el ámbito. */
+  spentMicros: number;
+  /** Suma de reservas activas de procesos en curso. */
+  reservedMicros: number;
+  /** límite − gasto real − reservado; puede ser negativo si el coste real superó la reserva. */
+  availableMicros: number;
+}
+
 // ---- HU-009 / HU-137 · Bandeja de autorizaciones ----
 /** Clases de decisión que esperan al propietario. */
 export const PENDING_DECISION_KINDS = ['process_authorization', 'apply_diff', 'integrate', 'publish', 'backlog_proposal'] as const;
@@ -523,4 +561,36 @@ export interface InboxDecisionResult {
   processId: string;
   verdict: DecisionVerdict;
   processStatus: string | null;
+}
+
+// ---- HU-147 · Feedback por paso en la prueba manual ----
+export const MANUAL_TEST_RESULTS = ['ok', 'fail', 'observation'] as const;
+export type ManualTestStepResult = typeof MANUAL_TEST_RESULTS[number];
+
+/** Feedback del propietario sobre un paso de la prueba manual de un proceso. */
+export interface ManualTestStepFeedback {
+  processId: string;
+  /** Ver manualTestStepKey. */
+  stepKey: string;
+  /** null = sin resultado (solo comentario). */
+  result: ManualTestStepResult | null;
+  comment: string;
+  updatedAt: string;
+}
+
+/** Paso de la prueba manual con su clave estable. */
+export interface ManualTestStepRef { stepKey: string; index: number; text: string; }
+
+/** Lectura completa: pasos del proceso + feedback guardado (puede incluir pasos huérfanos si la prueba cambió). */
+export interface ManualTestFeedbackView { steps: ManualTestStepRef[]; items: ManualTestStepFeedback[]; }
+
+/**
+ * Clave estable de un paso. Los pasos de la prueba manual son texto sin id, así que la clave combina
+ * la posición y un hash corto (FNV-1a) del texto: si el texto cambia, el feedback antiguo deja de
+ * asociarse al paso nuevo (queda huérfano en la base) en lugar de aplicarse a un paso distinto.
+ */
+export function manualTestStepKey(index: number, text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return `p${index + 1}-${h.toString(36)}`;
 }
