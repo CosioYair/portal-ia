@@ -85,6 +85,8 @@ button.chip:hover{border-color:#B8B5AC}
 .assure{display:flex;gap:10px;align-items:flex-start;font-size:13px;line-height:1.45;color:#4F5259;background:#fff;border:1px solid #E5E3DC;border-radius:8px;padding:12px 14px}
 .mt-row{display:flex;gap:12px;align-items:center;padding:10px 0;border-top:1px solid #EEECE6;font-size:13px}
 .mt-row:first-child{border-top:0}
+.mt-row{min-width:0;flex-wrap:wrap}
+.mt-row > :not(input):not(button){min-width:0;overflow-wrap:anywhere;white-space:normal;text-overflow:clip}
 .pcard{appearance:none;text-align:left;font:inherit;background:#fff;border:1px solid #CFCCC3;border-radius:10px;padding:14px 16px;display:flex;gap:12px;align-items:flex-start;cursor:pointer;color:#1A1B1E;width:100%;position:relative;transition:border-color .15s,box-shadow .15s}
 .pcard:hover{border-color:#9D9A91}
 .pcard.is-selected{border-color:#0F6E6A;box-shadow:inset 0 0 0 1px #0F6E6A}
