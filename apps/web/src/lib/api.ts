@@ -1,5 +1,7 @@
 import type { DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
+import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
+
 export class ApiError extends Error {
   constructor(public status: number, message: string, public body?: any) { super(message); }
 }
@@ -100,6 +102,17 @@ export const api = {
   applyChanges: (slug: string, processId: string, branch?: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/apply`, { method: 'POST', body: JSON.stringify({ authorized: true, branch }) }),
   verifyProcess: (slug: string, processId: string, command: 'install' | 'typecheck' | 'test' | 'build') => request<Process>(`/api/workspaces/${slug}/processes/${processId}/verify`, { method: 'POST', body: JSON.stringify({ authorized: true, command }) }),
   markStoryDone: (slug: string, id: string, opts?: { force: boolean; reason?: string }) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/done`, { method: 'POST', body: opts ? JSON.stringify(opts) : undefined }),
+  // HU-133 / HU-138 · presupuestos jerárquicos (empresa > proyecto) con saldo real
+  getBudgetBalance: (level: BudgetLevel, id: string, workspace?: string, period?: string) => {
+    const q = new URLSearchParams();
+    if (workspace) q.set('workspace', workspace);
+    if (period) q.set('period', period);
+    const qs = q.toString();
+    return request<BudgetBalance>(`/api/budgets/${level}/${encodeURIComponent(id)}/balance${qs ? `?${qs}` : ''}`);
+  },
+  /** Fija el presupuesto mensual del periodo actual (UTC). No tiene costo de IA, pero exige confirmación explícita. */
+  setMonthlyBudget: (level: BudgetLevel, id: string, limitUsd: number, workspace?: string) =>
+    request<BudgetBalance>(`/api/budgets/${level}/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ workspace, limitUsd, authorized: true }) }),
   // HU-009 / HU-137 · bandeja de autorizaciones
   inbox: (slug: string) => request<PendingDecision[]>(`/api/workspaces/${slug}/inbox`),
   decideInbox: (slug: string, kind: PendingDecisionKind, processId: string, verdict: DecisionVerdict, reason?: string) =>

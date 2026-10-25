@@ -1,0 +1,27 @@
+.budget-meter { border: 1px solid var(--line, #E5E3DC); border-radius: 10px; background: var(--surface, #FFFFFF); padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; }
+.budget-meter__head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.budget-meter__title { font-size: 15px; font-weight: 600; margin: 0; }
+.budget-meter__period { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 12px; color: var(--ink-3, #686B72); }
+.budget-meter__status { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 999px; font-size: 12px; font-weight: 500; border: 1px solid var(--line, #E5E3DC); background: var(--surface-2, #FAF9F6); color: var(--ink-2, #4F5259); }
+.budget-meter--ok .budget-meter__status { background: #E4F3EA; border-color: #C2E3CF; color: #166534; }
+.budget-meter--warn .budget-meter__status { background: #FBF0DC; border-color: #F0DCB0; color: #7A4A00; }
+.budget-meter--exhausted .budget-meter__status, .budget-meter--error .budget-meter__status { background: #FBE7E5; border-color: #F2C7C3; color: #9A1F18; }
+.budget-meter__bar { display: flex; height: 12px; border-radius: 999px; overflow: hidden; background: #EEECE6; }
+.budget-meter__seg { height: 100%; }
+.budget-meter__seg--spent { background: #1A1B1E; }
+.budget-meter__seg--reserved { background: #E39B1C; }
+.budget-meter__seg--available { background: #22A55B; }
+.budget-meter__legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; font-size: 13px; }
+.budget-meter__legend li { display: flex; flex-direction: column; gap: 2px; }
+.budget-meter__legend .label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-3, #686B72); font-size: 12px; }
+.budget-meter__legend .value { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 14px; color: var(--ink, #1A1B1E); }
+.budget-meter__dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.budget-meter__dot--spent { background: #1A1B1E; }
+.budget-meter__dot--reserved { background: #E39B1C; }
+.budget-meter__dot--available { background: #22A55B; }
+.budget-meter__note { font-size: 12px; color: var(--ink-3, #686B72); margin: 0; }
+.budget-meter__form { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line-soft, #EEECE6); padding-top: 10px; }
+.budget-meter__row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.budget-meter__row input[type='number'] { height: 36px; width: 150px; border-radius: 8px; border: 1px solid var(--line-strong, #CFCCC3); padding: 0 10px; font: inherit; }
+.budget-meter__confirm { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }
+.budget-meter__error { font-size: 13px; color: #7F1D16; background: #FBE7E5; border: 1px solid #F2C7C3; border-radius: 8px; padding: 8px 10px; margin: 0; }
