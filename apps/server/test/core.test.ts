@@ -428,7 +428,7 @@ test('v0.9: parches buscar/reemplazar, rutas protegidas sin tumbar el proceso, .
   const base: any = { id: 'p', kind: 'story_execution', status: 'done', steps: [], spentUsd: 0.5, budgetUsd: 2, error: null, delegation: null };
   assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a', error: null }], applied: null, merged: null, published: null, review: null, verifyCommands: [] } }).phase, /Diff listo/);
   assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: null, published: null, review: null, verifyCommands: [] } }).phase, /falta integrar/);
-  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [] } }, { isPortalRepo: true }).next, /Publicar/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [] } }, { isPortalRepo: true }).next, /lista de prueba/);
   assert.match(describeProcess({ ...base, status: 'failed', error: 'X', result: null }).phase, /Falló/);
   assert.equal(describeProcess({ ...base, status: 'pending_authorization', result: null }).settled, false);
 });
@@ -513,4 +513,30 @@ test('v0.11: sección PARA EL PROPIETARIO y PRUEBA MANUAL, regla de cierre con p
   execSync('git checkout -q main', { cwd: dir }); fs.writeFileSync(path.join(dir, 'w.ts'), 'a\nb\n');
   let st = await repoStatus(dir); assert.equal(st.dirty, true); assert.equal(st.eolOnly, true);
   const n = await normalizeEol(dir); assert.ok(n.commit); st = await repoStatus(dir); assert.equal(st.dirty, false);
+});
+
+test('v0.11.1: lista de prueba a mano para historias antiguas, estimación de generarla y cierre bloqueado sin prueba', async () => {
+  const { processesRepo, projectsRepo, backlogRepo } = await import('../src/db/workspace.ts');
+  const { addManualItem } = await import('../src/services/backlog.ts');
+  const { estimateManualTest } = await import('../src/services/storyExecution.ts');
+  const internal = projectsRepo('portal-ia').list()[0];
+  const it = addManualItem('portal-ia', internal.id, { title: 'Historia antigua sin prueba' });
+  const procs = processesRepo('portal-ia');
+  const proc = procs.create({ projectId: internal.id, kind: 'story_execution', title: 'HU-old', estimatedUsd: 1, backlogItemId: it.id, steps: [{ agentId: 'a', agentName: 'A', title: 'Plan', model: 'm' }, { agentId: 'b', agentName: 'B', title: 'Impl', model: 'm' }] });
+  procs.authorize(proc.id, 1);
+  procs.setResult(proc.id, { plan: null, implementationSummary: 'x', changes: [{ path: 'a.ts', action: 'create', content: 'x', diff: '+x', before: 0, after: 1 }], verifyCommands: [], review: null, applied: { branch: 'b', commit: 'c', files: ['a.ts'], appliedAt: 't' }, merged: { into: 'main', commit: 'd', mergedAt: 't' }, published: { remote: 'origin', url: null, branches: ['main'], pushedAt: 't' }, verifications: [] });
+  procs.finish(proc.id, 'done'); backlogRepo('portal-ia').setStatus(it.id, 'review', proc.id);
+  const est = estimateManualTest('portal-ia', proc.id); assert.ok(est.estimatedUsd > 0); assert.match(est.agentName, /QA|Coordinador/);
+  const app = await buildApp();
+  const r1 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/backlog/${it.id}/done`, payload: {} });
+  assert.equal(r1.statusCode, 409); assert.equal(r1.json().code, 'no_test');
+  const r2 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/processes/${proc.id}/manual-test`, payload: { steps: ['1. Abre el Panel. Esperado: tarjeta.', '2. Pulsa X. Esperado: Y.'] } });
+  assert.equal(r2.statusCode, 200); assert.deepEqual(r2.json().result.manualTest.checks, [false, false]); assert.match(r2.json().guidance.phase, /falta probar \(0 de 2/);
+  const r3 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/backlog/${it.id}/done`, payload: {} });
+  assert.equal(r3.json().code, 'not_tested');
+  const r4 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/processes/${proc.id}/manual-test`, payload: { checks: [true, true], note: 'todo ok' } });
+  assert.match(r4.json().guidance.phase, /Listo para cerrar/);
+  const r5 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/backlog/${it.id}/done`, payload: {} });
+  assert.equal(r5.statusCode, 200); assert.equal(r5.json().status, 'done');
+  await app.close();
 });

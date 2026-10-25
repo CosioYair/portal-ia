@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
 import { knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { cancelProcess, clearCancel, createAssessment, estimateAssessment, isCancelled, runAssessment } from '../services/assessment.ts';
-import { createStoryProcess, estimateStory, recoverStory, retryStory, runStory } from '../services/storyExecution.ts';
+import { createStoryProcess, estimateManualTest, estimateStory, generateManualTest, recoverStory, retryStory, runStory } from '../services/storyExecution.ts';
 import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
 import { describeProcess } from '../services/guidance.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
@@ -122,13 +122,26 @@ export async function processRoutes(app: FastifyInstance) {
   // ---- Prueba manual: el propietario marca cada paso probado ----
   app.post('/api/workspaces/:slug/processes/:id/manual-test', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ checks: z.array(z.boolean()).max(20), note: z.string().max(500).nullable().optional() }).safeParse(req.body);
+    const body = z.object({ checks: z.array(z.boolean()).max(20).optional(), steps: z.array(z.string().trim().min(4).max(400)).min(1).max(20).optional(), note: z.string().max(500).nullable().optional() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Datos no válidos' });
     const procs = processesRepo(slug); const proc = procs.get(id);
-    if (!proc?.result?.manualTest) return reply.code(404).send({ error: 'Este proceso no tiene prueba manual.' });
-    const mt = proc.result.manualTest; const checks = mt.steps.map((_, i) => !!body.data.checks[i]);
-    procs.setResult(id, { ...proc.result, manualTest: { ...mt, checks, note: body.data.note === undefined ? mt.note : body.data.note } });
+    if (!proc?.result) return reply.code(404).send({ error: 'Proceso de historia no encontrado.' });
+    const cur = proc.result.manualTest;
+    // Pasos escritos a mano por el propietario (o editados): reemplazan la lista y reinician las marcas.
+    const steps = body.data.steps ?? cur?.steps; if (!steps) return reply.code(404).send({ error: 'Este proceso no tiene prueba manual; genera una o añade los pasos.' });
+    const checks = steps.map((_, i) => body.data.steps ? false : !!(body.data.checks ?? cur?.checks ?? [])[i]);
+    procs.setResult(id, { ...proc.result, manualTest: { steps, checks, note: body.data.note === undefined ? (cur?.note ?? null) : body.data.note } });
     return withGuidance(slug, procs.get(id)!);
+  });
+  app.get('/api/workspaces/:slug/processes/:id/manual-test/estimate', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    try { return estimateManualTest(slug, id); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+  app.post('/api/workspaces/:slug/processes/:id/manual-test/generate', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ authorized: z.literal(true) }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita (consume una llamada).' });
+    try { const p = await generateManualTest(slug, id, (o, m) => app.log.info(o, m)); return withGuidance(slug, p); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
 
   // ---- Rechazar el diff de un proceso (la historia vuelve a pendiente) / devolver una historia a pendiente ----
@@ -271,6 +284,7 @@ Proceso: ${proc.id}`);
     if (!body.data?.force) {
       if (!r?.applied) return reply.code(409).send({ error: 'La historia no tiene cambios aplicados. Ejecútala y aplica su diff, o ciérrala como «resuelta fuera del flujo».', code: 'not_applied' });
       if (!r.merged) return reply.code(409).send({ error: `Los cambios están en la rama ${r.applied.branch} pero no integrados en la rama principal. Intégralos desde el proceso antes de cerrar la historia.`, code: 'not_merged' });
+      if (!r.manualTest) return reply.code(409).send({ error: 'Falta la prueba manual: en el Resumen del proceso, genera la lista de prueba con QA o escríbela, pruébala paso a paso y entonces cierra la historia.', code: 'no_test' });
       if (r.manualTest && r.manualTest.checks.some(c => !c)) { const n = r.manualTest.checks.filter(Boolean).length; return reply.code(409).send({ error: `Falta probar la historia: ${n} de ${r.manualTest.steps.length} pasos marcados. Sigue la lista «Qué probar» en el proceso y marca cada paso; si no puedes probarla, ciérrala como «resuelta fuera del flujo» indicando por qué.`, code: 'not_tested' }); }
       if (!r.published) { const repo = projectsRepo(slug).repository(item.projectId); const { remote } = repo ? await remoteInfo(repo.path) : { remote: null }; if (remote) return reply.code(409).send({ error: 'Falta publicar: pulsa «Publicar en el remoto» en el proceso antes de cerrar la historia.', code: 'not_published' }); }
     }

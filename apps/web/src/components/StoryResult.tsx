@@ -43,7 +43,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
           {r.plan.risks.length > 0 && <div><div className="eyebrow" style={{ marginBottom: 6 }}>Riesgos</div><ul style={{ paddingLeft: 20 }}>{r.plan.risks.map((t, i) => <li key={i}>{t}</li>)}</ul></div>}
         </div></section>}
 
-      {r.changes.length > 0 && <section className="card">
+      {r.changes.length > 0 && <section className="card" id="sec-diff">
         <div className="card-h"><div><div className="h3">Cambios propuestos</div><div className="small muted">{r.changes.length} archivo{r.changes.length === 1 ? '' : 's'} · +{added} líneas · aún no escritos en el repositorio</div></div>
           {r.review && <Chip tone={r.review.approve ? 'ok' : 'warn'} xs>{r.review.approve ? 'QA: aprobado' : 'QA: con observaciones'}</Chip>}</div>
         {r.implementationSummary && <div className="card-b" style={{ borderBottom: '1px solid #EEECE6' }}><Markdown text={r.implementationSummary} /></div>}
@@ -71,7 +71,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
         </div></section>}
 
       {r.rejected && !r.applied && <Notice kind="warn"><strong>Diff rechazado</strong> ({new Date(r.rejected.at).toLocaleString()}): {r.rejected.reason}. La historia volvió a pendiente; puedes ejecutarla de nuevo desde Backlog o con «Volver a ejecutar».</Notice>}
-      {(canApply || r.applied) && <section className="card">
+      {(canApply || r.applied) && <section className="card" id="sec-apply">
         <div className="card-h"><div><div className="h3">Aplicar en el repositorio</div><div className="small muted">Escritura en rama de trabajo + commit. Herramienta «Escritura en el repositorio» · requiere tu autorización por uso.</div></div>{r.applied ? <Chip tone="ok" dot="ok">aplicado</Chip> : <Chip tone="warn" xs>pendiente de tu aprobación</Chip>}</div>
         <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {r.applied ? <>
@@ -91,7 +91,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
           </>}
         </div></section>}
 
-      {r.applied && <section className="card">
+      {r.applied && <section className="card" id="sec-verify">
         <div className="card-h"><div><div className="h3">Verificación</div><div className="small muted">Ejecución <strong>local</strong> en el repositorio (sin sandbox en esta versión). Herramienta «Ejecución» · requiere tu autorización por uso.</div></div>{r.verifyCommands.length > 0 && <Chip xs>sugerido: {r.verifyCommands.join(', ')}</Chip>}</div>
         <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <label className="ck"><input className="cb" type="checkbox" checked={authVerify} onChange={e => setAuthVerify(e.target.checked)} /><span>Autorizo ejecutar comandos <span className="mono">npm</span> permitidos (install, typecheck, test, build) en la carpeta del repositorio. Nada más se ejecuta.</span></label>
@@ -105,7 +105,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
           </div>)}
         </div></section>}
 
-      {r.applied && <section className="card">
+      {r.applied && <section className="card" id="sec-git">
         <div className="card-h"><div><div className="h3">Integrar y publicar</div><div className="small muted">Herramienta «Escritura en el repositorio» · cada acción requiere tu autorización por uso. Hasta aquí nada ha salido de tu equipo.</div></div>
           <div style={{ display: 'flex', gap: 6 }}>{r.merged && <Chip tone="ok" xs dot="ok">integrada en {r.merged.into}</Chip>}{r.published && <Chip tone="ok" xs dot="ok">publicada en {r.published.remote}</Chip>}</div></div>
         <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>

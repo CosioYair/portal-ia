@@ -344,3 +344,53 @@ export function retryStory(slug: string, processId: string, opts: StoryOptions =
   if (item.status === 'in_progress') throw Object.assign(new Error('La historia ya está en ejecución.'), { statusCode: 409 });
   return createStoryProcess(slug, proc.projectId, item.id, opts);
 }
+
+/** Estimación de generar la lista de prueba manual (1 llamada corta del Especialista QA o, en su defecto, del Coordinador). */
+export function estimateManualTest(slug: string, processId: string): { agentId: string; agentName: string; model: string; estimatedUsd: number } {
+  const proc = processesRepo(slug).get(processId);
+  if (!proc || proc.kind !== 'story_execution' || !proc.result) throw Object.assign(new Error('Proceso de historia no encontrado'), { statusCode: 404 });
+  const agents = agentsRepo(slug).list().filter(a => a.projectId === proc.projectId || a.projectId === null);
+  const agent = agents.find(a => a.key === 'pj-qa') ?? agents.find(a => a.key === 'pj-coordinador');
+  if (!agent) throw Object.assign(new Error('No hay agente de QA ni Coordinador en el proyecto.'), { statusCode: 409 });
+  const p = estimatePricing(agent.config.provider, agent.config.model);
+  const inTok = estimateTokens(JSON.stringify(proc.result.plan ?? '') + (proc.result.implementationSummary ?? '') + proc.result.changes.map(c => c.path + (c.diff ?? '').slice(0, 2000)).join('')) + 800;
+  return { agentId: agent.id, agentName: agent.config.name, model: agent.config.model, estimatedUsd: (inTok * p.inPerM + 1500 * p.outPerM) / 1_000_000 };
+}
+
+/**
+ * Genera, con una llamada autorizada, la explicación para el propietario y la prueba manual paso a paso de una
+ * historia ya ejecutada que no las trae (procesos anteriores a v0.11). Guarda ambas en el resultado del proceso.
+ */
+export async function generateManualTest(slug: string, processId: string, log: (o: any, m: string) => void): Promise<Process> {
+  const procs = processesRepo(slug); const proc = procs.get(processId)!;
+  const est = estimateManualTest(slug, processId);
+  const agent = agentsRepo(slug).get(est.agentId)!;
+  const project = projectsRepo(slug).get(proc.projectId)!;
+  const item = proc.backlogItemId ? backlogRepo(slug).get(proc.backlogItemId) : undefined;
+  const providerId = agent.config.provider as ProviderId;
+  const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
+  if (!cred || prow.status !== 'connected') throw Object.assign(new Error(`El proveedor ${providerId} no está conectado.`), { statusCode: 409 });
+  const models: ModelInfo[] = JSON.parse(prow.models_json);
+  const r = proc.result!;
+  const system = `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} del proyecto «${project.name}» en Portal IA. Escribes para el propietario, que no es técnico.`;
+  const user = `Historia: ${item ? `${item.storyId} · ${item.title}` : proc.title}
+Criterio de aceptación: ${item?.criterion || '(no definido)'}
+Plan: ${r.plan?.summary ?? '—'}
+Resumen de la implementación: ${(r.implementationSummary ?? '').slice(0, 3000)}
+Archivos cambiados: ${r.changes.map(c => `${c.action} ${c.path}`).join(', ')}
+Fragmentos de diff (recortados):
+${r.changes.slice(0, 8).map(c => `## ${c.path}\n${(c.diff ?? '').slice(0, 1500)}`).join('\n\n')}
+
+Responde SOLO con JSON: {"userFacing": string (3-8 líneas en lenguaje llano: qué cambia para quien usa el Portal y DÓNDE lo verá: menú, botón, pantalla o ruta exacta; si no hay nada visible, dilo), "steps": string[] (3-10 pasos numerados de prueba manual en el Portal, cada uno "acción. Esperado: resultado"; empieza por dónde entrar)}`;
+  const startedAt = new Date().toISOString();
+  const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user, maxTokens: 2000, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
+  const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
+  procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
+  procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'manual_test_gen', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
+  const j = extractJson(res.text);
+  const steps: string[] = Array.isArray(j?.steps) ? j.steps.map((s: any) => String(s).replace(/^\s*\d+[.)]\s*/, '').trim()).filter((s: string) => s.length > 3).slice(0, 12) : [];
+  if (!steps.length) throw Object.assign(new Error('QA no devolvió pasos de prueba legibles; inténtalo de nuevo o añádelos a mano.'), { statusCode: 502 });
+  procs.setResult(processId, { ...r, userFacing: r.userFacing || (typeof j?.userFacing === 'string' ? j.userFacing : null), manualTest: { steps, checks: steps.map(() => false), note: null } });
+  log({ processId, steps: steps.length, cost: cost.toFixed(4) }, 'lista de prueba manual generada');
+  return procs.get(processId)!;
+}
