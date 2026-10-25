@@ -1,0 +1,141 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-mtf-'));
+process.env.PORTAL_ALLOW_FOREIGN_REPO = '1';
+
+const { encryptSecret } = await import('../src/security/crypto.ts');
+const { classifyModel, manualTestStepKey } = await import('@portal-ia/domain');
+const { providersRepo } = await import('../src/db/platform.ts');
+const { projectsRepo } = await import('../src/db/workspace.ts');
+const { runBootstrap } = await import('../src/routes/bootstrap.ts');
+const { createAssessment } = await import('../src/services/assessment.ts');
+const { createDelegation } = await import('../src/services/delegation.ts');
+const { manualTestStepsOf, closeManualTestFeedbackDbs } = await import('../src/services/manual-test-feedback.ts');
+const { buildApp } = await import('../src/app.ts');
+
+providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');
+providersRepo.setConnected('anthropic', ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5'].map(id => classifyModel('anthropic', id)));
+runBootstrap();
+const project = projectsRepo('portal-ia').list()[0];
+const procA = createAssessment('portal-ia', project.id);
+const procB = createDelegation('portal-ia', project.id, undefined, 'Encargo de prueba para feedback');
+
+const url = (pid: string, key?: string) => `/api/workspaces/portal-ia/processes/${pid}/manual-test-feedback${key ? `/${key}` : ''}`;
+
+test('clave de paso: estable para el mismo texto y distinta si cambia el texto o la posición', () => {
+  assert.equal(manualTestStepKey(0, 'Abre Backlog'), manualTestStepKey(0, 'Abre Backlog'));
+  assert.notEqual(manualTestStepKey(0, 'Abre Backlog'), manualTestStepKey(0, 'Abre Equipo'));
+  assert.notEqual(manualTestStepKey(0, 'Abre Backlog'), manualTestStepKey(1, 'Abre Backlog'));
+  assert.match(manualTestStepKey(2, 'x'), /^[A-Za-z0-9_.-]{1,80}$/);
+});
+
+test('manualTestStepsOf: pasos con clave y sin prueba manual devuelve vacío', () => {
+  assert.deepEqual(manualTestStepsOf({ result: null }), []);
+  const steps = manualTestStepsOf({ result: { manualTest: { steps: ['Uno', 'Dos'], checks: [false, false], note: null } } as any });
+  assert.equal(steps.length, 2);
+  assert.equal(steps[1].index, 1);
+  assert.equal(steps[1].stepKey, manualTestStepKey(1, 'Dos'));
+});
+
+test('PUT guarda y GET lo devuelve; un segundo PUT sobrescribe', async () => {
+  const app = await buildApp();
+  const put = await app.inject({ method: 'PUT', url: url(procA.id, 'p1-abc'), payload: { result: 'fail', comment: 'El botón no responde' } });
+  assert.equal(put.statusCode, 200);
+  assert.equal(put.json().item.result, 'fail');
+  const get = await app.inject({ method: 'GET', url: url(procA.id) });
+  assert.equal(get.statusCode, 200);
+  const items = get.json().items;
+  assert.equal(items.length, 1);
+  assert.equal(items[0].stepKey, 'p1-abc');
+  assert.equal(items[0].result, 'fail');
+  assert.equal(items[0].comment, 'El botón no responde');
+  assert.ok(items[0].updatedAt);
+
+  const again = await app.inject({ method: 'PUT', url: url(procA.id, 'p1-abc'), payload: { result: 'ok', comment: 'Ya funciona' } });
+  assert.equal(again.statusCode, 200);
+  const get2 = await app.inject({ method: 'GET', url: url(procA.id) });
+  const items2 = get2.json().items;
+  assert.equal(items2.length, 1, 'el segundo PUT sobrescribe, no duplica');
+  assert.equal(items2[0].result, 'ok');
+  assert.equal(items2[0].comment, 'Ya funciona');
+  await app.close();
+});
+
+test('el feedback sigue disponible tras cerrar y reabrir la base y la app', async () => {
+  const app1 = await buildApp();
+  const put = await app1.inject({ method: 'PUT', url: url(procA.id, 'p2-xyz'), payload: { result: 'observation', comment: 'Texto cortado en móvil' } });
+  assert.equal(put.statusCode, 200);
+  await app1.close();
+  closeManualTestFeedbackDbs();
+
+  const app2 = await buildApp();
+  const get = await app2.inject({ method: 'GET', url: url(procA.id) });
+  assert.equal(get.statusCode, 200);
+  const found = get.json().items.find((i: { stepKey: string }) => i.stepKey === 'p2-xyz');
+  assert.ok(found, 'el feedback persiste en disco');
+  assert.equal(found.result, 'observation');
+  assert.equal(found.comment, 'Texto cortado en móvil');
+  await app2.close();
+});
+
+test('validación: resultado inválido, comentario de más de 2000 caracteres y cuerpo incompleto dan 400', async () => {
+  const app = await buildApp();
+  const badResult = await app.inject({ method: 'PUT', url: url(procA.id, 'p3-bad'), payload: { result: 'meh', comment: '' } });
+  assert.equal(badResult.statusCode, 400);
+  const tooLong = await app.inject({ method: 'PUT', url: url(procA.id, 'p3-bad'), payload: { result: 'fail', comment: 'x'.repeat(2001) } });
+  assert.equal(tooLong.statusCode, 400);
+  const atLimit = await app.inject({ method: 'PUT', url: url(procA.id, 'p3-lim'), payload: { result: 'fail', comment: 'x'.repeat(2000) } });
+  assert.equal(atLimit.statusCode, 200, '2000 caracteres es el máximo permitido');
+  const missing = await app.inject({ method: 'PUT', url: url(procA.id, 'p3-bad'), payload: { comment: 'sin resultado' } });
+  assert.equal(missing.statusCode, 400);
+  const badKey = await app.inject({ method: 'PUT', url: url(procA.id, 'clave%20con%20espacios'), payload: { result: 'ok', comment: '' } });
+  assert.equal(badKey.statusCode, 400);
+  const get = await app.inject({ method: 'GET', url: url(procA.id) });
+  assert.ok(!get.json().items.some((i: { stepKey: string }) => i.stepKey === 'p3-bad'), 'lo inválido no se guarda');
+  await app.close();
+});
+
+test('un proceso o empresa inexistente da 404', async () => {
+  const app = await buildApp();
+  const get = await app.inject({ method: 'GET', url: url('no-existe') });
+  assert.equal(get.statusCode, 404);
+  const put = await app.inject({ method: 'PUT', url: url('no-existe', 'p1-abc'), payload: { result: 'ok', comment: '' } });
+  assert.equal(put.statusCode, 404);
+  const noWs = await app.inject({ method: 'GET', url: `/api/workspaces/empresa-fantasma/processes/${procA.id}/manual-test-feedback` });
+  assert.equal(noWs.statusCode, 404);
+  await app.close();
+});
+
+test('el feedback de un proceso no aparece en otro', async () => {
+  const app = await buildApp();
+  const put = await app.inject({ method: 'PUT', url: url(procB.id, 'p1-abc'), payload: { result: 'observation', comment: 'Solo del proceso B' } });
+  assert.equal(put.statusCode, 200);
+  const getB = await app.inject({ method: 'GET', url: url(procB.id) });
+  assert.equal(getB.json().items.length, 1);
+  assert.equal(getB.json().items[0].comment, 'Solo del proceso B');
+  const getA = await app.inject({ method: 'GET', url: url(procA.id) });
+  const a = getA.json().items.find((i: { stepKey: string }) => i.stepKey === 'p1-abc');
+  assert.equal(a.comment, 'Ya funciona', 'el proceso A conserva su propio feedback');
+  assert.ok(getA.json().items.every((i: { processId: string }) => i.processId === procA.id));
+  await app.close();
+});
+
+test('resultado null con comentario vacío elimina la entrada; null con comentario la conserva', async () => {
+  const app = await buildApp();
+  await app.inject({ method: 'PUT', url: url(procA.id, 'p9-del'), payload: { result: 'fail', comment: 'temporal' } });
+  const keep = await app.inject({ method: 'PUT', url: url(procA.id, 'p9-del'), payload: { result: null, comment: 'solo comentario' } });
+  assert.equal(keep.statusCode, 200);
+  assert.equal(keep.json().item.result, null);
+  const mid = await app.inject({ method: 'GET', url: url(procA.id) });
+  assert.ok(mid.json().items.some((i: { stepKey: string }) => i.stepKey === 'p9-del'));
+  const del = await app.inject({ method: 'PUT', url: url(procA.id, 'p9-del'), payload: { result: null, comment: '' } });
+  assert.equal(del.statusCode, 200);
+  assert.equal(del.json().item, null);
+  const end = await app.inject({ method: 'GET', url: url(procA.id) });
+  assert.ok(!end.json().items.some((i: { stepKey: string }) => i.stepKey === 'p9-del'), 'la fila se borró');
+  await app.close();
+});

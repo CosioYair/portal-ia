@@ -1,0 +1,9 @@
+.mtf-panel { margin: 16px 24px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.mtf-step { display: flex; flex-direction: column; gap: 8px; padding-bottom: 12px; border-bottom: 1px solid rgba(128, 128, 128, 0.25); }
+.mtf-text { white-space: pre-wrap; }
+.mtf-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.mtf-comment { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; padding: 8px; }
+.mtf-status { min-height: 1.25em; font-size: 0.875em; opacity: 0.85; }
+.mtf-summary { display: flex; flex-direction: column; gap: 8px; }
+.mtf-summary-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.mtf-summary-head h3 { margin: 0; }
