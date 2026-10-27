@@ -156,17 +156,24 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
     const lastInstall = lastOf('install');
     const noDeps = (v?: VerificationRun) => !!v && v.exitCode === DEPS_MISSING_EXIT && v.isolation === 'docker' && !(lastInstall?.exitCode === 0 && lastInstall.startedAt > v.startedAt);
     const blockedDeps = need.filter(c => noDeps(lastOf(c)));
-    const failed = need.map(lastOf).filter((v): v is VerificationRun => !!v && v.exitCode !== 0 && v.exitCode !== DEPS_MISSING_EXIT && v.isolation !== 'unavailable');
+    const failed = need.map(lastOf).filter((v): v is VerificationRun => !!v && v.exitCode !== null && v.exitCode !== 0 && v.exitCode !== DEPS_MISSING_EXIT && v.isolation !== 'unavailable');
+    const timedOut = need.map(lastOf).filter((v): v is VerificationRun => !!v && v.exitCode === null);
     const ok = need.filter(c => lastOf(c)?.exitCode === 0);
     const missing = need.filter(c => !ok.includes(c));
     const unavailable = opts.sandbox === 'unavailable' || need.some(c => lastOf(c)?.isolation === 'unavailable');
-    const summary = need.map(c => { const v = lastOf(c); return `${c}: ${!v ? '—' : v.exitCode === 0 ? 'ok' : noDeps(v) ? 'sin dependencias' : v.isolation === 'unavailable' ? 'sin sandbox' : 'falló'}`; }).join(' · ');
+    const summary = need.map(c => { const v = lastOf(c); return `${c}: ${!v ? '—' : v.exitCode === 0 ? 'ok' : v.exitCode === null ? 'no terminó' : noDeps(v) ? 'sin dependencias' : v.isolation === 'unavailable' ? 'sin sandbox' : 'falló'}`; }).join(' · ');
     // Un fallo real del código (se ejecutó y falló) tiene prioridad sobre los requisitos del entorno de lo que falta.
     if (failed.length) {
       set('verify', 'failed', summary);
       issue = verificationIssue(failed[0], devs);
       if (failed.length > 1) issue.explanation += ` También falló: ${failed.slice(1).map(v => v.command).join(', ')}.`;
       actions.push(fix(), ASK, TASKS, act('retry_verification', 'Repetir la verificación', `Vuelve a ejecutar ${failed.map(v => v.command).join(', ')} en el sandbox (útil si el fallo fue intermitente).`, ['authorization'], { commands: failed.map(v => v.command) }), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
+      return finish();
+    }
+    if (timedOut.length) {
+      set('verify', 'blocked', summary);
+      issue = { kind: 'sandbox_timeout', level: 'blocker', cause: 'environment', command: timedOut.map(v => v.command).join(', '), title: 'La verificación no terminó (tiempo agotado)', explanation: `El sandbox no devolvió resultado de ${timedOut.map(v => v.command).join(', ')} en el tiempo máximo y se detuvo. Suele ser un problema del motor de Docker (Docker Desktop bloqueado o sin recursos), no del código. Comprueba que Docker Desktop responde y repite la verificación; si se repite, reinicia Docker Desktop.`, details: [{ text: 'Abre Docker Desktop y comprueba que dice «Engine running».' }, { text: 'Si no responde, reinícialo (Troubleshoot → Restart) y repite la verificación.' }], files: [], evidence: tailOf(timedOut[0].output), responsible: [] };
+      actions.push(act('retry_verification', 'Repetir la verificación', `Vuelve a ejecutar ${timedOut.map(v => v.command).join(', ')} en el sandbox.`, ['authorization'], { commands: missing }), act('refresh_sandbox', 'Comprobar el sandbox de nuevo', 'Vuelve a detectar Docker sin ejecutar nada.'), act('sandbox_help', 'Cómo preparar el sandbox', 'Guía paso a paso (docs/sandbox.md).'));
       return finish();
     }
     if (blockedDeps.length || (lastInstall && lastInstall.exitCode !== 0 && missing.length)) {

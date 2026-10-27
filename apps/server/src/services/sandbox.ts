@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { config } from '../config.ts';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { Isolation, VerificationRun } from '@portal-ia/domain';
@@ -72,6 +72,16 @@ export function depsVolumeName(worktree: string, image: string = SANDBOX_IMAGE):
   const content = lock ? fs.readFileSync(lock, 'utf8').replace(/\r\n/g, '\n') : '';
   return `portal-ia-nm-${createHash('sha256').update(`${image}\n${content}`).digest('hex').slice(0, 16)}`;
 }
+
+/**
+ * Contenedores en marcha lanzados por este servidor. Matar el CLI de docker no detiene su contenedor: al salir el proceso
+ * (apagado normal, reinicio por el supervisor) se eliminan, para que no queden huérfanos ocupando el motor.
+ */
+const activeContainers = new Set<string>();
+process.once('exit', () => {
+  if (!activeContainers.size) return;
+  try { execFileSync('docker', ['rm', '-f', ...activeContainers], { env: dockerCliEnv(), stdio: 'ignore', timeout: 10_000, windowsHide: true }); } catch { /* motor parado */ }
+});
 
 /** Marca que deja `install` en el volumen al terminar bien; sin ella, el resto de comandos no se ejecutan. */
 const DEPS_READY = 'node_modules/.portal-ia-ready';
@@ -154,7 +164,9 @@ export async function runInSandbox(worktree: string, repoRoot: string, command: 
     const env = dockerCliEnv();
     const args = buildDockerRunArgs({ worktree, command, script, image: SANDBOX_IMAGE, volume, allowNetwork, name });
     // Matar el CLI no detiene el contenedor: al agotar el tiempo se elimina por nombre.
+    activeContainers.add(name);
     const r = await run('docker', args, { timeoutMs, env, onTimeout: () => { spawn('docker', ['rm', '-f', name], { env, stdio: 'ignore', windowsHide: true }).on('error', () => { /* sin docker */ }); } });
+    activeContainers.delete(name);
     return finish(r.code, `[docker ${SANDBOX_IMAGE} · red ${allowNetwork ? 'activada solo para install' : 'desactivada'} · dependencias ${volume}${command === 'install' ? '' : ' (solo lectura)'}]\n` + r.output, 'docker');
   }
   if (st.available === 'wsl') {

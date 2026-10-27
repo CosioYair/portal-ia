@@ -1,4 +1,4 @@
-import type { FlowIssueDetail, IssueSeverity } from '@portal-ia/domain';
+import type { FlowIssueDetail } from '@portal-ia/domain';
 
 /**
  * Lectura de la salida de las verificaciones y de la revisión de QA para explicar un fallo sin obligar al propietario a
@@ -62,14 +62,7 @@ export function tailOf(output: string, lines = 25): string {
   return clean(output).split('\n').filter(l => l.trim() && !/^\{"level":/.test(l) && !/^npm (notice|warn)/i.test(l)).slice(-lines).join('\n');
 }
 
-/** Gravedad de una observación de QA: prefijo «[alta]/[media]/[baja]» si lo trae; si no, por palabras clave. */
-export function qaSeverity(issue: string): { severity: IssueSeverity; text: string } {
-  const m = issue.match(/^\s*\[?\s*(alta|media|baja|cr[ií]tica|grave|menor)\s*[\]:\-–]\s*(.*)$/i);
-  if (m) { const k = m[1].toLowerCase(); return { severity: /alta|cr[ií]tica|grave/.test(k) ? 'alta' : k === 'media' ? 'media' : 'baja', text: m[2].trim() }; }
-  if (/(seguridad|secreto|credencial|inyecci|rompe|romper|no compila|error de tipos|bloque|cr[ií]tic|grave|p[ée]rdida de datos|regresi[oó]n|incorrect|no cumple|falta .*criterio)/i.test(issue)) return { severity: 'alta', text: issue.trim() };
-  if (/(menor|estilo|sugerencia|opcional|cosm[ée]tic|nombre|comentario|legibilidad|podr[ií]a|considera)/i.test(issue)) return { severity: 'baja', text: issue.trim() };
-  return { severity: 'media', text: issue.trim() };
-}
+export { qaSeverity } from '@portal-ia/domain';
 
 /** Archivos mencionados en un texto (rutas relativas con extensión). */
 export function filesIn(text: string): string[] {

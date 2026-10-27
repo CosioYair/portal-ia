@@ -534,12 +534,12 @@ test('v0.11: sección PARA EL PROPIETARIO y PRUEBA MANUAL, regla de cierre con p
   const active = { ...inactive, active: true, runningCommit: 'new1234', reason: 'ok' };
   const rc = (status: 'ok' | 'fail' | 'skipped') => ({ checks: [{ kind: 'http', path: '/api/health', expect: 'ok' }], results: [{ check: { kind: 'http', path: '/api/health', expect: 'ok' }, status, detail: '', at: 't' }], ranAt: 't' });
   const portal = (extra: any) => describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied, merged, published: null, review: null, verifyCommands: [], verifications: [], manualTest: { ...mt, checks: [true, true] }, ...extra } }, { isPortalRepo: true });
-  assert.match(portal({ activation: inactive }).phase, /Paso 5 de 8 .* NO activada/);
-  assert.match(portal({ activation: active }).phase, /Paso 6 de 8 · Activada \(new1234\) · falta comprobar/);
+  assert.match(portal({ activation: inactive }).phase, /Etapa 6 de 9 .* NO activada/);
+  assert.match(portal({ activation: active }).phase, /Etapa 7 de 9 · Activada \(new1234\) · falta comprobar/);
   assert.match(portal({ activation: active, runtimeChecks: rc('fail') }).phase, /comprobación en ejecución FALLÓ/);
   assert.match(portal({ activation: active, runtimeChecks: rc('skipped') }).phase, /interfaz pendiente/);
-  assert.match(portal({ activation: active, runtimeChecks: rc('ok'), manualTest: mt }).phase, /Paso 7 de 8 · Verificada en ejecución · falta probar \(1 de 2/);
-  assert.match(portal({ activation: active, runtimeChecks: rc('ok') }).phase, /Paso 8 de 8 · Listo para cerrar \(activada y probada\)/);
+  assert.match(portal({ activation: active, runtimeChecks: rc('ok'), manualTest: mt }).phase, /Etapa 8 de 9 · Verificada en ejecución · falta probar \(1 de 2/);
+  assert.match(portal({ activation: active, runtimeChecks: rc('ok') }).phase, /Etapa 9 de 9 · Listo para cerrar \(activada y probada\)/);
   assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: null, merged: null, published: null, review: { approve: false, issues: ['x', 'y'], summary: 's', suggestedTests: [] }, verifyCommands: [], verifications: [] } }).phase, /QA NO aprueba \(2/);
   // EOL: archivo CRLF, contenido nuevo LF → diff limpio y escritura en CRLF; cambios solo-EOL detectados y normalizados
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-eol-'));

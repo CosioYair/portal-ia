@@ -256,7 +256,7 @@ export type FlowStageKey = 'execute' | 'review' | 'apply' | 'verify' | 'integrat
 export type FlowStageStatus = 'done' | 'warning' | 'rejected' | 'failed' | 'blocked' | 'waiting' | 'running' | 'current' | 'pending';
 export interface FlowStage { key: FlowStageKey; label: string; status: FlowStageStatus; detail: string }
 export type FlowIssueKind =
-  | 'deps_missing' | 'sandbox_unavailable' | 'typecheck_failed' | 'test_failed' | 'build_failed' | 'qa_rejected' | 'patch_failed'
+  | 'deps_missing' | 'sandbox_unavailable' | 'sandbox_timeout' | 'typecheck_failed' | 'test_failed' | 'build_failed' | 'qa_rejected' | 'patch_failed'
   | 'merge_conflict' | 'activation_failed' | 'runtime_failed' | 'runtime_unavailable' | 'manual_failed' | 'budget_exceeded'
   | 'process_failed' | 'cancelled' | 'diff_rejected' | 'legacy';
 export type IssueSeverity = 'alta' | 'media' | 'baja';

@@ -102,6 +102,8 @@ test('recorrido: autorización, ejecución, presupuesto, conflicto, activación,
   assert.equal(stage(runp, 'execute').status, 'running'); assert.match(stage(runp, 'execute').detail, /Desarrollador Full Stack implementa: implementer · paso 2 de 3/); assert.equal(runp.responsible[0].agentName, 'Desarrollador Full Stack');
   const budget = buildStoryFlow(base({ status: 'budget_exceeded', spentUsd: 1, result: null }), {});
   assert.equal(budget.issue?.kind, 'budget_exceeded'); assert.deepEqual(budget.actions.map(a => a.id), ['recover', 'retry_process']);
+  const slow = buildStoryFlow(base({}, { applied, verifications: [run('typecheck', null as any, 5, 'x\n[tiempo máximo agotado]')] }), { isPortalRepo: true, sandbox: 'docker' });
+  assert.equal(slow.issue?.kind, 'sandbox_timeout'); assert.equal(slow.issue?.cause, 'environment'); assert.equal(slow.actions[0].id, 'retry_verification'); assert.notEqual(slow.issue?.kind, 'typecheck_failed');
   const unavailable = buildStoryFlow(base({}, { applied }), { isPortalRepo: true, sandbox: 'unavailable' });
   assert.equal(unavailable.issue?.kind, 'sandbox_unavailable'); assert.equal(unavailable.actions[0].id, 'refresh_sandbox');
   const ok3 = [run('typecheck', 0, 4), run('test', 0, 5), run('build', 0, 6)];

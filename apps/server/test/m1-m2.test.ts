@@ -121,7 +121,7 @@ test('M1/M2 · flujo por API: aplicar en worktree, verificar, integrar bloqueado
   // Simulamos typecheck en verde (el worktree de prueba no tiene tsconfig): se registra como verificación y desbloquea
   const cur = procs.get(proc.id)!.result!;
   procs.setResult(proc.id, { ...cur, verifications: [{ command: 'typecheck', exitCode: 0, output: 'ok', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), durationMs: 1, isolation: 'host-min' }] });
-  const g = await app.inject({ method: 'GET', url: `/api/workspaces/${slug}/processes/${proc.id}` }); assert.match(g.json().guidance.phase, /Paso 4 de 6 · Verificado .* falta integrar/);
+  const g = await app.inject({ method: 'GET', url: `/api/workspaces/${slug}/processes/${proc.id}` }); assert.match(g.json().guidance.phase, /Etapa 5 de 7 · Verificado .* falta integrar/);
   // Comprobación en ejecución antes de integrar → 409
   assert.equal((await post(`/processes/${proc.id}/runtime-check`)).statusCode, 409);
   // Integrar: merge --no-ff en main, worktree retirado, checkout principal intacto
@@ -135,7 +135,7 @@ test('M1/M2 · flujo por API: aplicar en worktree, verificar, integrar bloqueado
   // Cierre: sin probar → not_tested; probada → cerrada SIN publicar (publicar es opcional)
   const d1 = await post(`/backlog/${it.id}/done`, {}); assert.equal(d1.statusCode, 409); assert.equal(d1.json().code, 'not_tested');
   await post(`/processes/${proc.id}/manual-test`, { checks: [true], note: 'ok' });
-  const g2 = await app.inject({ method: 'GET', url: `/api/workspaces/${slug}/processes/${proc.id}` }); assert.match(g2.json().guidance.phase, /Paso 6 de 6 · Listo para cerrar/);
+  const g2 = await app.inject({ method: 'GET', url: `/api/workspaces/${slug}/processes/${proc.id}` }); assert.match(g2.json().guidance.phase, /Etapa 7 de 7 · Listo para cerrar/);
   const d2 = await post(`/backlog/${it.id}/done`, {}); assert.equal(d2.statusCode, 200, d2.body); assert.equal(d2.json().status, 'done');
   assert.equal(procs.get(proc.id)!.result!.published ?? null, null, 'cerrada sin publicar');
   const g3 = await app.inject({ method: 'GET', url: `/api/workspaces/${slug}/processes/${proc.id}` });
