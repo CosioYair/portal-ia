@@ -1,6 +1,8 @@
 import type { Process, ProcessGuidance } from '@portal-ia/domain';
 import { runtimeVerified } from './runtimeChecks.ts';
 
+/** Aplicada con el flujo anterior a v0.12 (sin worktree aislado) y sin integrar. */
+export const isLegacyApplied = (p: Process) => !!p.result?.applied && !p.result.applied.worktree && !p.result.merged;
 const implStep = (p: Process) => p.steps.find(s => s.role === 'implementer') ?? (p.steps.some(s => s.role) ? undefined : p.steps[1]);
 
 /**
@@ -31,7 +33,7 @@ export function describeProcess(p: Process, opts: { isPortalRepo?: boolean; stor
   const r = p.result;
   if (!r) return { phase: 'Terminado', next: '—', tone: 'ok', settled: true };
   const applicable = r.changes.filter(c => !c.error).length;
-  if (r.rejected && !r.merged) return { phase: r.applied ? 'Diff rechazado (rama descartada)' : 'Diff rechazado', next: `Motivo: ${r.rejected.reason}. La historia volvió a pendiente; ejecútala de nuevo cuando quieras.`, tone: 'warn', settled: true };
+  if (r.rejected && !r.merged) return { phase: r.applied ? (r.applied.worktree ? 'Diff rechazado (rama descartada)' : 'Iteración anterior a v0.12 descartada (rama conservada)') : 'Diff rechazado', next: `Motivo: ${r.rejected.reason}. La historia volvió a pendiente; ejecútala de nuevo cuando quieras.`, tone: 'warn', settled: true };
   if (!r.applied) {
     if (!applicable) return { phase: 'Terminado sin cambios aplicables', next: 'El Desarrollador no entregó cambios válidos. Acota la historia y vuelve a ejecutarla.', tone: 'err', settled: true };
     if (r.review && !r.review.approve) return { phase: `Diff entregado · QA NO aprueba (${r.review.issues.length} observaciones)`, next: 'Lee las observaciones de QA antes de decidir. Si son graves, pulsa «Rechazar el diff» y vuelve a ejecutar con un criterio más acotado; si son menores, aplica, verifica con typecheck/test y corrige en la rama.', tone: 'warn', settled: false };
@@ -44,6 +46,9 @@ export function describeProcess(p: Process, opts: { isPortalRepo?: boolean; stor
   const portal = !!opts.isPortalRepo && r.activation !== undefined && r.activation !== null;
   const total = opts.isPortalRepo ? 8 : 6;
   const step = (n: number, label: string) => `Paso ${n} de ${total} · ${label}`;
+  // Iteración aplicada antes de v0.12 (en la carpeta del Portal, sin worktree): no puede verificarse en sandbox ni integrarse
+  // con el flujo actual. Salidas: cerrar la historia si ya está resuelta, o descartar la iteración y preparar una nueva.
+  if (!r.merged && isLegacyApplied(p)) return { phase: `Iteración anterior a v0.12 · aplicada sin aislamiento en ${r.applied.branch}`, next: 'Esta iteración se aplicó con el método anterior (directamente en tu carpeta, sin worktree), así que no puede verificarse en sandbox ni integrarse. Si lo que pedía la historia ya funciona en tu Portal, pulsa «Cerrar como resuelta»; si no, pulsa «Descartar esta iteración y preparar otra» (la rama se conserva) y autoriza la nueva iteración.', tone: 'warn', settled: false };
   if (!r.merged) {
     const after = new Date(r.applied.appliedAt).getTime() - 1000;
     const since = (r.verifications ?? []).filter(v => new Date(v.startedAt).getTime() >= after);

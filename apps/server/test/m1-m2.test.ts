@@ -162,3 +162,40 @@ test('M2 · activación: un merge que el proceso en marcha no contiene no está 
   assert.deepEqual(r.map(x => x.status), ['ok', 'fail', 'fail']);
   await app.close();
 });
+
+test('iteración anterior a v0.12 (aplicada en la carpeta, sin worktree): orientación clara, verificar/integrar explican la salida, descartar conserva la rama, se puede iterar o cerrar como resuelta', async () => {
+  const ws = createCompany('Legado'); const slug = ws.slug;
+  const project = createProject(slug, 'Producto', 'x', []);
+  const dir = tmpRepo(); projectsRepo(slug).setRepository(project.id, dir, 'main');
+  execSync('git branch portal-ia/hu-001', { cwd: dir }); // la rama antigua existe en el repositorio
+  const it = addManualItem(slug, project.id, { title: 'Feedback por paso' });
+  const procs = processesRepo(slug);
+  const proc = procs.create({ projectId: project.id, kind: 'story_execution', title: 'HU-001', estimatedUsd: 0.1, backlogItemId: it.id, steps: [{ agentId: 'c', agentName: 'Coord', title: 'Plan', model: 'm' }, { agentId: 'd', agentName: 'Dev', title: 'Impl', model: 'm' }] });
+  procs.authorize(proc.id, 1);
+  // Como en v0.11: applied sin worktree, verificaciones fallidas en el equipo, prueba manual con 6 pasos
+  procs.setResult(proc.id, { plan: null, implementationSummary: 'x', changes: [{ path: 'a.ts', action: 'create', content: 'x', diff: '+x', before: 0, after: 1 }], verifyCommands: ['typecheck'], review: { approve: false, issues: ['x'], summary: 's', suggestedTests: [] }, applied: { branch: 'portal-ia/hu-001', commit: '1de85e4', files: ['a.ts'], appliedAt: '2026-10-20T00:00:00Z' }, verifications: [{ command: 'typecheck', exitCode: 2, output: 'error', startedAt: '2026-10-20T00:01:00Z', finishedAt: '2026-10-20T00:01:06Z', durationMs: 6000 }], manualTest: { steps: ['a', 'b', 'c', 'd', 'e', 'f'], checks: [false, false, false, false, false, false], note: null } });
+  procs.finish(proc.id, 'done'); backlogRepo(slug).setStatus(it.id, 'review', proc.id);
+  const app = await buildApp();
+  const g = await app.inject({ method: 'GET', url: `/api/workspaces/${slug}/processes/${proc.id}` });
+  assert.match(g.json().guidance.phase, /anterior a v0\.12/); assert.match(g.json().guidance.next, /Cerrar como resuelta/);
+  const v = await app.inject({ method: 'POST', url: `/api/workspaces/${slug}/processes/${proc.id}/verify`, payload: { authorized: true, command: 'typecheck' } });
+  assert.equal(v.statusCode, 409); assert.equal(v.json().code, 'legacy_applied'); assert.match(v.json().error, /antes de v0\.12/);
+  const m = await app.inject({ method: 'POST', url: `/api/workspaces/${slug}/processes/${proc.id}/merge`, payload: { authorized: true } });
+  assert.equal(m.json().code, 'legacy_applied');
+  // Descartar: la historia vuelve a pendiente, la rama se conserva
+  const rj = await app.inject({ method: 'POST', url: `/api/workspaces/${slug}/processes/${proc.id}/reject`, payload: { reason: 'iteración anterior a v0.12 descartada' } });
+  assert.equal(rj.statusCode, 200, rj.body); assert.match(rj.json().guidance.phase, /descartada \(rama conservada\)/);
+  assert.equal(backlogRepo(slug).get(it.id)!.status, 'pending');
+  assert.ok(execSync('git branch --list portal-ia/hu-001', { cwd: dir }).toString().trim(), 'la rama antigua se conserva');
+  // Preparar otra iteración: queda pendiente de autorización
+  const itr = await app.inject({ method: 'POST', url: `/api/workspaces/${slug}/stories/${it.id}/iterate`, payload: { note: 'revisa si ya existe' } });
+  assert.equal(itr.statusCode, 201, itr.body); assert.equal(itr.json().process.status, 'pending_authorization');
+  // Alternativa: cerrar como resuelta (otra historia en el mismo estado)
+  const it2 = addManualItem(slug, project.id, { title: 'Otra antigua' });
+  const p2 = procs.create({ projectId: project.id, kind: 'story_execution', title: 'HU-002', estimatedUsd: 0.1, backlogItemId: it2.id, steps: [] });
+  procs.authorize(p2.id, 1); procs.setResult(p2.id, { plan: null, implementationSummary: 'x', changes: [], verifyCommands: [], review: null, applied: { branch: 'portal-ia/hu-002', commit: 'abc', files: [], appliedAt: 't' }, verifications: [] }); procs.finish(p2.id, 'done'); backlogRepo(slug).setStatus(it2.id, 'review', p2.id);
+  const d = await app.inject({ method: 'POST', url: `/api/workspaces/${slug}/backlog/${it2.id}/done`, payload: { force: true, reason: 'ya incluida en v0.12' } });
+  assert.equal(d.statusCode, 200); assert.equal(d.json().status, 'done');
+  assert.equal((await app.inject({ method: 'GET', url: `/api/workspaces/${slug}/processes/${p2.id}` })).json().guidance.phase, 'Historia completada');
+  await app.close();
+});

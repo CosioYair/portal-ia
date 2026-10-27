@@ -68,10 +68,14 @@ export async function storyContext(slug: string, itemId: string): Promise<StoryC
   const enriched = await Promise.all(procs.map(async p => {
     let q = p;
     if (runtime && p.result?.merged) { const activation = await activationOf(p.result.merged.commit, p.result.merged.mergedAt).catch(() => null); q = { ...p, result: { ...p.result, activation } }; }
-    return { ...q, guidance: describeProcess(q, { isPortalRepo: isPortal, storyStatus: q.id === item.lastProcessId || !item.lastProcessId ? item.status : null }) };
+    return { ...q, guidance: describeProcess(q, { isPortalRepo: isPortal, storyStatus: q.id === item.lastProcessId || !item.lastProcessId || q.id === procs[0]?.id ? item.status : null }) };
   }));
-  const last = (item.lastProcessId ? enriched.find(p => p.id === item.lastProcessId) : undefined) ?? enriched[0] ?? null;
-  const team: TeamMember[] = last?.result?.team?.members ?? (last ? last.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, agentKey: '', role: (s.role ?? 'consultant') as any, capability: null, model: s.model ?? '', reason: s.reason ?? '' })) : []);
+  // La iteración «actual» es la más reciente (también si está pendiente de autorización), no la última que llegó a ejecutarse.
+  const last = enriched[0] ?? null;
+  // Equipo: el registrado por el compositor en la iteración más reciente que lo tenga; en procesos antiguos (sin papeles), por posición.
+  const withTeam = enriched.find(p => p.result?.team?.members?.length);
+  const legacyRole = (i: number) => (['planner', 'implementer', 'reviewer'] as const)[i] ?? 'consultant';
+  const team: TeamMember[] = withTeam?.result?.team?.members ?? (last ? last.steps.map((s, i) => ({ agentId: s.agentId, agentName: s.agentName, agentKey: '', role: (s.role ?? legacyRole(i)) as any, capability: null, model: s.model ?? '', reason: s.reason ?? '' })) : []);
   const feedback = last ? listFeedback(slug, last.id) : { steps: [], items: [] };
   const lessons = lessonsRepo(slug).list(item.projectId).filter(l => l.evidence.processId && procs.some(p => p.id === l.evidence.processId));
   const t = threadRepo(slug);

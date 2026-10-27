@@ -15,10 +15,12 @@ import { Markdown } from './Markdown.tsx';
  * El orden lo decide el servidor (guidance); aquí solo se dibuja y se ofrecen los botones.
  */
 export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onChange: (p: Process) => void; onClose: () => Promise<void> }) {
-  const { status, flash } = useApp();
+  const { status, flash, navigate } = useApp();
   const slug = status.workspace!.slug;
   const isPortal = slug === 'portal-ia';
   const r = proc.result!;
+  // Iteración aplicada antes de v0.12 (en la carpeta, sin worktree): no puede verificarse ni integrarse con el flujo actual.
+  const legacy = !!r.applied && !r.applied.worktree && !r.merged;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState(r.manualTest?.note ?? '');
@@ -51,8 +53,8 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
   type Step = { key: string; label: string; done: boolean; hint?: string; optional?: boolean; action?: { label: string; onClick: () => void; busy?: boolean } };
   const steps: Step[] = [
     { key: 'review', label: 'Revisar el diff', done: !!r.applied || rejected, hint: `${applicable} archivo(s)${r.review ? r.review.approve ? ' · QA aprobó' : ` · QA no aprueba (${r.review.issues.length} observaciones)` : ''}`, action: { label: 'Ver el diff y la revisión de QA', onClick: () => go('sec-diff') } },
-    { key: 'apply', label: 'Aplicar en un worktree aislado', done: !!r.applied, hint: r.applied ? `${r.applied.branch} · ${r.applied.commit}${r.applied.worktree ? ' · fuera de la carpeta del Portal' : ''}` : 'la carpeta desde la que corre el Portal no se toca', action: { label: 'Ir a Aplicar', onClick: () => go('sec-apply') } },
-    { key: 'verify', label: isPortal ? 'Verificar en sandbox (typecheck, test y build)' : 'Verificar (typecheck obligatorio)', done: !!r.applied && (verified || !!r.merged), hint: r.verifications.length ? r.verifications.slice(-4).map(v => `${v.command}: ${v.exitCode === 0 ? 'ok' : 'falló'}${v.isolation ? ` (${v.isolation})` : ''}`).join(' · ') : (isPortal ? 'el Portal exige test y build en Docker/WSL2; sin sandbox no se integra' : 'sin typecheck no se puede integrar'), action: { label: 'Ir a Verificar', onClick: () => go('sec-verify') } },
+    { key: 'apply', label: legacy ? 'Aplicado con el método anterior (sin worktree)' : 'Aplicar en un worktree aislado', done: !!r.applied, hint: r.applied ? `${r.applied.branch} · ${r.applied.commit}${r.applied.worktree ? ' · fuera de la carpeta del Portal' : ' · en tu carpeta (antes de v0.12)'}` : 'la carpeta desde la que corre el Portal no se toca', action: { label: 'Ir a Aplicar', onClick: () => go('sec-apply') } },
+    { key: 'verify', label: isPortal ? 'Verificar en sandbox (typecheck, test y build)' : 'Verificar (typecheck obligatorio)', done: !!r.applied && (verified || !!r.merged), hint: legacy ? 'no disponible: iteración anterior a v0.12 (usa las salidas de arriba)' : r.verifications.length ? r.verifications.slice(-4).map(v => `${v.command}: ${v.exitCode === 0 ? 'ok' : 'falló'}${v.isolation ? ` (${v.isolation})` : ''}`).join(' · ') : (isPortal ? 'el Portal exige test y build en Docker/WSL2; sin sandbox no se integra' : 'sin typecheck no se puede integrar'), action: legacy ? undefined : { label: 'Ir a Verificar', onClick: () => go('sec-verify') } },
     { key: 'merge', label: 'Integrar en la rama principal', done: !!r.merged, hint: r.merged ? `${r.merged.into} · ${r.merged.commit}` : undefined, action: { label: 'Ir a Integrar', onClick: () => go('sec-git') } },
     ...(portalFlow ? [
       { key: 'activate', label: 'Activar: reconstruir y reiniciar el Portal', done: activation!.active, hint: activation!.active ? `el Portal en marcha corre ${activation!.runningCommit} (interfaz construida ${activation!.buildAt ? new Date(activation!.buildAt).toLocaleString() : '—'})` : activation!.reason, action: { label: 'Ir a la barra «Reconstruir y reiniciar»', onClick: () => window.scrollTo({ top: 0, behavior: 'smooth' }) } },
@@ -64,7 +66,8 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
   const firstPending = steps.findIndex(s => !s.done && !s.optional);
   const canClose = /Listo para cerrar/.test(phase);
   const closeStep = steps.length - 1;
-  const testEnabled = !!r.merged && (!portalFlow || (activation!.active && runtimeOk));
+  // En una iteración anterior a v0.12 se puede probar ya (el código está en tu carpeta) para decidir si cerrarla como resuelta.
+  const testEnabled = legacy || (!!r.merged && (!portalFlow || (activation!.active && runtimeOk)));
 
   // Prueba manual unificada (M6): una sola lista con OK / Falla / Observación + comentario por paso. «OK» marca el paso como
   // probado (checks del proceso, lo que exige la regla de cierre); Falla/Observación lo desmarcan y quedan como feedback.
@@ -79,12 +82,40 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
     if (want !== mt.checks[i]) { const p = await api.manualTest(slug, proc.id, mt.checks.map((c, j) => j === i ? want : c), note || null); onChange(p); }
   };
   const saveNote = async () => { if (!mt) return; try { const p = await api.manualTest(slug, proc.id, mt.checks, note || null); onChange(p); } catch (e: any) { setErr(e.message); } };
+  const storyClosed = /Historia completada|Historia descartada/.test(proc.guidance?.phase ?? '');
+  const refresh = async () => { try { onChange(await api.process(slug, proc.id)); } catch { /* sin cambios */ } };
+  const closeResolved = async () => {
+    if (!proc.backlogItemId) return;
+    const reason = prompt('Cerrar la historia como resuelta (sin integrar esta iteración). Indica brevemente por qué; queda registrado:', legacy ? 'Lo que pedía ya funciona en el Portal (incluido en v0.12)' : 'resuelta fuera del flujo');
+    if (reason === null) return;
+    setBusy(true); setErr(null);
+    try { await api.markStoryDone(slug, proc.backlogItemId, { force: true, reason: reason.trim() || 'resuelta fuera del flujo' }); flash('Historia cerrada como resuelta'); await refresh(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  };
+  const discardAndIterate = async () => {
+    if (!proc.backlogItemId) return;
+    if (!confirm('Se descarta esta iteración (la rama se conserva en git) y se prepara una nueva iteración de la historia, pendiente de tu autorización: no gasta nada hasta que la autorices. ¿Continuar?')) return;
+    setBusy(true); setErr(null);
+    try {
+      await api.rejectProcess(slug, proc.id, legacy ? 'iteración anterior a v0.12 descartada' : 'iteración descartada por el propietario');
+      await api.storyIterate(slug, proc.backlogItemId, legacy ? 'La iteración anterior se aplicó antes de v0.12 y se descartó. Revisa si lo pedido ya existe en el código actual antes de cambiar nada.' : null);
+      flash('Nueva iteración preparada: autorízala en Iteraciones');
+      navigate(`/historias/${proc.backlogItemId}`);
+    } catch (e: any) { setErr(e.message); setBusy(false); }
+  };
   const close = async () => { setBusy(true); setErr(null); try { await onClose(); flash('Historia completada'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
 
   return <section className="card" style={{ borderColor: '#C6E2DE' }}>
     <div className="card-h"><div><div className="h3">Resumen de la historia</div><div className="small muted">Qué cambia, en qué paso vas y qué toca ahora.</div></div>{proc.guidance && <Chip tone={proc.guidance.tone === 'err' ? 'err' : proc.guidance.tone === 'ok' ? 'ok' : proc.guidance.tone === 'warn' ? 'warn' : ''} xs>{proc.guidance.phase}</Chip>}</div>
     <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       {rejected && <Notice kind="warn">Este diff fue rechazado ({r.rejected!.reason}); la historia volvió a pendiente.</Notice>}
+      {legacy && !storyClosed && !rejected && <Notice kind="warn"><div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <div><strong>Esta iteración es anterior a v0.12.</strong> Se aplicó directamente en tu carpeta (rama <span className="mono">{r.applied!.branch}</span>), sin worktree aislado, así que no puede verificarse en sandbox ni integrarse con el flujo actual. Elige una salida:</div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn btn-primary btn-sm" onClick={closeResolved} disabled={busy || !proc.backlogItemId}>{Icon.check()}Cerrar como resuelta</button>
+          <button className="btn btn-secondary btn-sm" onClick={discardAndIterate} disabled={busy || !proc.backlogItemId}>Descartar esta iteración y preparar otra</button>
+        </div>
+        <div className="small muted">«Cerrar como resuelta» si lo que pedía la historia ya funciona en tu Portal (pruébalo con la lista de abajo). «Preparar otra» crea una iteración nueva con el feedback que hayas dejado; no gasta nada hasta que la autorices.</div>
+      </div></Notice>}
       <div>
         <div className="eyebrow" style={{ marginBottom: 6 }}>Qué cambia para ti y dónde verlo</div>
         {r.userFacing ? <Markdown text={r.userFacing} /> : <p className="muted sm13" style={{ margin: 0 }}>El Desarrollador no incluyó explicación para el propietario (historias anteriores a v0.11). Resumen técnico: {r.plan?.summary ?? r.implementationSummary?.slice(0, 300)}</p>}
@@ -140,7 +171,8 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
       {err && <Notice kind="err">{err}</Notice>}
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <button className="btn btn-primary" onClick={close} disabled={!canClose || busy || !proc.backlogItemId}>{busy ? <span className="spin spin-light" /> : Icon.check()}Marcar historia como completada</button>
-        {!canClose && <span className="small muted">{proc.guidance?.next}</span>}
+        {!canClose && !storyClosed && <span className="small muted">{proc.guidance?.next}</span>}
+        {!canClose && !storyClosed && !legacy && proc.backlogItemId && <button className="lnk small" onClick={closeResolved} disabled={busy} title="Si la historia ya está resuelta por otro camino, ciérrala indicando el motivo (queda registrado)">Cerrar como resuelta fuera del flujo</button>}
       </div>
     </div>
   </section>;

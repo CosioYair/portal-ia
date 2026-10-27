@@ -179,7 +179,10 @@ export async function processRoutes(app: FastifyInstance) {
     const proc = processesRepo(slug).get(id);
     if (!proc || proc.kind !== 'story_execution') return reply.code(404).send({ error: 'Proceso de historia no encontrado' });
     if (proc.result?.merged) return reply.code(409).send({ error: 'Los cambios ya están integrados en la rama principal; no se pueden rechazar. Crea una nueva iteración o devuelve la historia a pendiente.' });
-    if (proc.result?.applied) {
+    if (proc.result?.applied && !proc.result.applied.worktree) {
+      // Iteración anterior a v0.12 (aplicada en la carpeta, sin worktree): solo se marca descartada; la rama se conserva para que decidas tú.
+      app.log.info({ processId: id, branch: proc.result.applied.branch }, 'iteración anterior a v0.12 descartada; rama conservada');
+    } else if (proc.result?.applied) {
       // M1: aplicado en worktree pero no integrado → se retira el worktree y se borra la rama (nunca el checkout principal).
       const repo = projectsRepo(slug).repository(proc.projectId);
       if (repo) { try { requirePolicy('delete_worktree', { slug, processId: id, projectId: proc.projectId, authorized: true }); const d = await discardBranch(repo.path, id, proc.result.applied.branch); app.log.info({ processId: id, ...d }, 'rama de historia descartada'); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); } }
@@ -270,6 +273,7 @@ Proceso: ${proc.id}`, { processId: proc.id });
     const procs = processesRepo(slug); const proc = procs.get(id);
     if (!proc?.result?.applied) return reply.code(409).send({ error: 'Primero aplica los cambios en la rama.' });
     if (proc.result.merged) return reply.code(409).send({ error: `Ya integrada en ${proc.result.merged.into}.` });
+    if (!proc.result.applied.worktree) return reply.code(409).send({ error: 'Esta iteración se aplicó antes de v0.12 (sin worktree aislado) y no se integra con el flujo actual. Ciérrala como resuelta o descártala y prepara una nueva iteración.', code: 'legacy_applied' });
     // Orden de cierre: no se integra sin que typecheck haya pasado en esta rama (salvo que el propietario lo fuerce a sabiendas).
     const after = new Date(proc.result.applied.appliedAt).getTime();
     const okTypecheck = proc.result.verifications.some(v => v.command === 'typecheck' && v.exitCode === 0 && new Date(v.startedAt).getTime() >= after - 1000);
@@ -325,7 +329,8 @@ Proceso: ${proc.id}`, { processId: proc.id });
     const repo = projectsRepo(slug).repository(proc.projectId);
     if (!repo) return reply.code(409).send({ error: 'No hay repositorio registrado.' });
     const wt = proc.result.applied.worktree ?? worktreePathFor(repo.path, id);
-    if (!fs.existsSync(wt)) return reply.code(409).send({ error: 'El worktree del proceso ya no existe (¿se integró o se limpió?). Vuelve a aplicar si necesitas verificar.' });
+    if (!proc.result.applied.worktree) return reply.code(409).send({ error: `Esta iteración se aplicó antes de v0.12, directamente en tu carpeta (rama ${proc.result.applied.branch}), y no puede verificarse en sandbox. Ciérrala como resuelta si la historia ya funciona, o descártala y prepara una nueva iteración desde el Resumen.`, code: 'legacy_applied' });
+    if (!fs.existsSync(wt)) return reply.code(409).send({ error: 'El worktree del proceso ya no existe (¿se integró o se limpió?). Descarta esta iteración y prepara una nueva desde el Resumen.' });
     try {
       const op = body.data.command === 'install' ? 'install_deps' : body.data.command === 'typecheck' && (await detectSandbox()).available === 'unavailable' ? 'host_typecheck_min' : 'sandbox_exec';
       const qa = proc.steps.find(s => /calidad|QA/i.test(s.title)) ?? proc.steps[1];

@@ -444,8 +444,8 @@ test('v0.9: parches buscar/reemplazar, rutas protegidas sin tumbar el proceso, .
   // Orientación
   const base: any = { id: 'p', kind: 'story_execution', status: 'done', steps: [], spentUsd: 0.5, budgetUsd: 2, error: null, delegation: null };
   assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a', error: null }], applied: null, merged: null, published: null, review: null, verifyCommands: [] } }).phase, /Diff listo/);
-  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b', appliedAt: new Date().toISOString() }, merged: null, published: null, review: null, verifyCommands: [], verifications: [] } }).phase, /falta verificar/);
-  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [] } }, { isPortalRepo: true }).next, /lista de prueba/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b', appliedAt: new Date().toISOString(), worktree: 'wt' }, merged: null, published: null, review: null, verifyCommands: [], verifications: [] } }).phase, /falta verificar/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b', worktree: 'wt' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [] } }, { isPortalRepo: true }).next, /lista de prueba/);
   assert.match(describeProcess({ ...base, status: 'failed', error: 'X', result: null }).phase, /Falló/);
   assert.equal(describeProcess({ ...base, status: 'pending_authorization', result: null }).settled, false);
 });
@@ -517,12 +517,12 @@ test('v0.11: sección PARA EL PROPIETARIO y PRUEBA MANUAL, regla de cierre con p
   assert.equal(p.userFacing, 'Verás un botón **Nuevo** en Backlog.'); assert.deepEqual(p.manualSteps, ['Abre Backlog. Esperado: botón Nuevo.', 'Pulsa Nuevo. Esperado: se abre el diálogo.']); assert.equal(p.changes.length, 1); assert.equal(p.notes, 'n');
   const base: any = { id: 'p', kind: 'story_execution', status: 'done', steps: [], spentUsd: 0, budgetUsd: 1, error: null, delegation: null };
   const mt = { steps: ['a', 'b'], checks: [true, false], note: null };
-  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [], verifications: [], manualTest: mt } }).phase, /falta probar \(1 de 2/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b', worktree: 'wt' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [], verifications: [], manualTest: mt } }).phase, /falta probar \(1 de 2/);
   // M2: publicar ya no es requisito para cerrar; una historia probada está lista para cerrar aunque no se haya publicado
-  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [], verifications: [], manualTest: { ...mt, checks: [true, true] } } }).phase, /Listo para cerrar/);
-  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: { remote: 'origin', branches: [] }, review: null, verifyCommands: [], verifications: [], manualTest: { ...mt, checks: [true, true] } } }).phase, /Listo para cerrar.*publicado/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b', worktree: 'wt' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [], verifications: [], manualTest: { ...mt, checks: [true, true] } } }).phase, /Listo para cerrar/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b', worktree: 'wt' }, merged: { into: 'main' }, published: { remote: 'origin', branches: [] }, review: null, verifyCommands: [], verifications: [], manualTest: { ...mt, checks: [true, true] } } }).phase, /Listo para cerrar.*publicado/);
   // Antes de integrar: sin verificación → falta verificar; con typecheck fallido → FALLÓ; con typecheck ok → falta integrar
-  const applied = { branch: 'b', commit: 'c', files: ['a'], appliedAt: new Date().toISOString() };
+  const applied = { branch: 'b', commit: 'c', files: ['a'], appliedAt: new Date().toISOString(), worktree: 'wt' };
   assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied, merged: null, published: null, review: null, verifyCommands: [], verifications: [] } }).phase, /falta verificar \(typecheck\)/);
   const v = (command: string, exitCode: number) => ({ command, exitCode, output: '', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), durationMs: 1 });
   assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied, merged: null, published: null, review: null, verifyCommands: [], verifications: [v('typecheck', 2)] } }).phase, /verificación FALLÓ \(typecheck\)/);
@@ -593,7 +593,7 @@ test('v0.11.2: el hash de archivo ignora CRLF (no marca como cambiado lo que no 
   const procs = processesRepo('portal-ia');
   const proc = procs.create({ projectId: internal.id, kind: 'story_execution', title: 'HU-nv', estimatedUsd: 1, backlogItemId: it.id, steps: [] });
   procs.authorize(proc.id, 1);
-  procs.setResult(proc.id, { plan: null, implementationSummary: 'x', changes: [], verifyCommands: [], review: null, applied: { branch: 'b', commit: 'c', files: [], appliedAt: new Date().toISOString() }, merged: null, published: null, verifications: [] });
+  procs.setResult(proc.id, { plan: null, implementationSummary: 'x', changes: [], verifyCommands: [], review: null, applied: { branch: 'b', commit: 'c', files: [], appliedAt: new Date().toISOString(), worktree: 'wt' }, merged: null, published: null, verifications: [] });
   procs.finish(proc.id, 'done'); backlogRepo('portal-ia').setStatus(it.id, 'review', proc.id);
   const app = await buildApp();
   const r1 = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/processes/${proc.id}/merge`, payload: { authorized: true } });
