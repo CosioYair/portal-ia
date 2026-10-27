@@ -1,3 +1,14 @@
+# Portal IA v0.12.1 · Integración en Windows (Fases 0–2)
+
+Fecha: 27 de octubre de 2026. Sobre la entrega v0.12.0 (abajo). Todo verificado en Windows 11 con Docker Desktop (motor WSL2), con datos temporales y proveedor simulado; **sin abrir `data/`, sin gastar créditos reales, sin publicar**.
+
+- **Sandbox Docker en Windows** (`docs/sandbox.md`): imagen propia `portal-ia-sandbox:1` (`docker/sandbox.Dockerfile`: git + procps), dependencias Linux en un volumen por package-lock (`portal-ia-nm-<hash>`, install con red confirmada; el resto en solo lectura y sin red), entorno del CLI de Docker separado del contenedor, `--mount` para rutas `C:…` con espacios, `--pull never`, `--read-only`, `--init`, contenedor eliminado al agotar el tiempo. Pruebas: `sandbox-docker.test.ts` (orden sin Docker + aislamiento real).
+- **E2E de automejora en Windows**: `node apps/server/test/e2e/self-improvement.e2e.mjs` → 45/45 pasos con Docker y Playwright/Chromium.
+- **Iterar desde el feedback de la prueba** (Fase 2): acciones en «Pasos con falla», estados de la iteración anterior (`StoryContext.iteration`), reabrir, descarte confirmado del worktree, edición del contexto con historial, orientación «Enviar feedback al equipo» y «faltan dependencias del sandbox». Pruebas: `story-iteration-feedback.test.ts`, `story-iteration-ui-wiring.test.ts`; recorrido en navegador con Playwright sobre una instancia aislada.
+- Pendiente de la validación del propietario en su instalación real: ver la lista de prueba final de la sesión.
+
+---
+
 # Portal IA v0.12.0 — Entrega de la implementación (Hitos 0–6)
 
 Fecha: 27 de octubre de 2026. Base: tu `main` (`7627938` v0.11.2 + merge `cd84b69` de HU-147). Todo el trabajo está en commits sobre esa base en la copia adjunta (`portal-ia-v0.12.0.zip`, sin `node_modules`, `data`, `dist` ni `.git`). No se publicó nada en GitHub ni en ningún remoto; no se consumió ningún crédito de proveedor real; tus datos no se tocaron.
