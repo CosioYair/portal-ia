@@ -23,7 +23,7 @@ Requisitos: Node.js ≥ 22.13 (incluye `node:sqlite`), Git, y para el sandbox de
    npm run typecheck
    npm test
    ```
-   Esperado: typecheck sin errores; `npm test` con 99 correctas y 1 omitida (la del sandbox de Linux, que en Windows no aplica).
+   Esperado: typecheck sin errores; `npm test` sin fallos. En Windows se omiten 2 pruebas que no aplican (el sandbox `linux-ns` y la señal SIGTERM); con Docker Desktop y la imagen del sandbox construida (ver `docs/sandbox.md`) se ejecuta además la prueba de aislamiento de Docker.
 6. Confirma en tu repositorio:
    ```
    git add -A
@@ -41,7 +41,7 @@ npm start
 
 `npm start` lanza el **supervisor** (`scripts/portal-start.mjs`), que arranca el servidor en `http://127.0.0.1:4310` y lo relanza automáticamente cuando el Portal se reconstruye y reinicia desde la interfaz (código de salida 75). Sin supervisor (`npm run start:server`) el Portal funciona igual, pero «Reconstruir y reiniciar» lo apaga y tendrás que arrancarlo a mano (la pantalla te muestra los comandos).
 
-Variables opcionales (archivo `.env` en la raíz o variables del sistema): `PORTAL_PORT` (4310), `PORTAL_DATA_DIR` (`.\data`), `PORTAL_SANDBOX_IMAGE` (`node:22-alpine`), `PORTAL_WSL_DISTRO` (`PortalIA-sandbox`).
+Variables opcionales (archivo `.env` en la raíz o variables del sistema): `PORTAL_PORT` (4310), `PORTAL_DATA_DIR` (`.\data`), `PORTAL_SANDBOX_IMAGE` (`portal-ia-sandbox:1`), `PORTAL_WSL_DISTRO` (`PortalIA-sandbox`).
 
 ## Parar
 

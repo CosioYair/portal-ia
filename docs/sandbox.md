@@ -8,24 +8,38 @@ Estado actual: `GET /api/system/sandbox` o la tarjeta «Repositorio» del panel.
 
 1. Instala [Docker Desktop](https://www.docker.com/products/docker-desktop/) con el motor WSL2 (opción por defecto).
 2. Arráncalo y comprueba en una terminal: `docker version --format "{{.Server.Os}}"` → debe imprimir `linux`.
-3. Descarga la imagen una vez (después funciona sin red): `docker pull node:22-alpine`.
+3. Construye la imagen del sandbox una vez, desde la carpeta del Portal (necesita red; después todo funciona sin red):
+   ```
+   docker build -t portal-ia-sandbox:1 -f docker/sandbox.Dockerfile docker
+   ```
+   Es `node:22-bookworm-slim` con `git` (las pruebas del Portal crean repositorios) y `procps` (`ps`, que usa el apagado limpio). Repite el comando si cambia `docker/sandbox.Dockerfile`. Sin la imagen, el sandbox aparece como no disponible (fail-closed; el Portal nunca la descarga por su cuenta: `--pull never`).
 4. Reinicia el Portal (o pulsa «Actualizar estado» en la tarjeta Repositorio). El sandbox aparecerá como `docker`.
+5. En el primer proceso (y cada vez que cambie `package-lock.json`): «npm ci (install)» con «Permitir red solo para install». Instala las dependencias **Linux** en un volumen de Docker; typecheck, test y build lo reutilizan sin red.
 
-Cada verificación lanza un contenedor efímero:
+Cada verificación lanza un contenedor efímero (simplificado):
 
 ```
-docker run --rm --network none --memory 2g --cpus 2 --pids-limit 512 \
+docker run --rm --init --pull never --read-only --network none --memory 2g --cpus 2 --pids-limit 512 \
   --security-opt no-new-privileges --cap-drop ALL --user 1000:1000 \
-  -e CI=1 -e HOME=/tmp -v <worktree>:/work -v <repo>/node_modules:/work/node_modules:ro \
-  -w /work node:22-alpine sh -c "npm run test"
+  --mount type=tmpfs,target=/tmp -e CI=1 -e HOME=/tmp … \
+  --mount "type=bind,source=C:\…\Portal IA-worktrees\<proceso>,target=/work" \
+  --mount type=volume,source=portal-ia-nm-<hash>,target=/work/node_modules,readonly \
+  --mount type=tmpfs,target=/work/node_modules/.vite-temp … \
+  -w /work portal-ia-sandbox:1 sh -c "npm test"
 ```
 
-- Sin red (`--network none`), salvo `install`, que exige la confirmación «Permitir red solo para install» y muestra antes el diff de `package.json`.
-- Sin variables de entorno del Portal (ni claves, ni rutas de datos).
-- `node_modules` del Portal montado en solo lectura; el worktree es lo único escribible.
-- Límites de memoria, CPU, procesos y tiempo (10 min).
+- Sin red (`--network none`), salvo `install`, que exige la confirmación «Permitir red solo para install» y muestra antes el diff de `package.json`. `install` es `npm ci --ignore-scripts`: no ejecuta scripts del repositorio.
+- **Dependencias Linux en un volumen** `portal-ia-nm-<hash>` (hash de la imagen y del `package-lock.json`, sin distinguir CRLF/LF). Los `node_modules` de tu equipo no sirven dentro (binarios de Windows como `@esbuild/win32-x64` y enlaces a rutas `C:\…`), así que nunca se montan. `install` llena el volumen; el resto de comandos lo montan **en solo lectura** (con tmpfs privados para las cachés `.vite-temp`, `.vite` y `.cache`) y, si aún no se instaló, terminan con código 86 y el aviso de ejecutar `install`.
+- El worktree es lo único escribible del equipo; la carpeta del Portal y `data/` no se montan. Raíz del contenedor de solo lectura y `/tmp` privado.
+- Al contenedor solo entran variables explícitas (`-e CLAVE=valor`): ninguna clave, ruta de datos ni variable del Portal. El proceso `docker` (el CLI, no el contenedor) recibe solo las variables que Docker Desktop necesita para encontrar su configuración (`PATH`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `ProgramData`, `SYSTEMROOT`, `DOCKER_*`…).
+- Límites de memoria, CPU, procesos y tiempo (10 min; al agotarse se elimina el contenedor).
+- Dentro del contenedor el worktree no ve su `.git` (apunta a una ruta de Windows): el código del repositorio no puede leer ni tocar la historia git del Portal.
 
-Variables opcionales: `PORTAL_SANDBOX_IMAGE` (imagen alternativa, p. ej. `node:22`), `DOCKER_HOST`.
+Volúmenes antiguos (de `package-lock.json` anteriores): `docker volume ls --filter name=portal-ia-nm-` y `docker volume rm <nombre>`.
+
+Variables opcionales: `PORTAL_SANDBOX_IMAGE` (imagen alternativa; necesita `git`, `ps` y un usuario 1000 con `/work/node_modules` suyo), `DOCKER_HOST`, `DOCKER_CONTEXT`.
+
+Comprobación automática: `apps/server/test/sandbox-docker.test.ts` (construcción de la orden, sin Docker; y, si Docker está disponible, un script que intenta encontrar la carpeta del Portal y los datos, escribir fuera del worktree y en las dependencias, leer variables del equipo y salir a Internet: todo debe fallar y solo el worktree debe aceptar escrituras).
 
 ## Opción B · Distribución WSL2 dedicada (sin Docker)
 

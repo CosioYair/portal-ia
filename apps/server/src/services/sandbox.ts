@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { config } from '../config.ts';
 import { execFile, spawn } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { Isolation, VerificationRun } from '@portal-ia/domain';
 import { scanSecrets } from './repoWrite.ts';
@@ -12,8 +13,10 @@ const IS_WIN = process.platform === 'win32';
 
 /**
  * Sandbox de ejecución (M1). El código generado y los scripts de npm NUNCA se ejecutan en el equipo del propietario:
- *  - `docker`: contenedor efímero node:22-alpine, sin red (salvo `install`, con autorización aparte), solo lectura
- *    salvo el worktree, sin variables del Portal, límites de CPU/memoria/procesos/tiempo, usuario sin privilegios.
+ *  - `docker`: contenedor efímero de la imagen `portal-ia-sandbox:1` (docker/sandbox.Dockerfile), sin red (salvo `install`,
+ *    con autorización aparte), raíz de solo lectura, solo el worktree escribible, sin variables del Portal, límites de
+ *    CPU/memoria/procesos/tiempo, usuario sin privilegios. Las dependencias son Linux y viven en un volumen por
+ *    package-lock (`portal-ia-nm-<hash>`): `install` lo llena; el resto de comandos lo montan en solo lectura.
  *  - `wsl`: distribución dedicada «PortalIA-sandbox» (usuario sin privilegios), misma lista de comandos.
  *  - `linux-ns` (Linux sin Docker): espacios de nombres de usuario, red y montaje (`unshare -rn -m`): sin red, el
  *    HOME, la carpeta del Portal y los datos montados en solo lectura, /tmp privado, solo el worktree escribible.
@@ -21,40 +24,109 @@ const IS_WIN = process.platform === 'win32';
  *    con entorno mínimo. Se marca como verificación mínima, no como sandbox.
  *  - Sin sandbox → fail-closed: `install`, `test` y `build` no se ejecutan.
  */
-export const SANDBOX_IMAGE = process.env.PORTAL_SANDBOX_IMAGE ?? 'node:22-alpine';
+export const DEFAULT_SANDBOX_IMAGE = 'portal-ia-sandbox:1';
+export const SANDBOX_IMAGE = process.env.PORTAL_SANDBOX_IMAGE || DEFAULT_SANDBOX_IMAGE;
+const IMAGE_BUILD_HINT = `docker build -t ${DEFAULT_SANDBOX_IMAGE} -f docker/sandbox.Dockerfile docker`;
 export const WSL_DISTRO = process.env.PORTAL_WSL_DISTRO ?? 'PortalIA-sandbox';
 /** Levanta `lo` dentro del nuevo espacio de red: con iproute2 si existe, si no con un ioctl desde python3; si nada existe, sigue (solo falla lo que necesite loopback). */
 const LO_UP = `{ if command -v ip >/dev/null 2>&1; then ip link set lo up; elif command -v python3 >/dev/null 2>&1; then python3 -c 'import socket,fcntl,struct;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);f=struct.unpack("16sH14s",fcntl.ioctl(s,0x8913,struct.pack("16sH14s",b"lo",0,b"")))[1];fcntl.ioctl(s,0x8914,struct.pack("16sH14s",b"lo",f|0x41,b""))' ; fi; true; }`;
 const COMMANDS: Record<string, string> = { install: 'npm ci --ignore-scripts --no-audit --no-fund', typecheck: 'npm run typecheck', test: 'npm test', build: 'npm run build' };
 
-export interface SandboxStatus { available: Isolation; docker: boolean; wsl: boolean; linuxNs?: boolean; detail: string; checkedAt: string }
+export interface SandboxStatus { available: Isolation; docker: boolean; dockerImage?: string; dockerImageReady?: boolean; wsl: boolean; linuxNs?: boolean; detail: string; checkedAt: string }
 let cached: SandboxStatus | null = null; let cachedAt = 0;
 
-async function has(cmd: string, args: string[], timeout = 6000): Promise<string | null> {
-  try { const { stdout } = await execFileP(cmd, args, { timeout, windowsHide: true }); return stdout.toString().trim(); } catch { return null; }
+async function has(cmd: string, args: string[], timeout = 6000, env?: NodeJS.ProcessEnv): Promise<string | null> {
+  try { const { stdout } = await execFileP(cmd, args, { timeout, windowsHide: true, env }); return stdout.toString().trim(); } catch { return null; }
+}
+
+// ---- Docker: construcción de la orden (funciones puras; probadas sin Docker en sandbox-docker.test.ts) ----
+
+/**
+ * Variables del equipo que necesita el CLI de Docker para encontrar su configuración y su contexto (en Windows, Docker
+ * Desktop las lee de USERPROFILE, APPDATA…). Solo llegan al proceso `docker`, nunca al contenedor: dentro solo entra lo
+ * que buildDockerRunArgs pasa explícitamente con `-e CLAVE=valor`.
+ */
+const DOCKER_CLI_VARS = ['PATH', 'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY', 'HOME', 'XDG_RUNTIME_DIR'];
+const DOCKER_CLI_VARS_WIN = ['SYSTEMROOT', 'SystemDrive', 'WINDIR', 'COMSPEC', 'PATHEXT', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432', 'TEMP', 'TMP'];
+
+/** Entorno mínimo del proceso `docker` (no del contenedor). En Windows las claves se buscan sin distinguir mayúsculas. */
+export function dockerCliEnv(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  const byLower = new Map(Object.entries(env).map(([k, v]) => [k.toLowerCase(), v]));
+  const out: NodeJS.ProcessEnv = {};
+  for (const key of platform === 'win32' ? [...DOCKER_CLI_VARS, ...DOCKER_CLI_VARS_WIN] : DOCKER_CLI_VARS) {
+    const v = platform === 'win32' ? byLower.get(key.toLowerCase()) : env[key];
+    if (v) out[key] = v;
+  }
+  return out;
+}
+
+/** Valor de `--mount` (formato CSV de Docker): un campo con coma o comillas va entre comillas dobles. Admite rutas `C:\Mis Proyectos\…`. */
+export function dockerMountArg(fields: Record<string, string | true>): string {
+  const csv = (f: string) => /[",]/.test(f) ? `"${f.replace(/"/g, '""')}"` : f;
+  return Object.entries(fields).map(([k, v]) => csv(v === true ? k : `${k}=${v}`)).join(',');
+}
+
+/** Volumen de dependencias Linux: uno por imagen + package-lock (finales de línea normalizados: CRLF y LF comparten volumen). */
+export function depsVolumeName(worktree: string, image: string = SANDBOX_IMAGE): string {
+  const lock = ['package-lock.json', 'package.json'].map(f => path.join(worktree, f)).find(f => fs.existsSync(f));
+  const content = lock ? fs.readFileSync(lock, 'utf8').replace(/\r\n/g, '\n') : '';
+  return `portal-ia-nm-${createHash('sha256').update(`${image}\n${content}`).digest('hex').slice(0, 16)}`;
+}
+
+/** Marca que deja `install` en el volumen al terminar bien; sin ella, el resto de comandos no se ejecutan. */
+const DEPS_READY = 'node_modules/.portal-ia-ready';
+/** Cachés que las herramientas escriben dentro de node_modules (vite, babel…): tmpfs privados sobre el volumen de solo lectura. */
+const NM_CACHES = ['.vite-temp', '.vite', '.cache'];
+export const DEPS_MISSING_EXIT = 86;
+
+export interface DockerRunSpec { worktree: string; command: string; script: string; image: string; volume: string; allowNetwork: boolean; name: string }
+
+/** Argumentos de `docker run` para un comando permitido. Red solo en `install` con la red confirmada. */
+export function buildDockerRunArgs(spec: DockerRunSpec): string[] {
+  const install = spec.command === 'install';
+  const network = install && spec.allowNetwork ? 'bridge' : 'none';
+  const env = { CI: '1', PORTAL_INSIDE_SANDBOX: '1', HOME: '/tmp', TMPDIR: '/tmp', npm_config_cache: '/tmp/npm-cache', npm_config_update_notifier: 'false', FORCE_COLOR: '0' };
+  const deps = { type: 'volume', source: spec.volume, target: '/work/node_modules' };
+  const args = ['run', '--rm', '--init', '--pull', 'never', '--name', spec.name, '--label', 'portal-ia.sandbox=1',
+    '--network', network, '--memory', '2g', '--cpus', '2', '--pids-limit', '512',
+    '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--user', '1000:1000',
+    '--read-only', '--mount', dockerMountArg({ type: 'tmpfs', target: '/tmp', 'tmpfs-mode': '1777' }),
+    ...Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
+    '--mount', dockerMountArg({ type: 'bind', source: path.resolve(spec.worktree), target: '/work' }),
+    '--mount', dockerMountArg(install ? deps : { ...deps, readonly: true })];
+  if (!install) for (const c of NM_CACHES) args.push('--mount', dockerMountArg({ type: 'tmpfs', target: `/work/node_modules/${c}`, 'tmpfs-mode': '1777' }));
+  const script = install
+    ? `${spec.script} && mkdir -p ${NM_CACHES.map(c => `node_modules/${c}`).join(' ')} && touch ${DEPS_READY}`
+    : `if [ ! -f ${DEPS_READY} ]; then echo "Faltan las dependencias Linux de este package-lock (volumen ${spec.volume}). Ejecuta una vez «npm ci (install)» con «Permitir red solo para install»; después typecheck, test y build corren sin red."; exit ${DEPS_MISSING_EXIT}; fi; ${spec.script}`;
+  args.push('-w', '/work', spec.image, 'sh', '-c', script);
+  return args;
 }
 
 /** Detecta el sandbox disponible (caché de 60 s). */
 export async function detectSandbox(force = false): Promise<SandboxStatus> {
   if (cached && !force && Date.now() - cachedAt < 60_000) return cached;
   if (process.env.PORTAL_SANDBOX === 'none') { cached = { available: 'unavailable', docker: false, wsl: false, detail: 'Sandbox desactivado por PORTAL_SANDBOX=none (solo para pruebas).', checkedAt: new Date().toISOString() }; cachedAt = Date.now(); return cached; }
-  const dockerOs = await has('docker', ['version', '--format', '{{.Server.Os}}']);
-  const docker = dockerOs === 'linux';
+  const dockerOs = await has('docker', ['version', '--format', '{{.Server.Os}}'], 6000, dockerCliEnv());
+  const dockerEngine = dockerOs === 'linux';
+  // Sin la imagen no hay sandbox Docker (fail-closed): `--pull never` impide descargarla en silencio.
+  const dockerImageReady = dockerEngine && (await has('docker', ['image', 'inspect', '--format', '{{.Id}}', SANDBOX_IMAGE], 6000, dockerCliEnv())) !== null;
+  const docker = dockerEngine && dockerImageReady;
   let wsl = false; let linuxNs = false;
   if (IS_WIN) { const list = await has('wsl.exe', ['-l', '-q']); wsl = !!list && list.replace(/\0/g, '').split(/\r?\n/).map(s => s.trim()).includes(WSL_DISTRO); }
   else if (!docker && process.platform === 'linux') linuxNs = (await has('unshare', ['-rn', '-m', '--', 'sh', '-c', 'mount -t tmpfs tmpfs /tmp && echo ok'])) === 'ok';
   const available: Isolation = docker ? 'docker' : wsl ? 'wsl' : linuxNs ? 'linux-ns' : 'unavailable';
-  const detail = docker ? `Docker disponible (${SANDBOX_IMAGE}).` : wsl ? `WSL2: distribución «${WSL_DISTRO}».` : linuxNs ? 'Espacios de nombres de Linux (unshare): sin red, HOME/Portal/datos en solo lectura, /tmp privado; solo el worktree es escribible.' : IS_WIN
+  const imageMissing = dockerEngine && !dockerImageReady ? `Docker responde, pero falta la imagen ${SANDBOX_IMAGE}: constrúyela una vez con «${IMAGE_BUILD_HINT}» (ver docs/sandbox.md).` : '';
+  const detail = docker ? `Docker disponible (${SANDBOX_IMAGE}).` : imageMissing && !wsl && !linuxNs ? `No hay sandbox. ${imageMissing} Hasta entonces, install/test/build quedan bloqueados; solo se permite la verificación mínima (tsc).` : wsl ? `WSL2: distribución «${WSL_DISTRO}».` : linuxNs ? 'Espacios de nombres de Linux (unshare): sin red, HOME/Portal/datos en solo lectura, /tmp privado; solo el worktree es escribible.' : IS_WIN
     ? `No hay sandbox: instala Docker Desktop (motor WSL2) o crea la distribución WSL2 «${WSL_DISTRO}» (ver docs/sandbox.md). Hasta entonces, install/test/build quedan bloqueados; solo se permite la verificación mínima (tsc).`
     : 'No hay sandbox (docker no responde). install/test/build quedan bloqueados; solo se permite la verificación mínima (tsc).';
-  cached = { available, docker, wsl, linuxNs, detail, checkedAt: new Date().toISOString() }; cachedAt = Date.now();
+  cached = { available, docker, dockerImage: SANDBOX_IMAGE, dockerImageReady, wsl, linuxNs, detail, checkedAt: new Date().toISOString() }; cachedAt = Date.now();
   return cached;
 }
 
-function run(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs: number; shell?: boolean }): Promise<{ code: number | null; output: string }> {
+function run(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs: number; shell?: boolean; onTimeout?: () => void }): Promise<{ code: number | null; output: string }> {
   return new Promise(resolve => {
     let out = ''; const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? {}, shell: !!opts.shell, windowsHide: true });
-    const t = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* ya terminó */ } out += '\n[tiempo máximo agotado]'; }, opts.timeoutMs);
+    const t = setTimeout(() => { try { opts.onTimeout?.(); } catch { /* sin limpieza */ } try { child.kill('SIGKILL'); } catch { /* ya terminó */ } out += '\n[tiempo máximo agotado]'; }, opts.timeoutMs);
     child.stdout.on('data', d => { out += d; }); child.stderr.on('data', d => { out += d; });
     child.on('error', e => { clearTimeout(t); resolve({ code: 1, output: out + `\n${e.message}` }); });
     child.on('close', code => { clearTimeout(t); resolve({ code, output: out }); });
@@ -75,15 +147,15 @@ export async function runInSandbox(worktree: string, repoRoot: string, command: 
   const finish = (code: number | null, output: string, isolation: Isolation): VerificationRun => ({ command, exitCode: code, output: redact(output) + (scanSecrets(output) ? '\n[aviso: la salida contenía un posible secreto; se ha redactado]' : ''), startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - t0, isolation });
   const st = await detectSandbox();
   if (st.available === 'docker') {
-    const nm = path.join(repoRoot, 'node_modules');
-    const args = ['run', '--rm', '--network', command === 'install' && opts.allowNetwork ? 'bridge' : 'none', '--memory', '2g', '--cpus', '2', '--pids-limit', '512',
-      '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--user', '1000:1000', '-e', 'CI=1', '-e', 'PORTAL_INSIDE_SANDBOX=1', '-e', 'HOME=/tmp', '-e', 'npm_config_cache=/tmp/npm-cache', '-e', 'FORCE_COLOR=0',
-      '-v', `${worktree}:/work`, '-w', '/work'];
-    // Dependencias: se montan las del checkout principal en solo lectura salvo que se esté instalando.
-    if (command !== 'install' && fs.existsSync(nm)) args.push('-v', `${nm}:/work/node_modules:ro`);
-    args.push(SANDBOX_IMAGE, 'sh', '-c', script);
-    const r = await run('docker', args, { timeoutMs, env: { PATH: process.env.PATH ?? '', DOCKER_HOST: process.env.DOCKER_HOST ?? '' } });
-    return finish(r.code, `[docker ${SANDBOX_IMAGE} · red ${command === 'install' && opts.allowNetwork ? 'activada solo para install' : 'desactivada'}]\n` + r.output, 'docker');
+    // Dependencias Linux en un volumen propio: los node_modules del equipo (binarios de Windows, enlaces con rutas C:\…) no sirven dentro.
+    const allowNetwork = command === 'install' && !!opts.allowNetwork;
+    const volume = depsVolumeName(worktree);
+    const name = `portal-ia-sbx-${randomBytes(6).toString('hex')}`;
+    const env = dockerCliEnv();
+    const args = buildDockerRunArgs({ worktree, command, script, image: SANDBOX_IMAGE, volume, allowNetwork, name });
+    // Matar el CLI no detiene el contenedor: al agotar el tiempo se elimina por nombre.
+    const r = await run('docker', args, { timeoutMs, env, onTimeout: () => { spawn('docker', ['rm', '-f', name], { env, stdio: 'ignore', windowsHide: true }).on('error', () => { /* sin docker */ }); } });
+    return finish(r.code, `[docker ${SANDBOX_IMAGE} · red ${allowNetwork ? 'activada solo para install' : 'desactivada'} · dependencias ${volume}${command === 'install' ? '' : ' (solo lectura)'}]\n` + r.output, 'docker');
   }
   if (st.available === 'wsl') {
     const wslPath = (await has('wsl.exe', ['-d', WSL_DISTRO, '--', 'wslpath', '-a', worktree])) ?? worktree;
