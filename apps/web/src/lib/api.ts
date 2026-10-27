@@ -116,7 +116,8 @@ export const api = {
   storyTasksFromFeedback: (slug: string, id: string) => request<StoryTask[]>(`/api/workspaces/${slug}/stories/${id}/tasks/from-feedback`, { method: 'POST' }),
   storySetTask: (slug: string, id: string, taskId: string, status: 'open' | 'done') => request<StoryTask>(`/api/workspaces/${slug}/stories/${id}/tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
   storyDeleteTask: (slug: string, id: string, taskId: string) => request<{ ok: boolean }>(`/api/workspaces/${slug}/stories/${id}/tasks/${taskId}`, { method: 'DELETE' }),
-  storyIterate: (slug: string, id: string, note?: string | null) => request<{ process: Process; context: string }>(`/api/workspaces/${slug}/stories/${id}/iterate`, { method: 'POST', body: JSON.stringify({ note: note ?? null }) }),
+  /** reopen: reabre una historia cerrada · discardApplied: confirma descartar el worktree y la rama de la iteración aplicada sin integrar. */
+  storyIterate: (slug: string, id: string, note?: string | null, opts: { reopen?: boolean; discardApplied?: boolean } = {}) => request<{ process: Process; context: string; actions: string[] }>(`/api/workspaces/${slug}/stories/${id}/iterate`, { method: 'POST', body: JSON.stringify({ note: note ?? null, ...opts }) }),
   // M4 · lecciones validadas
   lessons: (slug: string, projectId?: string | null, status?: string) => { const q = new URLSearchParams(); if (projectId) q.set('projectId', projectId); if (status) q.set('status', status); const qs = q.toString(); return request<Lesson[]>(`/api/workspaces/${slug}/lessons${qs ? `?${qs}` : ''}`); },
   createLesson: (slug: string, input: { projectId: string | null; title: string; lessonText: string; role?: string | null; tags?: string[] }) => request<Lesson>(`/api/workspaces/${slug}/lessons`, { method: 'POST', body: JSON.stringify(input) }),

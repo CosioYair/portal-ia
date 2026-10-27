@@ -4,6 +4,7 @@ import { manualTestStepKey } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { getManualTestFeedback, saveManualTestStepFeedback } from '../lib/manualTestFeedback.ts';
 import { ManualTestStepList } from './ManualTestStepList.tsx';
+import { FeedbackToTeam } from './FeedbackToTeam.tsx';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
@@ -159,7 +160,8 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
         {!testEnabled && <p className="small muted" style={{ margin: '0 0 8px' }}>Se habilita cuando los cambios estén integrados{portalFlow ? ', activados en el Portal en marcha y comprobados en ejecución' : ''}.</p>}
         {r.merged && portalFlow && !activation!.active && <Notice kind="warn">Antes de probar, reconstruye y reinicia el Portal desde la barra del sistema: {activation!.reason}</Notice>}
         <div style={{ opacity: testEnabled ? 1 : 0.6, pointerEvents: testEnabled ? 'auto' : 'none' }}>
-          {feedback ? <ManualTestStepList key={`${proc.id}:${mt.steps.length}`} steps={mt.steps} checks={mt.checks} initialFeedback={feedback} onSave={onStepSave} /> : <span className="small muted">Cargando feedback…</span>}
+          {feedback ? <ManualTestStepList key={`${proc.id}:${mt.steps.length}`} steps={mt.steps} checks={mt.checks} initialFeedback={feedback} onSave={onStepSave}
+            failureActions={proc.backlogItemId ? ({ failed, flush }) => <FeedbackToTeam slug={slug} itemId={proc.backlogItemId!} failed={failed} flush={flush} /> : undefined} /> : <span className="small muted">Cargando feedback…</span>}
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <input className="input" style={{ flex: 1, minWidth: 240, height: 34 }} value={note} onChange={e => setNote(e.target.value)} onBlur={saveNote} placeholder="Nota de la prueba (opcional): qué viste, qué falló…" disabled={!testEnabled} />
