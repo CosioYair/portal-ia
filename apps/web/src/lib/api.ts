@@ -1,4 +1,4 @@
-import type { StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
+import type { PhaseTransition, PhaseTransitionPreview, ProjectArchive, StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
 import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
 
@@ -65,6 +65,13 @@ export const api = {
   cancelProcess: (slug: string, id: string) => request<Process>(`/api/workspaces/${slug}/processes/${id}/cancel`, { method: 'POST' }),
   knowledge: (slug: string, projectId: string) => request<KnowledgeDoc[]>(`/api/workspaces/${slug}/projects/${projectId}/knowledge`),
   // HU-005 · backlog y ejecución de historias
+  // Etapas operativas: archivo reversible del trabajo activo (el conocimiento se conserva)
+  phase: (slug: string, projectId: string) => request<{ current: PhaseTransition | null; transitions: PhaseTransition[]; defaultName: string }>(`/api/workspaces/${slug}/projects/${projectId}/phase`),
+  phasePreview: (slug: string, projectId: string, name?: string) => request<PhaseTransitionPreview>(`/api/workspaces/${slug}/projects/${projectId}/phase/preview${name ? `?name=${encodeURIComponent(name)}` : ''}`),
+  startPhase: (slug: string, projectId: string, name: string) => request<PhaseTransition>(`/api/workspaces/${slug}/projects/${projectId}/phase`, { method: 'POST', body: JSON.stringify({ name, authorized: true }) }),
+  revertPhase: (slug: string, projectId: string, id: string, reason?: string) => request<PhaseTransition>(`/api/workspaces/${slug}/projects/${projectId}/phase/${id}/revert`, { method: 'POST', body: JSON.stringify({ authorized: true, reason }) }),
+  archive: (slug: string, projectId: string) => request<ProjectArchive>(`/api/workspaces/${slug}/projects/${projectId}/archive`),
+  restoreStory: (slug: string, id: string) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/restore`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   backlog: (slug: string, projectId: string) => request<BacklogItem[]>(`/api/workspaces/${slug}/projects/${projectId}/backlog`),
   importBacklog: (slug: string, projectId: string, opts?: { authorized: true; maxUsd: number }) => request<{ imported: number; total: number; source: string | null; parsed: number; usedAI: boolean; costUsd: number }>(`/api/workspaces/${slug}/projects/${projectId}/backlog/import`, { method: 'POST', body: JSON.stringify(opts ?? {}) }),
   importEstimate: (slug: string, projectId: string) => request<{ model: string | null; byAgent: string | null; estimatedUsd: number }>(`/api/workspaces/${slug}/projects/${projectId}/backlog/import/estimate`),

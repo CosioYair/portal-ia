@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Agent, BacklogItem, KnowledgeDoc, Process, UsageToday } from '@portal-ia/domain';
+import type { Agent, BacklogItem, KnowledgeDoc, Process, UsageToday, PhaseTransition } from '@portal-ia/domain';
 import { BACKLOG_STATUS } from '../lib/labels.ts';
 import { api, type ProjectFull } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
+import { TeamReady } from '../components/TeamReady.tsx';
 import { Avatar, Chip, Empty, Icon, KV } from '../components/ui.tsx';
 import { FolderPicker } from '../components/FolderPicker.tsx';
 import { RepoCard } from '../components/RepoCard.tsx';
@@ -22,6 +23,7 @@ export function Dashboard() {
   const [procs, setProcs] = useState<Process[]>([]);
   const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
   const [backlog, setBacklog] = useState<BacklogItem[]>([]);
+  const [phase, setPhase] = useState<PhaseTransition | null>(null);
   const [reqText, setReqText] = useState('');
   const [sending, setSending] = useState(false);
 
@@ -29,7 +31,7 @@ export function Dashboard() {
     const [ps, ag, us] = await Promise.all([api.projects(ws.slug), api.agents(ws.slug), api.usageToday(ws.slug)]);
     const cur = ps.find(p => p.id === status.project?.id) ?? ps[0] ?? null;
     setProject(cur); setAgents(ag.filter(a => a.scope === 'workspace' || a.projectId === cur?.id)); setUsage(us);
-    if (cur) { const [pr, kd, bl] = await Promise.all([api.processes(ws.slug, cur.id).catch(() => []), api.knowledge(ws.slug, cur.id).catch(() => []), api.backlog(ws.slug, cur.id).catch(() => [])]); setProcs(pr); setDocs(kd); setBacklog(bl); }
+    if (cur) { const [pr, kd, bl, ph] = await Promise.all([api.processes(ws.slug, cur.id).catch(() => []), api.knowledge(ws.slug, cur.id).catch(() => []), api.backlog(ws.slug, cur.id).catch(() => []), api.phase(ws.slug, cur.id).catch(() => null)]); setProcs(pr); setDocs(kd); setBacklog(bl); setPhase(ph?.current ?? null); }
   };
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.slug, status.project?.id]);
@@ -37,7 +39,8 @@ export function Dashboard() {
   const connected = providers.filter(p => p.status === 'connected');
   const modelShort = (a: Agent) => providers.find(p => p.id === a.config.provider)?.models.find(m => m.id === a.config.model)?.short ?? a.config.model;
   const active = agents.filter(a => a.status === 'active').length;
-  const synthesis = docs.find(d => d.title.startsWith('Síntesis')) ?? null;
+  const synthesis = docs.find(d => d.title.startsWith('Síntesis') && (!phase || d.createdAt > phase.startedAt)) ?? null;
+  const baseline = phase?.baselineDocId ? docs.find(d => d.id === phase.baselineDocId) ?? null : null;
   const running = procs.filter(p => p.status === 'running');
   const integrated = procs.filter(p => p.kind === 'story_execution' && p.result?.merged).slice(0, 6);
   const row = (a: Agent) => (
@@ -63,7 +66,7 @@ export function Dashboard() {
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <Link className="btn btn-secondary" to="/equipo">Configurar equipo</Link>
-            <Link className="btn btn-primary" to="/backlog">{Icon.arrow()}{backlog.some(b => b.status !== 'done') ? 'Ejecutar backlog' : 'Backlog'}</Link>
+            <Link className="btn btn-primary" to="/backlog">{Icon.arrow()}{backlog.some(b => b.status !== 'done' && b.status !== 'discarded') ? 'Ejecutar backlog' : 'Backlog'}</Link>
           </div>
         </div>
 
@@ -82,13 +85,19 @@ export function Dashboard() {
               </div>
             </section>
 
+            {phase && <section className="card" aria-label="Etapa vigente" style={{ borderColor: '#BFD9D6' }}>
+              <div className="card-h"><div><div className="eyebrow">Etapa vigente</div><div className="h3">{phase.name}</div><div className="small muted">Desde {new Date(phase.startedAt).toLocaleDateString('es-MX')} · base: commit <span className="mono">{phase.gitHead?.slice(0, 7) ?? '—'}</span> · {phase.summary.archivedStories.length} historias de la etapa anterior en el archivo</div></div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Link className="btn btn-ghost btn-sm" to="/archivo">Archivo histórico</Link><Link className="btn btn-ghost btn-sm" to="/etapa">Etapas</Link></div></div>
+              {baseline && <div className="card-b"><details><summary className="sm13" style={{ cursor: 'pointer' }}>Línea base del proyecto (lo que ya existe y está verificado)</summary><div style={{ maxHeight: 520, overflow: 'auto', marginTop: 8 }}><Markdown text={baseline.body} /></div></details></div>}
+            </section>}
+
             {project && synthesis && (
               <section className="card">
                 <div className="card-h"><div><div className="h3">Dirección del proyecto</div><div className="small muted">Síntesis del Coordinador del Proyecto tras la evaluación inicial · {new Date(synthesis.createdAt).toLocaleString('es-MX')}</div></div><Link className="lnk sm13" to="/conocimiento">Ver todos los documentos</Link></div>
                 <div className="card-b" style={{ maxHeight: 520, overflow: 'auto' }}><Markdown text={synthesis.body} /></div>
               </section>
             )}
-            {project && !synthesis && <AssessmentCard projectId={project.id} hasRepo={!!project.repository} compact />}
+            {project && !synthesis && !phase && <AssessmentCard projectId={project.id} hasRepo={!!project.repository} compact />}
 
             {project && <RepoCard project={project} onPick={() => setPicker(true)} onChanged={load} />}
 
@@ -106,13 +115,14 @@ export function Dashboard() {
             <section className="card">
               <div className="card-h"><div><div className="h3">Backlog y solicitudes</div><div className="small muted">Historias del plan y peticiones tuyas. Se ejecutan una a una con tu autorización.</div></div><Link className="lnk sm13" to="/backlog">Abrir backlog</Link></div>
               <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                {backlog.length === 0 && <Empty icon={Icon.inbox()} title="Aún no hay historias" hint={synthesis ? 'Importa las historias del plan desde el backlog o añade una solicitud aquí.' : 'Ejecuta la evaluación inicial para obtener el plan, o añade una solicitud aquí.'} style={{ padding: '14px 16px 6px' }} />}
+                {backlog.length === 0 && phase && <TeamReady phase={phase} onCreate={() => document.getElementById('dash-request')?.focus()} />}
+                {backlog.length === 0 && !phase && <Empty icon={Icon.inbox()} title="Aún no hay historias" hint={synthesis ? 'Importa las historias del plan desde el backlog o añade una solicitud aquí.' : 'Ejecuta la evaluación inicial para obtener el plan, o añade una solicitud aquí.'} style={{ padding: '14px 16px 6px' }} />}
                 {backlog.length > 0 && <div style={{ display: 'flex', flexDirection: 'column' }}>
                   {backlog.filter(b => b.status !== 'done').slice(0, 5).map(b => { const st = BACKLOG_STATUS[b.status]; return <div key={b.id} className="rrow"><span className="mono small muted">{b.storyId}</span><span style={{ flex: 1, fontWeight: 500 }}>{b.title}</span><Chip tone={st.tone} xs dot={b.status === 'in_progress' ? 'pulse' : undefined}>{st.label}</Chip></div>; })}
                   <div className="small muted" style={{ paddingTop: 8 }}>{backlog.filter(b => b.status === 'done').length} de {backlog.length} completadas</div>
                 </div>}
                 <form style={{ display: 'flex', flexDirection: 'column', gap: 8 }} onSubmit={async e => { e.preventDefault(); if (!project || reqText.trim().length < 3) return; setSending(true); try { await api.addBacklogItem(ws.slug, project.id, { title: reqText.trim() }); setReqText(''); flash('Solicitud añadida al backlog'); await load(); } catch (err: any) { flash(err.message, 'err'); } finally { setSending(false); } }}>
-                  <textarea className="input" value={reqText} onChange={e => setReqText(e.target.value)} placeholder="Describe lo que quieres que el equipo construya o corrija…" aria-label="Nueva solicitud de desarrollo" style={{ minHeight: 72 }} />
+                  <textarea id="dash-request" className="input" value={reqText} onChange={e => setReqText(e.target.value)} placeholder="Describe lo que quieres que el equipo construya o corrija…" aria-label="Nueva solicitud de desarrollo" style={{ minHeight: 72 }} />
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}><span className="small muted">Añadirla no consume IA. Se ejecuta desde el backlog con presupuesto autorizado.</span><button className="btn btn-secondary btn-sm" type="submit" disabled={sending || reqText.trim().length < 3}>Añadir al backlog</button></div>
                 </form>
               </div>

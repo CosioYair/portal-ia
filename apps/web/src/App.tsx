@@ -14,6 +14,8 @@ import { ProcessList, ProcessView } from './screens/ProcessView.tsx';
 import { StoryWorkspace } from './screens/StoryWorkspace.tsx';
 import { Knowledge } from './screens/Knowledge.tsx';
 import { Backlog } from './screens/Backlog.tsx';
+import { Phase } from './screens/Phase.tsx';
+import { Archive } from './screens/Archive.tsx';
 import { Assistant } from './screens/Assistant.tsx';
 import { CompanyHome } from './screens/CompanyHome.tsx';
 import { Icon } from './components/ui.tsx';
@@ -116,6 +118,8 @@ export default function App() {
           <Route path="/historias/:storyId" element={guard(<StoryWorkspace />)} />
           <Route path="/conocimiento" element={guard(<Knowledge />)} />
           <Route path="/backlog" element={guard(<Backlog />)} />
+          <Route path="/etapa" element={guard(<Phase />)} />
+          <Route path="/archivo" element={guard(<Archive />)} />
           <Route path="/autorizaciones" element={ready ? <InboxScreen /> : <Navigate to={home} replace />} />
           <Route path="*" element={<Navigate to={home} replace />} />
         </Routes>

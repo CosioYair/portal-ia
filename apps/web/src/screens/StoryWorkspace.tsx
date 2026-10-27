@@ -93,19 +93,22 @@ export function StoryWorkspace() {
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}><Chip tone={st.tone}>{st.label}</Chip>{it.estimate && <Chip xs>{it.estimate}</Chip>}{openTasks > 0 && <Chip tone="warn" xs>{openTasks} tarea(s) abiertas</Chip>}{fails > 0 && <Chip tone="err" xs>{fails} paso(s) con falla</Chip>}</div>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {!last && it.status === 'pending' && <button className="btn btn-primary btn-sm" onClick={() => navigate('/backlog#ejecutar')}>{Icon.arrow()}Ejecutar desde Backlog</button>}
+            {!last && it.status === 'pending' && !it.archivedAt && <button className="btn btn-primary btn-sm" onClick={() => navigate('/backlog#ejecutar')}>{Icon.arrow()}Ejecutar desde Backlog</button>}
           </div>
         </header>
+        {it.archivedAt && <Notice kind="info"><strong>Historia archivada</strong> con la etapa anterior ({new Date(it.archivedAt).toLocaleDateString('es-MX')}). Es histórica: puedes consultarla, pero no admite acciones. Para retomarla, restáurala desde el <Link className="lnk" to="/archivo">archivo histórico</Link>.</Notice>}
+        <fieldset disabled={!!it.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
         {last?.guidance?.flow ? <StoryFlowPanel proc={last} story={{ id: it.id, storyId: it.storyId, title: it.title }} variant="story" onChange={onProcChange}
           onAsk={q => { setText(q); setAsk(true); openTab('chat'); }} onOpenIterations={() => openTab('iteraciones')} />
           : last?.guidance && <Notice kind={last.guidance.tone === 'err' ? 'err' : last.guidance.tone === 'ok' ? 'ok' : last.guidance.tone === 'warn' ? 'warn' : 'info'}><div><strong>Siguiente paso:</strong> {last.guidance.next}</div></Notice>}
+        </fieldset>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 320px)', gap: 16, alignItems: 'start', marginTop: 14 }}>
           <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               {(['estado', 'chat', 'tareas', 'iteraciones'] as const).map(t => <button key={t} className={`btn btn-sm ${tab === t ? 'btn-primary' : 'btn-ghost'}`} onClick={() => openTab(t)}>{t === 'estado' ? 'Estado y prueba' : t === 'chat' ? `Chat con el equipo${ctx.messages.length ? ` (${ctx.messages.length})` : ''}` : t === 'tareas' ? `Tareas${openTasks ? ` (${openTasks})` : ''}` : `Iteraciones (${ctx.iterations})`}</button>)}
             </div>
-
+            <fieldset disabled={!!it.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
             {tab === 'estado' && (last ? (last.status === 'done' || (last.result?.changes.length ?? 0) > 0 ? <StoryResult proc={last} onChange={onProcChange} /> : <section className="card card-b"><p className="sm13">La iteración actual está <strong>{last.status === 'running' ? 'en ejecución' : last.status === 'pending_authorization' ? 'pendiente de autorización' : last.status}</strong>. {last.status === 'pending_authorization' ? 'Autorízala en la pestaña Iteraciones.' : ''}<Link className="lnk" to={`/procesos/${last.id}`}> Ver el proceso</Link>.</p></section>) : <section className="card card-b"><p className="sm13 muted">Esta historia aún no se ha ejecutado. Hazlo desde Backlog («Ejecutar») para que el equipo proponga el diff; después todo el seguimiento ocurre aquí.</p></section>)}
 
             {tab === 'chat' && <section className="card">
@@ -163,10 +166,11 @@ export function StoryWorkspace() {
                 </div>}
               </div>
             </section>}
+            </fieldset>
           </div>
 
           <aside style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <section className="card" aria-label="Contexto"><div className="card-h"><div className="h3">Contexto</div>{!edit && <button className="btn btn-ghost btn-sm" onClick={startEdit}>Editar</button>}</div><div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <section className="card" aria-label="Contexto"><div className="card-h"><div className="h3">Contexto</div>{!edit && !it.archivedAt && <button className="btn btn-ghost btn-sm" onClick={startEdit}>Editar</button>}</div><div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {edit ? <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <label className="label" htmlFor="ctx-title" style={{ margin: 0 }}>Título</label>
                 <input id="ctx-title" className="input" style={{ height: 34 }} value={edit.title} maxLength={200} onChange={e => setEdit({ ...edit, title: e.target.value })} />

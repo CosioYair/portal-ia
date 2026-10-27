@@ -93,11 +93,11 @@ function ActionRow({ a }: { a: AssistantAction }) {
 }
 
 /** Conversación con el Asistente de Empresa (compartida por la pantalla Asistente y el dock flotante). */
-export function AssistantChat({ compact = false, onInfo, onPending }: { compact?: boolean; onInfo?: (i: AssistantInfo) => void; onPending?: (n: number) => void }) {
+export function AssistantChat({ compact = false, onInfo, onPending, initialText }: { compact?: boolean; onInfo?: (i: AssistantInfo) => void; onPending?: (n: number) => void; initialText?: string }) {
   const { flash, refreshStructure } = useApp();
   const [info, setInfo] = useState<AssistantInfo | null>(null);
   const [msgs, setMsgs] = useState<AssistantMessage[]>([]);
-  const [text, setText] = useState('');
+  const [text, setText] = useState(initialText ?? '');
   const [images, setImages] = useState<Pending[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

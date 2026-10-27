@@ -69,23 +69,25 @@ export function ProcessView() {
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
             {proc.kind === 'story_execution' && proc.backlogItemId && <Link className="btn btn-secondary" to={`/historias/${proc.backlogItemId}`}>Espacio de la historia {Icon.arrow()}</Link>}
-            {proc.status === 'running' && <button className="btn btn-secondary" onClick={cancel}>Cancelar proceso</button>}
+            {proc.status === 'running' && !proc.archivedAt && <button className="btn btn-secondary" onClick={cancel}>Cancelar proceso</button>}
             {proc.status === 'done' && proc.kind === 'initial_assessment' && <Link className="btn btn-primary" to="/backlog">Ver backlog y ejecutar {Icon.arrow()}</Link>}
             {proc.kind === 'story_execution' && <Link className="btn btn-secondary" to="/backlog">Volver al backlog</Link>}
           </div>
         </div>
 
+        {proc.archivedAt && <Notice kind="info"><strong>Proceso archivado</strong> con la etapa anterior ({new Date(proc.archivedAt).toLocaleDateString('es-MX')}). Es histórico: se puede consultar, pero no admite acciones. <Link className="lnk" to="/archivo">Archivo histórico</Link>.</Notice>}
+        <fieldset disabled={!!proc.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
         {proc.kind === 'story_execution' && proc.guidance?.flow && <StoryFlowPanel proc={proc} variant="process" onChange={setProc}
           story={proc.backlogItemId ? { id: proc.backlogItemId, storyId: proc.title.split(' · ')[0], title: proc.title.split(' · ').slice(1).join(' · ') || proc.title } : null} />}
-        {proc.guidance && !proc.guidance.flow && proc.status !== 'pending_authorization' && <Notice kind={proc.guidance.tone}><div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
+        {proc.guidance && !proc.guidance.flow && proc.status !== 'pending_authorization' && !proc.archivedAt && <Notice kind={proc.guidance.tone}><div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
           <div><strong>{proc.guidance.phase}.</strong> <span style={{ fontWeight: 600 }}>Siguiente paso:</span> {proc.guidance.next}</div>
-          {proc.kind === 'story_execution' && (proc.status === 'failed' || proc.status === 'cancelled' || proc.status === 'budget_exceeded') && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          {proc.kind === 'story_execution' && !proc.archivedAt && (proc.status === 'failed' || proc.status === 'cancelled' || proc.status === 'budget_exceeded') && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             {!!proc.steps[1]?.outputMd && !proc.result?.applied && <button className="btn btn-primary btn-sm" onClick={recover} disabled={fixBusy !== null}>{fixBusy === 'recover' ? <span className="spin spin-light" /> : Icon.check()}Recuperar el resultado (sin IA)</button>}
             <button className="btn btn-secondary btn-sm" onClick={retry} disabled={fixBusy !== null}>{fixBusy === 'retry' ? <span className="spin" /> : Icon.arrow()}Volver a ejecutar la historia</button>
             {fixErr && <span className="sm13" style={{ color: '#9A1F18' }}>{fixErr}</span>}
           </div>}
         </div></Notice>}
-        {proc.status === 'pending_authorization' && <section className="card" id="sec-authorize" style={{ borderColor: '#F0C66B', background: '#FFFBF0' }}>
+        {proc.status === 'pending_authorization' && !proc.archivedAt && <section className="card" id="sec-authorize" style={{ borderColor: '#F0C66B', background: '#FFFBF0' }}>
           <div className="card-h"><div><div className="h3">Autorizar este proceso</div><div className="small muted">Consume IA. Nada se ha gastado todavía. Costo estimado ≈ {fmtUsd(proc.estimatedUsd)}.</div></div><Chip tone="warn" xs>requiere tu autorización</Chip></div>
           <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {authErr && <Notice kind="err">{authErr}</Notice>}
@@ -137,6 +139,7 @@ export function ProcessView() {
             </section>
           </aside>
         </div>
+        </fieldset>
       </main>
     </Shell>
   );
@@ -150,7 +153,7 @@ export function ProcessList() {
   return (
     <Shell crumb="Actividad">
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        <div><div className="eyebrow">Actividad</div><h1 className="h1" style={{ fontSize: 26 }}>Procesos del proyecto</h1></div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}><div><div className="eyebrow">Actividad</div><h1 className="h1" style={{ fontSize: 26 }}>Procesos del proyecto</h1></div><Link className="btn btn-ghost btn-sm" to="/archivo">Archivo histórico</Link></div>
         <section className="card">
           <div className="card-h"><div className="h3">Procesos</div><span className="small muted">{list?.length ?? 0} en total</span></div>
           {list && list.length === 0 && <div className="card-b"><p className="muted sm13">Aún no hay procesos. La evaluación inicial se lanza desde el panel; las historias, desde el backlog.</p></div>}

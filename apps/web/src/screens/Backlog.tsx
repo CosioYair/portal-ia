@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Agent, AssessmentEstimate, BacklogItem, Process } from '@portal-ia/domain';
+import type { Agent, AssessmentEstimate, BacklogItem, PhaseTransition, Process } from '@portal-ia/domain';
 import { api, type ProjectFull } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { BACKLOG_STATUS, fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
-import { Chip, Empty, Icon, Notice } from '../components/ui.tsx';
+import { Chip, Icon, Notice } from '../components/ui.tsx';
+import { TeamReady } from '../components/TeamReady.tsx';
 
 /** Backlog del proyecto: historias del plan (importadas de la síntesis) y solicitudes del propietario. Desde aquí se ejecutan. */
 export function Backlog() {
@@ -15,6 +16,7 @@ export function Backlog() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [procs, setProcs] = useState<Process[]>([]);
   const [project, setProject] = useState<ProjectFull | null>(null);
+  const [phase, setPhase] = useState<PhaseTransition | null>(null);
   const [sel, setSel] = useState<BacklogItem | null>(null);
   const [est, setEst] = useState<AssessmentEstimate | null>(null);
   const [estError, setEstError] = useState<string | null>(null);
@@ -34,8 +36,8 @@ export function Backlog() {
   const toggleSec = (k: string) => setOpenSec(o => { const n = { ...o, [k]: !(o[k] ?? true) }; try { localStorage.setItem('portal-ia.backlog.sec', JSON.stringify(n)); } catch { /* sin almacenamiento */ } return n; });
 
   const load = async () => {
-    const [b, a, p, ps] = await Promise.all([api.backlog(ws.slug, projectId), api.agents(ws.slug), api.processes(ws.slug, projectId), api.projects(ws.slug)]);
-    setItems(b); setAgents(a); setProcs(p); setProject(ps[0] ?? null);
+    const [b, a, p, ps, ph] = await Promise.all([api.backlog(ws.slug, projectId), api.agents(ws.slug), api.processes(ws.slug, projectId), api.projects(ws.slug), api.phase(ws.slug, projectId).catch(() => null)]);
+    setItems(b); setAgents(a); setProcs(p); setProject(ps[0] ?? null); setPhase(ph?.current ?? null);
   };
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.slug, projectId]);
@@ -100,12 +102,14 @@ export function Backlog() {
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div className="eyebrow">Backlog</div>
+            <div className="eyebrow">Backlog{phase ? ` · etapa «${phase.name}»` : ''}</div>
             <h1 className="h1" style={{ fontSize: 26 }}>Plan del proyecto y solicitudes</h1>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip>{items?.length ?? 0} historias</Chip><Chip tone="ok">{items?.filter(i => i.status === 'done').length ?? 0} completadas</Chip><Chip tone="accent">{items?.filter(i => i.status === 'review').length ?? 0} para revisar</Chip><Chip>{pending.length} abiertas</Chip>{running && <Chip tone="warn" dot="pulse">1 en ejecución</Chip>}</div>
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            <button className="btn btn-secondary" onClick={() => importPlan(false)} disabled={busy}>{Icon.book()}Importar historias de la síntesis</button>
+            {!phase && <button className="btn btn-secondary" onClick={() => importPlan(false)} disabled={busy}>{Icon.book()}Importar historias de la síntesis</button>}
+            <Link className="btn btn-ghost" to="/archivo">Archivo histórico</Link>
+            <Link className="btn btn-ghost" to="/etapa">Nueva etapa</Link>
             {next && <button className="btn btn-primary" onClick={() => setSel(next)} disabled={!!running}>{Icon.arrow()}Ejecutar siguiente: {next.storyId}</button>}
           </div>
         </div>
@@ -125,7 +129,7 @@ export function Backlog() {
                   <input className="input" value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por id o texto…" aria-label="Buscar historias" style={{ height: 32, width: 220 }} />
                   <div style={{ display: 'flex', gap: 4 }}>{([['open', 'Abiertas'], ['all', 'Todas'], ['done', 'Completadas'], ['discarded', 'Descartadas']] as const).map(([k, l]) => <button key={k} className={`btn btn-sm ${filter === k ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setFilter(k)}>{l}</button>)}</div>
                 </div></div>
-              {items && items.length === 0 && <div className="card-b"><Empty icon={Icon.inbox()} title="El backlog está vacío" hint="Importa las historias de la síntesis de la evaluación inicial o añade una solicitud a la derecha." style={{ padding: '24px 0 8px' }} /></div>}
+              {items && items.length === 0 && <TeamReady phase={phase} onCreate={() => document.getElementById('new-story-title')?.focus()} />}
               {items && items.length > 0 && sections.map(sec => <div key={sec.key} style={{ borderTop: '1px solid #EEECE6' }}>
                 <button className="arow" style={{ borderRadius: 0, padding: '10px 18px', background: '#FAF9F6' }} onClick={() => toggleSec(sec.key)} aria-expanded={isOpen(sec)}>
                   <span style={{ display: 'inline-block', transform: isOpen(sec) ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>{Icon.chevR()}</span>
@@ -196,7 +200,7 @@ export function Backlog() {
             <section className="card">
               <div className="card-h"><div className="h3">Nueva solicitud de desarrollo</div></div>
               <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <input className="input" value={newTitle} onChange={e => setNewTitle(e.target.value)} placeholder="Qué quieres que el equipo construya o corrija" aria-label="Título de la solicitud" />
+                <input id="new-story-title" className="input" value={newTitle} onChange={e => setNewTitle(e.target.value)} placeholder="Qué quieres que el equipo construya o corrija" aria-label="Título de la solicitud" />
                 <textarea className="input" value={newCrit} onChange={e => setNewCrit(e.target.value)} placeholder="Criterio de aceptación (opcional): cómo sabremos que está hecho" aria-label="Criterio de aceptación" style={{ minHeight: 70 }} />
                 <button className="btn btn-secondary" onClick={addItem} disabled={busy || newTitle.trim().length < 3}>Añadir al backlog</button>
                 <div className="help">Se asigna al Coordinador del Proyecto. Añadirla no consume IA; ejecutarla sí, con tu autorización.</div>
