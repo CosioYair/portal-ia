@@ -139,11 +139,12 @@ test('API: GET de estado y POST fuera de main responden con motivo claro (409) s
   if (!body.canIntegrate) {
     assert.ok(['NOT_ON_MAIN', 'DETACHED_HEAD', 'NOT_A_REPO'].includes(body.reasonCode));
     assert.ok(typeof body.reason === 'string' && body.reason.length > 0);
-    const headBefore = git(REPO_ROOT, 'rev-parse', 'HEAD');
+    // Sin repositorio (p. ej. dentro del sandbox Docker, donde el worktree no ve su .git) no hay HEAD que comparar.
+    const headBefore = body.reasonCode === 'NOT_A_REPO' ? null : git(REPO_ROOT, 'rev-parse', 'HEAD');
     const post = await app.inject({ method: 'POST', url: '/api/portal/integration', payload: { branch: 'portal-ia/hu-143' } });
     assert.equal(post.statusCode, 409);
     assert.equal(post.json().code, body.reasonCode);
-    assert.equal(git(REPO_ROOT, 'rev-parse', 'HEAD'), headBefore, 'no se hizo ningún commit');
+    if (headBefore) assert.equal(git(REPO_ROOT, 'rev-parse', 'HEAD'), headBefore, 'no se hizo ningún commit');
   }
   const invalid = await app.inject({ method: 'POST', url: '/api/portal/integration', payload: {} });
   assert.equal(invalid.statusCode, 400);
