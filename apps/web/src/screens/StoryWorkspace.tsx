@@ -9,6 +9,7 @@ import { Chip, Icon, KV, Notice } from '../components/ui.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { StoryResult } from '../components/StoryResult.tsx';
 import { IterationComposer } from '../components/IterationComposer.tsx';
+import { StoryFlowPanel } from '../components/StoryFlowPanel.tsx';
 
 const ROLE: Record<string, string> = { planner: 'planifica', implementer: 'implementa', reviewer: 'revisa', consultant: 'consulta' };
 type Tab = 'estado' | 'chat' | 'tareas' | 'iteraciones';
@@ -27,7 +28,7 @@ export function StoryWorkspace() {
   const slug = status.workspace!.slug;
   const [ctx, setCtx] = useState<StoryContext | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const { hash } = useLocation();
+  const { hash, state: navState } = useLocation();
   const [tab, setTab] = useState<Tab>(() => tabFromHash(hash) ?? 'estado');
   const load = async () => { try { const c = await api.story(slug, storyId!); setCtx(c); setErr(null); return c; } catch (e: any) { setErr(e.message); return null; } };
   useEffect(() => { let alive = true; const tick = async () => { const c = await load(); if (!alive) return; if (c?.lastProcess && (c.lastProcess.status === 'running' || c.lastProcess.status === 'pending_authorization')) setTimeout(tick, 3000); }; void tick(); return () => { alive = false; }; // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -38,8 +39,9 @@ export function StoryWorkspace() {
   useEffect(() => { const t = tabFromHash(hash); if (t) { setTab(t); void load(); } // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hash]);
 
-  // Chat
+  // Chat (también llega una pregunta preparada desde el recorrido: «Preguntar al equipo sobre este problema»)
   const [text, setText] = useState(''); const [ask, setAsk] = useState(true); const [auth, setAuth] = useState(false); const [agentId, setAgentId] = useState<string>(''); const [est, setEst] = useState<{ agentName: string; estimatedUsd: number } | null>(null); const [sending, setSending] = useState(false);
+  useEffect(() => { const q = (navState as any)?.ask; if (typeof q === 'string' && q) { setText(q); setAsk(true); } }, [navState]);
   useEffect(() => { if (ctx) api.storyAskEstimate(slug, ctx.item.id, agentId || null).then(setEst).catch(() => setEst(null)); }, [slug, ctx?.item.id, agentId]);
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [ctx?.messages.length, tab]);
@@ -88,14 +90,15 @@ export function StoryWorkspace() {
           <div style={{ minWidth: 0 }}>
             <div className="eyebrow">Espacio de la historia · iteración {ctx.iterations || '—'}</div>
             <h1 className="h2" style={{ margin: '4px 0' }}>{it.storyId} · {it.title}</h1>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}><Chip tone={st.tone}>{st.label}</Chip>{last?.guidance && <Chip tone={last.guidance.tone === 'err' ? 'err' : last.guidance.tone === 'ok' ? 'ok' : last.guidance.tone === 'warn' ? 'warn' : ''} xs>{last.guidance.phase}</Chip>}{it.estimate && <Chip xs>{it.estimate}</Chip>}{openTasks > 0 && <Chip tone="warn" xs>{openTasks} tarea(s) abiertas</Chip>}{fails > 0 && <Chip tone="err" xs>{fails} paso(s) con falla</Chip>}</div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}><Chip tone={st.tone}>{st.label}</Chip>{it.estimate && <Chip xs>{it.estimate}</Chip>}{openTasks > 0 && <Chip tone="warn" xs>{openTasks} tarea(s) abiertas</Chip>}{fails > 0 && <Chip tone="err" xs>{fails} paso(s) con falla</Chip>}</div>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {last && <Link className="btn btn-ghost btn-sm" to={`/procesos/${last.id}`}>Ver proceso</Link>}
             {!last && it.status === 'pending' && <button className="btn btn-primary btn-sm" onClick={() => navigate('/backlog#ejecutar')}>{Icon.arrow()}Ejecutar desde Backlog</button>}
           </div>
         </header>
-        {last?.guidance && <Notice kind={last.guidance.tone === 'err' ? 'err' : last.guidance.tone === 'ok' ? 'ok' : last.guidance.tone === 'warn' ? 'warn' : 'info'}><div><strong>Siguiente paso:</strong> {last.guidance.next}</div></Notice>}
+        {last?.guidance?.flow ? <StoryFlowPanel proc={last} story={{ id: it.id, storyId: it.storyId, title: it.title }} variant="story" onChange={onProcChange}
+          onAsk={q => { setText(q); setAsk(true); openTab('chat'); }} onOpenIterations={() => openTab('iteraciones')} />
+          : last?.guidance && <Notice kind={last.guidance.tone === 'err' ? 'err' : last.guidance.tone === 'ok' ? 'ok' : last.guidance.tone === 'warn' ? 'warn' : 'info'}><div><strong>Siguiente paso:</strong> {last.guidance.next}</div></Notice>}
 
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 320px)', gap: 16, alignItems: 'start', marginTop: 14 }}>
           <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>

@@ -113,6 +113,10 @@ export const api = {
   storyMessage: (slug: string, id: string, text: string, ask?: { maxUsd: number; agentId?: string | null }) => request<{ user: StoryMessage; reply: StoryMessage | null }>(`/api/workspaces/${slug}/stories/${id}/messages`, { method: 'POST', body: JSON.stringify(ask ? { text, ask: true, authorized: true, maxUsd: ask.maxUsd, agentId: ask.agentId ?? null } : { text }) }),
   storyApplyProposals: (slug: string, id: string, messageId: string, what: { tasks?: boolean; criterion?: boolean }) => request<StoryContext>(`/api/workspaces/${slug}/stories/${id}/messages/${messageId}/apply`, { method: 'POST', body: JSON.stringify(what) }),
   storyAddTask: (slug: string, id: string, title: string, assigneeAgentId?: string | null, assigneeName?: string | null) => request<StoryTask>(`/api/workspaces/${slug}/stories/${id}/tasks`, { method: 'POST', body: JSON.stringify({ title, assigneeAgentId, assigneeName }) }),
+  /** Tareas a partir del problema actual del recorrido (QA, verificación, comprobaciones…). Sin IA. */
+  storyTasksFromIssue: (slug: string, id: string) => request<StoryTask[]>(`/api/workspaces/${slug}/stories/${id}/tasks/from-issue`, { method: 'POST' }),
+  /** «Faltan las dependencias Linux»: install con red temporal y repetir los comandos pendientes (autorización y red explícitas). */
+  installAndRetry: (slug: string, processId: string, commands: string[]) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/verify/install-and-retry`, { method: 'POST', body: JSON.stringify({ authorized: true, allowNetwork: true, commands }) }),
   storyTasksFromFeedback: (slug: string, id: string) => request<StoryTask[]>(`/api/workspaces/${slug}/stories/${id}/tasks/from-feedback`, { method: 'POST' }),
   storySetTask: (slug: string, id: string, taskId: string, status: 'open' | 'done') => request<StoryTask>(`/api/workspaces/${slug}/stories/${id}/tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
   storyDeleteTask: (slug: string, id: string, taskId: string) => request<{ ok: boolean }>(`/api/workspaces/${slug}/stories/${id}/tasks/${taskId}`, { method: 'DELETE' }),

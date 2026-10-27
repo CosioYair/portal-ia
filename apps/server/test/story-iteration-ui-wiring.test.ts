@@ -35,3 +35,12 @@ test('el panel Contexto permite editar título, criterio y descripción con el P
   assert.match(ws, />Editar<\/button>/); assert.match(ws, /api\.patchBacklogItem\(slug, ctx\.item\.id, changed\)/);
   for (const id of ['ctx-title', 'ctx-criterion', 'ctx-description']) assert.ok(ws.includes(`id="${id}"`), id);
 });
+
+test('recorrido guiado: una sola cabecera (StoryFlowPanel) en la historia y en el proceso, sin orden de cierre calculado en el cliente', () => {
+  const ws = read('screens/StoryWorkspace.tsx'); const pv = read('screens/ProcessView.tsx'); const ov = read('components/StoryOverview.tsx');
+  assert.match(ws, /<StoryFlowPanel proc=\{last\}/); assert.match(pv, /<StoryFlowPanel proc=\{proc\} variant="process"/);
+  assert.ok(!ov.includes('Orden de cierre'), 'el orden de cierre lo calcula el servidor (guidance.flow)');
+  const panel = read('components/StoryFlowPanel.tsx');
+  for (const id of ['install_and_retry', 'request_fix', 'ask_team', 'tasks_from_issue', 'merge', 'runtime_check', 'retry_process', 'recover']) assert.ok(panel.includes(`'${id}'`), id);
+  assert.match(panel, /requires\.some\(r => r === 'authorization' \|\| r === 'network'\) && confirming\?\.id !== a\.id/, 'lo que exige autorización o red pide confirmación antes');
+});

@@ -9,6 +9,7 @@ import { Chip, Icon, KV, Notice } from '../components/ui.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { StoryResult } from '../components/StoryResult.tsx';
 import { DelegationResultView } from '../components/DelegationResultView.tsx';
+import { StoryFlowPanel } from '../components/StoryFlowPanel.tsx';
 
 const P_LABEL: Record<Process['status'], { label: string; tone: '' | 'ok' | 'warn' | 'err'; dot: '' | 'ok' | 'pulse' | 'err' }> = {
   pending_authorization: { label: 'Pendiente de autorización', tone: 'warn', dot: '' },
@@ -54,6 +55,7 @@ export function ProcessView() {
   const tokens = proc.inputTokens + proc.outputTokens;
   const pct = proc.budgetUsd ? Math.min(100, Math.round((proc.spentUsd / proc.budgetUsd) * 100)) : 0;
 
+  const stepTime = (s: ProcessStep) => { const sec = Math.max(0, Math.round(((s.finishedAt ? new Date(s.finishedAt) : new Date()).getTime() - new Date(s.startedAt!).getTime()) / 1000)); return sec < 60 ? `${sec} s` : `${Math.floor(sec / 60)} min ${sec % 60} s`; };
   const stepChip = (s: ProcessStep) => s.status === 'done' ? <Chip tone="ok" xs dot="ok">completado</Chip> : s.status === 'running' ? <Chip tone="warn" xs dot="pulse">en curso</Chip> : s.status === 'failed' ? <Chip tone="err" xs dot="err">error</Chip> : s.status === 'skipped' ? <Chip xs>omitido</Chip> : <Chip xs dot="">pendiente</Chip>;
 
   return (
@@ -73,7 +75,9 @@ export function ProcessView() {
           </div>
         </div>
 
-        {proc.guidance && proc.status !== 'pending_authorization' && <Notice kind={proc.guidance.tone}><div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
+        {proc.kind === 'story_execution' && proc.guidance?.flow && <StoryFlowPanel proc={proc} variant="process" onChange={setProc}
+          story={proc.backlogItemId ? { id: proc.backlogItemId, storyId: proc.title.split(' · ')[0], title: proc.title.split(' · ').slice(1).join(' · ') || proc.title } : null} />}
+        {proc.guidance && !proc.guidance.flow && proc.status !== 'pending_authorization' && <Notice kind={proc.guidance.tone}><div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
           <div><strong>{proc.guidance.phase}.</strong> <span style={{ fontWeight: 600 }}>Siguiente paso:</span> {proc.guidance.next}</div>
           {proc.kind === 'story_execution' && (proc.status === 'failed' || proc.status === 'cancelled' || proc.status === 'budget_exceeded') && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             {!!proc.steps[1]?.outputMd && !proc.result?.applied && <button className="btn btn-primary btn-sm" onClick={recover} disabled={fixBusy !== null}>{fixBusy === 'recover' ? <span className="spin spin-light" /> : Icon.check()}Recuperar el resultado (sin IA)</button>}
@@ -81,7 +85,7 @@ export function ProcessView() {
             {fixErr && <span className="sm13" style={{ color: '#9A1F18' }}>{fixErr}</span>}
           </div>}
         </div></Notice>}
-        {proc.status === 'pending_authorization' && <section className="card" style={{ borderColor: '#F0C66B', background: '#FFFBF0' }}>
+        {proc.status === 'pending_authorization' && <section className="card" id="sec-authorize" style={{ borderColor: '#F0C66B', background: '#FFFBF0' }}>
           <div className="card-h"><div><div className="h3">Autorizar este proceso</div><div className="small muted">Consume IA. Nada se ha gastado todavía. Costo estimado ≈ {fmtUsd(proc.estimatedUsd)}.</div></div><Chip tone="warn" xs>requiere tu autorización</Chip></div>
           <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {authErr && <Notice kind="err">{authErr}</Notice>}
@@ -106,12 +110,12 @@ export function ProcessView() {
                     <span className="ili-ic" style={s.status === 'done' ? { background: '#E3F1EF', color: '#0B5652' } : undefined}>{s.status === 'done' ? Icon.check() : s.status === 'running' ? <span className="spin" /> : <span className="mono">{i + 1}</span>}</span>
                     <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}><span className="h3">{s.title}</span><span className="small muted">{s.agentName}{s.role ? ` · ${s.role === 'planner' ? 'planifica' : s.role === 'implementer' ? 'implementa' : s.role === 'reviewer' ? 'revisa' : 'consulta'}` : ''} · <span className="mono">{s.model}</span>{s.status === 'done' && <> · {s.inputTokens + s.outputTokens} tokens · {fmtUsd(s.costUsd)} <span title="Costo calculado con los tokens que devolvió el proveedor">real</span></>}{s.reason && <span title={s.reason}> · ⓘ</span>}</span></span>
                   </div>
-                  {stepChip(s)}
+                  <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>{s.startedAt && <span className="small muted mono">{stepTime(s)}{s.inputTokens + s.outputTokens ? ` · ${s.inputTokens + s.outputTokens} tok · ${fmtUsd(s.costUsd)}` : ''}</span>}{stepChip(s)}</span>
                 </button>
                 {open === s.id && <div className="card-b">
                   {s.error && <Notice kind="err">{s.error}</Notice>}
                   {s.status === 'running' && <p className="sm13 muted">El agente está trabajando… esta vista se actualiza cada 2 segundos.</p>}
-                  {s.outputMd && <Markdown text={s.outputMd} />}
+                  {s.outputMd && (/^\s*[{[]/.test(s.outputMd) ? <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><p className="sm13 muted" style={{ margin: 0 }}>{s.role === 'reviewer' ? 'El veredicto de QA se muestra arriba, en «Revisión de calidad», con las observaciones por gravedad.' : s.role === 'planner' ? 'El plan se muestra arriba, en «Plan técnico».' : 'El resultado estructurado se muestra arriba.'}</p><details><summary className="small" style={{ cursor: 'pointer' }}>Ver la respuesta técnica del agente</summary><pre className="mono" style={{ fontSize: 12, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 320, overflow: 'auto' }}>{(() => { try { return JSON.stringify(JSON.parse(s.outputMd), null, 2); } catch { return s.outputMd; } })()}</pre></details></div> : <Markdown text={s.outputMd} />)}
                 </div>}
               </section>
             ))}
