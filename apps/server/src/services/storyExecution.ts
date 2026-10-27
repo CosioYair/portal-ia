@@ -349,7 +349,7 @@ ${result.implementationSummary}
 ${consultText}# Diffs
 ${diffs}
 
-Sé concreto y breve: "summary" en 3-5 frases, como máximo 8 "issues" y 6 "suggestedTests", cada uno de una línea.
+Sé concreto y breve: "summary" en 3-5 frases, como máximo 8 "issues" y 6 "suggestedTests", cada uno de una línea. Empieza cada issue con su gravedad entre corchetes: "[alta]" (rompe algo, inseguro o no cumple el criterio), "[media]" o "[baja]" (estilo, mejora opcional); si citas un archivo, usa su ruta.
 Responde SOLO con JSON: {"approve": boolean, "summary": string, "issues": string[], "suggestedTests": string[]}`, 6000);
     result.review = parseReview(revRes.text, revRes.stopReason);
     }

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import type { Process } from '@portal-ia/domain';
+import type { Process, VerificationRun } from '@portal-ia/domain';
 import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
 import { knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
@@ -7,7 +7,8 @@ import { cancelProcess, clearCancel, createAssessment, estimateAssessment, isCan
 import { createStoryProcess, estimateManualTest, estimateStory, generateManualTest, recoverStory, retryStory, runStory, stepByRole } from '../services/storyExecution.ts';
 import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
 import { describeProcess } from '../services/guidance.ts';
-import { listFeedback } from '../services/manual-test-feedback.ts';
+import { flowOptions } from '../services/processView.ts';
+import { DEPS_MISSING_EXIT } from '../services/sandbox.ts';
 import { recordContextEdit } from '../services/storyThread.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { applyChanges, checkStaleChanges, discardBranch, mergeBranch, pushBranches, removeWorktree, worktreePathFor } from '../services/repoWrite.ts';
@@ -38,8 +39,8 @@ export async function processRoutes(app: FastifyInstance) {
       q = { ...p, result: { ...p.result, activation } };
     }
     const item = q.kind === 'story_execution' && q.backlogItemId ? backlogRepo(slug).get(q.backlogItemId) : undefined;
-    const failedSteps = q.kind === 'story_execution' && q.result?.manualTest ? listFeedback(slug, q.id).items.filter(i => i.result === 'fail').length : 0;
-    return { ...q, guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, failedSteps }) };
+    const fo = await flowOptions(slug, q, item);
+    return { ...q, guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, ...fo }) };
   };
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
 
@@ -297,12 +298,20 @@ Proceso: ${proc.id}`, { processId: proc.id });
     try {
       requirePolicy('git_merge', { slug, processId: id, projectId: proc.projectId, authorized: true });
       const m = await mergeBranch(repo.path, proc.result.applied.branch, body.data.into, { affectedFiles: proc.result.changes.filter(c => !c.error).map(c => c.path), processId: id });
-      procs.setResult(id, { ...proc.result, merged: { into: m.into, commit: m.commit, mergedAt: new Date().toISOString() } });
+      procs.setResult(id, { ...proc.result, merged: { into: m.into, commit: m.commit, mergedAt: new Date().toISOString() }, mergeError: null });
       await removeWorktree(repo.path, id).catch(() => false);
       procs.logExecution({ projectId: proc.projectId, agentId: proc.steps[0]?.agentId ?? '', kind: 'repo_merge', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() });
       app.log.info({ processId: id, into: m.into, commit: m.commit, viaWorktree: m.viaWorktree }, 'rama integrada');
       return await withGuidance(slug, procs.get(id)!);
-    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : undefined }); }
+    } catch (e: any) {
+      // Conflicto: se guarda para que el recorrido lo explique y ofrezca la corrección (el merge ya se deshizo).
+      if (e.statusCode === 409 && /conflict/i.test(e.message)) {
+        const files = Array.from(new Set(Array.from(String(e.message).matchAll(/Merge conflict in (\S+)/g)).map(x => x[1])));
+        procs.setResult(id, { ...proc.result, mergeError: { at: new Date().toISOString(), message: String(e.message).slice(0, 2000), files: files.length ? files : proc.result.changes.filter(c => !c.error).map(c => c.path) } });
+        return reply.code(409).send({ error: e.message, code: 'merge_conflict', process: await withGuidance(slug, procs.get(id)!) });
+      }
+      return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : undefined });
+    }
   });
 
   // ---- Publicar en el remoto (git push · requiere autorización por uso) ----
@@ -325,33 +334,54 @@ Proceso: ${proc.id}`, { processId: proc.id });
   });
 
   // ---- Verificación local (sandbox_exec · requiere autorización por uso; ejecución local sin sandbox) ----
+  /**
+   * Ejecuta un comando permitido en el sandbox sobre el worktree del proceso y guarda la ejecución (historial completo).
+   * Lanza errores con statusCode/code (los mismos que devolvía la ruta).
+   */
+  const runVerify = async (slug: string, id: string, command: 'install' | 'typecheck' | 'test' | 'build', allowNetwork: boolean): Promise<VerificationRun> => {
+    const fail = (statusCode: number, error: string, code?: string) => Object.assign(new Error(error), { statusCode, code });
+    const procs = processesRepo(slug); const proc = procs.get(id);
+    if (!proc || !proc.result) throw fail(404, 'Proceso no encontrado');
+    if (!proc.result.applied) throw fail(409, 'Primero aplica los cambios: la verificación corre sobre el worktree del proceso.');
+    const repo = projectsRepo(slug).repository(proc.projectId);
+    if (!repo) throw fail(409, 'No hay repositorio registrado.');
+    const wt = proc.result.applied.worktree ?? worktreePathFor(repo.path, id);
+    if (!proc.result.applied.worktree) throw fail(409, `Esta iteración se aplicó antes de v0.12, directamente en tu carpeta (rama ${proc.result.applied.branch}), y no puede verificarse en sandbox. Ciérrala como resuelta si la historia ya funciona, o descártala y prepara una nueva iteración desde el Resumen.`, 'legacy_applied');
+    if (!fs.existsSync(wt)) throw fail(409, 'El worktree del proceso ya no existe (¿se integró o se limpió?). Descarta esta iteración y prepara una nueva desde el Resumen.');
+    const op = command === 'install' ? 'install_deps' : command === 'typecheck' && (await detectSandbox()).available === 'unavailable' ? 'host_typecheck_min' : 'sandbox_exec';
+    const qa = proc.steps.find(s => /calidad|QA/i.test(s.title)) ?? proc.steps[1];
+    // La verificación la pide el propietario (no un agente): la política comprueba nivel y autorización; las herramientas de agente se exigen en los pasos que ejecutan agentes.
+    requirePolicy(op, { slug, processId: id, agentId: null, projectId: proc.projectId, authorized: true });
+    // Instalar dependencias exige red: solo con autorización explícita y mostrando qué cambió en package.json.
+    if (command === 'install' && !allowNetwork) throw fail(409, 'Instalar dependencias necesita red dentro del sandbox. Revisa el diff de package.json y confirma «Permitir red solo para install».', 'network_confirmation_required');
+    const run = await runInSandbox(wt, path.resolve(repo.path), command, { allowNetwork });
+    const cur = procs.get(id)!;
+    procs.setResult(id, { ...cur.result!, verifications: [...cur.result!.verifications, run] });
+    procs.logExecution({ projectId: proc.projectId, agentId: qa?.agentId ?? '', kind: `verify:${command}:${run.isolation}`, status: run.exitCode === 0 ? 'done' : 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: run.startedAt });
+    // Faltar dependencias (86) es un problema del entorno, no del código: no genera lección.
+    if (run.exitCode !== 0 && run.isolation !== 'unavailable' && run.exitCode !== DEPS_MISSING_EXIT) recordDetections(slug, id, repo.path);
+    return run;
+  };
+  const sendError = (reply: any, e: any) => reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError || typeof e.code === 'string' ? e.code : undefined });
   app.post('/api/workspaces/:slug/processes/:id/verify', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ authorized: z.literal(true), command: z.enum(['install', 'typecheck', 'test', 'build']), allowNetwork: z.boolean().optional() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita y un comando permitido.' });
-    const procs = processesRepo(slug); const proc = procs.get(id);
-    if (!proc || !proc.result) return reply.code(404).send({ error: 'Proceso no encontrado' });
-    if (!proc.result.applied) return reply.code(409).send({ error: 'Primero aplica los cambios: la verificación corre sobre el worktree del proceso.' });
-    const repo = projectsRepo(slug).repository(proc.projectId);
-    if (!repo) return reply.code(409).send({ error: 'No hay repositorio registrado.' });
-    const wt = proc.result.applied.worktree ?? worktreePathFor(repo.path, id);
-    if (!proc.result.applied.worktree) return reply.code(409).send({ error: `Esta iteración se aplicó antes de v0.12, directamente en tu carpeta (rama ${proc.result.applied.branch}), y no puede verificarse en sandbox. Ciérrala como resuelta si la historia ya funciona, o descártala y prepara una nueva iteración desde el Resumen.`, code: 'legacy_applied' });
-    if (!fs.existsSync(wt)) return reply.code(409).send({ error: 'El worktree del proceso ya no existe (¿se integró o se limpió?). Descarta esta iteración y prepara una nueva desde el Resumen.' });
+    try { await runVerify(slug, id, body.data.command, !!body.data.allowNetwork); return await withGuidance(slug, processesRepo(slug).get(id)!); } catch (e: any) { return sendError(reply, e); }
+  });
+  // Recuperación de «faltan las dependencias Linux» (Docker, código 86): install con red temporal y, si termina bien, se
+  // repiten sin red los comandos pendientes. Exige autorizar la ejecución y la red explícitamente; conserva el historial.
+  app.post('/api/workspaces/:slug/processes/:id/verify/install-and-retry', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ authorized: z.literal(true), allowNetwork: z.literal(true), commands: z.array(z.enum(['typecheck', 'test', 'build'])).min(1).max(3) }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'Instalar dependencias necesita tu autorización explícita y permitir la red temporalmente (solo durante la instalación).', code: 'authorization_required' });
     try {
-      const op = body.data.command === 'install' ? 'install_deps' : body.data.command === 'typecheck' && (await detectSandbox()).available === 'unavailable' ? 'host_typecheck_min' : 'sandbox_exec';
-      const qa = proc.steps.find(s => /calidad|QA/i.test(s.title)) ?? proc.steps[1];
-      // La verificación la pide el propietario (no un agente): la política comprueba nivel y autorización; las herramientas de agente se exigen en los pasos que ejecutan agentes.
-      requirePolicy(op, { slug, processId: id, agentId: null, projectId: proc.projectId, authorized: true });
-      if (body.data.command === 'install') {
-        // Instalar dependencias exige red: solo con autorización explícita y mostrando qué cambió en package.json.
-        if (!body.data.allowNetwork) return reply.code(409).send({ error: 'Instalar dependencias necesita red dentro del sandbox. Revisa el diff de package.json y confirma «Permitir red solo para install».', code: 'network_confirmation_required' });
-      }
-      const run = await runInSandbox(wt, path.resolve(repo.path), body.data.command, { allowNetwork: !!body.data.allowNetwork });
-      procs.setResult(id, { ...proc.result, verifications: [...proc.result.verifications, run] });
-      procs.logExecution({ projectId: proc.projectId, agentId: qa?.agentId ?? '', kind: `verify:${body.data.command}:${run.isolation}`, status: run.exitCode === 0 ? 'done' : 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: run.startedAt });
-      if (run.exitCode !== 0 && run.isolation !== 'unavailable') recordDetections(slug, id, repo.path);
-      return await withGuidance(slug, procs.get(id)!);
-    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : undefined }); }
+      const install = await runVerify(slug, id, 'install', true);
+      const ran: string[] = ['install'];
+      if (install.exitCode === 0) for (const c of body.data.commands) { const v = await runVerify(slug, id, c, false); ran.push(c); if (v.exitCode === DEPS_MISSING_EXIT) break; }
+      app.log.info({ processId: id, install: install.exitCode, ran }, 'dependencias instaladas y verificación repetida');
+      return await withGuidance(slug, processesRepo(slug).get(id)!);
+    } catch (e: any) { return sendError(reply, e); }
   });
   app.get('/api/system/sandbox', async (req) => detectSandbox(String((req.query as any)?.force ?? '') === '1'));
   // ---- Verificación en ejecución (M2): el Portal se comprueba a sí mismo tras activar el cambio ----

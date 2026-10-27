@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
 import { backlogRepo } from '../db/workspace.ts';
-import { applyProposals, askTeam, estimateAsk, iterateStory, storyContext, tasksFromFeedback, threadRepo } from '../services/storyThread.ts';
+import { applyProposals, askTeam, estimateAsk, iterateStory, storyContext, tasksFromFeedback, tasksFromIssue, threadRepo } from '../services/storyThread.ts';
 import { PolicyError } from '../services/executionPolicy.ts';
 
 /** M6 · Espacio de la historia: contexto, chat con el equipo (autorizado), tareas, iteraciones. */
@@ -50,6 +50,10 @@ export async function storyRoutes(app: FastifyInstance) {
   app.post('/api/workspaces/:slug/stories/:id/tasks/from-feedback', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     try { return reply.code(201).send(await tasksFromFeedback(slug, id)); } catch (e: any) { return fail(reply, e); }
+  });
+  app.post('/api/workspaces/:slug/stories/:id/tasks/from-issue', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    try { return reply.code(201).send(await tasksFromIssue(slug, id)); } catch (e: any) { return fail(reply, e); }
   });
   app.patch('/api/workspaces/:slug/stories/:id/tasks/:taskId', async (req, reply) => {
     const { slug, taskId } = req.params as any; if (!guard(slug, reply)) return;

@@ -1,6 +1,7 @@
 import type { Process, ProcessGuidance } from '@portal-ia/domain';
 import { runtimeVerified } from './runtimeChecks.ts';
 import { DEPS_MISSING_EXIT } from './sandbox.ts';
+import { buildStoryFlow, type FlowOptions } from './storyFlow.ts';
 
 /** Aplicada con el flujo anterior a v0.12 (sin worktree aislado) y sin integrar. */
 export const isLegacyApplied = (p: Process) => !!p.result?.applied && !p.result.applied.worktree && !p.result.merged;
@@ -10,7 +11,17 @@ const implStep = (p: Process) => p.steps.find(s => s.role === 'implementer') ?? 
  * Una sola fuente de verdad sobre «qué pasa y qué toca hacer» con un proceso. La usan la vista del proceso, el backlog
  * y las tarjetas del Asistente, para que el estado que se muestra sea siempre el real.
  */
-export function describeProcess(p: Process, opts: { isPortalRepo?: boolean; storyStatus?: string | null; failedSteps?: number } = {}): ProcessGuidance {
+export type GuidanceOptions = Omit<FlowOptions, 'failedSteps'> & { failedSteps?: number; failedStepDetails?: FlowOptions['failedSteps'] };
+
+/** Orientación + recorrido guiado (para historias). */
+export function describeProcess(p: Process, opts: GuidanceOptions = {}): ProcessGuidance {
+  const g = describePhase(p, { ...opts, failedSteps: opts.failedSteps ?? opts.failedStepDetails?.length ?? 0 });
+  if (p.kind !== 'story_execution') return g;
+  // El recorrido nunca debe tumbar la orientación: si algo no encaja, se sirve sin él.
+  try { return { ...g, flow: buildStoryFlow(p, { ...opts, failedSteps: opts.failedStepDetails ?? [] }) }; } catch { return g; }
+}
+
+function describePhase(p: Process, opts: GuidanceOptions): ProcessGuidance {
   // La historia ya se cerró (o se descartó): nada que hacer, aunque el proceso quede en su último paso.
   if (p.kind === 'story_execution' && p.status === 'done' && opts.storyStatus === 'done') return { phase: 'Historia completada', next: p.result?.published ? 'Cerrada y publicada. Nada pendiente.' : 'Cerrada. Publicar en el remoto es opcional y puede hacerse desde el proceso.', tone: 'ok', settled: true };
   if (p.kind === 'story_execution' && opts.storyStatus === 'discarded') return { phase: 'Historia descartada', next: 'La historia se descartó; reábrela desde el backlog si la necesitas.', tone: 'info', settled: true };

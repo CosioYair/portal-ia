@@ -246,6 +246,62 @@ export interface ProcessGuidance {
   tone: 'info' | 'warn' | 'ok' | 'err';
   /** Si el proceso ya no requiere acción del propietario. */
   settled: boolean;
+  /** Recorrido guiado de una historia (solo story_execution): etapas, problema actual y acciones de recuperación. */
+  flow?: StoryFlow;
+}
+
+// ---- Recorrido guiado de la historia (una sola fuente de verdad: services/storyFlow.ts) ----
+export type FlowStageKey = 'execute' | 'review' | 'apply' | 'verify' | 'integrate' | 'activate' | 'runtime' | 'manual' | 'close';
+/** done: completada · warning: completada con advertencias · rejected · failed · blocked: falta un requisito previo · waiting: espera tu autorización · running · current: es lo que toca · pending: aún no disponible. */
+export type FlowStageStatus = 'done' | 'warning' | 'rejected' | 'failed' | 'blocked' | 'waiting' | 'running' | 'current' | 'pending';
+export interface FlowStage { key: FlowStageKey; label: string; status: FlowStageStatus; detail: string }
+export type FlowIssueKind =
+  | 'deps_missing' | 'sandbox_unavailable' | 'typecheck_failed' | 'test_failed' | 'build_failed' | 'qa_rejected' | 'patch_failed'
+  | 'merge_conflict' | 'activation_failed' | 'runtime_failed' | 'runtime_unavailable' | 'manual_failed' | 'budget_exceeded'
+  | 'process_failed' | 'cancelled' | 'diff_rejected' | 'legacy';
+export type IssueSeverity = 'alta' | 'media' | 'baja';
+export interface FlowIssueDetail { text: string; file?: string | null; line?: number | null; code?: string | null; severity?: IssueSeverity | null }
+export interface FlowIssue {
+  kind: FlowIssueKind;
+  /** blocker: no se puede avanzar · warning: se puede avanzar, pero conviene resolverlo. */
+  level: 'blocker' | 'warning';
+  /** ¿Lo tiene que corregir el equipo (código) o es un requisito del entorno? */
+  cause: 'code' | 'environment' | 'decision';
+  title: string;
+  explanation: string;
+  /** Comando o comprobación que falló (typecheck, test, build, merge, ui /backlog…). */
+  command?: string | null;
+  details: FlowIssueDetail[];
+  files: string[];
+  /** Extracto de la salida (las últimas líneas relevantes). La salida completa sigue en la verificación. */
+  evidence?: string | null;
+  /** Agentes responsables de corregirlo (por papel en el equipo). */
+  responsible: string[];
+}
+export type FlowActionId =
+  | 'authorize' | 'cancel' | 'review_diff' | 'apply' | 'reject' | 'install_and_retry' | 'verify' | 'retry_verification'
+  | 'sandbox_help' | 'refresh_sandbox' | 'request_fix' | 'ask_team' | 'tasks_from_issue' | 'merge' | 'rebuild'
+  | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'retry_process' | 'recover' | 'new_iteration';
+export interface FlowAction {
+  id: FlowActionId;
+  label: string;
+  primary: boolean;
+  /** Qué ocurrirá al pulsarlo (y qué no). */
+  description: string;
+  /** Lo que exige antes de ejecutarse: tu autorización, red temporal, gasto de IA (con presupuesto) o una confirmación. */
+  requires: ('authorization' | 'network' | 'ai_budget' | 'confirmation')[];
+  /** Comandos a (re)ejecutar (verify, retry_verification, install_and_retry). */
+  commands?: string[];
+}
+export interface StoryFlow {
+  stages: FlowStage[];
+  current: FlowStageKey;
+  progress: { done: number; total: number };
+  issue: FlowIssue | null;
+  actions: FlowAction[];
+  /** Agentes que trabajan ahora o de los que depende la etapa actual. */
+  responsible: { agentName: string; role: string; status: string }[];
+  iteration: { number: number; total: number } | null;
 }
 
 export interface KnowledgeDoc {
@@ -371,6 +427,8 @@ export interface ExecutionResult {
   verifications: VerificationRun[];
   /** Integración de la rama en la rama principal (git merge --no-ff), autorizada por el propietario. */
   merged?: { into: string; commit: string; mergedAt: string } | null;
+  /** Último intento de integrar que falló (conflictos): se conserva para explicarlo y corregirlo; se borra al integrar. */
+  mergeError?: { at: string; message: string; files: string[] } | null;
   /** Publicación en el remoto (git push), autorizada por el propietario. */
   published?: { remote: string; url: string | null; branches: string[]; pushedAt: string } | null;
   /** HU-146 · Intentos de «Corregir y revalidar» dentro de esta misma historia. */

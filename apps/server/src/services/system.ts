@@ -23,6 +23,8 @@ const isGit = fs.existsSync(path.join(REPO_ROOT, '.git'));
 if (isGit) git(REPO_ROOT, ['rev-parse', '--short', 'HEAD']).then(c => { startCommit = c; }).catch(() => { startCommit = null; });
 
 let update: NonNullable<SystemStatus['update']> | null = null;
+/** Última reconstrucción del Portal (para explicar una activación fallida en el recorrido de la historia). */
+export const lastUpdate = () => update;
 
 /** Clasifica el impacto de los archivos cambiados: nada / recargar navegador / reconstruir y reiniciar. */
 export function classifyImpact(files: string[]): SystemStatus['action'] {

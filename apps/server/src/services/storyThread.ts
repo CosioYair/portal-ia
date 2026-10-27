@@ -11,6 +11,8 @@ import { listFeedback } from './manual-test-feedback.ts';
 import { createStoryProcess, stepByRole } from './storyExecution.ts';
 import { lessonsRepo } from './lessons.ts';
 import { discardBranch } from './repoWrite.ts';
+import { flowOptions } from './processView.ts';
+import { issueForPrompt } from './storyFlow.ts';
 import { activationOf } from './system.ts';
 import { REPO_ROOT } from '../config.ts';
 import path from 'node:path';
@@ -69,8 +71,8 @@ export async function storyContext(slug: string, itemId: string): Promise<StoryC
   const enriched = await Promise.all(procs.map(async p => {
     let q = p;
     if (runtime && p.result?.merged) { const activation = await activationOf(p.result.merged.commit, p.result.merged.mergedAt).catch(() => null); q = { ...p, result: { ...p.result, activation } }; }
-    const failedSteps = q.result?.manualTest ? listFeedback(slug, q.id).items.filter(i => i.result === 'fail').length : 0;
-    return { ...q, guidance: describeProcess(q, { isPortalRepo: isPortal, storyStatus: q.id === item.lastProcessId || !item.lastProcessId || q.id === procs[0]?.id ? item.status : null, failedSteps }) };
+    const fo = await flowOptions(slug, q, item);
+    return { ...q, guidance: describeProcess(q, { isPortalRepo: isPortal, storyStatus: q.id === item.lastProcessId || !item.lastProcessId || q.id === procs[0]?.id ? item.status : null, ...fo }) };
   }));
   // La iteración «actual» es la más reciente (también si está pendiente de autorización), no la última que llegó a ejecutarse.
   const last = enriched[0] ?? null;
@@ -132,6 +134,7 @@ function contextForPrompt(ctx: StoryContext): string {
     r?.userFacing ? `Qué verá el propietario: ${r.userFacing}` : '',
     r?.manualTest ? `Prueba manual: ${r.manualTest.checks.filter(Boolean).length}/${r.manualTest.steps.length} marcados. Pasos: ${r.manualTest.steps.map((s, i) => `${i + 1}. ${s}`).join(' | ')}` : '',
     fails.length ? `Feedback del propietario en la prueba: ${fails.map(f => `paso ${f.index + 1} ${f.result.toUpperCase()}${f.comment ? `: ${f.comment}` : ''}`).join(' · ')}` : '',
+    last?.guidance?.flow?.issue ? `# Problema actual de la iteración\n${issueForPrompt(last.guidance.flow.issue, last)}` : '',
     ctx.tasks.length ? `Tareas: ${ctx.tasks.map(t => `[${t.status === 'done' ? 'x' : ' '}] ${t.title}${t.assigneeName ? ` (${t.assigneeName})` : ''}`).join(' · ')}` : '',
     ctx.lessons.length ? `Lecciones detectadas en esta historia: ${ctx.lessons.map(l => `${l.title} [${l.status}]`).join(' · ')}` : '',
     ctx.team.length ? `Equipo: ${ctx.team.map(m => `${m.agentName} (${m.role})`).join(', ')}` : ''
@@ -202,6 +205,22 @@ export async function tasksFromFeedback(slug: string, itemId: string): Promise<S
 
 const conflict = (message: string, code: string, extra: Record<string, unknown> = {}) => Object.assign(new Error(message), { statusCode: 409, code, ...extra });
 
+/** Tareas a partir del problema actual del recorrido (observaciones de QA, errores de verificación, comprobaciones en rojo…). Sin IA; no duplica. */
+export async function tasksFromIssue(slug: string, itemId: string): Promise<StoryTask[]> {
+  const ctx = await storyContext(slug, itemId); const issue = ctx.lastProcess?.guidance?.flow?.issue;
+  if (!issue) throw Object.assign(new Error('La iteración actual no tiene ningún problema que convertir en tareas.'), { statusCode: 409, code: 'no_issue' });
+  if (issue.kind === 'manual_failed') return tasksFromFeedback(slug, itemId);
+  const t = threadRepo(slug); const existing = new Set(ctx.tasks.map(x => x.title)); const out: StoryTask[] = [];
+  const impl = ctx.team.find(m => m.role === 'implementer');
+  const prefix = issue.kind === 'qa_rejected' ? 'QA' : issue.command ? issue.command : issue.kind;
+  for (const d of issue.details.slice(0, 12)) {
+    const title = `${prefix}${d.severity ? ` [${d.severity}]` : ''}: ${d.file ? `${d.file}${d.line ? `:${d.line}` : ''} — ` : ''}${d.code ? `${d.code} ` : ''}${d.text}`.slice(0, 300);
+    if (existing.has(title)) continue; existing.add(title);
+    out.push(t.addTask({ backlogItemId: itemId, title, assigneeAgentId: impl?.agentId ?? null, assigneeName: impl?.agentName ?? null, source: 'issue', processId: ctx.lastProcess?.id ?? null }));
+  }
+  return out;
+}
+
 /**
  * Nueva iteración de la historia: crea un proceso (pendiente de autorización) cuyo contexto incluye el feedback de la
  * prueba, las tareas abiertas y la nota del propietario. Según la iteración anterior (iterationState):
@@ -242,6 +261,8 @@ export async function iterateStory(slug: string, itemId: string, note: string | 
   const context = [
     `Iteración ${ctx.iterations + 1} de la historia. ${prev?.result?.merged ? `La iteración anterior YA está integrada en ${prev.result.merged.into} (commit ${prev.result.merged.commit}); esta iteración corrige o completa sobre ese código.` : prev?.result?.applied ? `La iteración anterior se aplicó en la rama ${prev.result.applied.branch} pero no se integró y se descartó: parte de la rama principal y rehace lo necesario.` : 'La iteración anterior no llegó a aplicarse.'}`,
     `Criterio de aceptación vigente: ${backlog.get(item.id)!.criterion || '(no definido)'}`,
+    prev?.guidance?.flow?.issue && prev.guidance.flow.issue.kind !== 'manual_failed' ? `Problema que motiva esta iteración (CORRÍGELO; no repitas el mismo error):\n${issueForPrompt(prev.guidance.flow.issue, prev)}` : '',
+    ctx.processes.length > 1 ? `Intentos anteriores de esta historia:\n${ctx.processes.slice(1).map((p, i) => `- Iteración ${ctx.processes.length - 1 - i}: ${p.guidance?.flow?.issue ? p.guidance.flow.issue.title : p.guidance?.phase ?? p.status}${p.result?.rejected ? ` (descartada: ${p.result.rejected.reason})` : ''}`).join('\n')}` : '',
     note ? `Nota del propietario: ${note}` : '',
     fails.length ? `Resultado de la prueba manual anterior:\n${fails.map(f => `- Paso ${f.index + 1} (${f.result}): ${f.text}${f.comment ? ` → ${f.comment}` : ''}`).join('\n')}` : '',
     open.length ? `Tareas abiertas:\n${open.map(t => `- ${t.title}${t.assigneeName ? ` (${t.assigneeName})` : ''}`).join('\n')}` : '',
