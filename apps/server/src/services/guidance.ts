@@ -1,5 +1,6 @@
 import type { Process, ProcessGuidance } from '@portal-ia/domain';
 import { runtimeVerified } from './runtimeChecks.ts';
+import { DEPS_MISSING_EXIT } from './sandbox.ts';
 
 /** Aplicada con el flujo anterior a v0.12 (sin worktree aislado) y sin integrar. */
 export const isLegacyApplied = (p: Process) => !!p.result?.applied && !p.result.applied.worktree && !p.result.merged;
@@ -9,7 +10,7 @@ const implStep = (p: Process) => p.steps.find(s => s.role === 'implementer') ?? 
  * Una sola fuente de verdad sobre «qué pasa y qué toca hacer» con un proceso. La usan la vista del proceso, el backlog
  * y las tarjetas del Asistente, para que el estado que se muestra sea siempre el real.
  */
-export function describeProcess(p: Process, opts: { isPortalRepo?: boolean; storyStatus?: string | null } = {}): ProcessGuidance {
+export function describeProcess(p: Process, opts: { isPortalRepo?: boolean; storyStatus?: string | null; failedSteps?: number } = {}): ProcessGuidance {
   // La historia ya se cerró (o se descartó): nada que hacer, aunque el proceso quede en su último paso.
   if (p.kind === 'story_execution' && p.status === 'done' && opts.storyStatus === 'done') return { phase: 'Historia completada', next: p.result?.published ? 'Cerrada y publicada. Nada pendiente.' : 'Cerrada. Publicar en el remoto es opcional y puede hacerse desde el proceso.', tone: 'ok', settled: true };
   if (p.kind === 'story_execution' && opts.storyStatus === 'discarded') return { phase: 'Historia descartada', next: 'La historia se descartó; reábrela desde el backlog si la necesitas.', tone: 'info', settled: true };
@@ -46,6 +47,10 @@ export function describeProcess(p: Process, opts: { isPortalRepo?: boolean; stor
   const portal = !!opts.isPortalRepo && r.activation !== undefined && r.activation !== null;
   const total = opts.isPortalRepo ? 8 : 6;
   const step = (n: number, label: string) => `Paso ${n} de ${total} · ${label}`;
+  // Prueba manual con pasos en «Falla» (integrada o iteración anterior a v0.12, que también se prueba): el siguiente
+  // paso es devolver ese feedback al equipo, no cerrar.
+  const fails = opts.failedSteps ?? 0;
+  if (fails > 0 && (r.merged || isLegacyApplied(p))) return { phase: step(r.merged ? total - 1 : 3, `Probada · ${fails} paso(s) con falla`), next: `Hay ${fails} paso(s) marcados con «Falla» en «Qué probar». Pulsa «Enviar feedback al equipo» en «Pasos con falla» para crear una nueva iteración con esos fallos y tus comentarios (queda pendiente de tu autorización), o «Crear tareas con estos fallos» para seguirlos aparte.`, tone: 'err', settled: false };
   // Iteración aplicada antes de v0.12 (en la carpeta del Portal, sin worktree): no puede verificarse en sandbox ni integrarse
   // con el flujo actual. Salidas: cerrar la historia si ya está resuelta, o descartar la iteración y preparar una nueva.
   if (!r.merged && isLegacyApplied(p)) return { phase: `Iteración anterior a v0.12 · aplicada sin aislamiento en ${r.applied.branch}`, next: 'Esta iteración se aplicó con el método anterior (directamente en tu carpeta, sin worktree), así que no puede verificarse en sandbox ni integrarse. Si lo que pedía la historia ya funciona en tu Portal, pulsa «Cerrar como resuelta»; si no, pulsa «Descartar esta iteración y preparar otra» (la rama se conserva) y autoriza la nueva iteración.', tone: 'warn', settled: false };
@@ -53,7 +58,14 @@ export function describeProcess(p: Process, opts: { isPortalRepo?: boolean; stor
     const after = new Date(r.applied.appliedAt).getTime() - 1000;
     const since = (r.verifications ?? []).filter(v => new Date(v.startedAt).getTime() >= after);
     const lastOf = (c: string) => since.filter(v => v.command === c).at(-1);
-    const failed = ['typecheck', 'test', 'build'].map(lastOf).filter(v => v && v.exitCode !== 0) as typeof since;
+    // Docker: sin dependencias Linux instaladas para este package-lock el sandbox no ejecuta nada (no es un fallo del código).
+    // Si después se instaló bien, esa ejecución solo queda pendiente de repetir.
+    const lastInstall = since.filter(v => v.command === 'install').at(-1);
+    const noDeps = (v: (typeof since)[number]) => v.exitCode === DEPS_MISSING_EXIT && v.isolation === 'docker';
+    const installedAfter = (v: (typeof since)[number]) => !!lastInstall && lastInstall.exitCode === 0 && lastInstall.startedAt > v.startedAt;
+    const failed = ['typecheck', 'test', 'build'].map(lastOf).filter(v => v && v.exitCode !== 0 && !(noDeps(v) && installedAfter(v))) as typeof since;
+    const depsMissing = failed.filter(noDeps);
+    if (depsMissing.length) return { phase: step(3, `Aplicado en ${r.applied.branch} · faltan las dependencias del sandbox`), next: 'El sandbox Docker aún no tiene las dependencias (Linux) de este package-lock. En Verificar, marca «Permitir red solo para install» y pulsa «npm ci (install)» una vez; después repite typecheck, test y build (sin red).', tone: 'warn', settled: false };
     if (failed.length) return { phase: step(3, `Aplicado en ${r.applied.branch} · verificación FALLÓ (${failed.map(v => v.command).join(', ')})`), next: 'Lee la salida de la verificación. Corrige con una nueva iteración de la historia (el equipo recibe el error) o rechaza el diff; no se integra código que no compila.', tone: 'err', settled: false };
     const need = opts.isPortalRepo ? ['typecheck', 'test', 'build'] : ['typecheck'];
     const missing = need.filter(c => !(lastOf(c)?.exitCode === 0));
@@ -70,10 +82,10 @@ export function describeProcess(p: Process, opts: { isPortalRepo?: boolean; stor
       return { phase: step(6, `Activada (${act.runningCommit}) · falta comprobar en ejecución`), next: 'Pulsa «Comprobar en ejecución»: el Portal se consulta a sí mismo (HTTP y navegador) y guarda la evidencia.', tone: 'warn', settled: false };
     }
     if (untested && !mt) return { phase: step(7, 'Verificada en ejecución · falta la lista de prueba'), next: 'Genera la lista de prueba con QA (una llamada corta) o escríbela a mano; después pruébala paso a paso.', tone: 'warn', settled: false };
-    if (untested) return { phase: step(7, `Verificada en ejecución · falta probar (${tested} de ${mt!.steps.length} pasos)`), next: 'Sigue la lista «Qué probar» en el Portal y marca cada paso que funcione. Si algo falla, devuelve la historia a pendiente con el motivo.', tone: 'warn', settled: false };
+    if (untested) return { phase: step(7, `Verificada en ejecución · falta probar (${tested} de ${mt!.steps.length} pasos)`), next: 'Sigue la lista «Qué probar» en el Portal y marca «OK» en cada paso que funcione. Si algo falla, márcalo con «Falla», comenta qué viste y pulsa «Enviar feedback al equipo».', tone: 'warn', settled: false };
     return { phase: step(8, `Listo para cerrar (activada y probada${r.published ? ', publicada' : ''})`), next: `Pulsa «Marcar historia como completada».${r.published ? '' : ' Publicar en el remoto es opcional y puede hacerse después.'}`, tone: 'ok', settled: false };
   }
   if (untested && !mt) return { phase: step(5, `Integrado en ${r.merged.into} · falta la lista de prueba`), next: 'En el Resumen del proceso, genera la lista de prueba con QA (una llamada corta) o escríbela a mano; después pruébala paso a paso.', tone: 'warn', settled: false };
-  if (untested) return { phase: step(5, `Integrado en ${r.merged.into} · falta probar (${tested} de ${mt!.steps.length} pasos)`), next: `${opts.isPortalRepo ? 'Reconstruye y reinicia el Portal (barra amarilla) si aún no lo has hecho; luego s' : 'S'}igue la lista «Qué probar» y marca cada paso que funcione. Si algo falla, devuelve la historia a pendiente con el motivo.`, tone: 'warn', settled: false };
+  if (untested) return { phase: step(5, `Integrado en ${r.merged.into} · falta probar (${tested} de ${mt!.steps.length} pasos)`), next: `${opts.isPortalRepo ? 'Reconstruye y reinicia el Portal (barra amarilla) si aún no lo has hecho; luego s' : 'S'}igue la lista «Qué probar» y marca «OK» en cada paso que funcione. Si algo falla, márcalo con «Falla», comenta qué viste y pulsa «Enviar feedback al equipo».`, tone: 'warn', settled: false };
   return { phase: step(6, `Listo para cerrar (${r.merged.into}, probado${r.published ? `, publicado en ${r.published.remote}` : ''})`), next: `Pulsa «Marcar historia como completada».${r.published ? '' : ' Publicar en el remoto es opcional.'}`, tone: 'ok', settled: false };
 }

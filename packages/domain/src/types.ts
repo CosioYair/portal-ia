@@ -659,6 +659,28 @@ export interface StoryContext {
   item: BacklogItem; project: Project; processes: Process[]; lastProcess: Process | null; iterations: number; team: TeamMember[];
   manualTest: { steps: string[]; checks: boolean[]; note: string | null } | null; feedback: ManualTestFeedbackView;
   tasks: StoryTask[]; messages: StoryMessage[]; lessons: Lesson[];
+  /** Qué ocurrirá al crear una nueva iteración (lo calcula el servidor; la interfaz pide las confirmaciones que indique). */
+  iteration: StoryIterationState;
+}
+/**
+ * Estado de la iteración anterior frente a una nueva:
+ * - `none`: sin iteraciones o la anterior ya se rechazó · `not_applied`: el diff anterior queda superado
+ * - `applied_worktree`: aplicada en un worktree sin integrar → se descartan worktree y rama (confirmación explícita)
+ * - `legacy`: aplicada antes de v0.12 sin worktree → se marca descartada y la rama se conserva
+ * - `merged`: integrada → la nueva iteración parte de main · `in_progress`: hay una en ejecución o pendiente (no se crea otra)
+ */
+export interface StoryIterationState {
+  state: 'none' | 'not_applied' | 'applied_worktree' | 'legacy' | 'merged' | 'in_progress';
+  /** Rama afectada (la que se descarta en `applied_worktree`, la que se conserva en `legacy`, la integrada en `merged`). */
+  branch: string | null;
+  /** La historia está cerrada o descartada: hay que reabrirla (`reopen: true`). */
+  needsReopen: boolean;
+  /** Hay que confirmar el descarte del worktree y la rama (`discardApplied: true`). */
+  needsDiscardConfirmation: boolean;
+  /** Pasos de la prueba manual marcados con «Falla» en la última iteración. */
+  failedSteps: number;
+  /** Explicación para el propietario de lo que hará el Portal. */
+  summary: string;
 }
 
 // ---- M4 · Lecciones validadas ----

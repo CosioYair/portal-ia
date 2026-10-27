@@ -7,6 +7,8 @@ import { cancelProcess, clearCancel, createAssessment, estimateAssessment, isCan
 import { createStoryProcess, estimateManualTest, estimateStory, generateManualTest, recoverStory, retryStory, runStory, stepByRole } from '../services/storyExecution.ts';
 import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
 import { describeProcess } from '../services/guidance.ts';
+import { listFeedback } from '../services/manual-test-feedback.ts';
+import { recordContextEdit } from '../services/storyThread.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { applyChanges, checkStaleChanges, discardBranch, mergeBranch, pushBranches, removeWorktree, worktreePathFor } from '../services/repoWrite.ts';
 import { requirePolicy, PolicyError } from '../services/executionPolicy.ts';
@@ -36,7 +38,8 @@ export async function processRoutes(app: FastifyInstance) {
       q = { ...p, result: { ...p.result, activation } };
     }
     const item = q.kind === 'story_execution' && q.backlogItemId ? backlogRepo(slug).get(q.backlogItemId) : undefined;
-    return { ...q, guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null }) };
+    const failedSteps = q.kind === 'story_execution' && q.result?.manualTest ? listFeedback(slug, q.id).items.filter(i => i.result === 'fail').length : 0;
+    return { ...q, guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, failedSteps }) };
   };
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
 
@@ -119,8 +122,11 @@ export async function processRoutes(app: FastifyInstance) {
     const body = z.object({ status: z.enum(['pending', 'in_progress', 'review', 'done', 'blocked']).optional(), title: z.string().trim().min(3).max(200).optional(), criterion: z.string().max(600).optional(), description: z.string().max(4000).optional(), ownerKey: z.string().nullable().optional(), estimate: z.enum(['S', 'M', 'L']).nullable().optional() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Datos no válidos' });
     const { status, ...rest } = body.data;
+    const before = repo.get(id)!;
     if (Object.keys(rest).length) repo.update(id, rest);
     if (status) repo.setStatus(id, status);
+    // Una historia ya ejecutada (en revisión, integrada, cerrada…) guarda en su historial qué cambió del contexto.
+    if (before.lastProcessId || before.status !== 'pending') recordContextEdit(slug, before, repo.get(id)!);
     return repo.get(id);
   });
   app.delete('/api/workspaces/:slug/backlog/:id', async (req, reply) => {

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { BacklogItem, ModelInfo, Process, ProviderId, StoryContext, StoryMessage, StoryTask, TeamMember } from '@portal-ia/domain';
+import type { BacklogItem, ModelInfo, Process, ProviderId, StoryContext, StoryIterationState, StoryMessage, StoryTask, TeamMember } from '@portal-ia/domain';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -10,6 +10,7 @@ import { describeProcess } from './guidance.ts';
 import { listFeedback } from './manual-test-feedback.ts';
 import { createStoryProcess, stepByRole } from './storyExecution.ts';
 import { lessonsRepo } from './lessons.ts';
+import { discardBranch } from './repoWrite.ts';
 import { activationOf } from './system.ts';
 import { REPO_ROOT } from '../config.ts';
 import path from 'node:path';
@@ -68,7 +69,8 @@ export async function storyContext(slug: string, itemId: string): Promise<StoryC
   const enriched = await Promise.all(procs.map(async p => {
     let q = p;
     if (runtime && p.result?.merged) { const activation = await activationOf(p.result.merged.commit, p.result.merged.mergedAt).catch(() => null); q = { ...p, result: { ...p.result, activation } }; }
-    return { ...q, guidance: describeProcess(q, { isPortalRepo: isPortal, storyStatus: q.id === item.lastProcessId || !item.lastProcessId || q.id === procs[0]?.id ? item.status : null }) };
+    const failedSteps = q.result?.manualTest ? listFeedback(slug, q.id).items.filter(i => i.result === 'fail').length : 0;
+    return { ...q, guidance: describeProcess(q, { isPortalRepo: isPortal, storyStatus: q.id === item.lastProcessId || !item.lastProcessId || q.id === procs[0]?.id ? item.status : null, failedSteps }) };
   }));
   // La iteración «actual» es la más reciente (también si está pendiente de autorización), no la última que llegó a ejecutarse.
   const last = enriched[0] ?? null;
@@ -79,7 +81,23 @@ export async function storyContext(slug: string, itemId: string): Promise<StoryC
   const feedback = last ? listFeedback(slug, last.id) : { steps: [], items: [] };
   const lessons = lessonsRepo(slug).list(item.projectId).filter(l => l.evidence.processId && procs.some(p => p.id === l.evidence.processId));
   const t = threadRepo(slug);
-  return { item, processes: enriched, lastProcess: last, iterations: procs.length, team, manualTest: last?.result?.manualTest ?? null, feedback, tasks: t.tasks(item.id), messages: t.messages(item.id), lessons, project: projectsRepo(slug).get(item.projectId)! };
+  const iteration = iterationState(item, enriched, feedback.items.filter(i => i.result === 'fail').length);
+  return { item, processes: enriched, lastProcess: last, iterations: procs.length, team, manualTest: last?.result?.manualTest ?? null, feedback, tasks: t.tasks(item.id), messages: t.messages(item.id), lessons, project: projectsRepo(slug).get(item.projectId)!, iteration };
+}
+
+/** Qué hará una nueva iteración según el estado de la anterior (una sola regla para la interfaz y para iterateStory). */
+export function iterationState(item: BacklogItem, procs: Process[], failedSteps: number): StoryIterationState {
+  const needsReopen = item.status === 'done' || item.status === 'discarded';
+  const base = { needsReopen, needsDiscardConfirmation: false, failedSteps };
+  const reopen = needsReopen ? `Primero se reabre la historia (está ${item.status === 'done' ? 'completada' : 'descartada'}; queda registrado en su historial). ` : '';
+  const pendingNote = 'La nueva iteración queda pendiente de tu autorización: no gasta nada hasta que la autorices con un presupuesto.';
+  if (procs.some(p => p.status === 'running' || p.status === 'pending_authorization')) return { ...base, state: 'in_progress', branch: null, summary: 'Ya hay una iteración en ejecución o pendiente de autorización: autorízala o cancélala en «Iteraciones» antes de crear otra.' };
+  const prev = procs[0]; const r = prev?.result;
+  if (!r || r.rejected && !r.merged) return { ...base, state: 'none', branch: null, summary: `${reopen}${pendingNote}` };
+  if (r.merged) return { ...base, state: 'merged', branch: r.merged.into, summary: `${reopen}La iteración anterior ya está integrada en ${r.merged.into} (commit ${r.merged.commit}): la nueva parte de ese código y lo corrige o completa. ${pendingNote}` };
+  if (r.applied && !r.applied.worktree) return { ...base, state: 'legacy', branch: r.applied.branch, summary: `${reopen}La iteración anterior se aplicó antes de v0.12 (sin worktree): se marca como descartada y su rama ${r.applied.branch} se conserva en git. ${pendingNote}` };
+  if (r.applied) return { ...base, state: 'applied_worktree', branch: r.applied.branch, needsDiscardConfirmation: true, summary: `${reopen}La iteración anterior está aplicada en ${r.applied.branch} pero no integrada: se rechaza, se retira su worktree y se borra la rama (esos cambios no integrados se pierden; la nueva iteración los rehace con tu feedback). ${pendingNote}` };
+  return { ...base, state: 'not_applied', branch: null, summary: `${reopen}El diff anterior no se aplicó: queda marcado como superado. ${pendingNote}` };
 }
 
 /** Pasos marcados como fallo/observación con su comentario (para iteraciones y para el chat). */
@@ -182,29 +200,71 @@ export async function tasksFromFeedback(slug: string, itemId: string): Promise<S
   return out;
 }
 
+const conflict = (message: string, code: string, extra: Record<string, unknown> = {}) => Object.assign(new Error(message), { statusCode: 409, code, ...extra });
+
 /**
  * Nueva iteración de la historia: crea un proceso (pendiente de autorización) cuyo contexto incluye el feedback de la
- * prueba, las tareas abiertas y la nota del propietario. Si el diff anterior no se aplicó, queda rechazado.
+ * prueba, las tareas abiertas y la nota del propietario. Según la iteración anterior (iterationState):
+ * no aplicada → superada; aplicada en worktree sin integrar → rechazada, worktree y rama descartados (solo con
+ * `discardApplied`); anterior a v0.12 → descartada conservando la rama; integrada → parte de main.
+ * Una historia cerrada o descartada solo itera con `reopen` (queda registrado en su historial).
  */
-export async function iterateStory(slug: string, itemId: string, note: string | null): Promise<{ process: Process; context: string }> {
-  const ctx = await storyContext(slug, itemId); const item = ctx.item;
-  if (item.status === 'done' || item.status === 'discarded') throw Object.assign(new Error('La historia está cerrada o descartada; reábrela desde el backlog.'), { statusCode: 409 });
-  if (ctx.processes.some(p => p.status === 'running' || p.status === 'pending_authorization')) throw Object.assign(new Error('Ya hay una iteración en curso o pendiente de autorización.'), { statusCode: 409 });
+export async function iterateStory(slug: string, itemId: string, note: string | null, opts: { reopen?: boolean; discardApplied?: boolean } = {}): Promise<{ process: Process; context: string; actions: string[] }> {
+  const ctx = await storyContext(slug, itemId); const item = ctx.item; const st = ctx.iteration;
+  if (st.state === 'in_progress') throw conflict('Ya hay una iteración en curso o pendiente de autorización.', 'iteration_in_progress');
+  if (st.needsReopen && !opts.reopen) throw conflict(`La historia está ${item.status === 'done' ? 'completada' : 'descartada'}: reábrela para crear una nueva iteración.`, 'story_closed');
+  if (st.needsDiscardConfirmation && !opts.discardApplied) throw conflict(`La iteración anterior está aplicada en ${st.branch} sin integrar. Para iterar hay que descartar su worktree y su rama: confírmalo explícitamente.`, 'discard_confirmation_required', { branch: st.branch });
   const fails = failedSteps(ctx); const open = ctx.tasks.filter(t => t.status === 'open');
-  const prev = ctx.lastProcess;
+  const prev = ctx.lastProcess; const actions: string[] = [];
+  const procs = processesRepo(slug); const backlog = backlogRepo(slug);
+  // 1 · Reabrir (registrado en el historial de la historia).
+  if (st.needsReopen) {
+    backlog.update(item.id, { description: `${item.description ? item.description + '\n' : ''}[${now().slice(0, 10)}] Reabierta por el propietario para una nueva iteración${note ? `: ${note.slice(0, 300)}` : ''}` });
+    backlog.setStatus(item.id, 'pending', prev?.id ?? null);
+    actions.push(`historia reabierta (estaba ${item.status === 'done' ? 'completada' : 'descartada'})`);
+  }
+  // 2 · Retirar la iteración anterior según su estado.
+  if (prev?.result && st.state === 'applied_worktree') {
+    const repo = projectsRepo(slug).repository(item.projectId);
+    if (repo) {
+      requirePolicy('delete_worktree', { slug, processId: prev.id, projectId: item.projectId, authorized: true });
+      const d = await discardBranch(repo.path, prev.id, prev.result.applied!.branch);
+      actions.push(`iteración anterior rechazada: worktree ${d.worktreeRemoved ? 'retirado' : 'ya no existía'}, rama ${prev.result.applied!.branch} ${d.branchDeleted ? 'borrada' : 'conservada (integrada o activa)'}`);
+    }
+    procs.setResult(prev.id, { ...prev.result, rejected: { at: now(), reason: 'descartada para una nueva iteración con el feedback del propietario' } });
+  } else if (prev?.result && st.state === 'legacy') {
+    procs.setResult(prev.id, { ...prev.result, rejected: { at: now(), reason: 'iteración anterior a v0.12 descartada para una nueva iteración (rama conservada)' } });
+    actions.push(`iteración anterior a v0.12 descartada; rama ${prev.result.applied!.branch} conservada`);
+  } else if (prev?.result && st.state === 'not_applied') {
+    procs.setResult(prev.id, { ...prev.result, rejected: { at: now(), reason: 'superado por una nueva iteración' } });
+    actions.push('diff anterior marcado como superado');
+  }
   const context = [
-    `Iteración ${ctx.iterations + 1} de la historia. ${prev?.result?.merged ? `La iteración anterior YA está integrada en ${prev.result.merged.into} (commit ${prev.result.merged.commit}); esta iteración corrige o completa sobre ese código.` : prev?.result?.applied ? `La iteración anterior se aplicó en la rama ${prev.result.applied.branch} pero no se integró.` : 'La iteración anterior no llegó a aplicarse.'}`,
+    `Iteración ${ctx.iterations + 1} de la historia. ${prev?.result?.merged ? `La iteración anterior YA está integrada en ${prev.result.merged.into} (commit ${prev.result.merged.commit}); esta iteración corrige o completa sobre ese código.` : prev?.result?.applied ? `La iteración anterior se aplicó en la rama ${prev.result.applied.branch} pero no se integró y se descartó: parte de la rama principal y rehace lo necesario.` : 'La iteración anterior no llegó a aplicarse.'}`,
+    `Criterio de aceptación vigente: ${backlog.get(item.id)!.criterion || '(no definido)'}`,
     note ? `Nota del propietario: ${note}` : '',
     fails.length ? `Resultado de la prueba manual anterior:\n${fails.map(f => `- Paso ${f.index + 1} (${f.result}): ${f.text}${f.comment ? ` → ${f.comment}` : ''}`).join('\n')}` : '',
     open.length ? `Tareas abiertas:\n${open.map(t => `- ${t.title}${t.assigneeName ? ` (${t.assigneeName})` : ''}`).join('\n')}` : '',
     prev?.result?.review && !prev.result.review.approve ? `Observaciones de QA anteriores: ${prev.result.review.issues.slice(0, 6).join(' · ')}` : '',
     ctx.messages.slice(-6).length ? `Conversación reciente:\n${ctx.messages.slice(-6).map(m => `- ${m.role === 'owner' ? 'Propietario' : m.agentName}: ${m.content.slice(0, 400)}`).join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
-  if (prev?.result && !prev.result.applied && !prev.result.rejected) processesRepo(slug).setResult(prev.id, { ...prev.result, rejected: { at: now(), reason: 'superado por una nueva iteración' } });
-  if (item.status === 'review' || item.status === 'blocked') backlogRepo(slug).setStatus(item.id, 'pending', prev?.id ?? null);
+  const cur = backlog.get(item.id)!;
+  if (cur.status === 'review' || cur.status === 'blocked') backlog.setStatus(item.id, 'pending', prev?.id ?? null);
   const proc = createStoryProcess(slug, item.projectId, item.id, { iterationContext: context });
-  threadRepo(slug).add({ backlogItemId: itemId, role: 'system', agentId: null, agentName: null, content: `Iteración ${ctx.iterations + 1} creada (proceso ${proc.id}); pendiente de autorización.${note ? ` Nota: ${note}` : ''}`, processId: proc.id, costUsd: 0, tokens: 0, proposals: null });
-  return { process: proc, context };
+  threadRepo(slug).add({ backlogItemId: itemId, role: 'system', agentId: null, agentName: null, content: `Iteración ${ctx.iterations + 1} creada (proceso ${proc.id}); pendiente de autorización.${fails.length ? ` Incluye ${fails.length} paso(s) de la prueba con falla u observación.` : ''}${actions.length ? ` Antes: ${actions.join('; ')}.` : ''}${note ? ` Nota: ${note}` : ''}`, processId: proc.id, costUsd: 0, tokens: 0, proposals: null });
+  return { process: proc, context, actions };
+}
+
+/** Registra en la conversación de la historia los cambios del propietario en título, criterio o descripción (historial). */
+export function recordContextEdit(slug: string, before: BacklogItem, after: BacklogItem): StoryMessage | null {
+  const clip = (s: string) => s.length > 300 ? `${s.slice(0, 300)}…` : s;
+  const changes = [
+    before.title !== after.title ? `título: «${clip(before.title)}» → «${clip(after.title)}»` : '',
+    before.criterion !== after.criterion ? `criterio de aceptación: «${clip(before.criterion || '(vacío)')}» → «${clip(after.criterion || '(vacío)')}»` : '',
+    before.description !== after.description ? `descripción actualizada (antes: «${clip(before.description || '(vacía)')}»)` : ''
+  ].filter(Boolean);
+  if (!changes.length) return null;
+  return threadRepo(slug).add({ backlogItemId: after.id, role: 'system', agentId: null, agentName: null, content: `Contexto editado por el propietario (historia ${({ pending: 'pendiente', in_progress: 'en ejecución', review: 'en revisión', done: 'completada', blocked: 'bloqueada', discarded: 'descartada' } as Record<string, string>)[before.status] ?? before.status}): ${changes.join('; ')}. La próxima iteración usa este contexto.`, processId: after.lastProcessId ?? null, costUsd: 0, tokens: 0, proposals: null });
 }
 
 export { stepByRole };

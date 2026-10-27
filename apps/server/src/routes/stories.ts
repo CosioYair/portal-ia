@@ -8,7 +8,7 @@ import { PolicyError } from '../services/executionPolicy.ts';
 /** M6 · Espacio de la historia: contexto, chat con el equipo (autorizado), tareas, iteraciones. */
 export async function storyRoutes(app: FastifyInstance) {
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
-  const fail = (reply: any, e: any) => reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : undefined });
+  const fail = (reply: any, e: any) => reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError || (e.statusCode && typeof e.code === 'string') ? e.code : undefined, branch: e.branch });
 
   app.get('/api/workspaces/:slug/stories/:id', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
@@ -64,7 +64,9 @@ export async function storyRoutes(app: FastifyInstance) {
   });
   app.post('/api/workspaces/:slug/stories/:id/iterate', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ note: z.string().trim().max(2000).nullable().optional() }).safeParse(req.body ?? {});
-    try { const r = await iterateStory(slug, id, body.success ? body.data.note ?? null : null); app.log.info({ story: id, processId: r.process.id }, 'nueva iteración creada'); return reply.code(201).send(r); } catch (e: any) { return fail(reply, e); }
+    // reopen: reabre una historia cerrada/descartada · discardApplied: confirma descartar el worktree y la rama de una iteración aplicada sin integrar.
+    const body = z.object({ note: z.string().trim().max(2000).nullable().optional(), reopen: z.boolean().optional(), discardApplied: z.boolean().optional() }).safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Datos de la iteración no válidos' });
+    try { const r = await iterateStory(slug, id, body.data.note || null, { reopen: body.data.reopen, discardApplied: body.data.discardApplied }); app.log.info({ story: id, processId: r.process.id, actions: r.actions }, 'nueva iteración creada'); return reply.code(201).send(r); } catch (e: any) { return fail(reply, e); }
   });
 }
