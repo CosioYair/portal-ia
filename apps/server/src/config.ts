@@ -48,3 +48,28 @@ export const config = {
 };
 
 fs.mkdirSync(path.join(config.dataDir, 'workspaces'), { recursive: true });
+
+/** Versión del esquema de datos: cada cambio de versión hace una copia de `data/` antes de abrir las bases (migraciones solo aditivas). */
+export const DATA_SCHEMA_VERSION = '0.12';
+export function backupDataBeforeMigration(): string | null {
+  try {
+    const marker = path.join(config.dataDir, '.schema-version');
+    const current = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim() : '';
+    if (current === DATA_SCHEMA_VERSION) return null;
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const dest = path.join(config.dataDir, 'backups', `${stamp}_antes-de-${DATA_SCHEMA_VERSION}`);
+    fs.mkdirSync(dest, { recursive: true });
+    const copy = (src: string, rel = '') => {
+      for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+        if (e.name === 'backups' || e.name === 'evidence') continue;
+        const from = path.join(src, e.name); const to = path.join(dest, rel, e.name);
+        if (e.isDirectory()) { fs.mkdirSync(to, { recursive: true }); copy(from, path.join(rel, e.name)); }
+        else if (/\.(sqlite|sqlite-wal|sqlite-shm)$|^\.master\.key$/.test(e.name)) fs.copyFileSync(from, to);
+      }
+    };
+    copy(config.dataDir);
+    fs.writeFileSync(marker, DATA_SCHEMA_VERSION);
+    return dest;
+  } catch { return null; }
+}
+backupDataBeforeMigration();

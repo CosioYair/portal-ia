@@ -55,8 +55,8 @@ export function SystemBar() {
       <Notice kind={phase === 'failed' ? 'err' : 'warn'}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
           <div>
-            <strong>El código del Portal cambió desde que arrancó</strong> ({st.changedFiles.length} archivo(s){st.stories.length ? ` · ${st.stories.join(', ')}` : ''}; commit {st.startCommit} → {st.headCommit}).{' '}
-            {restart ? 'Hace falta reconstruir y reiniciar para que los cambios entren en funcionamiento.' : 'Basta reconstruir la interfaz y recargar el navegador.'}
+            <strong>{st.startCommit === st.headCommit ? 'La interfaz servida se construyó con un commit anterior' : 'El código del Portal cambió desde que arrancó'}</strong> ({st.changedFiles.length} archivo(s){st.stories.length ? ` · ${st.stories.join(', ')}` : ''}; servidor {st.startCommit} · interfaz {st.buildCommit ?? '?'} · repositorio {st.headCommit}).{' '}
+            {restart ? 'Hace falta reconstruir y reiniciar para que los cambios entren en funcionamiento (hasta entonces las historias integradas no están activas).' : 'Basta reconstruir la interfaz y recargar el navegador.'}
           </div>
           {phase === 'idle' && <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo ejecutar <span className="mono">npm install</span> (si cambiaron dependencias), <span className="mono">npm run build</span>{restart ? ' y reiniciar el servidor del Portal' : ''} en la carpeta de esta instalación.</span></label>}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>

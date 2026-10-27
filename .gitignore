@@ -1,6 +1,12 @@
-node_modules/
+node_modules
 dist/
 data/
 .env
 *.log
 .DS_Store
+
+# Evidencia de la prueba e2e y worktrees de procesos
+apps/server/test/e2e/out/
+*-worktrees/
+apps/web/dist.next/
+apps/web/dist.prev/

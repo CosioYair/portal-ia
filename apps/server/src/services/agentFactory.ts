@@ -1,9 +1,11 @@
 import type { Agent, AgentConfig, AgentCreateInput, AgentDraftResult, ModelInfo, ProviderId, Scope } from '@portal-ia/domain';
-import { KNOWLEDGE, TOOLS, pickByTier } from '@portal-ia/domain';
+import { CAPABILITIES, KNOWLEDGE, TOOLS, pickByTier } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
+import { requirePolicy } from './executionPolicy.ts';
+import { inheritLatestTemplate } from './agentTemplates.ts';
 
 /**
  * Creación de agentes especializados (propósito central del producto).
@@ -40,7 +42,8 @@ export function createAgent(slug: string, input: AgentCreateInput): Agent {
     const boss = all.find(a => a.key === input.reportsTo)!;
     if (!boss.template.supervises.includes(key)) agents.updateTemplateMeta(boss.id, { ...boss.template, supervises: [...boss.template.supervises, key] });
   }
-  return created;
+  // M5: hereda las prácticas vigentes del papel de su primera capacidad.
+  return inheritLatestTemplate(slug, created);
 }
 
 export function deleteAgent(slug: string, id: string) {
@@ -80,6 +83,7 @@ export async function draftAgent(slug: string, description: string, scope: Scope
 Tu tarea: proponer la configuración de un nuevo agente especializado, en JSON estricto, para que el propietario la revise y edite antes de crearlo. No creas nada tú; solo propones.
 Herramientas disponibles (id · riesgo): ${TOOLS.map(t => `${t.id} · ${t.risk === 'auth' ? 'requiere autorización' : 'local'}`).join(', ')}.
 Conocimiento disponible (id): ${KNOWLEDGE.map(k => k.id).join(', ')}.
+Capacidades (id · qué permite en una historia): ${CAPABILITIES.map(c => `${c.id} · ${c.label}`).join(', ')}. Un agente que implementa necesita write_repo; uno que revisa o consulta necesita read_repo.
 Modelos disponibles (id · nivel): ${models.map(m => `${m.id} · ${m.tier}`).join(', ')}.
 Agentes existentes (key: nombre):
 ${existing}
@@ -88,9 +92,10 @@ Principios: mínimo privilegio (activa solo las herramientas imprescindibles), p
 """${description}"""
 
 Responde SOLO con un objeto JSON con esta forma exacta:
-{"name": string, "role": string (3–6 palabras), "specialization": string (1–2 frases), "responsibilities": string[3-5], "reportsTo": key existente u "owner", "collaborates": key[], "evaluation": string[3], "model": id de la lista, "effort": "low"|"medium"|"high", "tools": {id: true}, "knowledge": {id: true}, "monthlyLimitUsd": number, "perTaskAuthUsd": number, "rationale": string (por qué estas decisiones, 2 frases)}`;
+{"name": string, "role": string (3–6 palabras), "specialization": string (1–2 frases), "responsibilities": string[3-5], "reportsTo": key existente u "owner", "collaborates": key[], "evaluation": string[3], "model": id de la lista, "effort": "low"|"medium"|"high", "tools": {id: true}, "knowledge": {id: true}, "capabilities": id[] (1-3 de la lista), "monthlyLimitUsd": number, "perTaskAuthUsd": number, "rationale": string (por qué estas decisiones, 2 frases)}`;
   const startedAt = new Date().toISOString();
   try {
+    requirePolicy('ai_call', { slug, agentId: onboarding.id, authorized: true });
     const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
       model: onboarding.config.model, system, user, maxTokens: 1500, effort: 'low', supportsEffort: false
     });
@@ -106,7 +111,8 @@ Responde SOLO con un objeto JSON con esta forma exacta:
       name: typeof j.name === 'string' ? j.name : undefined, specialization: typeof j.specialization === 'string' ? j.specialization : undefined,
       responsibilities: Array.isArray(j.responsibilities) ? j.responsibilities.filter((x: any) => typeof x === 'string').slice(0, 8) : undefined,
       provider: providerId, model, effort: ['low', 'medium', 'high'].includes(j.effort) ? j.effort : 'medium', tools, knowledge,
-      monthlyLimitUsd: typeof j.monthlyLimitUsd === 'number' ? j.monthlyLimitUsd : 20, perTaskAuthUsd: typeof j.perTaskAuthUsd === 'number' ? j.perTaskAuthUsd : 2, fallbacks: []
+      monthlyLimitUsd: typeof j.monthlyLimitUsd === 'number' ? j.monthlyLimitUsd : 20, perTaskAuthUsd: typeof j.perTaskAuthUsd === 'number' ? j.perTaskAuthUsd : 2, fallbacks: [],
+      capabilities: Array.isArray(j.capabilities) ? j.capabilities.filter((c: any) => CAPABILITIES.some(k => k.id === c)).slice(0, 3) : ['consultar']
     };
     return {
       proposal: { scope, name: config.name, role: typeof j.role === 'string' ? j.role : undefined, reportsTo: j.reportsTo === 'owner' || keys.includes(j.reportsTo) ? j.reportsTo : undefined,

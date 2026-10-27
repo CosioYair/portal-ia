@@ -15,6 +15,8 @@ import { integrationRoutes } from './routes/integration.ts';
 import { inboxRoutes } from './routes/inbox.ts';
 import { budgetRoutes } from './routes/budgets.ts';
 import { manualTestFeedbackRoutes } from './routes/manual-test-feedback.ts';
+import { learningRoutes } from './routes/learning.ts';
+import { storyRoutes } from './routes/stories.ts';
 import { VERSION } from './services/system.ts';
 
 export async function buildApp() {
@@ -40,13 +42,16 @@ export async function buildApp() {
   await app.register(inboxRoutes);
   await app.register(budgetRoutes);
   await app.register(manualTestFeedbackRoutes);
+  await app.register(learningRoutes);
+  await app.register(storyRoutes);
 
   // Producción local: sirve apps/web/dist si existe (npm run build). SPA fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {
-    await app.register(fastifyStatic, { root: config.webDist, prefix: '/' });
+    // index.html y build-info.json nunca se cachean: tras reconstruir, el navegador debe ver la interfaz nueva (M2).
+    await app.register(fastifyStatic, { root: config.webDist, prefix: '/', setHeaders: (res, filePath) => { if (/index\.html$|build-info\.json$/.test(filePath)) res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate'); } });
     app.setNotFoundHandler((req, reply) => {
       if (req.url.startsWith('/api/')) return reply.code(404).send({ error: 'Ruta no encontrada' });
-      return reply.sendFile('index.html');
+      return reply.header('Cache-Control', 'no-cache, no-store, must-revalidate').sendFile('index.html');
     });
   }
   return app;

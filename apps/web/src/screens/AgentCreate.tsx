@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Agent, AgentConfig, ProviderId, Scope } from '@portal-ia/domain';
-import { KNOWLEDGE, TOOLS } from '@portal-ia/domain';
+import { CAPABILITIES, KNOWLEDGE, TOOLS } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS, KNOWLEDGE_LABELS, TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
@@ -25,7 +25,7 @@ export function AgentCreate() {
   const [evaluation, setEvaluation] = useState<string[]>(['', '', '']);
   const [cfg, setCfg] = useState<AgentConfig>({
     name: '', specialization: '', responsibilities: [], provider: (defaultProvider?.id ?? 'anthropic') as ProviderId,
-    model: defaultProvider?.defaultModel ?? defaultProvider?.models[0]?.id ?? '', fallbacks: [], effort: 'medium', tools: { delegate: true }, knowledge: { objectives: true, context: true },
+    model: defaultProvider?.defaultModel ?? defaultProvider?.models[0]?.id ?? '', fallbacks: [], effort: 'medium', tools: { delegate: true }, knowledge: { objectives: true, context: true }, capabilities: ['consultar'],
     monthlyLimitUsd: 20, perTaskAuthUsd: 2
   });
   const [newResp, setNewResp] = useState('');
@@ -149,6 +149,11 @@ export function AgentCreate() {
                 <div><label className="label" htmlFor="n-limit">Límite mensual (USD)</label><input id="n-limit" className="input mono" type="number" min={0} step={1} value={cfg.monthlyLimitUsd} onChange={e => edit({ monthlyLimitUsd: Number(e.target.value) })} /></div>
                 <div><label className="label" htmlFor="n-pertask">Autorización por encima de (USD/tarea)</label><input id="n-pertask" className="input mono" type="number" min={0} step={0.5} value={cfg.perTaskAuthUsd} onChange={e => edit({ perTaskAuthUsd: Number(e.target.value) })} /></div>
               </div>
+            </div></section>
+
+          <section className="card"><div className="card-h"><div><div className="h3">Capacidades</div><div className="small muted">Deciden su papel en cada historia (sin IA): quién planifica, implementa, revisa o consulta.</div></div><span className="small muted">{(cfg.capabilities ?? []).length} de {CAPABILITIES.length}</span></div>
+            <div className="card-b" style={{ display: 'flex', flexDirection: 'column' }}>
+              {CAPABILITIES.map(c => { const on = (cfg.capabilities ?? []).includes(c.id); const needs = c.id === 'implementar' ? 'write_repo' : c.role === 'reviewer' || c.role === 'consultant' ? 'read_repo' : null; return <label key={c.id} className="krow"><input className="cb" type="checkbox" checked={on} onChange={e => edit({ capabilities: e.target.checked ? [...(cfg.capabilities ?? []), c.id] : (cfg.capabilities ?? []).filter(x => x !== c.id) })} /><span style={{ flex: 1 }}>{c.label} <span className="small muted">· {c.role === 'planner' ? 'planificador' : c.role === 'implementer' ? 'implementador' : c.role === 'reviewer' ? 'revisor' : 'consultor'}{needs && !cfg.tools[needs] && on ? ` · necesita la herramienta ${needs}` : ''}</span></span></label>; })}
             </div></section>
 
           <section className="card"><div className="card-h"><div className="h3">Herramientas y permisos</div><span className="small muted">{TOOLS.filter(t => cfg.tools[t.id]).length} de {TOOLS.length}</span></div>

@@ -72,6 +72,31 @@ export interface AgentTemplate {
   evaluation: string[];
   monthlyLimitUsd: number;
   perTaskAuthUsd: number;
+  /** Capacidades (M3): qué puede hacer el agente en una historia; deciden su papel en el equipo sin llamar a la IA. */
+  capabilities?: Capability[];
+}
+
+/** Capacidades reconocidas por el compositor de equipos (M3). */
+export type Capability = 'planificar' | 'implementar' | 'revisar_calidad' | 'generar_pruebas' | 'consultar_arquitectura' | 'consultar_ux' | 'revisar_seguridad' | 'consultar' | 'documentar';
+export const CAPABILITIES: { id: Capability; label: string; role: 'planner' | 'implementer' | 'reviewer' | 'consultant' }[] = [
+  { id: 'planificar', label: 'Planificar historias (plan técnico)', role: 'planner' },
+  { id: 'implementar', label: 'Implementar cambios en el código', role: 'implementer' },
+  { id: 'revisar_calidad', label: 'Revisar calidad del diff (QA)', role: 'reviewer' },
+  { id: 'generar_pruebas', label: 'Redactar pruebas manuales', role: 'consultant' },
+  { id: 'consultar_arquitectura', label: 'Consultar sobre arquitectura', role: 'consultant' },
+  { id: 'consultar_ux', label: 'Consultar sobre UX/UI', role: 'consultant' },
+  { id: 'revisar_seguridad', label: 'Revisar seguridad', role: 'consultant' },
+  { id: 'consultar', label: 'Consultar en su especialidad', role: 'consultant' },
+  { id: 'documentar', label: 'Documentar', role: 'consultant' }
+];
+/** Capacidades por defecto de las plantillas del equipo inicial (para agentes creados antes de M3). */
+export function defaultCapabilitiesFor(key: string): Capability[] {
+  if (key === 'pj-coordinador') return ['planificar'];
+  if (key === 'pj-dev') return ['implementar'];
+  if (key === 'pj-qa') return ['revisar_calidad', 'generar_pruebas'];
+  if (key === 'pj-arquitecto') return ['consultar_arquitectura'];
+  if (key === 'pj-ux') return ['consultar_ux'];
+  return [];
 }
 
 /** Configuración editable por el usuario; parte de la plantilla. */
@@ -87,6 +112,8 @@ export interface AgentConfig {
   knowledge: Record<string, boolean>;
   monthlyLimitUsd: number;
   perTaskAuthUsd: number;
+  /** Capacidades (M3). */
+  capabilities?: Capability[];
 }
 
 export interface Agent {
@@ -103,6 +130,8 @@ export interface Agent {
   updatedAt: string;
   /** Datos inmutables heredados de la plantilla, para la UI. */
   template: Pick<AgentTemplate, 'initials' | 'role' | 'reportsTo' | 'supervises' | 'collaborates' | 'evaluation' | 'tier'>;
+  /** Versión de plantilla aplicada (M5), p. ej. «pj-dev@2»; null = versión original (@1). */
+  templateVersion?: string | null;
 }
 
 export interface Workspace {
@@ -165,6 +194,12 @@ export interface ProcessStep {
   agentId: string;
   agentName: string;
   title: string;
+  /** Papel en el equipo (M3): planner · consultant · implementer · reviewer. */
+  role?: TeamRole | null;
+  /** Por qué este agente ocupa este papel (compositor determinista o anulación manual). */
+  reason?: string | null;
+  /** Ids de lecciones/prácticas inyectadas en el prompt de este paso (M4/M5). */
+  lessonsUsed?: string[];
   status: StepStatus;
   model: string | null;
   inputTokens: number;
@@ -225,8 +260,15 @@ export interface KnowledgeDoc {
   createdAt: string;
 }
 
+export type TeamRole = 'planner' | 'consultant' | 'implementer' | 'reviewer';
+export interface TeamMember { agentId: string; agentName: string; agentKey: string; role: TeamRole; capability: Capability | null; model: string; reason: string; override?: boolean }
+export interface TeamOverride { add?: string[]; remove?: string[]; by: 'owner'; at: string }
+export interface TeamComposition { members: TeamMember[]; excluded: { agentId: string; agentName: string; reason: string }[]; override: TeamOverride | null; aiCalls: 0 }
+
 export interface AssessmentEstimate {
-  steps: { agentId: string; agentName: string; title: string; model: string; estimatedUsd: number }[];
+  steps: { agentId: string; agentName: string; title: string; model: string; estimatedUsd: number; role?: TeamRole; reason?: string }[];
+  /** Equipo compuesto por capacidades (M3), con motivos y exclusiones. */
+  team?: TeamComposition;
   contextChars: number;
   estimatedUsd: number;
   suggestedBudgetUsd: number;
@@ -303,7 +345,8 @@ export interface ProposedChange {
   before: number; after: number; // líneas
 }
 export interface ReviewVerdict { approve: boolean; issues: string[]; suggestedTests: string[]; summary: string; }
-export interface VerificationRun { command: string; exitCode: number | null; output: string; startedAt: string; finishedAt: string; durationMs: number; }
+export type Isolation = 'docker' | 'wsl' | 'linux-ns' | 'host-min' | 'unavailable';
+export interface VerificationRun { command: string; exitCode: number | null; output: string; startedAt: string; finishedAt: string; durationMs: number; /** Dónde se ejecutó: sandbox real (docker/wsl), verificación mínima en el equipo (solo tsc) o no disponible. */ isolation?: Isolation; }
 export interface ExecutionResult {
   plan: StoryPlan | null;
   implementationSummary: string | null;
@@ -311,10 +354,20 @@ export interface ExecutionResult {
   userFacing?: string | null;
   /** Prueba manual paso a paso que el propietario sigue y marca; la historia no se cierra hasta que todos los pasos estén probados. */
   manualTest?: { steps: string[]; checks: boolean[]; note: string | null } | null;
+  /** Comprobaciones en ejecución definidas por el equipo (http/ui) y sus resultados tras activar (M2). */
+  runtimeChecks?: { checks: RuntimeCheck[]; results: RuntimeCheckResult[]; ranAt: string | null } | null;
+  /** Estado de activación calculado al leer (no se persiste): ¿el Portal en marcha contiene el merge y la web fue reconstruida después? */
+  activation?: ActivationState | null;
+  /** Equipo de la historia (M3): quién hizo qué y por qué, incluidas anulaciones manuales. */
+  team?: TeamComposition | null;
+  /** Aportaciones de los consultores (M3), por agente. */
+  consultations?: { agentId: string; agentName: string; role: string; text: string }[];
+  /** Contexto de iteración (M6): feedback de la prueba, tareas abiertas y nota del propietario que recibe el equipo. */
+  iterationContext?: string | null;
   changes: ProposedChange[];
   verifyCommands: string[];
   review: ReviewVerdict | null;
-  applied: { branch: string; commit: string; files: string[]; appliedAt: string } | null;
+  applied: { branch: string; commit: string; files: string[]; appliedAt: string; /** Worktree aislado donde viven los cambios hasta integrarse (M1). */ worktree?: string | null } | null;
   verifications: VerificationRun[];
   /** Integración de la rama en la rama principal (git merge --no-ff), autorizada por el propietario. */
   merged?: { into: string; commit: string; mergedAt: string } | null;
@@ -346,6 +399,10 @@ export interface RepoStatus {
 export interface SystemStatus {
   version: string; startedAt: string; repoRoot: string; isGit: boolean;
   startCommit: string | null; headCommit: string | null; branch: string | null;
+  /** Commit con el que se construyó la web servida (apps/web/dist/build-info.json) y cuándo. */
+  buildCommit?: string | null; buildAt?: string | null;
+  /** Sandbox detectado para verificar código generado. */
+  sandbox?: { available: Isolation; detail: string } | null;
   /** Archivos cambiados entre el commit arrancado y HEAD (y sin confirmar). */
   changedFiles: string[];
   /** Acción necesaria para ver los cambios: ninguna, recargar el navegador o reconstruir y reiniciar. */
@@ -594,3 +651,37 @@ export function manualTestStepKey(index: number, text: string): string {
   for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
   return `p${index + 1}-${h.toString(36)}`;
 }
+
+// ---- M6 · Espacio de la historia ----
+export interface StoryMessage { id: string; backlogItemId: string; role: 'owner' | 'agent' | 'system'; agentId: string | null; agentName: string | null; content: string; processId: string | null; costUsd: number; tokens: number; proposals: { tasks: { title: string; assignee: string | null }[]; criterion: string | null; iterate: boolean; iterationNote: string | null; applied: boolean } | null; createdAt: string }
+export interface StoryTask { id: string; backlogItemId: string; title: string; status: 'open' | 'done'; assigneeAgentId: string | null; assigneeName: string | null; source: string; processId: string | null; createdAt: string; doneAt: string | null }
+export interface StoryContext {
+  item: BacklogItem; project: Project; processes: Process[]; lastProcess: Process | null; iterations: number; team: TeamMember[];
+  manualTest: { steps: string[]; checks: boolean[]; note: string | null } | null; feedback: ManualTestFeedbackView;
+  tasks: StoryTask[]; messages: StoryMessage[]; lessons: Lesson[];
+}
+
+// ---- M4 · Lecciones validadas ----
+export type LessonStatus = 'detected' | 'proposed' | 'validated' | 'rejected' | 'obsolete';
+export interface LessonEvidence { processId: string | null; processTitle: string | null; stepId: string | null; agentId: string | null; agentName: string | null; file: string | null; detail: string; at: string }
+export interface Lesson {
+  id: string; projectId: string | null; role: string | null; tags: string[]; status: LessonStatus; version: number; parentId: string | null;
+  title: string; detector: string; evidence: LessonEvidence; rootCause: string | null; correctiveAction: string | null;
+  /** Texto que se inyecta en los prompts (solo si está validada). */
+  lessonText: string | null;
+  source: 'detector' | 'ai' | 'owner' | string; usedCount: number; recurrenceCount: number;
+  /** Versión de plantilla a la que se promovió como práctica (M5), p. ej. «pj-dev@2». */
+  promotedTo: string | null;
+  createdAt: string; updatedAt: string; validatedAt: string | null;
+}
+
+// ---- M5 · Plantillas versionadas ----
+export interface AgentTemplatePractice { lessonId: string; text: string; title: string; addedAt: string }
+export interface AgentTemplateVersion {
+  key: string; version: number; /** «pj-dev@2» */ id: string; name: string; role: string; responsibilities: string[]; practices: AgentTemplatePractice[];
+  /** Diff legible respecto a la versión anterior. */ diffMd: string; source: 'seed' | 'promotion' | string; lessonId: string | null; createdAt: string; createdBy: string;
+}
+
+export interface RuntimeCheck { kind: 'http' | 'ui'; path: string; selector?: string | null; expect: string; }
+export interface RuntimeCheckResult { check: RuntimeCheck; status: 'ok' | 'fail' | 'skipped'; detail: string; evidence?: string | null; at: string; }
+export interface ActivationState { active: boolean; runningCommit: string | null; buildCommit: string | null; buildAt: string | null; reason: string; }

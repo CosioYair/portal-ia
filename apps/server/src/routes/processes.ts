@@ -4,11 +4,19 @@ import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
 import { knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { cancelProcess, clearCancel, createAssessment, estimateAssessment, isCancelled, runAssessment } from '../services/assessment.ts';
-import { createStoryProcess, estimateManualTest, estimateStory, generateManualTest, recoverStory, retryStory, runStory } from '../services/storyExecution.ts';
+import { createStoryProcess, estimateManualTest, estimateStory, generateManualTest, recoverStory, retryStory, runStory, stepByRole } from '../services/storyExecution.ts';
 import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
 import { describeProcess } from '../services/guidance.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
-import { applyChanges, checkStaleChanges, mergeBranch, pushBranches, remoteInfo, runVerification } from '../services/repoWrite.ts';
+import { applyChanges, checkStaleChanges, discardBranch, mergeBranch, pushBranches, removeWorktree, worktreePathFor } from '../services/repoWrite.ts';
+import { requirePolicy, PolicyError } from '../services/executionPolicy.ts';
+import { detectSandbox, runInSandbox } from '../services/sandbox.ts';
+import fs from 'node:fs';
+import path from 'node:path';
+import { REPO_ROOT } from '../config.ts';
+import { activationOf } from '../services/system.ts';
+import { defaultChecks, runRuntimeChecks, runtimeVerified } from '../services/runtimeChecks.ts';
+import { recordDetections } from '../services/lessons.ts';
 import { addManualItem, estimateExtraction, extractBacklogWithAI, importBacklogFromKnowledge, resetStory } from '../services/backlog.ts';
 import { backlogRepo } from '../db/workspace.ts';
 
@@ -17,7 +25,19 @@ import { backlogRepo } from '../db/workspace.ts';
  * IA cuando el usuario lo autoriza con un presupuesto (POST /authorize). Puede cancelarse; se detiene entre pasos.
  */
 export async function processRoutes(app: FastifyInstance) {
-  const withGuidance = (slug: string, p: Process): Process => ({ ...p, guidance: describeProcess(p, { isPortalRepo: slug === INTERNAL_WORKSPACE.slug }) });
+  // Al servir un proceso se calcula (no se persiste) su estado de activación en el Portal en marcha y la orientación.
+  const withGuidance = async (slug: string, p: Process): Promise<Process> => {
+    const isPortalRepo = slug === INTERNAL_WORKSPACE.slug;
+    let q = p;
+    if (isPortalRepo && p.kind === 'story_execution' && p.result?.merged) {
+      const repo = projectsRepo(slug).repository(p.projectId);
+      const runtime = !!repo && path.resolve(repo.path) === path.resolve(REPO_ROOT);
+      const activation = runtime ? await activationOf(p.result.merged.commit, p.result.merged.mergedAt).catch(() => null) : null;
+      q = { ...p, result: { ...p.result, activation } };
+    }
+    const item = q.kind === 'story_execution' && q.backlogItemId ? backlogRepo(slug).get(q.backlogItemId) : undefined;
+    return { ...q, guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null }) };
+  };
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
 
   app.get('/api/workspaces/:slug/projects/:projectId/assessment/estimate', async (req, reply) => {
@@ -33,13 +53,13 @@ export async function processRoutes(app: FastifyInstance) {
 
   app.get('/api/workspaces/:slug/projects/:projectId/processes', async (req, reply) => {
     const { slug, projectId } = req.params as any; if (!guard(slug, reply)) return;
-    return processesRepo(slug).list(projectId).map(p => withGuidance(slug, p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p));
+    return Promise.all(processesRepo(slug).list(projectId).map(p => withGuidance(slug, p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p)));
   });
 
   app.get('/api/workspaces/:slug/processes/:id', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const p = processesRepo(slug).get(id); if (!p) return reply.code(404).send({ error: 'Proceso no encontrado' });
-    return withGuidance(slug, p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p);
+    return await withGuidance(slug, p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p);
   });
 
   // Autorización explícita: aquí y solo aquí empieza el consumo de IA.
@@ -109,14 +129,22 @@ export async function processRoutes(app: FastifyInstance) {
   });
   app.get('/api/workspaces/:slug/projects/:projectId/backlog/:id/estimate', async (req, reply) => {
     const { slug, projectId, id } = req.params as any; if (!guard(slug, reply)) return;
-    const skipQa = String((req.query as any)?.skipQa ?? '') === '1';
-    try { return estimateStory(slug, projectId, id, { skipQa }); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    const q = (req.query as any) ?? {}; const skipQa = String(q.skipQa ?? '') === '1';
+    // Anulación manual del equipo (M3): ?add=id1,id2&remove=id3
+    const override = q.add || q.remove ? { add: String(q.add ?? '').split(',').filter(Boolean), remove: String(q.remove ?? '').split(',').filter(Boolean), by: 'owner' as const, at: new Date().toISOString() } : null;
+    try { return estimateStory(slug, projectId, id, { skipQa, override }); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   // Crea el proceso de ejecución (pendiente de autorización). El consumo empieza en /authorize.
   app.post('/api/workspaces/:slug/projects/:projectId/backlog/:id/execute', async (req, reply) => {
     const { slug, projectId, id } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ skipQa: z.boolean().optional() }).safeParse(req.body ?? {});
-    try { return createStoryProcess(slug, projectId, id, { skipQa: body.success ? !!body.data.skipQa : false }); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    const body = z.object({ skipQa: z.boolean().optional(), team: z.object({ add: z.array(z.string()).max(10).optional(), remove: z.array(z.string()).max(10).optional() }).optional() }).safeParse(req.body ?? {});
+    const override = body.success && body.data.team && ((body.data.team.add?.length ?? 0) + (body.data.team.remove?.length ?? 0) > 0) ? { ...body.data.team, by: 'owner' as const, at: new Date().toISOString() } : null;
+    try { return createStoryProcess(slug, projectId, id, { skipQa: body.success ? !!body.data.skipQa : false, override }); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+  // M3 · Métricas de participación de un agente (derivadas de process_steps, sin IA).
+  app.get('/api/workspaces/:slug/agents/:id/stats', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    return processesRepo(slug).agentStats(id);
   });
 
   // ---- Prueba manual: el propietario marca cada paso probado ----
@@ -131,7 +159,7 @@ export async function processRoutes(app: FastifyInstance) {
     const steps = body.data.steps ?? cur?.steps; if (!steps) return reply.code(404).send({ error: 'Este proceso no tiene prueba manual; genera una o añade los pasos.' });
     const checks = steps.map((_, i) => body.data.steps ? false : !!(body.data.checks ?? cur?.checks ?? [])[i]);
     procs.setResult(id, { ...proc.result, manualTest: { steps, checks, note: body.data.note === undefined ? (cur?.note ?? null) : body.data.note } });
-    return withGuidance(slug, procs.get(id)!);
+    return await withGuidance(slug, procs.get(id)!);
   });
   app.get('/api/workspaces/:slug/processes/:id/manual-test/estimate', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
@@ -141,7 +169,7 @@ export async function processRoutes(app: FastifyInstance) {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ authorized: z.literal(true) }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita (consume una llamada).' });
-    try { const p = await generateManualTest(slug, id, (o, m) => app.log.info(o, m)); return withGuidance(slug, p); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    try { const p = await generateManualTest(slug, id, (o, m) => app.log.info(o, m)); return await withGuidance(slug, p); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
 
   // ---- Rechazar el diff de un proceso (la historia vuelve a pendiente) / devolver una historia a pendiente ----
@@ -150,24 +178,35 @@ export async function processRoutes(app: FastifyInstance) {
     const body = z.object({ reason: z.string().trim().max(300).optional() }).safeParse(req.body ?? {});
     const proc = processesRepo(slug).get(id);
     if (!proc || proc.kind !== 'story_execution') return reply.code(404).send({ error: 'Proceso de historia no encontrado' });
-    if (proc.result?.applied) return reply.code(409).send({ error: 'Los cambios ya se aplicaron en una rama; si no los quieres, borra la rama con git.' });
-    try { if (proc.backlogItemId) resetStory(slug, proc.backlogItemId, body.success && body.data.reason ? body.data.reason : 'diff rechazado por el propietario'); else processesRepo(slug).setResult(id, { ...(proc.result ?? { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [] }), rejected: { at: new Date().toISOString(), reason: 'rechazado' } }); app.log.info({ processId: id }, 'diff rechazado'); return withGuidance(slug, processesRepo(slug).get(id)!); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    if (proc.result?.merged) return reply.code(409).send({ error: 'Los cambios ya están integrados en la rama principal; no se pueden rechazar. Crea una nueva iteración o devuelve la historia a pendiente.' });
+    if (proc.result?.applied) {
+      // M1: aplicado en worktree pero no integrado → se retira el worktree y se borra la rama (nunca el checkout principal).
+      const repo = projectsRepo(slug).repository(proc.projectId);
+      if (repo) { try { requirePolicy('delete_worktree', { slug, processId: id, projectId: proc.projectId, authorized: true }); const d = await discardBranch(repo.path, id, proc.result.applied.branch); app.log.info({ processId: id, ...d }, 'rama de historia descartada'); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); } }
+    }
+    try { if (proc.backlogItemId) resetStory(slug, proc.backlogItemId, body.success && body.data.reason ? body.data.reason : 'diff rechazado por el propietario'); else processesRepo(slug).setResult(id, { ...(proc.result ?? { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [] }), rejected: { at: new Date().toISOString(), reason: 'rechazado' } }); app.log.info({ processId: id }, 'diff rechazado'); return await withGuidance(slug, processesRepo(slug).get(id)!); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   app.post('/api/workspaces/:slug/backlog/:id/reset', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ reason: z.string().trim().max(300).optional() }).safeParse(req.body ?? {});
-    try { return resetStory(slug, id, body.success && body.data.reason ? body.data.reason : 'devuelta a pendiente por el propietario'); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    try {
+      const reason = body.success && body.data.reason ? body.data.reason : 'devuelta a pendiente por el propietario';
+      const item = backlogRepo(slug).get(id); const lastId = item?.lastProcessId ?? null;
+      const r = resetStory(slug, id, reason);
+      if (lastId) { try { recordDetections(slug, lastId, projectsRepo(slug).repository(item!.projectId)?.path ?? null, { resetReason: reason }); } catch { /* sin lección */ } }
+      return r;
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
 
   // ---- Recuperar (sin IA) o reintentar un proceso de historia ----
   app.post('/api/workspaces/:slug/processes/:id/recover', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    try { const p = await recoverStory(slug, id); app.log.info({ processId: id, changes: p.result?.changes.length }, 'proceso recuperado sin IA'); return withGuidance(slug, p); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    try { const p = await recoverStory(slug, id); app.log.info({ processId: id, changes: p.result?.changes.length }, 'proceso recuperado sin IA'); return await withGuidance(slug, p); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   app.post('/api/workspaces/:slug/processes/:id/retry', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ skipQa: z.boolean().optional() }).safeParse(req.body ?? {});
-    try { const p = retryStory(slug, id, { skipQa: body.success ? !!body.data.skipQa : false }); app.log.info({ from: id, processId: p.id }, 'historia relanzada (pendiente de autorización)'); return reply.code(201).send(withGuidance(slug, p)); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    try { const p = retryStory(slug, id, { skipQa: body.success ? !!body.data.skipQa : false }); app.log.info({ from: id, processId: p.id }, 'historia relanzada (pendiente de autorización)'); return reply.code(201).send(await withGuidance(slug, p)); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
 
   // ---- Encargos delegados a un agente responsable (sin IA hasta autorizar) ----
@@ -205,21 +244,22 @@ export async function processRoutes(app: FastifyInstance) {
     const item = proc.backlogItemId ? backlogRepo(slug).get(proc.backlogItemId) : undefined;
     const branch = body.data.branch ?? `portal-ia/${(item?.storyId ?? 'cambio').toLowerCase()}`;
     try {
+      requirePolicy('write_worktree', { slug, processId: id, agentId: stepByRole(proc, 'implementer')?.agentId ?? null, projectId: proc.projectId, authorized: true });
       // Última comprobación: ningún «modify» completo sobre un archivo que cambió después de leerse.
       const checked = checkStaleChanges(repo.path, proc.result.changes);
-      if (checked.some((c, i) => c.error && !proc.result!.changes[i].error)) { procs.setResult(id, { ...proc.result, changes: checked }); }
+      if (checked.some((c, i) => c.error && !proc.result!.changes[i].error)) { procs.setResult(id, { ...proc.result, changes: checked }); recordDetections(slug, id, repo.path); }
       if (!checked.some(c => !c.error)) return reply.code(409).send({ error: `Ningún cambio es aplicable ya: ${checked.filter(c => c.error).map(c => `${c.path}: ${c.error}`).join(' · ')}` });
       proc.result.changes = checked;
       const applied = await applyChanges(repo.path, branch, proc.result.changes, `${item?.storyId ?? 'Portal IA'}: ${item?.title ?? proc.title}
 
 Cambios propuestos por el equipo de agentes de Portal IA y aprobados por el propietario.
-Proceso: ${proc.id}`);
+Proceso: ${proc.id}`, { processId: proc.id });
       const result = { ...proc.result, applied: { ...applied, appliedAt: new Date().toISOString() } };
       procs.setResult(id, result);
-      procs.logExecution({ projectId: proc.projectId, agentId: proc.steps[1]?.agentId ?? '', kind: 'repo_write', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() });
-      app.log.info({ processId: id, branch: applied.branch, commit: applied.commit, files: applied.files.length }, 'cambios aplicados en rama');
-      return procs.get(id);
-    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+      procs.logExecution({ projectId: proc.projectId, agentId: stepByRole(proc, 'implementer')?.agentId ?? '', kind: 'repo_write', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() });
+      app.log.info({ processId: id, branch: applied.branch, commit: applied.commit, files: applied.files.length, worktree: applied.worktree }, 'cambios aplicados en worktree aislado');
+      return await withGuidance(slug, procs.get(id)!);
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : undefined }); }
   });
 
   // ---- Integrar en la rama principal (merge --no-ff · requiere autorización por uso) ----
@@ -234,18 +274,25 @@ Proceso: ${proc.id}`);
     const after = new Date(proc.result.applied.appliedAt).getTime();
     const okTypecheck = proc.result.verifications.some(v => v.command === 'typecheck' && v.exitCode === 0 && new Date(v.startedAt).getTime() >= after - 1000);
     const failedLast = ['typecheck', 'build', 'test'].map(c => proc.result!.verifications.filter(v => v.command === c).at(-1)).filter(v => v && v.exitCode !== 0);
-    if (!body.data.skipVerification) {
+    // Proyecto interno (el propio Portal): además de typecheck, test y build en sandbox real; en otros proyectos basta typecheck.
+    const internal = slug === INTERNAL_WORKSPACE.slug;
+    const okAfter = (cmd: string, sandboxOnly = false) => proc.result!.verifications.some(v => v.command === cmd && v.exitCode === 0 && new Date(v.startedAt).getTime() >= after - 1000 && (!sandboxOnly || v.isolation === 'docker' || v.isolation === 'wsl' || v.isolation === 'linux-ns'));
+    const missing = internal ? [!okTypecheck ? 'typecheck' : '', !okAfter('test', true) ? 'test (sandbox)' : '', !okAfter('build', true) ? 'build (sandbox)' : ''].filter(Boolean) : [!okTypecheck ? 'typecheck' : ''].filter(Boolean);
+    if (!body.data.skipVerification || internal) {
+      // El proyecto interno (el propio Portal) nunca se integra saltándose la verificación: es un control de seguridad.
       if (failedLast.length) return reply.code(409).send({ error: `La última verificación falló (${failedLast.map(v => v!.command).join(', ')}). Corrige en la rama o rechaza el diff; integrar código roto dejaría el Portal sin compilar.`, code: 'verification_failed' });
-      if (!okTypecheck) return reply.code(409).send({ error: 'Antes de integrar ejecuta «npm run typecheck» en la sección Verificación (y «build» si es el propio Portal). Así nunca se integra código que no compila.', code: 'verification_required' });
+      if (missing.length) return reply.code(409).send({ error: `Antes de integrar faltan verificaciones en verde tras aplicar: ${missing.join(', ')}. ${internal && missing.some(m => m.includes('sandbox')) ? 'El proyecto interno exige test y build en un sandbox real (Docker/WSL2); sin sandbox no se integra.' : ''}`, code: 'verification_required', missing });
     }
     const repo = projectsRepo(slug).repository(proc.projectId); if (!repo) return reply.code(409).send({ error: 'No hay repositorio registrado.' });
     try {
-      const m = await mergeBranch(repo.path, proc.result.applied.branch, body.data.into);
-      procs.setResult(id, { ...proc.result, merged: { ...m, mergedAt: new Date().toISOString() } });
+      requirePolicy('git_merge', { slug, processId: id, projectId: proc.projectId, authorized: true });
+      const m = await mergeBranch(repo.path, proc.result.applied.branch, body.data.into, { affectedFiles: proc.result.changes.filter(c => !c.error).map(c => c.path), processId: id });
+      procs.setResult(id, { ...proc.result, merged: { into: m.into, commit: m.commit, mergedAt: new Date().toISOString() } });
+      await removeWorktree(repo.path, id).catch(() => false);
       procs.logExecution({ projectId: proc.projectId, agentId: proc.steps[0]?.agentId ?? '', kind: 'repo_merge', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() });
-      app.log.info({ processId: id, into: m.into, commit: m.commit }, 'rama integrada');
-      return procs.get(id);
-    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+      app.log.info({ processId: id, into: m.into, commit: m.commit, viaWorktree: m.viaWorktree }, 'rama integrada');
+      return await withGuidance(slug, procs.get(id)!);
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : undefined }); }
   });
 
   // ---- Publicar en el remoto (git push · requiere autorización por uso) ----
@@ -258,6 +305,7 @@ Proceso: ${proc.id}`);
     const repo = projectsRepo(slug).repository(proc.projectId); if (!repo) return reply.code(409).send({ error: 'No hay repositorio registrado.' });
     const branches = [proc.result.applied.branch, ...(proc.result.merged ? [proc.result.merged.into] : [])];
     try {
+      requirePolicy('git_push', { slug, processId: id, projectId: proc.projectId, authorized: true });
       const p = await pushBranches(repo.path, branches);
       procs.setResult(id, { ...proc.result, published: { ...p, pushedAt: new Date().toISOString() } });
       procs.logExecution({ projectId: proc.projectId, agentId: proc.steps[0]?.agentId ?? '', kind: 'repo_push', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() });
@@ -269,16 +317,53 @@ Proceso: ${proc.id}`);
   // ---- Verificación local (sandbox_exec · requiere autorización por uso; ejecución local sin sandbox) ----
   app.post('/api/workspaces/:slug/processes/:id/verify', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ authorized: z.literal(true), command: z.enum(['install', 'typecheck', 'test', 'build']) }).safeParse(req.body);
+    const body = z.object({ authorized: z.literal(true), command: z.enum(['install', 'typecheck', 'test', 'build']), allowNetwork: z.boolean().optional() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita y un comando permitido.' });
     const procs = processesRepo(slug); const proc = procs.get(id);
     if (!proc || !proc.result) return reply.code(404).send({ error: 'Proceso no encontrado' });
+    if (!proc.result.applied) return reply.code(409).send({ error: 'Primero aplica los cambios: la verificación corre sobre el worktree del proceso.' });
     const repo = projectsRepo(slug).repository(proc.projectId);
     if (!repo) return reply.code(409).send({ error: 'No hay repositorio registrado.' });
-    const run = await runVerification(repo.path, body.data.command);
-    procs.setResult(id, { ...proc.result, verifications: [...proc.result.verifications, run] });
-    procs.logExecution({ projectId: proc.projectId, agentId: proc.steps[2]?.agentId ?? '', kind: 'local_exec', status: run.exitCode === 0 ? 'done' : 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: run.startedAt });
-    return procs.get(id);
+    const wt = proc.result.applied.worktree ?? worktreePathFor(repo.path, id);
+    if (!fs.existsSync(wt)) return reply.code(409).send({ error: 'El worktree del proceso ya no existe (¿se integró o se limpió?). Vuelve a aplicar si necesitas verificar.' });
+    try {
+      const op = body.data.command === 'install' ? 'install_deps' : body.data.command === 'typecheck' && (await detectSandbox()).available === 'unavailable' ? 'host_typecheck_min' : 'sandbox_exec';
+      const qa = proc.steps.find(s => /calidad|QA/i.test(s.title)) ?? proc.steps[1];
+      // La verificación la pide el propietario (no un agente): la política comprueba nivel y autorización; las herramientas de agente se exigen en los pasos que ejecutan agentes.
+      requirePolicy(op, { slug, processId: id, agentId: null, projectId: proc.projectId, authorized: true });
+      if (body.data.command === 'install') {
+        // Instalar dependencias exige red: solo con autorización explícita y mostrando qué cambió en package.json.
+        if (!body.data.allowNetwork) return reply.code(409).send({ error: 'Instalar dependencias necesita red dentro del sandbox. Revisa el diff de package.json y confirma «Permitir red solo para install».', code: 'network_confirmation_required' });
+      }
+      const run = await runInSandbox(wt, path.resolve(repo.path), body.data.command, { allowNetwork: !!body.data.allowNetwork });
+      procs.setResult(id, { ...proc.result, verifications: [...proc.result.verifications, run] });
+      procs.logExecution({ projectId: proc.projectId, agentId: qa?.agentId ?? '', kind: `verify:${body.data.command}:${run.isolation}`, status: run.exitCode === 0 ? 'done' : 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: run.startedAt });
+      if (run.exitCode !== 0 && run.isolation !== 'unavailable') recordDetections(slug, id, repo.path);
+      return await withGuidance(slug, procs.get(id)!);
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : undefined }); }
+  });
+  app.get('/api/system/sandbox', async (req) => detectSandbox(String((req.query as any)?.force ?? '') === '1'));
+  // ---- Verificación en ejecución (M2): el Portal se comprueba a sí mismo tras activar el cambio ----
+  app.post('/api/workspaces/:slug/processes/:id/runtime-check', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ authorized: z.literal(true) }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita.' });
+    const procs = processesRepo(slug); const proc = procs.get(id);
+    if (!proc?.result?.merged) return reply.code(409).send({ error: 'Primero integra los cambios: la verificación en ejecución comprueba el Portal en marcha con el cambio activado.' });
+    const served = await withGuidance(slug, proc);
+    const act = served.result?.activation;
+    if (act && !act.active) return reply.code(409).send({ error: `El cambio aún no está activo en el Portal en marcha: ${act.reason}`, code: 'not_activated' });
+    try {
+      requirePolicy('runtime_check', { slug, processId: id, projectId: proc.projectId, authorized: true });
+      const own = proc.result.runtimeChecks?.checks ?? [];
+      const checks = slug === INTERNAL_WORKSPACE.slug ? [...defaultChecks(), ...own] : own;
+      if (!checks.length) return reply.code(409).send({ error: 'Esta historia no define comprobaciones en ejecución y el proyecto no es el Portal: nada que comprobar automáticamente.', code: 'no_checks' });
+      const results = await runRuntimeChecks(id, checks);
+      procs.setResult(id, { ...proc.result, runtimeChecks: { checks, results, ranAt: new Date().toISOString() } });
+      procs.logExecution({ projectId: proc.projectId, agentId: '', kind: `runtime_check:${results.every(r => r.status === 'ok') ? 'ok' : results.some(r => r.status === 'fail') ? 'fail' : 'skipped'}`, status: results.every(r => r.status === 'ok') ? 'done' : 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() });
+      if (results.some(r => r.status === 'fail')) recordDetections(slug, id, projectsRepo(slug).repository(proc.projectId)?.path ?? null);
+      return await withGuidance(slug, procs.get(id)!);
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : undefined }); }
   });
   // Cierre de historia: solo cuando sus cambios están integrados en la rama principal (regla de cierre), salvo cierre
   // explícito «resuelta fuera del flujo» (force) que el propietario asume.
@@ -292,9 +377,15 @@ Proceso: ${proc.id}`);
     if (!body.data?.force) {
       if (!r?.applied) return reply.code(409).send({ error: 'La historia no tiene cambios aplicados. Ejecútala y aplica su diff, o ciérrala como «resuelta fuera del flujo».', code: 'not_applied' });
       if (!r.merged) return reply.code(409).send({ error: `Los cambios están en la rama ${r.applied.branch} pero no integrados en la rama principal. Intégralos desde el proceso antes de cerrar la historia.`, code: 'not_merged' });
+      // Proyecto interno (el propio Portal): el merge no basta. Debe estar ACTIVADO (servidor reiniciado con el cambio y web
+      // reconstruida) y VERIFICADO en ejecución; publicar en GitHub no es requisito para cerrar.
+      if (slug === INTERNAL_WORKSPACE.slug && last) {
+        const served = await withGuidance(slug, last); const act = served.result?.activation;
+        if (act && !act.active) return reply.code(409).send({ error: `La historia está integrada pero no activa en el Portal en marcha: ${act.reason}`, code: 'not_activated' });
+        if (act && !runtimeVerified(served.result?.runtimeChecks)) return reply.code(409).send({ error: 'Falta la verificación en ejecución: pulsa «Comprobar en ejecución» en el proceso (el Portal se comprueba a sí mismo) y que todas las comprobaciones queden en verde.', code: 'not_runtime_verified' });
+      }
       if (!r.manualTest) return reply.code(409).send({ error: 'Falta la prueba manual: en el Resumen del proceso, genera la lista de prueba con QA o escríbela, pruébala paso a paso y entonces cierra la historia.', code: 'no_test' });
       if (r.manualTest && r.manualTest.checks.some(c => !c)) { const n = r.manualTest.checks.filter(Boolean).length; return reply.code(409).send({ error: `Falta probar la historia: ${n} de ${r.manualTest.steps.length} pasos marcados. Sigue la lista «Qué probar» en el proceso y marca cada paso; si no puedes probarla, ciérrala como «resuelta fuera del flujo» indicando por qué.`, code: 'not_tested' }); }
-      if (!r.published) { const repo = projectsRepo(slug).repository(item.projectId); const { remote } = repo ? await remoteInfo(repo.path) : { remote: null }; if (remote) return reply.code(409).send({ error: 'Falta publicar: pulsa «Publicar en el remoto» en el proceso antes de cerrar la historia.', code: 'not_published' }); }
     }
     backlogRepo(slug).setStatus(id, 'done');
     app.log.info({ story: item.storyId, force: !!body.data?.force, reason: body.data?.reason }, 'historia cerrada');

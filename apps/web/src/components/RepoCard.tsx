@@ -23,7 +23,8 @@ export function RepoCard({ project, onPick, onChanged }: { project: ProjectFull;
   }, [project.id, project.repository?.path]);
 
   const [portalRoot, setPortalRoot] = useState<string | null>(null);
-  useEffect(() => { api.health().then(h => setPortalRoot(h.repoRoot)).catch(() => null); }, []);
+  const [sandbox, setSandbox] = useState<{ available: string; detail: string } | null>(null);
+  useEffect(() => { api.health().then(h => setPortalRoot(h.repoRoot)).catch(() => null); if (internal) api.systemSandbox().then(setSandbox).catch(() => null); }, [internal]);
   const act = async (key: string, fn: () => Promise<string>) => { setBusy(key); setErr(null); try { const msg = await fn(); flash(msg); await load(); await onChanged(); } catch (e: any) { setErr(e.message); } finally { setBusy(null); setAuth(false); } };
   const useInstall = () => act('install', async () => { await api.registerRepository(ws.slug, project.id, st?.portalRoot ?? portalRoot!); return 'Repositorio registrado: la carpeta de esta instalación'; });
 
@@ -59,7 +60,7 @@ export function RepoCard({ project, onPick, onChanged }: { project: ProjectFull;
       {st && !st.isGit && <Notice kind="err">La carpeta ya no contiene un repositorio git.</Notice>}
       {st?.dirty && st.eolOnly && <Notice kind="warn"><strong>{st.dirtyFiles} archivo(s) aparecen modificados solo por finales de línea</strong> (CRLF/LF, típico en Windows). Eso bloquea aplicar historias. Se arregla con un clic: fija <span className="mono">.gitattributes</span>, renormaliza y confirma.
         <div style={{ marginTop: 8 }}><button className="btn btn-primary btn-sm" onClick={() => act('eol', async () => { const r = await api.repoNormalizeEol(ws.slug, project.id); return r.commit ? `Finales de línea normalizados (${r.files} archivos, commit ${r.commit})` : 'No había nada que normalizar'; })} disabled={busy !== null}>{busy === 'eol' ? <span className="spin spin-light" /> : Icon.git()}Normalizar finales de línea</button></div></Notice>}
-      {st?.dirty && !st.eolOnly && <Notice kind="warn"><strong>{st.dirtyFiles} archivo(s) con cambios sin confirmar.</strong> Aplicar historias exige el árbol limpio: confirma (<span className="mono">git add -A && git commit</span>) o descarta esos cambios.</Notice>}
+      {st?.dirty && !st.eolOnly && <Notice kind="info"><strong>{st.dirtyFiles} archivo(s) con cambios sin confirmar.</strong> Las historias se aplican en worktrees aislados, así que no se bloquean; pero integrar en <span className="mono">{st.mainBranch ?? 'main'}</span> exige que los archivos que toca la historia no tengan cambios locales.</Notice>}
       {st && st.isGit && !st.hasCommits && <Notice kind="warn">El repositorio no tiene commits. Confirma el código actual (<span className="mono">git add -A && git commit -m "Base"</span>) para que exista una base sobre la que trabajar.</Notice>}
       {mainMissing && <Notice kind="warn"><strong>No existe la rama principal <span className="mono">main</span>.</strong> Las historias deben partir de main e integrarse en main. Puedes crearla ahora a partir de la rama activa (<span className="mono">{st.branch}</span>).</Notice>}
       {st?.hasMain && st.branch && st.branch !== st.mainBranch && <Notice kind="info">La rama activa es <span className="mono">{st.branch}</span>; la principal es <span className="mono">{st.mainBranch}</span>. Las historias nuevas parten de <span className="mono">{st.mainBranch}</span> automáticamente.</Notice>}
@@ -77,7 +78,8 @@ export function RepoCard({ project, onPick, onChanged }: { project: ProjectFull;
         <button className="btn btn-ghost btn-sm" onClick={onPick} disabled={busy !== null}>{Icon.folder()}Cambiar carpeta…</button>
         <button className="btn btn-ghost btn-sm" onClick={load} disabled={busy !== null}>Actualizar estado</button>
       </div>
-      <div className="help">Flujo: cada historia crea su rama desde <span className="mono">{st?.mainBranch ?? 'main'}</span> → revisas el diff → aplicar → verificar → integrar en <span className="mono">{st?.mainBranch ?? 'main'}</span> → publicar. En GitHub, fija <span className="mono">main</span> como rama por defecto (Settings → Branches).</div>
+      {internal && sandbox && <KV k="Sandbox"><Chip xs tone={sandbox.available === 'unavailable' ? 'warn' : 'ok'}>{sandbox.available === 'unavailable' ? 'no disponible' : sandbox.available}</Chip> <span className="small muted">{sandbox.detail}</span></KV>}
+      <div className="help">Flujo: cada historia crea su rama desde <span className="mono">{st?.mainBranch ?? 'main'}</span> en un worktree aislado → revisas el diff → aplicar → verificar en sandbox → integrar en <span className="mono">{st?.mainBranch ?? 'main'}</span>{internal ? ' → reconstruir y reiniciar → comprobar en ejecución' : ''} → probar → cerrar. Publicar en GitHub es opcional.</div>
     </div>
   </section>;
 }

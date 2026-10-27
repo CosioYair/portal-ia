@@ -1,4 +1,5 @@
 import { classifyModel, sortModels, type ModelInfo, type ProviderError, type ProviderId } from '@portal-ia/domain';
+import { isMockProvider, mockAdapter } from './mock.ts';
 
 /**
  * Adaptador de proveedor: contrato mínimo para HU-001.
@@ -161,4 +162,9 @@ export function costUsd(provider: ProviderId, modelId: string, inputTokens: numb
 }
 
 export const ADAPTERS: Record<ProviderId, ProviderAdapter> = { anthropic: anthropicAdapter, openai: openaiAdapter };
-export function getAdapter(id: string): ProviderAdapter | null { return (ADAPTERS as Record<string, ProviderAdapter>)[id] ?? null; }
+/** Con PORTAL_MOCK_PROVIDER=1 (solo pruebas) todas las llamadas van al proveedor simulado: 0 USD, sin red, respuestas de guion. */
+export function getAdapter(id: string): ProviderAdapter | null {
+  if (isMockProvider()) return mockAdapter;
+  return (ADAPTERS as Record<string, ProviderAdapter>)[id] ?? null;
+}
+export { mockAdapter, isMockProvider, mockCalls, resetMockCalls } from './mock.ts';

@@ -66,6 +66,7 @@ export function ProcessView() {
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone={st.tone} dot={st.dot}>{st.label}</Chip><Chip className="mono">{tokens} tokens · {fmtUsd(proc.spentUsd)} de {fmtUsd(proc.budgetUsd)}</Chip><Chip xs>{proc.steps.filter(s => s.status === 'done').length} de {proc.steps.length} pasos</Chip></div>
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
+            {proc.kind === 'story_execution' && proc.backlogItemId && <Link className="btn btn-secondary" to={`/historias/${proc.backlogItemId}`}>Espacio de la historia {Icon.arrow()}</Link>}
             {proc.status === 'running' && <button className="btn btn-secondary" onClick={cancel}>Cancelar proceso</button>}
             {proc.status === 'done' && proc.kind === 'initial_assessment' && <Link className="btn btn-primary" to="/backlog">Ver backlog y ejecutar {Icon.arrow()}</Link>}
             {proc.kind === 'story_execution' && <Link className="btn btn-secondary" to="/backlog">Volver al backlog</Link>}
@@ -103,7 +104,7 @@ export function ProcessView() {
                 <button className="card-h" style={{ width: '100%', background: 'transparent', border: 0, borderBottom: open === s.id ? '1px solid #EEECE6' : 0, font: 'inherit', cursor: 'pointer', textAlign: 'left', borderRadius: 10 }} onClick={() => setOpen(open === s.id ? null : s.id)} aria-expanded={open === s.id}>
                   <div style={{ display: 'flex', gap: 12, alignItems: 'center', minWidth: 0 }}>
                     <span className="ili-ic" style={s.status === 'done' ? { background: '#E3F1EF', color: '#0B5652' } : undefined}>{s.status === 'done' ? Icon.check() : s.status === 'running' ? <span className="spin" /> : <span className="mono">{i + 1}</span>}</span>
-                    <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}><span className="h3">{s.title}</span><span className="small muted">{s.agentName} · <span className="mono">{s.model}</span>{s.status === 'done' && <> · {s.inputTokens + s.outputTokens} tokens · {fmtUsd(s.costUsd)}</>}</span></span>
+                    <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}><span className="h3">{s.title}</span><span className="small muted">{s.agentName}{s.role ? ` · ${s.role === 'planner' ? 'planifica' : s.role === 'implementer' ? 'implementa' : s.role === 'reviewer' ? 'revisa' : 'consulta'}` : ''} · <span className="mono">{s.model}</span>{s.status === 'done' && <> · {s.inputTokens + s.outputTokens} tokens · {fmtUsd(s.costUsd)} <span title="Costo calculado con los tokens que devolvió el proveedor">real</span></>}{s.reason && <span title={s.reason}> · ⓘ</span>}</span></span>
                   </div>
                   {stepChip(s)}
                 </button>

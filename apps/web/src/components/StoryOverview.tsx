@@ -1,21 +1,24 @@
 import { useEffect, useState } from 'react';
-import type { Process, SystemStatus } from '@portal-ia/domain';
+import type { ManualTestFeedbackEntry, Process } from '@portal-ia/domain';
+import { manualTestStepKey } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
+import { getManualTestFeedback, saveManualTestStepFeedback } from '../lib/manualTestFeedback.ts';
+import { ManualTestStepList } from './ManualTestStepList.tsx';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
 
 /**
- * Resumen legible de una historia ejecutada y su orden de cierre:
- * 1 Revisar diff → 2 Aplicar → 3 Verificar → 4 Integrar en main → (5 Reconstruir y reiniciar, solo el Portal) →
- * 6 Probar paso a paso → 7 Publicar → 8 Cerrar. Cada paso se habilita cuando el anterior está hecho.
+ * Resumen legible de una historia ejecutada y su orden de cierre (M2):
+ * 1 Revisar diff → 2 Aplicar (worktree) → 3 Verificar (sandbox) → 4 Integrar en main → [Portal: 5 Activar (reconstruir y
+ * reiniciar) → 6 Comprobar en ejecución] → Probar paso a paso → Cerrar. Publicar en el remoto es opcional.
+ * El orden lo decide el servidor (guidance); aquí solo se dibuja y se ofrecen los botones.
  */
 export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onChange: (p: Process) => void; onClose: () => Promise<void> }) {
   const { status, flash } = useApp();
   const slug = status.workspace!.slug;
   const isPortal = slug === 'portal-ia';
   const r = proc.result!;
-  const [sys, setSys] = useState<SystemStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState(r.manualTest?.note ?? '');
@@ -27,34 +30,53 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
   const generate = async () => { setBusy(true); setErr(null); try { const p = await api.manualTestGenerate(slug, proc.id); onChange(p); flash('Lista de prueba generada'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); setGenAuth(false); } };
   const saveSteps = async () => { const steps = manualText.split(/\r?\n/).map(l => l.replace(/^\s*\d+[.)]\s*/, '').trim()).filter(l => l.length > 3); if (!steps.length) return; setBusy(true); setErr(null); try { const p = await api.manualTestSteps(slug, proc.id, steps); onChange(p); setWriting(false); setManualText(''); flash('Pasos de prueba guardados'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
   const go = (id: string) => { const el = document.getElementById(id); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
-  useEffect(() => { if (isPortal && r.merged) api.systemStatus().then(setSys).catch(() => null); }, [isPortal, r.merged]);
 
   const mt = r.manualTest;
   const tested = mt ? mt.checks.filter(Boolean).length : 0;
   const allTested = !mt || tested === mt.steps.length;
-  const rebuilt = !isPortal || !r.merged || (sys ? sys.action === 'none' : false);
   const rejected = !!r.rejected && !r.applied;
   const applicable = r.changes.filter(c => !c.error).length;
+  const phase = proc.guidance?.phase ?? '';
+  // El servidor es la única fuente de verdad del orden de cierre (services/guidance.ts); aquí solo se dibuja.
+  const activation = r.activation ?? null;
+  const portalFlow = isPortal && !!activation;
+  const appliedAt = r.applied ? new Date(r.applied.appliedAt).getTime() - 1000 : 0;
+  const okV = (c: string) => r.verifications.some(v => v.command === c && v.exitCode === 0 && new Date(v.startedAt).getTime() >= appliedAt);
+  const verified = isPortal ? okV('typecheck') && okV('test') && okV('build') : okV('typecheck');
+  const rc = r.runtimeChecks ?? null;
+  const runtimeOk = !!rc?.ranAt && rc.results.length > 0 && rc.results.every(x => x.status === 'ok');
+  const [rcBusy, setRcBusy] = useState(false);
+  const runtimeCheck = async () => { setRcBusy(true); setErr(null); try { const p = await api.runtimeCheck(slug, proc.id); onChange(p); const ok = p.result?.runtimeChecks?.results.every(x => x.status === 'ok'); flash(ok ? 'Comprobación en ejecución correcta' : 'Alguna comprobación falló', ok ? 'ok' : 'err'); } catch (e: any) { setErr(e.message); } finally { setRcBusy(false); } };
 
-  type Step = { key: string; label: string; done: boolean; hint?: string; optional?: boolean; action?: { label: string; onClick: () => void } };
+  type Step = { key: string; label: string; done: boolean; hint?: string; optional?: boolean; action?: { label: string; onClick: () => void; busy?: boolean } };
   const steps: Step[] = [
     { key: 'review', label: 'Revisar el diff', done: !!r.applied || rejected, hint: `${applicable} archivo(s)${r.review ? r.review.approve ? ' · QA aprobó' : ` · QA no aprueba (${r.review.issues.length} observaciones)` : ''}`, action: { label: 'Ver el diff y la revisión de QA', onClick: () => go('sec-diff') } },
-    { key: 'apply', label: 'Aplicar en una rama', done: !!r.applied, hint: r.applied ? `${r.applied.branch} · ${r.applied.commit}` : undefined, action: { label: 'Ir a Aplicar', onClick: () => go('sec-apply') } },
-    { key: 'verify', label: 'Verificar (typecheck obligatorio; build y test recomendados)', done: r.verifications.some(v => v.command === 'typecheck' && v.exitCode === 0 && new Date(v.startedAt).getTime() >= (r.applied ? new Date(r.applied.appliedAt).getTime() - 1000 : 0)), hint: r.verifications.length ? r.verifications.map(v => `${v.command}: ${v.exitCode === 0 ? 'ok' : 'falló'}`).join(' · ') : 'sin typecheck no se puede integrar', action: { label: 'Ir a Verificar', onClick: () => go('sec-verify') } },
+    { key: 'apply', label: 'Aplicar en un worktree aislado', done: !!r.applied, hint: r.applied ? `${r.applied.branch} · ${r.applied.commit}${r.applied.worktree ? ' · fuera de la carpeta del Portal' : ''}` : 'la carpeta desde la que corre el Portal no se toca', action: { label: 'Ir a Aplicar', onClick: () => go('sec-apply') } },
+    { key: 'verify', label: isPortal ? 'Verificar en sandbox (typecheck, test y build)' : 'Verificar (typecheck obligatorio)', done: !!r.applied && (verified || !!r.merged), hint: r.verifications.length ? r.verifications.slice(-4).map(v => `${v.command}: ${v.exitCode === 0 ? 'ok' : 'falló'}${v.isolation ? ` (${v.isolation})` : ''}`).join(' · ') : (isPortal ? 'el Portal exige test y build en Docker/WSL2; sin sandbox no se integra' : 'sin typecheck no se puede integrar'), action: { label: 'Ir a Verificar', onClick: () => go('sec-verify') } },
     { key: 'merge', label: 'Integrar en la rama principal', done: !!r.merged, hint: r.merged ? `${r.merged.into} · ${r.merged.commit}` : undefined, action: { label: 'Ir a Integrar', onClick: () => go('sec-git') } },
-    ...(isPortal ? [{ key: 'rebuild', label: 'Reconstruir y reiniciar el Portal', done: !!r.merged && rebuilt, hint: r.merged && !rebuilt ? 'usa la barra amarilla de arriba' : undefined, action: { label: 'Ir a la barra amarilla', onClick: () => window.scrollTo({ top: 0, behavior: 'smooth' }) } }] : []),
+    ...(portalFlow ? [
+      { key: 'activate', label: 'Activar: reconstruir y reiniciar el Portal', done: activation!.active, hint: activation!.active ? `el Portal en marcha corre ${activation!.runningCommit} (interfaz construida ${activation!.buildAt ? new Date(activation!.buildAt).toLocaleString() : '—'})` : activation!.reason, action: { label: 'Ir a la barra «Reconstruir y reiniciar»', onClick: () => window.scrollTo({ top: 0, behavior: 'smooth' }) } },
+      { key: 'runtime', label: 'Comprobar en ejecución (el Portal se verifica a sí mismo)', done: activation!.active && runtimeOk, hint: rc?.ranAt ? `${rc.results.filter(x => x.status === 'ok').length} de ${rc.results.length} comprobaciones en verde · ${new Date(rc.ranAt).toLocaleString()}` : `${(rc?.checks.length ?? 0) + 2} comprobaciones (HTTP y navegador) con evidencia`, action: { label: rc?.ranAt ? 'Volver a comprobar' : 'Comprobar en ejecución', onClick: runtimeCheck, busy: rcBusy } }
+    ] : []),
     { key: 'test', label: 'Probar paso a paso', done: !!r.merged && allTested && !!mt, hint: mt ? `${tested} de ${mt.steps.length} pasos` : 'aún no hay lista de prueba: genérala o escríbela abajo', action: { label: mt ? 'Ir a la lista de prueba' : 'Crear la lista de prueba', onClick: () => go('sec-test') } },
-    { key: 'publish', label: 'Publicar en GitHub', done: !!r.published, hint: r.published ? r.published.branches.join(', ') : undefined, action: { label: 'Ir a Publicar', onClick: () => go('sec-git') } },
     { key: 'close', label: 'Cerrar la historia', done: false }
   ];
   const firstPending = steps.findIndex(s => !s.done && !s.optional);
-  const canClose = !!r.merged && allTested && !!mt && !!r.published;
+  const canClose = /Listo para cerrar/.test(phase);
   const closeStep = steps.length - 1;
+  const testEnabled = !!r.merged && (!portalFlow || (activation!.active && runtimeOk));
 
-  const toggle = async (i: number) => {
-    if (!mt) return; setBusy(true); setErr(null);
-    const checks = mt.checks.map((c, j) => j === i ? !c : c);
-    try { const p = await api.manualTest(slug, proc.id, checks, note || null); onChange(p); } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+  // Prueba manual unificada (M6): una sola lista con OK / Falla / Observación + comentario por paso. «OK» marca el paso como
+  // probado (checks del proceso, lo que exige la regla de cierre); Falla/Observación lo desmarcan y quedan como feedback.
+  const [feedback, setFeedback] = useState<ManualTestFeedbackEntry[] | null>(null);
+  useEffect(() => { let alive = true; setFeedback(null); if (mt) getManualTestFeedback(slug, proc.id).then(v => { if (alive) setFeedback(v.items.map(i => ({ stepKey: i.stepKey, result: i.result, comment: i.comment }))); }).catch(() => { if (alive) setFeedback([]); }); return () => { alive = false; }; }, [slug, proc.id, mt?.steps.join('|')]);
+  const onStepSave = async (stepKey: string, result: 'ok' | 'fail' | 'observation' | null, comment: string) => {
+    if (!mt) return;
+    await saveManualTestStepFeedback(slug, proc.id, stepKey, { result, comment });
+    const i = mt.steps.findIndex((t, j) => manualTestStepKey(j, t) === stepKey);
+    if (i < 0) return;
+    const want = result === 'ok' ? true : result ? false : mt.checks[i];
+    if (want !== mt.checks[i]) { const p = await api.manualTest(slug, proc.id, mt.checks.map((c, j) => j === i ? want : c), note || null); onChange(p); }
   };
   const saveNote = async () => { if (!mt) return; try { const p = await api.manualTest(slug, proc.id, mt.checks, note || null); onChange(p); } catch (e: any) { setErr(e.message); } };
   const close = async () => { setBusy(true); setErr(null); try { await onClose(); flash('Historia completada'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
@@ -74,10 +96,20 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
           {steps.map((s, i) => { const current = i === firstPending || (i === closeStep && canClose); return <li key={s.key} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '8px 10px', borderRadius: 8, background: current ? '#FFFBF0' : s.done ? '#F2FAF5' : 'transparent', border: current ? '1px solid #F0C66B' : '1px solid transparent' }}>
             <span style={{ width: 22, height: 22, borderRadius: 999, display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 600, background: s.done ? '#166534' : current ? '#1A1B1E' : '#E5E3DC', color: s.done || current ? '#fff' : '#686B72', flex: 'none' }}>{s.done ? Icon.check(12) : i + 1}</span>
             <span style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1 }}><span style={{ fontWeight: current ? 600 : 500, color: s.done ? '#166534' : '#1A1B1E' }}>{s.label}{s.optional && !s.done && <span className="small muted"> · opcional</span>}</span>{s.hint && <span className="small muted">{s.hint}</span>}
-              {current && s.action && i !== closeStep && <span><button className="btn btn-primary btn-sm" onClick={s.action.onClick}>{Icon.arrow()}{s.action.label}</button></span>}</span>
+              {current && s.action && i !== closeStep && <span><button className="btn btn-primary btn-sm" onClick={s.action.onClick} disabled={!!s.action.busy}>{s.action.busy ? <span className="spin spin-light" /> : Icon.arrow()}{s.action.label}</button></span>}</span>
           </li>; })}
         </ol>
       </div>
+
+      {portalFlow && rc?.ranAt && <div id="sec-runtime">
+        <div className="eyebrow" style={{ marginBottom: 6 }}>Comprobaciones en ejecución · {new Date(rc.ranAt).toLocaleString()}</div>
+        <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {rc.results.map((x, i) => <li key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '6px 10px', borderRadius: 8, background: x.status === 'ok' ? '#F2FAF5' : x.status === 'fail' ? '#FDF2F1' : '#FFFBF0' }}>
+            <Chip tone={x.status === 'ok' ? 'ok' : x.status === 'fail' ? 'err' : 'warn'} xs>{x.status === 'ok' ? 'ok' : x.status === 'fail' ? 'falló' : 'pendiente'}</Chip>
+            <span style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1 }}><span className="mono sm13">{x.check.kind} {x.check.path}{x.check.selector ? ` · ${x.check.selector}` : ''} → {x.check.expect}</span><span className="small muted">{x.detail}{x.evidence ? ` · evidencia: ${x.evidence.split(/[\\/]/).slice(-2).join('/')}` : ''}</span></span>
+          </li>)}
+        </ul>
+      </div>}
 
       {!mt && <div id="sec-test" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <div className="eyebrow">Qué probar, paso a paso</div>
@@ -93,13 +125,13 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
       </div>}
       {mt && <div id="sec-test">
         <div className="eyebrow" style={{ marginBottom: 6 }}>Qué probar, paso a paso · {tested} de {mt.steps.length}</div>
-        {!r.merged && <p className="small muted" style={{ margin: '0 0 8px' }}>Se habilita cuando los cambios estén integrados{isPortal ? ' y el Portal reconstruido' : ''}.</p>}
-        {r.merged && isPortal && !rebuilt && <Notice kind="warn">Antes de probar, reconstruye y reinicia el Portal desde la barra amarilla: ahora corre con el código anterior.</Notice>}
-        <ol style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {mt.steps.map((st, i) => <li key={i}><label className="ck" style={{ alignItems: 'flex-start', opacity: r.merged ? 1 : 0.6 }}><input className="cb" type="checkbox" checked={mt.checks[i]} disabled={!r.merged || busy} onChange={() => toggle(i)} /><span style={{ lineHeight: 1.5 }}><span className="mono small muted" style={{ marginRight: 6 }}>{i + 1}.</span>{st}</span></label></li>)}
-        </ol>
+        {!testEnabled && <p className="small muted" style={{ margin: '0 0 8px' }}>Se habilita cuando los cambios estén integrados{portalFlow ? ', activados en el Portal en marcha y comprobados en ejecución' : ''}.</p>}
+        {r.merged && portalFlow && !activation!.active && <Notice kind="warn">Antes de probar, reconstruye y reinicia el Portal desde la barra del sistema: {activation!.reason}</Notice>}
+        <div style={{ opacity: testEnabled ? 1 : 0.6, pointerEvents: testEnabled ? 'auto' : 'none' }}>
+          {feedback ? <ManualTestStepList key={`${proc.id}:${mt.steps.length}`} steps={mt.steps} checks={mt.checks} initialFeedback={feedback} onSave={onStepSave} /> : <span className="small muted">Cargando feedback…</span>}
+        </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-          <input className="input" style={{ flex: 1, minWidth: 240, height: 34 }} value={note} onChange={e => setNote(e.target.value)} onBlur={saveNote} placeholder="Nota de la prueba (opcional): qué viste, qué falló…" disabled={!r.merged} />
+          <input className="input" style={{ flex: 1, minWidth: 240, height: 34 }} value={note} onChange={e => setNote(e.target.value)} onBlur={saveNote} placeholder="Nota de la prueba (opcional): qué viste, qué falló…" disabled={!testEnabled} />
           <button className="btn btn-ghost btn-sm" onClick={() => { setManualText(mt.steps.map((st, i) => `${i + 1}. ${st}`).join('\n')); setWriting(true); }} disabled={busy}>Editar pasos</button>
         </div>
         {writing && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}><textarea className="input" value={manualText} onChange={e => setManualText(e.target.value)} style={{ minHeight: 110 }} /><div style={{ display: 'flex', gap: 8 }}><button className="btn btn-primary btn-sm" onClick={saveSteps} disabled={busy || manualText.trim().length < 4}>Guardar pasos (reinicia las marcas)</button><button className="btn btn-ghost btn-sm" onClick={() => setWriting(false)}>Cancelar</button></div></div>}

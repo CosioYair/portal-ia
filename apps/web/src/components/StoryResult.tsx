@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Process } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
@@ -21,13 +21,18 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
   const [gitErr, setGitErr] = useState<string | null>(null);
   const isPortalRepo = slug === 'portal-ia';
   const appliedAt = r.applied ? new Date(r.applied.appliedAt).getTime() : 0;
-  const typecheckOk = r.verifications.some(v => v.command === 'typecheck' && v.exitCode === 0 && new Date(v.startedAt).getTime() >= appliedAt - 1000);
+  const okV = (c: string) => r.verifications.some(v => v.command === c && v.exitCode === 0 && new Date(v.startedAt).getTime() >= appliedAt - 1000);
+  const canMerge = isPortalRepo ? okV('typecheck') && okV('test') && okV('build') : okV('typecheck');
   const lastFailed = ['typecheck', 'build', 'test'].map(c => r.verifications.filter(v => v.command === c).at(-1)).filter(v => v && v.exitCode !== 0).map(v => v!.command).join(', ');
+  const [sandbox, setSandbox] = useState<{ available: string; detail: string } | null>(null);
+  const [allowNet, setAllowNet] = useState(false);
+  useEffect(() => { if (r.applied && !r.merged) api.systemSandbox().then(setSandbox).catch(() => setSandbox(null)); }, [r.applied, r.merged]);
+  const isoLabel = (i?: string) => i === 'docker' ? 'sandbox Docker' : i === 'wsl' ? 'sandbox WSL2' : i === 'linux-ns' ? 'sandbox Linux (namespaces)' : i === 'host-min' ? 'verificación mínima (tsc)' : i === 'unavailable' ? 'sin sandbox · no ejecutado' : '';
   const merge = async () => { if (!authGit) return; setBusy('merge'); setGitErr(null); try { const p = await api.mergeProcess(slug, proc.id); onChange(p); flash(`Rama integrada en ${p.result?.merged?.into} · commit ${p.result?.merged?.commit}`); } catch (e: any) { setGitErr(e.message); } finally { setBusy(null); } };
   const publish = async () => { if (!authGit) return; setBusy('publish'); setGitErr(null); try { const p = await api.publishProcess(slug, proc.id); onChange(p); flash(`Publicado en ${p.result?.published?.remote}: ${p.result?.published?.branches.join(', ')}`); } catch (e: any) { setGitErr(e.message); } finally { setBusy(null); } };
 
   const apply = async () => { if (!authApply) return; setBusy('apply'); setErr(null); try { const p = await api.applyChanges(slug, proc.id, branch.trim() || undefined); onChange(p); flash(`Cambios aplicados en la rama ${p.result?.applied?.branch} · commit ${p.result?.applied?.commit}`); } catch (e: any) { setErr(e.message); } finally { setBusy(null); setAuthApply(false); } };
-  const verify = async (cmd: 'install' | 'typecheck' | 'test' | 'build') => { if (!authVerify) return; setBusy(cmd); setErr(null); try { const p = await api.verifyProcess(slug, proc.id, cmd); onChange(p); const last = p.result?.verifications.at(-1); flash(last?.exitCode === 0 ? `${last.command}: correcto` : `${last?.command}: terminó con código ${last?.exitCode}`, last?.exitCode === 0 ? 'ok' : 'err'); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } };
+  const verify = async (cmd: 'install' | 'typecheck' | 'test' | 'build') => { if (!authVerify) return; setBusy(cmd); setErr(null); try { const p = await api.verifyProcess(slug, proc.id, cmd, cmd === 'install' && allowNet); onChange(p); const last = p.result?.verifications.at(-1); flash(last?.exitCode === 0 ? `${last.command}: correcto` : `${last?.command}: terminó con código ${last?.exitCode}`, last?.exitCode === 0 ? 'ok' : 'err'); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } };
 
   const added = r.changes.reduce((a, c) => a + Math.max(0, c.after - c.before), 0);
   const applicable = r.changes.filter(c => !c.error).length;
@@ -81,10 +86,11 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
             <KV k="Rama"><span className="mono">{r.applied.branch}</span></KV>
             <KV k="Commit"><span className="mono">{r.applied.commit}</span></KV>
             <KV k="Archivos"><span className="mono">{r.applied.files.length}</span></KV>
-            <div className="help">Los cambios ya están escritos <strong>en tu disco</strong>, en la rama <span className="mono">{r.applied.branch}</span> (aún no en tu rama principal ni en GitHub). Verifica abajo y, si estás conforme, intégralos y publícalos desde aquí. Si los rechazas: <span className="mono">git checkout main</span> y borra la rama.</div>
+            {r.applied.worktree && <KV k="Worktree"><span className="mono small">{r.applied.worktree}</span></KV>}
+            <div className="help">Los cambios están en la rama <span className="mono">{r.applied.branch}</span>, escritos en un <strong>worktree aislado</strong> fuera de la carpeta desde la que corre el Portal (esa carpeta no cambia de rama ni se toca). Verifica abajo en sandbox y, en verde, intégralos. Si los rechazas, el worktree se retira y la rama queda sin integrar.</div>
           </> : <>
             {!r.review?.approve && <Notice kind="warn">QA no aprobó sin observaciones. Puedes aplicar igualmente y corregir en la rama, o volver a ejecutar la historia con más detalle en el criterio.</Notice>}
-            <div><label className="label" htmlFor="branch">Rama de trabajo</label><input id="branch" className="input mono" value={branch} onChange={e => setBranch(e.target.value)} /><div className="help">Se crea desde la rama actual del repositorio (debe estar sin cambios pendientes). Si ya existe, se reutiliza.</div></div>
+            <div><label className="label" htmlFor="branch">Rama de trabajo</label><input id="branch" className="input mono" value={branch} onChange={e => setBranch(e.target.value)} /><div className="help">Nace de la rama principal en un worktree aislado (<span className="mono">&lt;repo&gt;-worktrees/&lt;proceso&gt;</span>); los cambios locales sin confirmar de tu carpeta no bloquean ni se tocan. Si la rama ya existe, se reutiliza.</div></div>
             <label className="ck"><input className="cb" type="checkbox" checked={authApply} onChange={e => setAuthApply(e.target.checked)} /><span>He revisado los cambios y <strong>autorizo escribirlos</strong> en la rama indicada del repositorio registrado, con un commit a nombre de Portal IA.</span></label>
             {err && <Notice kind="err"><strong>No se pudo aplicar.</strong> {err}</Notice>}
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -95,21 +101,23 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
         </div></section>}
 
       {r.applied && <section className="card" id="sec-verify">
-        <div className="card-h"><div><div className="h3">Verificación</div><div className="small muted">Ejecución <strong>local</strong> en el repositorio (sin sandbox en esta versión). Herramienta «Ejecución» · requiere tu autorización por uso.</div></div>{r.verifyCommands.length > 0 && <Chip xs>sugerido: {r.verifyCommands.join(', ')}</Chip>}</div>
+        <div className="card-h"><div><div className="h3">Verificación en sandbox</div><div className="small muted">El código generado se ejecuta en un contenedor aislado (Docker), en WSL2 o en espacios de nombres de Linux, nunca sobre tu carpeta del Portal. Sin sandbox, solo la verificación mínima <span className="mono">tsc --noEmit</span>.</div></div>
+          <div style={{ display: 'flex', gap: 6 }}>{sandbox && <Chip tone={sandbox.available === 'unavailable' ? 'warn' : 'ok'} xs>{sandbox.available === 'unavailable' ? 'sin sandbox' : `sandbox: ${sandbox.available}`}</Chip>}{r.verifyCommands.length > 0 && <Chip xs>sugerido: {r.verifyCommands.join(', ')}</Chip>}</div></div>
         <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <label className="ck"><input className="cb" type="checkbox" checked={authVerify} onChange={e => setAuthVerify(e.target.checked)} /><span>Autorizo ejecutar comandos <span className="mono">npm</span> permitidos (install, typecheck, test, build) en la carpeta del repositorio. Nada más se ejecuta.</span></label>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {(['install', 'typecheck', 'test', 'build'] as const).map(c => <button key={c} className="btn btn-secondary btn-sm" onClick={() => verify(c)} disabled={!authVerify || busy !== null}>{busy === c ? <span className="spin" /> : null}{c === 'install' ? 'npm install' : `npm run ${c}`}</button>)}
-
+          {sandbox?.available === 'unavailable' && !r.merged && <Notice kind="warn"><div><strong>No hay sandbox disponible.</strong> {sandbox.detail} {isPortalRepo ? 'El Portal no se integra sin test y build en sandbox: es una restricción de seguridad, no se puede desactivar.' : ''} Guía: <span className="mono">docs/sandbox.md</span>.</div></Notice>}
+          <label className="ck"><input className="cb" type="checkbox" checked={authVerify} onChange={e => setAuthVerify(e.target.checked)} /><span>Autorizo ejecutar los comandos permitidos (typecheck, test, build; install solo con red confirmada) <strong>sobre el worktree del proceso, dentro del sandbox</strong>. Nada se ejecuta en la carpeta del Portal.</span></label>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            {(['typecheck', 'test', 'build', 'install'] as const).map(c => <button key={c} className="btn btn-secondary btn-sm" onClick={() => verify(c)} disabled={!authVerify || busy !== null || (c === 'install' && !allowNet)}>{busy === c ? <span className="spin" /> : null}{c === 'install' ? 'npm ci (install)' : `npm run ${c}`}</button>)}
+            <label className="ck small" style={{ marginLeft: 4 }}><input className="cb" type="checkbox" checked={allowNet} onChange={e => setAllowNet(e.target.checked)} /><span>Permitir red <strong>solo para install</strong> (revisa antes el diff de package.json)</span></label>
           </div>
           {r.verifications.map((v, i) => <div key={i} className="card" style={{ background: '#FAF9F6' }}>
-            <div className="card-h" style={{ padding: '10px 14px' }}><span className="mono sm13">{v.command}</span><Chip tone={v.exitCode === 0 ? 'ok' : 'err'} xs>{v.exitCode === 0 ? 'correcto' : `código ${v.exitCode ?? '?'}`} · {(v.durationMs / 1000).toFixed(1)} s</Chip></div>
+            <div className="card-h" style={{ padding: '10px 14px' }}><span className="mono sm13">{v.command}{v.isolation ? <span className="muted"> · {isoLabel(v.isolation)}</span> : null}</span><Chip tone={v.exitCode === 0 ? 'ok' : 'err'} xs>{v.exitCode === 0 ? 'correcto' : `código ${v.exitCode ?? '?'}`} · {(v.durationMs / 1000).toFixed(1)} s</Chip></div>
             <pre className="mono" style={{ margin: 0, padding: '10px 14px', fontSize: 12, maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{v.output || '(sin salida)'}</pre>
           </div>)}
         </div></section>}
 
       {r.applied && <section className="card" id="sec-git">
-        <div className="card-h"><div><div className="h3">Integrar y publicar</div><div className="small muted">Herramienta «Escritura en el repositorio» · cada acción requiere tu autorización por uso. Hasta aquí nada ha salido de tu equipo.</div></div>
+        <div className="card-h"><div><div className="h3">Integrar y publicar</div><div className="small muted">Cada acción pasa por la política de ejecución y requiere tu autorización por uso. Publicar es opcional: nada sale de tu equipo sin pulsarlo.</div></div>
           <div style={{ display: 'flex', gap: 6 }}>{r.merged && <Chip tone="ok" xs dot="ok">integrada en {r.merged.into}</Chip>}{r.published && <Chip tone="ok" xs dot="ok">publicada en {r.published.remote}</Chip>}</div></div>
         <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {r.merged && <KV k="Integración"><span className="mono">{r.merged.into} · {r.merged.commit}</span></KV>}
@@ -117,11 +125,12 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
           {gitErr && <Notice kind="err"><strong>No se pudo completar.</strong> {gitErr}</Notice>}
           <label className="ck"><input className="cb" type="checkbox" checked={authGit} onChange={e => setAuthGit(e.target.checked)} /><span>Autorizo <strong>integrar</strong> la rama <span className="mono">{r.applied.branch}</span> en la rama principal del repositorio (merge con commit) y/o <strong>publicarla</strong> en el remoto configurado (<span className="mono">git push</span>, con las credenciales git de este equipo).</span></label>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {!r.merged && <button className="btn btn-primary btn-sm" onClick={merge} disabled={!authGit || busy !== null || !typecheckOk} title={typecheckOk ? '' : 'Primero ejecuta npm run typecheck en Verificación'}>{busy === 'merge' ? <span className="spin spin-light" /> : Icon.git()}{busy === 'merge' ? 'Integrando…' : 'Integrar en la rama principal'}</button>}
-            {!r.merged && !typecheckOk && <span className="small muted" style={{ alignSelf: 'center' }}>{lastFailed ? `La última verificación falló (${lastFailed}); corrige en la rama o rechaza el diff.` : 'Para integrar hace falta que «npm run typecheck» pase en Verificación (y «build» si es el Portal).'}</span>}
-            <button className="btn btn-secondary btn-sm" onClick={publish} disabled={!authGit || busy !== null}>{busy === 'publish' ? <span className="spin" /> : null}{r.published ? 'Volver a publicar (git push)' : 'Publicar en el remoto (git push)'}</button>
+            {!r.merged && <button className="btn btn-primary btn-sm" onClick={merge} disabled={!authGit || busy !== null || !canMerge} title={canMerge ? '' : 'Primero verifica en sandbox'}>{busy === 'merge' ? <span className="spin spin-light" /> : Icon.git()}{busy === 'merge' ? 'Integrando…' : 'Integrar en la rama principal'}</button>}
+            {!r.merged && !canMerge && <span className="small muted" style={{ alignSelf: 'center' }}>{lastFailed ? `La última verificación falló (${lastFailed}); corrige con una nueva iteración o rechaza el diff.` : isPortalRepo ? 'Para integrar el Portal hacen falta typecheck, test y build en verde en sandbox tras aplicar.' : 'Para integrar hace falta que «npm run typecheck» pase en Verificación.'}</span>}
+            <button className="btn btn-secondary btn-sm" onClick={publish} disabled={!authGit || busy !== null}>{busy === 'publish' ? <span className="spin" /> : null}{r.published ? 'Volver a publicar (git push)' : 'Publicar en el remoto (git push) · opcional'}</button>
           </div>
-          {isPortalRepo && r.merged && <Notice kind="info">Esta rama modifica el propio Portal IA. Para que los cambios integrados entren en funcionamiento: detén el servidor, ejecuta <span className="mono">npm install</span> (si cambió package.json), <span className="mono">npm run build</span> y vuelve a arrancar con <span className="mono">npm start</span>.</Notice>}
+          {isPortalRepo && r.merged && r.activation && !r.activation.active && <Notice kind="warn"><div><strong>Integrada, pero no activa.</strong> {r.activation.reason} El Portal en marcha corre <span className="mono">{r.activation.runningCommit ?? '?'}</span>; la interfaz servida se construyó {r.activation.buildAt ? new Date(r.activation.buildAt).toLocaleString() : 'en fecha desconocida'}. Usa «Reconstruir y reiniciar» en la barra del sistema.</div></Notice>}
+          {isPortalRepo && r.merged && r.activation?.active && <Notice kind="ok"><div><strong>Activada.</strong> El servidor y la interfaz en marcha contienen el commit <span className="mono">{r.merged.commit}</span> (arrancado con <span className="mono">{r.activation.runningCommit}</span>). Falta comprobar en ejecución y probar paso a paso (arriba, en el Resumen).</div></Notice>}
         </div></section>}
     </div>
   );

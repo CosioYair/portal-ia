@@ -1,7 +1,7 @@
 {
   "name": "portal-ia",
   "private": true,
-  "version": "0.11.2",
+  "version": "0.12.0",
   "description": "Portal IA — sistema operativo empresarial multiagente, local-first (nombre provisional)",
   "type": "module",
   "engines": {

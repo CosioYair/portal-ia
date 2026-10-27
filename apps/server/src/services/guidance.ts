@@ -1,17 +1,23 @@
 import type { Process, ProcessGuidance } from '@portal-ia/domain';
+import { runtimeVerified } from './runtimeChecks.ts';
+
+const implStep = (p: Process) => p.steps.find(s => s.role === 'implementer') ?? (p.steps.some(s => s.role) ? undefined : p.steps[1]);
 
 /**
  * Una sola fuente de verdad sobre «qué pasa y qué toca hacer» con un proceso. La usan la vista del proceso, el backlog
  * y las tarjetas del Asistente, para que el estado que se muestra sea siempre el real.
  */
-export function describeProcess(p: Process, opts: { isPortalRepo?: boolean } = {}): ProcessGuidance {
+export function describeProcess(p: Process, opts: { isPortalRepo?: boolean; storyStatus?: string | null } = {}): ProcessGuidance {
+  // La historia ya se cerró (o se descartó): nada que hacer, aunque el proceso quede en su último paso.
+  if (p.kind === 'story_execution' && p.status === 'done' && opts.storyStatus === 'done') return { phase: 'Historia completada', next: p.result?.published ? 'Cerrada y publicada. Nada pendiente.' : 'Cerrada. Publicar en el remoto es opcional y puede hacerse desde el proceso.', tone: 'ok', settled: true };
+  if (p.kind === 'story_execution' && opts.storyStatus === 'discarded') return { phase: 'Historia descartada', next: 'La historia se descartó; reábrela desde el backlog si la necesitas.', tone: 'info', settled: true };
   const done = p.steps.filter(s => s.status === 'done').length;
   if (p.status === 'pending_authorization') return { phase: 'Pendiente de autorización', next: 'Nada se ha gastado. Autoriza el proceso con un presupuesto para que empiece.', tone: 'warn', settled: false };
   if (p.status === 'running') { const cur = p.steps.find(s => s.status === 'running'); return { phase: `En ejecución · paso ${Math.min(done + 1, p.steps.length)} de ${p.steps.length}${cur ? ` (${cur.title})` : ''}`, next: 'Espera a que termine; puedes cancelarlo entre pasos.', tone: 'info', settled: false }; }
   if (p.status === 'cancelled') return { phase: 'Cancelado', next: 'Si quieres retomarlo, pulsa «Volver a ejecutar».', tone: 'warn', settled: true };
-  if (p.status === 'budget_exceeded') return { phase: 'Detenido por presupuesto', next: `Gastó ${p.spentUsd.toFixed(2)} de ${p.budgetUsd.toFixed(2)} USD. ${p.kind === 'story_execution' && p.steps[1]?.outputMd?.trim() ? 'El Desarrollador sí entregó: puedes «Recuperar el resultado» sin IA, o ' : ''}«Volver a ejecutar» con más presupuesto o una historia más acotada.`, tone: 'warn', settled: true };
+  if (p.status === 'budget_exceeded') return { phase: 'Detenido por presupuesto', next: `Gastó ${p.spentUsd.toFixed(2)} de ${p.budgetUsd.toFixed(2)} USD. ${p.kind === 'story_execution' && implStep(p)?.outputMd?.trim() ? 'El Desarrollador sí entregó: puedes «Recuperar el resultado» sin IA, o ' : ''}«Volver a ejecutar» con más presupuesto o una historia más acotada.`, tone: 'warn', settled: true };
   if (p.status === 'failed') {
-    const recoverable = p.kind === 'story_execution' && !!p.steps[1]?.outputMd?.trim() && !p.result?.applied;
+    const recoverable = p.kind === 'story_execution' && !!implStep(p)?.outputMd?.trim() && !p.result?.applied;
     return { phase: 'Falló', next: `${p.error ? `Motivo: ${p.error} ` : ''}${recoverable ? 'El Desarrollador sí entregó su trabajo: puedes «Recuperar el resultado» sin gastar IA, o «Volver a ejecutar».' : 'Pulsa «Volver a ejecutar» (acotando la historia si hizo falta).'}`, tone: 'err', settled: true };
   }
   // status === 'done'
@@ -25,17 +31,44 @@ export function describeProcess(p: Process, opts: { isPortalRepo?: boolean } = {
   const r = p.result;
   if (!r) return { phase: 'Terminado', next: '—', tone: 'ok', settled: true };
   const applicable = r.changes.filter(c => !c.error).length;
-  if (r.rejected && !r.applied) return { phase: 'Diff rechazado', next: `Motivo: ${r.rejected.reason}. La historia volvió a pendiente; ejecútala de nuevo cuando quieras.`, tone: 'warn', settled: true };
+  if (r.rejected && !r.merged) return { phase: r.applied ? 'Diff rechazado (rama descartada)' : 'Diff rechazado', next: `Motivo: ${r.rejected.reason}. La historia volvió a pendiente; ejecútala de nuevo cuando quieras.`, tone: 'warn', settled: true };
   if (!r.applied) {
     if (!applicable) return { phase: 'Terminado sin cambios aplicables', next: 'El Desarrollador no entregó cambios válidos. Acota la historia y vuelve a ejecutarla.', tone: 'err', settled: true };
     if (r.review && !r.review.approve) return { phase: `Diff entregado · QA NO aprueba (${r.review.issues.length} observaciones)`, next: 'Lee las observaciones de QA antes de decidir. Si son graves, pulsa «Rechazar el diff» y vuelve a ejecutar con un criterio más acotado; si son menores, aplica, verifica con typecheck/test y corrige en la rama.', tone: 'warn', settled: false };
     return { phase: `Diff listo para revisar (${applicable} archivo(s)${r.review ? ', QA aprobó' : ''})`, next: 'Revisa los cambios y, si estás conforme, pulsa «Aplicar» para escribirlos en una rama.', tone: 'warn', settled: false };
   }
   const mt = r.manualTest; const tested = mt ? mt.checks.filter(Boolean).length : 0; const untested = !mt || tested < mt.steps.length;
-  // Orden del cierre: aplicar → verificar → integrar → (reconstruir y reiniciar si es el Portal) → probar paso a paso → publicar → cerrar.
-  if (!r.merged) return { phase: `Paso 2 de 7 · Aplicado en ${r.applied.branch} · falta integrar`, next: `Ejecuta la verificación (${r.verifyCommands.join(', ') || 'typecheck'}) y pulsa «Integrar en la rama principal».`, tone: 'warn', settled: false };
-  if (untested && !mt) return { phase: `Paso 5 de 7 · Integrado en ${r.merged.into} · falta la lista de prueba`, next: 'En el Resumen del proceso, genera la lista de prueba con QA (una llamada corta) o escríbela a mano; después pruébala paso a paso.', tone: 'warn', settled: false };
-  if (untested) return { phase: `Paso 5 de 7 · Integrado en ${r.merged.into} · falta probar (${tested} de ${mt!.steps.length} pasos)`, next: `${opts.isPortalRepo ? 'Reconstruye y reinicia el Portal (barra amarilla) si aún no lo has hecho; luego s' : 'S'}igue la lista «Qué probar» y marca cada paso que funcione. Si algo falla, devuelve la historia a pendiente con el motivo.`, tone: 'warn', settled: false };
-  if (!r.published) return { phase: `Paso 6 de 7 · ${mt ? 'Probado' : 'Integrado'} · falta publicar`, next: 'Pulsa «Publicar en el remoto» para subir main a GitHub y después cierra la historia.', tone: 'warn', settled: false };
-  return { phase: `Paso 7 de 7 · Listo para cerrar (${r.merged.into} → ${r.published.remote}${mt ? ', probado' : ''})`, next: 'Pulsa «Marcar historia como completada».', tone: 'ok', settled: false };
+  // Orden del cierre (M2). Portal: aplicar → verificar (sandbox) → integrar → activar (reconstruir y reiniciar) →
+  // comprobar en ejecución → probar paso a paso → cerrar. Otros repositorios: sin activar/comprobar. Publicar es opcional.
+  // Portal: 8 pasos siempre; la rama de activación solo se evalúa cuando el servidor pudo calcularla (repositorio = carpeta en marcha).
+  const portal = !!opts.isPortalRepo && r.activation !== undefined && r.activation !== null;
+  const total = opts.isPortalRepo ? 8 : 6;
+  const step = (n: number, label: string) => `Paso ${n} de ${total} · ${label}`;
+  if (!r.merged) {
+    const after = new Date(r.applied.appliedAt).getTime() - 1000;
+    const since = (r.verifications ?? []).filter(v => new Date(v.startedAt).getTime() >= after);
+    const lastOf = (c: string) => since.filter(v => v.command === c).at(-1);
+    const failed = ['typecheck', 'test', 'build'].map(lastOf).filter(v => v && v.exitCode !== 0) as typeof since;
+    if (failed.length) return { phase: step(3, `Aplicado en ${r.applied.branch} · verificación FALLÓ (${failed.map(v => v.command).join(', ')})`), next: 'Lee la salida de la verificación. Corrige con una nueva iteración de la historia (el equipo recibe el error) o rechaza el diff; no se integra código que no compila.', tone: 'err', settled: false };
+    const need = opts.isPortalRepo ? ['typecheck', 'test', 'build'] : ['typecheck'];
+    const missing = need.filter(c => !(lastOf(c)?.exitCode === 0));
+    if (missing.length) return { phase: step(3, `Aplicado en ${r.applied.branch} · falta verificar (${missing.join(', ')})`), next: `Ejecuta ${missing.join(', ')} desde el proceso (en sandbox${opts.isPortalRepo ? '; el Portal exige test y build en Docker/WSL2' : ''}) y, en verde, pulsa «Integrar en la rama principal».`, tone: 'warn', settled: false };
+    return { phase: step(4, `Verificado en ${r.applied.branch} · falta integrar`), next: 'Pulsa «Integrar en la rama principal» (merge sin fast-forward en main).', tone: 'warn', settled: false };
+  }
+  if (portal) {
+    const act = r.activation!;
+    if (!act.active) return { phase: step(5, `Integrada en ${r.merged.into} · NO activada`), next: `${act.reason} Pulsa «Reconstruir y reiniciar» en la barra del sistema; el estado pasará a «Activada» solo cuando el Portal en marcha contenga el commit ${r.merged.commit}.`, tone: 'warn', settled: false };
+    const rc = r.runtimeChecks;
+    if (!runtimeVerified(rc)) {
+      if (rc?.ranAt && rc.results.some(x => x.status === 'fail')) return { phase: step(6, `Activada (${act.runningCommit}) · comprobación en ejecución FALLÓ`), next: `Falló: ${rc.results.filter(x => x.status === 'fail').map(x => `${x.check.kind} ${x.check.path}`).join(', ')}. Revisa el detalle y la evidencia; corrige con una nueva iteración o devuelve la historia a pendiente con el motivo. No puede cerrarse así.`, tone: 'err', settled: false };
+      if (rc?.ranAt && rc.results.some(x => x.status === 'skipped')) return { phase: step(6, `Activada (${act.runningCommit}) · comprobación de interfaz pendiente`), next: 'Las comprobaciones HTTP pasaron pero las de interfaz no pudieron ejecutarse (falta Playwright). Instálalo y vuelve a «Comprobar en ejecución»; no se da por verificada sin evidencia.', tone: 'warn', settled: false };
+      return { phase: step(6, `Activada (${act.runningCommit}) · falta comprobar en ejecución`), next: 'Pulsa «Comprobar en ejecución»: el Portal se consulta a sí mismo (HTTP y navegador) y guarda la evidencia.', tone: 'warn', settled: false };
+    }
+    if (untested && !mt) return { phase: step(7, 'Verificada en ejecución · falta la lista de prueba'), next: 'Genera la lista de prueba con QA (una llamada corta) o escríbela a mano; después pruébala paso a paso.', tone: 'warn', settled: false };
+    if (untested) return { phase: step(7, `Verificada en ejecución · falta probar (${tested} de ${mt!.steps.length} pasos)`), next: 'Sigue la lista «Qué probar» en el Portal y marca cada paso que funcione. Si algo falla, devuelve la historia a pendiente con el motivo.', tone: 'warn', settled: false };
+    return { phase: step(8, `Listo para cerrar (activada y probada${r.published ? ', publicada' : ''})`), next: `Pulsa «Marcar historia como completada».${r.published ? '' : ' Publicar en el remoto es opcional y puede hacerse después.'}`, tone: 'ok', settled: false };
+  }
+  if (untested && !mt) return { phase: step(5, `Integrado en ${r.merged.into} · falta la lista de prueba`), next: 'En el Resumen del proceso, genera la lista de prueba con QA (una llamada corta) o escríbela a mano; después pruébala paso a paso.', tone: 'warn', settled: false };
+  if (untested) return { phase: step(5, `Integrado en ${r.merged.into} · falta probar (${tested} de ${mt!.steps.length} pasos)`), next: `${opts.isPortalRepo ? 'Reconstruye y reinicia el Portal (barra amarilla) si aún no lo has hecho; luego s' : 'S'}igue la lista «Qué probar» y marca cada paso que funcione. Si algo falla, devuelve la historia a pendiente con el motivo.`, tone: 'warn', settled: false };
+  return { phase: step(6, `Listo para cerrar (${r.merged.into}, probado${r.published ? `, publicado en ${r.published.remote}` : ''})`), next: `Pulsa «Marcar historia como completada».${r.published ? '' : ' Publicar en el remoto es opcional.'}`, tone: 'ok', settled: false };
 }

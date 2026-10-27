@@ -26,6 +26,8 @@ export function Backlog() {
   const [newCrit, setNewCrit] = useState('');
   const [aiOffer, setAiOffer] = useState<{ source: string; model: string | null; byAgent: string | null; estimatedUsd: number } | null>(null);
   const [skipQa, setSkipQa] = useState(false);
+  const [teamAdd, setTeamAdd] = useState<string[]>([]);
+  const [teamRemove, setTeamRemove] = useState<string[]>([]);
   const [q, setQ] = useState('');
   const [filter, setFilter] = useState<'open' | 'all' | 'done' | 'discarded'>('open');
   const [openSec, setOpenSec] = useState<Record<string, boolean>>(() => { try { return JSON.parse(localStorage.getItem('portal-ia.backlog.sec') ?? '{}'); } catch { return {}; } });
@@ -41,8 +43,8 @@ export function Backlog() {
   useEffect(() => {
     setEst(null); setEstError(null); setExecError(null); setAuth(false);
     if (!sel) return;
-    api.storyEstimate(ws.slug, projectId, sel.id, skipQa).then(e => { setEst(e); setBudget(e.suggestedBudgetUsd.toFixed(2)); }).catch(e => setEstError(e.message));
-  }, [sel, ws.slug, projectId, skipQa]);
+    api.storyEstimate(ws.slug, projectId, sel.id, skipQa, { add: teamAdd, remove: teamRemove }).then(e => { setEst(e); setBudget(e.suggestedBudgetUsd.toFixed(2)); }).catch(e => setEstError(e.message));
+  }, [sel, ws.slug, projectId, skipQa, teamAdd, teamRemove]);
 
   const importPlan = async (useAI = false) => {
     setBusy(true);
@@ -58,7 +60,7 @@ export function Backlog() {
   const addItem = async () => { if (newTitle.trim().length < 3) return; setBusy(true); try { await api.addBacklogItem(ws.slug, projectId, { title: newTitle.trim(), criterion: newCrit.trim() || undefined }); setNewTitle(''); setNewCrit(''); flash('Solicitud añadida al backlog'); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   const execute = async () => {
     if (!sel || !auth) return; setBusy(true); setExecError(null);
-    try { const p = await api.executeStory(ws.slug, projectId, sel.id, skipQa); const a = await api.authorizeProcess(ws.slug, p.id, Number(budget)); flash(`Historia ${sel.storyId} en ejecución · presupuesto ${fmtUsd(a.budgetUsd)}`); navigate(`/procesos/${a.id}`); }
+    try { const p = await api.executeStory(ws.slug, projectId, sel.id, skipQa, { add: teamAdd, remove: teamRemove }); const a = await api.authorizeProcess(ws.slug, p.id, Number(budget)); flash(`Historia ${sel.storyId} en ejecución · presupuesto ${fmtUsd(a.budgetUsd)}`); navigate(`/procesos/${a.id}`); }
     catch (e: any) { setExecError(e.message); flash(e.message, 'err'); } finally { setBusy(false); }
   };
 
@@ -140,8 +142,9 @@ export function Backlog() {
                     <td className="med" style={{ verticalAlign: 'top' }}>{it.estimate ?? '—'}</td>
                     <td style={{ verticalAlign: 'top' }}><Chip tone={blocked && it.status === 'pending' ? 'err' : st.tone} xs dot={it.status === 'in_progress' ? 'pulse' : undefined}>{blocked && it.status === 'pending' ? `Espera ${it.dependsOn}` : st.label}</Chip>{it.status === 'review' && g && <div className="small muted" style={{ marginTop: 4, maxWidth: '24ch' }}>{g.phase}</div>}</td>
                     <td style={{ whiteSpace: 'nowrap', verticalAlign: 'top' }}>
-                      {it.status === 'review' && lp?.result?.merged && lp.guidance?.phase.startsWith('Paso 7') && <button className="btn btn-primary btn-sm" onClick={() => closeStory(it, false)} disabled={busy}>Cerrar historia</button>}
-                      {it.status === 'review' && lp && <button className="btn btn-secondary btn-sm" style={{ marginLeft: 6 }} onClick={() => navigate(`/procesos/${lp.id}`)}>{lp.result?.applied ? 'Continuar' : 'Revisar diff'}</button>}
+                      {it.status === 'review' && lp?.result?.merged && /Listo para cerrar/.test(lp.guidance?.phase ?? '') && <button className="btn btn-primary btn-sm" onClick={() => closeStory(it, false)} disabled={busy}>Cerrar historia</button>}
+                      {it.status === 'review' && lp && <button className="btn btn-secondary btn-sm" style={{ marginLeft: 6 }} onClick={() => navigate(`/historias/${it.id}`)}>{lp.result?.applied ? 'Continuar' : 'Revisar diff'}</button>}
+                      {(lp || it.status !== 'pending') && it.status !== 'review' && <button className="btn btn-ghost btn-sm" style={{ marginLeft: 6 }} onClick={() => navigate(`/historias/${it.id}`)}>Espacio de la historia</button>}
                       {it.status === 'review' && lp && !lp.result?.applied && <button className="btn btn-ghost btn-sm" style={{ marginLeft: 6 }} title="Rechaza el diff pendiente y deja la historia lista para ejecutarse de nuevo" onClick={() => resetItem(it)} disabled={busy}>Devolver a pendiente</button>}
                       {it.status === 'in_progress' && lp && <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/procesos/${lp.id}`)}>Ver proceso</button>}
                       {(it.status === 'pending' || it.status === 'blocked') && <button className="btn btn-primary btn-sm" onClick={() => setSel(it)} disabled={!!running || !project?.repository}>Ejecutar</button>}
@@ -157,7 +160,7 @@ export function Backlog() {
           {sel && (
             <div className="backdrop" onMouseDown={e => { if (e.target === e.currentTarget && !busy) setSel(null); }}>
               <div className="modal" role="dialog" aria-modal="true" aria-labelledby="ex-title" id="ejecutar" style={{ width: 'min(760px, 100%)' }}>
-                <div className="modal-h"><div><div className="h3" id="ex-title">Ejecutar {sel.storyId} · {sel.title}</div><div className="small muted">Coordinador planifica → Desarrollador implementa → QA revisa. Nada se escribe en el repositorio hasta que apruebes el diff.</div></div><button className="xbtn" onClick={() => setSel(null)} aria-label="Cerrar" disabled={busy}>{Icon.x(16)}</button></div>
+                <div className="modal-h"><div><div className="h3" id="ex-title">Ejecutar {sel.storyId} · {sel.title}</div><div className="small muted">Plan → consultas de especialistas (si la historia lo pide) → implementación → revisión QA. Nada se escribe en tu carpeta hasta que apruebes el diff.</div></div><button className="xbtn" onClick={() => setSel(null)} aria-label="Cerrar" disabled={busy}>{Icon.x(16)}</button></div>
                 <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 14, overflow: 'auto' }}>
                   <div><Chip tone="warn" xs>consume IA · requiere autorización</Chip></div>
                   {estError && <Notice kind="err"><strong>No se pudo estimar la historia.</strong> {estError}</Notice>}
@@ -165,8 +168,11 @@ export function Backlog() {
                   {sel.criterion && <div className="kv"><span>Criterio de aceptación</span><span style={{ textAlign: 'right', maxWidth: '60ch' }}>{sel.criterion}</span></div>}
                   {!est && !estError && <div className="muted sm13" style={{ display: 'flex', gap: 8, alignItems: 'center' }}><span className="spin" /> Estimando costo con los modelos de los agentes…</div>}
                   {est && <div style={{ display: 'flex', flexDirection: 'column' }}>
-                    {est.steps.map((s, i) => <div key={i} className="rrow"><span className="mono small muted">{String(i + 1).padStart(2, '0')}</span><span style={{ flex: 1, display: 'flex', flexDirection: 'column' }}><span style={{ fontWeight: 500 }}>{s.title}</span><span className="small muted">{s.agentName} · <span className="mono">{s.model}</span></span></span><span className="mono small muted">≈ {fmtUsd(s.estimatedUsd)}</span></div>)}
-                    <div className="kv" style={{ marginTop: 6 }}><span>Costo estimado total</span><span className="mono">≈ {fmtUsd(est.estimatedUsd)} <span className="muted">(aprox.)</span></span></div>
+                    <div className="eyebrow" style={{ marginBottom: 6 }}>Equipo y pasos · elegidos por capacidades, sin IA</div>
+                    {est.steps.map((s, i) => { const canRemove = s.role === 'consultant' || s.role === 'reviewer'; return <div key={i} className="rrow"><span className="mono small muted">{String(i + 1).padStart(2, '0')}</span><span style={{ flex: 1, display: 'flex', flexDirection: 'column' }}><span style={{ fontWeight: 500 }}>{s.title}</span><span className="small muted">{s.agentName} · <span className="mono">{s.model}</span>{s.reason ? ` · ${s.reason}` : ''}</span></span><span className="mono small muted">≈ {fmtUsd(s.estimatedUsd)}</span>{canRemove && s.role === 'consultant' && <button className="lnk small" onClick={() => { setTeamRemove(r => [...r, s.agentId]); setTeamAdd(a => a.filter(x => x !== s.agentId)); }}>quitar</button>}</div>; })}
+                    {est.team && est.team.excluded.length > 0 && <details style={{ marginTop: 6 }}><summary className="small muted" style={{ cursor: 'pointer' }}>Agentes no incluidos ({est.team.excluded.length}) · añadir manualmente</summary>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>{est.team.excluded.map(e => <div key={e.agentId} className="small" style={{ display: 'flex', gap: 8, alignItems: 'center' }}><span style={{ flex: 1 }}><strong>{e.agentName}</strong> <span className="muted">· {e.reason}</span></span>{!/write_repo/.test(e.reason) && <button className="lnk small" onClick={() => { setTeamAdd(a => [...a, e.agentId]); setTeamRemove(r => r.filter(x => x !== e.agentId)); }}>añadir como consultor</button>}</div>)}</div></details>}
+                    <div className="kv" style={{ marginTop: 6 }}><span>Costo estimado total</span><span className="mono">≈ {fmtUsd(est.estimatedUsd)} <span className="muted">(estimación; el costo real se registra por paso)</span></span></div>
                   </div>}
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))', gap: 14, alignItems: 'end' }}>
                     <div><label className="label" htmlFor="st-budget">Presupuesto máximo (USD)</label><input id="st-budget" className="input mono" type="number" min={0.1} step={0.5} value={budget} onChange={e => setBudget(e.target.value)} /></div>

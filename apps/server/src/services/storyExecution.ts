@@ -1,8 +1,12 @@
-import type { Agent, AssessmentEstimate, BacklogItem, ExecutionResult, ModelInfo, Process, ProviderId, ReviewVerdict, StoryPlan } from '@portal-ia/domain';
+import type { Agent, AssessmentEstimate, BacklogItem, ExecutionResult, ModelInfo, Process, ProcessStep, ProviderId, ReviewVerdict, RuntimeCheck, StoryPlan, TeamOverride, TeamRole } from '@portal-ia/domain';
+import { composeTeam, orderedMembers, type StoryText } from './teamComposer.ts';
+import { injectLessons, recordDetections } from './lessons.ts';
+import { practicesFor } from './agentTemplates.ts';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
+import { requirePolicy } from './executionPolicy.ts';
 import { buildRepoContext } from './repoContext.ts';
 import { annotateChanges, fileChangedSince, readRepoFile, type RawChange } from './repoWrite.ts';
 import path from 'node:path';
@@ -18,14 +22,25 @@ import { expandHome } from '../routes/fs.ts';
  */
 const CONVENTIONS = `Convenciones del repositorio: monorepositorio npm workspaces; TypeScript estricto con ESM e imports con extensión .ts/.tsx; dominio compartido en packages/domain (tipos y plantillas, sin IO); adaptadores en packages/ai-adapters (toda llamada a modelos pasa por complete() y registra tokens/costo); backend Fastify en apps/server (rutas delgadas que validan con zod y delegan en services/; una base SQLite por espacio vía node:sqlite); frontend React 19 + Vite en apps/web (pantallas en src/screens, componentes en src/components, textos en español, estados explícitos, ninguna acción con costo sin autorización explícita en la UI). Pruebas: node --test en apps/server/test. No introducir dependencias nuevas salvo necesidad justificada.`;
 
-export interface StoryOptions { skipQa?: boolean }
-function stepPlanFor(agents: Agent[], opts: StoryOptions = {}) {
-  const by = (k: string) => agents.find(a => a.key === k);
-  return [
-    { agent: by('pj-coordinador')!, title: 'Plan técnico de la historia', maxTokens: 2500 },
-    { agent: by('pj-dev')!, title: 'Implementación (cambios propuestos)', maxTokens: 16000 },
-    ...(opts.skipQa ? [] : [{ agent: by('pj-qa')!, title: 'Revisión de calidad', maxTokens: 6000 }])
-  ].map(s => { if (!s.agent) throw Object.assign(new Error('Faltan agentes del proyecto (coordinador, desarrollador o QA).'), { statusCode: 409 }); return s; });
+export interface StoryOptions { skipQa?: boolean; override?: TeamOverride | null; iterationContext?: string | null }
+const MAX_TOKENS: Record<TeamRole, number> = { planner: 2500, consultant: 2500, implementer: 16000, reviewer: 6000 };
+const TITLES: Record<TeamRole, (name: string) => string> = { planner: () => 'Plan técnico de la historia', consultant: n => `Consulta: ${n}`, implementer: () => 'Implementación (cambios propuestos)', reviewer: () => 'Revisión de calidad' };
+
+/** Pasos de la historia a partir del equipo compuesto por capacidades (M3). Sin IA. */
+function stepPlanFor(agents: Agent[], projectId: string, story: StoryText, opts: StoryOptions = {}) {
+  const team = composeTeam(agents, projectId, story, { skipQa: opts.skipQa, override: opts.override ?? null });
+  const byId = new Map(agents.map(a => [a.id, a]));
+  const missing = (['planner', 'implementer'] as TeamRole[]).filter(r => !team.members.some(m => m.role === r));
+  if (missing.length) throw Object.assign(new Error(`Faltan agentes con capacidad para ${missing.map(r => r === 'planner' ? 'planificar' : 'implementar (con herramienta write_repo)').join(' y ')} en este proyecto. ${team.excluded.map(e => `${e.agentName}: ${e.reason}`).join(' · ')}`), { statusCode: 409 });
+  const steps = orderedMembers(team).map(m => ({ agent: byId.get(m.agentId)!, title: TITLES[m.role](m.agentName), maxTokens: MAX_TOKENS[m.role], role: m.role, reason: m.reason }));
+  return { steps, team };
+}
+/** Paso por papel (procesos antiguos sin `role`: por posición). */
+export function stepByRole(proc: Process, role: TeamRole): ProcessStep | undefined {
+  const byRole = proc.steps.find(s => s.role === role);
+  if (byRole || proc.steps.some(s => s.role)) return byRole;
+  const legacy: Record<TeamRole, number> = { planner: 0, implementer: 1, reviewer: 2, consultant: -1 };
+  return legacy[role] >= 0 ? proc.steps[legacy[role]] : undefined;
 }
 
 function sys(agent: Agent, project: { name: string; description: string }, story: BacklogItem): string {
@@ -72,12 +87,17 @@ const FILE_FORMAT = `=== RESUMEN ===
 (OBLIGATORIO, en lenguaje llano y sin tecnicismos, 3-8 líneas: qué cambia para quien usa el Portal y DÓNDE lo verá —menú, botón, pantalla o ruta exacta— tras integrar y reconstruir. Si no hay nada visible, dilo: "sin cambios visibles; afecta a X por dentro".)
 === PRUEBA MANUAL ===
 (OBLIGATORIO: lista numerada de 3-10 pasos concretos que el propietario seguirá en el Portal para comprobar que la historia funciona. Cada paso: acción + resultado esperado. Ej.: "1. Abre Backlog y pulsa «Ejecutar» en una historia pendiente. Esperado: se abre el diálogo con la estimación.")
+=== COMPROBACIONES ===
+(OBLIGATORIO si el cambio es observable desde fuera: 1-4 comprobaciones automáticas que el Portal ejecutará contra sí mismo una vez activado el cambio. Una por línea:
+- http GET /ruta | texto o /expresión regular/ que debe contener la respuesta
+- ui /ruta | selector CSS | texto o /expresión regular/ que debe contener ese elemento
+Ej.: "- http GET /api/system/status | version" · "- ui /backlog | h1 | /\\(\\d+ abiertas\\)/". Si nada es observable, escribe "- ninguna: <motivo>".)
 === NOTAS ===
 (opcional: decisiones, riesgos, pasos manuales)
-Reglas: la acción es create, modify, patch o delete; PREFIERE patch para modificar archivos existentes (mucho más rápido y barato) y modify solo para archivos pequeños; cada archivo abre con "=== ARCHIVO:" y cierra con "=== FIN ARCHIVO ==="; nada fuera de estos bloques salvo RESUMEN, PARA EL PROPIETARIO, PRUEBA MANUAL, VERIFICAR y NOTAS. Para renombrar: delete del antiguo + create del nuevo. Puedes tocar cualquier archivo del repositorio salvo .git, data/, node_modules y archivos de secretos (.env reales, claves).`;
+Reglas: la acción es create, modify, patch o delete; PREFIERE patch para modificar archivos existentes (mucho más rápido y barato) y modify solo para archivos pequeños; cada archivo abre con "=== ARCHIVO:" y cierra con "=== FIN ARCHIVO ==="; nada fuera de estos bloques salvo RESUMEN, PARA EL PROPIETARIO, PRUEBA MANUAL, COMPROBACIONES, VERIFICAR y NOTAS. Para renombrar: delete del antiguo + create del nuevo. Puedes tocar cualquier archivo del repositorio salvo .git, data/, node_modules y archivos de secretos (.env reales, claves).`;
 
 /** Lee la respuesta del Desarrollador en formato de bloques; detecta un archivo cortado (abierto sin cierre). */
-export function parseFileBlocks(text: string): { summary: string; notes: string; userFacing: string; manualSteps: string[]; verify: string[]; changes: RawChange[]; truncatedFile: string | null } {
+export function parseFileBlocks(text: string): { summary: string; notes: string; userFacing: string; manualSteps: string[]; runtimeChecks: RuntimeCheck[]; verify: string[]; changes: RawChange[]; truncatedFile: string | null } {
   const changes: RawChange[] = [];
   const re = /^[ \t]*={3,}\s*ARCHIVO:\s*(.+?)\s*\|\s*(create|modify|patch|delete)\s*={3,}[ \t]*\r?\n?([\s\S]*?)(?:^[ \t]*={3,}\s*FIN ARCHIVO\s*={3,}[ \t]*$|(?![\s\S]))/gmi;
   let truncatedFile: string | null = null; let m: RegExpExecArray | null;
@@ -95,10 +115,27 @@ export function parseFileBlocks(text: string): { summary: string; notes: string;
     }
     changes.push({ path, action, content: action === 'delete' ? null : content.replace(/^\n/, '') });
   }
-  const section = (name: string) => text.match(new RegExp(`^[ \\t]*={3,}\\s*${name}\\s*={3,}[ \\t]*\\r?\\n([\\s\\S]*?)(?=^[ \\t]*={3,}\\s*(?:ARCHIVO:|VERIFICAR:|NOTAS|RESUMEN|PARA EL PROPIETARIO|PRUEBA MANUAL)|(?![\\s\\S]))`, 'mi'))?.[1]?.trim() ?? '';
+  const section = (name: string) => text.match(new RegExp(`^[ \\t]*={3,}\\s*${name}\\s*={3,}[ \\t]*\\r?\\n([\\s\\S]*?)(?=^[ \\t]*={3,}\\s*(?:ARCHIVO:|VERIFICAR:|NOTAS|RESUMEN|PARA EL PROPIETARIO|PRUEBA MANUAL|COMPROBACIONES)|(?![\\s\\S]))`, 'mi'))?.[1]?.trim() ?? '';
   const verify = (text.match(/^[ \t]*={3,}\s*VERIFICAR:\s*(.*?)\s*={3,}/mi)?.[1] ?? '').split(/[\s,]+/).map(v => v.trim().toLowerCase()).filter(Boolean);
   const manualSteps = section('PRUEBA MANUAL').split(/\r?\n/).map(l => l.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, '').trim()).filter(l => l.length > 3).slice(0, 12);
-  return { summary: section('RESUMEN'), notes: section('NOTAS'), userFacing: section('PARA EL PROPIETARIO'), manualSteps, verify, changes, truncatedFile };
+  const runtimeChecks = parseRuntimeChecks(section('COMPROBACIONES'));
+  return { summary: section('RESUMEN'), notes: section('NOTAS'), userFacing: section('PARA EL PROPIETARIO'), manualSteps, runtimeChecks, verify, changes, truncatedFile };
+}
+
+/** Lee la sección COMPROBACIONES: `- http GET /ruta | esperado` y `- ui /ruta | selector | esperado`. Líneas no reconocidas se ignoran. */
+export function parseRuntimeChecks(text: string): RuntimeCheck[] {
+  const out: RuntimeCheck[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const l = raw.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, '').trim(); if (!l || /^ninguna/i.test(l)) continue;
+    const parts = l.split('|').map(s => s.trim());
+    const head = parts[0].match(/^(http|ui)\s+(?:GET\s+)?(\/\S*)$/i); if (!head) continue;
+    const kind = head[1].toLowerCase() as RuntimeCheck['kind']; const path = head[2];
+    if (kind === 'http' && parts[1]) out.push({ kind, path, selector: null, expect: parts[1] });
+    else if (kind === 'ui' && parts.length >= 3) out.push({ kind, path, selector: parts[1], expect: parts[2] });
+    else if (kind === 'ui' && parts[1]) out.push({ kind, path, selector: 'body', expect: parts[1] });
+    if (out.length >= 6) break;
+  }
+  return out;
 }
 
 /** Lee el veredicto de QA; si el JSON llegó cortado (max_tokens) rescata lo legible y lo señala. */
@@ -130,15 +167,16 @@ export function estimateStory(slug: string, projectId: string, itemId: string, o
   if (!repo) throw Object.assign(new Error('Registra el repositorio del proyecto antes de ejecutar historias.'), { statusCode: 409 });
   preflightRepo(slug, repo.path);
   const ctxChars = buildRepoContext(repo.path, 60_000).totalChars;
-  const agents = agentsRepo(slug).list().filter(a => a.projectId === projectId);
-  const steps = stepPlanFor(agents, opts).map((s, i) => {
+  const agents = agentsRepo(slug).list();
+  const { steps: plan, team } = stepPlanFor(agents, projectId, item, opts);
+  const steps = plan.map(s => {
     const p = estimatePricing(s.agent.config.provider, s.agent.config.model);
-    const inTok = Math.ceil(ctxChars / 3.5) + 2000 + (i === 1 ? 20000 : i === 2 ? 12000 : 0);
-    const outTok = s.maxTokens * (i === 1 ? 0.7 : 0.6) + (s.agent.config.effort === 'high' ? 6000 : s.agent.config.effort === 'medium' ? 2500 : 0);
-    return { agentId: s.agent.id, agentName: s.agent.config.name, title: s.title, model: s.agent.config.model, estimatedUsd: (inTok * p.inPerM + outTok * p.outPerM) / 1_000_000 };
+    const inTok = Math.ceil(ctxChars / 3.5) + 2000 + (s.role === 'implementer' ? 20000 : s.role === 'reviewer' ? 12000 : 0);
+    const outTok = s.maxTokens * (s.role === 'implementer' ? 0.7 : 0.6) + (s.agent.config.effort === 'high' ? 6000 : s.agent.config.effort === 'medium' ? 2500 : 0);
+    return { agentId: s.agent.id, agentName: s.agent.config.name, title: s.title, model: s.agent.config.model, estimatedUsd: (inTok * p.inPerM + outTok * p.outPerM) / 1_000_000, role: s.role, reason: s.reason };
   });
   const estimatedUsd = steps.reduce((a, s) => a + s.estimatedUsd, 0);
-  return { steps, contextChars: ctxChars, estimatedUsd, suggestedBudgetUsd: Math.max(0.5, Math.ceil(estimatedUsd * 1.6 * 2) / 2), approximate: true };
+  return { steps, team, contextChars: ctxChars, estimatedUsd, suggestedBudgetUsd: Math.max(0.5, Math.ceil(estimatedUsd * 1.6 * 2) / 2), approximate: true };
 }
 
 export function createStoryProcess(slug: string, projectId: string, itemId: string, opts: StoryOptions = {}): Process {
@@ -147,7 +185,10 @@ export function createStoryProcess(slug: string, projectId: string, itemId: stri
   const pending = procs.list(projectId).find(p => p.backlogItemId === itemId && (p.status === 'pending_authorization' || p.status === 'running'));
   if (pending) return pending;
   const est = estimateStory(slug, projectId, itemId, opts);
-  return procs.create({ projectId, kind: 'story_execution', title: `${item.storyId} · ${item.title}`, estimatedUsd: est.estimatedUsd, backlogItemId: itemId, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model })) });
+  const proc = procs.create({ projectId, kind: 'story_execution', title: `${item.storyId} · ${item.title}`, estimatedUsd: est.estimatedUsd, backlogItemId: itemId, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model, role: s.role, reason: s.reason })) });
+  // El equipo (con motivos y anulaciones) queda registrado desde el principio; runStory lo conserva.
+  procs.setResult(proc.id, { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: est.team ?? null, iterationContext: opts.iterationContext ?? null });
+  return procs.get(proc.id)!;
 }
 
 export async function runStory(slug: string, processId: string, log: (o: any, m: string) => void, isCancelled: () => boolean) {
@@ -160,14 +201,23 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   const treeText = `## Árbol del repositorio\n\`\`\`\n${ctx.tree}\n\`\`\``;
   const docs = knowledge.list(project.id);
   const direction = docs.find(d => /^Síntesis/.test(d.title))?.body.slice(0, 6000) ?? '';
-  const result: ExecutionResult = { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [] };
+  const result: ExecutionResult = { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: proc.result?.team ?? null, consultations: [], iterationContext: proc.result?.iterationContext ?? null };
+  const iterText = result.iterationContext ? `\n# Contexto de iteración (feedback del propietario y estado anterior; OBLIGATORIO tenerlo en cuenta)\n${result.iterationContext}\n` : '';
   const involved = Array.from(new Set(proc.steps.map(s => s.agentId)));
+  const roleStep = (role: TeamRole) => { const st = stepByRole(proc, role); if (!st) throw new Error(`El proceso no tiene paso de ${role}.`); return proc.steps.indexOf(st); };
   involved.forEach(id => agents.setStatus(id, 'active'));
   backlog.setStatus(item.id, 'in_progress', processId);
   let finalStatus: Process['status'] = 'done'; let finalError: string | null = null;
 
-  const call = async (stepIdx: number, system: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[]) => {
+  const injectedSystems = new Map<number, string>();
+  const call = async (stepIdx: number, system0: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[]) => {
     const step = proc.steps[stepIdx]; const agent = agents.get(step.agentId)!;
+    // M4/M5: lecciones validadas (por proyecto y papel) y prácticas de la plantilla del agente, inyectadas y registradas en el paso.
+    if (!injectedSystems.has(stepIdx)) {
+      const role = step.role ?? (stepIdx === 0 ? 'planner' : stepIdx === 1 ? 'implementer' : 'reviewer');
+      injectedSystems.set(stepIdx, injectLessons(slug, step.id, system0, { projectId: proc.projectId, role, tags: [] }, practicesFor(slug, agent)).system);
+    }
+    const system = injectedSystems.get(stepIdx)!;
     const providerId = agent.config.provider as ProviderId;
     const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
     if (!cred || prow.status !== 'connected') throw new Error(`El proveedor ${providerId} no está conectado.`);
@@ -179,6 +229,7 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
     procs.stepStart(step.id);
     const startedAt = new Date().toISOString();
     try {
+      requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
       const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history });
       const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
       const prev = procs.get(processId)!.steps[stepIdx];
@@ -205,10 +256,10 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   try {
     // 1 · Plan técnico
     if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
-    const coord = agents.get(proc.steps[0].agentId)!;
-    const planRes = await call(0, sys(coord, project, item),
+    const planIdx = roleStep('planner'); const coord = agents.get(proc.steps[planIdx].agentId)!;
+    const planRes = await call(planIdx, sys(coord, project, item),
       `Elabora el plan técnico para implementar esta historia en el repositorio. Sé concreto: qué archivos hay que leer, qué archivos hay que crear o modificar y qué tareas en orden. Mantén el alcance mínimo que cumpla el criterio de aceptación.
-${direction ? `\n# Dirección del proyecto (síntesis previa)\n${direction}\n` : ''}
+${direction ? `\n# Dirección del proyecto (síntesis previa)\n${direction}\n` : ''}${iterText}
 ${treeText}
 
 Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "acceptance": string[], "risks": string[]}`, 2500);
@@ -216,9 +267,24 @@ Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": st
     const plan: StoryPlan = { summary: String(planJson?.summary ?? planRes.text.slice(0, 500)), tasks: planJson?.tasks ?? [], filesToRead: (planJson?.filesToRead ?? []).slice(0, 8), filesToChange: (planJson?.filesToChange ?? []).slice(0, 10), acceptance: planJson?.acceptance ?? [], risks: planJson?.risks ?? [] };
     result.plan = plan; procs.setResult(processId, result);
 
+    // 1b · Consultas de especialistas (M3): aportan recomendaciones concretas que recibe el implementador.
+    const consultSteps = proc.steps.map((s, i) => ({ s, i })).filter(x => x.s.role === 'consultant');
+    for (const { s: cs, i: ci } of consultSteps) {
+      if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
+      const consultant = agents.get(cs.agentId)!;
+      const cRes = await call(ci, sys(consultant, project, item), `Como ${consultant.template.role.toLowerCase()}, aporta recomendaciones concretas y accionables para esta historia desde tu especialidad, a partir del plan del Coordinador. Máximo 10 puntos, cada uno de una o dos líneas, en orden de importancia; indica archivos o pantallas cuando aplique. No escribas código completo.
+# Plan
+${JSON.stringify(plan, null, 2)}
+
+${treeText}`, MAX_TOKENS.consultant);
+      result.consultations!.push({ agentId: consultant.id, agentName: consultant.config.name, role: consultant.template.role, text: cRes.text.trim().slice(0, 8000) });
+      procs.setResult(processId, result);
+    }
+    const consultText = result.consultations!.length ? `\n# Aportaciones de especialistas (tenlas en cuenta)\n${result.consultations!.map(c => `## ${c.agentName} · ${c.role}\n${c.text}`).join('\n\n')}\n` : '';
+
     // 2 · Implementación
     if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
-    const dev = agents.get(proc.steps[1].agentId)!;
+    const implIdx = roleStep('implementer'); const dev = agents.get(proc.steps[implIdx].agentId)!;
     // Contexto acotado: archivos del plan, cada uno hasta 30 000 caracteres y 120 000 en total (lo demás, el modelo lo parchea a ciegas con contexto suficiente o lo pide en NOTAS).
     let ctxBudget = 120_000;
     const filesCtx = Array.from(new Set([...plan.filesToRead, ...plan.filesToChange])).map(f => {
@@ -228,7 +294,7 @@ Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": st
     }).join('\n\n');
     const implPrompt = `Implementa la historia siguiendo este plan del Coordinador:
 ${JSON.stringify(plan, null, 2)}
-
+${iterText}${consultText}
 ${treeText}
 
 # Contenido actual de los archivos relevantes
@@ -238,13 +304,13 @@ Para archivos nuevos entrega el contenido íntegro (create). Para archivos exist
 
 FORMATO DE RESPUESTA (texto plano, sin JSON ni bloques de código alrededor de los archivos):
 ${FILE_FORMAT}`;
-    let implRes = await call(1, sys(dev, project, item), implPrompt, DEV_MAX_TOKENS);
+    let implRes = await call(implIdx, sys(dev, project, item), implPrompt, DEV_MAX_TOKENS);
     let implText = implRes.text;
     // Si la respuesta se cortó por longitud, pedimos continuar (hasta 2 veces) exactamente donde quedó.
     for (let i = 0; i < 2 && isTruncated(implRes.stopReason); i++) {
       if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
       log({ step: 'Implementación', continuation: i + 1 }, 'respuesta cortada: se pide continuación');
-      implRes = await call(1, sys(dev, project, item), 'Tu respuesta anterior se cortó por el límite de longitud. Continúa EXACTAMENTE desde el último carácter que escribiste, sin repetir nada de lo anterior, sin saludos ni explicaciones, manteniendo el mismo formato de marcadores.', DEV_MAX_TOKENS, [{ role: 'user', content: implPrompt }, { role: 'assistant', content: implText }]);
+      implRes = await call(implIdx, sys(dev, project, item), 'Tu respuesta anterior se cortó por el límite de longitud. Continúa EXACTAMENTE desde el último carácter que escribiste, sin repetir nada de lo anterior, sin saludos ni explicaciones, manteniendo el mismo formato de marcadores.', DEV_MAX_TOKENS, [{ role: 'user', content: implPrompt }, { role: 'assistant', content: implText }]);
       implText += implRes.text;
     }
     const parsed = parseFileBlocks(implText);
@@ -263,22 +329,24 @@ ${FILE_FORMAT}`;
     result.implementationSummary += parsed.summary + (parsed.notes ? `\n\n${parsed.notes}` : '');
     result.userFacing = parsed.userFacing || null;
     result.manualTest = parsed.manualSteps.length ? { steps: parsed.manualSteps, checks: parsed.manualSteps.map(() => false), note: null } : null;
+    result.runtimeChecks = parsed.runtimeChecks.length ? { checks: parsed.runtimeChecks, results: [], ranAt: null } : null;
     result.verifyCommands = parsed.verify.filter(c => ['typecheck', 'test', 'build'].includes(c));
     if (!result.verifyCommands.length) result.verifyCommands = ['typecheck'];
     procs.setResult(processId, result);
 
     // 3 · Revisión QA (opcional: el propietario puede omitirla para ir más rápido)
-    if (proc.steps[2]) {
+    const qaStep = stepByRole(proc, 'reviewer');
+    if (qaStep) {
     if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
-    const qa = agents.get(proc.steps[2].agentId)!;
+    const qaIdx = proc.steps.indexOf(qaStep); const qa = agents.get(qaStep.agentId)!;
     const diffs = result.changes.map(c => `${c.error ? `[NO APLICABLE: ${c.error}] ` : ''}${c.warning ? `[AVISO: ${c.warning}] ` : ''}${c.diff ?? ''}`).join('\n\n').slice(0, 60_000);
-    const revRes = await call(2, sys(qa, project, item),
+    const revRes = await call(qaIdx, sys(qa, project, item),
       `Revisa los cambios propuestos para la historia frente al plan y al criterio de aceptación. Busca errores, incoherencias con las convenciones, riesgos de seguridad y qué pruebas deberían ejecutarse.
 # Plan
 ${JSON.stringify(plan, null, 2)}
 # Resumen del desarrollador
 ${result.implementationSummary}
-# Diffs
+${consultText}# Diffs
 ${diffs}
 
 Sé concreto y breve: "summary" en 3-5 frases, como máximo 8 "issues" y 6 "suggestedTests", cada uno de una línea.
@@ -297,6 +365,8 @@ Responde SOLO con JSON: {"approve": boolean, "summary": string, "issues": string
     procs.setResult(processId, result);
     procs.finish(processId, finalStatus, finalError);
     log({ processId, status: finalStatus, spent: procs.get(processId)?.spentUsd.toFixed(4) }, 'historia finalizada');
+    // M4: detección determinista de errores objetivos (sin IA) → lecciones «detectadas» con evidencia.
+    try { const ls = recordDetections(slug, processId, repo.path); if (ls.length) log({ processId, lessons: ls.map(l => l.detector) }, 'lecciones detectadas'); } catch (e: any) { log({ err: e.message }, 'detección de lecciones fallida'); }
   }
 }
 
@@ -310,7 +380,7 @@ export async function recoverStory(slug: string, processId: string): Promise<Pro
   if (!proc || proc.kind !== 'story_execution') throw Object.assign(new Error('Proceso de historia no encontrado'), { statusCode: 404 });
   if (proc.status === 'running' || proc.status === 'pending_authorization') throw Object.assign(new Error('El proceso no ha terminado.'), { statusCode: 409 });
   if (proc.result?.applied) throw Object.assign(new Error('Los cambios de este proceso ya se aplicaron.'), { statusCode: 409 });
-  const dev = proc.steps[1]; const text = dev?.outputMd ?? '';
+  const dev = stepByRole(proc, 'implementer'); const text = dev?.outputMd ?? '';
   if (!text.trim()) throw Object.assign(new Error('El Desarrollador no llegó a entregar nada en este proceso: no hay salida que recuperar. Vuelve a ejecutar la historia.'), { statusCode: 409 });
   const repo = projectsRepo(slug).repository(proc.projectId);
   if (!repo) throw Object.assign(new Error('No hay repositorio registrado.'), { statusCode: 409 });
@@ -319,14 +389,15 @@ export async function recoverStory(slug: string, processId: string): Promise<Pro
   if (!parsed.changes.length) throw Object.assign(new Error('La salida del Desarrollador no contiene archivos en un formato reconocible. Vuelve a ejecutar la historia.'), { statusCode: 409 });
   const changes = annotateChanges(repo.path, parsed.changes);
   // El Desarrollador leyó los archivos cuando empezó su paso: si alguno cambió después, un «modify» completo lo machacaría.
-  const readAt = dev.startedAt ?? proc.createdAt;
+  const readAt = dev?.startedAt ?? proc.createdAt;
   for (const c of changes) { if (!c.error && c.action === 'modify' && await fileChangedSince(repo.path, c.path, readAt)) c.error = `El archivo cambió en el repositorio después de que el Desarrollador lo leyera (${new Date(readAt).toLocaleString()}): aplicar esta versión completa sobrescribiría ese trabajo. Si necesitas el cambio, vuelve a ejecutar la historia.`; }
   const applicable = changes.filter(c => !c.error);
   if (!applicable.length) throw Object.assign(new Error(`Ningún cambio es aplicable: ${changes.map(c => `${c.path}: ${c.error}`).join(' · ')}`), { statusCode: 409 });
-  const planJson = proc.steps[0]?.outputMd ? extractJson(proc.steps[0].outputMd) : null;
+  const planStep = stepByRole(proc, 'planner');
+  const planJson = planStep?.outputMd ? extractJson(planStep.outputMd) : null;
   const plan: StoryPlan | null = planJson ? { summary: String(planJson.summary ?? ''), tasks: planJson.tasks ?? [], filesToRead: planJson.filesToRead ?? [], filesToChange: planJson.filesToChange ?? [], acceptance: planJson.acceptance ?? [], risks: planJson.risks ?? [] } : proc.result?.plan ?? null;
   const invalid = changes.filter(c => c.error);
-  const result: ExecutionResult = { plan, implementationSummary: `♻ Resultado recuperado sin IA de la salida del Desarrollador (el proceso había fallado por: ${proc.error ?? 'error posterior'}).${parsed.truncatedFile ? ` ⚠ La salida se cortó a mitad de «${parsed.truncatedFile}»; ese archivo no está incluido.` : ''}${invalid.length ? ` ⚠ ${invalid.length} cambio(s) no aplicables: ${invalid.map(c => c.path).join(', ')}.` : ''}\n\n${parsed.summary}${parsed.notes ? `\n\n${parsed.notes}` : ''}`, changes, verifyCommands: parsed.verify.filter(c => ['install', 'typecheck', 'test', 'build'].includes(c)).length ? parsed.verify : ['typecheck'], review: null, applied: null, verifications: [], userFacing: parsed.userFacing || null, manualTest: parsed.manualSteps.length ? { steps: parsed.manualSteps, checks: parsed.manualSteps.map(() => false), note: null } : null };
+  const result: ExecutionResult = { plan, implementationSummary: `♻ Resultado recuperado sin IA de la salida del Desarrollador (el proceso había fallado por: ${proc.error ?? 'error posterior'}).${parsed.truncatedFile ? ` ⚠ La salida se cortó a mitad de «${parsed.truncatedFile}»; ese archivo no está incluido.` : ''}${invalid.length ? ` ⚠ ${invalid.length} cambio(s) no aplicables: ${invalid.map(c => c.path).join(', ')}.` : ''}\n\n${parsed.summary}${parsed.notes ? `\n\n${parsed.notes}` : ''}`, changes, verifyCommands: parsed.verify.filter(c => ['install', 'typecheck', 'test', 'build'].includes(c)).length ? parsed.verify : ['typecheck'], review: null, applied: null, verifications: [], userFacing: parsed.userFacing || null, manualTest: parsed.manualSteps.length ? { steps: parsed.manualSteps, checks: parsed.manualSteps.map(() => false), note: null } : null, runtimeChecks: parsed.runtimeChecks.length ? { checks: parsed.runtimeChecks, results: [], ranAt: null } : null, team: proc.result?.team ?? null, consultations: proc.result?.consultations ?? [] };
   procs.setResult(processId, result);
   procs.finish(processId, 'done', null);
   if (proc.backlogItemId) backlogRepo(slug).setStatus(proc.backlogItemId, 'review', processId);
@@ -383,6 +454,7 @@ ${r.changes.slice(0, 8).map(c => `## ${c.path}\n${(c.diff ?? '').slice(0, 1500)}
 
 Responde SOLO con JSON: {"userFacing": string (3-8 líneas en lenguaje llano: qué cambia para quien usa el Portal y DÓNDE lo verá: menú, botón, pantalla o ruta exacta; si no hay nada visible, dilo), "steps": string[] (3-10 pasos numerados de prueba manual en el Portal, cada uno "acción. Esperado: resultado"; empieza por dónde entrar)}`;
   const startedAt = new Date().toISOString();
+  requirePolicy('ai_call', { slug, agentId: agent.id, projectId: proc.projectId, authorized: true });
   const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user, maxTokens: 2000, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
   const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
   procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);

@@ -3,6 +3,7 @@ import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@por
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
+import { requirePolicy } from './executionPolicy.ts';
 
 export interface ParsedStory { storyId: string; title: string; ownerKey: string | null; dependsOn: string | null; estimate: 'S' | 'M' | 'L' | null; criterion: string }
 
@@ -122,6 +123,7 @@ export async function extractBacklogWithAI(slug: string, projectId: string, maxU
   const agents = agentsRepo(slug).list().map(a => `${a.key}: ${a.config.name}`).join(', ');
   const startedAt = new Date().toISOString();
   try {
+    requirePolicy('ai_call', { slug, agentId: coord.id, projectId, authorized: true });
     const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
       model: coord.config.model, maxTokens: 3000, effort: 'low', supportsEffort: false,
       system: `Eres «${coord.config.name}». Conviertes un documento de dirección en un backlog estructurado. Agentes disponibles (key: nombre): ${agents}. Responde SOLO con JSON válido.`,
@@ -161,7 +163,7 @@ export function resetStory(slug: string, itemId: string, reason: string): Backlo
   if (it.status === 'in_progress') throw Object.assign(new Error('La historia está en ejecución; cancela el proceso primero.'), { statusCode: 409 });
   const procs = processesRepo(slug);
   const last = (it.lastProcessId ? procs.get(it.lastProcessId) : undefined) ?? procs.list(it.projectId).find(p => p.backlogItemId === it.id && p.kind === 'story_execution');
-  if (last?.result && !last.result.applied && !last.result.rejected) procs.setResult(last.id, { ...last.result, rejected: { at: new Date().toISOString(), reason } });
+  if (last?.result && !last.result.merged && !last.result.rejected) procs.setResult(last.id, { ...last.result, rejected: { at: new Date().toISOString(), reason } });
   repo.update(it.id, { description: `${it.description ? it.description + '\n' : ''}[${new Date().toISOString().slice(0, 10)}] Devuelta a pendiente: ${reason}` });
   repo.setStatus(it.id, 'pending', last?.id ?? null);
   return repo.get(it.id)!;

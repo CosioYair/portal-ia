@@ -1,0 +1,83 @@
+# Portal IA v0.12.0 — Entrega de la implementación (Hitos 0–6)
+
+Fecha: 27 de octubre de 2026. Base: tu `main` (`7627938` v0.11.2 + merge `cd84b69` de HU-147). Todo el trabajo está en commits sobre esa base en la copia adjunta (`portal-ia-v0.12.0.zip`, sin `node_modules`, `data`, `dist` ni `.git`). No se publicó nada en GitHub ni en ningún remoto; no se consumió ningún crédito de proveedor real; tus datos no se tocaron.
+
+## 1 · Resumen por hito
+
+| Hito | Estado | Qué hay |
+|---|---|---|
+| 0 · Base fiable | **Implementado y verificado** | Copia de seguridad automática de `data/` antes de la primera apertura con el esquema 0.12 (`data/backups/<fecha>_antes-de-0.12`, marca `.schema-version`); migraciones solo aditivas probadas sobre una copia **sintética** 0.11 (`migration.test.ts`). Proveedor simulado para pruebas (`PORTAL_MOCK_PROVIDER=1`, 0 USD). |
+| 1 · Ejecución segura | **Implementado y verificado** (Docker/WSL2: pendiente de tu entorno) | Política de ejecución en backend (`executionPolicy.ts`): toda operación con efectos (worktree, sandbox, merge, push, reinicio, llamada a IA) pasa por `requirePolicy`, que exige autorización, herramienta del agente y ámbito, y lo audita en `execution_history` (`policy:*`). Worktrees aislados por proceso (`<repo>-worktrees/<proceso>`): el checkout del Portal nunca cambia de rama. Sandbox fail-closed: `docker` → `wsl` → `linux-ns` (Linux sin Docker: `unshare`, sin red, HOME/Portal/datos en solo lectura) → sin sandbox solo `tsc --noEmit`; el proyecto interno no se integra sin test y build en sandbox real, ni siquiera con «saltar verificación». |
+| 2 · Automejora verificada | **Implementado y verificado de extremo a extremo** (con proveedor simulado) | Integrar ≠ activo: `activation` se calcula con `git merge-base --is-ancestor` del commit arrancado y del commit con el que se construyó la interfaz (`dist/build-info.json`); reconstrucción a `dist.next` con `dist.prev` conservado; reinicio por supervisor; `index.html` sin caché. Comprobaciones en ejecución (`=== COMPROBACIONES ===` del Desarrollador + 2 por defecto): HTTP contra el propio Portal y navegador (Playwright) con captura en `data/evidence/`. Orden de cierre 1–8 calculado en el servidor; cerrar exige activación + comprobación en verde + prueba manual; publicar es opcional. |
+| 3 · Agentes especializados efectivos | **Implementado y verificado** | `capabilities` por agente; `teamComposer.ts` determinista (0 llamadas a IA) elige planificador, implementador (exige `write_repo`), revisor y hasta 2 consultores por coincidencia de vocabulario con la historia; motivos y exclusiones visibles; anulación manual (añadir/quitar) registrada; las consultas se ejecutan como pasos y llegan al prompt del implementador y de QA; métricas por agente desde `process_steps`; costo por paso real vs estimación. |
+| 4 · Aprendizaje validado | **Implementado y verificado** | Detectores sin IA (parche que no encaja, archivo desactualizado, reemplazo masivo, módulo sin importar, QA no aprueba, verificación/activación/ejecución fallidas, historia devuelta, sin entrega) → lección `detected` con evidencia; «Proponer con IA» solo con autorización (1 llamada); validación/edición con versiones; inyección por proyecto y papel («Lecciones de esta organización») registrada en `process_steps.lessons_used`; reincidencia contada cuando el mismo detector salta con la lección presente. |
+| 5 · Plantillas versionadas | **Implementado y verificado** | `agent_templates` por espacio (v1 = plantilla aprobada); promover una lección validada crea `clave@N+1` con diff legible; agentes nuevos (de plantilla o personalizados por capacidad) heredan la última; los existentes siguen en su versión hasta «Actualizar» (diff) y pueden «Volver»; historial por agente; prácticas inyectadas y trazadas como `practice:<clave@v>:<lección>`. |
+| 6 · Espacio unificado de la historia | **Implementado y verificado** | `/historias/:id`: contexto, equipo con motivos, orden de cierre, diff/QA/aplicar/verificar/integrar (misma implementación que el proceso), prueba paso a paso **única** (OK/Falla/Observación + comentario; «OK» marca el paso probado), chat con los agentes implicados (autorizado por pregunta; propuestas de tareas/criterio/iteración aplicables), tareas (manuales, del equipo o desde los pasos con falla), iteraciones con contexto (feedback + tareas + conversación + nota) y cierre. El panel aparte de feedback se retiró. |
+
+## 2 · Evidencia
+
+### Pruebas automáticas (todas con proveedor simulado o sin IA)
+
+`npm run typecheck` sin errores en los 4 paquetes; `npm run build --workspace apps/web` correcto.
+
+`npm test --workspace apps/server`: **100 pruebas, 100 correctas, 0 omitidas** en este entorno Linux. En Windows, `sandbox-linux.test.ts` se omite sola (no hay `unshare`); también se omite cuando las pruebas ya corren dentro de un sandbox. Las mismas 100 pruebas pasan **dentro** del sandbox `linux-ns` (es lo que ejecuta «Verificar → test» sobre el propio Portal). Archivos nuevos o adaptados:
+
+- `m1-m2.test.ts` — política (niveles, herramientas, ámbito, proceso en ejecución, presupuesto, auditoría), fail-closed, flujo API aplicar→verificar→integrar→comprobar→cerrar sin publicar, activación, parser de comprobaciones, comprobación HTTP que falla de verdad.
+- `sandbox-linux.test.ts` — un `npm test` malicioso no escribe en el Portal, HOME ni datos, no sale a Internet; el worktree sí.
+- `m3-team.test.ts` — A1 composición determinista (0 llamadas a IA; si omites QA, el revisor no reaparece como consultor), A2 participación real del especialista (su aportación llega al prompt; `process_steps` con modelo/tokens/costo), A3 permisos en backend (403 + auditoría).
+- `m4-m5-learning.test.ts` — B1 detección objetiva (9 detectores, idempotente), B2 ciclo de validación (sin autorización 0 llamadas; versiones; ámbito), B3/B4 inyección medible (el simulado solo acierta si recibe L1: tasa de parches fallidos 1 → 0; `lessons_used`; reincidencia), C1/C2 plantillas (promoción, herencia, opt-in, vuelta atrás, práctica en el prompt).
+- `m6-story.test.ts` — contexto, feedback↔marcas, chat autorizado con propuestas, tareas desde fallos, iteración con contexto, dos iteraciones no simultáneas.
+- `migration.test.ts` — migración 0.11→0.12 sobre copia sintética: copia previa, columnas añadidas, filas intactas, segunda apertura sin copiar.
+- `core.test.ts` adaptado a worktrees (el checkout no cambia de rama; sin commits se rechaza con mensaje; orden de cierre nuevo) y `manual-test-wiring.test.ts` (los 2 fallos que traía tu `main` quedan resueltos por la lista unificada).
+
+### Prueba B · automejora verificada de extremo a extremo (`apps/server/test/e2e/self-improvement.e2e.mjs`)
+
+Arranca una **copia** del Portal (clon de `main`) con `npm start` (supervisor) en un puerto libre, datos temporales, proveedor simulado y sandbox `linux-ns`, registra la carpeta de esa instalación como repositorio del proyecto interno y recorre: solicitud → equipo/estimación → autorización 1 USD → ejecución (patch real a `Backlog.tsx`, 3 pasos de prueba, 2 comprobaciones) → aplicar en worktree (checkout sigue en `main`, sin el cambio) → integrar bloqueado sin verificar (409) → typecheck/test/build en sandbox (exit 0) → integrar (`merge --no-ff`, worktree retirado) → «Integrada · NO activada», comprobar y cerrar bloqueados (409 `not_activated`) → «Reconstruir y reiniciar» (dist.next, reinicio por supervisor, `startedAt` nuevo, `startCommit = buildCommit = HEAD`) → «Activada» → comprobación en ejecución: HTTP ok y **el propio Portal abre `/backlog` con un navegador y encuentra el `h1` «(1 abiertas)»** (captura `data/evidence/<proceso>/check-3-ui.png`) → cerrar bloqueado sin prueba manual (409 `not_tested`) → prueba manual → «Listo para cerrar (activada y probada)» → cerrada **sin publicar** (`origin/main` sigue en el commit anterior) → sin lecciones falsas. Escenarios negativos, todos de extremo a extremo: **verificación fallida** (typecheck roto: integrar 409 `verification_failed`, también con «saltar verificación»; lección `verification_failed`; rechazar descarta worktree y rama); **activación fallida** (build roto: `dist` anterior intacta, el Portal sigue respondiendo con el mismo `startedAt`, lección `activation_failed`); **parche que no encaja** (proceso «failed» con motivo, nada escrito, lección `patch_mismatch`); **fallo en ejecución** (una historia que compila, pasa typecheck/test/build en sandbox, se integra y se activa, pero el Portal abre `/backlog` en el navegador y encuentra «(3 abiertas)» en lugar de lo prometido: comprobación `ui` en rojo con captura, fase «comprobación en ejecución FALLÓ», y **cerrar devuelve 409 `not_runtime_verified` aunque los 3 pasos de la prueba manual estén marcados**; lección `runtime_failed`). Resultado: **43/43 pasos correctos en ~2,5 min, 9 llamadas al proveedor simulado, 0 a uno real**. Resultados y capturas: `portal-ia-v0.12.0-evidencia-e2e.zip` (`results.json` + 13 capturas, incluidas las de las pantallas nuevas). Se regeneran con el mismo comando.
+
+**Proveedor real: NO se ejecutó** (sin autorización de gasto ni clave). Todo lo anterior es con proveedor simulado; nada de este documento afirma verificación con proveedor real.
+
+### Pruebas A–E del encargo
+
+| | Resultado | Dónde |
+|---|---|---|
+| A · Creación de agente y participación | Simulado ✔ (creación por formulario con capacidades; entra en una historia relevante como consultor; su aportación llega al implementador; métricas) | `m3-team.test.ts`, pantalla Equipo → agente (Capacidades y participación) |
+| B · Automejora verificada (+ verificación/activación/ejecución fallidas) | Simulado ✔ 43/43 en una copia real del Portal arrancada con el supervisor y sandbox `linux-ns`; los tres fallos, de extremo a extremo | `self-improvement.e2e.mjs`, `m1-m2.test.ts` |
+| C · Aprendizaje validado y medible | Simulado ✔ (patch_fail_rate 1 → 0 con L1; reincidencia) | `m4-m5-learning.test.ts` |
+| D · Transferencia a agentes nuevos | Simulado ✔ (pj-dev@2; herencia; opt-in/vuelta atrás; práctica en el prompt) | `m4-m5-learning.test.ts` C1/C2 |
+| E · Preservación y seguridad | ✔ (migración sintética; política; fail-closed; aislamiento `linux-ns`; cierre bloqueado; rechazo seguro) | `migration.test.ts`, `m1-m2.test.ts`, `sandbox-linux.test.ts`, `m3-team.test.ts` A3 |
+
+## 3 · Cómo instalar y ejecutar (Windows)
+
+Ver `docs/instalacion-windows.md` (instalar sobre tu carpeta, `npm install`, `npm run build`, `npm start`; parar con Ctrl+C; reiniciar desde la barra del sistema). Sandbox: `docs/sandbox.md` (Docker Desktop recomendado; WSL2 alternativa). Migración: automática con copia previa en `data/backups`.
+
+Comandos de verificación tras instalar: `npm run typecheck`, `npm test`, y opcionalmente `node apps/server/test/e2e/self-improvement.e2e.mjs` (requiere sandbox; con Docker Desktop en Windows debería funcionar igual que aquí con `linux-ns`; Playwright opcional: sin él, las comprobaciones `ui` quedan «pendientes» y la historia no se da por verificada).
+
+## 4 · Primera automejora real desde dentro del Portal
+
+Pasos exactos en `docs/instalacion-windows.md` §«Primera automejora real». Resumen: Panel → Repositorio = carpeta de esta instalación y sandbox `docker`/`wsl`; Backlog → nueva solicitud pequeña y observable (p. ej. el contador en el título de Backlog) → Ejecutar (equipo y estimación; autoriza 1 USD) → Espacio de la historia → Aplicar → Verificar (typecheck, test, build) → Integrar → barra «Reconstruir y reiniciar» → Comprobar en ejecución → prueba paso a paso → Cerrar. Costo esperado con Anthropic (Sonnet para QA/Dev, Opus para el Coordinador según tus agentes): 0,3–1,2 USD; se registra el costo real por paso.
+
+## 5 · Qué queda pendiente de tu entorno o bloqueado
+
+- **Docker Desktop / WSL2 en tu Windows**: no verificable desde aquí. Hasta que uno exista, el Portal te lo dirá en la tarjeta Repositorio y en Verificación; `test`/`build` quedarán «no disponible» y el proyecto interno no se integrará (fail-closed, por diseño).
+- **Proveedor real**: ninguna prueba se hizo con Anthropic/OpenAI. La primera automejora real la haces tú con tu clave y presupuesto.
+- **Playwright en tu equipo**: `npm i -D playwright && npx playwright install chromium` para que «Comprobar en ejecución» incluya la comprobación de navegador; sin él las `ui` quedan pendientes (no bloquea las HTTP, pero sí el cierre si hay comprobaciones `ui` definidas).
+- **`npm test` del propio Portal dentro del sandbox** tarda ~20 s en Linux; en Docker Desktop dependerá del disco compartido.
+- Hallazgos corregidos durante la verificación final: (1) el detector de «módulo sin importar» habría marcado como huérfano cualquier módulo nuevo en el repositorio del Portal porque `git grep` fallaba con una ruta inexistente (`src/`); ahora solo usa rutas que existen y, si git no puede comprobar, no detecta nada; (2) la prueba de migración importaba rutas absolutas que en Windows no son válidas para ESM; ahora usa `file://`; (3) si omites QA al ejecutar, el revisor ya no entra como consultor.
+- Actualización simulada sobre una copia de **tu** árbol subido (en `main` = `7627938`, sin tu carpeta `data`, que retiré de la copia antes de nada para no abrirla ni migrarla): descomprimir encima → typecheck limpio, 100/100 pruebas, build correcto, con y sin los tres archivos sobrantes del panel anterior.
+- Hallazgo durante las pruebas: `.gitignore` tenía `node_modules/` (solo carpetas); un `node_modules` que sea **enlace simbólico** no quedaba ignorado y un `git add -A` lo habría incluido en un commit. Corregido a `node_modules`. Con tu instalación normal (carpeta real) no te afectaba.
+- La API de prueba manual permite marcar pasos antes de que la comprobación en ejecución esté en verde (la interfaz no lo permite); la regla de cierre lo bloquea igualmente (`not_runtime_verified`), como demuestra la e2e.
+- Limitaciones conocidas: el compositor de equipos usa coincidencia léxica (sin IA) y puede no elegir a un especialista cuando la historia no nombra su área (puedes añadirlo manualmente al ejecutar); el detector de «módulo sin importar» usa `git grep` (solo archivos rastreados); el chat de la historia responde un agente por pregunta (el Coordinador por defecto o el que elijas), no todo el equipo a la vez; la activación se evalúa solo para el proyecto interno con la carpeta de esta instalación.
+
+## 6 · Commits (sobre tu `main`)
+
+`4f37942` M0–M2 servidor · `e11d09a` M1/M2 interfaz y docs · `7419e78` M3 · `101f326` M4/M5 servidor · `75ef5c8` M4/M5 interfaz · `3fbc5ae` M6 · `ff4bcfe` sandbox linux-ns · `402f2f2` loopback en sandbox · `f9fe6bf` rechazo seguro + e2e · `aac48dc` sandbox marcas/salida · `1b8fb64` orden de cierre de 8 pasos · `f420359` v0.12.0 (handoff, docs, migración, orientación de historias cerradas) · `ebb8e0b` QA omitida no reaparece; e2e de fallo en ejecución · `5916ae4` capturas en la e2e · `f280f7c` pasos de actualización · `8703987` detector sin falsos positivos y prueba de migración portable.
+
+Estos commits están en la copia de trabajo de esta sesión, **no** en tu repositorio ni en GitHub. Al descomprimir el zip sobre tu carpeta y hacer `git add -A && git commit`, quedarán como un único commit tuyo; si prefieres conservar la historia por hitos, te puedo entregar los parches (`git format-patch`) para aplicarlos con `git am`.
+
+## 7 · Próximos pasos sugeridos
+
+1. Instalar Docker Desktop, arrancar, confirmar sandbox `docker` en el Panel.
+2. Ejecutar la primera automejora real (§4) con 1 USD; revisar costos reales por paso en el proceso.
+3. Validar la primera lección que aparezca en Conocimiento → Lecciones y promoverla a práctica; comprobar en Equipo → Desarrollador el diff y actualizarlo.
+4. Crear un agente especializado con capacidad `consultar` para tu área (p. ej. accesibilidad) y ver cómo entra en la siguiente historia que la mencione.
+5. Cuando Docker esté, ejecutar `node apps/server/test/e2e/self-improvement.e2e.mjs` en tu equipo como prueba de regresión antes de cada actualización.

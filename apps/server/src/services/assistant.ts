@@ -8,11 +8,13 @@ import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@por
 import { platform, providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
+import { requirePolicy } from './executionPolicy.ts';
 import { addManualItem, resetStory } from './backlog.ts';
 import { createCompany, createProject } from './companies.ts';
 import { createStoryProcess, estimateStory } from './storyExecution.ts';
 import { createDelegation, estimateDelegation } from './delegation.ts';
 import { describeProcess } from './guidance.ts';
+import { lessonsRepo } from './lessons.ts';
 import { systemStatus } from './system.ts';
 import { repoStatus } from './repoStatus.ts';
 
@@ -83,9 +85,11 @@ const SCREEN_MAP = `# Pantallas del Portal (menú izquierdo salvo que se indique
 - Equipo de IA (/equipo): agentes, organigrama, crear agente especializado, configurar cada agente (modelo, límites).
 - Backlog (/backlog): historias por secciones (en curso/para revisar, pendientes por prioridad, completadas, descartadas), buscar/filtrar, «Ejecutar», «Devolver a pendiente», «Cerrar», aviso «Pendientes de tu decisión», «Nueva solicitud», «Encargo al equipo».
 - Actividad (/actividad): lista de procesos; cada proceso (/procesos/<id>) muestra pasos, costo, orientación «Siguiente paso», y para historias: Resumen (qué cambia y dónde, orden de cierre, prueba manual paso a paso), diff por archivo, revisión QA, Aplicar, Verificar, Integrar, Publicar, Rechazar, Recuperar/Volver a ejecutar.
-- Conocimiento (/conocimiento): documentos generados (evaluación, planes, encargos).
+- Conocimiento (/conocimiento): documentos generados (evaluación, planes, encargos) y pestaña «Lecciones de la organización» (M4: lecciones detectadas sin IA → proponer con IA (autorizado) → validar → se inyectan en los prompts por papel → promover a práctica de plantilla (M5)).
+- Espacio de la historia (/historias/<id>): todo lo de una historia en un solo lugar: contexto, equipo, orden de cierre, prueba paso a paso con feedback, chat con los agentes implicados, tareas e iteraciones.
 - Autorizaciones (/autorizaciones, lanzador «Autorizaciones» abajo a la izquierda; HU-009): bandeja de decisiones pendientes.
-- Barra amarilla superior: aparece cuando el código del Portal cambió respecto al que arrancó; «Reconstruir y reiniciar» con autorización.
+- Barra amarilla superior: aparece cuando el código del Portal cambió respecto al que arrancó o la interfaz se construyó antes; «Reconstruir y reiniciar» con autorización. Una historia del Portal solo cuenta como ACTIVADA cuando el servidor y la interfaz en marcha contienen su commit; después debe «Comprobar en ejecución» (el Portal se verifica a sí mismo) y probarse paso a paso antes de cerrarse. Publicar en GitHub es opcional.
+- Seguridad (M1): los cambios se escriben en worktrees aislados (la carpeta del Portal no cambia de rama); las verificaciones corren en sandbox (Docker/WSL2) o quedan bloqueadas (fail-closed); toda operación pasa por la política de ejecución del backend.
 Herramientas y MCP, Presupuestos, Organización: marcadas «próx.», aún no existen.`;
 
 async function platformSnapshot(): Promise<string> {
@@ -93,7 +97,7 @@ async function platformSnapshot(): Promise<string> {
   // Estado del propio Portal en marcha
   try {
     const sys = await systemStatus();
-    lines.push(`# Portal en marcha: versión ${sys.version}, arrancado ${sys.startedAt} con el commit ${sys.startCommit ?? '?'}; HEAD actual de la carpeta: ${sys.headCommit ?? '?'} (rama ${sys.branch ?? '?'}). ${sys.action === 'none' ? 'El código en marcha es el actual.' : `⚠ Hay código integrado que NO está en marcha (${sys.changedFiles.length} archivos${sys.stories.length ? `, historias ${sys.stories.join(', ')}` : ''}): el propietario debe pulsar «Reconstruir y reiniciar» en la barra amarilla; hasta entonces esas mejoras no se ven aunque estén en main.`}`);
+    lines.push(`# Portal en marcha: versión ${sys.version}, arrancado ${sys.startedAt} con el commit ${sys.startCommit ?? '?'}; interfaz construida con ${sys.buildCommit ?? '?'}; HEAD actual de la carpeta: ${sys.headCommit ?? '?'} (rama ${sys.branch ?? '?'}). Sandbox: ${sys.sandbox?.available ?? '?'}${sys.sandbox?.available === 'unavailable' ? ' (⚠ sin sandbox: test/build bloqueados y el Portal no se integra; ver docs/sandbox.md)' : ''}. ${sys.action === 'none' ? 'El código en marcha es el actual.' : `⚠ Hay código integrado que NO está activo (${sys.changedFiles.length} archivos${sys.stories.length ? `, historias ${sys.stories.join(', ')}` : ''}): el propietario debe pulsar «Reconstruir y reiniciar» en la barra amarilla; hasta entonces esas mejoras no se ven aunque estén en main.`}`);
   } catch { /* sin git */ }
   for (const ws of workspacesRepo.list()) {
     lines.push(`\n# Empresa «${ws.name}» (slug: ${ws.slug}${ws.kind === 'internal' ? ', espacio interno: aquí vive el propio Portal IA' : ''})`);
@@ -109,7 +113,7 @@ async function platformSnapshot(): Promise<string> {
       const open = bl.filter(b => b.status !== 'done' && b.status !== 'discarded');
       lines.push(`Backlog abierto (${open.length} de ${bl.length}), en orden de prioridad:`);
       for (const b of open) {
-        const lp = lastProc(b); const g = lp ? describeProcess(lp, { isPortalRepo: ws.kind === 'internal' }) : null; const mt = lp?.result?.manualTest;
+        const lp = lastProc(b); const g = lp ? describeProcess(lp, { isPortalRepo: ws.kind === 'internal', storyStatus: b.status }) : null; const mt = lp?.result?.manualTest;
         lines.push(`- ${b.storyId} [${b.status}] ${b.title}${b.criterion ? ` — criterio: ${b.criterion.slice(0, 160)}` : ''}${g ? ` — proceso ${lp!.id}: ${g.phase}. Siguiente: ${g.next}` : ''}${mt ? ` Prueba manual: ${mt.checks.filter(Boolean).length}/${mt.steps.length} pasos.` : ''}`);
       }
       const done = bl.filter(b => b.status === 'done').slice(-6);
@@ -120,6 +124,7 @@ async function platformSnapshot(): Promise<string> {
       const encargos = procs.filter(x => x.kind === 'delegated_task');
       if (encargos.length) lines.push(`Encargos: ${encargos.map(x => `${x.title} [${x.status}${x.delegation?.backlogOps.length ? `, ${x.delegation.backlogOps.length} propuestas ${x.delegation.opsApplied ? 'aplicadas' : 'SIN aplicar'}` : ''}]`).join(' | ')}`);
       lines.push(`Procesos: ${procs.length} (${procs.filter(x => x.status === 'running').length} en ejecución); conocimiento: ${knowledgeRepo(ws.slug).list(p.id).length} documentos`);
+      try { const ls = lessonsRepo(ws.slug).list(p.id); const pend = ls.filter(l => l.status === 'detected' || l.status === 'proposed'); const val = ls.filter(l => l.status === 'validated'); if (ls.length) lines.push(`Lecciones: ${val.length} validadas (se inyectan en los prompts)${pend.length ? `, ${pend.length} pendientes de revisar en Conocimiento → Lecciones: ${pend.slice(0, 4).map(l => l.title).join(' | ')}` : ''}${val.some(l => l.recurrenceCount > 0) ? `; ⚠ con reincidencia: ${val.filter(l => l.recurrenceCount > 0).map(l => l.title).join(' | ')}` : ''}`); } catch { /* sin tabla */ }
     }
   }
   return lines.join('\n');
@@ -257,6 +262,7 @@ ${await platformSnapshot()}`;
   const prompt = `${history ? `# Conversación reciente\n${history}\n\n` : ''}Propietario: ${userText}${images.length ? `\n(adjunta ${images.length} imagen(es))` : ''}`;
   const startedAt = new Date().toISOString();
   try {
+    requirePolicy('ai_call', { slug: INTERNAL_WORKSPACE.slug, agentId: a.id, authorized: true }); // enviar el mensaje es la autorización (límite mensual ya comprobado)
     const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
       model: a.config.model, system, user: prompt, maxTokens: 3000, effort: a.config.effort, supportsEffort: !!models.find(m => m.id === a.config.model)?.supportsEffort, images
     });

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { Agent, AgentConfig, ProviderId } from '@portal-ia/domain';
-import { KNOWLEDGE, TOOLS } from '@portal-ia/domain';
+import { CAPABILITIES, KNOWLEDGE, TOOLS } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS, KNOWLEDGE_LABELS, TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
@@ -21,6 +21,15 @@ export function AgentDetail() {
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.slug]);
   useEffect(() => { setDraft(null); setNewResp(''); }, [agentId]);
+  const [stats, setStats] = useState<{ steps: number; done: number; failed: number; costUsd: number; byRole: Record<string, number>; lastAt: string | null } | null>(null);
+  useEffect(() => { if (agentId) api.agentStats(ws.slug, agentId).then(setStats).catch(() => setStats(null)); }, [agentId, ws.slug]);
+  const [tpl, setTpl] = useState<Awaited<ReturnType<typeof api.agentTemplate>> | null>(null);
+  const [tplTo, setTplTo] = useState<string>('');
+  const [tplBusy, setTplBusy] = useState(false);
+  const loadTpl = (to?: string) => { if (agentId) api.agentTemplate(ws.slug, agentId, to).then(setTpl).catch(() => setTpl(null)); };
+  useEffect(() => { setTplTo(''); loadTpl(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentId, ws.slug]);
+  const changeVersion = async (v: string) => { if (!agentId) return; setTplBusy(true); try { await api.setAgentTemplateVersion(ws.slug, agentId, v); flash(`Agente ahora sigue ${v}`); setTplTo(''); loadTpl(); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setTplBusy(false); } };
 
   const agent = agents.find(a => a.id === agentId);
   const cfg = draft ?? agent?.config ?? null;
@@ -150,6 +159,38 @@ export function AgentDetail() {
                 <div><label className="label" htmlFor="ag-pertask">Autorización por encima de (USD por tarea)</label><input id="ag-pertask" className="input mono" type="number" min={0} step={0.5} value={cfg.perTaskAuthUsd} onChange={e => edit({ perTaskAuthUsd: Number(e.target.value) })} /></div>
                 <div className="help" style={{ gridColumn: '1 / -1' }}>Los límites se aplican por agente y se combinan con los presupuestos por proceso (próximamente). Al alcanzarlos, el agente se detiene y solicita autorización.</div>
               </div></section>
+
+            <section className="card" style={{ gridColumn: '1 / -1' }}><div className="card-h"><div><div className="h3">Capacidades y participación</div><div className="small muted">Las capacidades deciden su papel en cada historia (sin IA); la participación se calcula de los pasos ejecutados.</div></div><span className="small muted">{(cfg.capabilities ?? []).length} capacidades</span></div>
+              <div className="card-b" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))', gap: 16 }}>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  {CAPABILITIES.map(c => { const on = (cfg.capabilities ?? []).includes(c.id); const needs = c.id === 'implementar' ? 'write_repo' : c.role === 'reviewer' || c.role === 'consultant' ? 'read_repo' : null; return <label key={c.id} className="krow"><input className="cb" type="checkbox" checked={on} onChange={e => edit({ capabilities: e.target.checked ? [...(cfg.capabilities ?? []), c.id] : (cfg.capabilities ?? []).filter(x => x !== c.id) })} /><span style={{ flex: 1 }}>{c.label}{needs && on && !cfg.tools[needs] ? <span className="small" style={{ color: '#9A1F18' }}> · falta la herramienta {needs}: el backend lo excluirá</span> : null}</span></label>; })}
+                </div>
+                <div>
+                  <div className="label">Participación real</div>
+                  {stats ? <div>
+                    <KV k="Pasos ejecutados">{stats.steps} ({stats.done} correctos{stats.failed ? `, ${stats.failed} fallidos` : ''})</KV>
+                    <KV k="Por papel">{Object.entries(stats.byRole).map(([r, n]) => `${r === 'planner' ? 'planificador' : r === 'implementer' ? 'implementador' : r === 'reviewer' ? 'revisor' : r === 'consultant' ? 'consultor' : r}: ${n}`).join(' · ') || '—'}</KV>
+                    <KV k="Costo real acumulado"><span className="mono">{stats.costUsd.toFixed(4)} USD</span></KV>
+                    <KV k="Última participación">{stats.lastAt ? new Date(stats.lastAt).toLocaleString() : 'nunca'}</KV>
+                    {stats.steps === 0 && <div className="help" style={{ marginTop: 8 }}>Este agente aún no ha participado en ninguna historia. Entrará cuando una historia coincida con su especialidad o lo añadas manualmente al ejecutar.</div>}
+                  </div> : <span className="small muted">Cargando…</span>}
+                </div>
+              </div></section>
+
+            {tpl?.current && <section className="card" style={{ gridColumn: '1 / -1' }}><div className="card-h"><div><div className="h3">Plantilla y prácticas de la organización</div><div className="small muted">Las prácticas (lecciones promovidas) se inyectan en sus prompts. Las versiones nuevas solo se aplican cuando tú lo decides; puedes volver atrás.</div></div><Chip tone={tpl.latest && tpl.latest.id !== tpl.current.id ? 'warn' : 'ok'} xs>{tpl.current.id}{tpl.latest && tpl.latest.id !== tpl.current.id ? ` · disponible ${tpl.latest.id}` : ' · al día'}</Chip></div>
+              <div className="card-b" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))', gap: 16 }}>
+                <div><div className="label">Prácticas vigentes ({tpl.current.practices.length})</div>{tpl.current.practices.length ? <ol style={{ margin: 0, paddingLeft: 20, display: 'flex', flexDirection: 'column', gap: 6 }}>{tpl.current.practices.map(p => <li key={p.lessonId} className="sm13">{p.text}</li>)}</ol> : <span className="sm13 muted">Ninguna todavía. Valida lecciones en Conocimiento → Lecciones y promuévelas a práctica.</span>}
+                  {tpl.history.length > 0 && <div className="small muted" style={{ marginTop: 10 }}>Historial: {tpl.history.map(h => `${h.fromVersion ?? '—'} → ${h.toVersion} (${new Date(h.at).toLocaleDateString()}, ${h.by})`).join(' · ')}</div>}</div>
+                <div>
+                  <div className="label">Cambiar de versión</div>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <select className="input" style={{ maxWidth: 200 }} value={tplTo} onChange={e => { setTplTo(e.target.value); loadTpl(e.target.value || undefined); }}><option value="">— elegir versión —</option>{tpl.versions.filter(v => v.id !== tpl.current!.id).map(v => <option key={v.id} value={v.id}>{v.id} · {v.practices.length} práctica(s){tpl.latest?.id === v.id ? ' · última' : ''}</option>)}</select>
+                  </div>
+                  {tpl.diff && (tplTo ? tpl.diff.to === tplTo : true) && <div style={{ marginTop: 8 }}><div className="small muted">Diff {tpl.diff.from ?? '—'} → {tpl.diff.to}</div><pre className="mono" style={{ margin: '4px 0 8px', padding: 8, background: '#FAF9F6', borderRadius: 8, fontSize: 12, whiteSpace: 'pre-wrap' }}>{tpl.diff.diffMd}</pre>
+                    <button className="btn btn-primary btn-sm" disabled={tplBusy} onClick={() => changeVersion(tpl.diff!.to)}>{tplBusy ? <span className="spin spin-light" /> : null}{tpl.diff.to > (tpl.current.id) ? `Actualizar a ${tpl.diff.to}` : `Volver a ${tpl.diff.to}`}</button></div>}
+                  {!tpl.diff && !tplTo && <div className="help" style={{ marginTop: 8 }}>No hay versión más reciente que la que sigue este agente.</div>}
+                </div>
+              </div></section>}
 
             <section className="card" style={{ gridColumn: '1 / -1' }}><div className="card-h"><div className="h3">Herramientas y permisos</div><span className="small muted">{toolsOn} de {TOOLS.length} habilitadas</span></div>
               <div className="card-b" style={{ display: 'flex', flexDirection: 'column' }}>

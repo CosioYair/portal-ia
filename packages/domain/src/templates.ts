@@ -26,7 +26,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     reportsTo: 'owner', supervises: [], collaborates: ['ws-gestor', 'pj-coordinador'], tier: 'mid', fallbackTier: 'low', effort: 'low',
     tools: { delegate: true }, knowledge: { objectives: true, context: true, history: true, memory: true },
     evaluation: ['Precisión de las respuestas respecto al estado real del espacio.', 'Derivación correcta de las solicitudes.', 'Tokens consumidos por consulta.'],
-    monthlyLimitUsd: 10, perTaskAuthUsd: 1
+    monthlyLimitUsd: 10, perTaskAuthUsd: 1, capabilities: []
   },
   {
     id: 'tpl.workspace.org-manager@1', key: 'ws-gestor', scope: 'workspace', name: 'Gestor Organizacional', initials: 'GO',
@@ -36,7 +36,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     reportsTo: 'owner', supervises: ['ws-onboarding', 'pj-coordinador'], collaborates: ['ws-asistente'], tier: 'top', fallbackTier: 'mid', effort: 'high',
     tools: { delegate: true, knowledge_write: true }, knowledge: { objectives: true, context: true, history: true, memory: true },
     evaluation: ['Coherencia de la estructura organizativa.', 'Calidad de las propuestas de cambio.', 'Respeto de los límites aprobados.'],
-    monthlyLimitUsd: 25, perTaskAuthUsd: 3
+    monthlyLimitUsd: 25, perTaskAuthUsd: 3, capabilities: ['consultar']
   },
   {
     id: 'tpl.workspace.onboarding@1', key: 'ws-onboarding', scope: 'workspace', name: 'Agente de Onboarding', initials: 'AO',
@@ -46,7 +46,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     reportsTo: 'ws-gestor', supervises: [], collaborates: ['ws-asistente'], tier: 'low', fallbackTier: 'mid', effort: 'low',
     tools: { delegate: true, knowledge_write: true }, knowledge: { context: true, memory: true },
     evaluation: ['Completitud de las configuraciones propuestas.', 'Pasos necesarios por alta.', 'Ausencia de llamadas innecesarias a modelos.'],
-    monthlyLimitUsd: 10, perTaskAuthUsd: 1
+    monthlyLimitUsd: 10, perTaskAuthUsd: 1, capabilities: []
   },
   {
     id: 'tpl.project.coordinator@1', key: 'pj-coordinador', scope: 'project', name: 'Coordinador del Proyecto', initials: 'CP',
@@ -56,7 +56,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     reportsTo: 'ws-gestor', supervises: ['pj-arquitecto', 'pj-dev', 'pj-ux', 'pj-qa'], collaborates: ['ws-asistente'], tier: 'top', fallbackTier: 'mid', effort: 'high',
     tools: { delegate: true, knowledge_write: true, read_repo: true }, knowledge: { objectives: true, context: true, repo: true, history: true, memory: true },
     evaluation: ['Planes completos y verificables.', 'Cumplimiento de los presupuestos por proceso.', 'Tareas entregadas sin retrabajo.'],
-    monthlyLimitUsd: 40, perTaskAuthUsd: 5
+    monthlyLimitUsd: 40, perTaskAuthUsd: 5, capabilities: ['planificar']
   },
   {
     id: 'tpl.project.architect@1', key: 'pj-arquitecto', scope: 'project', name: 'Arquitecto de Software', initials: 'AS',
@@ -66,7 +66,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     reportsTo: 'pj-coordinador', supervises: [], collaborates: ['pj-dev', 'pj-qa'], tier: 'top', fallbackTier: 'mid', effort: 'high',
     tools: { read_repo: true, knowledge_write: true }, knowledge: { objectives: true, context: true, repo: true, history: true },
     evaluation: ['Coherencia con la arquitectura aprobada.', 'Claridad de los contratos definidos.', 'Deuda técnica introducida.'],
-    monthlyLimitUsd: 30, perTaskAuthUsd: 5
+    monthlyLimitUsd: 30, perTaskAuthUsd: 5, capabilities: ['consultar_arquitectura']
   },
   {
     id: 'tpl.project.fullstack-dev@1', key: 'pj-dev', scope: 'project', name: 'Desarrollador Full Stack', initials: 'DF',
@@ -76,7 +76,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     reportsTo: 'pj-coordinador', supervises: [], collaborates: ['pj-arquitecto', 'pj-ux', 'pj-qa'], tier: 'mid', fallbackTier: 'top', effort: 'medium',
     tools: { read_repo: true, write_repo: true, sandbox_exec: true, run_tests: true }, knowledge: { objectives: true, context: true, repo: true, history: true },
     evaluation: ['Pruebas superadas por cambio.', 'Cambios revisados sin correcciones mayores.', 'Tokens consumidos por tarea completada.'],
-    monthlyLimitUsd: 60, perTaskAuthUsd: 8
+    monthlyLimitUsd: 60, perTaskAuthUsd: 8, capabilities: ['implementar']
   },
   {
     id: 'tpl.project.ux-designer@1', key: 'pj-ux', scope: 'project', name: 'Diseñador UX/UI', initials: 'UX',
@@ -86,7 +86,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     reportsTo: 'pj-coordinador', supervises: [], collaborates: ['pj-dev', 'pj-arquitecto'], tier: 'mid', fallbackTier: 'low', effort: 'medium',
     tools: { read_repo: true, knowledge_write: true }, knowledge: { objectives: true, context: true, repo: true },
     evaluation: ['Consistencia con el sistema de diseño.', 'Claridad de las especificaciones entregadas.', 'Problemas de usabilidad detectados antes de implementar.'],
-    monthlyLimitUsd: 20, perTaskAuthUsd: 3
+    monthlyLimitUsd: 20, perTaskAuthUsd: 3, capabilities: ['consultar_ux']
   },
   {
     id: 'tpl.project.qa@1', key: 'pj-qa', scope: 'project', name: 'Especialista QA', initials: 'QA',
@@ -96,7 +96,7 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     reportsTo: 'pj-coordinador', supervises: [], collaborates: ['pj-dev', 'pj-arquitecto'], tier: 'mid', fallbackTier: 'low', effort: 'medium',
     tools: { read_repo: true, sandbox_exec: true, run_tests: true }, knowledge: { objectives: true, context: true, repo: true, history: true },
     evaluation: ['Defectos detectados antes de la aprobación.', 'Cobertura de los criterios de aceptación.', 'Falsos positivos reportados.'],
-    monthlyLimitUsd: 30, perTaskAuthUsd: 4
+    monthlyLimitUsd: 30, perTaskAuthUsd: 4, capabilities: ['revisar_calidad', 'generar_pruebas']
   }
 ];
 

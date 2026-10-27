@@ -1,4 +1,4 @@
-import type { DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
+import type { StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
 import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
 
@@ -77,8 +77,9 @@ export const api = {
   addBacklogItem: (slug: string, projectId: string, input: { title: string; description?: string; criterion?: string; ownerKey?: string | null; estimate?: 'S' | 'M' | 'L' | null }) => request<BacklogItem>(`/api/workspaces/${slug}/projects/${projectId}/backlog`, { method: 'POST', body: JSON.stringify(input) }),
   patchBacklogItem: (slug: string, id: string, patch: Partial<Pick<BacklogItem, 'title' | 'criterion' | 'description' | 'ownerKey' | 'estimate'>> & { status?: BacklogStatus }) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteBacklogItem: (slug: string, id: string) => request<{ ok: boolean }>(`/api/workspaces/${slug}/backlog/${id}`, { method: 'DELETE' }),
-  storyEstimate: (slug: string, projectId: string, id: string, skipQa = false) => request<AssessmentEstimate>(`/api/workspaces/${slug}/projects/${projectId}/backlog/${id}/estimate${skipQa ? '?skipQa=1' : ''}`),
-  executeStory: (slug: string, projectId: string, id: string, skipQa = false) => request<Process>(`/api/workspaces/${slug}/projects/${projectId}/backlog/${id}/execute`, { method: 'POST', body: JSON.stringify({ skipQa }) }),
+  storyEstimate: (slug: string, projectId: string, id: string, skipQa = false, team?: { add?: string[]; remove?: string[] }) => { const q = new URLSearchParams(); if (skipQa) q.set('skipQa', '1'); if (team?.add?.length) q.set('add', team.add.join(',')); if (team?.remove?.length) q.set('remove', team.remove.join(',')); const qs = q.toString(); return request<AssessmentEstimate>(`/api/workspaces/${slug}/projects/${projectId}/backlog/${id}/estimate${qs ? `?${qs}` : ''}`); },
+  executeStory: (slug: string, projectId: string, id: string, skipQa = false, team?: { add?: string[]; remove?: string[] }) => request<Process>(`/api/workspaces/${slug}/projects/${projectId}/backlog/${id}/execute`, { method: 'POST', body: JSON.stringify({ skipQa, team }) }),
+  agentStats: (slug: string, id: string) => request<{ steps: number; done: number; failed: number; costUsd: number; byRole: Record<string, number>; lastAt: string | null }>(`/api/workspaces/${slug}/agents/${id}/stats`),
   repoStatus: (slug: string, projectId: string) => request<RepoStatus & { portalRoot: string }>(`/api/workspaces/${slug}/projects/${projectId}/repository/status`),
   repoInitMain: (slug: string, projectId: string) => request<{ mainBranch: string; from: string }>(`/api/workspaces/${slug}/projects/${projectId}/repository/init-main`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   repoSetRemote: (slug: string, projectId: string, url: string) => request<{ remote: string; url: string }>(`/api/workspaces/${slug}/projects/${projectId}/repository/remote`, { method: 'POST', body: JSON.stringify({ authorized: true, url }) }),
@@ -100,8 +101,35 @@ export const api = {
   mergeProcess: (slug: string, processId: string, skipVerification = false) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/merge`, { method: 'POST', body: JSON.stringify({ authorized: true, skipVerification }) }),
   publishProcess: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/publish`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   applyChanges: (slug: string, processId: string, branch?: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/apply`, { method: 'POST', body: JSON.stringify({ authorized: true, branch }) }),
-  verifyProcess: (slug: string, processId: string, command: 'install' | 'typecheck' | 'test' | 'build') => request<Process>(`/api/workspaces/${slug}/processes/${processId}/verify`, { method: 'POST', body: JSON.stringify({ authorized: true, command }) }),
+  verifyProcess: (slug: string, processId: string, command: 'install' | 'typecheck' | 'test' | 'build', allowNetwork = false) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/verify`, { method: 'POST', body: JSON.stringify({ authorized: true, command, allowNetwork }) }),
+  /** M2 · el Portal se comprueba a sí mismo (HTTP y navegador) una vez activado el cambio. */
+  runtimeCheck: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/runtime-check`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
+  systemSandbox: (force = false) => request<{ available: 'docker' | 'wsl' | 'host-min' | 'unavailable'; docker: boolean; wsl: boolean; detail: string; checkedAt: string }>(`/api/system/sandbox${force ? '?force=1' : ''}`),
+  systemPolicy: () => request<{ op: string; level: 'local' | 'auth' | 'external'; tool: string | null; label: string }[]>('/api/system/policy'),
   markStoryDone: (slug: string, id: string, opts?: { force: boolean; reason?: string }) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/done`, { method: 'POST', body: opts ? JSON.stringify(opts) : undefined }),
+  // M6 · espacio de la historia
+  story: (slug: string, id: string) => request<StoryContext>(`/api/workspaces/${slug}/stories/${id}`),
+  storyAskEstimate: (slug: string, id: string, agentId?: string | null) => request<{ agentId: string; agentName: string; model: string; estimatedUsd: number }>(`/api/workspaces/${slug}/stories/${id}/ask/estimate${agentId ? `?agentId=${encodeURIComponent(agentId)}` : ''}`),
+  storyMessage: (slug: string, id: string, text: string, ask?: { maxUsd: number; agentId?: string | null }) => request<{ user: StoryMessage; reply: StoryMessage | null }>(`/api/workspaces/${slug}/stories/${id}/messages`, { method: 'POST', body: JSON.stringify(ask ? { text, ask: true, authorized: true, maxUsd: ask.maxUsd, agentId: ask.agentId ?? null } : { text }) }),
+  storyApplyProposals: (slug: string, id: string, messageId: string, what: { tasks?: boolean; criterion?: boolean }) => request<StoryContext>(`/api/workspaces/${slug}/stories/${id}/messages/${messageId}/apply`, { method: 'POST', body: JSON.stringify(what) }),
+  storyAddTask: (slug: string, id: string, title: string, assigneeAgentId?: string | null, assigneeName?: string | null) => request<StoryTask>(`/api/workspaces/${slug}/stories/${id}/tasks`, { method: 'POST', body: JSON.stringify({ title, assigneeAgentId, assigneeName }) }),
+  storyTasksFromFeedback: (slug: string, id: string) => request<StoryTask[]>(`/api/workspaces/${slug}/stories/${id}/tasks/from-feedback`, { method: 'POST' }),
+  storySetTask: (slug: string, id: string, taskId: string, status: 'open' | 'done') => request<StoryTask>(`/api/workspaces/${slug}/stories/${id}/tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
+  storyDeleteTask: (slug: string, id: string, taskId: string) => request<{ ok: boolean }>(`/api/workspaces/${slug}/stories/${id}/tasks/${taskId}`, { method: 'DELETE' }),
+  storyIterate: (slug: string, id: string, note?: string | null) => request<{ process: Process; context: string }>(`/api/workspaces/${slug}/stories/${id}/iterate`, { method: 'POST', body: JSON.stringify({ note: note ?? null }) }),
+  // M4 · lecciones validadas
+  lessons: (slug: string, projectId?: string | null, status?: string) => { const q = new URLSearchParams(); if (projectId) q.set('projectId', projectId); if (status) q.set('status', status); const qs = q.toString(); return request<Lesson[]>(`/api/workspaces/${slug}/lessons${qs ? `?${qs}` : ''}`); },
+  createLesson: (slug: string, input: { projectId: string | null; title: string; lessonText: string; role?: string | null; tags?: string[] }) => request<Lesson>(`/api/workspaces/${slug}/lessons`, { method: 'POST', body: JSON.stringify(input) }),
+  lessonProposeEstimate: (slug: string, id: string) => request<{ agentId: string; agentName: string; model: string; estimatedUsd: number }>(`/api/workspaces/${slug}/lessons/${id}/propose/estimate`),
+  lessonPropose: (slug: string, id: string) => request<Lesson>(`/api/workspaces/${slug}/lessons/${id}/propose`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
+  lessonValidate: (slug: string, id: string, patch: { lessonText?: string; rootCause?: string; correctiveAction?: string; role?: string | null; tags?: string[] } = {}) => request<Lesson>(`/api/workspaces/${slug}/lessons/${id}/validate`, { method: 'POST', body: JSON.stringify(patch) }),
+  lessonReject: (slug: string, id: string) => request<Lesson>(`/api/workspaces/${slug}/lessons/${id}/reject`, { method: 'POST' }),
+  lessonObsolete: (slug: string, id: string) => request<Lesson>(`/api/workspaces/${slug}/lessons/${id}/obsolete`, { method: 'POST' }),
+  lessonPromote: (slug: string, id: string, targetKey?: string | null) => request<AgentTemplateVersion>(`/api/workspaces/${slug}/lessons/${id}/promote`, { method: 'POST', body: JSON.stringify({ authorized: true, targetKey }) }),
+  detectLessons: (slug: string, processId: string) => request<Lesson[]>(`/api/workspaces/${slug}/processes/${processId}/detect-lessons`, { method: 'POST' }),
+  // M5 · plantillas versionadas
+  agentTemplate: (slug: string, id: string, to?: string) => request<{ current: AgentTemplateVersion | null; latest: AgentTemplateVersion | null; versions: AgentTemplateVersion[]; history: { fromVersion: string | null; toVersion: string; at: string; by: string }[]; diff: { from: string | null; to: string; added: string[]; removed: string[]; diffMd: string } | null; templateVersion: string | null }>(`/api/workspaces/${slug}/agents/${id}/template${to ? `?to=${encodeURIComponent(to)}` : ''}`),
+  setAgentTemplateVersion: (slug: string, id: string, version: string) => request<Agent>(`/api/workspaces/${slug}/agents/${id}/template-version`, { method: 'POST', body: JSON.stringify({ authorized: true, version }) }),
   // HU-133 / HU-138 · presupuestos jerárquicos (empresa > proyecto) con saldo real
   getBudgetBalance: (level: BudgetLevel, id: string, workspace?: string, period?: string) => {
     const q = new URLSearchParams();

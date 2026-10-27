@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { ProposedChange, VerificationRun } from '@portal-ia/domain';
 import { expandHome } from '../routes/fs.ts';
@@ -149,61 +149,97 @@ export async function git(cwd: string, args: string[]): Promise<string> {
 }
 
 /** Aplica los cambios en una rama de trabajo y crea un commit. Devuelve rama, commit y archivos. */
-export async function applyChanges(repoPath: string, branch: string, changes: ProposedChange[], message: string): Promise<{ branch: string; commit: string; files: string[] }> {
+/** Ruta del worktree aislado de un proceso (fuera del repositorio, hermano `<repo>-worktrees/<id>`). */
+export function worktreePathFor(repoPath: string, processId: string): string {
+  const cwd = repoRoot(repoPath);
+  const base = path.resolve(cwd, '..', `${path.basename(cwd)}-worktrees`);
+  if (!/^[A-Za-z0-9-]{4,64}$/.test(processId)) throw Object.assign(new Error('Identificador de proceso no válido.'), { statusCode: 400 });
+  return path.join(base, processId);
+}
+
+/**
+ * Aplica los cambios en un WORKTREE aislado del proceso (M1): el checkout desde el que corre el Portal nunca cambia de
+ * rama ni se toca. La rama de la historia nace de la rama principal; si ya existe (iteración), se reutiliza.
+ * Rollback: eliminar el worktree (y la rama si la creamos nosotros y no tiene commits propios). Nunca `reset --hard`.
+ */
+export async function applyChanges(repoPath: string, branch: string, changes: ProposedChange[], message: string, opts: { processId?: string } = {}): Promise<{ branch: string; commit: string; files: string[]; worktree: string | null }> {
   const cwd = repoRoot(repoPath);
   if (!fs.existsSync(path.join(cwd, '.git'))) throw Object.assign(new Error('La carpeta registrada no es un repositorio git.'), { statusCode: 400 });
   if (!/^[A-Za-z0-9._\/-]{1,80}$/.test(branch)) throw Object.assign(new Error('Nombre de rama no válido.'), { statusCode: 400 });
-  const dirty = await git(cwd, ['status', '--porcelain']);
-  if (dirty) throw Object.assign(new Error('El repositorio tiene cambios sin confirmar. Confírmalos o descártalos antes de aplicar cambios de los agentes.'), { statusCode: 409 });
-  // `symbolic-ref` funciona también en un repositorio recién creado (sin commits), donde `rev-parse HEAD` falla.
-  const current = await git(cwd, ['symbolic-ref', '--short', '-q', 'HEAD']).catch(() => '') || 'main';
   const hasCommits = await git(cwd, ['rev-parse', '--verify', '-q', 'HEAD']).then(() => true).catch(() => false);
-  const branches = (await git(cwd, ['branch', '--list', branch])).trim();
-  if (branches) await git(cwd, ['checkout', branch]);
-  else if (hasCommits) {
-    // Política de ramas: cada historia parte de la rama principal actualizada (main/master), no de la rama que esté activa.
-    const base = await mainBranch(cwd, branch);
-    const baseExists = (await git(cwd, ['branch', '--list', base])).trim();
-    if (baseExists && base !== current) await git(cwd, ['checkout', base]);
-    await git(cwd, ['checkout', '-b', branch]);
-  }
-  else await git(cwd, ['checkout', '--orphan', branch]); // sin commits: la rama nace vacía
+  if (!hasCommits) throw Object.assign(new Error('El repositorio no tiene commits. Confirma el código actual (git add -A && git commit -m "Base") antes de aplicar historias.'), { statusCode: 409 });
+  const processId = opts.processId ?? `p-${Date.now().toString(36)}`;
+  const wt = worktreePathFor(cwd, processId);
+  fs.mkdirSync(path.dirname(wt), { recursive: true });
+  // Un worktree anterior del mismo proceso (reintento) se reutiliza si está sano; si no, se retira.
+  if (fs.existsSync(wt)) { await git(cwd, ['worktree', 'remove', '--force', wt]).catch(() => ''); if (fs.existsSync(wt)) fs.rmSync(wt, { recursive: true, force: true }); await git(cwd, ['worktree', 'prune']).catch(() => ''); }
+  const branchExisted = !!(await git(cwd, ['branch', '--list', branch])).trim();
+  const base = await mainBranch(cwd, branch);
+  if (branchExisted) await git(cwd, ['worktree', 'add', '-q', wt, branch]);
+  else await git(cwd, ['worktree', 'add', '-q', '-b', branch, wt, base]);
   const files: string[] = [];
   try {
     for (const c of changes) {
       if (c.error) continue; // cambios inválidos: se muestran en la revisión pero no se escriben
-      const abs = path.join(cwd, safeRelPath(c.path));
+      const abs = path.join(wt, safeRelPath(c.path));
       if (c.action === 'delete') { if (fs.existsSync(abs)) fs.rmSync(abs); }
       else {
         fs.mkdirSync(path.dirname(abs), { recursive: true });
         let content = c.content ?? '';
-        // Conservar el estilo de fin de línea del archivo existente (CRLF en Windows) para no ensuciar el diff.
         try { if (fs.existsSync(abs) && /\r\n/.test(fs.readFileSync(abs, 'utf8').slice(0, 4000))) content = content.replace(/\r?\n/g, '\r\n'); } catch { /* se escribe tal cual */ }
         fs.writeFileSync(abs, content, 'utf8');
       }
       files.push(c.path);
     }
-    await git(cwd, ['add', '-A']);
-    const staged = await git(cwd, ['diff', '--cached', '--name-only']);
+    await git(wt, ['add', '-A']);
+    const staged = await git(wt, ['diff', '--cached', '--name-only']);
     if (!staged) throw Object.assign(new Error('Los cambios propuestos no modifican nada respecto al repositorio.'), { statusCode: 409 });
-    await git(cwd, ['-c', 'user.name=Portal IA', '-c', 'user.email=portal-ia@local', 'commit', '-q', '-m', message]);
-    const commit = await git(cwd, ['rev-parse', '--short', 'HEAD']);
-    return { branch, commit, files };
+    await git(wt, ['-c', 'user.name=Portal IA', '-c', 'user.email=portal-ia@local', 'commit', '-q', '-m', message]);
+    const commit = await git(wt, ['rev-parse', '--short', 'HEAD']);
+    return { branch, commit, files, worktree: wt };
   } catch (e) {
-    // Dejar el repositorio limpio y volver a la rama original si algo falla.
-    try {
-      if (hasCommits) { await git(cwd, ['reset', '--hard']); await git(cwd, ['checkout', current]); }
-      else { // repositorio sin commits: deshacer lo escrito y volver a la rama no nacida
-        await git(cwd, ['rm', '-rfq', '--cached', '.']).catch(() => '');
-        for (const f of files) { try { fs.rmSync(path.join(cwd, safeRelPath(f)), { force: true }); } catch { /* ignorar */ } }
-        await git(cwd, ['symbolic-ref', 'HEAD', `refs/heads/${current}`]);
-      }
-    } catch { /* informar el error original */ }
+    try { await git(cwd, ['worktree', 'remove', '--force', wt]); if (!branchExisted) await git(cwd, ['branch', '-D', branch]); } catch { /* informar el error original */ }
     throw e;
   }
 }
 
-/** Remoto configurado del repositorio (origin o el primero que exista). */
+/** Retira el worktree de un proceso (tras integrar o rechazar). Solo rutas bajo `<repo>-worktrees`. */
+export async function removeWorktree(repoPath: string, processId: string): Promise<boolean> {
+  const cwd = repoRoot(repoPath); const wt = worktreePathFor(cwd, processId);
+  if (!fs.existsSync(wt)) { await git(cwd, ['worktree', 'prune']).catch(() => ''); return false; }
+  await git(cwd, ['worktree', 'remove', '--force', wt]).catch(() => '');
+  if (fs.existsSync(wt)) fs.rmSync(wt, { recursive: true, force: true });
+  await git(cwd, ['worktree', 'prune']).catch(() => '');
+  return true;
+}
+
+/** Descarta la rama de una historia no integrada: retira el worktree y borra la rama solo si main no la contiene. Nunca toca el checkout principal. */
+export async function discardBranch(repoPath: string, processId: string, branch: string): Promise<{ worktreeRemoved: boolean; branchDeleted: boolean }> {
+  const cwd = repoRoot(repoPath);
+  const worktreeRemoved = await removeWorktree(cwd, processId);
+  const main = await mainBranch(cwd, branch);
+  const merged = (await git(cwd, ['branch', '--merged', main, '--format=%(refname:short)']).catch(() => '')).split('\n').map(s => s.trim());
+  if (merged.includes(branch)) return { worktreeRemoved, branchDeleted: false }; // ya integrada: no se borra
+  const current = await git(cwd, ['symbolic-ref', '--short', '-q', 'HEAD']).catch(() => '');
+  if (current === branch) return { worktreeRemoved, branchDeleted: false }; // es la rama activa del checkout: no se toca
+  const branchDeleted = await git(cwd, ['branch', '-D', branch]).then(() => true).catch(() => false);
+  return { worktreeRemoved, branchDeleted };
+}
+
+/** Worktrees de procesos existentes (para listar huérfanos y limpiarlos con autorización). */
+export async function listWorktrees(repoPath: string): Promise<{ path: string; branch: string | null; processId: string }[]> {
+  const cwd = repoRoot(repoPath); const base = path.resolve(cwd, '..', `${path.basename(cwd)}-worktrees`);
+  const out = await git(cwd, ['worktree', 'list', '--porcelain']).catch(() => '');
+  const items: { path: string; branch: string | null; processId: string }[] = []; let cur: any = null;
+  for (const line of out.split('\n')) {
+    if (line.startsWith('worktree ')) { cur = { path: line.slice(9), branch: null }; }
+    else if (line.startsWith('branch ') && cur) cur.branch = line.slice(7).replace('refs/heads/', '');
+    else if (line === '' && cur) { if (path.resolve(cur.path).startsWith(base)) items.push({ ...cur, processId: path.basename(cur.path) }); cur = null; }
+  }
+  if (cur && path.resolve(cur.path).startsWith(base)) items.push({ ...cur, processId: path.basename(cur.path) });
+  return items;
+}
+
 export async function remoteInfo(repoPath: string): Promise<{ remote: string | null; url: string | null }> {
   const cwd = repoRoot(repoPath);
   const names = (await git(cwd, ['remote']).catch(() => '')).split('\n').map(s => s.trim()).filter(Boolean);
@@ -223,23 +259,40 @@ export async function mainBranch(cwd: string, exclude = ''): Promise<string> {
 }
 
 /** Integra la rama de trabajo en la rama principal con un commit de merge (sin fast-forward). Requiere árbol limpio. */
-export async function mergeBranch(repoPath: string, branch: string, into?: string): Promise<{ into: string; commit: string }> {
+/**
+ * Integra la rama de trabajo en la rama principal con un commit de merge (sin fast-forward) y sin cambiar la rama del
+ * checkout principal: si este está en main, se integra ahí (exige que los archivos afectados no tengan cambios locales);
+ * si está en otra rama, se integra en un worktree temporal de main y se actualiza la referencia.
+ */
+export async function mergeBranch(repoPath: string, branch: string, into?: string, opts: { affectedFiles?: string[]; processId?: string } = {}): Promise<{ into: string; commit: string; viaWorktree: boolean }> {
   const cwd = repoRoot(repoPath);
-  const dirty = await git(cwd, ['status', '--porcelain']);
-  if (dirty) throw Object.assign(new Error('El repositorio tiene cambios sin confirmar. Confírmalos o descártalos antes de integrar.'), { statusCode: 409 });
   const target = into ?? await mainBranch(cwd, branch);
   if (target === branch) throw Object.assign(new Error('La rama de destino no puede ser la misma rama de trabajo.'), { statusCode: 400 });
-  const exists = (await git(cwd, ['branch', '--list', target])).trim();
-  if (!exists) throw Object.assign(new Error(`La rama principal «${target}» no existe en el repositorio.`), { statusCode: 409 });
-  await git(cwd, ['checkout', target]);
-  try {
-    await git(cwd, ['-c', 'user.name=Portal IA', '-c', 'user.email=portal-ia@local', 'merge', '--no-ff', '--no-edit', '-m', `Integra ${branch} en ${target} (aprobado por el propietario en Portal IA)`, branch]);
-  } catch (e: any) {
-    await git(cwd, ['merge', '--abort']).catch(() => '');
-    throw Object.assign(new Error(`No se pudo integrar «${branch}» en «${target}» (conflictos o error de git). Resuélvelo manualmente con git. Detalle: ${e.message}`), { statusCode: 409 });
+  if (!(await git(cwd, ['branch', '--list', target])).trim()) throw Object.assign(new Error(`La rama principal «${target}» no existe en el repositorio.`), { statusCode: 409 });
+  const current = await git(cwd, ['symbolic-ref', '--short', '-q', 'HEAD']).catch(() => '');
+  const mergeMsg = `Integra ${branch} en ${target} (aprobado por el propietario en Portal IA)`;
+  const GIT_ID = ['-c', 'user.name=Portal IA', '-c', 'user.email=portal-ia@local'];
+  if (current === target) {
+    const files = opts.affectedFiles ?? [];
+    const dirty = files.length ? await git(cwd, ['status', '--porcelain', '--', ...files]) : await git(cwd, ['status', '--porcelain']);
+    if (dirty.trim()) throw Object.assign(new Error(`Hay cambios locales sin confirmar en archivos que esta historia modifica (${dirty.trim().split('\n').map(l => l.slice(3)).slice(0, 5).join(', ')}). Confírmalos o descártalos tú y vuelve a integrar.`), { statusCode: 409 });
+    try { await git(cwd, [...GIT_ID, 'merge', '--no-ff', '--no-edit', '-m', mergeMsg, branch]); }
+    catch (e: any) { await git(cwd, ['merge', '--abort']).catch(() => ''); throw Object.assign(new Error(`No se pudo integrar «${branch}» en «${target}» (conflictos). La rama queda intacta; resuélvelo en el espacio de la historia o con git. Detalle: ${e.message}`), { statusCode: 409 }); }
+    return { into: target, commit: await git(cwd, ['rev-parse', '--short', 'HEAD']), viaWorktree: false };
   }
-  const commit = await git(cwd, ['rev-parse', '--short', 'HEAD']);
-  return { into: target, commit };
+  // El checkout principal está en otra rama: no lo tocamos. Merge en un worktree temporal de main.
+  const tmp = worktreePathFor(cwd, `merge-${Date.now().toString(36)}`);
+  fs.mkdirSync(path.dirname(tmp), { recursive: true });
+  await git(cwd, ['worktree', 'add', '-q', '--detach', tmp, target]);
+  try {
+    await git(tmp, [...GIT_ID, 'merge', '--no-ff', '--no-edit', '-m', mergeMsg, branch]);
+    const commit = await git(tmp, ['rev-parse', 'HEAD']);
+    await git(cwd, ['update-ref', `refs/heads/${target}`, commit]);
+    return { into: target, commit: commit.slice(0, 7), viaWorktree: true };
+  } catch (e: any) {
+    await git(tmp, ['merge', '--abort']).catch(() => '');
+    throw Object.assign(new Error(`No se pudo integrar «${branch}» en «${target}» (conflictos). Detalle: ${e.message}`), { statusCode: 409 });
+  } finally { await git(cwd, ['worktree', 'remove', '--force', tmp]).catch(() => ''); }
 }
 
 /** Publica ramas en el remoto (git push -u). Usa las credenciales de git del equipo (gestor de credenciales / SSH). */
@@ -256,22 +309,4 @@ export async function pushBranches(repoPath: string, branches: string[]): Promis
   return { remote, url, branches };
 }
 
-const ALLOWED_COMMANDS: Record<string, string[]> = { install: ['install', '--no-audit', '--no-fund'], typecheck: ['run', 'typecheck'], test: ['run', 'test'], build: ['run', 'build'] };
-
-/** Ejecuta un comando npm permitido en el repositorio (ejecución local, sin sandbox; requiere autorización por uso). */
-export function runVerification(repoPath: string, command: string, timeoutMs = 10 * 60_000): Promise<VerificationRun> {
-  const args = ALLOWED_COMMANDS[command];
-  if (!args) throw Object.assign(new Error(`Comando no permitido: ${command}`), { statusCode: 400 });
-  const cwd = repoRoot(repoPath);
-  const startedAt = new Date().toISOString(); const t0 = Date.now();
-  return new Promise(resolve => {
-    const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    const child = spawn(npm, args, { cwd, env: { ...process.env, CI: '1', FORCE_COLOR: '0' }, shell: process.platform === 'win32' });
-    let out = '';
-    const push = (b: Buffer) => { out += b.toString(); if (out.length > 60_000) out = out.slice(-60_000); };
-    child.stdout.on('data', push); child.stderr.on('data', push);
-    const timer = setTimeout(() => { child.kill(); out += `\n[Portal IA] Tiempo de espera agotado (${timeoutMs / 1000} s).`; }, timeoutMs);
-    child.on('close', code => { clearTimeout(timer); resolve({ command: `npm ${args.join(' ')}`, exitCode: code, output: out.trim(), startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - t0 }); });
-    child.on('error', err => { clearTimeout(timer); resolve({ command: `npm ${args.join(' ')}`, exitCode: null, output: `No se pudo ejecutar: ${err.message}`, startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - t0 }); });
-  });
-}
+// (M1) La ejecución de comandos vive en services/sandbox.ts: nunca en el equipo del propietario.

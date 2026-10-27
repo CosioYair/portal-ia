@@ -3,6 +3,7 @@ import { AGENT_TEMPLATES } from '@portal-ia/domain';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, projectsRepo } from '../db/workspace.ts';
 import { buildAgentConfig } from '../routes/bootstrap.ts';
+import { inheritLatestTemplate } from './agentTemplates.ts';
 
 /**
  * Empresas (espacios de trabajo) y proyectos. Cada empresa tiene su propia base SQLite y sus agentes de espacio;
@@ -23,7 +24,7 @@ export function createCompany(name: string, _description?: string): Workspace {
   const { providerId, models, defaultModel } = connectedProvider();
   const ws = workspacesRepo.create({ slug, name: clean, kind: 'company' });
   const agents = agentsRepo(slug);
-  for (const t of AGENT_TEMPLATES.filter(t => t.scope === 'workspace')) agents.createFromTemplate(t, null, buildAgentConfig(t, providerId, models, defaultModel));
+  for (const t of AGENT_TEMPLATES.filter(t => t.scope === 'workspace')) inheritLatestTemplate(slug, agents.createFromTemplate(t, null, buildAgentConfig(t, providerId, models, defaultModel)));
   return ws;
 }
 
@@ -36,6 +37,6 @@ export function createProject(slug: string, name: string, description = '', obje
   const project = projects.create({ slug: pslug, name: clean, description });
   if (objectives.length) projects.setObjectives(project.id, objectives);
   const agents = agentsRepo(slug);
-  for (const t of AGENT_TEMPLATES.filter(t => t.scope === 'project')) if (!agents.byKey(t.key, project.id)) agents.createFromTemplate(t, project.id, buildAgentConfig(t, providerId, models, defaultModel));
+  for (const t of AGENT_TEMPLATES.filter(t => t.scope === 'project')) if (!agents.byKey(t.key, project.id)) inheritLatestTemplate(slug, agents.createFromTemplate(t, project.id, buildAgentConfig(t, providerId, models, defaultModel)));
   return project;
 }

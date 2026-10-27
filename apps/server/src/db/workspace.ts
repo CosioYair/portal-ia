@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { config } from '../config.ts';
+import { defaultCapabilitiesFor } from '@portal-ia/domain';
 import type { DelegationResult, Agent, AgentConfig, AgentStatus, AgentTemplate, BacklogItem, BacklogStatus, ContextItem, ExecutionResult, KnowledgeDoc, Objective, Process, ProcessStatus, ProcessStep, Project, Repository, Scope, StepStatus, UsageToday } from '@portal-ia/domain';
 
 /**
@@ -72,6 +73,14 @@ export function workspaceDb(slug: string): DatabaseSync {
   if (!pcols.includes('result_json')) db.exec(`ALTER TABLE processes ADD COLUMN result_json TEXT`);
   if (!pcols.includes('delegation_json')) db.exec(`ALTER TABLE processes ADD COLUMN delegation_json TEXT`);
   if (!pcols.includes('backlog_item_id')) db.exec(`ALTER TABLE processes ADD COLUMN backlog_item_id TEXT`);
+  // M3/M4: papel y motivo de cada paso; lecciones inyectadas.
+  const scols = (db.prepare(`PRAGMA table_info(process_steps)`).all() as any[]).map(c => c.name);
+  if (!scols.includes('role')) db.exec(`ALTER TABLE process_steps ADD COLUMN role TEXT`);
+  if (!scols.includes('reason')) db.exec(`ALTER TABLE process_steps ADD COLUMN reason TEXT`);
+  if (!scols.includes('lessons_used')) db.exec(`ALTER TABLE process_steps ADD COLUMN lessons_used TEXT`);
+  // M5: versión de plantilla aplicada a cada agente.
+  const acols = (db.prepare(`PRAGMA table_info(agents)`).all() as any[]).map(c => c.name);
+  if (!acols.includes('template_version')) db.exec(`ALTER TABLE agents ADD COLUMN template_version TEXT`);
   // Migración: conocimiento con nombre de autor y proceso de origen.
   const kcols = (db.prepare(`PRAGMA table_info(knowledge)`).all() as any[]).map(c => c.name);
   if (!kcols.includes('author_agent_name')) db.exec(`ALTER TABLE knowledge ADD COLUMN author_agent_name TEXT`);
@@ -130,10 +139,16 @@ export function projectsRepo(slug: string) {
 
 export function agentsRepo(slug: string) {
   const db = workspaceDb(slug);
-  const map = (r: any): Agent => ({
-    id: r.id, key: r.key, workspaceSlug: slug, projectId: r.project_id, templateId: r.template_id, scope: r.scope as Scope, status: r.status,
-    config: JSON.parse(r.config_json), configEdited: !!r.config_edited, template: JSON.parse(r.template_json), createdAt: r.created_at, updatedAt: r.updated_at
-  });
+  const map = (r: any): Agent => {
+    const config: AgentConfig = JSON.parse(r.config_json);
+    // M3: agentes creados antes de las capacidades → capacidades por defecto de su plantilla (sin modificar la fila).
+    if (!Array.isArray(config.capabilities)) config.capabilities = defaultCapabilitiesFor(r.key);
+    return {
+      id: r.id, key: r.key, workspaceSlug: slug, projectId: r.project_id, templateId: r.template_id, scope: r.scope as Scope, status: r.status,
+      config, configEdited: !!r.config_edited, template: JSON.parse(r.template_json), createdAt: r.created_at, updatedAt: r.updated_at,
+      templateVersion: r.template_version ?? null
+    };
+  };
   return {
     list(): Agent[] { return (db.prepare(`SELECT * FROM agents ORDER BY scope DESC, created_at`).all() as any[]).map(map); },
     get(id: string): Agent | undefined { const r = db.prepare(`SELECT * FROM agents WHERE id = ?`).get(id); return r ? map(r) : undefined; },
@@ -188,7 +203,7 @@ export function knowledgeRepo(slug: string) {
 
 export function processesRepo(slug: string) {
   const db = workspaceDb(slug);
-  const mapStep = (r: any): ProcessStep => ({ id: r.id, processId: r.process_id, position: r.position, agentId: r.agent_id, agentName: r.agent_name, title: r.title, status: r.status, model: r.model, inputTokens: r.tokens_in, outputTokens: r.tokens_out, costUsd: r.cost_usd, outputMd: r.output_md, error: r.error, startedAt: r.started_at, finishedAt: r.finished_at });
+  const mapStep = (r: any): ProcessStep => ({ id: r.id, processId: r.process_id, position: r.position, agentId: r.agent_id, agentName: r.agent_name, title: r.title, status: r.status, model: r.model, inputTokens: r.tokens_in, outputTokens: r.tokens_out, costUsd: r.cost_usd, outputMd: r.output_md, error: r.error, startedAt: r.started_at, finishedAt: r.finished_at, role: r.role ?? null, reason: r.reason ?? null, lessonsUsed: r.lessons_used ? JSON.parse(r.lessons_used) : [] });
   const mapProc = (r: any): Process => ({ id: r.id, projectId: r.project_id, kind: r.kind, title: r.title, status: r.status, budgetUsd: r.budget_usd, estimatedUsd: r.estimated_usd, spentUsd: r.spent_usd, inputTokens: r.tokens_in, outputTokens: r.tokens_out, createdAt: r.created_at, authorizedAt: r.authorized_at, startedAt: r.started_at, finishedAt: r.finished_at, error: r.error,
     result: r.result_json ? JSON.parse(r.result_json) : null, delegation: r.delegation_json ? JSON.parse(r.delegation_json) : null, backlogItemId: r.backlog_item_id ?? null,
     steps: (db.prepare(`SELECT * FROM process_steps WHERE process_id = ? ORDER BY position`).all(r.id) as any[]).map(mapStep) });
@@ -196,12 +211,20 @@ export function processesRepo(slug: string) {
     list(projectId: string): Process[] { return (db.prepare(`SELECT * FROM processes WHERE project_id = ? ORDER BY created_at DESC`).all(projectId) as any[]).map(mapProc); },
     get(id: string): Process | undefined { const r = db.prepare(`SELECT * FROM processes WHERE id = ?`).get(id); return r ? mapProc(r) : undefined; },
     running(): Process[] { return (db.prepare(`SELECT * FROM processes WHERE status = 'running'`).all() as any[]).map(mapProc); },
-    create(p: { projectId: string; kind: string; title: string; estimatedUsd: number; backlogItemId?: string | null; steps: { agentId: string; agentName: string; title: string; model: string }[] }): Process {
+    create(p: { projectId: string; kind: string; title: string; estimatedUsd: number; backlogItemId?: string | null; steps: { agentId: string; agentName: string; title: string; model: string; role?: string | null; reason?: string | null }[] }): Process {
       const id = uuid();
       db.prepare(`INSERT INTO processes (id, project_id, kind, title, status, estimated_usd, created_at, backlog_item_id) VALUES (?, ?, ?, ?, 'pending_authorization', ?, ?, ?)`).run(id, p.projectId, p.kind, p.title, p.estimatedUsd, now(), p.backlogItemId ?? null);
-      const ins = db.prepare(`INSERT INTO process_steps (id, process_id, position, agent_id, agent_name, title, model) VALUES (?, ?, ?, ?, ?, ?, ?)`);
-      p.steps.forEach((s, i) => ins.run(uuid(), id, i, s.agentId, s.agentName, s.title, s.model));
+      const ins = db.prepare(`INSERT INTO process_steps (id, process_id, position, agent_id, agent_name, title, model, role, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      p.steps.forEach((s, i) => ins.run(uuid(), id, i, s.agentId, s.agentName, s.title, s.model, s.role ?? null, s.reason ?? null));
       return this.get(id)!;
+    },
+    setStepLessons(stepId: string, ids: string[]) { db.prepare(`UPDATE process_steps SET lessons_used = ? WHERE id = ?`).run(JSON.stringify(ids), stepId); },
+    /** Métricas de participación de un agente derivadas de process_steps (sin IA). */
+    agentStats(agentId: string): { steps: number; done: number; failed: number; costUsd: number; byRole: Record<string, number>; lastAt: string | null } {
+      const rows = db.prepare(`SELECT role, status, cost_usd, finished_at FROM process_steps WHERE agent_id = ? AND status IN ('done','failed')`).all(agentId) as any[];
+      const byRole: Record<string, number> = {};
+      for (const r of rows) byRole[r.role ?? 'otro'] = (byRole[r.role ?? 'otro'] ?? 0) + 1;
+      return { steps: rows.length, done: rows.filter(r => r.status === 'done').length, failed: rows.filter(r => r.status === 'failed').length, costUsd: rows.reduce((a, r) => a + (r.cost_usd ?? 0), 0), byRole, lastAt: rows.map(r => r.finished_at).filter(Boolean).sort().at(-1) ?? null };
     },
     authorize(id: string, budgetUsd: number) {
       db.prepare(`UPDATE processes SET status = 'running', budget_usd = ?, authorized_at = ?, started_at = ? WHERE id = ?`).run(budgetUsd, now(), now(), id);

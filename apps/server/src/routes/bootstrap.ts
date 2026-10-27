@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { AGENT_TEMPLATES, INTERNAL_PROJECT, INTERNAL_WORKSPACE, pickByTier, type AgentConfig, type AgentTemplate, type BootstrapResult, type BootstrapStep, type ModelInfo, type ProviderId } from '@portal-ia/domain';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, projectsRepo, workspaceDbPath } from '../db/workspace.ts';
+import { inheritLatestTemplate } from '../services/agentTemplates.ts';
 
 /**
  * HU-002 + HU-003: inicialización del espacio interno y del equipo inicial.
@@ -15,7 +16,7 @@ export function buildAgentConfig(t: AgentTemplate, provider: ProviderId, models:
   return {
     name: t.name, specialization: t.specialization, responsibilities: [...t.responsibilities],
     provider, model, fallbacks, effort: t.effort,
-    tools: { ...t.tools }, knowledge: { ...t.knowledge }, monthlyLimitUsd: t.monthlyLimitUsd, perTaskAuthUsd: t.perTaskAuthUsd
+    tools: { ...t.tools }, knowledge: { ...t.knowledge }, monthlyLimitUsd: t.monthlyLimitUsd, perTaskAuthUsd: t.perTaskAuthUsd, capabilities: [...(t.capabilities ?? [])]
   };
 }
 
@@ -53,7 +54,7 @@ export function runBootstrap(): BootstrapResult {
   for (const t of AGENT_TEMPLATES) {
     const projectId = t.scope === 'project' ? project.id : null;
     if (agents.byKey(t.key, projectId)) continue;
-    agents.createFromTemplate(t, projectId, buildAgentConfig(t, providerId, models, prov.default_model));
+    inheritLatestTemplate(ws.slug, agents.createFromTemplate(t, projectId, buildAgentConfig(t, providerId, models, prov.default_model)));
     created++;
   }
   if (created) already = false;

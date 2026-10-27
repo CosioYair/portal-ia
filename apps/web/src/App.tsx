@@ -11,7 +11,7 @@ import { Team } from './screens/Team.tsx';
 import { AgentDetail } from './screens/AgentDetail.tsx';
 import { AgentCreate } from './screens/AgentCreate.tsx';
 import { ProcessList, ProcessView } from './screens/ProcessView.tsx';
-import { ManualTestFeedbackPanel } from './screens/ManualTestFeedbackPanel.tsx';
+import { StoryWorkspace } from './screens/StoryWorkspace.tsx';
 import { Knowledge } from './screens/Knowledge.tsx';
 import { Backlog } from './screens/Backlog.tsx';
 import { Assistant } from './screens/Assistant.tsx';
@@ -112,7 +112,8 @@ export default function App() {
           <Route path="/equipo/nuevo" element={guard(<AgentCreate />)} />
           <Route path="/equipo/:agentId" element={guard(<AgentDetail />)} />
           <Route path="/actividad" element={guard(<ProcessList />)} />
-          <Route path="/procesos/:processId" element={guard(<><ProcessView /><ManualTestFeedbackPanel /></>)} />
+          <Route path="/procesos/:processId" element={guard(<ProcessView />)} />
+          <Route path="/historias/:storyId" element={guard(<StoryWorkspace />)} />
           <Route path="/conocimiento" element={guard(<Knowledge />)} />
           <Route path="/backlog" element={guard(<Backlog />)} />
           <Route path="/autorizaciones" element={ready ? <InboxScreen /> : <Navigate to={home} replace />} />

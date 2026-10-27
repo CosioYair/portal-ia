@@ -22,7 +22,8 @@ const agentConfigSchema = z.object({
   tools: z.record(z.string(), z.boolean()),
   knowledge: z.record(z.string(), z.boolean()),
   monthlyLimitUsd: z.number().min(0).max(100000),
-  perTaskAuthUsd: z.number().min(0).max(100000)
+  perTaskAuthUsd: z.number().min(0).max(100000),
+  capabilities: z.array(z.enum(['planificar', 'implementar', 'revisar_calidad', 'generar_pruebas', 'consultar_arquitectura', 'consultar_ux', 'revisar_seguridad', 'consultar', 'documentar'])).max(9).optional()
 });
 
 const agentCreateSchema = z.object({

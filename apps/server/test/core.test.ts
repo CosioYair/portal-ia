@@ -82,7 +82,8 @@ test('evaluación inicial: estimación, autorización explícita y fallo control
   await runAssessment(ws.slug, proc.id, () => {});
   const done = processesRepo(ws.slug).get(proc.id)!;
   assert.equal(done.status, 'failed');            // clave de prueba → el proveedor rechaza o no hay red
-  assert.equal(done.spentUsd, 0);
+  // Con respuesta 401 del proveedor no se gasta nada; sin red (p. ej. dentro del sandbox) se anota el costo estimado de la entrada «sin confirmación del proveedor».
+  assert.ok(done.spentUsd === 0 || /sin confirmación del proveedor/.test(done.error ?? ''), `gasto ${done.spentUsd}: ${done.error}`);
   assert.ok(agentsRepo(ws.slug).list().every(a => a.status === 'inactive'), 'agentes vuelven a inactivo');
 });
 
@@ -136,7 +137,7 @@ test('backlog: parseo de la síntesis, importación idempotente y solicitud manu
 });
 
 test('escritura en repositorio: rutas seguras, diff y aplicación real en rama git', async () => {
-  const { safeRelPath, unifiedDiff, annotateChanges, applyChanges } = await import('../src/services/repoWrite.ts');
+  const { safeRelPath, unifiedDiff, annotateChanges, applyChanges, worktreePathFor, listWorktrees, removeWorktree } = await import('../src/services/repoWrite.ts');
   const { execFileSync } = await import('node:child_process');
   assert.throws(() => safeRelPath('../fuera.ts'), /no permitida/);
   assert.throws(() => safeRelPath('data/platform.sqlite'), /protegida/);
@@ -149,14 +150,23 @@ test('escritura en repositorio: rutas seguras, diff y aplicación real en rama g
   git('init', '-q', '-b', 'main'); fs.writeFileSync(path.join(dir, 'README.md'), 'hola\n'); git('add', '-A'); git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'init');
   const changes = annotateChanges(dir, [{ path: 'src/nuevo.ts', action: 'create', content: 'export const x = 1;\n' }, { path: 'README.md', action: 'modify', content: 'hola\nmundo\n' }]);
   assert.equal(changes[0].action, 'create'); assert.equal(changes[1].before, 2); assert.equal(changes[1].after, 3);
-  const applied = await applyChanges(dir, 'portal-ia/hu-999', changes, 'HU-999: prueba');
+  const applied = await applyChanges(dir, 'portal-ia/hu-999', changes, 'HU-999: prueba', { processId: 'proc-hu-999' });
   assert.equal(applied.branch, 'portal-ia/hu-999'); assert.equal(applied.files.length, 2);
-  assert.equal(git('rev-parse', '--abbrev-ref', 'HEAD'), 'portal-ia/hu-999');
-  assert.equal(fs.readFileSync(path.join(dir, 'src/nuevo.ts'), 'utf8'), 'export const x = 1;\n');
-  assert.equal(git('status', '--porcelain'), '', 'árbol limpio tras el commit');
-  // Con cambios sin confirmar debe negarse
+  // M1: el checkout principal NO cambia de rama ni recibe los archivos; todo ocurre en el worktree del proceso
+  assert.equal(git('rev-parse', '--abbrev-ref', 'HEAD'), 'main', 'el checkout principal sigue en main');
+  assert.equal(fs.existsSync(path.join(dir, 'src/nuevo.ts')), false, 'el archivo no aparece en el checkout principal');
+  assert.equal(applied.worktree, worktreePathFor(dir, 'proc-hu-999'));
+  assert.equal(fs.readFileSync(path.join(applied.worktree!, 'src/nuevo.ts'), 'utf8'), 'export const x = 1;\n');
+  assert.equal(git('status', '--porcelain'), '', 'árbol principal limpio');
+  assert.equal(git('log', '--format=%s', '-n', '1', 'portal-ia/hu-999'), 'HU-999: prueba');
+  const wts = await listWorktrees(dir); assert.deepEqual(wts.map(w => w.processId), ['proc-hu-999']);
+  // Cambios locales sin confirmar en el checkout principal ya no bloquean aplicar (no se toca ese árbol)
   fs.writeFileSync(path.join(dir, 'sucio.txt'), 'x');
-  await assert.rejects(applyChanges(dir, 'portal-ia/otra', changes, 'x'), /sin confirmar/);
+  const otra = await applyChanges(dir, 'portal-ia/otra', changes, 'x', { processId: 'proc-otra' });
+  assert.equal(otra.branch, 'portal-ia/otra'); assert.ok(fs.existsSync(path.join(dir, 'sucio.txt')), 'el archivo local sigue intacto');
+  assert.equal(await removeWorktree(dir, 'proc-otra'), true); assert.equal(fs.existsSync(otra.worktree!), false);
+  assert.equal((await listWorktrees(dir)).length, 1);
+  assert.throws(() => worktreePathFor(dir, '../x'), /no válido/);
 });
 
 test('parser de backlog robusto: tabla markdown, lista y JSON sin etiqueta', async () => {
@@ -233,20 +243,27 @@ test('asistente: parseo de respuesta (bloque actions, JSON legado, texto plano) 
 });
 
 test('aplicar cambios en un repositorio recién creado (sin commits) y rescate del veredicto de QA cortado', async () => {
-  const { applyChanges } = await import('../src/services/repoWrite.ts');
+  const { applyChanges, worktreePathFor } = await import('../src/services/repoWrite.ts');
   const { parseReview } = await import('../src/services/storyExecution.ts');
   const { execSync } = await import('node:child_process');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-empty-'));
   execSync('git init -q', { cwd: dir });
-  const r = await applyChanges(dir, 'portal-ia/hu-001', [{ path: 'README.md', action: 'create', content: '# Hola\n' }, { path: 'src/index.ts', action: 'create', content: 'export {};\n' }].map(c => ({ ...c, diff: '', before: 0, after: 1 })) as any, 'HU-001: inicio');
+  const changes = [{ path: 'README.md', action: 'create', content: '# Hola\n' }, { path: 'src/index.ts', action: 'create', content: 'export {};\n' }].map(c => ({ ...c, diff: '', before: 0, after: 1 })) as any;
+  // M1: sin commits no hay base desde la que crear un worktree → mensaje claro (409), nada se escribe
+  await assert.rejects(applyChanges(dir, 'portal-ia/hu-001', changes, 'HU-001: inicio'), /no tiene commits/);
+  assert.equal(fs.existsSync(path.join(dir, 'README.md')), false);
+  execSync('git -c user.email=t@t -c user.name=t commit -q --allow-empty -m Base', { cwd: dir });
+  const r = await applyChanges(dir, 'portal-ia/hu-001', changes, 'HU-001: inicio', { processId: 'proc-hu-001' });
   assert.equal(r.branch, 'portal-ia/hu-001'); assert.ok(r.commit.length >= 7); assert.equal(r.files.length, 2);
-  assert.equal(execSync('git rev-parse --abbrev-ref HEAD', { cwd: dir }).toString().trim(), 'portal-ia/hu-001');
-  assert.equal(execSync('git status --porcelain', { cwd: dir }).toString().trim(), '', 'árbol limpio tras el commit');
-  // Fallo controlado: ruta protegida → se deshace y el repo queda sin restos
+  assert.notEqual(execSync('git rev-parse --abbrev-ref HEAD', { cwd: dir }).toString().trim(), 'portal-ia/hu-001', 'el checkout principal no cambia de rama');
+  assert.equal(execSync('git status --porcelain', { cwd: dir }).toString().trim(), '', 'árbol principal limpio');
+  // Fallo controlado: ruta protegida → se deshace: sin worktree, sin rama, sin restos
   const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-empty2-'));
-  execSync('git init -q', { cwd: dir2 });
-  await assert.rejects(applyChanges(dir2, 'x', [{ path: 'ok.txt', action: 'create', content: 'a' }, { path: '.git/config', action: 'create', content: 'x' }].map(c => ({ ...c, diff: '', before: 0, after: 1 })) as any, 'm'));
+  execSync('git init -q -b main && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m Base', { cwd: dir2 });
+  await assert.rejects(applyChanges(dir2, 'portal-ia/x', [{ path: 'ok.txt', action: 'create', content: 'a' }, { path: '.git/config', action: 'create', content: 'x' }].map(c => ({ ...c, diff: '', before: 0, after: 1 })) as any, 'm', { processId: 'proc-x' }));
   assert.equal(fs.existsSync(path.join(dir2, 'ok.txt')), false, 'archivo revertido');
+  assert.equal(fs.existsSync(worktreePathFor(dir2, 'proc-x')), false, 'worktree retirado');
+  assert.equal(execSync('git branch --list portal-ia/x', { cwd: dir2 }).toString().trim(), '', 'rama retirada');
   // QA cortado por max_tokens
   const v = parseReview('{"approve": false, "summary": "El esqueleto es coherente. Sin embargo no hay evidencia de ejecución", "issues": ["Nada se ha ejecutado", "Falta package-lock', 'max_tokens');
   assert.equal(v.approve, false); assert.ok(v.summary.startsWith('El esqueleto es coherente')); assert.ok(v.summary.includes('se cortó'));
@@ -308,8 +325,7 @@ test('flujo git: estado del repositorio, crear main, remoto, preflight del proye
   const { execSync } = await import('node:child_process');
   // Repositorio que nació sin main (como el del propietario): solo ramas portal-ia/hu-xxx
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-nomain-'));
-  execSync('git init -q', { cwd: dir });
-  await applyChanges(dir, 'portal-ia/hu-001', [{ path: 'a.txt', action: 'create', content: 'a', diff: '', before: 0, after: 1 } as any], 'HU-001');
+  execSync('git init -q -b portal-ia/hu-001 && echo a > a.txt && git add -A && git -c user.email=t@t -c user.name=t commit -qm HU-001', { cwd: dir });
   let st = await repoStatus(dir);
   assert.equal(st.hasMain, false); assert.equal(st.branch, 'portal-ia/hu-001'); assert.deepEqual(st.storyBranches, ['portal-ia/hu-001']); assert.equal(st.remote, null); assert.equal(st.isPortalRuntime, false);
   const im = await initMainBranch(dir); assert.equal(im.mainBranch, 'main'); assert.equal(im.from, 'portal-ia/hu-001');
@@ -320,8 +336,9 @@ test('flujo git: estado del repositorio, crear main, remoto, preflight del proye
   st = await repoStatus(dir); assert.equal(st.remoteUrl, 'https://github.com/CosioYair/portal-ia.git'); assert.equal(st.aheadOfRemote, -1, 'main nunca publicada');
   // Las historias nuevas parten de main aunque la rama activa sea otra
   execSync('git checkout -q portal-ia/hu-001', { cwd: dir });
-  await applyChanges(dir, 'portal-ia/hu-002', [{ path: 'b.txt', action: 'create', content: 'b', diff: '', before: 0, after: 1 } as any], 'HU-002');
-  assert.equal(execSync('git log --format=%s -n 2', { cwd: dir }).toString().trim().split('\n')[1], 'HU-001', 'hu-002 parte de main (que contiene HU-001)');
+  await applyChanges(dir, 'portal-ia/hu-002', [{ path: 'b.txt', action: 'create', content: 'b', diff: '', before: 0, after: 1 } as any], 'HU-002', { processId: 'proc-hu-002' });
+  assert.equal(execSync('git log --format=%s -n 2 portal-ia/hu-002', { cwd: dir }).toString().trim().split('\n')[1], 'HU-001', 'hu-002 parte de main (que contiene HU-001)');
+  assert.equal(execSync('git rev-parse --abbrev-ref HEAD', { cwd: dir }).toString().trim(), 'portal-ia/hu-001', 'la rama activa del checkout no cambia');
   // Preflight: el proyecto interno exige la carpeta de esta instalación
   delete process.env.PORTAL_ALLOW_FOREIGN_REPO;
   assert.throws(() => preflightRepo('portal-ia', dir), /no es la carpeta desde la que corre este Portal/);
@@ -427,7 +444,7 @@ test('v0.9: parches buscar/reemplazar, rutas protegidas sin tumbar el proceso, .
   // Orientación
   const base: any = { id: 'p', kind: 'story_execution', status: 'done', steps: [], spentUsd: 0.5, budgetUsd: 2, error: null, delegation: null };
   assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a', error: null }], applied: null, merged: null, published: null, review: null, verifyCommands: [] } }).phase, /Diff listo/);
-  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: null, published: null, review: null, verifyCommands: [] } }).phase, /falta integrar/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b', appliedAt: new Date().toISOString() }, merged: null, published: null, review: null, verifyCommands: [], verifications: [] } }).phase, /falta verificar/);
   assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [] } }, { isPortalRepo: true }).next, /lista de prueba/);
   assert.match(describeProcess({ ...base, status: 'failed', error: 'X', result: null }).phase, /Falló/);
   assert.equal(describeProcess({ ...base, status: 'pending_authorization', result: null }).settled, false);
@@ -501,16 +518,36 @@ test('v0.11: sección PARA EL PROPIETARIO y PRUEBA MANUAL, regla de cierre con p
   const base: any = { id: 'p', kind: 'story_execution', status: 'done', steps: [], spentUsd: 0, budgetUsd: 1, error: null, delegation: null };
   const mt = { steps: ['a', 'b'], checks: [true, false], note: null };
   assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [], verifications: [], manualTest: mt } }).phase, /falta probar \(1 de 2/);
-  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [], verifications: [], manualTest: { ...mt, checks: [true, true] } } }).phase, /falta publicar/);
-  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: { remote: 'origin', branches: [] }, review: null, verifyCommands: [], verifications: [], manualTest: { ...mt, checks: [true, true] } } }).phase, /Listo para cerrar/);
+  // M2: publicar ya no es requisito para cerrar; una historia probada está lista para cerrar aunque no se haya publicado
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: null, review: null, verifyCommands: [], verifications: [], manualTest: { ...mt, checks: [true, true] } } }).phase, /Listo para cerrar/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: { branch: 'b' }, merged: { into: 'main' }, published: { remote: 'origin', branches: [] }, review: null, verifyCommands: [], verifications: [], manualTest: { ...mt, checks: [true, true] } } }).phase, /Listo para cerrar.*publicado/);
+  // Antes de integrar: sin verificación → falta verificar; con typecheck fallido → FALLÓ; con typecheck ok → falta integrar
+  const applied = { branch: 'b', commit: 'c', files: ['a'], appliedAt: new Date().toISOString() };
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied, merged: null, published: null, review: null, verifyCommands: [], verifications: [] } }).phase, /falta verificar \(typecheck\)/);
+  const v = (command: string, exitCode: number) => ({ command, exitCode, output: '', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), durationMs: 1 });
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied, merged: null, published: null, review: null, verifyCommands: [], verifications: [v('typecheck', 2)] } }).phase, /verificación FALLÓ \(typecheck\)/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied, merged: null, published: null, review: null, verifyCommands: [], verifications: [v('typecheck', 0)] } }).phase, /falta integrar/);
+  assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied, merged: null, published: null, review: null, verifyCommands: [], verifications: [v('typecheck', 0)] } }, { isPortalRepo: true }).phase, /falta verificar \(test, build\)/);
+  // Portal (M2): integrada pero no activada → activada sin comprobar → comprobación fallida → verificada → probada → cerrar
+  const merged = { into: 'main', commit: 'abc1234', mergedAt: new Date().toISOString() };
+  const inactive = { active: false, runningCommit: 'old', buildCommit: null, buildAt: null, reason: 'El servidor arrancó con old.' };
+  const active = { ...inactive, active: true, runningCommit: 'new1234', reason: 'ok' };
+  const rc = (status: 'ok' | 'fail' | 'skipped') => ({ checks: [{ kind: 'http', path: '/api/health', expect: 'ok' }], results: [{ check: { kind: 'http', path: '/api/health', expect: 'ok' }, status, detail: '', at: 't' }], ranAt: 't' });
+  const portal = (extra: any) => describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied, merged, published: null, review: null, verifyCommands: [], verifications: [], manualTest: { ...mt, checks: [true, true] }, ...extra } }, { isPortalRepo: true });
+  assert.match(portal({ activation: inactive }).phase, /Paso 5 de 8 .* NO activada/);
+  assert.match(portal({ activation: active }).phase, /Paso 6 de 8 · Activada \(new1234\) · falta comprobar/);
+  assert.match(portal({ activation: active, runtimeChecks: rc('fail') }).phase, /comprobación en ejecución FALLÓ/);
+  assert.match(portal({ activation: active, runtimeChecks: rc('skipped') }).phase, /interfaz pendiente/);
+  assert.match(portal({ activation: active, runtimeChecks: rc('ok'), manualTest: mt }).phase, /Paso 7 de 8 · Verificada en ejecución · falta probar \(1 de 2/);
+  assert.match(portal({ activation: active, runtimeChecks: rc('ok') }).phase, /Paso 8 de 8 · Listo para cerrar \(activada y probada\)/);
   assert.match(describeProcess({ ...base, result: { changes: [{ path: 'a' }], applied: null, merged: null, published: null, review: { approve: false, issues: ['x', 'y'], summary: 's', suggestedTests: [] }, verifyCommands: [], verifications: [] } }).phase, /QA NO aprueba \(2/);
   // EOL: archivo CRLF, contenido nuevo LF → diff limpio y escritura en CRLF; cambios solo-EOL detectados y normalizados
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-eol-'));
   fs.writeFileSync(path.join(dir, 'w.ts'), 'a\r\nb\r\n'); execSync('git init -q -b main && git -c core.autocrlf=false add -A && git -c user.email=t@t -c user.name=t commit -qm i', { cwd: dir });
   const ann = annotateChanges(dir, [{ path: 'w.ts', action: 'modify', content: 'a\nb\nc\n' }]);
   assert.equal(ann[0].before, 3); assert.ok(!(ann[0].diff ?? '').includes('-a'), 'las líneas iguales no aparecen como cambiadas por el CRLF');
-  await applyChanges(dir, 'portal-ia/hu-eol', ann, 'eol'); assert.equal(fs.readFileSync(path.join(dir, 'w.ts'), 'utf8'), 'a\r\nb\r\nc\r\n');
-  execSync('git checkout -q main', { cwd: dir }); fs.writeFileSync(path.join(dir, 'w.ts'), 'a\nb\n');
+  const ap = await applyChanges(dir, 'portal-ia/hu-eol', ann, 'eol', { processId: 'proc-eol' }); assert.equal(fs.readFileSync(path.join(ap.worktree!, 'w.ts'), 'utf8'), 'a\r\nb\r\nc\r\n');
+  fs.writeFileSync(path.join(dir, 'w.ts'), 'a\nb\n');
   let st = await repoStatus(dir); assert.equal(st.dirty, true); assert.equal(st.eolOnly, true);
   const n = await normalizeEol(dir); assert.ok(n.commit); st = await repoStatus(dir); assert.equal(st.dirty, false);
 });

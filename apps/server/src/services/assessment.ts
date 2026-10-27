@@ -3,6 +3,7 @@ import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestEr
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
+import { requirePolicy } from './executionPolicy.ts';
 import { buildRepoContext, renderRepoContext } from './repoContext.ts';
 import { importBacklogFromKnowledge } from './backlog.ts';
 
@@ -119,7 +120,8 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
       const startedAt = new Date().toISOString();
       const systemPrompt = systemFor(agent, project, objectives); const userPrompt = userFor(i, repoCtx, previous);
       try {
-        const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
+        requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
+      const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
           model: agent.config.model, system: systemPrompt, user: userPrompt,
           maxTokens: STEP_PLAN[i].maxTokens, effort: agent.config.effort, supportsEffort: !!modelInfo?.supportsEffort
         });
