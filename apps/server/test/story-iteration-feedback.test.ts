@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 
 /**
  * Fase 2 · Iterar desde el feedback de la prueba manual: estados de la iteración anterior (no aplicada, aplicada en
@@ -56,7 +56,8 @@ async function failStep(procId: string, steps: string[], i: number, comment: str
   const r = await app.inject({ method: 'PUT', url: `${W}/processes/${procId}/manual-test-feedback/${encodeURIComponent(manualTestStepKey(i, steps[i]))}`, payload: { result: 'fail', comment } });
   assert.equal(r.statusCode, 200, r.body);
 }
-const branches = () => execSync('git branch --format=%(refname:short)', { cwd: dir }).toString().split('\n').map(s => s.trim()).filter(Boolean);
+// Sin shell: «%(…)» sin comillas rompe en sh (Linux/sandbox) aunque cmd.exe lo acepte.
+const branches = () => execFileSync('git', ['branch', '--format=%(refname:short)'], { cwd: dir }).toString().split('\n').map(s => s.trim()).filter(Boolean);
 
 test('iterar: aplicada en worktree sin integrar → exige confirmar el descarte; con confirmación retira worktree y rama e incluye fallos, comentarios, tareas y nota', async () => {
   const it = addManualItem('portal-ia', internal.id, { title: 'Cambiar a (worktree)', criterion: 'a = 2' });
