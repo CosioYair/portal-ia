@@ -7,6 +7,7 @@ import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
+import { currentPhase, phaseContext } from './operationalPhase.ts';
 import { buildRepoContext } from './repoContext.ts';
 import { annotateChanges, fileChangedSince, readRepoFile, type RawChange } from './repoWrite.ts';
 import path from 'node:path';
@@ -200,7 +201,10 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   const ctx = buildRepoContext(repo.path, 60_000);
   const treeText = `## Árbol del repositorio\n\`\`\`\n${ctx.tree}\n\`\`\``;
   const docs = knowledge.list(project.id);
-  const direction = docs.find(d => /^Síntesis/.test(d.title))?.body.slice(0, 6000) ?? '';
+  // Con una etapa vigente, la dirección es su línea base (y una síntesis escrita en la etapa); la síntesis anterior es histórica.
+  const phase = currentPhase(slug, project.id);
+  const synthesis = docs.find(d => /^Síntesis/.test(d.title) && (!phase || d.createdAt > phase.startedAt))?.body.slice(0, 6000) ?? '';
+  const direction = phase ? `${phaseContext(slug, project.id, 16000)}${synthesis ? `\n\n${synthesis}` : ''}` : synthesis;
   const result: ExecutionResult = { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: proc.result?.team ?? null, consultations: [], iterationContext: proc.result?.iterationContext ?? null };
   const iterText = result.iterationContext ? `\n# Contexto de iteración (feedback del propietario y estado anterior; OBLIGATORIO tenerlo en cuenta)\n${result.iterationContext}\n` : '';
   const involved = Array.from(new Set(proc.steps.map(s => s.agentId)));
@@ -259,7 +263,7 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
     const planIdx = roleStep('planner'); const coord = agents.get(proc.steps[planIdx].agentId)!;
     const planRes = await call(planIdx, sys(coord, project, item),
       `Elabora el plan técnico para implementar esta historia en el repositorio. Sé concreto: qué archivos hay que leer, qué archivos hay que crear o modificar y qué tareas en orden. Mantén el alcance mínimo que cumpla el criterio de aceptación.
-${direction ? `\n# Dirección del proyecto (síntesis previa)\n${direction}\n` : ''}${iterText}
+${direction ? `\n# Dirección del proyecto (${phase ? 'etapa vigente y línea base' : 'síntesis previa'})\n${direction}\n` : ''}${iterText}
 ${treeText}
 
 Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "acceptance": string[], "risks": string[]}`, 2500);

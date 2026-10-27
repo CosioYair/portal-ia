@@ -21,7 +21,7 @@ export async function flowOptions(slug: string, p: Process, item?: BacklogItem |
   const u = lastUpdate();
   const updateFailedLog = r?.merged && u?.status === 'failed' && u.finishedAt && u.finishedAt > r.merged.mergedAt ? u.log : null;
   const it = item ?? (p.backlogItemId ? backlogRepo(slug).get(p.backlogItemId) : null);
-  const siblings = it ? processesRepo(slug).list(p.projectId).filter(x => x.backlogItemId === it.id && x.kind === 'story_execution') : [];
+  const siblings = it ? processesRepo(slug).listAll(p.projectId).filter(x => x.backlogItemId === it.id && x.kind === 'story_execution') : [];
   const idx = siblings.findIndex(x => x.id === p.id);
   return { failedStepDetails, sandbox, updateFailedLog, iteration: idx >= 0 ? { number: siblings.length - idx, total: siblings.length } : null };
 }

@@ -85,6 +85,13 @@ export function workspaceDb(slug: string): DatabaseSync {
   const kcols = (db.prepare(`PRAGMA table_info(knowledge)`).all() as any[]).map(c => c.name);
   if (!kcols.includes('author_agent_name')) db.exec(`ALTER TABLE knowledge ADD COLUMN author_agent_name TEXT`);
   if (!kcols.includes('process_id')) db.exec(`ALTER TABLE knowledge ADD COLUMN process_id TEXT`);
+  // Etapas operativas: archivo reversible (la fila se conserva; solo sale del flujo activo).
+  const bcols = (db.prepare(`PRAGMA table_info(backlog_items)`).all() as any[]).map(c => c.name);
+  if (!bcols.includes('archived_at')) db.exec(`ALTER TABLE backlog_items ADD COLUMN archived_at TEXT`);
+  if (!bcols.includes('archive_id')) db.exec(`ALTER TABLE backlog_items ADD COLUMN archive_id TEXT`);
+  const pcols2 = (db.prepare(`PRAGMA table_info(processes)`).all() as any[]).map(c => c.name);
+  if (!pcols2.includes('archived_at')) db.exec(`ALTER TABLE processes ADD COLUMN archived_at TEXT`);
+  if (!pcols2.includes('archive_id')) db.exec(`ALTER TABLE processes ADD COLUMN archive_id TEXT`);
   open.set(slug, db);
   return db;
 }
@@ -192,10 +199,10 @@ export function knowledgeRepo(slug: string) {
   return {
     list(projectId: string): KnowledgeDoc[] { return (db.prepare(`SELECT * FROM knowledge WHERE project_id = ? ORDER BY created_at DESC`).all(projectId) as any[]).map(map); },
     get(id: string): KnowledgeDoc | undefined { const r = db.prepare(`SELECT * FROM knowledge WHERE id = ?`).get(id); return r ? map(r) : undefined; },
-    add(d: { projectId: string; title: string; body: string; authorAgentId: string | null; authorAgentName: string | null; processId: string | null }): KnowledgeDoc {
+    add(d: { projectId: string; title: string; body: string; authorAgentId: string | null; authorAgentName: string | null; processId: string | null; version?: number }): KnowledgeDoc {
       const id = uuid();
-      db.prepare(`INSERT INTO knowledge (id, project_id, title, body, author_agent_id, author_agent_name, process_id, version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`)
-        .run(id, d.projectId, d.title, d.body, d.authorAgentId, d.authorAgentName, d.processId, now());
+      db.prepare(`INSERT INTO knowledge (id, project_id, title, body, author_agent_id, author_agent_name, process_id, version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, d.projectId, d.title, d.body, d.authorAgentId, d.authorAgentName, d.processId, d.version ?? 1, now());
       return this.get(id)!;
     }
   };
@@ -206,9 +213,13 @@ export function processesRepo(slug: string) {
   const mapStep = (r: any): ProcessStep => ({ id: r.id, processId: r.process_id, position: r.position, agentId: r.agent_id, agentName: r.agent_name, title: r.title, status: r.status, model: r.model, inputTokens: r.tokens_in, outputTokens: r.tokens_out, costUsd: r.cost_usd, outputMd: r.output_md, error: r.error, startedAt: r.started_at, finishedAt: r.finished_at, role: r.role ?? null, reason: r.reason ?? null, lessonsUsed: r.lessons_used ? JSON.parse(r.lessons_used) : [] });
   const mapProc = (r: any): Process => ({ id: r.id, projectId: r.project_id, kind: r.kind, title: r.title, status: r.status, budgetUsd: r.budget_usd, estimatedUsd: r.estimated_usd, spentUsd: r.spent_usd, inputTokens: r.tokens_in, outputTokens: r.tokens_out, createdAt: r.created_at, authorizedAt: r.authorized_at, startedAt: r.started_at, finishedAt: r.finished_at, error: r.error,
     result: r.result_json ? JSON.parse(r.result_json) : null, delegation: r.delegation_json ? JSON.parse(r.delegation_json) : null, backlogItemId: r.backlog_item_id ?? null,
+    archivedAt: r.archived_at ?? null, archiveId: r.archive_id ?? null,
     steps: (db.prepare(`SELECT * FROM process_steps WHERE process_id = ? ORDER BY position`).all(r.id) as any[]).map(mapStep) });
   return {
-    list(projectId: string): Process[] { return (db.prepare(`SELECT * FROM processes WHERE project_id = ? ORDER BY created_at DESC`).all(projectId) as any[]).map(mapProc); },
+    /** Procesos activos (los archivados al iniciar una etapa quedan fuera del flujo: ver listAll / listArchived). */
+    list(projectId: string): Process[] { return (db.prepare(`SELECT * FROM processes WHERE project_id = ? AND archived_at IS NULL ORDER BY created_at DESC`).all(projectId) as any[]).map(mapProc); },
+    listAll(projectId: string): Process[] { return (db.prepare(`SELECT * FROM processes WHERE project_id = ? ORDER BY created_at DESC`).all(projectId) as any[]).map(mapProc); },
+    listArchived(projectId: string): Process[] { return (db.prepare(`SELECT * FROM processes WHERE project_id = ? AND archived_at IS NOT NULL ORDER BY created_at DESC`).all(projectId) as any[]).map(mapProc); },
     get(id: string): Process | undefined { const r = db.prepare(`SELECT * FROM processes WHERE id = ?`).get(id); return r ? mapProc(r) : undefined; },
     running(): Process[] { return (db.prepare(`SELECT * FROM processes WHERE status = 'running'`).all() as any[]).map(mapProc); },
     create(p: { projectId: string; kind: string; title: string; estimatedUsd: number; backlogItemId?: string | null; steps: { agentId: string; agentName: string; title: string; model: string; role?: string | null; reason?: string | null }[] }): Process {
@@ -251,11 +262,15 @@ export function processesRepo(slug: string) {
 
 export function backlogRepo(slug: string) {
   const db = workspaceDb(slug);
-  const map = (r: any): BacklogItem => ({ id: r.id, projectId: r.project_id, storyId: r.story_id, title: r.title, ownerKey: r.owner_key, dependsOn: r.depends_on, estimate: r.estimate, criterion: r.criterion, description: r.description, status: r.status, position: r.position, sourceProcessId: r.source_process_id, lastProcessId: r.last_process_id, createdAt: r.created_at, updatedAt: r.updated_at });
+  const map = (r: any): BacklogItem => ({ id: r.id, projectId: r.project_id, storyId: r.story_id, title: r.title, ownerKey: r.owner_key, dependsOn: r.depends_on, estimate: r.estimate, criterion: r.criterion, description: r.description, status: r.status, position: r.position, sourceProcessId: r.source_process_id, lastProcessId: r.last_process_id, createdAt: r.created_at, updatedAt: r.updated_at, archivedAt: r.archived_at ?? null, archiveId: r.archive_id ?? null });
   return {
-    list(projectId: string): BacklogItem[] { return (db.prepare(`SELECT * FROM backlog_items WHERE project_id = ? ORDER BY position, created_at`).all(projectId) as any[]).map(map); },
+    /** Backlog activo. Las historias archivadas al iniciar una etapa siguen en la base (listAll / listArchived). */
+    list(projectId: string): BacklogItem[] { return (db.prepare(`SELECT * FROM backlog_items WHERE project_id = ? AND archived_at IS NULL ORDER BY position, created_at`).all(projectId) as any[]).map(map); },
+    /** Activas y archivadas: para numerar (nunca reutilizar un HU-xxx) y para no reimportar historias ya conocidas. */
+    listAll(projectId: string): BacklogItem[] { return (db.prepare(`SELECT * FROM backlog_items WHERE project_id = ? ORDER BY position, created_at`).all(projectId) as any[]).map(map); },
+    listArchived(projectId: string): BacklogItem[] { return (db.prepare(`SELECT * FROM backlog_items WHERE project_id = ? AND archived_at IS NOT NULL ORDER BY position, created_at`).all(projectId) as any[]).map(map); },
     get(id: string): BacklogItem | undefined { const r = db.prepare(`SELECT * FROM backlog_items WHERE id = ?`).get(id); return r ? map(r) : undefined; },
-    count(projectId: string): number { return (db.prepare(`SELECT COUNT(*) AS n FROM backlog_items WHERE project_id = ?`).get(projectId) as any).n; },
+    count(projectId: string): number { return (db.prepare(`SELECT COUNT(*) AS n FROM backlog_items WHERE project_id = ? AND archived_at IS NULL`).get(projectId) as any).n; },
     nextPosition(projectId: string): number { return ((db.prepare(`SELECT COALESCE(MAX(position), -1) AS m FROM backlog_items WHERE project_id = ?`).get(projectId) as any).m as number) + 1; },
     add(i: Omit<BacklogItem, 'id' | 'createdAt' | 'updatedAt' | 'position' | 'lastProcessId' | 'status'> & { status?: BacklogStatus }): BacklogItem {
       const id = uuid(); const ts = now();

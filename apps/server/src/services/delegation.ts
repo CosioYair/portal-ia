@@ -6,6 +6,7 @@ import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { buildRepoContext } from './repoContext.ts';
 import { addManualItem, resetStory } from './backlog.ts';
+import { phaseContext } from './operationalPhase.ts';
 
 /**
  * Encargos delegados: el Asistente (o el propietario) encarga una tarea a un agente responsable —revisar y replantear
@@ -88,7 +89,8 @@ function contextFor(slug: string, projectId: string | null): string {
     const bl = backlogRepo(slug).list(p.id); const docs = knowledgeRepo(slug).list(p.id); const repo = projects.repository(p.id);
     lines.push(`\n## Proyecto «${p.name}»\n${p.description}\nObjetivos: ${projects.objectives(p.id).map(o => o.text).join(' · ') || '—'}`);
     lines.push(`Equipo: ${agents.filter(a => a.projectId === p.id).map(a => `${a.config.name} (${a.template.role}, clave ${a.key}, reporta a ${a.template.reportsTo})`).join('; ') || '—'}`);
-    lines.push(`Backlog (${bl.length}):\n${bl.map(b => `- ${b.storyId} [${b.status}]${b.estimate ? ` (${b.estimate})` : ''}${b.dependsOn ? ` depende de ${b.dependsOn}` : ''} ${b.title}${b.criterion ? ` — criterio: ${b.criterion.slice(0, 220)}` : ''}${b.description ? ` — ${b.description.slice(0, 200)}` : ''}`).join('\n') || '(vacío)'}`);
+    const phase = phaseContext(slug, p.id, projectId ? 16000 : 4000); if (phase) lines.push(phase);
+    lines.push(`Backlog activo (${bl.length}):\n${bl.map(b => `- ${b.storyId} [${b.status}]${b.estimate ? ` (${b.estimate})` : ''}${b.dependsOn ? ` depende de ${b.dependsOn}` : ''} ${b.title}${b.criterion ? ` — criterio: ${b.criterion.slice(0, 220)}` : ''}${b.description ? ` — ${b.description.slice(0, 200)}` : ''}`).join('\n') || '(vacío)'}`);
     lines.push(`Conocimiento (${docs.length}): ${docs.map(d => `«${d.title}» (${d.authorAgentName}, ${d.createdAt.slice(0, 10)})`).join('; ') || '—'}`);
     if (repo && projectId) { try { const ctx = buildRepoContext(repo.path, 20_000); lines.push(`Repositorio ${repo.path} (rama ${repo.branch ?? '?'}):\n\`\`\`\n${ctx.tree.slice(0, 6000)}\n\`\`\``); } catch { /* sin árbol */ } }
   }

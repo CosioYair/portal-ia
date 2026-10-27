@@ -4,6 +4,7 @@ import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
+import { currentPhase, isBaselineDoc } from './operationalPhase.ts';
 
 export interface ParsedStory { storyId: string; title: string; ownerKey: string | null; dependsOn: string | null; estimate: 'S' | 'M' | 'L' | null; criterion: string }
 
@@ -75,14 +76,20 @@ function resolveOwner(slug: string, owner: string | null): string | null {
   return partial?.key ?? null;
 }
 
+/**
+ * Síntesis de la que se importa el backlog. Tras iniciar una etapa solo cuenta una síntesis escrita EN esa etapa: la de
+ * la etapa anterior es historia (sus historias están archivadas) y no debe volver a llenar el backlog. La línea base
+ * nunca es una síntesis.
+ */
 export function findSynthesis(slug: string, projectId: string) {
-  const docs = knowledgeRepo(slug).list(projectId);
+  const phase = currentPhase(slug, projectId);
+  const docs = knowledgeRepo(slug).list(projectId).filter(d => !isBaselineDoc(d) && (!phase || d.createdAt > phase.startedAt));
   return docs.find(d => /^S[ií]ntesis/i.test(d.title)) ?? docs.find(d => /backlog/i.test(d.title)) ?? docs.find(d => /HU-\d+/.test(d.body)) ?? null;
 }
 
 function insertStories(slug: string, projectId: string, items: ParsedStory[], sourceProcessId: string | null): number {
   const repo = backlogRepo(slug);
-  const existing = new Set(repo.list(projectId).map(b => b.storyId));
+  const existing = new Set(repo.listAll(projectId).map(b => b.storyId));
   let imported = 0;
   for (const it of items) {
     if (existing.has(it.storyId)) continue; existing.add(it.storyId);
@@ -144,8 +151,8 @@ export async function extractBacklogWithAI(slug: string, projectId: string, maxU
 /** Alta manual (solicitud de desarrollo del propietario o del asistente). */
 export function addManualItem(slug: string, projectId: string, input: { title: string; description?: string; criterion?: string; ownerKey?: string | null; estimate?: 'S' | 'M' | 'L' | null }): BacklogItem {
   const repo = backlogRepo(slug);
-  const ids = new Set(repo.list(projectId).map(b => b.storyId));
-  // Numeración continua: siguiente número tras el mayor existente (HU-014 → HU-015).
+  const ids = new Set(repo.listAll(projectId).map(b => b.storyId));
+  // Numeración continua: siguiente número tras el mayor existente (HU-014 → HU-015), incluidas las archivadas: un id nunca se reutiliza.
   let k = Math.max(0, ...Array.from(ids).map(id => parseInt(id.replace(/\D+/g, ''), 10)).filter(Number.isFinite)) + 1;
   let storyId = `HU-${String(k).padStart(3, '0')}`;
   while (ids.has(storyId)) storyId = `HU-${String(++k).padStart(3, '0')}`;

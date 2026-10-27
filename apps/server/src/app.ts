@@ -17,6 +17,7 @@ import { budgetRoutes } from './routes/budgets.ts';
 import { manualTestFeedbackRoutes } from './routes/manual-test-feedback.ts';
 import { learningRoutes } from './routes/learning.ts';
 import { storyRoutes } from './routes/stories.ts';
+import { phaseRoutes, registerArchivedGuard } from './routes/phase.ts';
 import { VERSION } from './services/system.ts';
 
 export async function buildApp() {
@@ -31,6 +32,7 @@ export async function buildApp() {
 
   app.get('/api/health', async () => ({ ok: true, name: 'portal-ia', version: VERSION, dataDir: config.dataDir, repoRoot: REPO_ROOT }));
 
+  registerArchivedGuard(app);
   await app.register(providerRoutes);
   await app.register(fsRoutes);
   await app.register(bootstrapRoutes);
@@ -44,6 +46,7 @@ export async function buildApp() {
   await app.register(manualTestFeedbackRoutes);
   await app.register(learningRoutes);
   await app.register(storyRoutes);
+  await app.register(phaseRoutes);
 
   // Producción local: sirve apps/web/dist si existe (npm run build). SPA fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {

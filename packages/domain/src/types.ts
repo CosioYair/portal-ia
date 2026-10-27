@@ -233,6 +233,9 @@ export interface Process {
   /** Resultado de un encargo delegado (kind = delegated_task). */
   delegation: DelegationResult | null;
   backlogItemId: string | null;
+  /** Archivado al iniciar una etapa: histórico, sin acciones. null = activo. */
+  archivedAt?: string | null;
+  archiveId?: string | null;
   /** Descripción de «qué pasa y qué hacer» calculada por el servidor al servir el proceso (no se persiste). */
   guidance?: ProcessGuidance;
 }
@@ -376,6 +379,58 @@ export interface BacklogItem {
   lastProcessId: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Archivada al iniciar una etapa (histórico consultable, fuera del flujo activo). null = activa. */
+  archivedAt?: string | null;
+  archiveId?: string | null;
+}
+
+// ---- Etapas operativas: archivo reversible del trabajo activo sin perder el conocimiento ----
+export interface PhaseTransition {
+  id: string;
+  projectId: string;
+  name: string;
+  startedAt: string;
+  startedBy: string;
+  gitHead: string | null;
+  gitBranch: string | null;
+  /** Documento de Conocimiento con la línea base de la etapa. */
+  baselineDocId: string | null;
+  summary: PhaseTransitionSummary;
+  revertedAt: string | null;
+  revertReason: string | null;
+}
+export interface PhaseTransitionSummary {
+  archivedStories: { id: string; storyId: string; title: string; status: BacklogStatus }[];
+  archivedProcesses: { id: string; title: string; kind: string; status: string }[];
+  /** Decisiones del propietario que dejaron de estar pendientes (siguen en el histórico de su proceso). */
+  clearedDecisions: { kind: string; processId: string; title: string }[];
+  preserved: PreservedCounts;
+  unmergedBranches: { name: string; ahead: number }[];
+  version: string;
+}
+export interface PreservedCounts {
+  agents: number; knowledgeDocs: number; lessonsValidated: number; lessonsPending: number; lessonsOther: number;
+  templates: number; storyMessages: number; storyTasks: number; manualTestFeedback: number; assistantMessages: number;
+  executionHistory: number; recordedCostUsd: number;
+}
+export interface PhaseTransitionPreview {
+  phaseName: string;
+  current: PhaseTransition | null;
+  stories: { total: number; byStatus: Record<string, number> };
+  processes: { total: number; byStatus: Record<string, number> };
+  pendingDecisions: { kind: string; processId: string; title: string }[];
+  /** Procesos en ejecución: bloquean la transición hasta que el propietario los cancele o terminen. */
+  running: { id: string; title: string }[];
+  git: { repoPath: string | null; branch: string | null; head: string | null; headSubject: string | null; dirty: boolean | null; aheadOfRemote: number | null; unmergedBranches: { name: string; ahead: number }[]; worktrees: { path: string; branch: string | null; dirty: boolean }[] };
+  preserved: PreservedCounts;
+  baselinePreview: string;
+  canStart: boolean;
+  blockers: string[];
+}
+export interface ProjectArchive {
+  transitions: PhaseTransition[];
+  stories: BacklogItem[];
+  processes: Process[];
 }
 
 export interface StoryPlan {

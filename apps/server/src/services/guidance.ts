@@ -15,6 +15,8 @@ export type GuidanceOptions = Omit<FlowOptions, 'failedSteps'> & { failedSteps?:
 
 /** Orientación + recorrido guiado (para historias). */
 export function describeProcess(p: Process, opts: GuidanceOptions = {}): ProcessGuidance {
+  // Archivado con una etapa anterior: histórico, sin recorrido ni acciones que recomendar.
+  if (p.archivedAt) return { phase: 'Archivado (etapa anterior)', next: 'Es histórico y no requiere ninguna acción. Si necesitas retomarlo, restaura su historia desde el archivo.', tone: 'info', settled: true };
   const g = describePhase(p, { ...opts, failedSteps: opts.failedSteps ?? opts.failedStepDetails?.length ?? 0 });
   if (p.kind !== 'story_execution') return g;
   // El recorrido nunca debe tumbar la orientación: si algo no encaja, se sirve sin él.

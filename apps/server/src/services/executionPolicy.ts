@@ -13,7 +13,7 @@ import { agentsRepo, processesRepo } from '../db/workspace.ts';
  */
 export type PolicyOp =
   | 'read_repo' | 'write_worktree' | 'sandbox_exec' | 'install_deps' | 'host_typecheck_min'
-  | 'git_merge' | 'git_push' | 'restart_portal' | 'delete_worktree' | 'runtime_check' | 'ai_call';
+  | 'git_merge' | 'git_push' | 'restart_portal' | 'delete_worktree' | 'runtime_check' | 'ai_call' | 'phase_transition';
 
 export type PolicyLevel = 'local' | 'auth' | 'external';
 
@@ -28,7 +28,8 @@ const OPS: Record<PolicyOp, { level: PolicyLevel; tool: string | null; label: st
   restart_portal: { level: 'auth', tool: null, label: 'Reconstrucción y reinicio del Portal' },
   delete_worktree: { level: 'auth', tool: null, label: 'Limpieza de worktree' },
   runtime_check: { level: 'auth', tool: null, label: 'Verificación en ejecución contra el Portal en marcha' },
-  ai_call: { level: 'auth', tool: null, label: 'Llamada a un modelo de IA' }
+  ai_call: { level: 'auth', tool: null, label: 'Llamada a un modelo de IA' },
+  phase_transition: { level: 'auth', tool: null, label: 'Inicio de etapa: archivo reversible del trabajo activo' }
 };
 
 export interface PolicyContext {

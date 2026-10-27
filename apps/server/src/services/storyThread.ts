@@ -14,6 +14,7 @@ import { discardBranch } from './repoWrite.ts';
 import { flowOptions } from './processView.ts';
 import { issueForPrompt } from './storyFlow.ts';
 import { activationOf } from './system.ts';
+import { phaseContext } from './operationalPhase.ts';
 import { REPO_ROOT } from '../config.ts';
 import path from 'node:path';
 
@@ -58,7 +59,8 @@ export function threadRepo(slug: string) {
 }
 
 function storyProcesses(slug: string, item: BacklogItem): Process[] {
-  return processesRepo(slug).list(item.projectId).filter(p => p.backlogItemId === item.id && p.kind === 'story_execution');
+  // Todas (también las archivadas): el espacio de una historia archivada sigue mostrando su historial.
+  return processesRepo(slug).listAll(item.projectId).filter(p => p.backlogItemId === item.id && p.kind === 'story_execution');
 }
 
 /** Contexto completo de la historia. Sin IA. */
@@ -159,7 +161,8 @@ export async function askTeam(slug: string, itemId: string, text: string, opts: 
 {"tasks":[{"title":string,"assignee":"nombre de agente del equipo o null"}],"criterion":string|null,"iterate":boolean,"iterationNote":string|null}
 \`\`\`
 (solo si procede; el propietario decide si aplicarlo).`;
-  const userPrompt = `# Contexto de la historia\n${contextForPrompt(ctx)}\n\n# Conversación reciente\n${history || '(sin mensajes previos)'}\n\n# Pregunta del propietario\n${text.trim()}`;
+  const phase = phaseContext(slug, ctx.item.projectId, 4000);
+  const userPrompt = `${phase ? `${phase}\n\n` : ''}# Contexto de la historia\n${contextForPrompt(ctx)}\n\n# Conversación reciente\n${history || '(sin mensajes previos)'}\n\n# Pregunta del propietario\n${text.trim()}`;
   const startedAt = now();
   try {
     requirePolicy('ai_call', { slug, agentId: agent.id, projectId: ctx.item.projectId, authorized: true });

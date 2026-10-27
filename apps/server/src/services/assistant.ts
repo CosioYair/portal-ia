@@ -17,6 +17,7 @@ import { describeProcess } from './guidance.ts';
 import { lessonsRepo } from './lessons.ts';
 import { systemStatus } from './system.ts';
 import { repoStatus } from './repoStatus.ts';
+import { phaseContext } from './operationalPhase.ts';
 
 /**
  * Asistente global (lo encarna el «Asistente de Empresa» del espacio interno).
@@ -51,7 +52,10 @@ export const assistantRepo = {
   listLive(limit = 80): AssistantMessage[] {
     return this.list(limit).map(m => m.actions.some(a => a.processId && a.workspaceSlug) ? { ...m, actions: m.actions.map(a => {
       if (!a.processId || !a.workspaceSlug) return a;
-      try { const p = processesRepo(a.workspaceSlug).get(a.processId); if (!p) return a; const g = describeProcess(p, { isPortalRepo: a.workspaceSlug === INTERNAL_WORKSPACE.slug }); return { ...a, live: { status: p.status, ...g } }; } catch { return a; }
+      try { const p = processesRepo(a.workspaceSlug).get(a.processId); if (!p) return a;
+        // Propuesta de un proceso archivado: ya no se autoriza desde el chat (solo se muestra; el mensaje no se modifica).
+        if (p.archivedAt) return { ...a, status: a.status === 'pending' ? 'done' as const : a.status, live: { status: p.status, phase: 'Archivado con la etapa anterior', next: 'Es histórico: consúltalo en el archivo; no requiere ninguna acción.', tone: 'info' as const, settled: true } };
+        const g = describeProcess(p, { isPortalRepo: a.workspaceSlug === INTERNAL_WORKSPACE.slug }); return { ...a, live: { status: p.status, ...g } }; } catch { return a; }
     }) } : m);
   },
   add(m: Omit<AssistantMessage, 'id' | 'createdAt'>): AssistantMessage {
@@ -87,6 +91,7 @@ const SCREEN_MAP = `# Pantallas del Portal (menú izquierdo salvo que se indique
 - Actividad (/actividad): lista de procesos; cada proceso (/procesos/<id>) muestra pasos, costo, orientación «Siguiente paso», y para historias: Resumen (qué cambia y dónde, orden de cierre, prueba manual paso a paso), diff por archivo, revisión QA, Aplicar, Verificar, Integrar, Publicar, Rechazar, Recuperar/Volver a ejecutar.
 - Conocimiento (/conocimiento): documentos generados (evaluación, planes, encargos) y pestaña «Lecciones de la organización» (M4: lecciones detectadas sin IA → proponer con IA (autorizado) → validar → se inyectan en los prompts por papel → promover a práctica de plantilla (M5)).
 - Espacio de la historia (/historias/<id>): todo lo de una historia en un solo lugar: contexto, equipo, orden de cierre, prueba paso a paso con feedback, chat con los agentes implicados, tareas e iteraciones.
+- Etapas (/etapa, botón «Nueva etapa» en Backlog): el propietario inicia una etapa nueva; el trabajo activo (historias, procesos, decisiones) se ARCHIVA de forma reversible y se guarda en Conocimiento una «Línea base» (qué existe y está verificado). Archivo histórico (/archivo): lo archivado, consultable y de solo lectura; una historia se puede restaurar con autorización. Lo archivado no es trabajo pendiente: no lo propongas para ejecutar.
 - Autorizaciones (/autorizaciones, lanzador «Autorizaciones» abajo a la izquierda; HU-009): bandeja de decisiones pendientes.
 - Barra amarilla superior: aparece cuando el código del Portal cambió respecto al que arrancó o la interfaz se construyó antes; «Reconstruir y reiniciar» con autorización. Una historia del Portal solo cuenta como ACTIVADA cuando el servidor y la interfaz en marcha contienen su commit; después debe «Comprobar en ejecución» (el Portal se verifica a sí mismo) y probarse paso a paso antes de cerrarse. Publicar en GitHub es opcional.
 - Seguridad (M1): los cambios se escriben en worktrees aislados (la carpeta del Portal no cambia de rama); las verificaciones corren en sandbox (Docker/WSL2) o quedan bloqueadas (fail-closed); toda operación pasa por la política de ejecución del backend.
@@ -104,14 +109,15 @@ async function platformSnapshot(): Promise<string> {
     const projects = projectsRepo(ws.slug); const agents = agentsRepo(ws.slug).list();
     lines.push(`Agentes de espacio: ${agents.filter(a => a.scope === 'workspace').map(a => `${a.config.name} (${a.key})`).join(', ') || 'ninguno'}`);
     for (const p of projects.list()) {
-      const bl = backlogRepo(ws.slug).list(p.id); const procs = processesRepo(ws.slug).list(p.id); const repo = projects.repository(p.id);
+      const bl = backlogRepo(ws.slug).list(p.id); const procs = processesRepo(ws.slug).list(p.id); const allProcs = processesRepo(ws.slug).listAll(p.id); const repo = projects.repository(p.id);
       const foreign = repo && ws.kind === 'internal' && path.resolve(expandHome(repo.path)).toLowerCase() !== path.resolve(REPO_ROOT).toLowerCase();
       let repoLine = repo ? `${repo.path}${foreign ? ` ⚠ NO es la carpeta desde la que corre este Portal (${REPO_ROOT}): historias detenidas hasta pulsar «Usar la carpeta de esta instalación» en el Panel` : ws.kind === 'internal' ? ' ✓ carpeta de este Portal (automejora real)' : ''}` : 'NO registrado (sin él no se pueden ejecutar historias)';
       if (repo) { try { const st = await repoStatus(repo.path); repoLine += ` · rama activa ${st.branch ?? '?'}, principal ${st.mainBranch ?? 'NO EXISTE'}, ${st.dirty ? `${st.dirtyFiles} archivo(s) sin confirmar (bloquea aplicar)` : 'árbol limpio'}, remoto ${st.remoteUrl ?? 'sin configurar'}${st.aheadOfRemote === -1 ? ' (main nunca publicada)' : st.aheadOfRemote ? ` (${st.aheadOfRemote} commit(s) por publicar)` : ''}`; } catch { /* sin estado */ } }
       lines.push(`## Proyecto «${p.name}» (slug: ${p.slug}) — repositorio: ${repoLine}; agentes: ${agents.filter(a => a.projectId === p.id).map(a => `${a.config.name} (${a.key})`).join(', ') || 'ninguno'}`);
+      const phase = phaseContext(ws.slug, p.id, 6000); if (phase) lines.push(phase);
       const lastProc = (b: { id: string; lastProcessId: string | null }) => (b.lastProcessId ? procs.find(x => x.id === b.lastProcessId) : undefined) ?? procs.find(x => x.backlogItemId === b.id && x.kind === 'story_execution');
       const open = bl.filter(b => b.status !== 'done' && b.status !== 'discarded');
-      lines.push(`Backlog abierto (${open.length} de ${bl.length}), en orden de prioridad:`);
+      lines.push(`Backlog activo abierto (${open.length} de ${bl.length}), en orden de prioridad:${bl.length === 0 ? ' (vacío: el equipo está listo para la primera historia de la etapa)' : ''}`);
       for (const b of open) {
         const lp = lastProc(b); const g = lp ? describeProcess(lp, { isPortalRepo: ws.kind === 'internal', storyStatus: b.status }) : null; const mt = lp?.result?.manualTest;
         lines.push(`- ${b.storyId} [${b.status}] ${b.title}${b.criterion ? ` — criterio: ${b.criterion.slice(0, 160)}` : ''}${g ? ` — proceso ${lp!.id}: ${g.phase}. Siguiente: ${g.next}` : ''}${mt ? ` Prueba manual: ${mt.checks.filter(Boolean).length}/${mt.steps.length} pasos.` : ''}`);
@@ -119,8 +125,9 @@ async function platformSnapshot(): Promise<string> {
       const done = bl.filter(b => b.status === 'done').slice(-6);
       if (done.length) lines.push(`Completadas recientes: ${done.map(b => `${b.storyId} ${b.title}`).join(' | ')}`);
       // Qué aportó cada historia integrada (para responder «dónde veo X»)
-      const integrated = procs.filter(x => x.kind === 'story_execution' && x.result?.merged).slice(0, 8);
-      if (integrated.length) lines.push(`Historias integradas en main y qué cambian para el propietario:\n${integrated.map(x => `  · ${x.title} (integrada ${x.result!.merged!.mergedAt.slice(0, 16)}${x.result!.published ? ', publicada' : ', SIN publicar'}${x.result!.manualTest ? `, prueba manual ${x.result!.manualTest.checks.filter(Boolean).length}/${x.result!.manualTest.steps.length}` : ''}): ${x.result!.userFacing ? x.result!.userFacing.replace(/\s+/g, ' ').slice(0, 400) : `sin explicación para el propietario; archivos: ${x.result!.changes.map(c => c.path).slice(0, 6).join(', ')}`}`).join('\n')}`);
+      // Conocimiento, no trabajo pendiente: incluye las integradas de etapas anteriores (archivadas).
+      const integrated = allProcs.filter(x => x.kind === 'story_execution' && x.result?.merged).slice(0, 8);
+      if (integrated.length) lines.push(`Historias integradas en main (también de etapas anteriores) y qué cambian para el propietario:\n${integrated.map(x => `  · ${x.title} (integrada ${x.result!.merged!.mergedAt.slice(0, 16)}${x.result!.published ? ', publicada' : ', SIN publicar'}${x.result!.manualTest ? `, prueba manual ${x.result!.manualTest.checks.filter(Boolean).length}/${x.result!.manualTest.steps.length}` : ''}): ${x.result!.userFacing ? x.result!.userFacing.replace(/\s+/g, ' ').slice(0, 400) : `sin explicación para el propietario; archivos: ${x.result!.changes.map(c => c.path).slice(0, 6).join(', ')}`}`).join('\n')}`);
       const encargos = procs.filter(x => x.kind === 'delegated_task');
       if (encargos.length) lines.push(`Encargos: ${encargos.map(x => `${x.title} [${x.status}${x.delegation?.backlogOps.length ? `, ${x.delegation.backlogOps.length} propuestas ${x.delegation.opsApplied ? 'aplicadas' : 'SIN aplicar'}` : ''}]`).join(' | ')}`);
       lines.push(`Procesos: ${procs.length} (${procs.filter(x => x.status === 'running').length} en ejecución); conocimiento: ${knowledgeRepo(ws.slug).list(p.id).length} documentos`);
