@@ -26,7 +26,10 @@ const OUT = path.join(here, 'out'); fs.mkdirSync(OUT, { recursive: true });
 const keep = process.argv.includes('--keep');
 const results = []; const t0 = Date.now();
 const step = (id, ok, detail, extra = {}) => { results.push({ id, ok, detail, at: new Date().toISOString(), ...extra }); console.log(`${ok ? '✓' : '✖'} ${id} — ${detail}`); if (!ok) throw new Error(`Paso ${id} falló: ${detail}`); };
+const IS_WIN = process.platform === 'win32';
 const sh = (cmd, args, opts = {}) => execFileSync(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...opts }).toString();
+// npm en Windows es npm.cmd: Node solo lo ejecuta a través del shell (los argumentos de esta prueba no llevan espacios).
+const npm = (args, opts = {}) => sh('npm', args, { ...opts, shell: IS_WIN });
 const freePort = () => new Promise(r => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -35,11 +38,12 @@ const work = fs.mkdtempSync(path.join(os.homedir(), 'portal-ia-e2e-'));
 const repo = path.join(work, 'portal'); const dataDir = path.join(work, 'data');
 sh('git', ['clone', '-q', '-b', 'main', SRC_REPO, repo]);
 sh('git', ['-C', repo, 'config', 'user.email', 'e2e@local']); sh('git', ['-C', repo, 'config', 'user.name', 'e2e']);
-fs.symlinkSync(path.join(SRC_REPO, 'node_modules'), path.join(repo, 'node_modules'));
-sh('npm', ['run', 'build', '--workspace', 'apps/web'], { cwd: repo });
+fs.symlinkSync(path.join(SRC_REPO, 'node_modules'), path.join(repo, 'node_modules'), 'junction'); // «junction»: sin privilegios en Windows; se ignora en POSIX
+npm(['run', 'build', '--workspace', 'apps/web'], { cwd: repo });
 const port = await freePort();
 const script = path.join(work, 'mock-script.json'); const mockLog = path.join(work, 'mock-log.jsonl');
-const env = { ...process.env, PORTAL_PORT: String(port), PORTAL_DATA_DIR: dataDir, PORTAL_MOCK_PROVIDER: '1', PORTAL_MOCK_SCRIPT: script, PORTAL_MOCK_LOG: mockLog, PORTAL_PLAYWRIGHT: process.env.PORTAL_PLAYWRIGHT ?? '/opt/npm-tools/node_modules/playwright/index.mjs', LOG_LEVEL: 'warn' };
+const env = { ...process.env, PORTAL_PORT: String(port), PORTAL_DATA_DIR: dataDir, PORTAL_MOCK_PROVIDER: '1', PORTAL_MOCK_SCRIPT: script, PORTAL_MOCK_LOG: mockLog, LOG_LEVEL: 'warn' };
+if (!IS_WIN && !env.PORTAL_PLAYWRIGHT) env.PORTAL_PLAYWRIGHT = '/opt/npm-tools/node_modules/playwright/index.mjs';
 delete env.PORTAL_SANDBOX; delete env.PORTAL_ALLOW_FOREIGN_REPO;
 const serverLog = fs.createWriteStream(path.join(OUT, 'server.log'));
 let sup = spawn(process.execPath, ['scripts/portal-start.mjs'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -50,7 +54,7 @@ const waitHealth = async (prevStartedAt = null, tries = 120) => { for (let i = 0
 const waitProcess = async (slug, id, tries = 600) => { for (let i = 0; i < tries; i++) { const r = await api('GET', `/api/workspaces/${slug}/processes/${id}`); if (r.body.status !== 'running' && r.body.status !== 'pending_authorization') return r.body; await sleep(1000); } throw new Error('proceso no terminó'); };
 
 // Playwright (capturas de la interfaz como evidencia)
-let pw = null; try { pw = await import(env.PORTAL_PLAYWRIGHT); } catch { try { pw = await import('playwright'); } catch { pw = null; } }
+let pw = null; try { pw = await import(env.PORTAL_PLAYWRIGHT ?? 'playwright'); } catch { try { pw = await import('playwright'); } catch { pw = null; } }
 let browser = pw ? await pw.chromium.launch() : null;
 const shot = async (route, name) => { if (!browser) return null; const page = await browser.newPage({ viewport: { width: 1360, height: 900 } }); await page.goto(base + route, { waitUntil: 'networkidle' }); await sleep(600); const file = path.join(OUT, `${name}.png`); await page.screenshot({ path: file, fullPage: true }); await page.close(); return file; };
 
@@ -95,6 +99,13 @@ try {
   const branchAfter = sh('git', ['-C', repo, 'branch', '--show-current']).trim();
   step('4-aplicar', ap.status === 200 && fs.existsSync(ap.body.result.applied.worktree) && branchBefore === 'main' && branchAfter === 'main' && !fs.readFileSync(path.join(repo, 'apps/web/src/screens/Backlog.tsx'), 'utf8').includes('abiertas)</h1>'), `worktree ${ap.body.result.applied.worktree}; el checkout sigue en main y sin el cambio`);
   const m0 = await api('POST', `/api/workspaces/portal-ia/processes/${proc.id}/merge`, { authorized: true }); step('5-integrar-bloqueado', m0.status === 409 && m0.body.code === 'verification_required', `integrar sin verificar → 409 ${m0.body.code}`);
+  if (sys.sandbox?.available === 'docker') {
+    const noNet = await api('POST', `/api/workspaces/portal-ia/processes/${proc.id}/verify`, { authorized: true, command: 'install' });
+    step('5-install-sin-red-bloqueado', noNet.status === 409 && noNet.body.code === 'network_confirmation_required', `install sin confirmar la red → 409 ${noNet.body.code}`);
+    const ins = await api('POST', `/api/workspaces/portal-ia/processes/${proc.id}/verify`, { authorized: true, command: 'install', allowNetwork: true });
+    const li = ins.body.result?.verifications?.at(-1);
+    step('5-verificar-install', ins.status === 200 && li?.exitCode === 0 && li.isolation === 'docker', `install (dependencias Linux en volumen, red solo para install): exit ${li?.exitCode} en ${li?.isolation} (${((li?.durationMs ?? 0) / 1000).toFixed(0)} s)`);
+  }
   for (const cmd of ['typecheck', 'test', 'build']) {
     const vr = await api('POST', `/api/workspaces/portal-ia/processes/${proc.id}/verify`, { authorized: true, command: cmd });
     const last = vr.body.result?.verifications?.at(-1);
@@ -225,8 +236,9 @@ try {
   fs.writeFileSync(path.join(OUT, 'results.json'), JSON.stringify({ at: new Date().toISOString(), base, repo, provider: 'simulado (PORTAL_MOCK_PROVIDER=1)', results }, null, 2));
   if (browser) await browser.close();
   try { await api('POST', '/api/system/restart', { confirm: true }); } catch { /* ya parado */ }
-  await sleep(1500); try { sup.kill('SIGTERM'); } catch { /* ya parado */ }
-  if (!keep) { await sleep(500); fs.rmSync(work, { recursive: true, force: true }); } else console.log('copia conservada en', work);
+  // Windows no tiene señales: kill() terminaría solo el supervisor y dejaría el servidor huérfano (puerto y archivos abiertos).
+  await sleep(1500); try { if (IS_WIN) execFileSync('taskkill', ['/PID', String(sup.pid), '/T', '/F'], { stdio: 'ignore' }); else sup.kill('SIGTERM'); } catch { /* ya parado */ }
+  if (!keep) { await sleep(1000); try { fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 }); } catch (e) { console.log('no se pudo borrar la copia temporal', work, e.message); } } else console.log('copia conservada en', work);
   console.log(`\nResultados: ${results.filter(r => r.ok).length}/${results.length} ok → ${path.join(OUT, 'results.json')}`);
   process.exit(results.every(r => r.ok) ? 0 : 1);
 }
