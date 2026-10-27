@@ -117,12 +117,17 @@ test('vista previa: lee sin cambiar nada; un proceso en ejecución bloquea; sin 
 
   // Un proceso en ejecución bloquea (el propietario decide cancelarlo); nada se archiva.
   const busy = addManualItem(S, project.id, { title: 'Historia en ejecución' });
-  const pRun = createStoryProcess(S, project.id, busy.id); processesRepo(S).authorize(pRun.id, 1);
+  // «En ejecución» en la base pero sin ejecución viva en este servidor: como tras un reinicio a mitad de una historia.
+  const pRun = createStoryProcess(S, project.id, busy.id); processesRepo(S).authorize(pRun.id, 1); backlogRepo(S).setStatus(busy.id, 'in_progress', pRun.id);
   const blocked = await json('POST', `${W}/projects/${project.id}/phase`, { authorized: true });
   assert.equal(blocked.status, 409); assert.equal(blocked.body.code, 'running_processes'); assert.equal(blocked.body.running[0].id, pRun.id);
   assert.equal((await json('GET', `${W}/projects/${project.id}/backlog`)).body.length, 7, 'nada archivado');
-  // Decisión del propietario: cancelar (la ruta marca la cancelación; el proceso simulado no tiene trabajo en marcha).
-  await json('POST', `${W}/processes/${pRun.id}/cancel`); processesRepo(S).finish(pRun.id, 'cancelled');
+  assert.equal(blocked.body.running[0].orphan, true, 'se reconoce como interrumpido (huérfano)');
+  // Decisión del propietario: cancelar. Un huérfano se cierra al momento (nadie leería la marca de cancelación).
+  const cancelled = await json('POST', `${W}/processes/${pRun.id}/cancel`);
+  assert.equal(cancelled.body.status, 'cancelled'); assert.match(cancelled.body.error, /Interrumpido/);
+  assert.equal(backlogRepo(S).get(busy.id)!.status, 'pending', 'la historia vuelve a pendiente');
+  assert.ok(cancelled.body.steps.every((st: any) => st.status !== 'running' && st.status !== 'pending'));
 
   const noAuth = await json('POST', `${W}/projects/${project.id}/phase`, {});
   assert.equal(noAuth.status, 400); assert.equal(noAuth.body.code, 'authorization_required');

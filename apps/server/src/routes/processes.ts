@@ -2,8 +2,9 @@ import type { FastifyInstance } from 'fastify';
 import type { Process, VerificationRun } from '@portal-ia/domain';
 import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
-import { knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
+import { agentsRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { cancelProcess, clearCancel, createAssessment, estimateAssessment, isCancelled, runAssessment } from '../services/assessment.ts';
+import { isActiveJob, trackJob } from '../services/activeJobs.ts';
 import { createStoryProcess, estimateManualTest, estimateStory, generateManualTest, recoverStory, retryStory, runStory, stepByRole } from '../services/storyExecution.ts';
 import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
 import { describeProcess } from '../services/guidance.ts';
@@ -80,7 +81,7 @@ export async function processRoutes(app: FastifyInstance) {
     app.log.info({ processId: id, kind: proc.kind, budget: body.data.budgetUsd }, 'proceso autorizado · inicia ejecución');
     const logger = (o: any, m: string) => app.log.info(o, m);
     const run = proc.kind === 'story_execution' ? runStory(slug, id, logger, () => isCancelled(id)).finally(() => clearCancel(id)) : proc.kind === 'delegated_task' ? runDelegation(slug, id, logger, () => isCancelled(id)).finally(() => clearCancel(id)) : runAssessment(slug, id, logger);
-    setImmediate(() => { run.catch(e => app.log.error(e, 'fallo inesperado en el proceso')); });
+    setImmediate(() => { trackJob(id, run).catch(e => app.log.error(e, 'fallo inesperado en el proceso')); });
     return procs.get(id);
   });
 
@@ -89,6 +90,17 @@ export async function processRoutes(app: FastifyInstance) {
     const proc = processesRepo(slug).get(id);
     if (!proc) return reply.code(404).send({ error: 'Proceso no encontrado' });
     if (proc.status === 'pending_authorization') { processesRepo(slug).finish(id, 'cancelled'); return processesRepo(slug).get(id); }
+    if (proc.status === 'running' && !isActiveJob(id)) {
+      // Huérfano: su ejecución murió con un servidor anterior. Se cierra como cancelado, igual que al cancelar en marcha.
+      const procs = processesRepo(slug);
+      for (const s of proc.steps) if (s.status === 'pending' || s.status === 'running') procs.stepFinish(s.id, 'skipped', { error: 'interrumpido: el servidor se reinició durante la ejecución' });
+      new Set(proc.steps.map(s => s.agentId)).forEach(aid => agentsRepo(slug).setStatus(aid, 'inactive'));
+      const item = proc.backlogItemId ? backlogRepo(slug).get(proc.backlogItemId) : undefined;
+      if (item?.status === 'in_progress') backlogRepo(slug).setStatus(item.id, 'pending', proc.id);
+      procs.finish(id, 'cancelled', 'Interrumpido: el servidor se reinició mientras se ejecutaba; cancelado por el propietario.');
+      app.log.info({ processId: id }, 'proceso huérfano cancelado');
+      return processesRepo(slug).get(id);
+    }
     if (proc.status === 'running') { cancelProcess(id); return { ...proc, cancelling: true }; }
     return proc;
   });

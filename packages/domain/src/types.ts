@@ -420,7 +420,7 @@ export interface PhaseTransitionPreview {
   processes: { total: number; byStatus: Record<string, number> };
   pendingDecisions: { kind: string; processId: string; title: string }[];
   /** Procesos en ejecución: bloquean la transición hasta que el propietario los cancele o terminen. */
-  running: { id: string; title: string }[];
+  running: { id: string; title: string; /** Marcado «en ejecución» pero sin ejecución viva en este servidor (interrumpido por un reinicio). */ orphan: boolean }[];
   git: { repoPath: string | null; branch: string | null; head: string | null; headSubject: string | null; dirty: boolean | null; aheadOfRemote: number | null; unmergedBranches: { name: string; ahead: number }[]; worktrees: { path: string; branch: string | null; dirty: boolean }[] };
   preserved: PreservedCounts;
   baselinePreview: string;

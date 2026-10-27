@@ -7,6 +7,7 @@ import { platform } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
 import { REPO_ROOT } from '../config.ts';
 import { expandHome } from '../routes/fs.ts';
+import { isActiveJob } from './activeJobs.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { decisionsFromProcess } from './inbox.ts';
 import { lessonsRepo } from './lessons.ts';
@@ -175,13 +176,13 @@ export async function previewTransition(slug: string, projectId: string, name = 
   const git = await gitSnapshot(repoPathOf(slug, projectId));
   const preserved = preservedCounts(slug, projectId);
   const blockers: string[] = [];
-  if (running.length) blockers.push(`Hay ${running.length} proceso(s) en ejecución. Cancélalo(s) desde su pantalla (tu decisión) o espera a que terminen; un proceso en marcha no se archiva.`);
+  if (running.length) blockers.push(`Hay ${running.length} proceso(s) marcados en ejecución. Cancélalo(s) desde su pantalla (tu decisión) o espera a que terminen; un proceso en marcha no se archiva.`);
   return {
     phaseName: name, current: currentPhase(slug, projectId),
     stories: { total: stories.length, byStatus: tally(stories.map(s => s.status)) },
     processes: { total: procs.length, byStatus: tally(procs.map(p => p.status)) },
     pendingDecisions: procs.flatMap(p => decisionsFromProcess(slug, p)).map(d => ({ kind: d.kind, processId: d.processId, title: d.title })),
-    running: running.map(p => ({ id: p.id, title: p.title })),
+    running: running.map(p => ({ id: p.id, title: p.title, orphan: !isActiveJob(p.id) })),
     git, preserved,
     baselinePreview: buildBaseline(slug, projectId, name, git, { stories, processes: procs }, preserved, now()),
     canStart: blockers.length === 0, blockers

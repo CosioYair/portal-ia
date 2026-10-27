@@ -108,7 +108,7 @@ export function Phase() {
               </div>
 
               {p.running.length > 0 && <Notice kind="err"><div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><strong>No se puede iniciar mientras haya procesos en ejecución.</strong>
-                {p.running.map(r => <div key={r.id}>{r.title} · <button className="lnk" onClick={() => navigate(`/procesos/${r.id}`)}>abrir el proceso</button> (cancelarlo es tu decisión, desde su pantalla)</div>)}</div></Notice>}
+                {p.running.map(r => <div key={r.id}>{r.title} · {r.orphan ? 'no se está ejecutando: quedó interrumpido por un reinicio del Portal; cancelarlo lo cierra sin consumir IA' : 'se está ejecutando ahora y consume IA; cancelarlo lo detiene al terminar el paso actual'} · <button className="lnk" onClick={() => navigate(`/procesos/${r.id}`)}>abrir el proceso</button> (cancelarlo es tu decisión, desde su pantalla)</div>)}</div></Notice>}
 
               <details><summary className="small" style={{ cursor: 'pointer' }}>Ver la línea base que se guardará en Conocimiento</summary>
                 <div style={{ maxHeight: 420, overflow: 'auto', marginTop: 8, padding: '8px 12px', border: '1px solid #EEECE6', borderRadius: 8 }}><Markdown text={p.baselinePreview} /></div></details>
