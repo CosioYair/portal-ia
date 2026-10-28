@@ -362,7 +362,7 @@ async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
   const qa = ctx.qa!; const proc = processesRepo(ctx.slug).get(ctx.processId)!; const r = proc.result!; const p = r.pipeline!;
   emit(ctx, 'qa', 'QA está evaluando la evidencia: diff, typecheck, pruebas y compilación.', { phase: 'qa', aiCall: true });
   const pendingQa = proc.steps.find(s => s.role === 'reviewer' && s.status === 'pending');
-  const user = qaEvidencePrompt({ criterion: ctx.item.criterion, plan: ctx.plan, summary: r.implementationSummary ?? '', changes: r.changes, verifications: sinceApplied(r), required: cfg.autoVerify ? cfg.commands : [], attempts: attemptsSummary(p), consultText: ctx.consultText });
+  const user = qaEvidencePrompt({ criterion: ctx.item.criterion, plan: ctx.plan, summary: r.implementationSummary ?? '', changes: r.changes, verifications: sinceApplied(r), required: cfg.commands, attempts: attemptsSummary(p), consultText: ctx.consultText });
   const system = sys(qa, ctx.project, ctx.item);
   let res = await stepCall(ctx, qa, 'reviewer', pendingQa ? pendingQa.title : `Revisión de QA con evidencia (tras corrección ${p.corrections})`, 'Puerta de calidad con evidencia del sandbox', system, user, 6000, pendingQa?.id, QA_SCHEMA);
   let verdict = parseQaVerdict(res.text);
@@ -373,7 +373,7 @@ async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
     verdict = parseQaVerdict(res.text);
   }
   const fresh = processesRepo(ctx.slug).get(ctx.processId)!.result!;
-  const gated = enforceQaGate(verdict, cfg.autoVerify ? cfg.commands : [], sinceApplied(fresh));
+  const gated = enforceQaGate(verdict, cfg.commands, sinceApplied(fresh));
   updateResult(ctx.slug, ctx.processId, x => ({ ...x, review: gated }));
   updatePipeline(ctx.slug, ctx.processId, { lastQaCommit: fresh.applied?.commit ?? null });
   const label = gated.verdict === 'approved' ? 'QA aprobó la implementación con evidencia.' : gated.verdict === 'rejected' ? `QA rechazó: ${actionableFindings(gated).length} hallazgo(s) con evidencia.` : gated.verdict === 'blocked_environment' ? 'QA no pudo validar por el entorno.' : 'QA no pudo verificar con la evidencia disponible.';

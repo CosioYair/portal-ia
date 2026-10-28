@@ -28,7 +28,8 @@ export function normalizePipeline(input: Partial<PipelineConfig> | null | undefi
   const commands = order.filter(k => Array.isArray(c.commands) && c.commands.includes(k));
   return {
     autoApply: !!c.autoApply,
-    autoVerify: !!c.autoApply && !!c.autoVerify,
+    // Aplicar solo sin verificar no existe: QA no puede validar sin evidencia del sandbox.
+    autoVerify: !!c.autoApply,
     commands: commands.length ? commands : ['typecheck'],
     allowInstall: !!c.allowInstall,
     maxOutputRepairs: int(c.maxOutputRepairs, 0, PIPELINE_LIMITS.maxOutputRepairs, DEFAULT_PIPELINE.maxOutputRepairs),

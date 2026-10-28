@@ -145,7 +145,7 @@ async function runWithPipeline(title: string, cfg: Partial<typeof DEFAULT_PIPELI
   return { it, p: processesRepo(S).get(p.id)! };
 }
 const flowOf = async (id: string) => (await app.inject({ method: 'GET', url: `${W}/processes/${id}` })).json();
-const waitDone = async (id: string) => { for (let i = 0; i < 600; i++) { const p = processesRepo(S).get(id)!; if (p.status !== 'running') return p; await new Promise(r => setTimeout(r, 100)); } throw new Error('el proceso no terminó'); };
+const waitDone = async (id: string) => { for (let i = 0; i < 1800; i++) { const p = processesRepo(S).get(id)!; if (p.status !== 'running') return p; await new Promise(r => setTimeout(r, 100)); } throw new Error('el proceso no terminó'); };
 
 test('A · formato mal formado: recuperación local sin IA y el pipeline sigue (sin llamadas extra)', async () => {
   useFakeSandbox(); clearLog();
@@ -205,7 +205,10 @@ test('B · respuesta cortada: la recuperación local no basta → reparación ac
 // Docker Desktop cargado (otras pruebas en paralelo) puede tardar en responder: se confirma antes de omitir.
 let dockerReady = (await real.detect(true)).available === 'docker';
 for (let i = 0; i < 3 && !dockerReady; i++) { await new Promise(r => setTimeout(r, 2000)); dockerReady = (await real.detect(true)).available === 'docker'; }
-const skipDocker = dockerReady ? false : 'Docker no disponible en este equipo: C, D y E necesitan el sandbox real';
+// Con PORTAL_REQUIRE_DOCKER=1 (verificación final) no se omite nada: si Docker no responde, la prueba FALLA.
+const requireDocker = process.env.PORTAL_REQUIRE_DOCKER === '1';
+const skipDocker = dockerReady || requireDocker ? false : 'Docker no disponible en este equipo: C, D y E necesitan el sandbox real';
+test('Docker disponible para las pruebas reales (obligatorio con PORTAL_REQUIRE_DOCKER=1)', { skip: requireDocker ? false : 'solo se exige con PORTAL_REQUIRE_DOCKER=1' }, () => { assert.ok(dockerReady, 'Docker no está disponible: C, D, E y E2 no pueden ejecutarse'); });
 
 test('E · faltan dependencias (86 real): instalación autorizada sin IA y la verificación continúa', { skip: skipDocker }, async () => {
   useRealSandbox(); clearLog(); setScript({ dev: patchA('export const a = 2;') });
@@ -296,11 +299,76 @@ test('F · presupuesto: la siguiente corrección no cabe → pausa SIN llamar a 
   assert.match(pl.reason!, /superaría el presupuesto autorizado/);
   const flow = (await flowOf(p.id)).guidance.flow;
   assert.equal(flow.issue.kind, 'pipeline_paused'); assert.equal(flow.actions[0].id, 'pipeline_resume'); assert.ok(flow.actions[0].requires.includes('ai_budget'));
+  // Antes de continuar: lo ya hecho (pasos, su costo y la verificación) queda fijado.
+  const stepsBefore = p.steps.filter(s => s.status === 'done').map(s => ({ id: s.id, cost: s.costUsd, tokens: s.inputTokens + s.outputTokens }));
+  const spentBefore = p.spentUsd; const applyCommit = p.result!.applied!.commit; const callsBefore = calls().length;
+  const idsBefore = new Set(p.steps.map(s => s.id));
   const cont = await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/continue`, payload: { authorized: true, addBudgetUsd: 1 } });
   assert.equal(cont.statusCode, 200, cont.body);
   p = await waitDone(p.id);
   assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
   assert.equal(byRule(calls(), R.fix).length, 1); assert.equal(byRule(calls(), R.plan).length, 1, 'continuar no repite el plan');
+  // Continuar no repite ni vuelve a cobrar lo hecho: los pasos anteriores no cambian y el gasto nuevo es exactamente el de los pasos nuevos.
+  for (const s of stepsBefore) { const now = p.steps.find(x => x.id === s.id)!; assert.equal(now.costUsd, s.cost); assert.equal(now.inputTokens + now.outputTokens, s.tokens); }
+  const newSteps = p.steps.filter(s => !idsBefore.has(s.id));
+  assert.equal(newSteps.length, 2, `solo se añadieron la corrección y la revisión de QA: ${newSteps.map(s => s.title).join(' | ')}`);
+  assert.equal(newSteps[0].title, 'Corrección 1'); assert.match(newSteps[1].title, /^Revisión de QA con evidencia/);
+  assert.ok(Math.abs(p.spentUsd - spentBefore - newSteps.reduce((a, s) => a + s.costUsd, 0)) < 1e-9, 'el gasto nuevo es solo el de los pasos nuevos');
+  assert.equal(calls().length - callsBefore, 2, 'al continuar: corrección + QA (sin plan ni implementación de nuevo)');
+  assert.notEqual(p.result!.applied!.commit, applyCommit, 'la corrección es un commit nuevo sobre el worktree aplicado (no se vuelve a aplicar desde cero)');
+  assert.equal(p.result!.verifications.filter(v => v.command === 'install').length, 0);
+});
+
+test('Docker no disponible: el pipeline se pausa como problema del entorno, sin llamar a QA ni a correcciones; «Continuar» retoma cuando vuelve', async () => {
+  useFakeSandbox(); clearLog(); setScript({ dev: patchA('export const a = 2;') });
+  sandboxDeps.detect = async () => ({ available: 'unavailable', docker: false, wsl: false, detail: 'Docker no responde (simulado)', checkedAt: new Date().toISOString() });
+  const { p } = await runWithPipeline('Sin Docker');
+  const pl = p.result!.pipeline!;
+  assert.equal(p.status, 'done'); assert.equal(pl.state, 'paused'); assert.equal(pl.pauseKind, 'environment');
+  assert.match(pl.reason!, /No es un fallo del código/);
+  assert.equal(p.result!.verifications.length, 0, 'no se ejecutó nada fuera del sandbox');
+  assert.equal(calls().length, 2, 'plan + implementación: ni QA ni correcciones sin evidencia');
+  const flow = (await flowOf(p.id)).guidance.flow;
+  assert.equal(flow.issue.kind, 'pipeline_paused'); assert.equal(flow.issue.cause, 'environment');
+  assert.ok(flow.actions.some((a: any) => a.id === 'refresh_sandbox') && flow.actions.some((a: any) => a.id === 'pipeline_resume' && !a.requires.includes('ai_budget')));
+  useFakeSandbox(); // vuelve el sandbox
+  const cont = await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/continue`, payload: { authorized: true } });
+  assert.equal(cont.statusCode, 200, cont.body);
+  const done = await waitDone(p.id);
+  assert.equal(done.result!.pipeline!.state, 'verified'); assert.equal(calls().length, 3, 'al continuar solo se añade QA');
+});
+
+test('QA rechaza con hallazgos y evidencia → corrección con esos hallazgos → QA vuelve a evaluar y aprueba', async () => {
+  useFakeSandbox(); clearLog();
+  const reject = JSON.stringify({ verdict: 'rejected', summary: 'Falta exportar el tipo.', findings: [{ severity: 'alta', text: 'El valor no se documenta en src/a.ts', file: 'src/a.ts', evidence: '+export const a = 2;' }], suggestedTests: [] });
+  // Primera evaluación: rechaza. Segunda (lleva el rechazo en «Intentos anteriores»): aprueba.
+  fs.writeFileSync(scriptPath, JSON.stringify({ markers: ['El valor no se documenta en src/a.ts', 'QA rechazó'], rules: [
+    { match: 'plan técnico', text: PLAN },
+    { match: 'Corrige la implementación de esta historia', text: '=== RESUMEN ===\nDocumentado.\n=== ARCHIVO: src/a.ts | patch ===\n<<<< BUSCAR\nexport const a = 2;\n==== REEMPLAZAR\n/** Valor del contador. */\nexport const a = 2;\n>>>> FIN\n=== FIN ARCHIVO ===' },
+    { match: 'Evalúa la implementación con la EVIDENCIA real[\\s\\S]*QA rechazó', text: QA_OK },
+    { match: 'Evalúa la implementación con la EVIDENCIA real', text: reject },
+    { match: 'Implementa la historia', text: patchA('export const a = 2;') }] }));
+  const { p } = await runWithPipeline('QA rechaza');
+  const pl = p.result!.pipeline!;
+  assert.equal(pl.state, 'verified', pl.reason ?? ''); assert.equal(pl.corrections, 1);
+  const c = calls();
+  const fix = byRule(c, R.fix); assert.equal(fix.length, 1); assert.ok(fix[0].markers.includes('El valor no se documenta en src/a.ts'), 'la corrección recibe el hallazgo de QA');
+  assert.equal(c.filter(x => /EVIDENCIA real/.test(x.rule ?? '')).length, 2, 'QA evalúa de nuevo tras la corrección');
+  assert.equal(p.result!.review?.verdict, 'approved');
+  assert.match(fs.readFileSync(path.join(p.result!.applied!.worktree!, 'src/a.ts'), 'utf8'), /Valor del contador/);
+  assert.ok(pl.events.some(e => /QA rechazó la implementación\. El equipo está preparando una corrección/.test(e.message)));
+});
+
+test('límites de autorización: ningún pipeline integra, reinicia ni publica; nada de eso se concede sin autorización', async () => {
+  const { workspaceDb } = await import('../src/db/workspace.ts');
+  const kinds = (workspaceDb(S).prepare(`SELECT kind FROM execution_history WHERE kind LIKE 'policy:%'`).all() as any[]).map(r => r.kind as string);
+  for (const op of ['git_merge', 'git_push', 'restart_portal']) assert.ok(!kinds.some(k => k.startsWith(`policy:${op}:`)), `ninguna concesión de ${op} durante los pipelines`);
+  assert.ok(kinds.some(k => k.startsWith('policy:write_worktree:granted')) && kinds.some(k => k.startsWith('policy:ai_call:granted')), 'las operaciones del pipeline sí pasan por la política');
+  for (const p of processesRepo(S).list(project.id)) { assert.ok(!p.result?.merged, `${p.title}: no integrado`); assert.ok(!p.result?.published, `${p.title}: no publicado`); }
+  const any = processesRepo(S).list(project.id).find(p => p.result?.applied?.worktree && !p.result.merged)!;
+  assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${any.id}/merge`, payload: {} })).statusCode, 400, 'integrar exige autorización');
+  assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${any.id}/publish`, payload: {} })).statusCode, 400, 'publicar exige autorización');
+  assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${any.id}/continue`, payload: {} })).statusCode, 400, 'continuar exige autorización');
 });
 
 test('G · fallo repetido: la misma corrección no arregla nada → se detiene por fallo repetido, sin bucle, con explicación', async () => {
