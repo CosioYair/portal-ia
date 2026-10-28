@@ -7,6 +7,7 @@ import { requirePolicy } from './executionPolicy.ts';
 import { buildRepoContext } from './repoContext.ts';
 import { addManualItem, resetStory } from './backlog.ts';
 import { phaseContext } from './operationalPhase.ts';
+import { callTimeoutMs, maybeBilled, registerCall, unregisterCall } from './providerCalls.ts';
 
 /**
  * Encargos delegados: el Asistente (o el propietario) encarga una tarea a un agente responsable —revisar y replantear
@@ -155,11 +156,14 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
     const models: ModelInfo[] = JSON.parse(prow.models_json);
     const cur = procs.get(processId)!; const p = estimatePricing(providerId, agent.config.model);
     const stepEst = (estimateTokens(system + user) * p.inPerM + maxTokens * p.outPerM) / 1_000_000;
-    if (cur.spentUsd + stepEst * 0.5 > cur.budgetUsd) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${cur.spentUsd.toFixed(2)} de ${cur.budgetUsd.toFixed(2)} USD).`), { budget: true });
+    // Lo no confirmado (llamadas abortadas que pudieron facturarse) cuenta como gastado al decidir.
+    if (cur.spentUsd + (cur.unconfirmedUsd ?? 0) + stepEst * 0.5 > cur.budgetUsd) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${cur.spentUsd.toFixed(2)} de ${cur.budgetUsd.toFixed(2)} USD).`), { budget: true });
     procs.stepStart(step.id); const startedAt = new Date().toISOString();
+    // Plazo proporcional y cancelación real: «Cancelar» aborta esta petición (ver providerCalls.ts).
+    const ctrl = registerCall(processId);
     try {
       requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
-      const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history });
+      const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history, timeoutMs: callTimeoutMs(maxTokens, agent.config.effort) }, ctrl.signal);
       const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
       const prev = procs.get(processId)!.steps[stepIdx]; const acc = history?.length ? prev : { inputTokens: 0, outputTokens: 0, costUsd: 0 };
       procs.stepFinish(step.id, 'done', { tokensIn: acc.inputTokens + res.inputTokens, tokensOut: acc.outputTokens + res.outputTokens, cost: acc.costUsd + cost, outputMd: history?.length ? `${history.filter(h => h.role === 'assistant').map(h => h.content).join('')}${res.text}` : res.text });
@@ -169,13 +173,13 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
       return res;
     } catch (e) {
       const err = e instanceof ProviderRequestError ? e.error : null; let msg = err ? err.message : (e as Error).message;
-      const maybeBilled = !err || err.code === 'network' || (err.httpStatus ?? 0) >= 500;
-      const estIn = maybeBilled ? estimateTokens(system + user) : 0; const estCost = maybeBilled ? costUsd(providerId, agent.config.model, estIn, 0) : 0;
-      if (maybeBilled) msg += ` Costo estimado de la entrada enviada: ${estCost.toFixed(4)} USD (sin confirmación del proveedor).`;
-      procs.stepFinish(step.id, 'failed', { tokensIn: estIn, cost: estCost, error: msg }); if (maybeBilled) procs.addUsage(processId, estIn, 0, estCost);
-      procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'delegated_step', status: 'failed', tokensIn: estIn, tokensOut: 0, cost: estCost, startedAt });
-      throw new Error(msg);
-    }
+      // Lo que pudo facturarse sin confirmación del proveedor se guarda aparte del gasto confirmado (estimación de la entrada).
+      const billed = maybeBilled(e); const estCost = billed ? costUsd(providerId, agent.config.model, estimateTokens(system + user), 0) : 0;
+      if (billed) msg += ` Posible costo NO confirmado por el proveedor: ≈ ${estCost.toFixed(4)} USD (estimación de la entrada enviada; sin confirmación del proveedor).`;
+      procs.stepFinish(step.id, 'failed', { error: msg }); if (billed) procs.addUnconfirmed(processId, step.id, estCost);
+      procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'delegated_step', status: 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });
+      throw Object.assign(new Error(msg), { cancelled: err?.code === 'cancelled' });
+    } finally { unregisterCall(processId, ctrl); }
   };
 
   const team = teamOf(slug, lead).slice(0, MAX_CONSULTS);

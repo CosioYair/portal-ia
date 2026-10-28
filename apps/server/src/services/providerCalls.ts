@@ -60,9 +60,12 @@ export function providerFailureClass(e: unknown): { kind: AgentFailureKind; code
   return { kind: 'UNKNOWN_FAILURE', code };
 }
 
-/** ¿Pudo facturarse? (el proveedor pudo recibir la petición y procesarla). Errores de autenticación o 4xx: no. */
+/**
+ * ¿Pudo facturarse? (el proveedor pudo recibir la petición y procesarla). Errores de autenticación o 4xx: no. Un error
+ * que no viene del proveedor (p. ej. la política lo rechaza antes de enviar nada) tampoco: no hubo petición.
+ */
 export function maybeBilled(e: unknown): boolean {
-  if (!(e instanceof ProviderRequestError)) return true;
+  if (!(e instanceof ProviderRequestError)) return false;
   const { code, httpStatus } = e.error;
   return code === 'timeout' || code === 'cancelled' || code === 'network' || (httpStatus ?? 0) >= 500;
 }

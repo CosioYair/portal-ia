@@ -472,6 +472,25 @@ test('L · presupuesto: lo no confirmado se reserva; si la siguiente llamada no 
   assert.match(p.result!.pipeline!.reason, /superaría el presupuesto autorizado/);
 });
 
+test('G2/K · cancelar una evaluación inicial también aborta la llamada en curso; lo posible queda como no confirmado', async () => {
+  fs.writeFileSync(scriptPath, JSON.stringify({ rules: [{ match: '.', text: '## Resumen\nok', delayMs: 10_000 }] }));
+  resetMockCalls(); try { fs.unlinkSync(logPath); } catch { /* vacío */ }
+  const created = await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/assessment` });
+  assert.equal(created.statusCode, 200, created.body);
+  const id = created.json().id;
+  const auth = await app.inject({ method: 'POST', url: `${W}/processes/${id}/authorize`, payload: { budgetUsd: 2, authorized: true } });
+  assert.equal(auth.statusCode, 200, auth.body);
+  await waitFor(() => inflightCount(id) === 1);
+  const t0 = Date.now();
+  const res = await app.inject({ method: 'POST', url: `${W}/processes/${id}/cancel` });
+  assert.equal(res.json().abortedCalls, 1);
+  const p = await waitDone(id);
+  assert.ok(Date.now() - t0 < 3000, 'se detuvo enseguida');
+  assert.equal(p.status, 'cancelled');
+  assert.ok((p.unconfirmedUsd ?? 0) > 0); assert.equal(p.spentUsd, 0, 'nada confirmado: la única llamada se abortó');
+  assert.equal(calls().length, 1, 'los pasos siguientes no se ejecutan');
+});
+
 test('O · lecciones: los fallos clasificados quedan como evidencia «detectada», nunca validada ni inyectada', async () => {
   const all = lessonsRepo(S).list(project.id);
   const byDetector = (d: string) => all.filter(l => l.detector === d);

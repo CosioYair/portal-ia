@@ -6,6 +6,7 @@ import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { buildRepoContext, renderRepoContext } from './repoContext.ts';
 import { importBacklogFromKnowledge } from './backlog.ts';
+import { callTimeoutMs, maybeBilled, registerCall, unregisterCall } from './providerCalls.ts';
 
 /**
  * HU-004 · Evaluación inicial del proyecto.
@@ -112,19 +113,22 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
       const current = procs.get(processId)!;
       const p = estimatePricing(providerId, agent.config.model);
       const stepEstimate = ((repoCtx.length / 3.5 + 4000) * p.inPerM + STEP_PLAN[i].maxTokens * p.outPerM) / 1_000_000;
-      if (current.spentUsd + stepEstimate * 0.6 > current.budgetUsd) {
+      if (current.spentUsd + (current.unconfirmedUsd ?? 0) + stepEstimate * 0.6 > current.budgetUsd) {
         procs.stepFinish(step.id, 'skipped', { error: `presupuesto insuficiente (gastado ${current.spentUsd.toFixed(2)} de ${current.budgetUsd.toFixed(2)} USD)` });
         finalStatus = 'budget_exceeded'; finalError = 'Se alcanzó el presupuesto autorizado antes de completar todos los pasos.'; continue;
       }
       procs.stepStart(step.id);
       const startedAt = new Date().toISOString();
       const systemPrompt = systemFor(agent, project, objectives); const userPrompt = userFor(i, repoCtx, previous);
+      // Plazo proporcional y cancelación real: «Cancelar» aborta esta petición (ver providerCalls.ts).
+      const ctrl = registerCall(processId);
       try {
         requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
       const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
           model: agent.config.model, system: systemPrompt, user: userPrompt,
-          maxTokens: STEP_PLAN[i].maxTokens, effort: agent.config.effort, supportsEffort: !!modelInfo?.supportsEffort
-        });
+          maxTokens: STEP_PLAN[i].maxTokens, effort: agent.config.effort, supportsEffort: !!modelInfo?.supportsEffort,
+          timeoutMs: callTimeoutMs(STEP_PLAN[i].maxTokens, agent.config.effort)
+        }, ctrl.signal);
         const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
         procs.stepFinish(step.id, 'done', { tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, outputMd: res.text });
         procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
@@ -135,18 +139,18 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
       } catch (e) {
         const err = e instanceof ProviderRequestError ? e.error : null;
         let msg = err ? err.message : (e as Error).message;
-        // Si la solicitud llegó al proveedor pero se cortó (timeout/red) o falló en servidor, la entrada pudo facturarse:
-        // registramos el costo ESTIMADO de los tokens enviados para no mostrar un 0 engañoso.
-        const maybeBilled = !err || err.code === 'network' || (err.httpStatus ?? 0) >= 500;
-        const estIn = maybeBilled ? estimateTokens(systemPrompt + userPrompt) : 0;
-        const estCost = maybeBilled ? costUsd(providerId, agent.config.model, estIn, 0) : 0;
-        if (maybeBilled) msg += ` Costo estimado de la entrada enviada: ${estCost.toFixed(4)} USD (≈${estIn} tokens; sin confirmación del proveedor).`;
-        procs.stepFinish(step.id, 'failed', { tokensIn: estIn, tokensOut: 0, cost: estCost, error: msg });
-        if (maybeBilled) procs.addUsage(processId, estIn, 0, estCost);
-        procs.logExecution({ projectId: project.id, agentId: agent.id, kind: 'assessment_step', status: 'failed', tokensIn: estIn, tokensOut: 0, cost: estCost, startedAt });
-        finalStatus = 'failed'; finalError = msg;
+        // Si la solicitud llegó al proveedor pero se cortó (plazo, cancelación, red) o falló en servidor, la entrada pudo
+        // facturarse: su costo ESTIMADO se guarda como no confirmado, aparte del gasto confirmado (nunca un 0 engañoso).
+        const billed = maybeBilled(e);
+        const estIn = billed ? estimateTokens(systemPrompt + userPrompt) : 0;
+        const estCost = billed ? costUsd(providerId, agent.config.model, estIn, 0) : 0;
+        if (billed) msg += ` Posible costo NO confirmado: ≈ ${estCost.toFixed(4)} USD (≈${estIn} tokens de entrada; sin confirmación del proveedor).`;
+        procs.stepFinish(step.id, 'failed', { error: msg });
+        if (billed) procs.addUnconfirmed(processId, step.id, estCost);
+        procs.logExecution({ projectId: project.id, agentId: agent.id, kind: 'assessment_step', status: 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });
+        finalStatus = err?.code === 'cancelled' ? 'cancelled' : 'failed'; finalError = msg;
         log({ step: step.title, error: msg }, 'paso fallido');
-      }
+      } finally { unregisterCall(processId, ctrl); }
     }
   } finally {
     involved.forEach(id => agents.setStatus(id, 'inactive'));
