@@ -155,7 +155,10 @@ fs.mkdirSync(path.join(repo, 'src'), { recursive: true });
 fs.writeFileSync(path.join(repo, 'src/a.ts'), 'export const a = 1;\n');
 fs.writeFileSync(path.join(repo, 'src/notes.ts'), 'export const n = 0; // NOTAS-REPO\n');
 fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'fail-fixture', version: '1.0.0', private: true, scripts: { typecheck: 'echo ok', test: 'echo ok', build: 'echo ok' } }, null, 2));
-execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm Base', { cwd: repo });
+// Base fechada en el pasado: la guarda «el archivo cambió después de que el Desarrollador lo leyera» compara la fecha
+// del commit (resolución de 1 s) con la del proceso; con la base en el mismo segundo, un ajuste del reloj de la VM de
+// Docker Desktop podía dispararla al azar dentro del sandbox.
+execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm Base', { cwd: repo, env: { ...process.env, GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z' } });
 projectsRepo(S).setRepository(project.id, repo, 'main');
 const app = await buildApp();
 after(async () => { await app.close(); });

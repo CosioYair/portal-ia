@@ -99,7 +99,10 @@ fs.writeFileSync(path.join(repo, 'src/notes.ts'), 'export const n = 0;\n');
 fs.writeFileSync(path.join(repo, 'scripts/tc.mjs'), "import fs from 'node:fs';\nconst src = fs.readFileSync('src/a.ts', 'utf8');\nif (/: number = \"/.test(src)) { console.log(\"src/a.ts(1,14): error TS2322: Type 'string' is not assignable to type 'number'.\"); process.exit(2); }\nconsole.log('sin errores');\n");
 fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: uniq, version: '1.0.0', private: true, scripts: { typecheck: 'node scripts/tc.mjs', test: 'node -e "console.log(\'1 prueba ok\')"', build: 'node -e "console.log(\'build ok\')"' } }, null, 2));
 fs.writeFileSync(path.join(repo, 'package-lock.json'), JSON.stringify({ name: uniq, version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: uniq, version: '1.0.0' } } }, null, 2));
-execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm Base', { cwd: repo });
+// Base fechada en el pasado: la guarda «el archivo cambió después de que el Desarrollador lo leyera» compara la fecha
+// del commit (resolución de 1 s) con la del proceso; con la base en el mismo segundo, un ajuste del reloj de la VM de
+// Docker Desktop podía dispararla al azar dentro del sandbox.
+execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm Base', { cwd: repo, env: { ...process.env, GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z' } });
 projectsRepo(S).setRepository(project.id, repo, 'main');
 const app = await buildApp();
 
