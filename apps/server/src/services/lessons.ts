@@ -96,7 +96,7 @@ export function detectInProcess(slug: string, proc: Process, repoPath: string | 
   if (extra.updateFailedLog) out.push({ detector: 'activation_failed', title: 'Activación fallida (reconstruir y reiniciar)', role: 'implementer', tags: ['activation', 'build'], evidence: ev(null, extra.updateFailedLog.slice(-600)), dedupeKey: key('activation_failed', null) });
   for (const x of r?.runtimeChecks?.results ?? []) if (x.status === 'fail') out.push({ detector: 'runtime_failed', title: `Comprobación en ejecución fallida: ${x.check.kind} ${x.check.path}`, role: 'implementer', tags: ['runtime', x.check.kind], evidence: ev(x.check.path, x.detail), dedupeKey: key(`runtime_failed:${x.check.kind}:${x.check.path}`, null) });
   if (extra.resetReason) out.push({ detector: 'story_reset', title: 'Historia devuelta a pendiente por el propietario', role: 'planner', tags: ['reset', 'planificar'], evidence: ev(null, extra.resetReason, proc.steps.find(s => s.role === 'planner') ?? proc.steps[0]), dedupeKey: key('story_reset', null) });
-  // v0.12.2: fallos clasificados (bloqueo del agente, negativa o plazo del proveedor). Evidencia para revisar; nunca se validan solos.
+  // HU-155: fallos clasificados (bloqueo del agente, negativa o plazo del proveedor). Evidencia para revisar; nunca se validan solos.
   const cls = r?.failure?.class ?? r?.pipeline?.failureClass ?? null;
   const req = r?.pipeline?.ownerRequest ?? r?.failure?.request ?? null;
   const a = r?.failure?.assessment ?? r?.pipeline?.lastAssessment ?? null;

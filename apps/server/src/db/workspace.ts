@@ -78,7 +78,7 @@ export function workspaceDb(slug: string): DatabaseSync {
   if (!scols.includes('role')) db.exec(`ALTER TABLE process_steps ADD COLUMN role TEXT`);
   if (!scols.includes('reason')) db.exec(`ALTER TABLE process_steps ADD COLUMN reason TEXT`);
   if (!scols.includes('lessons_used')) db.exec(`ALTER TABLE process_steps ADD COLUMN lessons_used TEXT`);
-  // v0.12.2: estado real de la llamada en curso y costo posiblemente facturado pero no confirmado (estimación).
+  // HU-155: estado real de la llamada en curso y costo posiblemente facturado pero no confirmado (estimación).
   if (!scols.includes('live_json')) db.exec(`ALTER TABLE process_steps ADD COLUMN live_json TEXT`);
   if (!scols.includes('unconfirmed_usd')) db.exec(`ALTER TABLE process_steps ADD COLUMN unconfirmed_usd REAL NOT NULL DEFAULT 0`);
   const pcols3 = (db.prepare(`PRAGMA table_info(processes)`).all() as any[]).map(c => c.name);

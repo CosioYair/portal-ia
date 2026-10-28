@@ -526,7 +526,7 @@ export type DevOutputKind = 'implementation' | 'no_changes' | 'incomplete' | 'tr
   | 'blocked'
   /** El proveedor o el modelo rechaza la petición (señal del proveedor o negativa breve e inequívoca). */
   | 'provider_refusal'
-  /** Clasificación antigua (antes de v0.12.2): se trata como «bloqueado sin detalle». */
+  /** Clasificación antigua (antes de la corrección de HU-155): se trata como «bloqueado sin detalle». */
   | 'refusal';
 export interface DevOutputAssessment {
   kind: DevOutputKind;
@@ -635,7 +635,7 @@ export interface PipelineStatus {
 }
 /** Por qué terminó mal un proceso de historia (clasificado al fallar; evita adivinar por el texto del error). */
 export interface ProcessFailure { kind: 'output_contract' | 'provider' | 'budget' | 'cancelled' | 'internal' | 'refusal'; detail: string; assessment?: DevOutputAssessment | null;
-  /** Clase explícita (v0.12.2): decide la recuperación y lo que se muestra. */
+  /** Clase explícita (desde la corrección de HU-155): decide la recuperación y lo que se muestra. */
   class?: AgentFailureKind;
   /** Código del proveedor cuando aplica (timeout, network, rate_limited…). */
   providerCode?: ProviderErrorCode | null;

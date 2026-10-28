@@ -45,7 +45,7 @@
 .sf-pipe-events li[data-kind="pause"], .sf-pipe-events li[data-kind="error"] { color: #8A3A00; }
 .sf-pipe-events li[data-kind="done"] { color: #0B5652; font-weight: 600; }
 .sf-pipe-log { max-height: 260px; overflow: auto; margin: 6px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; }
-/* v0.12.2 · llamada al proveedor en curso (hechos confirmados, plazo, costo no confirmado) y pregunta del equipo */
+/* HU-155 · llamada al proveedor en curso (hechos confirmados, plazo, costo no confirmado) y pregunta del equipo */
 .sf-live { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid #D9E2F2; border-radius: 10px; background: #F6F8FC; }
 .sf-live[data-overdue] { border-color: #E9B4AC; background: #FDF5F3; }
 .sf-live-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; }
