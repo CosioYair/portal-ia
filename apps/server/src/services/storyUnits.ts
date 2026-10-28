@@ -10,7 +10,7 @@ import { requirePolicy } from './executionPolicy.ts';
 import { applyChanges, changesSinceBase, commitInWorktree, readRepoFile } from './repoWrite.ts';
 import { verificationEvidence } from './qaGate.ts';
 import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
-import { agentHeadroom, attemptsSummary, checkCancelled, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, stepCall, updatePipeline, updateResult, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
+import { agentHeadroom, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, stepCall, updatePipeline, updateResult, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
 
 /**
  * Entrega INCREMENTAL de una historia (pipeline autorizado con aplicación automática).
@@ -65,13 +65,13 @@ const linesOf = (text: string | null) => text === null ? 0 : text.replace(/\r\n/
 
 function purposeFor(file: string, tasks: string[], summary: string): string {
   const b = base(file).replace(/\.[^.]+$/, '').toLowerCase();
-  return tasks.find(t => t.toLowerCase().includes(file.toLowerCase()) || t.toLowerCase().includes(b)) ?? summary.slice(0, 200);
+  return tasks.map(String).find(t => t.toLowerCase().includes(file.toLowerCase()) || t.toLowerCase().includes(b)) ?? String(summary).slice(0, 200);
 }
 /** Criterios de aceptación relacionados con la unidad (por vocabulario); si ninguno coincide, todos. */
 function relevantAcceptance(acceptance: string[], text: string): string[] {
   const words = new Set((text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').match(/[a-z0-9]{5,}/g) ?? []));
-  const hit = acceptance.filter(a => (a.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').match(/[a-z0-9]{5,}/g) ?? []).some(w => words.has(w)));
-  return (hit.length ? hit : acceptance).slice(0, 10);
+  const hit = acceptance.map(String).filter(a => (a.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').match(/[a-z0-9]{5,}/g) ?? []).some(w => words.has(w)));
+  return (hit.length ? hit : acceptance.map(String)).slice(0, 10);
 }
 /** Costo previsto de una llamada de unidad: entrada aproximada + texto previsto + la mitad del margen de razonamiento. */
 function unitUsd(agent: Agent, inputTokens: number, outputTokens: number): number {
@@ -96,7 +96,7 @@ export function buildManifest(ctx: StoryRunCtx): StoryManifest {
   const plan = ctx.plan!;
   const planned = new Map<string, { purpose?: string; kind?: DeliverableKind; estimatedLines?: number }>();
   for (const d of Array.isArray(plan.deliverables) ? plan.deliverables : []) if (d && typeof d.path === 'string' && clean(d.path)) planned.set(clean(d.path), d);
-  for (const f of plan.filesToChange) if (clean(f) && !planned.has(clean(f))) planned.set(clean(f), {});
+  for (const f of plan.filesToChange) if (typeof f === 'string' && clean(f) && !planned.has(clean(f))) planned.set(clean(f), {});
   const deliverables: Deliverable[] = Array.from(planned, ([p, d]) => {
     const kind = d.kind && d.kind in RANK ? d.kind : kindOf(p);
     const existing = readRepoFile(ctx.repoPath, p, 400_000);
@@ -222,7 +222,7 @@ ${unitContext(ctx, man, unit, unit.files.filter(f => readRepoFile(bp, f, 1) !== 
 FORMATO DE RESPUESTA:
 ${PATCH_ONLY_FORMAT}
 ${DROP_FORMAT}
-(si un hallazgo es incorrecto, explícalo en === NOTAS === con la evidencia; no inventes cambios)`;
+(si un hallazgo es incorrecto, no inventes cambios: responde solo con === RESUMEN === y === SIN CAMBIOS === seguido de la evidencia concreta; QA lo volverá a evaluar)`;
 }
 
 function unitRepairPrompt(ctx: StoryRunCtx, unit: WorkUnit, prompt: string, a: DevOutputAssessment, previous: string, ok: ProposedChange[], bad: ProposedChange[]): string {
@@ -260,6 +260,7 @@ async function continueFile(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
   const unit = unitOf(ctx, unitId); const p = pipelineOf(ctx.slug, ctx.processId);
   const used = p.continuations ?? 0; const perFile = unit.continued?.[partial.path] ?? 0;
   const max = cfg.maxContinuations ?? 6;
+  checkDuration(ctx, cfg);
   if (used >= max || perFile >= 2) {
     emit(ctx, 'continuation', `«${partial.path}» sigue sin caber en una respuesta tras ${perFile} continuación(es); no se piden más (${used} de ${max} en este proceso).`, { detail: unit.title });
     return null;
@@ -345,30 +346,36 @@ function scopeCheck(man: StoryManifest, unit: WorkUnit, s: Settled): ProposedCha
 }
 
 /** Aplica lo válido de una unidad y actualiza el manifiesto con la evidencia (commit, líneas, descartes). */
-async function applyUnit(ctx: StoryRunCtx, unitId: string, s: Settled): Promise<{ files: string[]; problems: string[] }> {
+async function applyUnit(ctx: StoryRunCtx, unitId: string, s: Settled): Promise<{ files: string[]; dropped: string[]; problems: string[] }> {
   const man = manifestOf(ctx); const unit = unitOf(ctx, unitId); const label = unitLabel(man, unit);
   const changes = scopeCheck(man, unit, s);
   const valid = changes.filter(c => !c.error);
   const { commit, files } = valid.length ? await commitUnit(ctx, unit, label, valid) : { commit: null, files: [] as string[] };
   const wt = worktreeOf(ctx);
+  const deletes = new Set(valid.filter(c => c.action === 'delete').map(c => c.path));
+  const dropped: string[] = [];
   saveManifest(ctx, m => {
     for (const f of files) {
       let d = m.deliverables.find(x => x.path === f);
       if (!d) { d = { path: f, purpose: 'Añadido por el equipo durante la implementación (fuera del plan).', kind: kindOf(f), planned: false, status: 'pending', unitId: unit.id, commit: null, lines: null, estimatedLines: 0, note: null }; m.deliverables.push(d); }
+      // Un borrado del plan está entregado cuando el archivo ya no existe (no se vuelve a pedir «crearlo»).
       const exists = wt ? fs.existsSync(path.join(wt, f)) : false;
-      Object.assign(d, { status: exists ? 'delivered' : 'pending', commit, lines: exists ? linesOf(readRepoFile(wt!, f, 400_000)) : 0, note: exists ? null : 'borrado' });
+      const ok = exists || deletes.has(f);
+      Object.assign(d, { status: ok ? 'delivered' : 'pending', commit, lines: exists ? linesOf(readRepoFile(wt!, f, 400_000)) : 0, note: exists ? null : deletes.has(f) ? 'eliminado (según el plan)' : 'borrado' });
       if (d.status === 'delivered' && (!d.unitId || m.units.find(x => x.id === d!.unitId)?.status !== 'done')) d.unitId = unit.id;
     }
-    for (const dr of s.drops) { const d = m.deliverables.find(x => x.path === dr.path); if (d && d.status !== 'delivered') { d.status = 'dropped'; d.note = dr.reason; } }
-    const u = m.units.find(x => x.id === unitId)!; u.applied = Array.from(new Set([...(u.applied ?? []), ...files]));
+    // Un descarte solo cuenta si cambia de verdad un entregable (no uno ya entregado).
+    for (const dr of s.drops) { const d = m.deliverables.find(x => x.path === dr.path); if (d && d.status !== 'delivered' && d.status !== 'dropped') { d.status = 'dropped'; d.note = dr.reason; dropped.push(d.path); } }
+    const u = m.units.find(x => x.id === unitId)!; u.applied = Array.from(new Set([...(u.applied ?? []), ...files])); if (dropped.length) u.dropped = Array.from(new Set([...(u.dropped ?? []), ...dropped]));
   });
   mergeMeta(ctx, unit, s.meta);
   // Lo rechazado por las reglas de ámbito queda registrado (evidencia para el propietario y para las lecciones).
   const scoped = changes.filter((c, i) => c.error && !s.changes[i].error);
   if (scoped.length) emit(ctx, 'unit', `${label[0].toUpperCase()}${label.slice(1)}: se rechazó ${scoped.length} cambio(s) por las reglas de entrega (lo demás se aplicó).`, { detail: scoped.map(c => `${c.path}: ${c.error}`).join(' · ') });
-  if (s.drops.length) emit(ctx, 'unit', `${ctx.dev.config.name} justifica que ${s.drops.length} entregable(s) del plan no hacen falta: ${s.drops.map(d => d.path).join(', ')}. QA lo revisará (no cambia los criterios de aceptación).`, { detail: s.drops.map(d => `${d.path}: ${clip(d.reason, 200)}`).join(' · ') });
-  const problems = [...changes.filter(c => c.error).map(c => `${c.path}: ${c.error}`), ...(s.truncatedFile ? [`${s.truncatedFile}: la respuesta se cortó dentro de este archivo y no llegó completo`] : []), ...(files.length || s.drops.length ? [] : s.assessment.reasons.slice(0, 3))];
-  return { files, problems };
+  if (dropped.length) emit(ctx, 'unit', `${ctx.dev.config.name} justifica que ${dropped.length} entregable(s) del plan no hacen falta: ${dropped.join(', ')}. QA lo revisará (no cambia los criterios de aceptación).`, { detail: s.drops.filter(d => dropped.includes(d.path)).map(d => `${d.path}: ${clip(d.reason, 200)}`).join(' · ') });
+  const ignoredDrops = s.drops.filter(d => !dropped.includes(d.path)).map(d => `${d.path}: el DESCARTE no aplica (ya está entregado; para cambiarlo usa patch, para discutir un hallazgo usa SIN CAMBIOS)`);
+  const problems = [...changes.filter(c => c.error).map(c => `${c.path}: ${c.error}`), ...(s.truncatedFile ? [`${s.truncatedFile}: la respuesta se cortó dentro de este archivo y no llegó completo`] : []), ...ignoredDrops, ...(files.length || dropped.length ? [] : s.assessment.reasons.slice(0, 3))];
+  return { files, dropped, problems };
 }
 
 /** Resultado de una llamada sin texto con la salida agotada: todo se fue en razonamiento oculto (pagado). Cambia de estrategia o se detiene. */
@@ -420,7 +427,7 @@ async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
   if (!unit.outputs?.length) emit(ctx, 'unit', `${label[0].toUpperCase()}${label.slice(1)}: ${unit.title} — ${agent.config.name}.`, { phase: isCorrection ? 'correcting' : 'implementing', aiCall: true, detail: `${unit.files.join(', ')} · ≈ ${unit.estimatedUsd.toFixed(2)} USD estimados` });
   let strategy: string | null = unit.error && unit.attempts ? `Intento anterior: ${unit.error}` : null;
   for (;;) {
-    checkCancelled(ctx);
+    checkCancelled(ctx); checkDuration(ctx, cfg);
     unit = unitOf(ctx, unitId); const man = manifestOf(ctx);
     const files = isCorrection ? unit.files : unit.files.filter(f => !['delivered', 'dropped'].includes(man.deliverables.find(d => d.path === f)?.status ?? 'pending'));
     if (!isCorrection && !files.length) break;
@@ -450,12 +457,15 @@ async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
     ctx.unit = { prompt, files, basePath: basePathOf(ctx), label };
     let s: Settled;
     try { s = await settleUnit(ctx, outputs, cfg, hooks); } finally { ctx.unit = null; }
-    const { files: applied, problems } = await applyUnit(ctx, unitId, s);
+    const { files: applied, dropped, problems } = await applyUnit(ctx, unitId, s);
     unit = unitOf(ctx, unitId);
     // Nuevo intento (o terminado): las salidas de este intento ya no se releen.
     setUnit(ctx, unitId, { outputs: [] });
     const missing = isCorrection ? [] : unit.files.filter(f => manifestOf(ctx).deliverables.find(d => d.path === f)?.status === 'pending');
-    const done = isCorrection ? applied.length > 0 || s.drops.length > 0 : !missing.length;
+    // Corrección que discute el hallazgo con evidencia (SIN CAMBIOS): resultado válido que QA vuelve a evaluar.
+    const disputed = isCorrection && !applied.length && !dropped.length && s.outcome === 'no_changes' && s.meta.noChanges ? s.meta.noChanges.slice(0, 1500) : null;
+    if (disputed) { setUnit(ctx, unitId, { disputed }); emit(ctx, 'correction', `${ctx.dev.config.name} discute el hallazgo «${clip((unit.findings ?? [])[0]?.text ?? unit.title, 120)}» con evidencia, sin cambiar el código. QA lo volverá a evaluar.`, { detail: clip(disputed, 400) }); }
+    const done = isCorrection ? applied.length > 0 || dropped.length > 0 || !!disputed : !missing.length;
     if (done) { setUnit(ctx, unitId, { status: 'done', error: null, finishedAt: now() }); return; }
     const why = problems.slice(0, 4).join(' · ') || `${s.assessment.kind}: sin cambios aplicables`;
     if (unit.attempts >= 2) {
@@ -551,14 +561,14 @@ export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' |
 function closeRound(ctx: StoryRunCtx, round: number) {
   const man = manifestOf(ctx); const units = man.units.filter(u => u.round === round);
   const applied = units.filter(u => (u.applied ?? []).length).length;
-  const dropped = units.some(u => u.status === 'done' && !(u.applied ?? []).length);
+  const dropped = units.some(u => u.status === 'done' && !(u.applied ?? []).length && ((u.dropped ?? []).length || !!u.disputed));
   saveManifest(ctx, m => { const r = m.rounds[round]; if (r) r.applied = applied; });
   const p = pipelineOf(ctx.slug, ctx.processId);
   if (applied || dropped) {
     const n = p.corrections + 1;
     const commit = resultOf(ctx).applied?.commit ?? '';
     updatePipeline(ctx.slug, ctx.processId, { corrections: n, ...(dropped && !applied ? { lastQaCommit: null } : {}) });
-    emit(ctx, 'correction', `Corrección ${n} aplicada (commit ${commit}). Se repite la verificación.`, { detail: units.flatMap(u => u.applied ?? []).join(', ') || 'entregables descartados con motivo' });
+    emit(ctx, 'correction', applied ? `Corrección ${n} aplicada (commit ${commit}). Se repite la verificación.` : `Corrección ${n}: sin cambios en el código; el equipo descarta o discute hallazgos con evidencia y QA vuelve a evaluar.`, { detail: units.flatMap(u => u.applied ?? []).join(', ') || units.map(u => u.disputed ? `${u.title}: ${clip(u.disputed, 200)}` : (u.dropped ?? []).join(', ')).filter(Boolean).join(' · ') });
     return;
   }
   updatePipeline(ctx.slug, ctx.processId, { ineffectiveRounds: (p.ineffectiveRounds ?? 0) + 1 });
@@ -569,7 +579,7 @@ function closeRound(ctx: StoryRunCtx, round: number) {
 // ---------------------------------------------------------------- Comprobación determinista previa a QA
 
 /** Script «test» del package.json más cercano a la prueba y si su ruta/patrón la incluye (null = no comprobable). */
-function testDiscovered(wt: string, file: string): { ok: boolean; script: string } | null {
+export function testDiscovered(wt: string, file: string): { ok: boolean; script: string } | null {
   let dir = path.posix.dirname(file);
   for (;;) {
     const pj = path.join(wt, dir, 'package.json');
@@ -578,7 +588,11 @@ function testDiscovered(wt: string, file: string): { ok: boolean; script: string
       const tokens = script.split(/\s+/).map(t => t.replace(/^['"]|['"]$/g, '')).filter(t => t && !t.startsWith('-') && !t.includes('=') && (t.includes('/') || t.includes('*')) && !/^(node|npx|tsx|vitest|jest|mocha)$/.test(t));
       if (!tokens.length) return null;
       const rel = dir === '.' ? file : path.posix.relative(dir, file);
-      const ok = tokens.some(t => { const g = t.replace(/^\.\//, ''); const re = new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*\//g, '(?:.*/)?').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*')}${g.endsWith('/') || !/[.*]/.test(base(g)) ? '' : '$'}`); return re.test(rel) || (!/[*]/.test(g) && rel.startsWith(g.replace(/\/?$/, '/'))); });
+      const checkable = tokens.filter(t => !/[{}?[\]!]/.test(t));
+      if (!checkable.length) return null;
+      const ok = checkable.some(t => { const g = t.replace(/^\.\//, ''); const re = new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*\//g, '(?:.*/)?').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*')}${g.endsWith('/') || !/[.*]/.test(base(g)) ? '' : '$'}`); return re.test(rel) || (!/[*]/.test(g) && rel.startsWith(g.replace(/\/?$/, '/'))); });
+      // Si alguna ruta del script no se pudo interpretar, podría ser la que incluye la prueba: no se afirma nada.
+      if (!ok && checkable.length < tokens.length) return null;
       return { ok, script };
     }
     if (dir === '.' || !dir) return null;
@@ -615,10 +629,15 @@ export function completenessGate(ctx: StoryRunCtx): CompletenessGate {
  * comprobación determinista. Devuelve true si hizo algo (el pipeline vuelve a empezar la vuelta).
  */
 export async function advanceUnits(ctx: StoryRunCtx, cfg: PipelineConfig): Promise<boolean> {
-  const pending = manifestOf(ctx).units.filter(u => u.status === 'pending' || u.status === 'running');
-  if (pending.length) {
-    for (const u of pending) { checkCancelled(ctx); await runUnit(ctx, cfg, u.id); }
-    const rounds = Array.from(new Set(pending.map(u => u.round).filter((x): x is number => x !== undefined)));
+  const isPending = (u: WorkUnit) => u.status === 'pending' || u.status === 'running';
+  if (manifestOf(ctx).units.some(isPending)) {
+    const rounds = new Set<number>();
+    for (let guard = 0; guard < 200; guard++) {
+      const next = manifestOf(ctx).units.find(isPending); if (!next) break;
+      checkCancelled(ctx); checkDuration(ctx, cfg);
+      if (next.round !== undefined) rounds.add(next.round);
+      await runUnit(ctx, cfg, next.id);
+    }
     for (const r of rounds) closeRound(ctx, r);
     return true;
   }
@@ -645,6 +664,7 @@ export async function advanceUnits(ctx: StoryRunCtx, cfg: PipelineConfig): Promi
 /** Al continuar tras una pausa por entrega incompleta, las unidades fallidas del plan vuelven a intentarse (con su motivo). */
 export function prepareResume(ctx: StoryRunCtx) {
   const man = processesRepo(ctx.slug).get(ctx.processId)?.result?.manifest; if (!man) return;
+  if (man.gate && !man.gate.ok) saveManifest(ctx, m => { m.gate = null; });
   if (!man.units.some(u => u.status === 'failed' && u.kind === 'build')) return;
   saveManifest(ctx, m => {
     for (const u of m.units) if (u.status === 'failed' && u.kind === 'build') { u.status = 'pending'; u.attempts = 0; u.exhausted = 0; u.outputs = []; }

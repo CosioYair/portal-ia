@@ -28,7 +28,7 @@ const { buildApp } = await import('../src/app.ts');
 const { addManualItem } = await import('../src/services/backlog.ts');
 const { createStoryProcess, runStory } = await import('../src/services/storyExecution.ts');
 const { newPipeline } = await import('../src/services/storyPipeline.ts');
-const { kindOf, syntaxProblem, UNIT_TEXT_BUDGET } = await import('../src/services/storyUnits.ts');
+const { kindOf, syntaxProblem, testDiscovered, UNIT_TEXT_BUDGET } = await import('../src/services/storyUnits.ts');
 const { sandboxDeps } = await import('../src/services/verification.ts');
 const { depsVolumeName, dockerCliEnv, SANDBOX_IMAGE } = await import('../src/services/sandbox.ts');
 const { lessonsRepo } = await import('../src/services/lessons.ts');
@@ -47,6 +47,7 @@ const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-inc-repo-'));
 const uniq = `inc-${Date.now().toString(36)}`;
 const put = (p: string, c: string) => { fs.mkdirSync(path.dirname(path.join(repo, p)), { recursive: true }); fs.writeFileSync(path.join(repo, p), c); };
 put('src/index.mjs', 'export const version = 1;\n');
+put('src/legacy.mjs', 'export const old = true;\n');
 put('test/smoke.test.mjs', "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('humo', () => assert.equal(1, 1));\n");
 put('scripts/tc.mjs', "import { execFileSync } from 'node:child_process';\nimport fs from 'node:fs';\nimport path from 'node:path';\nconst files = []; const walk = d => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (p.endsWith('.mjs')) files.push(p); } };\nfor (const d of ['src', 'test', 'tests']) if (fs.existsSync(d)) walk(d);\nlet bad = 0;\nfor (const f of files) { try { execFileSync(process.execPath, ['--check', f], { stdio: 'pipe' }); } catch (e) { bad++; console.log(`${f.split(path.sep).join('/')}(1,1): error TS1005: sintaxis no válida`); } }\nconsole.log(bad ? `${bad} error(es)` : `${files.length} archivos sin errores`);\nprocess.exit(bad ? 2 : 0);\n");
 put('scripts/build.mjs', "import fs from 'node:fs';\nfor (const f of ['contract.mjs', 'service.mjs']) if (fs.existsSync('src/' + f)) await import('../src/' + f);\nconsole.log('build ok');\n");
@@ -78,7 +79,7 @@ const EIGHT: Del[] = [['src/contract.mjs', 'code', 30], ['src/service.mjs', 'cod
 const planOf = (dels: Del[]) => JSON.stringify({ summary: 'Validador de contratos con servicio, CLI, pruebas y documentación', tasks: dels.map(d => `Entregar ${d[0]}`), filesToRead: ['src/index.mjs', 'package.json'], filesToChange: dels.map(d => d[0]), deliverables: dels.map(d => ({ path: d[0], purpose: `Entregable ${d[0]}`, kind: d[1], estimatedLines: d[2] })), acceptance: ['El validador comprueba datos, gasto y lecciones', 'Tiene CLI, pruebas y documentación'], risks: [] });
 const QA_OK = JSON.stringify({ verdict: 'approved', summary: 'Cumple el criterio con evidencia: todo entregado y probado.', findings: [], suggestedTests: [] });
 const qaReject = (findings: { text: string; file: string; expected?: string }[]) => JSON.stringify({ verdict: 'rejected', summary: 'Faltan requisitos del criterio.', findings: findings.map(f => ({ severity: 'alta', text: f.text, file: f.file, evidence: 'revisión del diff', requirement: 'criterio 1', expected: f.expected ?? 'corregirlo', verify: 'QA lo comprueba' })), suggestedTests: [] });
-const MARKERS = ['MARCA_SERVICIO', 'MARCA_CONTRATO', 'MARCA_CLI', 'MARCA_PRUEBA', 'MARCA_DOCS', 'MARCA_GUIA', 'MARCA_ARQUITECTO', 'MARCA_CONSEJO', '- crear src/contract.mjs', '- crear src/service.mjs', '- crear src/cli.mjs', '- crear test/service.test.mjs', 'Faltan src/service.mjs', 'Entregables del plan', 'Que compile no basta', 'test: OK', 'HALLAZGO_SERVICIO_1', 'HALLAZGO_SERVICIO_2', 'HALLAZGO_CLI', '[entregado] src/cli.mjs', 'Comprobación determinista previa', 'Criterio de'];
+const MARKERS = ['MARCA_SERVICIO', 'MARCA_CONTRATO', 'MARCA_CLI', 'MARCA_PRUEBA', 'MARCA_DOCS', 'MARCA_GUIA', 'MARCA_ARQUITECTO', 'MARCA_CONSEJO', '- crear src/contract.mjs', '- crear src/service.mjs', '- crear src/cli.mjs', '- crear test/service.test.mjs', 'Faltan src/service.mjs', 'Entregables del plan', 'Que compile no basta', 'test: OK', 'HALLAZGO_SERVICIO_1', 'HALLAZGO_SERVICIO_2', 'HALLAZGO_CLI', '[entregado] src/cli.mjs', 'Comprobación determinista previa', 'Criterio de', 'MARCA_HELPER', 'MARCA_DISPUTA'];
 type Rule = { match: string; text?: string; stopReason?: string; delayMs?: number; responses?: { text: string; stopReason?: string; thinkingTokens?: number }[]; thinkingTokens?: number };
 const R = { plan: 'plan técnico', consult: 'aporta recomendaciones concretas', repair: 'Tu entrega anterior para esta historia no se pudo convertir', fix: 'Corrige la implementación de esta historia', advice: 'necesita tu criterio para corregir esto', qa: 'Evalúa la implementación con la EVIDENCIA real', cont: 'Continúa el archivo', dev: 'Implementa la historia' };
 /** Las reglas específicas van antes (la primera que encaja responde): continuación, reparación, corrección, consulta, QA, unidades. */
@@ -509,6 +510,112 @@ test('lecciones: los problemas de HU-155 quedan como evidencia «detectada» (nu
     assert.ok(ls.length >= 1, `lección detectada: ${d}`);
     for (const l of ls) { assert.equal(l.status, 'detected'); assert.equal(l.lessonText, null); assert.equal(l.validatedAt, null); }
   }
+});
+
+// ---------- Revisión de código: casos límite del motor incremental ----------
+test('revisión 1/2 · un plan con formas inesperadas no rompe el manifiesto; un plan sin archivos va en una sola respuesta', async () => {
+  const odd = JSON.stringify({ summary: 'Raro', tasks: [{ text: 'Crear el contrato' }], filesToRead: 'src/index.mjs', filesToChange: [{ path: 'src/contract.mjs' }], acceptance: 'El contrato existe', risks: null });
+  setRules(odd, [{ match: 'Esta es la unidad 1 de 1', text: resp(F('src/contract.mjs', C.contract)) }]);
+  const p = await runIt('Revisión · plan raro');
+  assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
+  assert.deepEqual(p.result!.plan!.filesToChange, ['src/contract.mjs']); assert.deepEqual(p.result!.plan!.acceptance, ['El contrato existe']); assert.deepEqual(p.result!.plan!.tasks, ['Crear el contrato']);
+  setRules('No pude escribir el plan en JSON.', [{ match: R.dev, text: resp(F('src/contract.mjs', C.contract)) }]);
+  const q = await runIt('Revisión · plan ilegible');
+  assert.equal(q.result!.manifest ?? null, null, 'sin entregables no hay manifiesto: la historia va en una respuesta');
+  assert.equal(q.result!.pipeline!.state, 'verified', q.result!.pipeline!.reason ?? ''); assert.equal(byRule(R.dev).length, 1, 'el Desarrollador sí trabaja (antes: cero unidades y nada implementado)');
+});
+
+test('revisión 3 · una unidad dividida termina ANTES que las unidades que dependen de ella', async () => {
+  setRules(planOf([['src/contract.mjs', 'code', 30], ['src/cli.mjs', 'code', 30], ['test/service.test.mjs', 'test', 30]]), [
+    { match: 'Esta es la unidad 1 de ', responses: [{ text: '', stopReason: 'max_tokens', thinkingTokens: 5000 }, { text: resp(F('src/contract.mjs', C.contract)) }] },
+    { match: 'Esta es la unidad 2 de 3', text: resp(F('src/cli.mjs', C.cli.replace("from './service.mjs'", "from './contract.mjs'"))) },
+    { match: 'Esta es la unidad 3 de 3', text: resp(F('test/service.test.mjs', "import { test } from 'node:test';\ntest('ok', () => {});\n")) }
+  ]);
+  const p = await runIt('Revisión · orden tras dividir');
+  assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
+  const order = calls().map(c => c.rule).filter(r => /^Esta es la unidad/.test(r ?? ''));
+  assert.deepEqual(order, ['Esta es la unidad 1 de ', 'Esta es la unidad 1 de ', 'Esta es la unidad 2 de 3', 'Esta es la unidad 3 de 3'], 'la parte dividida (cli) va antes que las pruebas');
+  assert.ok(byRule('Esta es la unidad 3 de 3')[0].markers.includes('MARCA_CLI'), 'las pruebas ven el código ya entregado');
+});
+
+test('revisión 4 · la duración máxima autorizada se respeta entre unidades (no solo por vuelta del pipeline)', async () => {
+  setRules(planOf([['src/contract.mjs', 'code', 30], ['test/service.test.mjs', 'test', 30], ['docs/contract.md', 'docs', 20]]), [{ match: 'Esta es la unidad 1 de 3', text: resp(F('src/contract.mjs', C.contract)) }, { match: R.dev, text: resp(F('docs/contract.md', C.doc)) }]);
+  const id = newRun('Revisión · duración');
+  // Al aplicar la unidad 1, el pipeline «lleva» 3 horas (más que los 45 min autorizados).
+  await runStory(S, id, (_o, m) => { if (/^Unidad 1 de 3 aplicada/.test(m)) { const cur = processesRepo(S).get(id)!; processesRepo(S).setResult(id, { ...cur.result!, pipeline: { ...cur.result!.pipeline!, startedAt: new Date(Date.now() - 3 * 3_600_000).toISOString() } }); } }, () => false);
+  const p = processesRepo(S).get(id)!;
+  assert.equal(p.result!.pipeline!.pauseKind, 'duration'); assert.equal(calls().filter(c => /^Esta es la unidad|Implementa/.test(c.rule ?? '') && c.rule !== 'Esta es la unidad 1 de 3').length, 0, 'ninguna unidad más tras superar la duración');
+});
+
+test('revisión 5 · el archivo que pide una unidad sale del worktree (lo que entregó una unidad anterior), no de la carpeta del propietario', async () => {
+  const BLOQUEO = '=== RESUMEN ===\nNecesito ver un archivo.\n=== BLOQUEO ===\ntipo: informacion\nnecesito: el contenido de src/helpers.mjs\npregunta: ¿Qué exporta src/helpers.mjs?\nconsultar: ninguno\n';
+  setRules(planOf([['src/contract.mjs', 'code', 30], ['test/service.test.mjs', 'test', 30]]), [
+    { match: 'Antes no pudiste implementar la historia', text: resp(F('test/service.test.mjs', "import { test } from 'node:test';\nimport { help } from '../src/helpers.mjs';\ntest('ok', () => help());\n")) },
+    { match: 'Esta es la unidad 1 de 2', text: resp(F('src/contract.mjs', C.contract), F('src/helpers.mjs', '// MARCA_HELPER\nexport const help = () => 1;\n')) },
+    { match: 'Esta es la unidad 2 de 2', text: BLOQUEO }
+  ]);
+  const p = await runIt('Revisión · contexto del worktree');
+  assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
+  const supply = byRule('Antes no pudiste implementar la historia');
+  assert.equal(supply.length, 1); assert.ok(supply[0].markers.includes('MARCA_HELPER'), 'recibe el archivo que creó la unidad 1 (no existe en tu carpeta)');
+});
+
+test('revisión 6 · continuar tras «entrega incompleta» de la comprobación previa la repite: sin correcciones nuevas vuelve a pausar sin pagar a QA', async () => {
+  setRules(planOf([['src/contract.mjs', 'code', 30]]), [
+    { match: 'Corrige la implementación de esta historia', text: `=== RESUMEN ===\nCompleto.\n${P('src/contract.mjs', '// ...', "export const AREAS = 3;")}` },
+    { match: 'Esta es la unidad 1 de 1', text: resp(F('src/contract.mjs', `${C.contract}// ...\n`)) }
+  ]);
+  const id = newRun('Revisión · reanudar tras incompleta', { maxCorrections: 0 });
+  await runStory(S, id, () => undefined, () => false);
+  let p = processesRepo(S).get(id)!;
+  assert.equal(p.result!.pipeline!.pauseKind, 'incomplete'); assert.equal(byRule(R.qa).length, 0);
+  let cont = await app.inject({ method: 'POST', url: `${W}/processes/${id}/continue`, payload: { authorized: true, addBudgetUsd: 1 } });
+  assert.equal(cont.statusCode, 200, cont.body); p = await waitDone(id);
+  assert.equal(p.result!.pipeline!.pauseKind, 'incomplete', 'la comprobación se repitió y volvió a pausar'); assert.equal(byRule(R.qa).length, 0, 'QA no se paga por una entrega incompleta');
+  const act = (await flowOf(id)).guidance.flow.actions.find((a: any) => a.id === 'pipeline_resume');
+  assert.deepEqual(act.pipeline, { maxCorrections: 1 }, '«Reintentar solo lo que falta» concede la corrección que hace falta');
+  cont = await app.inject({ method: 'POST', url: `${W}/processes/${id}/continue`, payload: { authorized: true, addBudgetUsd: 1, pipeline: act.pipeline } });
+  assert.equal(cont.statusCode, 200, cont.body); p = await waitDone(id);
+  assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? ''); assert.equal(byRule(R.qa).length, 1);
+  assert.doesNotMatch(wtFile(p, 'src/contract.mjs'), /\/\/ \.\.\./);
+});
+
+test('revisión 7 · un borrado planificado cuenta como entregado (no se vuelve a pedir «crearlo»)', async () => {
+  setRules(JSON.stringify({ summary: 'Retirar el módulo antiguo', tasks: ['Eliminar src/legacy.mjs', 'Crear el contrato'], filesToRead: [], filesToChange: ['src/legacy.mjs', 'src/contract.mjs'], deliverables: [{ path: 'src/legacy.mjs', purpose: 'Eliminar el módulo antiguo', kind: 'code' }, { path: 'src/contract.mjs', purpose: 'Contrato', kind: 'code', estimatedLines: 10 }], acceptance: ['El módulo antiguo ya no existe'], risks: [] }), [
+    { match: 'Esta es la unidad 1 de 1', text: `=== RESUMEN ===\nRetirado.\n=== ARCHIVO: src/legacy.mjs | delete ===\n=== FIN ARCHIVO ===\n${F('src/contract.mjs', C.contract)}${OWNER}` }
+  ]);
+  const p = await runIt('Revisión · borrado planificado');
+  assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
+  const d = p.result!.manifest!.deliverables.find(x => x.path === 'src/legacy.mjs')!;
+  assert.equal(d.status, 'delivered'); assert.match(d.note ?? '', /eliminado/);
+  assert.equal(byRule('Esta es la unidad 1 de 1').length, 1, 'sin segundo intento');
+  assert.ok(!fs.existsSync(path.join(p.result!.applied!.worktree!, 'src/legacy.mjs')));
+});
+
+test('revisión 8/9 · un DESCARTE de un archivo ya entregado no cuenta como corrección; discutir un hallazgo con SIN CAMBIOS llega a QA', async () => {
+  const plan = planOf([['src/contract.mjs', 'code', 30]]); const dev = { match: 'Esta es la unidad 1 de 1', text: resp(F('src/contract.mjs', C.contract)) };
+  const finding = qaReject([{ text: 'CHECKS debería tener cuatro áreas', file: 'src/contract.mjs' }]);
+  setRules(plan, [{ match: 'Corrige la implementación de esta historia', text: '=== RESUMEN ===\nNo hace falta.\n=== DESCARTE: src/contract.mjs ===\nYa no se necesita.\n' }, dev], { match: R.qa, text: finding });
+  const p = await runIt('Revisión · descarte de lo entregado');
+  assert.equal(p.result!.pipeline!.pauseKind, 'repeated_failure'); assert.equal(p.result!.pipeline!.corrections, 0, 'no cuenta como corrección');
+  assert.equal(byRule(R.qa).length, 1, 'ni se vuelve a pagar a QA sobre el mismo código');
+  assert.equal(p.result!.manifest!.deliverables[0].status, 'delivered', 'el entregable no se marca como descartado');
+
+  setRules(plan, [{ match: 'Corrige la implementación de esta historia', text: '=== RESUMEN ===\nEl hallazgo no aplica.\n=== SIN CAMBIOS ===\nMARCA_DISPUTA: el criterio pide tres áreas (datos, gasto y lecciones) y CHECKS las tiene en src/contract.mjs:2.\n' }, dev], { match: R.qa, responses: [{ text: finding }, { text: QA_OK }] });
+  const q = await runIt('Revisión · hallazgo discutido');
+  assert.equal(q.result!.pipeline!.state, 'verified', q.result!.pipeline!.reason ?? '');
+  assert.equal(byRule(R.fix).length, 1, 'una sola llamada: la discusión es un resultado válido, no un intento fallido');
+  assert.ok(byRule(R.qa)[1].markers.includes('MARCA_DISPUTA'), 'QA recibe la respuesta del equipo y decide');
+  assert.equal(wtFile(q, 'src/contract.mjs'), C.contract, 'sin cambios inventados');
+});
+
+test('revisión 10 · patrones del script de test con llaves o «?» no se dan por «prueba no ejecutada»', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-glob-'));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: "mocha 'test/**/*.{test,spec}.mjs'" } }));
+  assert.equal(testDiscovered(dir, 'test/a/x.spec.mjs'), null, 'no comprobable: nunca un falso positivo');
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node --test test/*.test.mjs' } }));
+  assert.deepEqual(testDiscovered(dir, 'test/x.test.mjs')?.ok, true); assert.deepEqual(testDiscovered(dir, 'tests/x.spec.mjs')?.ok, false);
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 // ---------- R · Docker real ----------

@@ -206,6 +206,10 @@ export interface StoryRunCtx {
 }
 
 export const fileExistsIn = (base: string) => (rel: string) => { try { return fs.existsSync(path.join(base, safeRelPath(rel))); } catch { return false; } };
+/** Duración máxima autorizada (se comprueba antes de cada unidad y de cada llamada, no solo por vuelta del pipeline). */
+export function checkDuration(ctx: StoryRunCtx, cfg: PipelineConfig) {
+  if (Date.now() - new Date(pipelineOf(ctx.slug, ctx.processId).startedAt).getTime() > cfg.maxDurationMin * 60_000) throw new PipelinePause('duration', `Se alcanzó la duración máxima autorizada (${cfg.maxDurationMin} min). Lo hecho se conserva; puedes continuar.`);
+}
 export const checkCancelled = (ctx: StoryRunCtx) => { if (ctx.isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true }); };
 
 /** Llamada de un agente en un paso NUEVO (reparación, corrección, nueva revisión de QA), con comprobación de presupuesto previa. */
@@ -295,7 +299,7 @@ export function pickConsultant(team: Agent[], devId: string, blocker: AgentBlock
 /** Contexto que pidió el agente y que el equipo puede darle sin preguntar a nadie: archivos del repositorio. */
 function suppliedFiles(ctx: StoryRunCtx, files: string[]): string {
   let budget = 90_000;
-  return files.map(f => { const c = readRepoFile(ctx.repoPath, f, 30_000); if (c === null || budget <= 0) return null; budget -= c.length; return `## ${f}\n\`\`\`\n${c}\n\`\`\``; }).filter(Boolean).join('\n\n');
+  return files.map(f => { const c = readRepoFile(ctx.unit?.basePath ?? ctx.repoPath, f, 30_000); if (c === null || budget <= 0) return null; budget -= c.length; return `## ${f}\n\`\`\`\n${c}\n\`\`\``; }).filter(Boolean).join('\n\n');
 }
 
 function continuationPrompt(ctx: StoryRunCtx, need: string, info: string, previous: string): string {
@@ -671,7 +675,7 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
   const units = processesRepo(ctx.slug).get(ctx.processId)!.result!.manifest ? await import('./storyUnits.ts') : null;
   for (let guard = 0; guard < 60; guard++) {
     checkCancelled(ctx);
-    if (Date.now() - new Date(pipelineOf(ctx.slug, ctx.processId).startedAt).getTime() > cfg.maxDurationMin * 60_000) throw new PipelinePause('duration', `Se alcanzó la duración máxima autorizada (${cfg.maxDurationMin} min). Lo hecho se conserva; puedes continuar.`);
+    checkDuration(ctx, cfg);
     if (units && await units.advanceUnits(ctx, cfg)) continue;
     const p = pipelineOf(ctx.slug, ctx.processId);
     const r = processesRepo(ctx.slug).get(ctx.processId)!.result!;

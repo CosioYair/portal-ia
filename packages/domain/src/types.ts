@@ -718,6 +718,9 @@ export interface WorkUnit {
   continued?: Record<string, number>;
   /** Veces que el modelo agotó la salida sin escribir texto (todo en razonamiento oculto). */
   exhausted?: number;
+  /** Entregables que esta unidad descartó de verdad (con motivo) y respuesta del equipo que discute un hallazgo (correcciones). */
+  dropped?: string[];
+  disputed?: string | null;
   /** Salidas pagadas del intento en curso (paso + motivo de parada + prefijo de una continuación): al reanudar se releen sin volver a llamar. */
   outputs?: { stepId: string; stopReason: string | null; prefix?: string | null }[];
 }

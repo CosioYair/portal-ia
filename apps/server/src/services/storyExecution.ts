@@ -46,6 +46,13 @@ export function stepByRole(proc: Process, role: TeamRole): ProcessStep | undefin
   return legacy[role] >= 0 ? proc.steps[legacy[role]] : undefined;
 }
 
+/** Lista de textos a partir de lo que devuelva el modelo: un texto suelto, objetos con ruta/texto o valores sueltos. */
+export function asStrings(v: unknown, max: number): string[] {
+  const arr = Array.isArray(v) ? v : typeof v === 'string' ? [v] : [];
+  return arr.map(x => typeof x === 'string' ? x : x && typeof x === 'object' ? String((x as any).path ?? (x as any).text ?? (x as any).title ?? (x as any).description ?? JSON.stringify(x)) : x == null ? '' : String(x)).map(s => s.trim()).filter(Boolean).slice(0, max);
+}
+const planFrom = (j: any, fallbackSummary: string): StoryPlan => ({ summary: String(j?.summary ?? fallbackSummary), tasks: asStrings(j?.tasks, 20), filesToRead: asStrings(j?.filesToRead, 8), filesToChange: asStrings(j?.filesToChange, 10), acceptance: asStrings(j?.acceptance, 12), risks: asStrings(j?.risks, 10) });
+
 function extractJson(text: string): any | null {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
   const candidates = [fenced, text.match(/\{[\s\S]*\}/)?.[0]].filter(Boolean) as string[];
@@ -148,10 +155,10 @@ ${direction ? `\n# Dirección del proyecto (${phase ? 'etapa vigente y línea ba
 ${treeText}
 
 El equipo implementará por partes (unidades que caben en una respuesta), así que indica también, por cada archivo a crear o modificar, su propósito, tipo y tamaño previsto en líneas.
-Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "deliverables": [{"path": string, "purpose": string (una frase), "kind": "code"|"test"|"docs"|"config", "estimatedLines": number}] (uno por cada ruta de filesToChange, en orden de dependencia), "acceptance": string[], "risks": string[]}`, 2500);
+Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "deliverables": [{"path": string, "purpose": string (una frase), "kind": "code"|"test"|"docs"|"config", "estimatedLines": number}] (uno por cada ruta de filesToChange, en orden de dependencia), "acceptance": string[], "risks": string[]}`, 4000);
     const planJson = extractJson(planRes.text);
     const deliverables = Array.isArray(planJson?.deliverables) ? planJson.deliverables.filter((d: any) => d && typeof d.path === 'string').slice(0, 10).map((d: any) => ({ path: String(d.path), purpose: String(d.purpose ?? '').slice(0, 300), kind: ['code', 'test', 'docs', 'config'].includes(d.kind) ? d.kind : undefined, estimatedLines: Number.isFinite(Number(d.estimatedLines)) ? Number(d.estimatedLines) : undefined })) : undefined;
-    const plan: StoryPlan = { summary: String(planJson?.summary ?? planRes.text.slice(0, 500)), tasks: planJson?.tasks ?? [], filesToRead: (planJson?.filesToRead ?? []).slice(0, 8), filesToChange: (planJson?.filesToChange ?? []).slice(0, 10), acceptance: planJson?.acceptance ?? [], risks: planJson?.risks ?? [], ...(deliverables?.length ? { deliverables } : {}) };
+    const plan: StoryPlan = { ...planFrom(planJson, planRes.text.slice(0, 500)), ...(deliverables?.length ? { deliverables } : {}) };
     result.plan = plan; save();
 
     // 1b · Consultas de especialistas (M3): aportan recomendaciones concretas que recibe el implementador.
@@ -172,7 +179,8 @@ ${treeText}`, MAX_TOKENS.consultant);
     cancelled();
     const implStep = roleStep('implementer'); const dev = agents.get(implStep.agentId)!;
     const qaStep = stepByRole(proc, 'reviewer'); const qa = qaStep ? agents.get(qaStep.agentId)! : null;
-    if (config?.autoApply) {
+    // Sin archivos en el plan (JSON cortado o ilegible) no hay entregables que dividir: la historia va en una respuesta y el Desarrollador elige los archivos.
+    if (config?.autoApply && (plan.filesToChange.length || plan.deliverables?.length)) {
       // Pipeline con aplicación automática: entrega INCREMENTAL por unidades (manifiesto duradero, continuaciones por
       // archivo, comprobación previa a QA y correcciones dirigidas). El paso «Implementación» planificado pasa a ser
       // la primera unidad; cada llamada siguiente es su propio paso con su modelo, tokens y costo.
@@ -297,7 +305,7 @@ export async function recoverStory(slug: string, processId: string): Promise<Pro
   // Misma recuperación que el pipeline (formato canónico, variantes, diff unificado, archivos nuevos en bloques de código, JSON antiguo), sin IA.
   const planStep = stepByRole(proc, 'planner');
   const planJson = planStep?.outputMd ? extractJson(planStep.outputMd) : null;
-  const plan: StoryPlan | null = planJson ? { summary: String(planJson.summary ?? ''), tasks: planJson.tasks ?? [], filesToRead: planJson.filesToRead ?? [], filesToChange: planJson.filesToChange ?? [], acceptance: planJson.acceptance ?? [], risks: planJson.risks ?? [] } : proc.result?.plan ?? null;
+  const plan: StoryPlan | null = planJson ? planFrom(planJson, '') : proc.result?.plan ?? null;
   const exists = (p: string) => readRepoFile(repo.path, p, 1) !== null;
   let pool: RawChange[] = []; let assessment: DevOutputAssessment | null = null; let meta: ParsedDevOutput | null = null;
   for (const o of outputs) {

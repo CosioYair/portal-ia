@@ -54,6 +54,9 @@ export function qaEvidencePrompt(input: { criterion: string; plan: StoryPlan | n
 ${m.deliverables.map(d => `- [${d.planned ? STATUS[d.status] : 'fuera del plan'}] ${d.path}${d.lines ? ` (${d.lines} líneas)` : ''} — ${d.purpose}${d.status === 'dropped' && d.note ? `\n  motivo del descarte (confírmalo o recházalo con evidencia): ${d.note}` : ''}`).join('\n')}
 ${g ? `# Comprobación determinista previa (sin IA)\n${g.ok ? '- Sin problemas objetivos.' : ''}${g.missing.map(x => `\n- Falta: ${x}`).join('')}${g.invalid.map(x => `\n- ${x.path}: ${x.problem}`).join('')}${g.notes.map(x => `\n- Aviso: ${x}`).join('')}${g.testsChanged.length ? `\n- Pruebas añadidas o cambiadas: ${g.testsChanged.join(', ')}` : ''}\n` : ''}` : '';
   const prev = input.previousFindings?.length ? `# Hallazgos de tu revisión anterior (comprueba uno por uno si se corrigieron)\n${input.previousFindings.map(f => `- [${f.severity}] ${f.text}${f.file ? ` (${f.file})` : ''}`).join('\n')}\n` : '';
+  const lastRound = m?.rounds.length ? m.rounds.length - 1 : -1;
+  const disputes = (m?.units ?? []).filter(u => u.round === lastRound && u.disputed);
+  const disputed = disputes.length ? `# El equipo discute estos hallazgos sin cambiar el código (decide con la evidencia; si tiene razón, no vuelvas a pedirlo)\n${disputes.map(u => `- «${(u.findings ?? [])[0]?.text ?? u.title}»: ${u.disputed}`).join('\n')}\n` : '';
   return `Evalúa la implementación con la EVIDENCIA real de este proceso (no solo con el diff). Eres la puerta de calidad: tu veredicto decide si se entrega al propietario o vuelve al Desarrollador.
 # Criterio de aceptación
 ${input.criterion || '(no definido: usa el plan)'}
@@ -65,7 +68,7 @@ ${input.consultText}# Archivos modificados
 ${files || '(ninguno)'}
 # Verificación automática en sandbox (sobre el worktree con los cambios aplicados)
 ${ran}
-${input.tests ? `${input.tests}\n` : ''}${manifest}${prev}${input.attempts.length ? `# Intentos anteriores y correcciones\n${input.attempts.map(a => `- ${a}`).join('\n')}\n` : ''}# Diff
+${input.tests ? `${input.tests}\n` : ''}${manifest}${prev}${disputed}${input.attempts.length ? `# Intentos anteriores y correcciones\n${input.attempts.map(a => `- ${a}`).join('\n')}\n` : ''}# Diff
 ${diffs || '(vacío)'}
 
 Reglas:
