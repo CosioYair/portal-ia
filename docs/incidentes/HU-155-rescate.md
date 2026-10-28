@@ -109,21 +109,58 @@ La ruta nueva va al final de `routes/processes.ts`. Así las líneas que cita el
 
 ## 6. Cómo terminar HU-155 (sin iteración 5)
 
-1. Reiniciar el Portal con este código («Reconstruir y reiniciar»; requiere autorización).
-2. Llevar el worktree al commit de rescate, en avance rápido:
-   `git -C "<worktree>" merge --ff-only portal-ia/hu-155-rescate`.
-3. Pulsar «Registrar la corrección externa y verificarla (sin IA)» en la historia, con una nota. Se espera la pausa
+1. Reinicio controlado del Portal (autorizado) para activar `0b8e417`, sin procesos ni llamadas en curso.
+2. Worktree de HU-155 llevado a `cbcac73` en avance rápido (`git merge --ff-only portal-ia/hu-155-rescate` dentro del
+   worktree). No se reescribe ni se borra nada.
+3. El propietario pulsa «Registrar la corrección externa y verificarla (sin IA)» con una nota. Se espera la pausa
    «Corrección externa verificada: falta QA».
-4. Pulsar «Pasar a QA (sin correcciones nuevas)» con un tope de ≈ 0,5 USD. Si QA aprueba, la historia queda verificada y
-   la integración sigue siendo una decisión del propietario. Si rechaza, se detiene sin llamar al Desarrollador.
+4. El propietario pulsa «Pasar a QA (sin correcciones nuevas)» y fija el tope.
+   - Si QA aprueba, la historia queda verificada y la integración sigue siendo su decisión.
+   - Si rechaza, se detiene sin llamar al Desarrollador y los hallazgos se conservan.
 
-## 7. Decisiones del propietario que quedan
+## 7. Segunda ronda: decisiones del propietario y hallazgos pendientes (28/10/2026)
 
-- **Criterio 5:** no hay alta HTTP en Conocimiento. Las opciones son añadir un endpoint (fuera del plan) o aceptar
-  «no publicado» y publicar a mano.
-- **Barra del sistema:** el catálogo exige el commit `d9b857c`, pero el Portal en marcha está en otro. Esa área saldrá
-  Falla con el Portal actual.
-- **Hallazgos de QA sin cerrar del todo:** QA los evaluará.
-  - F1: la cadena de imports de la estimación sigue sin cotejar.
-  - F4: la captura automática depende de Playwright y Chromium.
-  - F8: el texto del incidente de la propia historia.
+El propietario decidió:
+- implementar el alta en Conocimiento que pide el criterio 5;
+- sustituir el commit fijado a mano por una comprobación dinámica.
+
+También pidió cerrar los hallazgos F1, F4 y F8 y revisar todos los criterios. Todo se hizo sin IA, en la rama
+`portal-ia/hu-155-rescate` (`c70ba87`, `1acb5af`, `cbcac73` sobre `5bee368`).
+
+| Tema | Resultado |
+|---|---|
+| Criterio 5 | `POST …/knowledge` (ver detalle abajo). `--publicar` lo usa una vez y no duplica |
+| Commit activo | `validarActivacion` exige dos cosas: que el repositorio del Portal esté en el HEAD de la CLI (leído con git por la propia CLI) o en el de `--commit`, y que no quede nada por reiniciar ni reconstruir |
+| F1 · estimación | Demostrado que no invoca IA ni escribe: ruta → `estimateStory()` síncrona → contexto, equipo y tabla de precios. Prueba con el Portal real y un proveedor simulado que registra cada llamada. El área se ejecuta sobre una historia real |
+| F4 · capturas | Playwright está declarado en el `package.json` raíz y la CLI lo carga sin dependencias nuevas. Hace falta Chromium; sin él, la CLI lo registra como Falla. En ejecución real se guardaron 9 PNG |
+| F8 · incidente | Las secciones 9.2-9.4 de la historia se reescribieron según el código y sus pruebas. Antes decían que el contrato no tenía pendientes, que no había captura, que se usaba `validarSandbox` y que la estimación quedaba fuera |
+| Criterio 1 (bloqueo nuevo) | El contrato tenía una sección de pendientes (F-1…F-6) y citas desfasadas. Ahora las 112 citas `archivo:línea` están en una tabla con su fragmento literal y `v0121-contrato.test.ts` las coteja |
+| Plantillas | `GET …/templates`. «Lecciones y plantillas» no sale OK solo con las lecciones |
+| reporta_a | El código no permite editarlo tras el alta: es una Falla prevista justificada y probada sobre el código |
+| Barra (visual) | Con todo activo, la barra del sistema no aparece. El commit se ve en la tarjeta Repositorio y la versión en ninguna parte: es una Falla visual que registra la guía |
+
+Detalle del alta en Conocimiento (`POST …/knowledge`):
+- solo alta, sin edición ni borrado por HTTP;
+- `authorized: true` en cada llamada y esquema estricto;
+- solo proyectos del espacio indicado;
+- sin secretos;
+- idempotente por título.
+
+**Dos fallos más del Portal, corregidos en `main`:**
+- **Recorte de la salida del sandbox.** Se guardaban 15 000 caracteres del principio y 15 000 del final de «test». Las pruebas
+  del medio parecían no ejecutadas: por eso la ronda 2 de la iteración 4 «corrigió» `incremental-delivery.test.ts`. Ahora:
+  - se conservan los nombres de las pruebas superadas, con un tope de 30 000 caracteres;
+  - si no caben todos, la comprobación queda «no determinada», nunca «fallida».
+
+  Con la salida real de HU-155, los 6 archivos de prueba constan como ejecutados.
+- **Pruebas inestables durante la verificación sin IA.** La verificación tras registrar una corrección externa también repite
+  una vez, sin IA, una prueba ajena que falla. Ya no cuenta como «de la historia» una prueba tocada fuera del plan y restaurada
+  después.
+
+**Evidencia.**
+- Sandbox Docker sobre `cbcac73`: typecheck, test y build en verde. Las 31 pruebas de HU-155 se ejecutaron.
+- Ejecución real de la CLI contra una instancia aislada de la rama: 14 de 14 comprobaciones.
+  - 9 capturas con Chromium.
+  - Informe publicado una vez y no duplicado al repetir.
+  - Commit activo; commit distinto y activación pendiente detectados.
+  - 0 llamadas a la IA.
