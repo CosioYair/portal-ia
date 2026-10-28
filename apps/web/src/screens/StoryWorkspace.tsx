@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
-import type { Process, StoryContext } from '@portal-ia/domain';
+import type { PipelineConfig, Process, StoryContext } from '@portal-ia/domain';
+import { DEFAULT_PIPELINE } from '@portal-ia/domain';
+import { PipelineOptions } from '../components/PipelineOptions.tsx';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
@@ -72,9 +74,10 @@ export function StoryWorkspace() {
     catch (e: any) { setEditErr(e.message); } finally { setEditBusy(false); }
   };
   const [budget, setBudget] = useState(''); const [authIter, setAuthIter] = useState(false);
+  const [pipeline, setPipeline] = useState<PipelineConfig>(DEFAULT_PIPELINE);
   const pending = ctx?.processes.find(p => p.status === 'pending_authorization') ?? null;
   useEffect(() => { if (pending && !budget) setBudget(Math.max(0.5, Math.ceil(pending.estimatedUsd * 2 * 2) / 2).toFixed(2)); }, [pending, budget]);
-  const authorize = async () => { if (!pending) return; setIterBusy(true); try { await api.authorizeProcess(slug, pending.id, Number(budget)); flash(`Iteración autorizada con ${fmtUsd(Number(budget))}`); setAuthIter(false); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setIterBusy(false); } };
+  const authorize = async () => { if (!pending) return; setIterBusy(true); try { await api.authorizeProcess(slug, pending.id, Number(budget), pipeline); flash(`Iteración autorizada con ${fmtUsd(Number(budget))}`); setAuthIter(false); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setIterBusy(false); } };
 
   if (err) return <Shell crumb="Historia"><main className="page"><Notice kind="err">{err}</Notice></main></Shell>;
   if (!ctx) return <Shell crumb="Historia"><main className="page"><span className="spin" aria-label="Cargando" /></main></Shell>;
@@ -158,7 +161,7 @@ export function StoryWorkspace() {
                 {pending ? <Notice kind="warn"><div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <div><strong>Iteración pendiente de autorización</strong> · estimación ≈ {fmtUsd(pending.estimatedUsd)} · {pending.steps.length} pasos ({pending.steps.map(s => s.agentName).join(', ')})</div>
                   {pending.result?.iterationContext && <details><summary className="small muted" style={{ cursor: 'pointer' }}>Contexto que recibirá el equipo</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap', fontSize: 12, background: '#FAF9F6', padding: 8, borderRadius: 8 }}>{pending.result.iterationContext}</pre></details>}
-                  <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}><label className="label" htmlFor="it-budget" style={{ margin: 0 }}>Presupuesto (USD)</label><input id="it-budget" className="input mono" style={{ width: 120, height: 34 }} type="number" min={0.1} step={0.5} value={budget} onChange={e => setBudget(e.target.value)} /><label className="ck"><input className="cb" type="checkbox" checked={authIter} onChange={e => setAuthIter(e.target.checked)} /><span>Autorizo al equipo a trabajar hasta ese importe</span></label><button className="btn btn-primary btn-sm" onClick={authorize} disabled={!authIter || iterBusy || !(Number(budget) > 0)}>{iterBusy ? <span className="spin spin-light" /> : Icon.arrow()}Autorizar iteración</button></div>
+                  <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}><label className="label" htmlFor="it-budget" style={{ margin: 0 }}>Presupuesto (USD)</label><input id="it-budget" className="input mono" style={{ width: 120, height: 34 }} type="number" min={0.1} step={0.5} value={budget} onChange={e => setBudget(e.target.value)} /><label className="ck"><input className="cb" type="checkbox" checked={authIter} onChange={e => setAuthIter(e.target.checked)} /><span>Autorizo al equipo a trabajar hasta ese importe</span></label></div><PipelineOptions compact value={pipeline} onChange={setPipeline} /><div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}><button className="btn btn-primary btn-sm" onClick={authorize} disabled={!authIter || iterBusy || !(Number(budget) > 0)}>{iterBusy ? <span className="spin spin-light" /> : Icon.arrow()}Autorizar iteración</button></div>
                 </div></Notice> : ctx.iteration.state !== 'in_progress' && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <div className="eyebrow">{ctx.iteration.needsReopen ? 'Reabrir la historia y crear una nueva iteración' : 'Nueva iteración'}</div>
                   <IterationComposer key={`${ctx.iterations}:${note}`} slug={slug} itemId={it.id} iteration={ctx.iteration} nextNumber={ctx.iterations + 1} initialNote={note}

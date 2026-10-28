@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, type ClipboardEvent, type ChangeEvent } from 'react';
 import { Link } from 'react-router-dom';
+import { DEFAULT_PIPELINE } from '@portal-ia/domain';
 import { api, type AssistantAction, type AssistantImage, type AssistantInfo, type AssistantMessage } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
@@ -42,7 +43,7 @@ function ProposalCard({ msgId, action, onResolved }: { msgId: string; action: As
     setBusy(true); setErr(null);
     try {
       if (isExec) {
-        const p = await api.authorizeProcess(action.workspaceSlug, action.processId, Number(budget));
+        const p = await api.authorizeProcess(action.workspaceSlug, action.processId, Number(budget), action.type === 'propose_execution' ? DEFAULT_PIPELINE : undefined);
         const r = await api.resolveAssistantProposal(msgId, action.processId, 'done', `En ejecución con presupuesto ${fmtUsd(p.budgetUsd)}. Sigue el avance en el proceso.`);
         onResolved(r.message); flash(isDeleg ? `Encargo en curso · presupuesto ${fmtUsd(p.budgetUsd)}` : `Historia ${action.storyId ?? ''} en ejecución · presupuesto ${fmtUsd(p.budgetUsd)}`);
       } else {
@@ -66,7 +67,7 @@ function ProposalCard({ msgId, action, onResolved }: { msgId: string; action: As
         {err && <Notice kind="err"><strong>No se pudo {isExec ? 'iniciar la ejecución' : 'aplicar los cambios'}.</strong> {err}</Notice>}
         {isExec && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(200px, 100%), 1fr))', gap: 12, alignItems: 'end' }}>
           <div><label className="label" htmlFor={`b-${action.processId}`}>Presupuesto máximo (USD)</label><input id={`b-${action.processId}`} className="input mono" type="number" min={0.1} step={0.5} value={budget} onChange={e => setBudget(e.target.value)} /></div>
-          <div className="help" style={{ paddingBottom: 6 }}>Estimado ≈ {fmtUsd(action.estimatedUsd ?? 0)}. El proceso se detiene entre pasos si se acerca al límite.</div>
+          <div className="help" style={{ paddingBottom: 6 }}>Estimado ≈ {fmtUsd(action.estimatedUsd ?? 0)}. El proceso se detiene entre pasos si se acerca al límite.{action.type === 'propose_execution' && ' Incluye aplicar en un worktree aislado, verificar en el sandbox y la validación de QA con evidencia (con hasta 2 correcciones). Nunca integra ni publica.'}</div>
         </div>}
         <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>{isExec
           ? (isDeleg

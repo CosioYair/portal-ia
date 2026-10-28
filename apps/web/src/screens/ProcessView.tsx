@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { Process, ProcessStep } from '@portal-ia/domain';
+import type { PipelineConfig, Process, ProcessStep } from '@portal-ia/domain';
+import { DEFAULT_PIPELINE } from '@portal-ia/domain';
+import { PipelineOptions } from '../components/PipelineOptions.tsx';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
@@ -44,10 +46,11 @@ export function ProcessView() {
   const retry = async () => { if (!proc) return; setFixBusy('retry'); setFixErr(null); try { const p = await api.retryProcess(slug, proc.id); flash('Nuevo proceso creado: autorízalo con un presupuesto'); navigate(`/procesos/${p.id}`); setProc(p); setBudget(''); } catch (e: any) { setFixErr(e.message); } finally { setFixBusy(null); } };
   const [budget, setBudget] = useState('');
   const [auth, setAuth] = useState(false);
+  const [pipeline, setPipeline] = useState<PipelineConfig>(DEFAULT_PIPELINE);
   const [authBusy, setAuthBusy] = useState(false);
   const [authErr, setAuthErr] = useState<string | null>(null);
   useEffect(() => { if (proc && proc.status === 'pending_authorization' && !budget) setBudget(Math.max(0.5, Math.ceil(proc.estimatedUsd * 2 * 2) / 2).toFixed(2)); }, [proc, budget]);
-  const authorize = async () => { if (!proc) return; setAuthBusy(true); setAuthErr(null); try { const p = await api.authorizeProcess(slug, proc.id, Number(budget)); setProc(p); flash(`Autorizado con presupuesto ${fmtUsd(p.budgetUsd)}`); setTimeout(async () => { try { setProc(await api.process(slug, proc.id)); } catch { /* seguirá el sondeo */ } }, 1500); } catch (e: any) { setAuthErr(e.message); } finally { setAuthBusy(false); } };
+  const authorize = async () => { if (!proc) return; setAuthBusy(true); setAuthErr(null); try { const p = await api.authorizeProcess(slug, proc.id, Number(budget), proc.kind === 'story_execution' ? pipeline : undefined); setProc(p); flash(`Autorizado con presupuesto ${fmtUsd(p.budgetUsd)}`); setTimeout(async () => { try { setProc(await api.process(slug, proc.id)); } catch { /* seguirá el sondeo */ } }, 1500); } catch (e: any) { setAuthErr(e.message); } finally { setAuthBusy(false); } };
 
   if (error) return <Shell crumb="Proceso"><main className="page"><Notice kind="err">{error}</Notice></main></Shell>;
   if (!proc) return <Shell crumb="Proceso"><main className="page"><span className="spin" aria-label="Cargando" /></main></Shell>;
@@ -95,6 +98,7 @@ export function ProcessView() {
               <div><label className="label" htmlFor="pv-budget">Presupuesto máximo (USD)</label><input id="pv-budget" className="input mono" type="number" min={0.1} step={0.5} value={budget} onChange={e => setBudget(e.target.value)} /></div>
               <div className="help" style={{ paddingBottom: 26 }}>El proceso se detiene entre pasos si el gasto se acerca al límite.</div>
             </div>
+            {proc.kind === 'story_execution' && <PipelineOptions value={pipeline} onChange={setPipeline} team={proc.steps.map(s => ({ agentName: s.agentName, role: s.title, model: s.model ?? '' }))} />}
             <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo a los agentes indicados a trabajar en este proceso hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. Los resultados son propuestas que revisaré antes de aplicarse.</span></label>
             <button className="btn btn-primary" style={{ alignSelf: 'flex-start' }} onClick={authorize} disabled={!auth || authBusy || !(Number(budget) > 0)}>{authBusy ? <span className="spin spin-light" /> : Icon.arrow()}{authBusy ? 'Autorizando…' : 'Autorizar y comenzar'}</button>
           </div></section>}

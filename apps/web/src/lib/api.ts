@@ -1,4 +1,4 @@
-import type { PhaseTransition, PhaseTransitionPreview, ProjectArchive, StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
+import type { PipelineConfig, PhaseTransition, PhaseTransitionPreview, ProjectArchive, StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
 import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
 
@@ -61,7 +61,10 @@ export const api = {
   createAssessment: (slug: string, projectId: string) => request<Process>(`/api/workspaces/${slug}/projects/${projectId}/assessment`, { method: 'POST' }),
   processes: (slug: string, projectId: string) => request<Process[]>(`/api/workspaces/${slug}/projects/${projectId}/processes`),
   process: (slug: string, id: string) => request<Process>(`/api/workspaces/${slug}/processes/${id}`),
-  authorizeProcess: (slug: string, id: string, budgetUsd: number) => request<Process>(`/api/workspaces/${slug}/processes/${id}/authorize`, { method: 'POST', body: JSON.stringify({ budgetUsd, authorized: true }) }),
+  /** Autoriza un proceso. En historias, `pipeline` incluye en ESTA autorización aplicar, verificar, QA con evidencia y correcciones acotadas. */
+  authorizeProcess: (slug: string, id: string, budgetUsd: number, pipeline?: PipelineConfig) => request<Process>(`/api/workspaces/${slug}/processes/${id}/authorize`, { method: 'POST', body: JSON.stringify({ budgetUsd, authorized: true, ...(pipeline ? { pipeline } : {}) }) }),
+  /** Continuar de forma autónoma (pipeline pausado/detenido, proceso sin pipeline o entrega a reparar). Autorizado por el propietario. */
+  continueProcess: (slug: string, id: string, body: { addBudgetUsd?: number; pipeline?: Partial<PipelineConfig> }) => request<Process>(`/api/workspaces/${slug}/processes/${id}/continue`, { method: 'POST', body: JSON.stringify({ authorized: true, ...body }) }),
   cancelProcess: (slug: string, id: string) => request<Process>(`/api/workspaces/${slug}/processes/${id}/cancel`, { method: 'POST' }),
   knowledge: (slug: string, projectId: string) => request<KnowledgeDoc[]>(`/api/workspaces/${slug}/projects/${projectId}/knowledge`),
   // HU-005 · backlog y ejecución de historias

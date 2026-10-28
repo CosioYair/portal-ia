@@ -39,6 +39,8 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const flow = proc.guidance?.flow;
   const [confirming, setConfirming] = useState<FlowAction | null>(null);
   const [okAuth, setOkAuth] = useState(false);
+  const [addBudget, setAddBudget] = useState('0.50');
+  const [allowInstall, setAllowInstall] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [composer, setComposer] = useState<StoryContext | null>(null);
@@ -67,7 +69,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
     if (a.id === 'ask_team') { if (!itemId) return; if (onAsk) onAsk(askText); else navigate(`/historias/${itemId}#chat`, { state: { ask: askText } }); return; }
     if ((a.id === 'request_fix' || a.id === 'new_iteration') && itemId) { setBusy(a.id); try { setComposer(await api.story(slug, itemId)); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } return; }
     // El resto se ejecuta aquí: las que exigen autorización/red piden confirmación explícita antes
-    if (a.requires.some(r => r === 'authorization' || r === 'network') && confirming?.id !== a.id) { setConfirming(a); setOkAuth(false); return; }
+    if (a.requires.some(r => r === 'authorization' || r === 'network') && confirming?.id !== a.id) { setConfirming(a); setOkAuth(false); setAddBudget((a.suggestedBudgetUsd ?? 0.5).toFixed(2)); setAllowInstall(!!a.pipeline?.allowInstall); return; }
     setBusy(a.id);
     try {
       if (a.id === 'install_and_retry') { const p = await api.installAndRetry(slug, proc.id, a.commands ?? []); onChange(p); const v = p.result?.verifications ?? []; const inst = v.filter(x => x.command === 'install').at(-1); flash(inst?.exitCode === 0 ? 'Dependencias instaladas; verificación repetida' : 'La instalación no terminó bien: revisa el detalle', inst?.exitCode === 0 ? 'ok' : 'err'); }
@@ -86,6 +88,11 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       else if (a.id === 'close' && itemId) { await api.markStoryDone(slug, itemId); flash('Historia completada'); await reload(); }
       else if (a.id === 'close_resolved' && itemId) { const reason = prompt('Cerrar como resuelta: indica brevemente por qué (queda registrado).', 'Lo pedido ya funciona en el Portal'); if (reason === null) return; await api.markStoryDone(slug, itemId, { force: true, reason: reason.trim() || 'resuelta fuera del flujo' }); await reload(); }
       else if (a.id === 'retry_process') { const p = await api.retryProcess(slug, proc.id); flash('Proceso nuevo creado: elige el presupuesto y autorízalo'); navigate(`/procesos/${p.id}`); }
+      else if (a.id === 'pipeline_resume' || a.id === 'repair_output') {
+        const add = a.requires.includes('ai_budget') ? Math.max(0, Number(addBudget) || 0) : 0;
+        const p = await api.continueProcess(slug, proc.id, { addBudgetUsd: add, pipeline: { ...(a.pipeline ?? {}), ...(allowInstall ? { allowInstall: true } : {}) } });
+        onChange(p); flash(a.id === 'repair_output' ? 'El Desarrollador está reparando su entrega (sin repetir el plan)' : 'El equipo retoma el trabajo donde lo dejó');
+      }
       else if (a.id === 'recover') { const p = await api.recoverProcess(slug, proc.id); onChange(p); flash('Resultado recuperado sin IA'); }
       else if (a.id === 'cancel') { if (!confirm('¿Cancelar el proceso? Se detendrá al terminar el paso en curso.')) return; await api.cancelProcess(slug, proc.id); flash('Cancelación solicitada'); }
       setConfirming(null);
@@ -117,6 +124,8 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         </li>)}
       </ol>
 
+      {flow.headline && <div className={`sf-headline${proc.result?.pipeline?.state === 'verified' ? ' is-ok' : ''}`} role="status" aria-label="Estado del pipeline">{proc.result?.pipeline?.state === 'verified' ? Icon.okc() : proc.status === 'running' ? <span className="spin" /> : Icon.info()}<span>{flow.headline}</span></div>}
+
       <div className="sf-now" aria-label="Etapa actual">
         <div className="sf-now-head"><strong>Ahora: {cur.label}</strong><Chip tone={STATUS_TONE[cur.status]} xs>{STATUS_TXT[cur.status]}</Chip></div>
         {cur.detail && <span className="small muted">{cur.detail}</span>}
@@ -131,6 +140,8 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
           <span className="small muted mono">{s.status === 'pending' ? 'en espera' : `${elapsed(s.startedAt, s.finishedAt)}${s.inputTokens + s.outputTokens ? ` · ${s.inputTokens + s.outputTokens} tokens · ${fmtUsd(s.costUsd)}` : ''}`}</span>
         </div>)}
       </div>}
+
+      {proc.result?.pipeline && <PipelineActivity proc={proc} />}
 
       {issue && <div className="sf-issue" data-cause={issue.cause} data-level={issue.level} role={issue.level === 'blocker' ? 'alert' : undefined} aria-label="Problema actual">
         <div className="sf-issue-title">{issue.level === 'blocker' ? Icon.alert() : Icon.warn()}<span>{issue.title}</span><Chip xs tone={issue.cause === 'environment' ? 'warn' : issue.cause === 'code' ? 'err' : ''}>{CAUSE[issue.cause]}</Chip></div>
@@ -154,7 +165,9 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         <strong className="sm13">{confirming.label}</strong>
         <span className="sm13">{confirming.description}</span>
         <label className="ck"><input className="cb" type="checkbox" checked={okAuth} onChange={e => setOkAuth(e.target.checked)} />
-          <span>{confirming.requires.includes('network') ? <>Autorizo ejecutar en el sandbox y <strong>permitir red solo durante la instalación de dependencias</strong> (npm ci, sin scripts del repositorio); lo demás se ejecuta sin red.</> : <>Autorizo esta acción{confirming.id === 'merge' ? ' (merge en main)' : confirming.id === 'runtime_check' ? ' (el Portal se consulta a sí mismo)' : ' en el sandbox, sobre el worktree del proceso'}.</>}</span></label>
+          <span>{confirming.requires.includes('network') ? <>Autorizo ejecutar en el sandbox y <strong>permitir red solo durante la instalación de dependencias</strong> (npm ci, sin scripts del repositorio); lo demás se ejecuta sin red.</> : confirming.id === 'pipeline_resume' || confirming.id === 'repair_output' ? <>Autorizo al equipo a continuar {confirming.requires.includes('ai_budget') ? <>con hasta <strong>{fmtUsd(Number(addBudget) || 0)}</strong> adicionales (máximo, no objetivo)</> : 'sin gasto de IA adicional'}. No integra, no reinicia el Portal ni publica.</> : <>Autorizo esta acción{confirming.id === 'merge' ? ' (merge en main)' : confirming.id === 'runtime_check' ? ' (el Portal se consulta a sí mismo)' : ' en el sandbox, sobre el worktree del proceso'}.</>}</span></label>
+        {(confirming.id === 'pipeline_resume' || confirming.id === 'repair_output') && confirming.requires.includes('ai_budget') && <label className="small" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>Presupuesto adicional (USD) <input className="input mono" type="number" min={0} step={0.25} value={addBudget} onChange={e => setAddBudget(e.target.value)} style={{ width: 100, height: 30 }} aria-label="Presupuesto adicional" /><span className="muted">quedan {fmtUsd(Math.max(0, proc.budgetUsd - proc.spentUsd))} del autorizado</span></label>}
+        {(confirming.id === 'pipeline_resume' || confirming.id === 'repair_output') && !confirming.requires.includes('network') && <label className="ck small"><input className="cb" type="checkbox" checked={allowInstall} onChange={e => setAllowInstall(e.target.checked)} /><span>Si faltan dependencias en el sandbox, instalarlas con red temporal (solo durante la instalación).</span></label>}
         <div className="sf-actions"><button className="btn btn-primary btn-sm" disabled={!okAuth || busy !== null} onClick={() => void run(confirming)}>{busy === confirming.id ? <span className="spin spin-light" /> : Icon.check()}Confirmar y ejecutar</button><button className="btn btn-ghost btn-sm" onClick={() => setConfirming(null)} disabled={busy !== null}>Cancelar</button></div>
       </div>}
 
@@ -170,6 +183,31 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       {err && <Notice kind="err">{err}</Notice>}
     </section>
   );
+}
+
+const EV_ICON: Record<string, string> = { recovery: '♻', repair: '✎', apply: '⎇', verify: '✓', environment: '⚙', qa: '◎', correction: '✎', pause: '⏸', done: '★', error: '✕', info: '·' };
+const QA_TXT: Record<string, string> = { approved: 'QA aprobó con evidencia', rejected: 'QA rechazó', blocked_environment: 'QA bloqueada por el entorno', unable_to_verify: 'QA no pudo verificar' };
+
+/** Actividad del pipeline como una sola actividad coordinada: eventos breves, intentos, QA y presupuesto. */
+function PipelineActivity({ proc }: { proc: Process }) {
+  const pl = proc.result!.pipeline!; const review = proc.result!.review;
+  const events = pl.events.filter(e => e.kind !== 'info' || pl.events.length < 6);
+  const recent = events.slice(-6);
+  const aiCost = pl.events.reduce((a, e) => a + (e.costUsd ?? 0), 0);
+  return <div className="sf-pipe" aria-label="Actividad del equipo">
+    <div className="sf-pipe-meta small">
+      <span>Pipeline autorizado · {pl.config.autoApply ? `aplicar, ${pl.config.commands.join(', ')}, QA` : 'manual'}</span>
+      <span>Correcciones {pl.corrections}/{pl.config.maxCorrections} · reparaciones {pl.outputRepairs}/{pl.config.maxOutputRepairs}</span>
+      {review?.verdict && <span>{QA_TXT[review.verdict]}{review.overridden ? ' (corregido por la verificación)' : ''}</span>}
+      <span className="mono">{fmtUsd(proc.spentUsd)} gastados · quedan {fmtUsd(Math.max(0, proc.budgetUsd - proc.spentUsd))}{aiCost ? ` · reparaciones/correcciones ${fmtUsd(aiCost)}` : ''}</span>
+    </div>
+    <ol className="sf-pipe-events">
+      {recent.map((e, i) => <li key={i} data-kind={e.kind}><span aria-hidden="true">{EV_ICON[e.kind] ?? '·'}</span><span>{e.message}{e.costUsd ? <span className="muted mono"> · {fmtUsd(e.costUsd)}</span> : null}</span></li>)}
+    </ol>
+    {pl.events.length > 0 && <details><summary className="small" style={{ cursor: 'pointer' }}>Registro técnico completo ({pl.events.length} eventos)</summary>
+      <ol className="sf-pipe-log small mono">{pl.events.map((e, i) => <li key={i}>{new Date(e.at).toLocaleTimeString('es-MX')} · {e.kind} · {e.message}{e.detail ? ` — ${e.detail}` : ''}</li>)}</ol>
+    </details>}
+  </div>;
 }
 
 /** Errores de la API en lenguaje claro (permisos, autorización, conflictos). */

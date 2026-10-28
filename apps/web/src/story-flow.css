@@ -35,3 +35,13 @@
 .sf-agent { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 13px; }
 .sf-agent .small { white-space: nowrap; }
 @media (max-width: 720px) { .sf-stage-label { display: none; } .sf-agent { grid-template-columns: 18px minmax(0, 1fr); } .sf-agent .small { grid-column: 2; white-space: normal; } }
+/* Pipeline autorizado: titular (éxito / trabajando) y actividad coordinada del equipo */
+.sf-headline { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-radius: 8px; background: #F3F1EC; font-size: 14px; font-weight: 600; }
+.sf-headline.is-ok { background: #E3F1EF; color: #0B5652; }
+.sf-pipe { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid #EEECE6; padding-top: 8px; }
+.sf-pipe-meta { display: flex; gap: 14px; flex-wrap: wrap; color: #5C5F66; }
+.sf-pipe-events { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.sf-pipe-events li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 6px; }
+.sf-pipe-events li[data-kind="pause"], .sf-pipe-events li[data-kind="error"] { color: #8A3A00; }
+.sf-pipe-events li[data-kind="done"] { color: #0B5652; font-weight: 600; }
+.sf-pipe-log { max-height: 260px; overflow: auto; margin: 6px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; }

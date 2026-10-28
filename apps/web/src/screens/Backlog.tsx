@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Agent, AssessmentEstimate, BacklogItem, PhaseTransition, Process } from '@portal-ia/domain';
+import type { Agent, AssessmentEstimate, BacklogItem, PhaseTransition, PipelineConfig, Process } from '@portal-ia/domain';
+import { DEFAULT_PIPELINE } from '@portal-ia/domain';
+import { PipelineOptions } from '../components/PipelineOptions.tsx';
 import { api, type ProjectFull } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { BACKLOG_STATUS, fmtUsd } from '../lib/labels.ts';
@@ -23,6 +25,7 @@ export function Backlog() {
   const [execError, setExecError] = useState<string | null>(null);
   const [budget, setBudget] = useState('');
   const [auth, setAuth] = useState(false);
+  const [pipeline, setPipeline] = useState<PipelineConfig>(DEFAULT_PIPELINE);
   const [busy, setBusy] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newCrit, setNewCrit] = useState('');
@@ -62,7 +65,7 @@ export function Backlog() {
   const addItem = async () => { if (newTitle.trim().length < 3) return; setBusy(true); try { await api.addBacklogItem(ws.slug, projectId, { title: newTitle.trim(), criterion: newCrit.trim() || undefined }); setNewTitle(''); setNewCrit(''); flash('Solicitud añadida al backlog'); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   const execute = async () => {
     if (!sel || !auth) return; setBusy(true); setExecError(null);
-    try { const p = await api.executeStory(ws.slug, projectId, sel.id, skipQa, { add: teamAdd, remove: teamRemove }); const a = await api.authorizeProcess(ws.slug, p.id, Number(budget)); flash(`Historia ${sel.storyId} en ejecución · presupuesto ${fmtUsd(a.budgetUsd)}`); navigate(`/procesos/${a.id}`); }
+    try { const p = await api.executeStory(ws.slug, projectId, sel.id, skipQa, { add: teamAdd, remove: teamRemove }); const a = await api.authorizeProcess(ws.slug, p.id, Number(budget), pipeline); flash(`Historia ${sel.storyId} en ejecución · presupuesto ${fmtUsd(a.budgetUsd)}`); navigate(`/procesos/${a.id}`); }
     catch (e: any) { setExecError(e.message); flash(e.message, 'err'); } finally { setBusy(false); }
   };
 
@@ -183,6 +186,7 @@ export function Backlog() {
                     <div className="help" style={{ paddingBottom: 26 }}>Si el gasto se acerca al límite, el proceso se detiene entre pasos. El Desarrollador modifica archivos con parches y crea los nuevos completos; es el paso más caro.</div>
                   </div>
                   <label className="ck"><input className="cb" type="checkbox" checked={!skipQa} onChange={e => setSkipQa(!e.target.checked)} /><span>Incluir la <strong>revisión de QA</strong> (recomendado). Sin ella la historia termina antes y cuesta menos; el diff lo revisas tú.</span></label>
+                  <PipelineOptions value={pipeline} onChange={setPipeline} repo={project?.repository?.path ?? null} team={(est?.steps ?? []).map(s => { const ag = agents.find(a => a.id === s.agentId); return { agentName: s.agentName, role: s.title, model: s.model, effort: ag?.config.effort ?? null, tools: Object.entries(ag?.config.tools ?? {}).filter(([, v]) => v).map(([k]) => k) }; })} />
                   <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo que los agentes del proyecto trabajen en la historia <strong>{sel.storyId}</strong> con lectura del repositorio, hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. Los cambios resultantes serán <strong>propuestas</strong> que revisaré antes de aplicarse en una rama git.</span></label>
                 </div>
                 <div className="modal-f">
