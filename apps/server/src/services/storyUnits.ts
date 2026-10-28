@@ -474,7 +474,7 @@ async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
       const advice = await consultOnce(ctx, cfg, unit, why);
       if (advice) strategy += `\n${advice}`;
     } else {
-      strategy = `Faltan ${missing.join(', ')} de esta unidad (${why}). Entrega SOLO esos archivos ahora.${s.truncatedFile || /cortó|reconstruido/.test(why) ? ' Si un archivo no cabe en una respuesta, divídelo en dos módulos más pequeños (y ajusta los imports); los módulos nuevos se aceptan.' : ''}`;
+      strategy = `Faltan ${missing.join(', ')} de esta unidad (${why}). Entrega SOLO esos archivos ahora; si alguno de verdad no hace falta (lo cubre otro archivo), decláralo con DESCARTE y el motivo en vez de omitirlo.${s.truncatedFile || /cortó|reconstruido/.test(why) ? ' Si un archivo no cabe en una respuesta, divídelo en dos módulos más pequeños (y ajusta los imports); los módulos nuevos se aceptan.' : ''}`;
     }
   }
   setUnit(ctx, unitId, { status: 'done', error: null, finishedAt: now() });
