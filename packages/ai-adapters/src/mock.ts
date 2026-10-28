@@ -40,7 +40,7 @@ export const mockAdapter: ProviderAdapter = {
     const rule = script.rules.find(r => { try { return new RegExp(r.match, 'is').test(hay); } catch { return false; } });
     const markers = (script.markers ?? []).filter(m => hay.includes(m));
     const log = process.env.PORTAL_MOCK_LOG;
-    if (log) fs.appendFileSync(log, JSON.stringify({ at: new Date().toISOString(), model: req.model, chars: hay.length, rule: rule?.match ?? null, markers, images: req.images?.length ?? 0, history: req.history?.length ?? 0 }) + '\n');
+    if (log) fs.appendFileSync(log, JSON.stringify({ at: new Date().toISOString(), model: req.model, chars: hay.length, rule: rule?.match ?? null, markers, images: req.images?.length ?? 0, history: req.history?.length ?? 0, schema: req.responseSchema?.name ?? null }) + '\n');
     if (!rule) return { text: DEFAULT_TEXT, inputTokens: estimateTokens(hay), outputTokens: estimateTokens(DEFAULT_TEXT), stopReason: 'end_turn' };
     if (rule.error) throw new ProviderRequestError({ code: rule.error as any, message: `Error simulado: ${rule.error}` });
     let text = rule.textFile ? fs.readFileSync(rule.textFile, 'utf8') : (rule.text ?? '');

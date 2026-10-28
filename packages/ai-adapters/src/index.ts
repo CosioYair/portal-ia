@@ -23,6 +23,12 @@ export interface CompletionRequest {
   images?: { mediaType: string; data: string }[];
   /** Turnos previos (para continuar una respuesta cortada): se insertan antes del turno de usuario actual. */
   history?: { role: 'user' | 'assistant'; content: string }[];
+  /**
+   * Salida estructurada nativa del proveedor (si la admite): Anthropic fuerza una herramienta con este esquema de entrada;
+   * OpenAI usa response_format json_schema estricto. El texto devuelto es el JSON. Si el proveedor rechaza el parámetro
+   * (400), se repite UNA vez sin él y el motor valida el JSON igualmente.
+   */
+  responseSchema?: { name: string; description?: string; schema: Record<string, unknown> };
 }
 export interface CompletionResult {
   text: string;
@@ -104,17 +110,21 @@ export const anthropicAdapter: ProviderAdapter = {
     const budget = req.effort === 'high' ? 8000 : req.effort === 'medium' ? 3000 : 0;
     const content: any[] = [...(req.images ?? []).map(im => ({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.data } })), { type: 'text', text: req.user }];
     const base: any = { model: req.model, max_tokens: req.maxTokens + budget, system: req.system, messages: [...(req.history ?? []).map(h => ({ role: h.role, content: h.content })), { role: 'user', content }] };
-    const withThinking = req.supportsEffort && budget > 0 ? { ...base, thinking: { type: 'enabled', budget_tokens: budget } } : base;
+    const thinking = req.supportsEffort && budget > 0;
+    // Forzar una herramienta no es compatible con el razonamiento extendido: con razonamiento, el esquema va solo en el prompt.
+    const structured = req.responseSchema && !thinking ? { ...base, tools: [{ name: req.responseSchema.name, description: req.responseSchema.description ?? 'Devuelve el resultado estructurado.', input_schema: req.responseSchema.schema }], tool_choice: { type: 'tool', name: req.responseSchema.name } } : base;
+    const withThinking = thinking ? { ...base, thinking: { type: 'enabled', budget_tokens: budget } } : structured;
     let j: any;
     try {
       j = await fetchJson('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(withThinking) }, signal, COMPLETE_TIMEOUT_MS);
     } catch (e) {
       // Si el modelo no acepta el parámetro de razonamiento, reintentamos sin él (una sola vez).
-      if (withThinking !== base && e instanceof ProviderRequestError && e.error.httpStatus === 400 && /thinking|budget_tokens/i.test(e.error.message)) {
+      if (withThinking !== base && e instanceof ProviderRequestError && e.error.httpStatus === 400 && /thinking|budget_tokens|tool/i.test(e.error.message)) {
         j = await fetchJson('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(base) }, signal, COMPLETE_TIMEOUT_MS);
       } else throw e;
     }
-    const text = (j.content ?? []).filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n');
+    const tool = (j.content ?? []).find((c: any) => c.type === 'tool_use' && c.input && typeof c.input === 'object');
+    const text = tool ? JSON.stringify(tool.input) : (j.content ?? []).filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n');
     return { text, inputTokens: j.usage?.input_tokens ?? 0, outputTokens: (j.usage?.output_tokens ?? 0), stopReason: j.stop_reason ?? null };
   }
 };
@@ -134,7 +144,15 @@ export const openaiAdapter: ProviderAdapter = {
     const userContent: any = req.images?.length ? [...req.images.map(im => ({ type: 'image_url', image_url: { url: `data:${im.mediaType};base64,${im.data}` } })), { type: 'text', text: req.user }] : req.user;
     const body: any = { model: req.model, messages: [{ role: 'system', content: req.system }, ...(req.history ?? []), { role: 'user', content: userContent }], max_completion_tokens: req.maxTokens };
     if (req.supportsEffort) body.reasoning_effort = req.effort;
-    const j = await fetchJson('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify(body) }, signal, COMPLETE_TIMEOUT_MS);
+    if (req.responseSchema) body.response_format = { type: 'json_schema', json_schema: { name: req.responseSchema.name, schema: req.responseSchema.schema, strict: true } };
+    const post = (b: any) => fetchJson('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify(b) }, signal, COMPLETE_TIMEOUT_MS);
+    let j: any;
+    try { j = await post(body); }
+    catch (e) {
+      // Si el modelo no admite response_format (400), se repite una vez sin él: el motor valida el JSON igualmente.
+      if (body.response_format && e instanceof ProviderRequestError && e.error.httpStatus === 400 && /response_format|json_schema|schema/i.test(e.error.message)) { const { response_format: _omit, ...plain } = body; j = await post(plain); }
+      else throw e;
+    }
     const choice = j.choices?.[0];
     return { text: choice?.message?.content ?? '', inputTokens: j.usage?.prompt_tokens ?? 0, outputTokens: j.usage?.completion_tokens ?? 0, stopReason: choice?.finish_reason ?? null };
   }
