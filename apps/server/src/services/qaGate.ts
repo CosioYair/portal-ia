@@ -1,4 +1,4 @@
-import type { ProposedChange, QaFinding, QaVerdictKind, ReviewVerdict, StoryPlan, VerificationRun } from '@portal-ia/domain';
+import type { ProposedChange, QaFinding, QaVerdictKind, ReviewVerdict, StoryManifest, StoryPlan, VerificationRun } from '@portal-ia/domain';
 import { qaSeverity } from '@portal-ia/domain';
 import { filesIn, parseBuildErrors, parseFailingTests, parseTypeScriptErrors, tailOf } from './diagnostics.ts';
 
@@ -14,7 +14,7 @@ export const QA_VERDICT_SCHEMA = {
   properties: {
     verdict: { type: 'string', enum: ['approved', 'rejected', 'blocked_environment', 'unable_to_verify'] },
     summary: { type: 'string' },
-    findings: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['severity', 'text', 'file', 'evidence'], properties: { severity: { type: 'string', enum: ['alta', 'media', 'baja'] }, text: { type: 'string' }, file: { type: ['string', 'null'] }, evidence: { type: ['string', 'null'] } } } },
+    findings: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['severity', 'text', 'file', 'evidence', 'requirement', 'expected', 'verify'], properties: { severity: { type: 'string', enum: ['alta', 'media', 'baja'] }, text: { type: 'string' }, file: { type: ['string', 'null'] }, evidence: { type: ['string', 'null'] }, requirement: { type: ['string', 'null'] }, expected: { type: ['string', 'null'] }, verify: { type: ['string', 'null'] } } } },
     suggestedTests: { type: 'array', items: { type: 'string' } }
   }
 } as const;
@@ -35,10 +35,25 @@ export function verificationEvidence(v: VerificationRun): string {
   return `${head}\n${d.slice(0, 12).map(x => `  · ${x.file ? `${x.file}${x.line ? `:${x.line}` : ''} ` : ''}${x.code ? `${x.code} ` : ''}${x.text}`).join('\n')}\n  Salida (final):\n${tailOf(v.output, 15).split('\n').map(l => `    ${l}`).join('\n')}`;
 }
 
-export function qaEvidencePrompt(input: { criterion: string; plan: StoryPlan | null; summary: string; changes: ProposedChange[]; verifications: VerificationRun[]; required: string[]; attempts: string[]; consultText: string }): string {
+/** Lo que dicen las pruebas en verde (cuántas pasaron), para que QA distinga «compila» de «está probado». */
+export function testsEvidence(verifications: VerificationRun[]): string {
+  const t = verifications.filter(v => v.command === 'test').at(-1);
+  if (!t) return '';
+  const pass = t.output.match(/^#\s*pass\s+(\d+)/m)?.[1] ?? t.output.match(/(\d+)\s+(?:passed|passing|pruebas? (?:ok|correctas?))/i)?.[1];
+  const files = Array.from(new Set(Array.from(t.output.matchAll(/([\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?)/g)).map(m => m[1]))).slice(0, 12);
+  return `- test: ${t.exitCode === 0 ? 'OK' : 'FALLÓ'}${pass ? ` · ${pass} prueba(s) correctas` : ''}${files.length ? ` · archivos: ${files.join(', ')}` : ''}`;
+}
+
+export function qaEvidencePrompt(input: { criterion: string; plan: StoryPlan | null; summary: string; changes: ProposedChange[]; verifications: VerificationRun[]; required: string[]; attempts: string[]; consultText: string; manifest?: StoryManifest | null; previousFindings?: QaFinding[]; tests?: string }): string {
   const files = input.changes.filter(c => !c.error).map(c => `${c.action} ${c.path} (${c.before}→${c.after} líneas)`).join('\n');
   const diffs = input.changes.filter(c => !c.error).map(c => c.diff ?? '').join('\n\n').slice(0, 50_000);
   const ran = input.required.map(cmd => { const v = input.verifications.filter(x => x.command === cmd).at(-1); return v ? verificationEvidence(v) : `- ${cmd}: NO SE EJECUTÓ`; }).join('\n');
+  const m = input.manifest; const g = m?.gate;
+  const STATUS: Record<string, string> = { delivered: 'entregado', pending: 'SIN ENTREGAR', failed: 'NO SE PUDO ENTREGAR', dropped: 'DESCARTADO por el equipo' };
+  const manifest = m ? `# Entregables del plan (estado REAL del worktree, no la palabra del agente)
+${m.deliverables.map(d => `- [${d.planned ? STATUS[d.status] : 'fuera del plan'}] ${d.path}${d.lines ? ` (${d.lines} líneas)` : ''} — ${d.purpose}${d.status === 'dropped' && d.note ? `\n  motivo del descarte (confírmalo o recházalo con evidencia): ${d.note}` : ''}`).join('\n')}
+${g ? `# Comprobación determinista previa (sin IA)\n${g.ok ? '- Sin problemas objetivos.' : ''}${g.missing.map(x => `\n- Falta: ${x}`).join('')}${g.invalid.map(x => `\n- ${x.path}: ${x.problem}`).join('')}${g.notes.map(x => `\n- Aviso: ${x}`).join('')}${g.testsChanged.length ? `\n- Pruebas añadidas o cambiadas: ${g.testsChanged.join(', ')}` : ''}\n` : ''}` : '';
+  const prev = input.previousFindings?.length ? `# Hallazgos de tu revisión anterior (comprueba uno por uno si se corrigieron)\n${input.previousFindings.map(f => `- [${f.severity}] ${f.text}${f.file ? ` (${f.file})` : ''}`).join('\n')}\n` : '';
   return `Evalúa la implementación con la EVIDENCIA real de este proceso (no solo con el diff). Eres la puerta de calidad: tu veredicto decide si se entrega al propietario o vuelve al Desarrollador.
 # Criterio de aceptación
 ${input.criterion || '(no definido: usa el plan)'}
@@ -50,16 +65,16 @@ ${input.consultText}# Archivos modificados
 ${files || '(ninguno)'}
 # Verificación automática en sandbox (sobre el worktree con los cambios aplicados)
 ${ran}
-${input.attempts.length ? `# Intentos anteriores y correcciones\n${input.attempts.map(a => `- ${a}`).join('\n')}\n` : ''}# Diff
+${input.tests ? `${input.tests}\n` : ''}${manifest}${prev}${input.attempts.length ? `# Intentos anteriores y correcciones\n${input.attempts.map(a => `- ${a}`).join('\n')}\n` : ''}# Diff
 ${diffs || '(vacío)'}
 
 Reglas:
-- "approved" solo si el cambio cumple el criterio Y todas las verificaciones requeridas (${input.required.join(', ')}) están en OK.
-- "rejected" si hay errores en el código o no cumple el criterio. Cada hallazgo debe ser accionable y citar evidencia: "file" (ruta) y/o "evidence" (línea del diff o de la salida de verificación).
+- "approved" solo si el cambio cumple el criterio Y todas las verificaciones requeridas (${input.required.join(', ')}) están en OK. Que compile no basta: comprueba que TODA la funcionalidad del criterio está implementada y probada (pruebas nuevas para lo nuevo).
+- "rejected" si hay errores en el código o no cumple el criterio. Cada hallazgo debe ser accionable y citar evidencia: "file" (ruta) y/o "evidence" (línea del diff o de la salida de verificación); indica también "requirement" (criterio afectado), "expected" (la corrección esperada, concreta) y "verify" (cómo se comprobará). Un hallazgo por problema y por archivo: el equipo corrige cada uno por separado, sin rehacer lo que funciona.
 - "blocked_environment" si no se pudo verificar por el entorno (sandbox, dependencias), no por el código.
 - "unable_to_verify" si con esta evidencia no puedes decidir.
 - Como máximo 8 hallazgos y 6 pruebas sugeridas, de una línea cada uno. "summary" en 2-4 frases.
-Responde SOLO con JSON: {"verdict": "approved"|"rejected"|"blocked_environment"|"unable_to_verify", "summary": string, "findings": [{"severity": "alta"|"media"|"baja", "text": string, "file": string|null, "evidence": string|null}], "suggestedTests": string[]}`;
+Responde SOLO con JSON: {"verdict": "approved"|"rejected"|"blocked_environment"|"unable_to_verify", "summary": string, "findings": [{"severity": "alta"|"media"|"baja", "text": string, "file": string|null, "evidence": string|null, "requirement": string|null, "expected": string|null, "verify": string|null}], "suggestedTests": string[]}`;
 }
 
 const issueOf = (f: QaFinding) => `[${f.severity}] ${f.text}${f.file && !f.text.includes(f.file) ? ` (${f.file})` : ''}`;
@@ -73,7 +88,8 @@ export function parseQaVerdict(text: string): ReviewVerdict {
   const findings: QaFinding[] = raw.slice(0, 12).map(x => {
     if (typeof x === 'string') { const q = qaSeverity(x); return { severity: q.severity, text: q.text, file: filesIn(x)[0] ?? null, evidence: null }; }
     const sev = ['alta', 'media', 'baja'].includes(x?.severity) ? x.severity : qaSeverity(String(x?.text ?? '')).severity;
-    return { severity: sev, text: String(x?.text ?? '').trim(), file: x?.file ? String(x.file) : null, evidence: x?.evidence ? String(x.evidence).slice(0, 600) : null };
+    const opt = (k: string) => typeof x?.[k] === 'string' && x[k].trim() ? String(x[k]).slice(0, 400) : null;
+    return { severity: sev, text: String(x?.text ?? '').trim(), file: x?.file ? String(x.file) : null, evidence: x?.evidence ? String(x.evidence).slice(0, 600) : null, requirement: opt('requirement'), expected: opt('expected'), verify: opt('verify') };
   }).filter(f => f.text);
   if (!VERDICTS.includes(verdict)) verdict = 'unable_to_verify';
   return { approve: verdict === 'approved', verdict, summary: String(j.summary ?? '').trim() || '(sin resumen)', issues: findings.map(issueOf), findings, suggestedTests: Array.isArray(j.suggestedTests) ? j.suggestedTests.map(String).slice(0, 6) : [], evidenceBased: true, overridden: null };

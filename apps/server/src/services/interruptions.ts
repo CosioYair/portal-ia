@@ -29,7 +29,8 @@ export function recoverInterruptedProcesses(log: (o: any, m: string) => void, op
       }
       new Set(p.steps.map(s => s.agentId)).forEach(aid => { try { agentsRepo(ws.slug).setStatus(aid, 'inactive'); } catch { /* agente borrado */ } });
       const r = p.result;
-      if (p.kind === 'story_execution' && r?.pipeline && implementerOutputs(p).length) {
+      // Con manifiesto (entrega incremental) el plan y cada unidad terminada están guardados: siempre se puede retomar.
+      if (p.kind === 'story_execution' && r?.pipeline && (implementerOutputs(p).length || r.manifest)) {
         procs.setResult(p.id, { ...r, pipeline: { ...r.pipeline, state: 'paused', pauseKind: 'interrupted', failureClass: 'UNKNOWN_FAILURE', phase: 'finished', finishedAt: at, reason: 'El Portal se reinició mientras el equipo trabajaba. Lo terminado se conserva; «Continuar» retoma desde aquí sin repetir lo hecho (la llamada interrumpida se vuelve a enviar solo si continúas).', events: [...r.pipeline.events, { at, kind: 'pause' as const, message: 'Interrumpido por un reinicio del Portal. Nada se reenvía solo.' }].slice(-80) } });
         procs.finish(p.id, 'done', null);
         if (p.backlogItemId) { const it = backlogRepo(ws.slug).get(p.backlogItemId); if (it?.status === 'in_progress') backlogRepo(ws.slug).setStatus(it.id, r.applied || r.changes.some(c => !c.error) ? 'review' : 'pending', p.id); }

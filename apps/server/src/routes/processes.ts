@@ -33,7 +33,7 @@ import { backlogRepo } from '../db/workspace.ts';
  * IA cuando el usuario lo autoriza con un presupuesto (POST /authorize). Puede cancelarse; se detiene entre pasos.
  */
 /** Configuración del pipeline autorizado (se normaliza y acota en el servidor). */
-const PIPELINE_INPUT = z.object({ autoApply: z.boolean().optional(), autoVerify: z.boolean().optional(), commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(), allowInstall: z.boolean().optional(), maxOutputRepairs: z.number().int().min(0).max(10).optional(), maxCorrections: z.number().int().min(0).max(10).optional(), maxIdenticalFailures: z.number().int().min(1).max(10).optional(), maxDurationMin: z.number().int().min(1).max(600).optional(), maxConsultations: z.number().int().min(0).max(3).optional(), maxProviderRetries: z.number().int().min(0).max(3).optional(), providerTimeoutSec: z.number().int().min(5).max(900).nullable().optional() });
+const PIPELINE_INPUT = z.object({ autoApply: z.boolean().optional(), autoVerify: z.boolean().optional(), commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(), allowInstall: z.boolean().optional(), maxOutputRepairs: z.number().int().min(0).max(10).optional(), maxCorrections: z.number().int().min(0).max(10).optional(), maxIdenticalFailures: z.number().int().min(1).max(10).optional(), maxDurationMin: z.number().int().min(1).max(600).optional(), maxConsultations: z.number().int().min(0).max(3).optional(), maxProviderRetries: z.number().int().min(0).max(3).optional(), providerTimeoutSec: z.number().int().min(5).max(900).nullable().optional(), maxContinuations: z.number().int().min(0).max(12).optional() });
 
 export async function processRoutes(app: FastifyInstance) {
   // Al servir un proceso se calcula (no se persiste) su estado de activación en el Portal en marcha y la orientación.
@@ -107,7 +107,7 @@ export async function processRoutes(app: FastifyInstance) {
     if (proc.status === 'running' || proc.status === 'pending_authorization') return reply.code(409).send({ error: 'El proceso sigue activo o pendiente de autorizar.' });
     if (proc.result.merged || proc.result.rejected) return reply.code(409).send({ error: proc.result.merged ? 'Ya está integrado en la rama principal.' : 'Este diff se rechazó; crea una nueva iteración.' });
     const hasOutput = proc.steps.some(s => s.role === 'implementer' && s.outputMd?.trim());
-    if (!proc.result.applied && !proc.result.changes.some(c => !c.error) && !hasOutput) return reply.code(409).send({ error: 'El Desarrollador no entregó nada que continuar: vuelve a ejecutar la historia.', code: 'nothing_to_continue' });
+    if (!proc.result.applied && !proc.result.changes.some(c => !c.error) && !hasOutput && !proc.result.manifest) return reply.code(409).send({ error: 'El Desarrollador no entregó nada que continuar: vuelve a ejecutar la historia.', code: 'nothing_to_continue' });
     if (procs.running().length) return reply.code(409).send({ error: 'Ya hay un proceso en ejecución. Espera a que termine.' });
     const prev = proc.result.pipeline;
     // Si el equipo preguntó algo (información, permiso o decisión), continuar sin respuesta solo repetiría la pregunta y gastaría créditos.
@@ -116,7 +116,7 @@ export async function processRoutes(app: FastifyInstance) {
     const cfg = normalizePipeline({ ...(prev?.config ?? {}), ...(body.data.pipeline ?? {}) });
     // Los límites nuevos se suman a lo ya consumido: continuar tras un tope concede ese margen otra vez, no más.
     const pipeline = prev
-      ? { ...prev, config: { ...cfg, maxCorrections: prev.corrections + cfg.maxCorrections, maxOutputRepairs: prev.outputRepairs + cfg.maxOutputRepairs, maxConsultations: (prev.consultations?.length ?? 0) + cfg.maxConsultations }, failures: [], startedAt: new Date().toISOString() }
+      ? { ...prev, config: { ...cfg, maxCorrections: prev.corrections + cfg.maxCorrections, maxOutputRepairs: prev.outputRepairs + cfg.maxOutputRepairs, maxConsultations: (prev.consultations?.length ?? 0) + cfg.maxConsultations, maxContinuations: (prev.continuations ?? 0) + (cfg.maxContinuations ?? 6) }, failures: [], ineffectiveRounds: 0, startedAt: new Date().toISOString() }
       : newPipeline(cfg);
     // La respuesta del propietario se entrega al agente que la pidió (una vez) al reanudar.
     if (request && body.data.answer) { pipeline.ownerAnswers = [...(pipeline.ownerAnswers ?? []), { at: new Date().toISOString(), question: request.question, answer: body.data.answer, delivered: false }]; pipeline.ownerRequest = null; }

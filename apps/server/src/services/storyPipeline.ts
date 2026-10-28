@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Agent, AgentBlocker, AgentFailureKind, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
-import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
+import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError, reasoningHeadroom } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
@@ -11,7 +11,7 @@ import { filesIn, parseBuildErrors, parseFailingTests, parseTypeScriptErrors } f
 import { requirePolicy } from './executionPolicy.ts';
 import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall, withWatchdog } from './providerCalls.ts';
 import { injectLessons, recordDetections } from './lessons.ts';
-import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, verificationEvidence } from './qaGate.ts';
+import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, testsEvidence, verificationEvidence } from './qaGate.ts';
 /** Veredicto de QA con salida estructurada nativa del proveedor (si la admite); el motor lo valida igualmente. */
 const QA_SCHEMA = { name: 'veredicto_qa', description: 'Veredicto de la puerta de calidad con hallazgos y evidencia.', schema: QA_VERDICT_SCHEMA as unknown as Record<string, unknown> };
 import { annotateChanges, applyChanges, changesSinceBase, checkStaleChanges, commitInWorktree, readRepoFile, safeRelPath, type RawChange } from './repoWrite.ts';
@@ -45,10 +45,19 @@ export class StoryFailure extends Error { constructor(public failure: ProcessFai
 
 export interface CallResult { text: string; stopReason: string | null; inputTokens: number; outputTokens: number; costUsd: number; refusal?: string | null }
 
-/** Lo que se exige que quede de presupuesto antes de una llamada: la entrada más la mitad de la salida máxima (criterio único del Portal). */
+/** Razonamiento oculto que el modelo del agente puede facturar además del texto (Opus 5.5: siempre activo). */
+export function agentHeadroom(agent: Agent): number {
+  let supports = false;
+  try { const row = providersRepo.get(agent.config.provider as ProviderId); supports = !!(JSON.parse(row?.models_json ?? '[]') as ModelInfo[]).find(m => m.id === agent.config.model)?.supportsEffort; } catch { /* sin catálogo */ }
+  return reasoningHeadroom(agent.config.provider, agent.config.model, agent.config.effort, supports);
+}
+/**
+ * Lo que se exige que quede de presupuesto antes de una llamada: la entrada más la mitad de la salida máxima, contando
+ * también el margen del razonamiento oculto (criterio único del Portal; antes se ignoraba y la estimación se quedaba corta).
+ */
 export function estimateCallUsd(agent: Agent, system: string, user: string, maxTokens: number): number {
   const p = estimatePricing(agent.config.provider, agent.config.model);
-  return (estimateTokens(system + user) * p.inPerM + maxTokens * p.outPerM * 0.5) / 1_000_000;
+  return (estimateTokens(system + user) * p.inPerM + (maxTokens + agentHeadroom(agent)) * p.outPerM * 0.5) / 1_000_000;
 }
 
 export function budgetCheck(slug: string, processId: string, agent: Agent, system: string, user: string, maxTokens: number): { ok: boolean; needed: number; remaining: number } {
@@ -91,13 +100,15 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   const models: ModelInfo[] = JSON.parse(prow.models_json);
   const b = budgetCheck(slug, processId, agent, system, user, maxTokens);
   if (!b.ok) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${proc.spentUsd.toFixed(2)} de ${proc.budgetUsd.toFixed(2)} USD${proc.unconfirmedUsd ? ` + ${proc.unconfirmedUsd.toFixed(2)} sin confirmar` : ''}; esta llamada necesita ≈ ${b.needed.toFixed(2)} USD).`), { budget: true, needed: b.needed, remaining: b.remaining, failure: { kind: 'budget', class: 'BUDGET_EXHAUSTED', detail: 'Presupuesto insuficiente para la siguiente llamada.' } satisfies ProcessFailure });
-  const timeoutMs = callTimeoutMs(maxTokens, agent.config.effort, opts.timeoutSec);
+  // El plazo cuenta la salida que la llamada puede facturar de verdad: texto pedido + margen del razonamiento oculto.
+  const headroom = agentHeadroom(agent);
+  const timeoutMs = headroom ? callTimeoutMs(maxTokens + headroom, 'low', opts.timeoutSec) : callTimeoutMs(maxTokens, agent.config.effort, opts.timeoutSec);
   const maxAttempts = 1 + maxProviderRetries(opts.retries);
   const inTok = estimateTokens(system + user + (opts.history ?? []).map(h => h.content).join(''));
   const p = estimatePricing(providerId, agent.config.model);
-  const callEstimate = (inTok * p.inPerM + maxTokens * p.outPerM * 0.5) / 1_000_000;
+  const callEstimate = (inTok * p.inPerM + (maxTokens + headroom) * p.outPerM * 0.5) / 1_000_000;
   const now0 = new Date();
-  let live: LiveCall = { state: 'preparing', provider: providerId, model: agent.config.model, startedAt: now0.toISOString(), lastEvent: 'Preparando la solicitud', lastEventAt: now0.toISOString(), deadlineAt: new Date(now0.getTime() + timeoutMs).toISOString(), timeoutMs, attempt: 1, maxAttempts, estimatedUsd: callEstimate, inputTokensEstimated: inTok, inputUsd: costUsd(providerId, agent.config.model, inTok, 0), maxOutputTokens: maxTokens, operation: opts.operation ?? null };
+  let live: LiveCall = { state: 'preparing', provider: providerId, model: agent.config.model, startedAt: now0.toISOString(), lastEvent: 'Preparando la solicitud', lastEventAt: now0.toISOString(), deadlineAt: new Date(now0.getTime() + timeoutMs).toISOString(), timeoutMs, attempt: 1, maxAttempts, estimatedUsd: callEstimate, inputTokensEstimated: inTok, inputUsd: costUsd(providerId, agent.config.model, inTok, 0), maxOutputTokens: maxTokens + headroom, operation: opts.operation ?? null };
   const setLive = (patch: Partial<LiveCall>) => { live = { ...live, ...patch }; try { procs.setStepLive(step.id, live); } catch { /* el estado en vivo nunca rompe la llamada */ } };
   procs.stepStart(step.id); setLive({});
   const startedAt = now0.toISOString();
@@ -171,11 +182,11 @@ export function newPipeline(config: PipelineConfig): PipelineStatus {
 export function updateResult(slug: string, id: string, fn: (r: ExecutionResult) => ExecutionResult): ExecutionResult {
   const procs = processesRepo(slug); const r = fn(procs.get(id)!.result!); procs.setResult(id, r); return r;
 }
-function updatePipeline(slug: string, id: string, patch: Partial<PipelineStatus>, ev?: Omit<PipelineEvent, 'at'>) {
+export function updatePipeline(slug: string, id: string, patch: Partial<PipelineStatus>, ev?: Omit<PipelineEvent, 'at'>) {
   updateResult(slug, id, r => r.pipeline ? { ...r, pipeline: { ...r.pipeline, ...patch, events: ev ? [...r.pipeline.events, { at: now(), ...ev }].slice(-80) : r.pipeline.events } } : r);
 }
-const pipelineOf = (slug: string, id: string) => processesRepo(slug).get(id)!.result!.pipeline!;
-function emit(ctx: StoryRunCtx, kind: PipelineEventKind, message: string, extra: { detail?: string | null; aiCall?: boolean; costUsd?: number | null; phase?: PipelinePhase } = {}) {
+export const pipelineOf = (slug: string, id: string) => processesRepo(slug).get(id)!.result!.pipeline!;
+export function emit(ctx: StoryRunCtx, kind: PipelineEventKind, message: string, extra: { detail?: string | null; aiCall?: boolean; costUsd?: number | null; phase?: PipelinePhase } = {}) {
   const { phase, ...rest } = extra;
   updatePipeline(ctx.slug, ctx.processId, phase ? { phase } : {}, { kind, message, ...rest });
   ctx.log({ processId: ctx.processId, kind }, message);
@@ -190,24 +201,28 @@ export interface StoryRunCtx {
   /** Equipo AUTORIZADO del proceso (los agentes de sus pasos): los únicos a los que se puede consultar. */
   team: Agent[];
   log: (o: any, m: string) => void; isCancelled: () => boolean; injected: Map<string, string>;
+  /** Unidad de trabajo en curso (entrega incremental): su prompt sirve de contexto a reparaciones y continuaciones. */
+  unit?: { prompt: string; files: string[]; basePath: string; label: string } | null;
 }
 
-const fileExistsIn = (base: string) => (rel: string) => { try { return fs.existsSync(path.join(base, safeRelPath(rel))); } catch { return false; } };
-const checkCancelled = (ctx: StoryRunCtx) => { if (ctx.isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true }); };
+export const fileExistsIn = (base: string) => (rel: string) => { try { return fs.existsSync(path.join(base, safeRelPath(rel))); } catch { return false; } };
+export const checkCancelled = (ctx: StoryRunCtx) => { if (ctx.isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true }); };
 
 /** Llamada de un agente en un paso NUEVO (reparación, corrección, nueva revisión de QA), con comprobación de presupuesto previa. */
-async function stepCall(ctx: StoryRunCtx, agent: Agent, role: TeamRole, title: string, reason: string, system: string, user: string, maxTokens: number, reuseStepId?: string, schema?: { name: string; description?: string; schema: Record<string, unknown> }): Promise<CallResult & { stepId: string }> {
+export async function stepCall(ctx: StoryRunCtx, agent: Agent, role: TeamRole, title: string, reason: string, system: string, user: string, maxTokens: number, reuseStepId?: string, schema?: { name: string; description?: string; schema: Record<string, unknown> }, operation?: string): Promise<CallResult & { stepId: string }> {
   const b = budgetCheck(ctx.slug, ctx.processId, agent, system, user, maxTokens);
   if (!b.ok) throw new PipelinePause('budget', `La siguiente llamada («${title}», ≈ ${b.needed.toFixed(2)} USD) superaría el presupuesto autorizado: quedan ${Math.max(0, b.remaining).toFixed(2)} USD. No se ha llamado a la IA; lo hecho se conserva.`);
   const stepId = reuseStepId ?? processesRepo(ctx.slug).addStep(ctx.processId, { agentId: agent.id, agentName: agent.config.name, title, model: agent.config.model, role, reason }).id;
   const cfg = processesRepo(ctx.slug).get(ctx.processId)?.result?.pipeline?.config;
-  const res = await callAgentStep(ctx.slug, ctx.processId, stepId, system, user, maxTokens, { injected: ctx.injected, log: ctx.log, schema, timeoutSec: cfg?.providerTimeoutSec ?? null, retries: cfg?.maxProviderRetries ?? null });
+  const res = await callAgentStep(ctx.slug, ctx.processId, stepId, system, user, maxTokens, { injected: ctx.injected, log: ctx.log, schema, timeoutSec: cfg?.providerTimeoutSec ?? null, retries: cfg?.maxProviderRetries ?? null, operation });
   return { ...res, stepId };
 }
 
 // ---------------------------------------------------------------- 1 · De la respuesta del Desarrollador a cambios válidos
 
-export interface DevOutput { text: string; stopReason: string | null; /** Señal explícita de negativa del proveedor. */ refusal?: string | null }
+export interface DevOutput { text: string; stopReason: string | null; /** Señal explícita de negativa del proveedor. */ refusal?: string | null;
+  /** Paso que la produjo y texto previo que la completa (continuación de un archivo cortado): para reanudar sin volver a llamar. */
+  stepId?: string; prefix?: string | null }
 
 /** Salidas del Desarrollador de este proceso en orden (entrega original + reparaciones), para reanudar sin IA. */
 export function implementerOutputs(p: Process): DevOutput[] {
@@ -230,7 +245,10 @@ function finalizeImplementation(ctx: StoryRunCtx, meta: ParsedDevOutput, changes
 }
 
 function repairPrompt(ctx: StoryRunCtx, a: DevOutputAssessment, previous: string, ok: ProposedChange[], bad: ProposedChange[]): string {
-  const resend = Array.from(new Set([...(a.truncatedFile ? [a.truncatedFile] : []), ...bad.map(c => c.path)]));
+  // HU-155: además del archivo cortado y de los que no encajan, los del plan que NUNCA llegaron (antes se omitían: 2 de 8).
+  const got = new Set([...ok.map(c => c.path), ...bad.map(c => c.path)]);
+  const neverSent = (ctx.plan?.filesToChange ?? []).filter(f => !got.has(f) && f !== a.truncatedFile);
+  const resend = Array.from(new Set([...(a.truncatedFile ? [a.truncatedFile] : []), ...bad.map(c => c.path), ...neverSent]));
   const extraFiles = Array.from(new Set([...a.requestedFiles, ...bad.map(c => c.path)])).map(f => { const c = readRepoFile(ctx.repoPath, f, 30_000); return c === null ? null : `## ${f}\n\`\`\`\n${c}\n\`\`\``; }).filter(Boolean).join('\n\n').slice(0, 90_000);
   const partial = ok.length > 0 && (a.kind === 'truncated' || a.kind === 'incomplete' || bad.length > 0);
   return `Tu entrega anterior para esta historia no se pudo convertir en cambios aplicables. NO repitas el plan ni el análisis: repara la ENTREGA.
@@ -281,6 +299,14 @@ function suppliedFiles(ctx: StoryRunCtx, files: string[]): string {
 }
 
 function continuationPrompt(ctx: StoryRunCtx, need: string, info: string, previous: string): string {
+  // Unidad de trabajo: se repite SU encargo (acotado), no la historia entera.
+  if (ctx.unit) return `Antes no pudiste implementar la historia en esta unidad (${ctx.unit.label}) porque te faltaba: «${need}». Ya tienes esa información:
+${info}
+
+# Tu respuesta anterior (recortada)
+${clip(previous, 6_000)}
+
+${ctx.unit.prompt}`;
   return `Antes no pudiste implementar la historia porque te faltaba: «${need}». Ya tienes esa información:
 ${info}
 
@@ -313,7 +339,7 @@ async function deliverOwnerAnswers(ctx: StoryRunCtx, a: DevOutputAssessment, pre
   updatePipeline(ctx.slug, ctx.processId, { ownerAnswers: (p.ownerAnswers ?? []).map(x => ({ ...x, delivered: true })), ownerRequest: null });
   const info = pending.map(x => `## Respuesta del propietario a «${x.question}»\n${x.answer}`).join('\n\n');
   const res = await stepCall(ctx, ctx.dev, 'implementer', 'Implementación con la respuesta del propietario', 'El propietario respondió a lo que el agente necesitaba', sys(ctx.dev, ctx.project, ctx.item), continuationPrompt(ctx, blockerOf(a).need, info, previous), DEV_MAX_TOKENS);
-  return { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null };
+  return { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null, stepId: res.stepId };
 }
 
 async function resolveMissingInformation(ctx: StoryRunCtx, cfg: PipelineConfig, a: DevOutputAssessment, previous: string): Promise<DevOutput | null> {
@@ -321,13 +347,13 @@ async function resolveMissingInformation(ctx: StoryRunCtx, cfg: PipelineConfig, 
   const p = pipelineOf(ctx.slug, ctx.processId);
   const system = sys(ctx.dev, ctx.project, ctx.item);
   const n = ctx.dev.config.name;
-  if (a.requestedFiles.length && (p.contextSupplies ?? 0) < 1) {
+  if (a.requestedFiles.length && (p.contextSupplies ?? 0) < (ctx.unit ? 3 : 1)) {
     const files = suppliedFiles(ctx, a.requestedFiles);
     if (files) {
       emit(ctx, 'info', `${n} necesitaba archivos del repositorio que no tenía; el equipo se los entrega (sin consultar a nadie).`, { phase: 'implementing', aiCall: true, detail: a.requestedFiles.join(', ') });
       updatePipeline(ctx.slug, ctx.processId, { contextSupplies: (p.contextSupplies ?? 0) + 1 });
       const res = await stepCall(ctx, ctx.dev, 'implementer', 'Implementación con el contexto solicitado', `Faltaba el contenido de ${a.requestedFiles.join(', ')}`, system, continuationPrompt(ctx, blocker.need, `# Contenido actual de los archivos solicitados\n${files}`, previous), DEV_MAX_TOKENS);
-      return { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null };
+      return { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null, stepId: res.stepId };
     }
   }
   const asked = (p.consultations ?? []).map(c => norm(c.question));
@@ -344,7 +370,7 @@ ${blocker.need}
 # Plan del Coordinador
 ${ctx.plan ? JSON.stringify(ctx.plan, null, 2) : '(sin plan)'}`, 2500);
     const res = await stepCall(ctx, ctx.dev, 'implementer', `Implementación con la respuesta de ${consultant.config.name}`, `Consultó a ${consultant.config.name}`, system, continuationPrompt(ctx, blocker.need, `## Respuesta de ${consultant.config.name} (${consultant.template.role})\n${cRes.text.trim().slice(0, 8000)}`, previous), DEV_MAX_TOKENS);
-    return { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null };
+    return { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null, stepId: res.stepId };
   }
   return null;
 }
@@ -356,50 +382,72 @@ function blockedStop(ctx: StoryRunCtx, cfg: PipelineConfig | null, kind: Pipelin
   throw new StoryFailure({ kind: 'refusal', class: cls, detail: message, assessment: a, request });
 }
 
+/** Ganchos de una unidad de trabajo (entrega incremental): continuación del archivo cortado y reparación acotada a la unidad. */
+export interface UnitHooks {
+  /** Pide SOLO la continuación del archivo cortado (contador propio, no consume correcciones); null si ya no quedan. */
+  continueFile: (partial: NonNullable<ParsedDevOutput['truncatedPartial']>, previous: string) => Promise<DevOutput | null>;
+  repairPrompt: (a: DevOutputAssessment, previous: string, ok: ProposedChange[], bad: ProposedChange[]) => string;
+  canRepair: () => boolean;
+  onRepair: () => void;
+  /** Cada salida pagada dentro de la unidad (reparación, contexto, respuesta del propietario, continuación) queda registrada. */
+  record: (o: DevOutput) => void;
+}
+export interface Settled { outcome: 'ok' | 'no_changes'; changes: ProposedChange[]; raw: RawChange[]; meta: ParsedDevOutput; assessment: DevOutputAssessment; drops: { path: string; reason: string }[]; truncatedFile: string | null }
+
 /**
  * Convierte las salidas del Desarrollador en cambios válidos según la CLASE del problema:
  * formato no válido o incompleto → recuperación local y reparación acotada; falta información → contexto, especialista
  * o propietario; permiso, capacidad o negativa del proveedor → NUNCA se reintenta a ciegas: se pide o se explica.
- * Devuelve 'ok' (cambios listos), 'no_changes' o lanza StoryFailure / PipelinePause.
+ * Con `unit` (entrega incremental) una respuesta cortada se CONTINÚA (solo el archivo cortado) en vez de repararse, y el
+ * resultado se devuelve a la unidad para aplicarlo; sin `unit`, se finaliza la implementación de la historia entera.
  */
-export async function settleImplementation(ctx: StoryRunCtx, outputs: DevOutput[], opts: { config: PipelineConfig | null }): Promise<'ok' | 'no_changes'> {
-  const knownFiles = ctx.plan ? [...ctx.plan.filesToRead, ...ctx.plan.filesToChange] : [];
-  const exists = fileExistsIn(ctx.repoPath);
+async function settleCore(ctx: StoryRunCtx, outputs: DevOutput[], opts: { config: PipelineConfig | null; unit?: UnitHooks }): Promise<Settled> {
+  const base = ctx.unit?.basePath ?? ctx.repoPath;
+  const knownFiles = [...(ctx.plan ? [...ctx.plan.filesToRead, ...ctx.plan.filesToChange] : []), ...(ctx.unit?.files ?? [])];
+  const exists = fileExistsIn(base);
   const evaluate = () => {
-    let pool: RawChange[] = []; let meta: ParsedDevOutput | null = null; let last: DevOutputAssessment | null = null; let lastText = '';
+    let pool: RawChange[] = []; let meta: ParsedDevOutput | null = null; let last: DevOutputAssessment | null = null; let lastText = ''; let partial: ParsedDevOutput['truncatedPartial'] = null;
+    const drops = new Map<string, string>();
     for (const o of outputs) {
       const { parsed, assessment } = assessDeveloperOutput(o.text, { stopReason: o.stopReason, exists, knownFiles, providerRefusal: o.refusal ?? null });
-      pool = mergeChanges(pool, parsed.changes); last = assessment; lastText = o.text;
+      pool = mergeChanges(pool, parsed.changes); last = assessment; lastText = o.text; partial = parsed.truncatedPartial ?? null;
+      for (const d of parsed.drops ?? []) drops.set(d.path, d.reason);
       if (!meta || (!meta.summary && parsed.summary) || (!meta.manualSteps.length && parsed.manualSteps.length)) meta = meta ? { ...parsed, summary: meta.summary || parsed.summary, userFacing: meta.userFacing || parsed.userFacing, manualSteps: meta.manualSteps.length ? meta.manualSteps : parsed.manualSteps, runtimeChecks: meta.runtimeChecks.length ? meta.runtimeChecks : parsed.runtimeChecks } : parsed;
     }
-    const changes = annotateChanges(ctx.repoPath, pool);
+    // Un archivo que llegó completo en una continuación posterior ya no está «cortado».
+    if (partial && pool.some(c => c.path === partial!.path)) partial = null;
+    const changes = annotateChanges(base, pool);
     // Si lo último entregado ya da cambios válidos, cuenta como implementación aunque antes hubiera fallos de forma.
-    const kind = last!.kind !== 'implementation' && pool.length && changes.some(c => !c.error) && outputs.length > 1 && last!.kind !== 'truncated' ? 'implementation' : last!.kind;
-    return { changes, meta: meta!, assessment: { ...last!, kind, files: pool.length } as DevOutputAssessment, lastText };
+    const kind = last!.kind !== 'implementation' && pool.length && changes.some(c => !c.error) && outputs.length > 1 && (last!.kind !== 'truncated' || !partial) ? 'implementation' : last!.kind;
+    return { changes, raw: pool, meta: meta!, assessment: { ...last!, kind, files: pool.length, truncatedFile: last!.truncatedFile && !pool.some(c => c.path === last!.truncatedFile) ? last!.truncatedFile : null } as DevOutputAssessment, lastText, partial, drops: Array.from(drops, ([path, reason]) => ({ path, reason })) };
   };
   let ev = evaluate();
   let announced = false;
   const who = ctx.dev.config.name;
+  const settled = (outcome: Settled['outcome']): Settled => ({ outcome, changes: ev.changes, raw: ev.raw, meta: ev.meta, assessment: ev.assessment, drops: ev.drops, truncatedFile: ev.partial?.path ?? null });
   for (;;) {
     checkCancelled(ctx);
     const valid = ev.changes.filter(c => !c.error); const invalid = ev.changes.filter(c => c.error);
     const cls: AgentFailureKind | null = failureClassOf(ev.assessment) ?? (invalid.length ? 'INVALID_OUTPUT' : null);
-    if (opts.config) updatePipeline(ctx.slug, ctx.processId, { lastAssessment: ev.assessment, failureClass: cls, phase: 'recovering' });
+    if (opts.config) updatePipeline(ctx.slug, ctx.processId, { lastAssessment: ev.assessment, failureClass: cls, phase: opts.unit ? 'implementing' : 'recovering' });
     if (!announced && ev.assessment.recoveredBy && ev.assessment.recoveredBy !== 'canonical' && opts.config) {
       emit(ctx, 'recovery', 'El Desarrollador entregó un formato incompleto. Recuperando los cambios existentes sin consumir IA.', { detail: `${valid.length} archivo(s) recuperados (${ev.assessment.recoveredBy}). ${ev.assessment.reasons.slice(0, 4).join(' ')}` });
       announced = true;
     }
-    if (ev.assessment.kind === 'no_changes' && !valid.length) {
-      updateResult(ctx.slug, ctx.processId, r => ({ ...r, changes: [], implementationSummary: `${ev.meta.summary}\n\nSin cambios: ${ev.meta.noChanges ?? ''}`.trim() }));
-      return 'no_changes';
+    if (ev.assessment.kind === 'no_changes' && !valid.length) return settled('no_changes');
+    // Unidad: una respuesta cortada se continúa por el archivo cortado; lo completo ya recibido se conserva tal cual.
+    if (opts.unit && ev.partial && cls === 'INCOMPLETE_OUTPUT') {
+      const next = await opts.unit.continueFile(ev.partial, ev.lastText);
+      if (next) { opts.unit.record(next); outputs = [...outputs, next]; ev = evaluate(); continue; }
+      return settled('ok');
     }
-    if (!cls) { finalizeImplementation(ctx, ev.meta, ev.changes, ev.assessment); return 'ok'; }
+    if (!cls) return settled('ok');
     const a = ev.assessment; const blocker = a.blocker;
     const now = new Date().toISOString();
     // Si el propietario ya respondió a lo que el agente necesitaba, se le entrega (una vez) antes de volver a parar.
     if (opts.config && (cls === 'MISSING_INFORMATION' || cls === 'PERMISSION_REQUIRED' || cls === 'UNSUPPORTED_CAPABILITY')) {
       const answered = await deliverOwnerAnswers(ctx, a, ev.lastText);
-      if (answered) { outputs = [...outputs, answered]; ev = evaluate(); continue; }
+      if (answered) { opts.unit?.record(answered); outputs = [...outputs, answered]; ev = evaluate(); continue; }
     }
     // Lo que NO se arregla reintentando: se conserva, se explica y se pide lo que haga falta.
     if (cls === 'PROVIDER_REFUSAL') {
@@ -417,24 +465,27 @@ export async function settleImplementation(ctx: StoryRunCtx, outputs: DevOutput[
     }
     if (cls === 'MISSING_INFORMATION') {
       const next = opts.config ? await resolveMissingInformation(ctx, opts.config, a, ev.lastText) : null;
-      if (next) { outputs = [...outputs, next]; ev = evaluate(); continue; }
+      if (next) { opts.unit?.record(next); outputs = [...outputs, next]; ev = evaluate(); continue; }
       blockedStop(ctx, opts.config, 'missing_information', cls, a, { kind: 'information', question: blocker?.question ?? a.reasons[0] ?? '¿Qué información falta?', why: `${who} no puede seguir sin esta información${blocker?.need && blocker.need !== blocker.question ? ` (${blocker.need})` : ''}. ${opts.config ? 'Nadie del equipo autorizado puede responderla (o ya se intentó).' : 'Este proceso no tiene el pipeline autorizado para consultar a nadie.'} Con tu respuesta, el equipo retoma donde lo dejó.`, askedBy: who, options: ['Responder la pregunta', 'Acotar la historia', 'Cerrarla como resuelta fuera del flujo'], at: now },
         `Pausado: ${who} necesita información para seguir: «${blocker?.question ?? a.reasons[0] ?? 'sin detalle'}».`);
     }
     // INVALID_OUTPUT / INCOMPLETE_OUTPUT: reparación acotada del formato (solo esto se repara «a ciegas»).
     const repairs = opts.config ? pipelineOf(ctx.slug, ctx.processId).outputRepairs : 0;
-    const canRepair = !!opts.config && repairs < opts.config.maxOutputRepairs;
+    const canRepair = opts.unit ? opts.unit.canRepair() : !!opts.config && repairs < opts.config.maxOutputRepairs;
     if (!canRepair) {
-      if (valid.length) { finalizeImplementation(ctx, ev.meta, ev.changes, ev.assessment); return 'ok'; }
+      if (opts.unit || valid.length) return settled('ok');
       const failure: ProcessFailure = { kind: 'output_contract', class: cls, detail: invalid.length && !a.reasons.length ? `Ninguno de los ${invalid.length} cambio(s) del Desarrollador es aplicable: ${invalid.map(c => `${c.path}: ${c.error}`).join(' · ')}` : `El Desarrollador no entregó cambios aplicables en el formato acordado (${a.kind}). ${a.reasons.slice(0, 4).join(' ')}`, assessment: a };
       updateResult(ctx.slug, ctx.processId, r => ({ ...r, changes: ev.changes }));
       throw new StoryFailure(failure);
     }
-    emit(ctx, 'repair', 'Corrigiendo la entrega del Desarrollador dentro del presupuesto autorizado.', { phase: 'repairing', aiCall: true, detail: `Intento ${repairs + 1} de ${opts.config!.maxOutputRepairs} · ${cls === 'INCOMPLETE_OUTPUT' ? 'entrega incompleta' : 'formato no válido'} (${a.kind}): ${a.reasons.slice(0, 3).join(' ')}` });
+    emit(ctx, 'repair', `Corrigiendo la entrega del Desarrollador${ctx.unit ? ` (${ctx.unit.label})` : ''} dentro del presupuesto autorizado.`, { phase: opts.unit ? 'implementing' : 'repairing', aiCall: true, detail: `Intento ${repairs + 1} · ${cls === 'INCOMPLETE_OUTPUT' ? 'entrega incompleta' : 'formato no válido'} (${a.kind}): ${a.reasons.slice(0, 3).join(' ')}` });
     const system = sys(ctx.dev, ctx.project, ctx.item);
-    const res = await stepCall(ctx, ctx.dev, 'implementer', `Reparación de la entrega (intento ${repairs + 1})`, `Entrega no aplicable (${a.kind}): reparación acotada sin repetir el plan`, system, repairPrompt(ctx, a, ev.lastText, valid, invalid), 12_000);
+    const res = await stepCall(ctx, ctx.dev, 'implementer', `Reparación de la entrega (intento ${repairs + 1})`, `Entrega no aplicable (${a.kind}): reparación acotada sin repetir el plan`, system, opts.unit ? opts.unit.repairPrompt(a, ev.lastText, valid, invalid) : repairPrompt(ctx, a, ev.lastText, valid, invalid), 12_000);
     updatePipeline(ctx.slug, ctx.processId, { outputRepairs: repairs + 1 });
-    outputs = [...outputs, { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null }];
+    opts.unit?.onRepair();
+    const repaired: DevOutput = { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null, stepId: res.stepId };
+    opts.unit?.record(repaired);
+    outputs = [...outputs, repaired];
     const before = JSON.stringify(a.reasons);
     ev = evaluate();
     emit(ctx, 'repair', ev.assessment.kind === 'implementation' && !ev.changes.some(c => c.error) ? `Entrega reparada: ${ev.changes.length} archivo(s) aplicables.` : `La reparación no resolvió todo (${ev.assessment.kind}).`, { costUsd: res.costUsd, detail: ev.assessment.reasons.slice(0, 3).join(' ') || null });
@@ -444,13 +495,27 @@ export async function settleImplementation(ctx: StoryRunCtx, outputs: DevOutput[
   }
 }
 
+/** Historia entera en una respuesta (procesos sin pipeline de aplicación automática): finaliza la implementación propuesta. */
+export async function settleImplementation(ctx: StoryRunCtx, outputs: DevOutput[], opts: { config: PipelineConfig | null }): Promise<'ok' | 'no_changes'> {
+  const s = await settleCore(ctx, outputs, opts);
+  if (s.outcome === 'no_changes') {
+    updateResult(ctx.slug, ctx.processId, r => ({ ...r, changes: [], implementationSummary: `${s.meta.summary}\n\nSin cambios: ${s.meta.noChanges ?? s.drops.map(d => `${d.path}: ${d.reason}`).join(' · ')}`.trim() }));
+    return 'no_changes';
+  }
+  finalizeImplementation(ctx, s.meta, s.changes, s.assessment);
+  return 'ok';
+}
+
+/** Una unidad de trabajo: devuelve lo entregado (sin aplicarlo) para que la unidad lo valide y lo aplique en el worktree. */
+export const settleUnit = (ctx: StoryRunCtx, outputs: DevOutput[], config: PipelineConfig, unit: UnitHooks) => settleCore(ctx, outputs, { config, unit });
+
 // ---------------------------------------------------------------- 2-6 · Aplicar, verificar, QA y correcciones
 
-function bumpFailure(list: PipelineStatus['failures'], signature: string, label: string) {
+export function bumpFailure(list: PipelineStatus['failures'], signature: string, label: string) {
   const f = list.find(x => x.signature === signature);
   return f ? list.map(x => x === f ? { ...x, count: x.count + 1 } : x) : [...list, { signature, count: 1, label }];
 }
-function verificationSignature(v: VerificationRun): string {
+export function verificationSignature(v: VerificationRun): string {
   const d = v.command === 'typecheck' ? parseTypeScriptErrors(v.output) : v.command === 'test' ? parseFailingTests(v.output) : parseBuildErrors(v.output);
   return `${v.command}|${d.slice(0, 3).map(x => `${x.file ?? ''}:${x.code ?? ''}:${x.text.slice(0, 40)}`).join(',') || v.output.trim().split('\n').slice(-2).join(' ').slice(0, 80)}`;
 }
@@ -477,14 +542,14 @@ async function applyInWorktree(ctx: StoryRunCtx) {
  * Comparación estricta: una corrección puede llegar en menos de un segundo tras la verificación que falló, y esa
  * ejecución anterior NO vale para el commit nuevo.
  */
-function sinceApplied(r: ExecutionResult): VerificationRun[] {
+export function sinceApplied(r: ExecutionResult): VerificationRun[] {
   if (!r.applied) return [];
   const after = new Date(r.applied.appliedAt).getTime();
   return (r.verifications ?? []).filter(v => new Date(v.startedAt).getTime() >= after);
 }
 
 /** Verifica los comandos autorizados; resuelve el entorno sin IA. Devuelve la primera ejecución que falla por el código, o null. */
-async function verifyStage(ctx: StoryRunCtx, cfg: PipelineConfig): Promise<VerificationRun | null> {
+export async function verifyStage(ctx: StoryRunCtx, cfg: PipelineConfig): Promise<VerificationRun | null> {
   // Detección en caché; un «no disponible» se confirma una vez más tras una pausa breve (Docker cargado puede tardar en responder).
   let sb = await sandboxDeps.detect();
   if (sb.available === 'unavailable') { await new Promise(r => setTimeout(r, 3000)); sb = await sandboxDeps.detect(true); }
@@ -520,12 +585,14 @@ async function verifyStage(ctx: StoryRunCtx, cfg: PipelineConfig): Promise<Verif
   return null;
 }
 
-function attemptsSummary(p: PipelineStatus): string[] {
+export function attemptsSummary(p: PipelineStatus): string[] {
   return p.events.filter(e => e.kind === 'correction' || (e.kind === 'qa' && /rechaz/i.test(e.message)) || e.kind === 'repair').map(e => `${e.message}${e.detail ? ` — ${e.detail}` : ''}`).slice(-8);
 }
 
-async function correct(ctx: StoryRunCtx, cfg: PipelineConfig, problem: string, files: string[]) {
+/** Corrección de procesos sin manifiesto (historia entera en una respuesta). true si aplicó cambios. */
+async function correct(ctx: StoryRunCtx, cfg: PipelineConfig, problem: string, files: string[]): Promise<boolean> {
   const p = pipelineOf(ctx.slug, ctx.processId); const n = p.corrections + 1;
+  const ineffective = (p.ineffectiveRounds ?? 0) > 0;
   const r = processesRepo(ctx.slug).get(ctx.processId)!.result!;
   const wt = r.applied!.worktree!;
   let budget = 70_000;
@@ -539,32 +606,44 @@ ${ctx.plan ? ctx.plan.summary : '(sin plan)'}
 # Contenido ACTUAL de los archivos implicados (worktree)
 ${filesCtx || '(no se identificaron archivos; usa las rutas de la evidencia)'}
 
+${ineffective ? '# Qué cambia en este intento\nEl intento anterior no produjo cambios aplicables (ver arriba). Esta vez: SOLO bloques patch pequeños sobre el contenido actual; no reescribas archivos enteros; si falta un archivo completo, entrega UNO solo, el más importante.\n' : ''}
 FORMATO DE RESPUESTA:
 ${PATCH_ONLY_FORMAT}`;
-  const res = await stepCall(ctx, ctx.dev, 'implementer', `Corrección ${n}`, `Corrección acotada con la evidencia: ${problem.split('\n')[0].slice(0, 120)}`, sys(ctx.dev, ctx.project, ctx.item), user, 12_000);
-  updatePipeline(ctx.slug, ctx.processId, { corrections: n });
+  const res = await stepCall(ctx, ctx.dev, 'implementer', `Corrección ${n}${ineffective ? ' (otra estrategia)' : ''}`, `Corrección acotada con la evidencia: ${problem.split('\n')[0].slice(0, 120)}`, sys(ctx.dev, ctx.project, ctx.item), user, 12_000);
+  updatePipeline(ctx.slug, ctx.processId, { correctionAttempts: (p.correctionAttempts ?? 0) + 1 });
   const { parsed, assessment } = assessDeveloperOutput(res.text, { stopReason: res.stopReason, exists: fileExistsIn(wt), knownFiles: affected });
   const fixes = annotateChanges(wt, parsed.changes).filter(c => !c.error);
   if (!fixes.length) {
-    emit(ctx, 'correction', `La corrección ${n} no trajo cambios aplicables (${assessment.kind}).`, { costUsd: res.costUsd, detail: assessment.reasons.slice(0, 3).join(' ') || null });
-    return;
+    // HU-155: una respuesta sin cambios aplicables (p. ej. cortada) NO consume la cuota de correcciones; sí queda contada y pagada.
+    emit(ctx, 'correction', `La corrección ${n} no trajo cambios aplicables (${assessment.kind}); no cuenta como corrección.`, { costUsd: res.costUsd, detail: assessment.reasons.slice(0, 3).join(' ') || null });
+    return false;
   }
   requirePolicy('write_worktree', { slug: ctx.slug, processId: ctx.processId, agentId: ctx.dev.id, projectId: ctx.project.id, authorized: true });
   try {
     const c = await commitInWorktree(wt, fixes, `${ctx.item.storyId}: corrección ${n} (pipeline)\n\nProceso: ${ctx.processId}`);
     const all = await changesSinceBase(ctx.repoPath, wt);
     updateResult(ctx.slug, ctx.processId, x => ({ ...x, changes: all, applied: { ...x.applied!, commit: c.commit, files: Array.from(new Set([...x.applied!.files, ...c.files])), appliedAt: now() } }));
+    updatePipeline(ctx.slug, ctx.processId, { corrections: n, ineffectiveRounds: 0 });
     emit(ctx, 'correction', `Corrección ${n} aplicada (commit ${c.commit}). Se repite la verificación.`, { costUsd: res.costUsd, detail: c.files.join(', ') });
+    return true;
   } catch (e: any) {
-    emit(ctx, 'correction', `La corrección ${n} no se pudo aplicar: ${e.message}`, { costUsd: res.costUsd });
+    emit(ctx, 'correction', `La corrección ${n} no se pudo aplicar: ${e.message}; no cuenta como corrección.`, { costUsd: res.costUsd });
+    return false;
   }
 }
+/** Una corrección sin efecto: se reintenta UNA vez con otra estrategia; dos seguidas detienen (nunca se repite lo mismo a ciegas). */
+function ineffectiveCorrection(ctx: StoryRunCtx) {
+  const n = (pipelineOf(ctx.slug, ctx.processId).ineffectiveRounds ?? 0) + 1;
+  updatePipeline(ctx.slug, ctx.processId, { ineffectiveRounds: n });
+  if (n >= 2) throw new PipelinePause('repeated_failure', `Dos correcciones seguidas no produjeron ningún cambio aplicable (la última con otra estrategia). El equipo se detiene en vez de repetir lo mismo; lo hecho se conserva y ninguna de las dos cuenta como corrección aplicada.`);
+}
 
-async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
+export async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
   const qa = ctx.qa!; const proc = processesRepo(ctx.slug).get(ctx.processId)!; const r = proc.result!; const p = r.pipeline!;
   emit(ctx, 'qa', 'QA está evaluando la evidencia: diff, typecheck, pruebas y compilación.', { phase: 'qa', aiCall: true });
   const pendingQa = proc.steps.find(s => s.role === 'reviewer' && s.status === 'pending');
-  const user = qaEvidencePrompt({ criterion: ctx.item.criterion, plan: ctx.plan, summary: r.implementationSummary ?? '', changes: r.changes, verifications: sinceApplied(r), required: cfg.commands, attempts: attemptsSummary(p), consultText: ctx.consultText });
+  // QA recibe también el manifiesto (qué estaba planificado, qué está de verdad en el worktree), la comprobación previa sin IA, la evidencia de las pruebas y sus hallazgos anteriores.
+  const user = qaEvidencePrompt({ criterion: ctx.item.criterion, plan: ctx.plan, summary: r.implementationSummary ?? '', changes: r.changes, verifications: sinceApplied(r), required: cfg.commands, attempts: attemptsSummary(p), consultText: ctx.consultText, manifest: r.manifest ?? null, previousFindings: r.review?.verdict === 'rejected' ? r.review.findings ?? [] : [], tests: testsEvidence(sinceApplied(r)) });
   const system = sys(qa, ctx.project, ctx.item);
   let res = await stepCall(ctx, qa, 'reviewer', pendingQa ? pendingQa.title : `Revisión de QA con evidencia (tras corrección ${p.corrections})`, 'Puerta de calidad con evidencia del sandbox', system, user, 6000, pendingQa?.id, QA_SCHEMA);
   let verdict = parseQaVerdict(res.text);
@@ -588,10 +667,13 @@ async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
  */
 export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatus> {
   const cfg = pipelineOf(ctx.slug, ctx.processId).config;
-  for (let guard = 0; guard < 40; guard++) {
+  // Entrega incremental (procesos con manifiesto): unidades, comprobación previa a QA y correcciones dirigidas.
+  const units = processesRepo(ctx.slug).get(ctx.processId)!.result!.manifest ? await import('./storyUnits.ts') : null;
+  for (let guard = 0; guard < 60; guard++) {
     checkCancelled(ctx);
+    if (Date.now() - new Date(pipelineOf(ctx.slug, ctx.processId).startedAt).getTime() > cfg.maxDurationMin * 60_000) throw new PipelinePause('duration', `Se alcanzó la duración máxima autorizada (${cfg.maxDurationMin} min). Lo hecho se conserva; puedes continuar.`);
+    if (units && await units.advanceUnits(ctx, cfg)) continue;
     const p = pipelineOf(ctx.slug, ctx.processId);
-    if (Date.now() - new Date(p.startedAt).getTime() > cfg.maxDurationMin * 60_000) throw new PipelinePause('duration', `Se alcanzó la duración máxima autorizada (${cfg.maxDurationMin} min). Lo hecho se conserva; puedes continuar.`);
     const r = processesRepo(ctx.slug).get(ctx.processId)!.result!;
     if (!r.applied) { await applyInWorktree(ctx); continue; }
     if (cfg.autoVerify) {
@@ -604,8 +686,9 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
         if (count > cfg.maxIdenticalFailures) throw new PipelinePause('repeated_failure', `El mismo fallo de ${failed.command} se repitió ${count} veces tras corregirlo: el equipo se detiene para no gastar más. Revisa el diagnóstico.`);
         if (p.corrections >= cfg.maxCorrections) throw new PipelinePause('limit', `${failed.command} sigue fallando y se alcanzó el máximo de correcciones autorizadas (${cfg.maxCorrections}). Lo hecho se conserva.`);
         emit(ctx, 'verify', FAIL_MSG[failed.command] ?? `${failed.command} falla. El equipo está preparando una corrección.`, { phase: 'correcting', detail: verificationEvidence(failed).split('\n').slice(0, 6).join(' ') });
+        if (units) { units.startRound(ctx, cfg, 'verification', units.verificationFindings(failed)); continue; }
         const d = failed.command === 'typecheck' ? parseTypeScriptErrors(failed.output) : failed.command === 'test' ? parseFailingTests(failed.output) : parseBuildErrors(failed.output);
-        await correct(ctx, cfg, `La verificación «${failed.command}» falla en el sandbox:\n${verificationEvidence(failed)}`, Array.from(new Set([...d.map(x => x.file).filter(Boolean) as string[], ...filesIn(failed.output)])));
+        if (!await correct(ctx, cfg, `La verificación «${failed.command}» falla en el sandbox:\n${verificationEvidence(failed)}`, Array.from(new Set([...d.map(x => x.file).filter(Boolean) as string[], ...filesIn(failed.output)])))) ineffectiveCorrection(ctx);
         continue;
       }
     }
@@ -614,7 +697,8 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
       updatePipeline(ctx.slug, ctx.processId, done, { kind: 'done', message: `Implementación completada. ${cfg.autoVerify ? `${cfg.commands.join(', ')} aprobados en el sandbox.` : 'Sin verificación automática.'} QA omitida por el propietario. Lista para tu revisión.` });
       return pipelineOf(ctx.slug, ctx.processId);
     }
-    if (p.lastQaCommit !== r.applied.commit || !r.review?.verdict) await qaStage(ctx, cfg);
+    const qaRan = p.lastQaCommit !== r.applied.commit || !r.review?.verdict;
+    if (qaRan) await qaStage(ctx, cfg);
     const v = processesRepo(ctx.slug).get(ctx.processId)!.result!.review!;
     if (v.verdict === 'approved') {
       const names: Record<string, string> = { typecheck: 'Typecheck', test: 'pruebas', build: 'compilación' };
@@ -624,16 +708,20 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
     }
     if (v.verdict === 'blocked_environment') throw new PipelinePause('environment', `QA no pudo validar por el entorno: ${v.overridden ?? v.summary}`);
     if (v.verdict === 'unable_to_verify') throw new PipelinePause('qa', `QA no pudo verificar la implementación: ${v.overridden ?? v.summary} Revisa la evidencia y decide.`);
-    // Rechazo accionable: corrección acotada con los hallazgos.
-    const sig = `qa|${rejectionSignature(v)}`;
-    const failures = bumpFailure(pipelineOf(ctx.slug, ctx.processId).failures, sig, 'QA rechaza por los mismos motivos');
-    updatePipeline(ctx.slug, ctx.processId, { failures });
-    const count = failures.find(f => f.signature === sig)!.count;
-    if (count > cfg.maxIdenticalFailures) throw new PipelinePause('repeated_failure', `QA rechazó ${count} veces por los mismos motivos tras corregirlo: el equipo se detiene para no gastar más.`);
+    // Rechazo accionable: corrección acotada con los hallazgos. Solo cuenta como rechazo repetido si QA volvió a evaluar
+    // (HU-155: una corrección sin efecto volvía a contar el MISMO veredicto y el aviso decía «QA rechazó 3 veces» con una sola revisión).
+    if (qaRan) {
+      const sig = `qa|${rejectionSignature(v)}`;
+      const failures = bumpFailure(pipelineOf(ctx.slug, ctx.processId).failures, sig, 'QA rechaza por los mismos motivos');
+      updatePipeline(ctx.slug, ctx.processId, { failures });
+      const count = failures.find(f => f.signature === sig)!.count;
+      if (count > cfg.maxIdenticalFailures) throw new PipelinePause('repeated_failure', `QA rechazó ${count} veces por los mismos motivos tras corregirlo: el equipo se detiene para no gastar más.`);
+    }
     if (pipelineOf(ctx.slug, ctx.processId).corrections >= cfg.maxCorrections) throw new PipelinePause('limit', `QA sigue rechazando y se alcanzó el máximo de correcciones autorizadas (${cfg.maxCorrections}). Lo hecho se conserva para tu revisión.`);
     emit(ctx, 'qa', 'QA rechazó la implementación. El equipo está preparando una corrección con sus hallazgos.', { phase: 'correcting' });
     const findings = actionableFindings(v);
-    await correct(ctx, cfg, `QA rechazó la implementación (con evidencia):\n${findings.map(f => `- [${f.severity}] ${f.text}${f.file ? ` (${f.file})` : ''}${f.evidence ? `\n  evidencia: ${f.evidence.split('\n').slice(0, 3).join(' ')}` : ''}`).join('\n')}\nResumen de QA: ${v.summary}`, findings.map(f => f.file).filter(Boolean) as string[]);
+    if (units) { units.startRound(ctx, cfg, 'qa', findings); continue; }
+    if (!await correct(ctx, cfg, `QA rechazó la implementación (con evidencia):\n${findings.map(f => `- [${f.severity}] ${f.text}${f.file ? ` (${f.file})` : ''}${f.evidence ? `\n  evidencia: ${f.evidence.split('\n').slice(0, 3).join(' ')}` : ''}`).join('\n')}\nResumen de QA: ${v.summary}`, findings.map(f => f.file).filter(Boolean) as string[])) ineffectiveCorrection(ctx);
   }
   throw new PipelinePause('limit', 'El pipeline alcanzó su número máximo de pasos internos.');
 }
@@ -682,7 +770,8 @@ export async function resumeStory(slug: string, processId: string, log: (o: any,
   try {
     updatePipeline(slug, processId, { state: 'running', reason: null, pauseKind: null, finishedAt: null }, { kind: 'info', message: 'El propietario autorizó continuar. El equipo retoma donde lo dejó.' });
     const cur = procs.get(processId)!.result!;
-    if (!cur.applied && !cur.changes.some(c => !c.error)) {
+    if (cur.manifest) (await import('./storyUnits.ts')).prepareResume(ctx);
+    else if (!cur.applied && !cur.changes.some(c => !c.error)) {
       const outs = implementerOutputs(procs.get(processId)!);
       // Sin entrega del Desarrollador no hay nada que retomar (p. ej. interrumpido durante el plan): no se inventa nada.
       if (!outs.length) throw new StoryFailure({ kind: 'internal', class: 'UNKNOWN_FAILURE', detail: 'No hay ninguna entrega del Desarrollador que retomar (se interrumpió antes). Vuelve a ejecutar la historia con un presupuesto nuevo.' });

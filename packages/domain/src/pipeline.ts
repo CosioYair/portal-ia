@@ -17,11 +17,12 @@ export const DEFAULT_PIPELINE: PipelineConfig = {
   maxDurationMin: 45,
   maxConsultations: 1,
   maxProviderRetries: 2,
-  providerTimeoutSec: null
+  providerTimeoutSec: null,
+  maxContinuations: 6
 };
 
 /** Límites duros: ni la interfaz ni la API pueden autorizar más que esto en un solo proceso. */
-export const PIPELINE_LIMITS = { maxOutputRepairs: 3, maxCorrections: 5, maxIdenticalFailures: 3, maxDurationMin: 180, maxConsultations: 3, maxProviderRetries: 3, providerTimeoutSec: 900 } as const;
+export const PIPELINE_LIMITS = { maxOutputRepairs: 3, maxCorrections: 5, maxIdenticalFailures: 3, maxDurationMin: 180, maxConsultations: 3, maxProviderRetries: 3, providerTimeoutSec: 900, maxContinuations: 12 } as const;
 
 /** Normaliza una configuración recibida (valores fuera de rango se acotan; comandos desconocidos se descartan). */
 export function normalizePipeline(input: Partial<PipelineConfig> | null | undefined): PipelineConfig {
@@ -41,6 +42,7 @@ export function normalizePipeline(input: Partial<PipelineConfig> | null | undefi
     maxDurationMin: int(c.maxDurationMin, 5, PIPELINE_LIMITS.maxDurationMin, DEFAULT_PIPELINE.maxDurationMin),
     maxConsultations: int(c.maxConsultations, 0, PIPELINE_LIMITS.maxConsultations, DEFAULT_PIPELINE.maxConsultations),
     maxProviderRetries: int(c.maxProviderRetries, 0, PIPELINE_LIMITS.maxProviderRetries, DEFAULT_PIPELINE.maxProviderRetries),
-    providerTimeoutSec: c.providerTimeoutSec == null ? null : int(c.providerTimeoutSec, 5, PIPELINE_LIMITS.providerTimeoutSec, 0) || null
+    providerTimeoutSec: c.providerTimeoutSec == null ? null : int(c.providerTimeoutSec, 5, PIPELINE_LIMITS.providerTimeoutSec, 0) || null,
+    maxContinuations: int(c.maxContinuations, 0, PIPELINE_LIMITS.maxContinuations, DEFAULT_PIPELINE.maxContinuations!)
   };
 }

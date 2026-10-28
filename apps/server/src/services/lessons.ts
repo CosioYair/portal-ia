@@ -107,6 +107,28 @@ export function detectInProcess(slug: string, proc: Process, repoPath: string | 
   if (cls === 'PROVIDER_REFUSAL') out.push({ detector: 'provider_refusal', title: 'El proveedor rechazó la petición', role: 'implementer', tags: ['proveedor', 'negativa'], evidence: ev(null, `${(a?.reasons ?? []).join(' ') || r?.failure?.detail || 'negativa del proveedor'}. No se reintentó.`.slice(0, 600)), dedupeKey: key('provider_refusal', null) });
   if (cls === 'PROVIDER_TIMEOUT' || cls === 'PROVIDER_CONNECTION_ERROR') out.push({ detector: cls === 'PROVIDER_TIMEOUT' ? 'provider_timeout' : 'provider_unavailable', title: cls === 'PROVIDER_TIMEOUT' ? 'El proveedor no respondió dentro del plazo' : 'No se pudo contactar con el proveedor', role: null, tags: ['proveedor', cls.toLowerCase()], evidence: ev(null, (r?.failure?.detail ?? r?.pipeline?.reason ?? '').slice(0, 600)), dedupeKey: key(cls === 'PROVIDER_TIMEOUT' ? 'provider_timeout' : 'provider_unavailable', null) });
   if (proc.status === 'failed' && proc.error && /no entregó ningún archivo|se cortó/.test(proc.error)) out.push({ detector: 'dev_no_output', title: 'El implementador no entregó archivos en el formato acordado', role: 'implementer', tags: ['format', 'implementar'], evidence: ev(null, proc.error), dedupeKey: key('dev_no_output', null) });
+  // Entrega incremental y lecciones de HU-155 (tamaño de las respuestas, regeneración, entrega incompleta, correcciones
+  // sin efecto, pruebas y contexto). Evidencia objetiva del propio proceso; nunca se validan solas.
+  const evs = r?.pipeline?.events ?? []; const man = r?.manifest ?? null;
+  const evText = (xs: typeof evs) => xs.map(e => `${e.message}${e.detail ? ` (${e.detail})` : ''}`).join(' · ');
+  const cut = evs.filter(e => e.kind === 'continuation' && /se cortó por longitud/.test(e.message));
+  if (cut.length) out.push({ detector: 'oversized_response', title: 'Se pidió más código del que cabe en una respuesta del modelo', role: 'implementer', tags: ['tamaño', 'salida', 'implementar'], evidence: ev(cut[0].message.match(/«([^»]+)»/)?.[1] ?? null, `${cut.length} respuesta(s) cortadas por longitud: ${evText(cut)}`), dedupeKey: key('oversized_response', null) });
+  const exhausted = evs.filter(e => /agotó toda su salida/.test(e.message));
+  if (exhausted.length) out.push({ detector: 'output_exhausted', title: 'El razonamiento interno agotó la salida del modelo sin entregar texto', role: 'implementer', tags: ['razonamiento', 'salida', 'costo'], evidence: ev(null, evText(exhausted)), dedupeKey: key('output_exhausted', null) });
+  const regen = evs.filter(e => /no se regenera un archivo terminado|no reescribe entero/.test(`${e.message} ${e.detail ?? ''}`));
+  if (regen.length) out.push({ detector: 'regenerated_completed', title: 'Se intentó regenerar un archivo ya terminado en lugar de parchearlo', role: 'implementer', tags: ['regenerar', 'patch', 'implementar'], evidence: ev(null, evText(regen)), dedupeKey: key('regenerated_completed', null) });
+  // Plan frente al diff real (también procesos sin manifiesto: HU-155 entregó 2 de 8 archivos y QA lo descubrió pagando).
+  const planned = man ? man.deliverables.filter(d => d.planned && d.status !== 'dropped').map(d => d.path) : r?.plan?.filesToChange ?? [];
+  const inDiff = new Set((r?.changes ?? []).filter(c => !c.error).map(c => c.path));
+  const missingPlan = r?.applied ? planned.filter(p => !inDiff.has(p)) : [];
+  const gateIssues = man?.gate && !man.gate.ok ? [...man.gate.missing.map(m => `falta ${m}`), ...man.gate.invalid.map(i => `${i.path}: ${i.problem}`)] : [];
+  if (missingPlan.length || gateIssues.length) out.push({ detector: 'incomplete_delivery', title: `Entrega incompleta frente al plan (${planned.length - missingPlan.length} de ${planned.length} entregables)`, role: 'implementer', tags: ['completitud', 'plan', 'implementar'], evidence: ev(missingPlan[0] ?? null, [missingPlan.length ? `Faltan en el diff: ${missingPlan.join(', ')}.` : '', gateIssues.length ? `Comprobación previa a QA: ${gateIssues.join(' · ')}.` : '', man ? 'Detectado sin IA antes de QA.' : 'Sin manifiesto: QA lo descubrió en una revisión pagada.'].filter(Boolean).join(' ')), dedupeKey: key('incomplete_delivery', null) });
+  const ineffective = evs.filter(e => /no trajo cambios aplicables|no produjo ningún cambio aplicable|no produjeron ningún cambio aplicable/.test(e.message));
+  if (ineffective.length) out.push({ detector: 'ineffective_correction', title: 'Correcciones pagadas sin ningún cambio aplicable', role: 'implementer', tags: ['corrección', 'costo', 'implementar'], evidence: ev(null, evText(ineffective)), dedupeKey: key('ineffective_correction', null) });
+  const noTests = man?.gate?.notes.find(n => /sin pruebas/.test(n));
+  if (noTests) out.push({ detector: 'missing_tests', title: 'Código nuevo sin pruebas nuevas', role: 'implementer', tags: ['pruebas', 'calidad', 'implementar'], evidence: ev(null, noTests), dedupeKey: key('missing_tests', null) });
+  const heavy = proc.steps.filter(s => (s.role === 'implementer' || s.role === 'reviewer') && s.inputTokens > 40_000);
+  if (heavy.length) out.push({ detector: 'excessive_context', title: `Contexto excesivo en ${heavy.length} llamada(s) (hasta ${Math.max(...heavy.map(s => s.inputTokens))} tokens de entrada)`, role: null, tags: ['contexto', 'costo', 'tokens'], evidence: ev(null, heavy.map(s => `${s.title}: ${s.inputTokens} tokens de entrada, ${s.outputTokens} de salida, ${s.costUsd.toFixed(4)} USD`).join(' · '), heavy[0]), dedupeKey: key('excessive_context', null) });
   return out;
 }
 

@@ -59,6 +59,28 @@ pregunta: (la pregunta concreta que lo resolvería)
 consultar: (agente o papel del equipo que podría saberlo, o «ninguno»)
 El equipo te dará ese contexto (o se lo preguntará al especialista o al propietario) y volverás a intentarlo. Los datos reales del propietario (carpeta data/, credenciales, .env) NO son accesibles para ningún agente.`;
 
+/** Descartar un entregable del plan con motivo (el alcance y los criterios no los cambia el agente: QA lo confirma). */
+export const DROP_FORMAT = `=== DESCARTE: ruta/del/plan ===
+(solo si ese archivo del plan NO hace falta: motivo verificable y qué lo sustituye; no cambia los criterios de aceptación)`;
+
+/** Formato de una unidad de trabajo intermedia (las secciones para el propietario se piden en la última unidad). */
+export const UNIT_FORMAT = `=== RESUMEN ===
+(1-3 frases: qué entrega esta unidad)
+=== ARCHIVO: ruta/relativa/al/repo | create ===
+(contenido íntegro del archivo nuevo, tal cual, sin cercas de código)
+=== FIN ARCHIVO ===
+=== ARCHIVO: archivo/existente.ts | patch ===
+<<<< BUSCAR
+(fragmento EXACTO del archivo actual, con contexto suficiente para ser único)
+==== REEMPLAZAR
+(el fragmento nuevo)
+>>>> FIN
+=== FIN ARCHIVO ===
+${DROP_FORMAT}
+=== NOTAS ===
+(opcional: decisiones o riesgos para las unidades siguientes)
+Reglas: cada archivo abre con "=== ARCHIVO:" y cierra con "=== FIN ARCHIVO ==="; nada fuera de estos bloques salvo RESUMEN, DESCARTE, BLOQUEO y NOTAS. Si te falta algo imprescindible, responde con la sección BLOQUEO (tipo / necesito / pregunta / consultar) en lugar de código a medias.`;
+
 /** Formato reducido para reparaciones y correcciones (sin repetir las secciones para el propietario si ya llegaron). */
 export const PATCH_ONLY_FORMAT = `=== RESUMEN ===
 (1-3 frases: qué corriges)

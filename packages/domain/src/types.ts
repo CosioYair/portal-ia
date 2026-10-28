@@ -357,6 +357,8 @@ export interface StoryFlow {
   iteration: { number: number; total: number } | null;
   /** Mensaje principal cuando el pipeline autorizado terminó bien o está trabajando (p. ej. «Implementación verificada por QA — lista para revisión del propietario»). */
   headline?: string | null;
+  /** Entrega incremental (procesos con manifiesto): entregables, unidad en curso, niveles de verificación, correcciones y costo. */
+  delivery?: DeliveryProgress | null;
 }
 
 export interface KnowledgeDoc {
@@ -492,6 +494,8 @@ export interface StoryPlan {
   filesToChange: string[];
   acceptance: string[];
   risks: string[];
+  /** Entregables del Coordinador (propósito, tipo y tamaño previsto por archivo); si faltan, se derivan de filesToChange. */
+  deliverables?: { path: string; purpose: string; kind?: DeliverableKind; estimatedLines?: number }[];
 }
 export interface ProposedChange {
   path: string;
@@ -519,7 +523,9 @@ export interface ReviewVerdict {
   overridden?: string | null;
 }
 export type QaVerdictKind = 'approved' | 'rejected' | 'blocked_environment' | 'unable_to_verify';
-export interface QaFinding { severity: IssueSeverity; text: string; file: string | null; evidence: string | null }
+export interface QaFinding { severity: IssueSeverity; text: string; file: string | null; evidence: string | null;
+  /** Criterio de aceptación afectado, corrección esperada y verificación necesaria (si QA los indica). */
+  requirement?: string | null; expected?: string | null; verify?: string | null }
 
 // ---- Contrato de salida del Desarrollador y pipeline autónomo autorizado ----
 /** Qué entregó el Desarrollador, clasificado sin IA. */
@@ -598,12 +604,18 @@ export interface PipelineConfig {
   maxProviderRetries: number;
   /** Plazo fijo de cada llamada (s). null = automático según la salida máxima (ver providerCalls.ts). */
   providerTimeoutSec: number | null;
+  /** Continuaciones de respuestas cortadas por longitud (en todo el proceso; cada archivo, como máximo 2). No consumen correcciones. */
+  maxContinuations?: number;
 }
-export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'verify' | 'environment' | 'qa' | 'correction' | 'pause' | 'done' | 'error';
+export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'verify' | 'environment' | 'qa' | 'correction' | 'pause' | 'done' | 'error'
+  /** Entrega incremental: unidad de trabajo, continuación de una respuesta cortada y comprobación determinista previa a QA. */
+  | 'unit' | 'continuation' | 'gate';
 export interface PipelineEvent { at: string; kind: PipelineEventKind; message: string; detail?: string | null; aiCall?: boolean; costUsd?: number | null }
 export type PipelineState = 'running' | 'verified' | 'paused' | 'stopped';
 export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' | 'repeated_failure' | 'duration' | 'no_changes' | 'refusal' | 'qa' | 'cancelled'
-  | 'missing_information' | 'permission' | 'unsupported' | 'provider_refusal' | 'provider_timeout' | 'provider_error' | 'interrupted' | 'unknown';
+  | 'missing_information' | 'permission' | 'unsupported' | 'provider_refusal' | 'provider_timeout' | 'provider_error' | 'interrupted' | 'unknown'
+  /** Entrega incremental: un entregable no cabe en la salida del modelo ni por secciones, o faltan entregables tras los intentos permitidos. */
+  | 'too_large' | 'incomplete';
 export type PipelinePhase = 'implementing' | 'recovering' | 'repairing' | 'applying' | 'verifying' | 'installing' | 'qa' | 'correcting' | 'finished';
 export interface PipelineStatus {
   config: PipelineConfig;
@@ -632,8 +644,126 @@ export interface PipelineStatus {
   contextSupplies?: number;
   /** Reintentos por errores de conexión con el proveedor (en total). */
   providerRetries?: number;
+  /** Continuaciones de respuestas cortadas (contador propio: no consume correcciones ni reparaciones de formato). */
+  continuations?: number;
+  /** Llamadas de corrección pagadas (aplicadas o no). `corrections` cuenta solo las rondas que produjeron cambios aplicados. */
+  correctionAttempts?: number;
+  /** Rondas de corrección sin ningún cambio aplicable (se detiene en vez de repetir lo mismo). */
+  ineffectiveRounds?: number;
   startedAt: string;
   finishedAt: string | null;
+}
+
+// ---- Entrega incremental: manifiesto de entregables y unidades de trabajo ----
+export type DeliverableKind = 'code' | 'test' | 'docs' | 'config';
+/**
+ * pending: aún no entregado · delivered: está en el diff del worktree (evidencia: commit) · failed: no se pudo entregar tras
+ * los intentos permitidos · dropped: el equipo justificó que no hace falta (QA lo confirma) · extra: fuera del plan.
+ */
+export type DeliverableStatus = 'pending' | 'delivered' | 'failed' | 'dropped';
+export interface Deliverable {
+  path: string;
+  purpose: string;
+  kind: DeliverableKind;
+  /** false = añadido por el equipo durante la implementación (no estaba en el plan). */
+  planned: boolean;
+  status: DeliverableStatus;
+  /** Unidad que lo entrega (o lo entregó). */
+  unitId: string | null;
+  /** Commit del worktree en el que quedó y líneas resultantes (evidencia real, no la palabra del agente). */
+  commit: string | null;
+  lines: number | null;
+  estimatedLines: number;
+  /** Motivo de un descarte o de un fallo. */
+  note: string | null;
+}
+export type WorkUnitKind = 'build' | 'correction';
+export type WorkUnitStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+export interface WorkUnit {
+  id: string;
+  kind: WorkUnitKind;
+  title: string;
+  purpose: string;
+  /** Ámbito autorizado: archivos que esta unidad entrega o corrige. */
+  files: string[];
+  /** Criterios de aceptación de la historia que cubre. */
+  acceptance: string[];
+  /** Unidades que deben estar terminadas antes. */
+  dependsOn: string[];
+  agentId: string; agentName: string; role: TeamRole;
+  status: WorkUnitStatus;
+  /** Llamadas de implementación de la unidad (sin contar continuaciones ni reparaciones de formato). */
+  attempts: number;
+  continuations: number;
+  repairs: number;
+  /** Salida de texto prevista (tokens) y costo estimado antes de llamar. */
+  estimatedOutputTokens: number;
+  estimatedUsd: number;
+  /** Costo confirmado de sus llamadas (suma de sus pasos). */
+  costUsd: number;
+  stepIds: string[];
+  /** Origen (unidades de corrección): QA, verificación o comprobación de completitud, con los hallazgos que corrige. */
+  source?: 'plan' | 'qa' | 'verification' | 'completeness';
+  findings?: { severity: IssueSeverity; text: string; file: string | null; evidence: string | null; expected?: string | null }[];
+  /** Último problema (para no repetir lo mismo y para el propietario). */
+  error: string | null;
+  startedAt: string | null; finishedAt: string | null;
+  /** Paso planificado que usa la primera llamada (la «Implementación» del equipo autorizado). */
+  reservedStepId?: string | null;
+  /** Ronda de corrección a la que pertenece (unidades de corrección). */
+  round?: number;
+  /** Archivos que esta unidad dejó aplicados en el worktree (evidencia). */
+  applied?: string[];
+  /** Continuaciones por archivo cortado (máximo 2 cada uno). */
+  continued?: Record<string, number>;
+  /** Veces que el modelo agotó la salida sin escribir texto (todo en razonamiento oculto). */
+  exhausted?: number;
+  /** Salidas pagadas del intento en curso (paso + motivo de parada + prefijo de una continuación): al reanudar se releen sin volver a llamar. */
+  outputs?: { stepId: string; stopReason: string | null; prefix?: string | null }[];
+}
+/** Comprobación determinista previa a QA (sin IA): lo que el motor ya sabe sin preguntar a nadie. */
+export interface CompletenessGate {
+  at: string;
+  /** Commit del worktree comprobado (si cambia, se vuelve a comprobar). */
+  commit: string | null;
+  ok: boolean;
+  /** Entregables planificados que no están en el diff del worktree (ni justificados como descartados). */
+  missing: string[];
+  /** Archivos entregados con problemas objetivos (JSON no válido, marcadores de conflicto, contenido omitido «...», prueba que el script de test no descubre). */
+  invalid: { path: string; problem: string }[];
+  dropped: { path: string; reason: string }[];
+  /** Archivos cambiados fuera del plan. */
+  extra: string[];
+  /** Pruebas añadidas o modificadas en el diff. */
+  testsChanged: string[];
+  notes: string[];
+}
+export interface StoryManifest {
+  version: 1;
+  deliverables: Deliverable[];
+  units: WorkUnit[];
+  /** Salida de texto máxima por unidad (tokens) con la que se dividió el trabajo. */
+  unitOutputBudget: number;
+  /** Rondas de corrección: de dónde vienen, cuántas unidades y cuántas aplicaron cambios. */
+  rounds: { at: string; source: 'qa' | 'verification' | 'completeness'; units: number; applied: number }[];
+  gate: CompletenessGate | null;
+  createdAt: string;
+}
+/** Resumen de la entrega para la interfaz (calculado al servir el proceso). */
+export interface DeliveryProgress {
+  deliverables: { path: string; kind: DeliverableKind; status: DeliverableStatus; planned: boolean; note: string | null; unit: string | null; lines: number | null }[];
+  delivered: number; total: number;
+  units: { done: number; total: number };
+  currentUnit: { title: string; agentName: string; kind: WorkUnitKind; index: number; total: number } | null;
+  /** Tres niveles distintos: compila ≠ funcionalidad completa ≠ QA aprobó los criterios. */
+  levels: { compiles: boolean | null; complete: boolean; qaApproved: boolean };
+  corrections: { applied: number; max: number; requested: number; ineffective: number; attempts: number };
+  continuations: number;
+  spentUsd: number;
+  /** Estimación de lo que falta (unidades pendientes + QA), nunca confirmada. */
+  remainingEstimateUsd: number;
+  blocker: string | null;
+  next: string;
 }
 /** Por qué terminó mal un proceso de historia (clasificado al fallar; evita adivinar por el texto del error). */
 export interface ProcessFailure { kind: 'output_contract' | 'provider' | 'budget' | 'cancelled' | 'internal' | 'refusal'; detail: string; assessment?: DevOutputAssessment | null;
@@ -681,6 +811,8 @@ export interface ExecutionResult {
   pipeline?: PipelineStatus | null;
   /** Clasificación del fallo del proceso (si falló). */
   failure?: ProcessFailure | null;
+  /** Entrega incremental: entregables del plan, unidades de trabajo y comprobación previa a QA (puntos de control duraderos). */
+  manifest?: StoryManifest | null;
 }
 
 /** Estado del repositorio registrado (solo lectura, sin red). */

@@ -147,9 +147,11 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
 ${direction ? `\n# Dirección del proyecto (${phase ? 'etapa vigente y línea base' : 'síntesis previa'})\n${direction}\n` : ''}${iterText}
 ${treeText}
 
-Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "acceptance": string[], "risks": string[]}`, 2500);
+El equipo implementará por partes (unidades que caben en una respuesta), así que indica también, por cada archivo a crear o modificar, su propósito, tipo y tamaño previsto en líneas.
+Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "deliverables": [{"path": string, "purpose": string (una frase), "kind": "code"|"test"|"docs"|"config", "estimatedLines": number}] (uno por cada ruta de filesToChange, en orden de dependencia), "acceptance": string[], "risks": string[]}`, 2500);
     const planJson = extractJson(planRes.text);
-    const plan: StoryPlan = { summary: String(planJson?.summary ?? planRes.text.slice(0, 500)), tasks: planJson?.tasks ?? [], filesToRead: (planJson?.filesToRead ?? []).slice(0, 8), filesToChange: (planJson?.filesToChange ?? []).slice(0, 10), acceptance: planJson?.acceptance ?? [], risks: planJson?.risks ?? [] };
+    const deliverables = Array.isArray(planJson?.deliverables) ? planJson.deliverables.filter((d: any) => d && typeof d.path === 'string').slice(0, 10).map((d: any) => ({ path: String(d.path), purpose: String(d.purpose ?? '').slice(0, 300), kind: ['code', 'test', 'docs', 'config'].includes(d.kind) ? d.kind : undefined, estimatedLines: Number.isFinite(Number(d.estimatedLines)) ? Number(d.estimatedLines) : undefined })) : undefined;
+    const plan: StoryPlan = { summary: String(planJson?.summary ?? planRes.text.slice(0, 500)), tasks: planJson?.tasks ?? [], filesToRead: (planJson?.filesToRead ?? []).slice(0, 8), filesToChange: (planJson?.filesToChange ?? []).slice(0, 10), acceptance: planJson?.acceptance ?? [], risks: planJson?.risks ?? [], ...(deliverables?.length ? { deliverables } : {}) };
     result.plan = plan; save();
 
     // 1b · Consultas de especialistas (M3): aportan recomendaciones concretas que recibe el implementador.
@@ -170,6 +172,22 @@ ${treeText}`, MAX_TOKENS.consultant);
     cancelled();
     const implStep = roleStep('implementer'); const dev = agents.get(implStep.agentId)!;
     const qaStep = stepByRole(proc, 'reviewer'); const qa = qaStep ? agents.get(qaStep.agentId)! : null;
+    if (config?.autoApply) {
+      // Pipeline con aplicación automática: entrega INCREMENTAL por unidades (manifiesto duradero, continuaciones por
+      // archivo, comprobación previa a QA y correcciones dirigidas). El paso «Implementación» planificado pasa a ser
+      // la primera unidad; cada llamada siguiente es su propio paso con su modelo, tokens y costo.
+      handedOff = true; save();
+      const team = involved.map(id => agents.get(id)).filter(Boolean) as Agent[];
+      const rc: StoryRunCtx = { slug, processId, item, project, repoPath: repo.path, plan, consultText, iterText, dev, qa, team, log, isCancelled, injected };
+      runCtx = rc;
+      const units = await import('./storyUnits.ts');
+      units.startIncremental(rc, implStep.status === 'pending' ? implStep.id : null);
+      await runPipelineStages(rc);
+      const fin = procs.get(processId)!.result!;
+      knowledge.add({ projectId: project.id, title: `${item.storyId} · Plan e implementación incremental — ${item.title}`, body: `# Plan\n${plan.summary}\n\n${plan.tasks.map(t => '- ' + t).join('\n')}\n\n# Entregables\n${(fin.manifest?.deliverables ?? []).map(d => `- [${d.status}] ${d.path}${d.note ? ` — ${d.note}` : ''}`).join('\n')}\n\n# Implementación\n${fin.implementationSummary ?? ''}\n\n# Revisión QA\n${fin.review ? `${fin.review.verdict ?? (fin.review.approve ? 'approved' : 'rejected')} — ${fin.review.summary}` : 'sin revisión'}${fin.pipeline ? `\n\n# Pipeline\n${fin.pipeline.events.map(e => `- ${e.message}`).join('\n')}` : ''}`, authorAgentId: coord.id, authorAgentName: coord.config.name, processId });
+      backlog.setStatus(item.id, 'review', processId);
+      return;
+    }
     // Contexto acotado: archivos del plan, cada uno hasta 30 000 caracteres y 120 000 en total (lo demás, el modelo lo parchea a ciegas con contexto suficiente o lo pide en NOTAS).
     let ctxBudget = 120_000;
     const filesCtx = Array.from(new Set([...plan.filesToRead, ...plan.filesToChange])).map(f => {

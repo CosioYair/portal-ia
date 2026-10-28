@@ -18,6 +18,10 @@ import type { RawChange } from './repoWrite.ts';
 export interface ParsedDevOutput {
   summary: string; notes: string; userFacing: string; manualSteps: string[]; runtimeChecks: RuntimeCheck[]; verify: string[];
   changes: RawChange[]; truncatedFile: string | null;
+  /** Lo recibido del archivo cortado (para pedir SOLO su continuación, sin regenerar lo demás). */
+  truncatedPartial?: { path: string; op: RawChange['action']; body: string } | null;
+  /** Entregables planificados que el agente justifica que no hacen falta («=== DESCARTE: ruta ===» + motivo). */
+  drops?: { path: string; reason: string }[];
   /** Justificación de la sección SIN CAMBIOS (análisis válido que no requiere tocar el código). */
   noChanges: string | null;
   /** Problemas de forma encontrados (bloque sin cierre, parche vacío, fragmento para un archivo existente…). */
@@ -30,7 +34,7 @@ const OPS: Record<string, RawChange['action']> = {
   patch: 'patch', parche: 'patch', parchear: 'patch', edit: 'patch', editar: 'patch',
   delete: 'delete', borrar: 'delete', eliminar: 'delete', remove: 'delete'
 };
-const SECTION_NAMES = 'RESUMEN|NOTAS|PARA EL PROPIETARIO|PRUEBA MANUAL|COMPROBACIONES|SIN CAMBIOS|BLOQUEO|VERIFICAR:[^=]*';
+const SECTION_NAMES = 'RESUMEN|NOTAS|PARA EL PROPIETARIO|PRUEBA MANUAL|COMPROBACIONES|SIN CAMBIOS|BLOQUEO|VERIFICAR:[^=]*|DESCARTE:[^=]*';
 const STRICT_HEADER = /^[ \t]*={3,}\s*ARCHIVO:\s*(.+?)\s*\|\s*(create|modify|patch|delete)\s*={3,}[ \t]*$/i;
 const LENIENT_HEADER = /^[ \t>*#_`]*={2,}\s*(?:ARCHIVO|FILE|FICHERO)\s*:?\s*(.+?)\s*={2,}[ \t*_`]*$/i;
 const FIN = /^[ \t>*#_`]*={2,}\s*(?:FIN(?:\s+(?:DE\s+)?ARCHIVO)?|END(?:\s+FILE)?)\s*={2,}[ \t*_`]*$/i;
@@ -93,8 +97,8 @@ function scanBlocks(text: string, lenient: boolean): Block[] {
   return blocks;
 }
 
-function blocksToChanges(blocks: Block[], stopReason: string | null | undefined, exists: (p: string) => boolean, problems: string[]): { changes: RawChange[]; truncatedFile: string | null } {
-  const changes: RawChange[] = []; let truncatedFile: string | null = null;
+function blocksToChanges(blocks: Block[], stopReason: string | null | undefined, exists: (p: string) => boolean, problems: string[]): { changes: RawChange[]; truncatedFile: string | null; truncatedPartial: ParsedDevOutput['truncatedPartial'] } {
+  const changes: RawChange[] = []; let truncatedFile: string | null = null; let truncatedPartial: ParsedDevOutput['truncatedPartial'] = null;
   for (const b of blocks) {
     if (!b.path) { problems.push('Un bloque de archivo no indica la ruta.'); continue; }
     const body = b.lines.join('\n');
@@ -107,7 +111,7 @@ function blocksToChanges(blocks: Block[], stopReason: string | null | undefined,
     }
     if (op === 'delete') { changes.push({ path: b.path, action: 'delete', content: null }); continue; }
     const eofCut = b.closed === 'eof';
-    if (eofCut && isTruncatedStop(stopReason)) { truncatedFile = b.path; problems.push(`${b.path}: la respuesta se cortó dentro de este archivo; no se incluye.`); continue; }
+    if (eofCut && isTruncatedStop(stopReason)) { truncatedFile = b.path; truncatedPartial = { path: b.path, op, body }; problems.push(`${b.path}: la respuesta se cortó dentro de este archivo; no se incluye.`); continue; }
     if (op === 'patch') {
       if (unterminated && eofCut) { truncatedFile = b.path; problems.push(`${b.path}: un bloque BUSCAR/REEMPLAZAR quedó sin cerrar.`); if (!edits.length) continue; }
       else if (unterminated) problems.push(`${b.path}: un bloque BUSCAR/REEMPLAZAR quedó sin cerrar; se usan solo los completos.`);
@@ -123,7 +127,7 @@ function blocksToChanges(blocks: Block[], stopReason: string | null | undefined,
     if (!content.trim()) { problems.push(`${b.path}: «${op}» sin contenido.`); continue; }
     changes.push({ path: b.path, action: op, content: content.endsWith('\n') ? content : content + '\n' });
   }
-  return { changes, truncatedFile };
+  return { changes, truncatedFile, truncatedPartial };
 }
 
 /** Diff unificado (`--- a/x` / `+++ b/x` / `@@`) → parches BUSCAR/REEMPLAZAR exactos (contexto + líneas quitadas → contexto + añadidas). */
@@ -196,7 +200,8 @@ function sections(text: string) {
   const verify = (t.match(/^[ \t>*#_`]*={3,}\s*VERIFICAR:\s*(.*?)\s*={3,}/mi)?.[1] ?? '').split(/[\s,]+/).map(v => v.trim().toLowerCase()).filter(Boolean);
   const manualSteps = section('PRUEBA MANUAL').split('\n').map(l => l.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, '').trim()).filter(l => l.length > 3).slice(0, 12);
   const noChangesRaw = /^[ \t>*#_`]*={3,}\s*SIN CAMBIOS\s*={3,}/mi.test(t) ? section('SIN CAMBIOS') : null;
-  return { summary: section('RESUMEN'), notes: section('NOTAS'), userFacing: section('PARA EL PROPIETARIO'), manualSteps, runtimeChecks: parseRuntimeChecks(section('COMPROBACIONES')), verify, noChanges: noChangesRaw === null ? null : (noChangesRaw || 'sin justificación') };
+  const drops = Array.from(t.matchAll(/^[ \t>*#_`]*={3,}\s*DESCARTE:\s*(.+?)\s*={3,}[ \t*_`]*\n([\s\S]*?)(?=^[ \t>*#_`]*={2,}\s*(?:ARCHIVO|FILE|FICHERO|RESUMEN|NOTAS|PARA EL PROPIETARIO|PRUEBA MANUAL|COMPROBACIONES|SIN CAMBIOS|BLOQUEO|VERIFICAR:|DESCARTE:)|(?![\s\S]))/gmi)).map(m => ({ path: cleanPath(m[1]), reason: m[2].trim().slice(0, 600) || 'sin motivo' })).filter(d => d.path);
+  return { summary: section('RESUMEN'), notes: section('NOTAS'), userFacing: section('PARA EL PROPIETARIO'), manualSteps, runtimeChecks: parseRuntimeChecks(section('COMPROBACIONES')), verify, noChanges: noChangesRaw === null ? null : (noChangesRaw || 'sin justificación'), drops };
 }
 
 /** Lector canónico (compatibilidad): bloques estrictos con cierre; equivalente al de antes pero sin fusionar archivos cuando falta un cierre. */
@@ -267,7 +272,7 @@ export function assessDeveloperOutput(text: string, opts: { stopReason: string |
   const sp: string[] = []; const strictBlocks = scanBlocks(text, false); const strict = blocksToChanges(strictBlocks, opts.stopReason, opts.exists, sp);
   const lp: string[] = []; const lenientBlocks = scanBlocks(text, true); const lenient = blocksToChanges(lenientBlocks, opts.stopReason, opts.exists, lp);
   const useStrict = strict.changes.length > lenient.changes.length;
-  let { changes, truncatedFile } = useStrict ? strict : lenient;
+  let { changes, truncatedFile, truncatedPartial } = useStrict ? strict : lenient;
   const problems: string[] = [...(useStrict ? sp : lp)];
   const deviated = !useStrict && lenientBlocks.some(b => !b.strict || b.closed === 'next');
   let recoveredBy: string | null = changes.length ? (deviated ? 'lenient-format' : 'canonical') : null;
@@ -284,6 +289,7 @@ export function assessDeveloperOutput(text: string, opts: { stopReason: string |
   const flat = text.trim();
   // Con artefactos de implementación, una frase suelta («no puedo verificarlo en el navegador») nunca convierte la entrega en negativa ni bloqueo.
   if (changes.length) kind = truncatedFile ? 'truncated' : problems.some(p => /sin bloques|sin contenido|sin cerrar/.test(p)) ? 'incomplete' : 'implementation';
+  else if (sec.drops?.length && !truncatedFile) { kind = 'no_changes'; reasons.push(`El Desarrollador justifica que no hacen falta: ${sec.drops.map(d => d.path).join(', ')}.`); }
   else if (sec.noChanges !== null) { kind = 'no_changes'; reasons.push(`El Desarrollador indica que no hacen falta cambios: ${sec.noChanges.slice(0, 300)}`); }
   else if (opts.providerRefusal) { kind = 'provider_refusal'; reasons.push(`El proveedor rechazó la petición (señal del proveedor: ${String(opts.providerRefusal).slice(0, 200)}).`); }
   else if (blockSection !== null && (blocker = parseBlocker(blockSection))) { kind = 'blocked'; reasons.push(`El Desarrollador declara un bloqueo (${blocker.type === 'permission' ? 'permiso' : blocker.type === 'capability' ? 'capacidad' : 'información'}): ${blocker.need}`); }
@@ -301,7 +307,7 @@ export function assessDeveloperOutput(text: string, opts: { stopReason: string |
     } else { kind = 'malformed'; reasons.push('La respuesta no contiene bloques de archivo, parches, la sección «SIN CAMBIOS» ni un «BLOQUEO»: no es una implementación.'); }
   }
   return {
-    parsed: { ...sec, changes, truncatedFile, problems },
+    parsed: { ...sec, changes, truncatedFile, truncatedPartial, problems },
     assessment: { kind, reasons: reasons.slice(0, 12), recoveredBy: changes.length ? recoveredBy : null, files: changes.length, truncatedFile, requestedFiles, blocker }
   };
 }

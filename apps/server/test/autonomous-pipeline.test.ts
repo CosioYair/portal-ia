@@ -187,22 +187,25 @@ test('A2 · caso HU-155: un fallo de formato antiguo se clasifica como contrato 
   assert.equal(calls().length, 0, 'la recuperación no llama a la IA');
 });
 
-test('B · respuesta cortada: la recuperación local no basta → reparación acotada del mismo Desarrollador, con el plan reutilizado', async () => {
+test('B · respuesta cortada: se continúa SOLO el archivo cortado (contador propio), sin reparación de formato ni corrección; el plan no se repite', async () => {
   useFakeSandbox(); clearLog();
   const cut = `=== RESUMEN ===\nDos archivos.\n=== ARCHIVO: src/a.ts | patch ===\n<<<< BUSCAR\nexport const a = 1;\n==== REEMPLAZAR\nexport const a = 2;\n>>>> FIN\n=== FIN ARCHIVO ===\n=== ARCHIVO: src/b.ts | create ===\nexport const b =`;
-  setScript({ dev: cut, devStop: 'max_tokens', continuation: { match: 'Continúa EXACTAMENTE', text: '', stopReason: 'max_tokens' }, repair: '=== RESUMEN ===\nFalta b.\n=== ARCHIVO: src/b.ts | create ===\nexport const b = 2;\n=== FIN ARCHIVO ===' });
+  // La línea cortada se descarta y la continuación la reescribe entera (unión determinista).
+  setScript({ dev: cut, devStop: 'max_tokens', continuation: { match: 'Continúa el archivo «src/b.ts»', text: 'export const b = 2;\n=== FIN ARCHIVO ===' } });
   const { p } = await runWithPipeline('B · respuesta cortada');
   const pl = p.result!.pipeline!;
   assert.equal(pl.state, 'verified', pl.reason ?? '');
   const c = calls();
   assert.equal(byRule(c, R.plan).length, 1, 'el Coordinador planifica una sola vez (no se repite el plan)');
-  const rep = byRule(c, R.repair); assert.equal(rep.length, 1, 'una reparación acotada');
-  assert.ok(rep[0].markers.includes('Ya recibidos y válidos') && rep[0].markers.includes('Entrega SOLO') && rep[0].markers.includes('src/b.ts'), 'pide solo lo que falta y conserva lo válido');
-  assert.equal(pl.outputRepairs, 1);
+  assert.equal(byRule(c, 'Continúa el archivo «src/b.ts»').length, 1, 'una continuación, solo del archivo cortado');
+  assert.equal(byRule(c, R.repair).length + byRule(c, R.fix).length, 0, 'ni reparación de formato ni corrección');
+  assert.equal(byRule(c, R.dev).length, 1, 'la unidad no se vuelve a pedir entera');
+  assert.equal(pl.continuations, 1); assert.equal(pl.outputRepairs, 0); assert.equal(pl.corrections, 0, 'no consume la cuota de correcciones');
   assert.deepEqual(p.result!.changes.map(x => x.path).sort(), ['src/a.ts', 'src/b.ts']);
-  assert.ok(pl.events.some(e => e.kind === 'repair' && /Corrigiendo la entrega del Desarrollador dentro del presupuesto autorizado/.test(e.message)));
-  const repairStep = p.steps.find(s => /^Reparación de la entrega/.test(s.title))!;
-  assert.ok(repairStep.costUsd > 0 && repairStep.inputTokens > 0, 'la reparación tiene su propio registro de tokens y costo');
+  assert.equal(fs.readFileSync(path.join(p.result!.applied!.worktree!, 'src/b.ts'), 'utf8').replace(/\r\n/g, '\n'), 'export const b = 2;\n');
+  assert.ok(pl.events.some(e => e.kind === 'continuation' && /Se pide SOLO la continuación de ese archivo/.test(e.message)));
+  const contStep = p.steps.find(s => /^Continuación de b\.ts/.test(s.title))!;
+  assert.ok(contStep.costUsd > 0 && contStep.inputTokens > 0, 'la continuación tiene su propio registro de tokens y costo');
 });
 
 // ---------- Docker real (C, D, E) ----------

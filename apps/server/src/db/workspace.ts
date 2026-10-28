@@ -241,6 +241,8 @@ export function processesRepo(slug: string) {
       db.prepare(`INSERT INTO process_steps (id, process_id, position, agent_id, agent_name, title, model, role, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, processId, pos, s.agentId, s.agentName, s.title, s.model, s.role ?? null, s.reason ?? null);
       return this.get(processId)!.steps.find(x => x.id === id)!;
     },
+    /** Un paso planificado que pasa a ser otra cosa antes de empezar (p. ej. la primera unidad de la entrega incremental). */
+    renameStep(stepId: string, title: string, reason?: string | null) { db.prepare(`UPDATE process_steps SET title = ?, reason = COALESCE(?, reason) WHERE id = ?`).run(title, reason ?? null, stepId); },
     /** Reanudar un proceso con más presupuesto (autorizado por el propietario): vuelve a «en ejecución». */
     resume(id: string, budgetUsd: number) { db.prepare(`UPDATE processes SET status = 'running', budget_usd = ?, finished_at = NULL, error = NULL WHERE id = ?`).run(budgetUsd, id); },
     setStepLessons(stepId: string, ids: string[]) { db.prepare(`UPDATE process_steps SET lessons_used = ? WHERE id = ?`).run(JSON.stringify(ids), stepId); },

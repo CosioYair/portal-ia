@@ -347,14 +347,20 @@ test('F/K · plazo agotado en la reparación (como HU-155): se aborta al plazo, 
   assert.equal(p.unconfirmedUsd, before.unconfirmed, 'lo no confirmado no se duplica ni se convierte en gasto');
 });
 
-test('F2 · plazo agotado en la primera implementación (sin pipeline en marcha): falla con su clase, sin reintento', async () => {
+test('F2 · plazo agotado en la primera implementación: sin pipeline falla con su clase; con pipeline (entrega incremental) se pausa y se retoma sin repetir el plan', async () => {
   script({ text: PATCH, delayMs: 8000 });
   process.env.PORTAL_PROVIDER_TIMEOUT_SEC = '0.3';
-  let p: any;
-  try { p = await run('F2 · plazo en la implementación'); } finally { delete process.env.PORTAL_PROVIDER_TIMEOUT_SEC; }
-  assert.equal(p.status, 'failed'); assert.equal(p.result!.failure?.class, 'PROVIDER_TIMEOUT'); assert.equal(count(R.dev), 1);
+  let p: any; let q: any;
+  try { p = await run('F2 · plazo en la implementación', null); q = await run('F2 · plazo en la unidad 1'); } finally { delete process.env.PORTAL_PROVIDER_TIMEOUT_SEC; }
+  assert.equal(p.status, 'failed'); assert.equal(p.result!.failure?.class, 'PROVIDER_TIMEOUT');
   const flow = (await flowOf(p.id)).guidance.flow;
   assert.equal(flow.issue.kind, 'provider_timeout'); assert.equal(flow.issue.cause, 'environment');
+  // Con el manifiesto guardado, el plan no se pierde: pausa «el proveedor no respondió a tiempo» y «Repetir la llamada y continuar».
+  assert.equal(q.status, 'done'); assert.equal(q.result!.pipeline!.state, 'paused'); assert.equal(q.result!.pipeline!.pauseKind, 'provider_timeout');
+  assert.equal(q.result!.failure?.class, 'PROVIDER_TIMEOUT'); assert.equal(count(R.dev), 2, 'una llamada por proceso, sin reintento');
+  const f2 = (await flowOf(q.id)).guidance.flow;
+  assert.equal(f2.issue.cause, 'environment'); assert.ok(f2.actions.some((a: any) => a.id === 'pipeline_resume'));
+  assert.equal(q.result!.manifest!.units[0].status, 'pending', 'la unidad interrumpida queda pendiente de retomar (sin entregables inventados)');
 });
 
 test('G/J · cancelar aborta la llamada en curso; mientras tanto el estado en vivo es real (no un latido local)', async () => {
@@ -447,7 +453,8 @@ test('I · errores transitorios: reintentos acotados con espera; la llamada se c
   // Más fallos que reintentos permitidos (2): 3 intentos y se detiene con su clase.
   script({ text: PATCH, failTimes: 10, error: 'network' });
   p = await run('I2 · reintentos agotados');
-  assert.equal(count(R.dev), 3, 'acotado: 1 + 2 reintentos'); assert.equal(p.status, 'failed'); assert.equal(p.result!.failure?.class, 'PROVIDER_CONNECTION_ERROR');
+  // Entrega incremental: el plan y el manifiesto están guardados, así que no se pierde nada: pausa reanudable con su clase.
+  assert.equal(count(R.dev), 3, 'acotado: 1 + 2 reintentos'); assert.equal(p.result!.pipeline!.pauseKind, 'provider_error'); assert.equal(p.result!.failure?.class, 'PROVIDER_CONNECTION_ERROR');
   // Credencial rechazada: no se reintenta.
   script({ text: PATCH, error: 'invalid_key' });
   p = await run('I3 · credencial');
@@ -455,7 +462,7 @@ test('I · errores transitorios: reintentos acotados con espera; la llamada se c
   // Configurable por proceso: 0 reintentos.
   script({ text: PATCH, failTimes: 1, error: 'network' });
   p = await run('I4 · sin reintentos', { maxProviderRetries: 0 });
-  assert.equal(count(R.dev), 1); assert.equal(p.status, 'failed');
+  assert.equal(count(R.dev), 1); assert.equal(p.result!.pipeline!.state, 'paused');
 });
 
 test('L · presupuesto: lo no confirmado se reserva; si la siguiente llamada no cabe, se pausa SIN llamar a la IA', async () => {

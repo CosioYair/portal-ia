@@ -166,10 +166,12 @@ test('11/12 · continuación (como HU-155): mientras corre, el paso no arrastra 
   script({ text: PART1, stopReason: 'max_tokens' }, { delayMs: 800 });
   const id = newStory('Continuación en curso');
   const job = start(id);
+  // Entrega incremental: la continuación es SOLO del archivo cortado y va en su propio paso; la llamada 1 queda confirmada en el suyo.
   const dev = await waitFor(() => processesRepo(S).get(id)!.steps.find(s => s.role === 'implementer' && s.status === 'running' && s.live?.operation));
-  assert.match(dev.live!.operation!, /^Continuación 1 de 2: la respuesta anterior se cortó por longitud/);
-  assert.equal(dev.finishedAt, null, 'el final de la llamada 1 no sigue visible mientras corre la continuación');
-  assert.ok(dev.inputTokens > 0 && dev.costUsd > 0, 'conserva el uso CONFIRMADO de la llamada 1 (la interfaz lo rotula «confirmados antes»)');
+  assert.match(dev.live!.operation!, /^Continuación 1 de 2 del archivo src\/a\.ts/);
+  assert.equal(dev.finishedAt, null, 'el final de la llamada 1 no aparece en el paso de la continuación mientras corre');
+  const first = processesRepo(S).get(id)!.steps.find(s => s.role === 'implementer' && s.status === 'done' && /^Unidad/.test(s.title))!;
+  assert.ok(first.inputTokens > 0 && first.costUsd > 0, 'el uso CONFIRMADO de la llamada 1 queda en su propio paso');
   const p0 = processesRepo(S).get(id)!;
   assert.ok(Math.abs(p0.spentUsd - stepCostSum(id)) < 1e-9, 'confirmado = suma de las llamadas terminadas; la continuación aún no suma nada');
   assert.ok(dev.live!.estimatedUsd > 0, 'la llamada en curso solo tiene una reserva estimada');
@@ -178,9 +180,10 @@ test('11/12 · continuación (como HU-155): mientras corre, el paso no arrastra 
   await job;
   const p = processesRepo(S).get(id)!;
   assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
-  const d = p.steps.find(s => s.role === 'implementer')!;
+  const d = p.steps.find(s => s.id === dev.id)!;
   assert.ok(Date.parse(d.finishedAt!) >= Date.parse(d.startedAt!), 'duración coherente');
-  assert.equal(d.live, null); assert.ok(d.outputMd!.includes('export const a = 2;'), 'salida = llamada 1 + continuación');
+  assert.equal(d.live, null); assert.ok(d.outputMd!.includes('export const a = 2;'), 'la continuación trae el resto del archivo');
+  assert.equal(fs.readFileSync(path.join(p.result!.applied!.worktree!, 'src/a.ts'), 'utf8').replace(/\r\n/g, '\n'), 'export const a = 2;\n', 'llamada 1 + continuación unidas sin solapes');
   assert.ok(Math.abs(p.spentUsd - stepCostSum(id)) < 1e-9, 'el gasto confirmado es exactamente la suma de los pasos');
   assert.equal(count(R.dev), 1); assert.equal(count(R.cont), 1, 'sin llamadas duplicadas');
 });
