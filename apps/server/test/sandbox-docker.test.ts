@@ -11,11 +11,32 @@ import { execSync, execFileSync } from 'node:child_process';
  */
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-docker-'));
 delete process.env.PORTAL_SANDBOX;
-const { buildDockerRunArgs, dockerCliEnv, dockerMountArg, depsVolumeName, detectSandbox, runInSandbox, splitExitMark, wrapWithExitMark, EXIT_MARK, DEFAULT_SANDBOX_IMAGE, SANDBOX_IMAGE, DEPS_MISSING_EXIT } = await import('../src/services/sandbox.ts');
+const { buildDockerRunArgs, clipSandboxOutput, dockerCliEnv, dockerMountArg, depsVolumeName, detectSandbox, runInSandbox, splitExitMark, wrapWithExitMark, EXIT_MARK, DEFAULT_SANDBOX_IMAGE, SANDBOX_IMAGE, DEPS_MISSING_EXIT } = await import('../src/services/sandbox.ts');
 
 const spec = (over: Partial<Parameters<typeof buildDockerRunArgs>[0]> = {}) => ({ worktree: 'C:\\Mis Proyectos\\Portal IA-worktrees\\p1', command: 'test', script: 'npm test', image: 'portal-ia-sandbox:1', volume: 'portal-ia-nm-abc', allowNetwork: false, name: 'portal-ia-sbx-x', ...over });
 /** Valores que siguen a cada aparición de una opción. */
 const values = (args: string[], flag: string) => args.flatMap((a, i) => a === flag ? [args[i + 1]] : []);
+
+test('salida recortada: conserva inicio, resumen final y los fallos del medio (prueba «not ok», error TS); redacta claves', () => {
+  const filler = (n: number, tag: string) => Array.from({ length: n }, (_, i) => `ok ${i} - ${tag} ${i}`).join('\n');
+  const out = `TAP version 13
+${filler(900, 'inicio')}
+not ok 412 - cancelar aborta la llamada en curso
+  ---
+  error: 'se detuvo tarde'
+  ...
+${filler(900, 'medio')}
+src/a.ts(1,14): error TS2322: Type 'string' is not assignable
+${filler(900, 'final')}
+# fail 1
+sk-ant-abcdefghijklmnop`;
+  const c = clipSandboxOutput(out);
+  assert.ok(c.length < out.length && c.length < 70_000, 'recortada');
+  assert.match(c, /^TAP version 13/); assert.match(c, /# fail 1/);
+  assert.match(c, /se conservan los fallos/); assert.match(c, /not ok 412 - cancelar aborta la llamada en curso/); assert.match(c, /se detuvo tarde/); assert.match(c, /error TS2322/);
+  assert.ok(!c.includes('sk-ant-abcdefghijklmnop'), 'claves redactadas');
+  assert.equal(clipSandboxOutput('corta'), 'corta');
+});
 
 test('docker: imagen por defecto portal-ia-sandbox:1, sustituible con PORTAL_SANDBOX_IMAGE', () => {
   assert.equal(DEFAULT_SANDBOX_IMAGE, 'portal-ia-sandbox:1');
@@ -123,8 +144,11 @@ test('docker: un script malicioso no ve el Portal ni los datos, no escribe fuera
     `node -e "fetch('https://example.com').then(()=>console.log('net=ok')).catch(()=>console.log('net=blocked'))"`,
     `node -e "const s=require('http').createServer((q,r)=>r.end('x')).listen(0,'127.0.0.1',()=>fetch('http://127.0.0.1:'+s.address().port).then(()=>{console.log('lo=ok');process.exit(0)}).catch(()=>{console.log('lo=down');process.exit(0)}))"`,
   ].join('; ');
-  fs.writeFileSync(path.join(wt, 'package.json'), JSON.stringify({ name: 'x', version: '1.0.0', scripts: { test: probe } }));
-  fs.writeFileSync(path.join(wt, 'package-lock.json'), JSON.stringify({ name: 'x', version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: 'x', version: '1.0.0' } } }));
+  // Nombre único por ejecución → volumen de dependencias propio: un volumen que quedara de otra ejecución (Docker Desktop
+  // puede tardar en retirar un contenedor y bloquear su borrado) no puede hacerse pasar por «recién creado».
+  const name = `x-${Date.now().toString(36)}`;
+  fs.writeFileSync(path.join(wt, 'package.json'), JSON.stringify({ name, version: '1.0.0', scripts: { test: probe } }));
+  fs.writeFileSync(path.join(wt, 'package-lock.json'), JSON.stringify({ name, version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name, version: '1.0.0' } } }));
   const volume = depsVolumeName(wt);
   try {
     // Sin dependencias instaladas, test no se ejecuta.
@@ -145,7 +169,8 @@ test('docker: un script malicioso no ve el Portal ni los datos, no escribe fuera
     assert.equal(fs.existsSync(path.join(path.dirname(wt), 'ESCAPE')), false);
   } finally {
     delete process.env.PORTAL_PROBE_SECRET;
-    try { execFileSync('docker', ['volume', 'rm', '-f', volume], { stdio: 'ignore' }); } catch { /* sin volumen */ }
+    // Reintento: mientras Docker Desktop retira el último contenedor, el volumen sigue «en uso».
+    for (let i = 0; i < 10; i++) { try { execFileSync('docker', ['volume', 'rm', '-f', volume], { stdio: 'ignore', env: dockerCliEnv() }); break; } catch { await new Promise(r => setTimeout(r, 500)); } }
     execSync(`git -C "${repo}" worktree remove --force "${wt}"`);
   }
 });

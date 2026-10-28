@@ -168,8 +168,27 @@ export function runProcess(cmd: string, args: string[], opts: { cwd?: string; en
   });
 }
 
-/** Redacta posibles claves y recorta: conserva el inicio (dónde falló) y el final (resumen). */
-const redact = (s: string) => { const t = s.replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, 'sk-ant-…').replace(/\bsk-[A-Za-z0-9]{20,}\b/g, 'sk-…'); return t.length <= 40_000 ? t : `${t.slice(0, 15_000)}\n\n[… ${t.length - 30_000} caracteres omitidos …]\n\n${t.slice(-15_000)}`; };
+/** Bloques de fallo del tramo omitido (prueba «not ok»/✖, error de TypeScript, aserción), hasta `max` caracteres. */
+function failureBlocks(mid: string, max = 10_000): string {
+  const lines = mid.split('\n'); const out: string[] = []; let len = 0;
+  for (let i = 0; i < lines.length && len < max; i++) {
+    if (!/^\s*not ok\b|^\s*✖|\berror TS\d{4}\b|AssertionError/.test(lines[i])) continue;
+    const block = lines.slice(i, i + 25).join('\n'); out.push(block); len += block.length; i += 24;
+  }
+  return out.join('\n…\n').slice(0, max);
+}
+/**
+ * Redacta posibles claves y recorta: conserva el inicio, el final (resumen) y los bloques de fallo del medio. En la
+ * salida TAP de una batería grande, la prueba que falla suele quedar en medio: sin rescatarla, la evidencia que reciben
+ * QA y el Desarrollador no dice qué falló.
+ */
+export const clipSandboxOutput = (s: string) => {
+  const t = s.replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, 'sk-ant-…').replace(/\bsk-[A-Za-z0-9]{20,}\b/g, 'sk-…');
+  if (t.length <= 40_000) return t;
+  const mid = t.slice(15_000, -15_000); const fails = failureBlocks(mid);
+  return `${t.slice(0, 15_000)}\n\n[… ${mid.length} caracteres omitidos${fails ? '; se conservan los fallos' : ''} …]\n\n${fails ? `${fails}\n\n[…]\n\n` : ''}${t.slice(-15_000)}`;
+};
+const redact = clipSandboxOutput;
 
 /**
  * Ejecuta un comando permitido sobre el worktree del proceso en el sandbox disponible.
