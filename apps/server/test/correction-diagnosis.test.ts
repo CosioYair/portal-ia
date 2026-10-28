@@ -249,3 +249,41 @@ test('una corrección externa que toca una ruta protegida no se registra (y el w
   assert.equal(processesRepo(S).get(p0.id)!.result!.externalCorrections, undefined);
   assert.equal(git(wt, 'rev-parse HEAD'), head);
 });
+
+test('la verificación de una corrección externa también repite una vez, sin IA, una prueba ajena que falla (no la da por rota)', async () => {
+  setRules([]);
+  const p0 = await runIt('Rescate · prueba inestable al verificar', { maxCorrections: 0 });
+  const wt = p0.result!.applied!.worktree!; const before = calls().length;
+  fs.writeFileSync(path.join(wt, 'src/catalog.mjs'), "export const RUTAS = ['/api/workspaces/:ws/inbox', '/api/budgets/:level/:id/balance'];\n");
+  git(wt, 'commit -qam "Corrección desde la consola"');
+  // Como en HU-155: el equipo tocó una prueba ajena fuera del plan y después la restauró; sigue en el manifiesto, pero ya no es de la historia.
+  const r0 = processesRepo(S).get(p0.id)!.result!;
+  processesRepo(S).setResult(p0.id, { ...r0, manifest: { ...r0.manifest!, deliverables: [...r0.manifest!.deliverables, { path: 'test/smoke.test.mjs', purpose: 'Añadido por el equipo durante la implementación (fuera del plan).', kind: 'test', planned: false, status: 'delivered', unitId: 'r1-1', commit: null, lines: 2, estimatedLines: 0, note: null }] } });
+  smoke = 'flaky'; smokeRuns = 0;
+  try {
+    const r = await app.inject({ method: 'POST', url: `${W}/processes/${p0.id}/external-correction`, payload: { authorized: true, note: 'rutas reales' } });
+    assert.equal(r.statusCode, 200, r.body);
+    const p = await waitDone(p0.id);
+    assert.equal(p.result!.pipeline!.pauseKind, 'external'); assert.match(p.result!.pipeline!.reason ?? '', /verificada sin IA/);
+    assert.ok(p.result!.pipeline!.events.some(e => /era una prueba inestable ajena/.test(e.message)));
+    assert.equal(calls().length, before, 'sin llamadas a la IA');
+  } finally { smoke = 'ok'; }
+});
+
+test('recortar la salida del sandbox no borra la evidencia de qué pruebas se ejecutaron (sin correcciones pagadas en falso)', async () => {
+  const { clipSandboxOutput } = await import('../src/services/sandbox.ts');
+  const { testFileExecuted } = await import('../src/services/storyUnits.ts');
+  const relleno = (desde: number, n: number) => Array.from({ length: n }, (_, i) => `# Subtest: caso de relleno ${desde + i}\nok ${desde + i} - caso de relleno ${desde + i}\n  ---\n  duration_ms: 1.2\n  ...`).join('\n');
+  const salida = `TAP version 13\n${relleno(1, 400)}\n# Subtest: el alta en Conocimiento no duplica\nok 401 - el alta en Conocimiento no duplica\n${relleno(402, 400)}\n1..801\n# tests 801\n# pass 801\n# fail 0\n`;
+  const recortada = clipSandboxOutput(salida);
+  assert.ok(recortada.length < salida.length, 'la salida se recorta');
+  const prueba = "import { test } from 'node:test';\ntest('el alta en Conocimiento no duplica', () => {});\n";
+  assert.equal(testFileExecuted(prueba, recortada).state, 'passed', 'la prueba del medio consta como ejecutada');
+  assert.equal(testFileExecuted("import { test } from 'node:test';\ntest('una prueba que no existe en la salida', () => {});\n", recortada).state, 'failed');
+  // Si ni siquiera caben todas las líneas de resultado, no aparecer no prueba nada: «no determinada», nunca una corrección pagada.
+  const enorme = `TAP version 13\n${relleno(1, 3000)}\n1..3000\n# tests 3000\n# pass 3000\n# fail 0\n`;
+  const parcial = clipSandboxOutput(enorme);
+  assert.match(parcial, /parte de los nombres de las pruebas superadas/);
+  assert.ok(parcial.length < 70_000);
+  assert.equal(testFileExecuted("import { test } from 'node:test';\ntest('caso que quedó fuera del recorte', () => {});\n", parcial).state, 'undetermined');
+});

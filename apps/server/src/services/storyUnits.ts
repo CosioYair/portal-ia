@@ -12,7 +12,7 @@ import { applyChanges, changesSinceBase, commitInWorktree, hashText, readRepoFil
 import { diagnoseFailure, diagnosisPrompt } from './failureDiagnosis.ts';
 import { verificationEvidence, zeroTests } from './qaGate.ts';
 import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
-import { agentHeadroom, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, stepCall, updatePipeline, updateResult, verifyStage, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
+import { agentHeadroom, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, retryForeignFailure, stepCall, updatePipeline, updateResult, verifyStage, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
 
 /**
  * Entrega INCREMENTAL de una historia (pipeline autorizado con aplicación automática).
@@ -755,6 +755,8 @@ export function testFileExecuted(content: string | null, output: string | null):
   if (!names.length) return { state: 'undetermined', detail: 'no se encontraron nombres de casos en el archivo' };
   const seen = names.filter(n => output.includes(n));
   if (seen.length) return { state: 'passed', detail: `${seen.length} de ${names.length} caso(s) aparecen en la salida de «test»` };
+  // Salida recortada sin todas las líneas de resultado: que no aparezca no prueba que no se ejecutara.
+  if (/caracteres omitidos/.test(output) && !/los nombres de todas las pruebas superadas/.test(output)) return { state: 'undetermined', detail: 'la salida de «test» se recortó y no conserva los nombres de todas las pruebas superadas' };
   const listsTests = /^\s*(?:ok|not ok) \d+ - |^\s*[✔✓√] |^# Subtest: |\bpassing\b/m.test(output);
   return listsTests ? { state: 'failed', detail: `la salida de «test» lista otras pruebas, pero ninguno de sus ${names.length} caso(s)` } : { state: 'undetermined', detail: 'la salida de «test» no muestra los nombres de los casos' };
 }
@@ -854,7 +856,9 @@ export async function objectiveChecks(ctx: StoryRunCtx, cfg: PipelineConfig): Pr
     const g = completenessGate(ctx); gate = g; saveManifest(ctx, m => { m.gate = g; });
     emit(ctx, 'gate', g.ok ? 'Comprobación previa a QA (sin IA): todos los entregables del plan están en el worktree, sin problemas objetivos.' : `Comprobación previa a QA (sin IA): ${g.missing.length} entregable(s) sin entregar y ${g.invalid.length} problema(s) objetivos.`, { phase: 'verifying', detail: [...g.missing.map(m => `falta ${m}`), ...g.invalid.map(i => `${i.path}: ${i.problem}`)].join(' · ') || null });
   }
-  const failed = cfg.autoVerify ? await verifyStage(ctx, cfg) : null;
+  let failed = cfg.autoVerify ? await verifyStage(ctx, cfg) : null;
+  // Igual que en el pipeline: si solo fallan pruebas ajenas a la historia, «test» se repite una vez (sin IA).
+  if (failed && await retryForeignFailure(ctx, failed)) failed = await verifyStage(ctx, cfg);
   const t = !failed && resultOf(ctx).manifest ? testEvidence(ctx, cfg) : null;
   return { gate, failed, notRun: t?.notRun.map(x => x.path) ?? [] };
 }

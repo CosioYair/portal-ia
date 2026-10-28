@@ -605,7 +605,8 @@ export async function retryForeignFailure(ctx: StoryRunCtx, failed: Verification
   if (failed.command !== 'test' || !r.applied || (p.flakeRetries ?? []).includes(r.applied.commit)) return false;
   const files = failingTests(failed).map(f => f.file);
   if (!files.length || files.some(f => !f)) return false;
-  const story = new Set([...r.changes.filter(c => !c.error).map(c => c.path), ...(r.manifest?.deliverables.map(d => d.path) ?? r.plan?.filesToChange ?? [])]);
+  // De la historia: lo que su diff cambia AHORA y lo planificado (un archivo tocado fuera del plan y ya restaurado no lo es).
+  const story = new Set([...r.changes.filter(c => !c.error).map(c => c.path), ...(r.manifest?.deliverables.filter(d => d.planned).map(d => d.path) ?? r.plan?.filesToChange ?? [])]);
   if (files.some(f => story.has(f!))) return false;
   const list = Array.from(new Set(files)).join(', ');
   updatePipeline(ctx.slug, ctx.processId, { flakeRetries: [...(p.flakeRetries ?? []), r.applied.commit].slice(-20) });

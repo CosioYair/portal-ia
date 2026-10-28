@@ -180,13 +180,19 @@ function failureBlocks(mid: string, max = 10_000): string {
 /**
  * Redacta posibles claves y recorta: conserva el inicio, el final (resumen) y los bloques de fallo del medio. En la
  * salida TAP de una batería grande, la prueba que falla suele quedar en medio: sin rescatarla, la evidencia que reciben
- * QA y el Desarrollador no dice qué falló.
+ * QA y el Desarrollador no dice qué falló. También se conservan las líneas de resultado («ok N - nombre») del medio: son
+ * la evidencia de qué pruebas se ejecutaron (HU-155: sin ellas, una prueba nueva que sí se ejecutó parecía no haberse
+ * ejecutado y abría una corrección pagada).
  */
 export const clipSandboxOutput = (s: string) => {
   const t = s.replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, 'sk-ant-…').replace(/\bsk-[A-Za-z0-9]{20,}\b/g, 'sk-…');
   if (t.length <= 40_000) return t;
   const mid = t.slice(15_000, -15_000); const fails = failureBlocks(mid);
-  return `${t.slice(0, 15_000)}\n\n[… ${mid.length} caracteres omitidos${fails ? '; se conservan los fallos' : ''} …]\n\n${fails ? `${fails}\n\n[…]\n\n` : ''}${t.slice(-15_000)}`;
+  // Solo los nombres, con tope (la salida va en los encargos): si no caben todos, se dice, y su ausencia no cuenta como evidencia.
+  const all = mid.split('\n').map(l => l.trim().match(/^ok \d+ - (.+?)(?:\s+#.*)?$/)?.[1]).filter(Boolean).join('\n');
+  const passed = all.length <= 30_000 ? all : all.slice(0, all.lastIndexOf('\n', 30_000));
+  const kept = passed ? (passed === all ? ' y los nombres de todas las pruebas superadas' : ' y parte de los nombres de las pruebas superadas') : '';
+  return `${t.slice(0, 15_000)}\n\n[… ${mid.length} caracteres omitidos${fails ? '; se conservan los fallos' : ''}${kept} …]\n\n${fails ? `${fails}\n\n[…]\n\n` : ''}${passed ? `${passed}\n\n[…]\n\n` : ''}${t.slice(-15_000)}`;
 };
 const redact = clipSandboxOutput;
 
