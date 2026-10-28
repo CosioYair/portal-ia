@@ -33,6 +33,7 @@ docker run --rm --init --pull never --read-only --network none --memory 2g --cpu
 - El worktree es lo único escribible del equipo; la carpeta del Portal y `data/` no se montan. Raíz del contenedor de solo lectura y `/tmp` privado.
 - Al contenedor solo entran variables explícitas (`-e CLAVE=valor`): ninguna clave, ruta de datos ni variable del Portal. El proceso `docker` (el CLI, no el contenedor) recibe solo las variables que Docker Desktop necesita para encontrar su configuración (`PATH`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `ProgramData`, `SYSTEMROOT`, `DOCKER_*`…).
 - Límites de memoria, CPU, procesos y tiempo (10 min; al agotarse se elimina el contenedor).
+- Cada comando imprime al final su código de salida (`__PORTAL_IA_EXIT__=N`). Con mucha actividad, Docker Desktop a veces no registra el final de un contenedor (queda «Up» sin procesos y `docker run` no vuelve): si la marca llegó y el CLI no responde en 15 s, el Portal retira el contenedor y usa ese código, en lugar de esperar los 10 minutos. Queda anotado en la salida de la verificación.
 - Dentro del contenedor el worktree no ve su `.git` (apunta a una ruta de Windows): el código del repositorio no puede leer ni tocar la historia git del Portal.
 
 Volúmenes antiguos (de `package-lock.json` anteriores): `docker volume ls --filter name=portal-ia-nm-` y `docker volume rm <nombre>`.

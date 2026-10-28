@@ -250,11 +250,14 @@ const app = await buildApp(); runBacklogMaintenance(() => undefined);
 const b = await app.inject({ method: 'GET', url: '/api/workspaces/${S}/projects/${project.id}/backlog' });
 const a = await app.inject({ method: 'GET', url: '/api/workspaces/${S}/projects/${project.id}/archive' });
 const ph = await app.inject({ method: 'GET', url: '/api/workspaces/${S}/projects/${project.id}/phase' });
-console.log(JSON.stringify({ active: b.json().map(x => x.storyId), archived: a.json().stories.length, phase: ph.json().current?.name ?? null }));
+console.log('RESULTADO:' + JSON.stringify({ active: b.json().map(x => x.storyId), archived: a.json().stories.length, phase: ph.json().current?.name ?? null }));
 await app.close(); process.exit(0);
 `);
-  const out = execFileSync(process.execPath, ['--import', 'tsx', child], { cwd: fileURLToPath(new URL('..', import.meta.url)), env: { ...process.env }, encoding: 'utf8' });
-  const r = JSON.parse(out.trim().split('\n').at(-1)!);
+  const out = execFileSync(process.execPath, ['--import', 'tsx', child], { cwd: fileURLToPath(new URL('..', import.meta.url)), env: { ...process.env, LOG_LEVEL: 'silent' }, encoding: 'utf8' });
+  // La línea del resultado lleva prefijo: con registros activos (p. ej. la verificación dentro del sandbox) puede no ser la última.
+  const line = out.split('\n').find(l => l.startsWith('RESULTADO:'));
+  assert.ok(line, `el proceso hijo no devolvió resultado:\n${out.slice(-2000)}`);
+  const r = JSON.parse(line.slice('RESULTADO:'.length));
   assert.deepEqual(r.active, activeBefore); assert.equal(r.archived, 7); assert.equal(r.phase, 'Portal IA — Inicio de operación organizada');
 });
 
