@@ -213,6 +213,45 @@ try {
   step('15-leccion', l5.some(l => l.detector === 'runtime_failed' && l.evidence.processId === proc4.id), 'lección «comprobación en ejecución fallida» detectada sin IA, con la evidencia del navegador');
   await shot(`/historias/${item4.id}`, '12-historia-fallo-en-ejecucion');
 
+  // ---------- 16 · Pipeline autónomo autorizado sobre el propio Portal (sin intervención entre pasos) ----------
+  // Una sola autorización: el equipo implementa, aplica en un worktree, verifica typecheck/test/build REALES del Portal en
+  // Docker, QA evalúa la evidencia y se detiene en «lista para revisión»; nunca integra. Después, un error de TypeScript
+  // real que el pipeline corrige solo con el diagnóstico de tsc.
+  const NEW_FILE = (name, value) => `=== RESUMEN ===\nAñade una constante interna de prueba.\n=== ARCHIVO: apps/web/src/lib/${name}.ts | create ===\nexport const PIPELINE_E2E: number = ${value};\n=== FIN ARCHIVO ===\n=== PARA EL PROPIETARIO ===\nSin cambios visibles; afecta a un módulo interno.\n=== PRUEBA MANUAL ===\n1. Abre el Panel. Esperado: carga como siempre.\n=== COMPROBACIONES ===\n- ninguna: sin cambios visibles`;
+  const QA_EVIDENCE = JSON.stringify({ verdict: 'approved', summary: 'Typecheck, pruebas y compilación en verde en el sandbox; el cambio cumple el criterio.', findings: [], suggestedTests: [] });
+  const setPipelineScript = (impl, correction = null) => fs.writeFileSync(script, JSON.stringify({ markers: ['typecheck: OK', 'test: OK', 'build: OK', 'TS2322'], rules: [{ match: 'plan técnico', text: PLAN }, ...(correction ? [{ match: 'Corrige la implementación de esta historia', text: correction }] : []), { match: 'Evalúa la implementación con la EVIDENCIA real', text: QA_EVIDENCE }, { match: 'Implementa la historia', text: impl }] }));
+  const mockCalls = () => fs.readFileSync(mockLog, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+  const PIPE = { autoApply: true, commands: ['typecheck', 'test', 'build'], allowInstall: false, maxCorrections: 2, maxOutputRepairs: 1, maxIdenticalFailures: 2, maxDurationMin: 45 };
+  if (sys.sandbox?.available === 'docker') {
+    const mainBefore = sh('git', ['-C', repo, 'rev-parse', 'main']).trim();
+    setPipelineScript(NEW_FILE('e2e-pipeline-a', '1'));
+    let n0 = mockCalls().length;
+    const item5 = (await api('POST', `/api/workspaces/portal-ia/projects/${projectId}/backlog`, { title: 'Constante interna (pipeline autónomo)', criterion: 'Existe PIPELINE_E2E y el Portal compila, pasa las pruebas y construye' })).body;
+    const proc5 = (await api('POST', `/api/workspaces/portal-ia/projects/${projectId}/backlog/${item5.id}/execute`, {})).body;
+    const au5 = await api('POST', `/api/workspaces/portal-ia/processes/${proc5.id}/authorize`, { budgetUsd: 1, authorized: true, pipeline: PIPE });
+    step('16-autorizar-pipeline', au5.status === 200 && au5.body.status === 'running', 'una sola autorización (1,00 USD) con el pipeline: aplicar, typecheck/test/build, QA, hasta 2 correcciones');
+    const p5 = await waitProcess(slug, proc5.id, 1200);
+    const r5 = p5.result; const v5 = r5.verifications.map(v => `${v.command}:${v.exitCode}@${v.isolation}`);
+    step('16-verificada-por-qa', p5.status === 'done' && r5.pipeline.state === 'verified' && p5.guidance.flow.headline === 'Implementación verificada por QA — lista para revisión del propietario.', `${p5.guidance.flow.headline} · ${v5.join(' ')}`);
+    step('16-docker', ['typecheck', 'test', 'build'].every(c => r5.verifications.some(v => v.command === c && v.exitCode === 0 && v.isolation === 'docker')), `typecheck, test y build del Portal en Docker: ${v5.join(' ')}`);
+    const qa5 = mockCalls().slice(n0).filter(c => /EVIDENCIA real/.test(c.rule ?? ''));
+    step('16-qa-con-evidencia', qa5.length === 1 && ['typecheck: OK', 'test: OK', 'build: OK'].every(m => qa5[0].markers.includes(m)) && r5.review.verdict === 'approved' && r5.review.evidenceBased === true, `QA recibió los resultados reales (${qa5[0]?.markers.join(', ')}) y aprobó con evidencia`);
+    step('16-no-integra', !r5.merged && sh('git', ['-C', repo, 'rev-parse', 'main']).trim() === mainBefore && sh('git', ['-C', repo, 'branch', '--show-current']).trim() === 'main' && fs.existsSync(r5.applied.worktree) && !fs.existsSync(path.join(repo, 'apps/web/src/lib/e2e-pipeline-a.ts')), `se detiene para tu revisión: main sin cambios (${mainBefore.slice(0, 7)}), cambios solo en ${r5.applied.branch}`);
+    await shot(`/procesos/${proc5.id}`, '13-pipeline-verificado');
+
+    setPipelineScript(NEW_FILE('e2e-pipeline-b', "'uno'"), `=== RESUMEN ===\nTipo corregido.\n=== ARCHIVO: apps/web/src/lib/e2e-pipeline-b.ts | patch ===\n<<<< BUSCAR\nexport const PIPELINE_E2E: number = 'uno';\n==== REEMPLAZAR\nexport const PIPELINE_E2E: number = 1;\n>>>> FIN\n=== FIN ARCHIVO ===`);
+    n0 = mockCalls().length;
+    const item6 = (await api('POST', `/api/workspaces/portal-ia/projects/${projectId}/backlog`, { title: 'Constante interna con error de tipos (corrección automática)', criterion: 'Existe PIPELINE_E2E (número) y el Portal compila' })).body;
+    const proc6 = (await api('POST', `/api/workspaces/portal-ia/projects/${projectId}/backlog/${item6.id}/execute`, {})).body;
+    await api('POST', `/api/workspaces/portal-ia/processes/${proc6.id}/authorize`, { budgetUsd: 1, authorized: true, pipeline: PIPE });
+    const p6 = await waitProcess(slug, proc6.id, 1200);
+    const r6 = p6.result; const tcs = r6.verifications.filter(v => v.command === 'typecheck').map(v => v.exitCode);
+    const calls6 = mockCalls().slice(n0); const fix6 = calls6.filter(c => /Corrige la implementación/.test(c.rule ?? ''));
+    step('16-correccion-automatica', r6.pipeline.state === 'verified' && r6.pipeline.corrections === 1 && tcs.length >= 2 && tcs[0] !== 0 && tcs.at(-1) === 0 && fix6.length === 1 && fix6[0].markers.includes('TS2322'), `typecheck real ${tcs.join(' → ')}; el Desarrollador recibió el diagnóstico de tsc (TS2322) y corrigió en 1 intento; QA aprobó`);
+    step('16-sin-replanificar', calls6.filter(c => c.rule === 'plan técnico').length === 1 && calls6.filter(c => c.rule === 'Implementa la historia').length === 1, `llamadas: ${calls6.map(c => c.rule).join(' · ')}`);
+    step('16-no-integra-2', !r6.merged && sh('git', ['-C', repo, 'rev-parse', 'main']).trim() === mainBefore, 'tampoco integra: espera tu revisión');
+  } else step('16-pipeline', false, `el pipeline sobre el propio Portal necesita Docker (sandbox: ${sys.sandbox?.available})`);
+
   // ---------- Capturas de las pantallas nuevas (evidencia visual) ----------
   if (browser) {
     const snap = async (route, name, click = null) => { const page = await browser.newPage({ viewport: { width: 1360, height: 900 } }); await page.goto(base + route, { waitUntil: 'networkidle' }); await sleep(600); if (click) { await page.getByRole('button', { name: click }).first().click(); await sleep(500); } await page.screenshot({ path: path.join(OUT, `${name}.png`), fullPage: !click }); await page.close(); };
