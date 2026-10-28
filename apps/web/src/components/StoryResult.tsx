@@ -93,7 +93,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
             <KV k="Rama"><span className="mono">{r.applied.branch}</span></KV>
             <KV k="Commit"><span className="mono">{r.applied.commit}</span></KV>
             <KV k="Archivos"><span className="mono">{r.applied.files.length}</span></KV>
-            {r.applied.worktree && <KV k="Worktree"><span className="mono small">{r.applied.worktree}</span></KV>}
+            {r.applied.worktree && <KV k="Worktree"><span className="mono small" style={{ overflowWrap: 'anywhere' }}>{r.applied.worktree}</span></KV>}
             {!r.applied.worktree && !r.merged ? <div className="help">Aplicado <strong>antes de v0.12</strong>, directamente en tu carpeta (rama <span className="mono">{r.applied.branch}</span>), sin worktree aislado. Usa las salidas del Resumen: cerrar como resuelta o preparar otra iteración.</div> : <div className="help">Los cambios están en la rama <span className="mono">{r.applied.branch}</span>, escritos en un <strong>worktree aislado</strong> fuera de la carpeta desde la que corre el Portal (esa carpeta no cambia de rama ni se toca). Verifica abajo en sandbox y, en verde, intégralos. Si los rechazas, el worktree se retira y la rama queda sin integrar.</div>}
           </> : <>
             {!r.review?.approve && <Notice kind="warn">QA no aprobó sin observaciones. Puedes aplicar igualmente y corregir en la rama, o volver a ejecutar la historia con más detalle en el criterio.</Notice>}
