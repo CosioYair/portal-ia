@@ -245,6 +245,8 @@ export interface LiveCall {
   /** Costo estimado de la entrada enviada (lo mínimo que pudo facturarse si la llamada se interrumpe). */
   inputUsd: number;
   maxOutputTokens: number;
+  /** Qué es esta llamada dentro del paso (p. ej. una continuación porque la respuesta anterior se cortó). */
+  operation?: string | null;
 }
 
 export interface Process {
@@ -301,7 +303,7 @@ export type FlowIssueKind =
   | 'merge_conflict' | 'activation_failed' | 'runtime_failed' | 'runtime_unavailable' | 'manual_failed' | 'budget_exceeded'
   | 'process_failed' | 'cancelled' | 'diff_rejected' | 'legacy'
   | 'output_contract' | 'provider_failed' | 'agent_refused' | 'pipeline_paused' | 'pipeline_stopped' | 'qa_blocked'
-  | 'agent_blocked' | 'provider_timeout' | 'process_interrupted';
+  | 'agent_blocked' | 'provider_timeout' | 'process_interrupted' | 'call_overdue';
 export type IssueSeverity = 'alta' | 'media' | 'baja';
 export interface FlowIssueDetail { text: string; file?: string | null; line?: number | null; code?: string | null; severity?: IssueSeverity | null }
 export interface FlowIssue {

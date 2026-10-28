@@ -1,6 +1,7 @@
 import type { PipelineConfig, PhaseTransition, PhaseTransitionPreview, ProjectArchive, StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
 import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
+import { noteFailure, noteResponse } from './liveStatus.ts';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public body?: any) { super(message); }
@@ -8,7 +9,17 @@ export class ApiError extends Error {
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = init?.body ? { 'Content-Type': 'application/json' } : {};
-  const res = await fetch(url, { ...init, headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) } });
+  // Las lecturas no pueden quedarse colgadas: un sondeo sin respuesta detendría la actualización de la pantalla.
+  const isRead = !init?.method || init.method === 'GET';
+  const sentAt = Date.now();
+  let res: Response;
+  try {
+    res = await fetch(url, { ...init, headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) }, ...(isRead && !init?.signal ? { signal: AbortSignal.timeout(20_000) } : {}) });
+  } catch (e: any) {
+    noteFailure(e?.name === 'TimeoutError' ? 'El servidor no respondió en 20 s' : 'No se pudo contactar con el servidor del Portal');
+    throw new ApiError(0, e?.name === 'TimeoutError' ? 'El servidor no respondió a tiempo.' : 'No se pudo contactar con el servidor del Portal.', { code: 'unreachable' });
+  }
+  noteResponse(res.headers.get('x-server-time'), sentAt, Date.now());
   const text = await res.text();
   const body = text ? JSON.parse(text) : null;
   if (!res.ok) throw new ApiError(res.status, body?.error ?? body?.lastError?.message ?? `Error ${res.status}`, body);

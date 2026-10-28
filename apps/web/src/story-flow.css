@@ -54,3 +54,4 @@
 .sf-live-grid dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .sf-ask { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid #E8D9A8; border-radius: 8px; background: #FFFBEF; }
 @media (max-width: 720px) { .sf-live-grid { grid-template-columns: minmax(0, 1fr); } .sf-live-grid dt { margin-top: 4px; } }
+.sf-conn { display: flex; gap: 8px; align-items: flex-start; padding: 8px 12px; border: 1px solid #E9B4AC; border-radius: 8px; background: #FDF5F3; font-size: 13px; line-height: 1.5; }

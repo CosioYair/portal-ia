@@ -32,10 +32,12 @@ export function StoryWorkspace() {
   const [err, setErr] = useState<string | null>(null);
   const { hash, state: navState } = useLocation();
   const [tab, setTab] = useState<Tab>(() => tabFromHash(hash) ?? 'estado');
-  const load = async () => { try { const c = await api.story(slug, storyId!); setCtx(c); setErr(null); return c; } catch (e: any) { setErr(e.message); return null; } };
+  // Un fallo al leer no borra la pantalla si ya hay datos (la cabecera avisa de la conexión) y el sondeo sigue intentando.
+  const loaded = useRef(false);
+  const load = async () => { try { const c = await api.story(slug, storyId!); loaded.current = true; setCtx(c); setErr(null); return c; } catch (e: any) { if (!loaded.current) setErr(e.message); return null; } };
   // El sondeo se reanuda cuando el último proceso vuelve a estar activo (p. ej. al continuar desde la cabecera).
   const active = ctx?.lastProcess?.status === 'running' || ctx?.lastProcess?.status === 'pending_authorization';
-  useEffect(() => { let alive = true; let timer: ReturnType<typeof setTimeout> | undefined; const tick = async () => { const c = await load(); if (!alive) return; if (c?.lastProcess && (c.lastProcess.status === 'running' || c.lastProcess.status === 'pending_authorization')) timer = setTimeout(tick, 3000); }; void tick(); return () => { alive = false; clearTimeout(timer); }; // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { let alive = true; let timer: ReturnType<typeof setTimeout> | undefined; const tick = async () => { const c = await load(); if (!alive) return; if (c === null ? active : c.lastProcess && (c.lastProcess.status === 'running' || c.lastProcess.status === 'pending_authorization')) timer = setTimeout(tick, c === null ? 5000 : 3000); }; void tick(); return () => { alive = false; clearTimeout(timer); }; // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, storyId, active]);
   // La pestaña vive en el hash (#estado, #iteraciones…): así navegar a /historias/:id#iteraciones desde cualquier pestaña
   // (p. ej. tras enviar el feedback de la prueba) siempre la abre y recarga el contexto.

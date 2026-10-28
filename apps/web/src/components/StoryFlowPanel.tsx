@@ -4,6 +4,7 @@ import type { FlowAction, FlowIssue, LiveCall, Process, ProcessStep, StoryContex
 import { api, ApiError } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
+import { callTiming, connection, serverNow, stepDurationMs } from '../lib/liveStatus.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
 import { IterationComposer } from './IterationComposer.tsx';
 import '../story-flow.css';
@@ -13,7 +14,6 @@ const STATUS_TONE: Record<string, '' | 'ok' | 'warn' | 'err' | 'accent'> = { don
 const CAUSE: Record<FlowIssue['cause'], string> = { environment: 'Entorno (no es un error del código)', code: 'Código: lo corrige el equipo', decision: 'Requiere tu decisión' };
 const REQ: Record<string, string> = { authorization: 'requiere tu autorización', network: 'red temporal', ai_budget: 'gasta IA con tu presupuesto', confirmation: 'pide confirmación' };
 const ROLE: Record<string, string> = { planner: 'planifica', implementer: 'implementa', reviewer: 'revisa', consultant: 'consulta' };
-const elapsed = (from: string | null, to: string | null) => { if (!from) return ''; const s = Math.max(0, Math.round(((to ? new Date(to) : new Date()).getTime() - new Date(from).getTime()) / 1000)); return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`; };
 const secs = (ms: number) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`; };
 const hhmm = (iso: string) => new Date(iso).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 const LIVE_TXT: Record<LiveCall['state'], string> = { preparing: 'Preparando la solicitud', sending: 'Enviando la solicitud', waiting: 'Esperando la respuesta del proveedor', receiving: 'Recibiendo la respuesta', processing: 'Procesando la respuesta', retrying: 'Esperando para reintentar', cancelling: 'Cancelando' };
@@ -151,13 +151,16 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
 
       {cancelling && proc.status === 'running' && <div className="sf-headline" role="status" aria-label="Cancelando"><span className="spin" /><span>Cancelando… se abortó la llamada en curso; el proceso se cierra en cuanto el paso lo registre.</span></div>}
 
+      {proc.status === 'running' && <ConnectionNotice />}
+
       {liveSteps.map(s => <LiveCallCard key={s.id} step={s} proc={proc} cancelling={cancelling} />)}
 
       {(proc.status === 'running' || proc.status === 'pending_authorization') && <div className="sf-agents" aria-label="Agentes">
         {agents.map(s => <div key={s.id} className="sf-agent">
           <span>{s.status === 'done' ? Icon.check(14) : s.status === 'running' ? (orphan ? '!' : <span className="spin" />) : s.status === 'failed' ? '✕' : '·'}</span>
           <span><strong>{s.agentName}</strong> · {ROLE[s.role ?? ''] ?? s.title}{s.status === 'running' ? ` · ${s.title}` : ''}</span>
-          <span className="small muted mono">{s.status === 'pending' ? 'en espera' : `${elapsed(s.startedAt, s.finishedAt)}${s.inputTokens + s.outputTokens ? ` · ${s.inputTokens + s.outputTokens} tokens · ${fmtUsd(s.costUsd)}` : ''}`}</span>
+          {/* En curso: duración hasta ahora y, si ya hubo llamadas en este paso (continuación), su uso confirmado rotulado. */}
+          <span className="small muted mono">{s.status === 'pending' ? 'en espera' : `${secs(stepDurationMs(s, serverNow()) ?? 0)}${s.inputTokens + s.outputTokens ? ` · ${s.inputTokens + s.outputTokens} tokens · ${fmtUsd(s.costUsd)}${s.status === 'running' ? ' confirmados antes' : ''}` : ''}`}</span>
         </div>)}
       </div>}
 
@@ -212,28 +215,42 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
 
 /**
  * La llamada al proveedor en curso, con hechos (no animación): estado, último evento CONFIRMADO, plazo, reintentos y
- * costo. El reloj que avanza es local; lo único que indica actividad del modelo es «Última actividad del proveedor».
+ * costo. Los tiempos se miden con la hora del SERVIDOR; que el contador avance no prueba que el modelo esté generando:
+ * lo único que indica actividad del proveedor es «Última actividad del proveedor».
  */
 function LiveCallCard({ step, proc, cancelling }: { step: ProcessStep; proc: Process; cancelling: boolean }) {
-  const l = step.live!; const now = Date.now();
-  const left = new Date(l.deadlineAt).getTime() - now;
-  const quiet = now - new Date(l.lastEventAt).getTime();
-  const remaining = Math.max(0, proc.budgetUsd - proc.spentUsd - (proc.unconfirmedUsd ?? 0));
+  const l = step.live!; const now = serverNow();
+  const t = callTiming(l, now);
+  const reserved = l.estimatedUsd;
+  const unconfirmed = proc.unconfirmedUsd ?? 0;
+  const available = Math.max(0, proc.budgetUsd - proc.spentUsd - unconfirmed - reserved);
   const state = cancelling ? 'cancelling' : l.state;
-  return <div className="sf-live" aria-label="Llamada en curso" data-state={state} data-overdue={left < 0 ? 'true' : undefined}>
-    <div className="sf-live-head"><span className="spin" /><strong>{step.agentName}</strong><span className="small">· {ROLE[step.role ?? ''] ?? 'trabaja'} · {step.title}</span><Chip xs tone={left < 0 ? 'err' : 'accent'}>{LIVE_TXT[state]}</Chip></div>
+  const priorTokens = step.inputTokens + step.outputTokens;
+  return <div className="sf-live" aria-label="Llamada en curso" data-state={state} data-overdue={t.overdue ? 'true' : undefined}>
+    <div className="sf-live-head"><span className="spin" /><strong>{step.agentName}</strong><span className="small">· {ROLE[step.role ?? ''] ?? 'trabaja'} · {step.title}</span><Chip xs tone={t.overdue ? 'err' : 'accent'}>{LIVE_TXT[state]}</Chip></div>
+    {l.operation && <span className="small" aria-label="Operación">{l.operation}</span>}
     <dl className="sf-live-grid small">
       <dt>Proveedor · modelo</dt><dd className="mono">{l.provider} · {l.model}</dd>
-      <dt>Inicio de la solicitud</dt><dd className="mono">{hhmm(l.startedAt)} · hace {secs(now - new Date(l.startedAt).getTime())} <span className="muted">(reloj local)</span></dd>
-      <dt>Última actividad del proveedor</dt><dd>{l.lastEvent} · <span className="mono">hace {secs(quiet)}</span></dd>
-      <dt>Plazo máximo</dt><dd className="mono">{hhmm(l.deadlineAt)} · {left >= 0 ? `quedan ${secs(left)}` : `superado hace ${secs(-left)}: se aborta`}</dd>
+      <dt>Esta llamada</dt><dd className="mono" aria-label="Tiempo de esta llamada">desde {hhmm(l.startedAt)} · {secs(t.sinceStartMs)}</dd>
+      {proc.authorizedAt && <><dt>Proceso completo</dt><dd className="mono">{secs(Math.max(0, now - Date.parse(proc.authorizedAt)))} desde la autorización</dd></>}
+      <dt>Última actividad del proveedor</dt><dd aria-label="Última actividad del proveedor">{l.lastEvent} · <span className="mono">hace {secs(t.sinceLastEventMs)}</span>{l.state === 'waiting' ? <span className="muted"> · sin streaming: hasta que responda no hay más señales; esperar no prueba que esté generando ni que no lo esté</span> : null}</dd>
+      <dt>Plazo máximo</dt><dd className="mono">{hhmm(l.deadlineAt)} · {!t.overdue ? `quedan ${secs(t.untilDeadlineMs)}` : `superado hace ${secs(-t.untilDeadlineMs)}: el servidor la aborta`}</dd>
       <dt>Intento</dt><dd className="mono">{l.attempt} de {l.maxAttempts}{l.attempt > 1 ? ' (reintento por error de conexión)' : ''}</dd>
-      <dt>Gasto confirmado</dt><dd className="mono">{fmtUsd(proc.spentUsd)} · quedan {fmtUsd(remaining)} del presupuesto</dd>
-      {(proc.unconfirmedUsd ?? 0) > 0 && <><dt>Sin confirmar</dt><dd className="mono">≈ {fmtUsd(proc.unconfirmedUsd!)} de llamadas interrumpidas</dd></>}
-      <dt>Esta llamada</dt><dd><span className="mono">estimación ≈ {fmtUsd(l.estimatedUsd)}</span> <span className="muted">(≈ {l.inputTokensEstimated.toLocaleString('es-MX')} tokens de entrada, hasta {l.maxOutputTokens.toLocaleString('es-MX')} de salida)</span> · <em>Consumo de esta llamada aún no confirmado</em></dd>
+      <dt>Gasto confirmado</dt><dd className="mono">{fmtUsd(proc.spentUsd)}<span className="muted"> (uso que reportó el proveedor, a tarifas públicas){priorTokens ? ` · incluye ${priorTokens.toLocaleString('es-MX')} tokens de llamadas anteriores de este paso` : ''}</span></dd>
+      {unconfirmed > 0 && <><dt>Sin confirmar</dt><dd className="mono">≈ {fmtUsd(unconfirmed)} de llamadas interrumpidas o abortadas</dd></>}
+      <dt>Reservado</dt><dd><span className="mono">estimación ≈ {fmtUsd(reserved)}</span> <span className="muted">para esta llamada (≈ {l.inputTokensEstimated.toLocaleString('es-MX')} tokens de entrada, hasta {l.maxOutputTokens.toLocaleString('es-MX')} de salida)</span> · <em>Consumo de esta llamada aún no confirmado</em></dd>
+      <dt>Disponible</dt><dd className="mono">{fmtUsd(available)} de {fmtUsd(proc.budgetUsd)} autorizados, descontando lo confirmado, lo no confirmado y lo reservado</dd>
       <dt>Siguiente operación</dt><dd>{LIVE_NEXT[state]}</dd>
     </dl>
   </div>;
+}
+
+/** Aviso de conexión: si el servidor no responde, lo que se ve puede estar desactualizado (el proceso puede seguir). */
+function ConnectionNotice() {
+  const c = connection();
+  if (c.kind === 'fresh') return <span className="small muted" aria-label="Actualización">Estado leído del servidor hace {secs(c.sinceOkMs ?? 0)}</span>;
+  const last = c.sinceOkMs === null ? 'nunca' : `hace ${secs(c.sinceOkMs)}`;
+  return <div className="sf-conn" role="alert" aria-label="Conexión con el servidor">{Icon.warn()}<span>{c.kind === 'offline' ? `Sin conexión con el servidor del Portal (${c.error ?? 'error de red'}). ` : 'El servidor no ha respondido recientemente. '}Última respuesta: {last}. Lo que ves puede estar desactualizado; el proceso puede seguir trabajando en el servidor. Se sigue intentando.</span></div>;
 }
 
 const EV_ICON: Record<string, string> = { recovery: '♻', repair: '✎', apply: '⎇', verify: '✓', environment: '⚙', qa: '◎', correction: '✎', pause: '⏸', done: '★', error: '✕', info: '·' };

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { PipelineConfig, Process, ProcessStep } from '@portal-ia/domain';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
@@ -12,6 +12,7 @@ import { Markdown } from '../components/Markdown.tsx';
 import { StoryResult } from '../components/StoryResult.tsx';
 import { DelegationResultView } from '../components/DelegationResultView.tsx';
 import { StoryFlowPanel } from '../components/StoryFlowPanel.tsx';
+import { serverNow, stepDurationMs } from '../lib/liveStatus.ts';
 
 const P_LABEL: Record<Process['status'], { label: string; tone: '' | 'ok' | 'warn' | 'err'; dot: '' | 'ok' | 'pulse' | 'err' }> = {
   pending_authorization: { label: 'Pendiente de autorización', tone: 'warn', dot: '' },
@@ -32,9 +33,15 @@ export function ProcessView() {
 
   // El sondeo se reanuda cuando el proceso vuelve a estar activo (p. ej. al continuar): nunca se muestra un estado congelado.
   const active = proc?.status === 'running' || proc?.status === 'pending_authorization';
+  // Un fallo del sondeo no lo detiene ni borra la pantalla: se sigue intentando y la cabecera avisa de que los datos
+  // pueden estar desactualizados (el proceso puede seguir trabajando en el servidor).
+  const loaded = useRef(false);
   useEffect(() => {
     let alive = true; let timer: ReturnType<typeof setTimeout> | undefined;
-    const tick = async () => { try { const p = await api.process(slug, processId!); if (!alive) return; setProc(p); if (p.status === 'running' || p.status === 'pending_authorization') timer = setTimeout(tick, p.status === 'running' ? 2000 : 5000); } catch (e: any) { if (alive) setError(e.message); } };
+    const tick = async () => {
+      try { const p = await api.process(slug, processId!); if (!alive) return; loaded.current = true; setError(null); setProc(p); if (p.status === 'running' || p.status === 'pending_authorization') timer = setTimeout(tick, p.status === 'running' ? 2000 : 5000); }
+      catch (e: any) { if (!alive) return; if (!loaded.current) setError(e.message); timer = setTimeout(tick, 5000); }
+    };
     void tick();
     return () => { alive = false; clearTimeout(timer); };
   }, [slug, processId, active]);
@@ -60,7 +67,8 @@ export function ProcessView() {
   const tokens = proc.inputTokens + proc.outputTokens;
   const pct = proc.budgetUsd ? Math.min(100, Math.round((proc.spentUsd / proc.budgetUsd) * 100)) : 0;
 
-  const stepTime = (s: ProcessStep) => { const sec = Math.max(0, Math.round(((s.finishedAt ? new Date(s.finishedAt) : new Date()).getTime() - new Date(s.startedAt!).getTime()) / 1000)); return sec < 60 ? `${sec} s` : `${Math.floor(sec / 60)} min ${sec % 60} s`; };
+  // En curso: hasta ahora (hora del servidor), aunque el paso conserve el final de una llamada anterior (continuación).
+  const stepTime = (s: ProcessStep) => { const sec = Math.round((stepDurationMs(s, serverNow()) ?? 0) / 1000); return sec < 60 ? `${sec} s` : `${Math.floor(sec / 60)} min ${sec % 60} s`; };
   const stepChip = (s: ProcessStep) => s.status === 'done' ? <Chip tone="ok" xs dot="ok">completado</Chip> : s.status === 'running' ? <Chip tone="warn" xs dot="pulse">en curso</Chip> : s.status === 'failed' ? <Chip tone="err" xs dot="err">error</Chip> : s.status === 'skipped' ? <Chip xs>omitido</Chip> : <Chip xs dot="">pendiente</Chip>;
 
   return (
@@ -118,12 +126,14 @@ export function ProcessView() {
                     <span className="ili-ic" style={s.status === 'done' ? { background: '#E3F1EF', color: '#0B5652' } : undefined}>{s.status === 'done' ? Icon.check() : s.status === 'running' ? <span className="spin" /> : <span className="mono">{i + 1}</span>}</span>
                     <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}><span className="h3">{s.title}</span><span className="small muted">{s.agentName}{s.role ? ` · ${s.role === 'planner' ? 'planifica' : s.role === 'implementer' ? 'implementa' : s.role === 'reviewer' ? 'revisa' : 'consulta'}` : ''} · <span className="mono">{s.model}</span>{s.status === 'done' && <> · {s.inputTokens + s.outputTokens} tokens · {fmtUsd(s.costUsd)} <span title="Costo calculado con los tokens que devolvió el proveedor">real</span></>}{s.reason && <span title={s.reason}> · ⓘ</span>}</span></span>
                   </div>
-                  <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>{s.startedAt && <span className="small muted mono">{stepTime(s)}{s.inputTokens + s.outputTokens ? ` · ${s.inputTokens + s.outputTokens} tok · ${fmtUsd(s.costUsd)}` : ''}</span>}{stepChip(s)}</span>
+                  <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>{s.startedAt && <span className="small muted mono" title={s.status === 'running' && s.inputTokens + s.outputTokens ? 'Uso confirmado de las llamadas ANTERIORES de este paso; la llamada en curso aún no tiene consumo confirmado.' : undefined}>{stepTime(s)}{s.inputTokens + s.outputTokens ? ` · ${s.inputTokens + s.outputTokens} tok · ${fmtUsd(s.costUsd)}${s.status === 'running' ? ' confirmados antes' : ''}` : ''}</span>}{stepChip(s)}</span>
                 </button>
                 {open === s.id && <div className="card-b">
                   {s.error && <Notice kind="err">{s.error}</Notice>}
-                  {s.status === 'running' && <p className="sm13 muted">El agente está trabajando… esta vista se actualiza cada 2 segundos.</p>}
-                  {s.outputMd && (/^\s*[{[]/.test(s.outputMd) ? <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><p className="sm13 muted" style={{ margin: 0 }}>{s.role === 'reviewer' ? 'El veredicto de QA se muestra arriba, en «Revisión de calidad», con las observaciones por gravedad.' : s.role === 'planner' ? 'El plan se muestra arriba, en «Plan técnico».' : 'El resultado estructurado se muestra arriba.'}</p><details><summary className="small" style={{ cursor: 'pointer' }}>Ver la respuesta técnica del agente</summary><pre className="mono" style={{ fontSize: 12, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 320, overflow: 'auto' }}>{(() => { try { return JSON.stringify(JSON.parse(s.outputMd), null, 2); } catch { return s.outputMd; } })()}</pre></details></div> : <Markdown text={s.outputMd} />)}
+                  {s.status === 'running' && <p className="sm13 muted">En curso: el estado real de la llamada al proveedor está en la cabecera de arriba. Esta vista consulta el servidor cada 2 segundos.</p>}
+                  {/* Paso en curso con salida de llamadas anteriores (continuación): texto plano y plegado, sin interpretarlo. */}
+                  {s.status === 'running' && s.outputMd ? <details><summary className="small" style={{ cursor: 'pointer' }}>Salida de las llamadas anteriores de este paso ({s.outputMd.length.toLocaleString('es-MX')} caracteres, incompleta)</summary><pre className="mono" style={{ fontSize: 12, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 320, overflow: 'auto' }}>{s.outputMd}</pre></details>
+                  : s.outputMd && (/^\s*[{[]/.test(s.outputMd) ? <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><p className="sm13 muted" style={{ margin: 0 }}>{s.role === 'reviewer' ? 'El veredicto de QA se muestra arriba, en «Revisión de calidad», con las observaciones por gravedad.' : s.role === 'planner' ? 'El plan se muestra arriba, en «Plan técnico».' : 'El resultado estructurado se muestra arriba.'}</p><details><summary className="small" style={{ cursor: 'pointer' }}>Ver la respuesta técnica del agente</summary><pre className="mono" style={{ fontSize: 12, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 320, overflow: 'auto' }}>{(() => { try { return JSON.stringify(JSON.parse(s.outputMd), null, 2); } catch { return s.outputMd; } })()}</pre></details></div> : <Markdown text={s.outputMd} />)}
                 </div>}
               </section>
             ))}
