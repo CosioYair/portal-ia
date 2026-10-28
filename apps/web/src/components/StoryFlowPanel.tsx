@@ -191,8 +191,11 @@ const QA_TXT: Record<string, string> = { approved: 'QA aprobó con evidencia', r
 /** Actividad del pipeline como una sola actividad coordinada: eventos breves, intentos, QA y presupuesto. */
 function PipelineActivity({ proc }: { proc: Process }) {
   const pl = proc.result!.pipeline!; const review = proc.result!.review;
+  // Hitos siempre visibles (recuperación, reparación, aplicación, correcciones, QA, pausas, final) y los últimos pasos;
+  // el detalle rutinario (cada comando verificado) queda en el registro técnico plegado.
+  const MILESTONE = new Set(['recovery', 'repair', 'apply', 'correction', 'qa', 'pause', 'error', 'done']);
   const events = pl.events.filter(e => e.kind !== 'info' || pl.events.length < 6);
-  const recent = events.slice(-6);
+  const recent = events.filter((e, i) => MILESTONE.has(e.kind) || i >= events.length - 3).slice(-8);
   const aiCost = pl.events.reduce((a, e) => a + (e.costUsd ?? 0), 0);
   return <div className="sf-pipe" aria-label="Actividad del equipo">
     <div className="sf-pipe-meta small">

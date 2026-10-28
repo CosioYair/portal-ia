@@ -295,8 +295,10 @@ async function verifyStage(ctx: StoryRunCtx, cfg: PipelineConfig): Promise<Verif
     const last = sinceApplied(r).filter(v => v.command === cmd).at(-1);
     if (last?.exitCode === 0) continue;
     if (last && last.exitCode !== null && last.exitCode !== DEPS_MISSING_EXIT && last.isolation !== 'unavailable') return last; // ya falló (al reanudar)
-    emit(ctx, 'verify', `Verificando ${cmd} en el sandbox…`, { phase: 'verifying' });
-    let run = await runVerification(ctx.slug, ctx.processId, cmd, false);
+    // Al reanudar tras «faltan dependencias» (86) no se repite esa comprobación: se va directo a instalar (si está autorizado).
+    const blockedByDeps = last?.exitCode === DEPS_MISSING_EXIT && last.isolation === 'docker';
+    if (!blockedByDeps) emit(ctx, 'verify', `Verificando ${cmd} en el sandbox…`, { phase: 'verifying' });
+    let run = blockedByDeps ? last! : await runVerification(ctx.slug, ctx.processId, cmd, false);
     if (run.exitCode === DEPS_MISSING_EXIT && run.isolation === 'docker') {
       if (!cfg.allowInstall) throw new PipelinePause('network', 'Faltan las dependencias Linux del sandbox y este proceso no tiene autorizada la instalación con red temporal. Autorízala y pulsa «Continuar» (no consume IA).');
       emit(ctx, 'environment', 'Faltan las dependencias Linux del sandbox: instalándolas con red temporal (autorizado). No se llama a ningún agente.', { phase: 'installing' });

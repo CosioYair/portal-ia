@@ -244,6 +244,7 @@ test('E2 · sin autorización de red: se pausa y lo explica; «Continuar» con l
   assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
   assert.equal(calls().length - before, 1, 'al continuar solo se llama a QA (la instalación no usa IA)');
   const v = p.result!.verifications.map(x => `${x.command}:${x.exitCode}`); assert.ok(v.includes('install:0'), v.join(' '));
+  assert.deepEqual(v, ['typecheck:86', 'install:0', 'typecheck:0', 'test:0', 'build:0'], 'al continuar no se repite la comprobación bloqueada: directo a instalar');
 });
 
 test('C · pipeline completo en Docker: aplicar, typecheck/test/build en verde, QA recibe la evidencia y aprueba; espera al propietario', { skip: skipDocker }, async () => {
