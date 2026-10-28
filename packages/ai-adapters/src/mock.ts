@@ -15,7 +15,11 @@ interface Rule { match: string; text?: string; textFile?: string; stopReason?: s
   /** Tarda este tiempo en responder (respeta el plazo y la cancelación de la llamada, como una petición HTTP real). */ delayMs?: number;
   /** Las primeras N llamadas que encajan fallan con `error` (o `network`); después responde normalmente. */ failTimes?: number;
   /** Señal explícita de negativa del proveedor (como stop_reason «refusal»). */ refusal?: boolean;
-  /** No termina nunca e ignora el plazo y la cancelación (adaptador roto o lectura que no se corta): lo cierra el vigilante. */ hang?: boolean }
+  /** No termina nunca e ignora el plazo y la cancelación (adaptador roto o lectura que no se corta): lo cierra el vigilante. */ hang?: boolean;
+  /** Respuestas sucesivas: la llamada N que encaja usa responses[N-1] (la última se repite). */
+  responses?: { text: string; stopReason?: string; thinkingTokens?: number }[];
+  /** Tokens de razonamiento oculto que se facturan además del texto (como en Opus 5.5: cuentan en output_tokens). */
+  thinkingTokens?: number }
 interface Script { rules: Rule[]; /** Marcadores a buscar en cada prompt para el registro. */ markers?: string[] }
 
 let cachedScript: { path: string; mtime: number; script: Script } | null = null;
@@ -66,10 +70,12 @@ export const mockAdapter: ProviderAdapter = {
     else if (signal?.aborted) throw new ProviderRequestError({ code: 'cancelled', message: 'Llamada cancelada antes de terminar (simulado).' });
     if (rule.failTimes !== undefined ? n <= rule.failTimes : !!rule.error) throw new ProviderRequestError({ code: (rule.error ?? 'network') as any, message: `Error simulado: ${rule.error ?? 'network'} (llamada ${n})`, httpStatus: rule.error === 'provider_error' ? 529 : undefined });
     req.onProgress?.('headers');
-    let text = rule.textFile ? fs.readFileSync(rule.textFile, 'utf8') : (rule.text ?? '');
+    const seq = rule.responses?.length ? rule.responses[Math.min(n, rule.responses.length) - 1] : null;
+    let text = seq ? seq.text : rule.textFile ? fs.readFileSync(rule.textFile, 'utf8') : (rule.text ?? '');
     if (rule.requires && !hay.includes(rule.requires)) text = rule.otherwise ?? text;
     req.onProgress?.('body');
-    return { text, inputTokens: estimateTokens(hay), outputTokens: estimateTokens(text), stopReason: rule.refusal ? 'refusal' : rule.stopReason ?? 'end_turn', refusal: rule.refusal ? (text || 'refusal') : null };
+    const thinking = seq?.thinkingTokens ?? rule.thinkingTokens ?? 0;
+    return { text, inputTokens: estimateTokens(hay), outputTokens: estimateTokens(text) + thinking, stopReason: rule.refusal ? 'refusal' : (seq?.stopReason ?? rule.stopReason ?? 'end_turn'), refusal: rule.refusal ? (text || 'refusal') : null };
   }
 };
 

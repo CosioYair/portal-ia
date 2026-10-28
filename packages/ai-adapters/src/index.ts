@@ -112,6 +112,38 @@ async function fetchJson(url: string, init: RequestInit, signal?: AbortSignal, t
   finally { cleanup(); }
 }
 
+/**
+ * Razonamiento de los modelos de Anthropic. En Claude 4.6 y posteriores (Opus 4.6–5.5, Sonnet 4.6–5.5, Haiku 5.5, Fable)
+ * el razonamiento es ADAPTATIVO: `budget_tokens` está retirado (400) y en Opus 5.5 el razonamiento no se puede desactivar;
+ * su profundidad se controla con `output_config.effort`. Los tokens de razonamiento cuentan dentro de `max_tokens` y de
+ * `usage.output_tokens` aunque no se devuelvan como texto. Antes (HU-155) se enviaba `budget_tokens` (rechazado), la
+ * petición se repetía sin él y el modelo razonaba sin límite dentro de una salida dimensionada solo para el texto: las
+ * respuestas se cortaban (o llegaban vacías) con el límite entero facturado.
+ */
+export function anthropicThinking(model: string, supportsEffort = true): 'adaptive' | 'budget' | 'none' {
+  const m = model.toLowerCase().replace(/-\d{8}$/, '');
+  if (/fable|mythos/.test(m)) return 'adaptive';
+  const v = m.match(/(opus|sonnet|haiku)-(\d+)(?:-(\d+))?$/);
+  // Nombre no reconocido: como antes, razonamiento con presupuesto solo si el catálogo dice que admite esfuerzo.
+  if (!v) return /claude-3-7/.test(m) || supportsEffort ? 'budget' : 'none';
+  const major = Number(v[2]); const minor = Number(v[3] ?? 0);
+  if (major >= 5 || (major === 4 && minor >= 6)) return 'adaptive';
+  return major >= 4 ? 'budget' : 'none';
+}
+/** Margen de salida reservado al razonamiento (además del texto pedido), por esfuerzo. */
+const ADAPTIVE_HEADROOM = { low: 4000, medium: 12000, high: 20000 } as const;
+const BUDGET_TOKENS = { low: 0, medium: 3000, high: 8000 } as const;
+/**
+ * Tokens de salida que una llamada puede consumir ADEMÁS del texto pedido (razonamiento oculto). El motor lo usa para
+ * estimar el costo antes de llamar y para no confundir «sin texto» con «sin gasto».
+ */
+export function reasoningHeadroom(provider: ProviderId | string, model: string, effort: 'low' | 'medium' | 'high', supportsEffort: boolean): number {
+  if (provider !== 'anthropic' || isMockProvider()) return 0;
+  const mode = anthropicThinking(model, supportsEffort);
+  if (mode === 'adaptive') return ADAPTIVE_HEADROOM[effort];
+  return mode === 'budget' && supportsEffort ? BUDGET_TOKENS[effort] : 0;
+}
+
 export const anthropicAdapter: ProviderAdapter = {
   id: 'anthropic',
   async listModels(apiKey, options, signal) {
@@ -135,19 +167,22 @@ export const anthropicAdapter: ProviderAdapter = {
     // https://docs.claude.com/en/api/messages — POST /v1/messages
     const headers: Record<string, string> = { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' };
     if (options?.workspaceId) headers['anthropic-workspace-id'] = options.workspaceId;
-    const budget = req.effort === 'high' ? 8000 : req.effort === 'medium' ? 3000 : 0;
+    const mode = anthropicThinking(req.model, req.supportsEffort);
     const content: any[] = [...(req.images ?? []).map(im => ({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.data } })), { type: 'text', text: req.user }];
-    const base: any = { model: req.model, max_tokens: req.maxTokens + budget, system: req.system, messages: [...(req.history ?? []).map(h => ({ role: h.role, content: h.content })), { role: 'user', content }] };
-    const thinking = req.supportsEffort && budget > 0;
-    // Forzar una herramienta no es compatible con el razonamiento extendido: con razonamiento, el esquema va solo en el prompt.
-    const structured = req.responseSchema && !thinking ? { ...base, tools: [{ name: req.responseSchema.name, description: req.responseSchema.description ?? 'Devuelve el resultado estructurado.', input_schema: req.responseSchema.schema }], tool_choice: { type: 'tool', name: req.responseSchema.name } } : base;
-    const withThinking = thinking ? { ...base, thinking: { type: 'enabled', budget_tokens: budget } } : structured;
+    // El margen del razonamiento se suma al texto pedido: así el texto no se queda sin sitio (ni el razonamiento sin límite).
+    const headroom = reasoningHeadroom('anthropic', req.model, req.effort, req.supportsEffort);
+    const base: any = { model: req.model, max_tokens: req.maxTokens + headroom, system: req.system, messages: [...(req.history ?? []).map(h => ({ role: h.role, content: h.content })), { role: 'user', content }] };
+    const budget = mode === 'budget' && req.supportsEffort ? BUDGET_TOKENS[req.effort] : 0;
+    // Adaptativo: el esfuerzo configurado del agente se envía de verdad (antes se ignoraba y regía el valor por defecto del modelo).
+    // Forzar una herramienta no es compatible con el razonamiento (y en Opus 5.5 está retirado): con razonamiento, el esquema va en el prompt.
+    const structured = req.responseSchema && mode !== 'adaptive' && !budget ? { ...base, tools: [{ name: req.responseSchema.name, description: req.responseSchema.description ?? 'Devuelve el resultado estructurado.', input_schema: req.responseSchema.schema }], tool_choice: { type: 'tool', name: req.responseSchema.name } } : base;
+    const withThinking = mode === 'adaptive' ? { ...base, thinking: { type: 'adaptive' }, output_config: { effort: req.effort } } : budget > 0 ? { ...base, thinking: { type: 'enabled', budget_tokens: budget } } : structured;
     let j: any;
     try {
       j = await fetchJson('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(withThinking) }, signal, req.timeoutMs ?? COMPLETE_TIMEOUT_MS, req.onProgress);
     } catch (e) {
       // Si el modelo no acepta el parámetro de razonamiento, reintentamos sin él (una sola vez).
-      if (withThinking !== base && e instanceof ProviderRequestError && e.error.httpStatus === 400 && /thinking|budget_tokens|tool/i.test(e.error.message)) {
+      if (withThinking !== base && e instanceof ProviderRequestError && e.error.httpStatus === 400 && /thinking|budget_tokens|tool|effort|output_config/i.test(e.error.message)) {
         j = await fetchJson('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(base) }, signal, req.timeoutMs ?? COMPLETE_TIMEOUT_MS, req.onProgress);
       } else throw e;
     }
@@ -196,9 +231,11 @@ export const openaiAdapter: ProviderAdapter = {
 export function estimatePricing(provider: ProviderId, modelId: string): { inPerM: number; outPerM: number; approximate: true } {
   const m = modelId.toLowerCase();
   if (provider === 'anthropic') {
-    if (m.includes('opus')) return { inPerM: 15, outPerM: 75, approximate: true };
-    if (m.includes('haiku')) return { inPerM: 1, outPerM: 5, approximate: true };
-    return { inPerM: 3, outPerM: 15, approximate: true };
+    // Tarifas públicas por modelo (USD por millón, API de Anthropic). Antes toda la familia Opus usaba la de Opus 4.1
+    // (15/75): con Opus 5.5 (4/20) el gasto mostrado era ≈3,75 veces el facturado.
+    const table: [RegExp, number, number][] = [[/fable|mythos/, 10, 50], [/opus-5-5/, 4, 20], [/opus-(?:5|4-[5-9])(?!\d)/, 5, 25], [/opus/, 15, 75], [/sonnet-5/, 2, 10], [/haiku-5/, 0.1, 0.5], [/haiku/, 1, 5], [/sonnet/, 3, 15]];
+    const hit = table.find(([re]) => re.test(m));
+    return { inPerM: hit ? hit[1] : 3, outPerM: hit ? hit[2] : 15, approximate: true };
   }
   if (/^o1|^o3(?!-mini)/.test(m)) return { inPerM: 15, outPerM: 60, approximate: true };
   if (/mini|nano/.test(m)) return { inPerM: 0.4, outPerM: 1.6, approximate: true };
