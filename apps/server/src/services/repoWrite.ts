@@ -203,6 +203,52 @@ export async function applyChanges(repoPath: string, branch: string, changes: Pr
   }
 }
 
+/**
+ * Corrección dentro del pipeline: escribe cambios (ya validados contra el worktree) en el worktree existente del proceso
+ * y crea un commit adicional en su rama. Nunca toca el checkout principal.
+ */
+export async function commitInWorktree(wt: string, changes: ProposedChange[], message: string): Promise<{ commit: string; files: string[] }> {
+  if (!fs.existsSync(wt)) throw Object.assign(new Error('El worktree del proceso ya no existe.'), { statusCode: 409 });
+  const files: string[] = [];
+  for (const c of changes) {
+    if (c.error) continue;
+    const abs = path.join(wt, safeRelPath(c.path));
+    if (c.action === 'delete') { if (fs.existsSync(abs)) fs.rmSync(abs); }
+    else {
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      let content = c.content ?? '';
+      try { if (fs.existsSync(abs) && /\r\n/.test(fs.readFileSync(abs, 'utf8').slice(0, 4000))) content = content.replace(/\r?\n/g, '\r\n'); } catch { /* se escribe tal cual */ }
+      fs.writeFileSync(abs, content, 'utf8');
+    }
+    files.push(c.path);
+  }
+  await git(wt, ['add', '-A']);
+  const staged = await git(wt, ['diff', '--cached', '--name-only']);
+  if (!staged) throw Object.assign(new Error('La corrección no modifica nada respecto al worktree.'), { statusCode: 409, code: 'no_effect' });
+  await git(wt, ['-c', 'user.name=Portal IA', '-c', 'user.email=portal-ia@local', 'commit', '-q', '-m', message]);
+  return { commit: await git(wt, ['rev-parse', '--short', 'HEAD']), files };
+}
+
+/**
+ * Diff acumulado de la rama del proceso respecto a su base en la rama principal (lo que el propietario revisa al final,
+ * tras correcciones). Cada archivo: contenido de la base → contenido actual del worktree.
+ */
+export async function changesSinceBase(repoPath: string, wt: string): Promise<ProposedChange[]> {
+  const main = await mainBranch(repoRoot(repoPath));
+  const base = await git(wt, ['merge-base', 'HEAD', main]);
+  const status = (await git(wt, ['diff', '--name-status', '--no-renames', base, 'HEAD'])).split('\n').filter(Boolean);
+  const out: ProposedChange[] = [];
+  for (const line of status) {
+    const [st, file] = line.split('\t'); if (!file) continue;
+    // git() recorta la salida; aquí hace falta el contenido exacto (salto final incluido) para un diff fiel.
+    const before = st === 'A' ? '' : (await execFileP('git', ['show', `${base}:${file}`], { cwd: wt, maxBuffer: 20 * 1024 * 1024 }).then(r => r.stdout, () => '')).replace(/\r\n/g, '\n');
+    const after = st === 'D' ? '' : (readRepoFile(wt, file, 400_000) ?? '').replace(/\r\n/g, '\n');
+    const action: ProposedChange['action'] = st === 'D' ? 'delete' : st === 'A' ? 'create' : 'modify';
+    out.push({ path: file, action, content: action === 'delete' ? null : after, diff: unifiedDiff(before, after, file), before: st === 'A' ? 0 : before.split('\n').length, after: st === 'D' ? 0 : after.split('\n').length, error: null, warning: action !== 'delete' ? scanSecrets(after) : null, baseHash: st === 'A' ? null : hashText(before) });
+  }
+  return out;
+}
+
 /** Retira el worktree de un proceso (tras integrar o rechazar). Solo rutas bajo `<repo>-worktrees`. */
 export async function removeWorktree(repoPath: string, processId: string): Promise<boolean> {
   const cwd = repoRoot(repoPath); const wt = worktreePathFor(cwd, processId);

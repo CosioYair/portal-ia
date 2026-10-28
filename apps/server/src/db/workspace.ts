@@ -229,6 +229,15 @@ export function processesRepo(slug: string) {
       p.steps.forEach((s, i) => ins.run(uuid(), id, i, s.agentId, s.agentName, s.title, s.model, s.role ?? null, s.reason ?? null));
       return this.get(id)!;
     },
+    /** Paso añadido durante la ejecución (reparación de la entrega, corrección, nueva revisión de QA). Devuelve el paso. */
+    addStep(processId: string, s: { agentId: string; agentName: string; title: string; model: string; role?: string | null; reason?: string | null }): ProcessStep {
+      const pos = ((db.prepare(`SELECT COALESCE(MAX(position), -1) AS m FROM process_steps WHERE process_id = ?`).get(processId) as any).m as number) + 1;
+      const id = uuid();
+      db.prepare(`INSERT INTO process_steps (id, process_id, position, agent_id, agent_name, title, model, role, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, processId, pos, s.agentId, s.agentName, s.title, s.model, s.role ?? null, s.reason ?? null);
+      return this.get(processId)!.steps.find(x => x.id === id)!;
+    },
+    /** Reanudar un proceso con más presupuesto (autorizado por el propietario): vuelve a «en ejecución». */
+    resume(id: string, budgetUsd: number) { db.prepare(`UPDATE processes SET status = 'running', budget_usd = ?, finished_at = NULL, error = NULL WHERE id = ?`).run(budgetUsd, id); },
     setStepLessons(stepId: string, ids: string[]) { db.prepare(`UPDATE process_steps SET lessons_used = ? WHERE id = ?`).run(JSON.stringify(ids), stepId); },
     /** Métricas de participación de un agente derivadas de process_steps (sin IA). */
     agentStats(agentId: string): { steps: number; done: number; failed: number; costUsd: number; byRole: Record<string, number>; lastAt: string | null } {

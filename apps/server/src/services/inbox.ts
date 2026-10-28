@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { DEFAULT_PIPELINE } from '@portal-ia/domain';
 import type { DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, Process } from '@portal-ia/domain';
 import { projectsRepo } from '../db/workspace.ts';
 
@@ -42,7 +43,9 @@ export function decisionsFromProcess(slug: string, p: Process): PendingDecision[
     return [make('process_authorization', p.createdAt, {
       estimatedCost: { usd: p.estimatedUsd, budgetUsd: budget },
       impact: `Estimado ${money(p.estimatedUsd)} · presupuesto máximo a autorizar ${money(budget)} · ${p.steps.length} paso${p.steps.length === 1 ? '' : 's'} con agentes de IA.`,
-      approveEffect: `Se autoriza el proceso con un presupuesto máximo de ${money(budget)}; empezará a ejecutarse y consumirá IA.`,
+      approveEffect: p.kind === 'story_execution'
+        ? `Se autoriza el proceso con un presupuesto máximo de ${money(budget)}: el equipo implementa, aplica en un worktree aislado, verifica en el sandbox (typecheck, test, build), QA valida con evidencia y corrige errores rutinarios dentro de ese presupuesto. No integra, no reinicia el Portal ni publica: eso sigue siendo tu decisión.`
+        : `Se autoriza el proceso con un presupuesto máximo de ${money(budget)}; empezará a ejecutarse y consumirá IA.`,
       denyEffect: 'Se cancela el proceso; no se consume IA.'
     })];
   }
@@ -145,7 +148,7 @@ export async function decide(app: FastifyInstance, slug: string, kind: PendingDe
   switch (kind) {
     case 'process_authorization':
       res = verdict === 'approve'
-        ? await call(app, 'POST', `${base}/authorize`, { budgetUsd: authorizationBudget(p), authorized: true })
+        ? await call(app, 'POST', `${base}/authorize`, { budgetUsd: authorizationBudget(p), authorized: true, ...(p.kind === 'story_execution' ? { pipeline: DEFAULT_PIPELINE } : {}) })
         : await call(app, 'POST', `${base}/cancel`);
       break;
     case 'apply_diff':

@@ -92,7 +92,9 @@ test('docker: el CLI recibe las variables de Windows que necesita y ninguna otra
 });
 
 // ---- Aislamiento real (requiere Docker Desktop / motor Linux y la imagen) ----
-const st = await detectSandbox(true);
+// Docker Desktop cargado (otras pruebas en paralelo) puede tardar en responder: se confirma antes de omitir.
+let st = await detectSandbox(true);
+for (let i = 0; i < 3 && st.available === 'unavailable'; i++) { await new Promise(r => setTimeout(r, 2000)); st = await detectSandbox(true); }
 
 test('docker: un script malicioso no ve el Portal ni los datos, no escribe fuera del worktree ni sale a la red; el worktree sí es escribible', { skip: process.env.PORTAL_INSIDE_SANDBOX ? 'ya dentro de un sandbox' : st.available !== 'docker' ? `sandbox disponible: ${st.available}` : false, timeout: 180_000 }, async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-docker-repo-'));

@@ -14,7 +14,10 @@ import { recordContextEdit } from '../services/storyThread.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { applyChanges, checkStaleChanges, discardBranch, mergeBranch, pushBranches, removeWorktree, worktreePathFor } from '../services/repoWrite.ts';
 import { requirePolicy, PolicyError } from '../services/executionPolicy.ts';
-import { detectSandbox, runInSandbox } from '../services/sandbox.ts';
+import { detectSandbox } from '../services/sandbox.ts';
+import { runVerification } from '../services/verification.ts';
+import { newPipeline, resumeStory } from '../services/storyPipeline.ts';
+import { normalizePipeline } from '@portal-ia/domain';
 import fs from 'node:fs';
 import path from 'node:path';
 import { REPO_ROOT } from '../config.ts';
@@ -28,6 +31,9 @@ import { backlogRepo } from '../db/workspace.ts';
  * Procesos autorizados (HU-004). Un proceso nace 'pending_authorization' con una estimación; solo empieza a consumir
  * IA cuando el usuario lo autoriza con un presupuesto (POST /authorize). Puede cancelarse; se detiene entre pasos.
  */
+/** Configuración del pipeline autorizado (se normaliza y acota en el servidor). */
+const PIPELINE_INPUT = z.object({ autoApply: z.boolean().optional(), autoVerify: z.boolean().optional(), commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(), allowInstall: z.boolean().optional(), maxOutputRepairs: z.number().int().min(0).max(10).optional(), maxCorrections: z.number().int().min(0).max(10).optional(), maxIdenticalFailures: z.number().int().min(1).max(10).optional(), maxDurationMin: z.number().int().min(1).max(600).optional() });
+
 export async function processRoutes(app: FastifyInstance) {
   // Al servir un proceso se calcula (no se persiste) su estado de activación en el Portal en marcha y la orientación.
   const withGuidance = async (slug: string, p: Process): Promise<Process> => {
@@ -70,19 +76,50 @@ export async function processRoutes(app: FastifyInstance) {
   // Autorización explícita: aquí y solo aquí empieza el consumo de IA.
   app.post('/api/workspaces/:slug/processes/:id/authorize', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ budgetUsd: z.number().min(0.1).max(500), authorized: z.literal(true) }).safeParse(req.body);
+    const body = z.object({ budgetUsd: z.number().min(0.1).max(500), authorized: z.literal(true), pipeline: PIPELINE_INPUT.optional() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere presupuesto (USD) y autorización explícita.' });
     const procs = processesRepo(slug);
     const proc = procs.get(id);
     if (!proc) return reply.code(404).send({ error: 'Proceso no encontrado' });
     if (proc.status !== 'pending_authorization') return reply.code(409).send({ error: 'El proceso ya fue autorizado o finalizado.' });
     if (procs.running().length) return reply.code(409).send({ error: 'Ya hay un proceso en ejecución. Espera a que termine.' });
+    // El pipeline (aplicar, verificar, QA con evidencia, correcciones acotadas) forma parte de ESTA autorización; sin él, cada paso se autoriza a mano como antes.
+    if (proc.kind === 'story_execution' && body.data.pipeline && proc.result) procs.setResult(id, { ...proc.result, pipeline: newPipeline(normalizePipeline(body.data.pipeline)) });
     procs.authorize(id, body.data.budgetUsd);
     app.log.info({ processId: id, kind: proc.kind, budget: body.data.budgetUsd }, 'proceso autorizado · inicia ejecución');
     const logger = (o: any, m: string) => app.log.info(o, m);
     const run = proc.kind === 'story_execution' ? runStory(slug, id, logger, () => isCancelled(id)).finally(() => clearCancel(id)) : proc.kind === 'delegated_task' ? runDelegation(slug, id, logger, () => isCancelled(id)).finally(() => clearCancel(id)) : runAssessment(slug, id, logger);
     setImmediate(() => { trackJob(id, run).catch(e => app.log.error(e, 'fallo inesperado en el proceso')); });
     return procs.get(id);
+  });
+
+  // Continuar de forma autónoma (autorizado por el propietario): reanuda un pipeline pausado o detenido, lo inicia sobre un
+  // proceso terminado con cambios sin aplicar, o repara la entrega de un proceso que falló por el formato del Desarrollador.
+  // Lo ya hecho no se repite; el presupuesto adicional es un máximo, no un objetivo.
+  app.post('/api/workspaces/:slug/processes/:id/continue', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ authorized: z.literal(true), addBudgetUsd: z.number().min(0).max(100).optional(), pipeline: PIPELINE_INPUT.optional() }).safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Continuar exige tu autorización explícita.', code: 'authorization_required' });
+    const procs = processesRepo(slug); const proc = procs.get(id);
+    if (!proc || proc.kind !== 'story_execution' || !proc.result) return reply.code(404).send({ error: 'Proceso de historia no encontrado' });
+    if (proc.status === 'running' || proc.status === 'pending_authorization') return reply.code(409).send({ error: 'El proceso sigue activo o pendiente de autorizar.' });
+    if (proc.result.merged || proc.result.rejected) return reply.code(409).send({ error: proc.result.merged ? 'Ya está integrado en la rama principal.' : 'Este diff se rechazó; crea una nueva iteración.' });
+    const hasOutput = proc.steps.some(s => s.role === 'implementer' && s.outputMd?.trim());
+    if (!proc.result.applied && !proc.result.changes.some(c => !c.error) && !hasOutput) return reply.code(409).send({ error: 'El Desarrollador no entregó nada que continuar: vuelve a ejecutar la historia.', code: 'nothing_to_continue' });
+    if (procs.running().length) return reply.code(409).send({ error: 'Ya hay un proceso en ejecución. Espera a que termine.' });
+    const prev = proc.result.pipeline;
+    const cfg = normalizePipeline({ ...(prev?.config ?? {}), ...(body.data.pipeline ?? {}) });
+    // Los límites nuevos se suman a lo ya consumido: continuar tras un tope concede ese margen otra vez, no más.
+    const pipeline = prev
+      ? { ...prev, config: { ...cfg, maxCorrections: prev.corrections + cfg.maxCorrections, maxOutputRepairs: prev.outputRepairs + cfg.maxOutputRepairs }, failures: [], startedAt: new Date().toISOString() }
+      : newPipeline(cfg);
+    procs.setResult(id, { ...proc.result, pipeline });
+    procs.resume(id, Math.max(proc.budgetUsd, proc.spentUsd) + (body.data.addBudgetUsd ?? 0));
+    app.log.info({ processId: id, addBudget: body.data.addBudgetUsd ?? 0, allowInstall: cfg.allowInstall }, 'pipeline de la historia: continuar (autorizado)');
+    const logger = (o: any, m: string) => app.log.info(o, m);
+    const run = resumeStory(slug, id, logger, () => isCancelled(id)).finally(() => clearCancel(id));
+    setImmediate(() => { trackJob(id, run).catch(e => app.log.error(e, 'fallo inesperado al continuar el proceso')); });
+    return await withGuidance(slug, procs.get(id)!);
   });
 
   app.post('/api/workspaces/:slug/processes/:id/cancel', async (req, reply) => {
@@ -346,34 +383,8 @@ Proceso: ${proc.id}`, { processId: proc.id });
   });
 
   // ---- Verificación local (sandbox_exec · requiere autorización por uso; ejecución local sin sandbox) ----
-  /**
-   * Ejecuta un comando permitido en el sandbox sobre el worktree del proceso y guarda la ejecución (historial completo).
-   * Lanza errores con statusCode/code (los mismos que devolvía la ruta).
-   */
-  const runVerify = async (slug: string, id: string, command: 'install' | 'typecheck' | 'test' | 'build', allowNetwork: boolean): Promise<VerificationRun> => {
-    const fail = (statusCode: number, error: string, code?: string) => Object.assign(new Error(error), { statusCode, code });
-    const procs = processesRepo(slug); const proc = procs.get(id);
-    if (!proc || !proc.result) throw fail(404, 'Proceso no encontrado');
-    if (!proc.result.applied) throw fail(409, 'Primero aplica los cambios: la verificación corre sobre el worktree del proceso.');
-    const repo = projectsRepo(slug).repository(proc.projectId);
-    if (!repo) throw fail(409, 'No hay repositorio registrado.');
-    const wt = proc.result.applied.worktree ?? worktreePathFor(repo.path, id);
-    if (!proc.result.applied.worktree) throw fail(409, `Esta iteración se aplicó antes de v0.12, directamente en tu carpeta (rama ${proc.result.applied.branch}), y no puede verificarse en sandbox. Ciérrala como resuelta si la historia ya funciona, o descártala y prepara una nueva iteración desde el Resumen.`, 'legacy_applied');
-    if (!fs.existsSync(wt)) throw fail(409, 'El worktree del proceso ya no existe (¿se integró o se limpió?). Descarta esta iteración y prepara una nueva desde el Resumen.');
-    const op = command === 'install' ? 'install_deps' : command === 'typecheck' && (await detectSandbox()).available === 'unavailable' ? 'host_typecheck_min' : 'sandbox_exec';
-    const qa = proc.steps.find(s => /calidad|QA/i.test(s.title)) ?? proc.steps[1];
-    // La verificación la pide el propietario (no un agente): la política comprueba nivel y autorización; las herramientas de agente se exigen en los pasos que ejecutan agentes.
-    requirePolicy(op, { slug, processId: id, agentId: null, projectId: proc.projectId, authorized: true });
-    // Instalar dependencias exige red: solo con autorización explícita y mostrando qué cambió en package.json.
-    if (command === 'install' && !allowNetwork) throw fail(409, 'Instalar dependencias necesita red dentro del sandbox. Revisa el diff de package.json y confirma «Permitir red solo para install».', 'network_confirmation_required');
-    const run = await runInSandbox(wt, path.resolve(repo.path), command, { allowNetwork });
-    const cur = procs.get(id)!;
-    procs.setResult(id, { ...cur.result!, verifications: [...cur.result!.verifications, run] });
-    procs.logExecution({ projectId: proc.projectId, agentId: qa?.agentId ?? '', kind: `verify:${command}:${run.isolation}`, status: run.exitCode === 0 ? 'done' : 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: run.startedAt });
-    // Faltar dependencias (86) es un problema del entorno, no del código: no genera lección.
-    if (run.exitCode !== 0 && run.isolation !== 'unavailable' && run.exitCode !== DEPS_MISSING_EXIT) recordDetections(slug, id, repo.path);
-    return run;
-  };
+  // Misma verificación para la ruta (autorización por uso) y para el pipeline autorizado: services/verification.ts.
+  const runVerify = (slug: string, id: string, command: 'install' | 'typecheck' | 'test' | 'build', allowNetwork: boolean): Promise<VerificationRun> => runVerification(slug, id, command, allowNetwork);
   const sendError = (reply: any, e: any) => reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError || typeof e.code === 'string' ? e.code : undefined });
   app.post('/api/workspaces/:slug/processes/:id/verify', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;

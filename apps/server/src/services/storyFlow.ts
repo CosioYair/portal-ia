@@ -35,7 +35,7 @@ const fix = (label = 'Pedir al equipo que lo corrija') => act('request_fix', lab
 /** Verificaciones relevantes desde que se aplicó (las anteriores son de otra versión del código). */
 function sinceApplied(p: Process): VerificationRun[] {
   const r = p.result!; if (!r.applied) return [];
-  const after = new Date(r.applied.appliedAt).getTime() - 1000;
+  const after = new Date(r.applied.appliedAt).getTime() - (r.pipeline ? 0 : 1000); // el pipeline puede corregir en menos de 1 s
   return (r.verifications ?? []).filter(v => new Date(v.startedAt).getTime() >= after);
 }
 
@@ -61,10 +61,12 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
   const devs = name('implementer').length ? name('implementer') : p.steps.filter(s => s.role === 'implementer').map(s => s.agentName);
   const qa = name('reviewer').length ? name('reviewer') : p.steps.filter(s => s.role === 'reviewer').map(s => s.agentName);
   const portal = !!opts.isPortalRepo && !!r?.merged && r.activation !== undefined && r.activation !== null;
-  const keys: FlowStageKey[] = ['execute', 'review', 'apply', 'verify', 'integrate', ...(opts.isPortalRepo ? ['activate', 'runtime'] as FlowStageKey[] : []), 'manual', 'close'];
+  const pl = r?.pipeline ?? null;
+  const keys: FlowStageKey[] = [...(pl ? ['execute', 'apply', 'verify', 'review'] as FlowStageKey[] : ['execute', 'review', 'apply', 'verify'] as FlowStageKey[]), 'integrate', ...(opts.isPortalRepo ? ['activate', 'runtime'] as FlowStageKey[] : []), 'manual', 'close'];
   const st: Record<string, { status: FlowStageStatus; detail: string }> = Object.fromEntries(keys.map(k => [k, { status: 'pending' as FlowStageStatus, detail: '' }]));
   const set = (k: FlowStageKey, status: FlowStageStatus, detail = '') => { if (st[k]) st[k] = { status, detail }; };
   let issue: FlowIssue | null = null; const actions: FlowAction[] = [];
+  let headline: string | null = null;
   let forced: FlowStageKey | null = null; // etapa actual cuando una advertencia aún espera tu decisión
   const responsible = p.steps.filter(s => s.status === 'running').map(s => ({ agentName: s.agentName, role: ROLE[s.role ?? ''] ?? 'trabaja', status: 'trabajando' }));
   const implOut = !!p.steps.find(s => s.role === 'implementer')?.outputMd?.trim() || !!p.steps[1]?.outputMd?.trim();
@@ -73,6 +75,16 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
   if (p.status === 'pending_authorization') {
     set('execute', 'waiting', `Pendiente de autorización · estimación ≈ ${usd(p.estimatedUsd)} USD · ${p.steps.length} agentes`);
     actions.push(act('authorize', 'Revisar y autorizar la iteración', 'Revisa el equipo, el contexto que recibirá y fija un presupuesto máximo. Nada se gasta hasta que lo autorices.', ['authorization', 'ai_budget']));
+  } else if (p.status === 'running' && pl && pl.phase !== 'implementing') {
+    const valid = (r?.changes ?? []).filter(c => !c.error).length;
+    headline = pl.events.at(-1)?.message ?? null;
+    const repairing = pl.phase === 'recovering' || pl.phase === 'repairing';
+    set('execute', repairing ? 'running' : 'done', pl.phase === 'repairing' ? `Reparando la entrega del Desarrollador (intento ${pl.outputRepairs + 1})` : pl.phase === 'recovering' ? 'Recuperando la entrega sin IA' : `${valid} archivo(s) · ${usd(p.spentUsd)} de ${usd(p.budgetUsd)} USD`);
+    if (r?.applied) set('apply', 'done', `${r.applied.branch} · ${r.applied.commit}`); else if (pl.phase === 'applying') set('apply', 'running', 'Aplicando en el worktree aislado');
+    if (pl.phase === 'verifying' || pl.phase === 'installing') set('verify', 'running', pl.phase === 'installing' ? 'Instalando dependencias (red temporal autorizada)' : `Verificando en el sandbox: ${pl.config.commands.join(', ')}`);
+    else if (pl.phase === 'correcting') set('verify', 'running', `El Desarrollador prepara la corrección ${pl.corrections + 1} de ${pl.config.maxCorrections}`);
+    else if (pl.phase === 'qa') { set('verify', 'done', 'Verificación en verde'); set('review', 'running', 'QA evalúa la evidencia'); }
+    actions.push(act('cancel', 'Cancelar', 'Detiene el proceso al terminar el paso en curso; lo hecho se conserva.'));
   } else if (p.status === 'running') {
     const cur = p.steps.find(s => s.status === 'running'); const done = p.steps.filter(s => s.status === 'done').length;
     set('execute', 'running', `${cur ? `${cur.agentName} ${ROLE[cur.role ?? ''] ?? 'trabaja'}: ${cur.title}` : 'En curso'} · paso ${Math.min(done + 1, p.steps.length)} de ${p.steps.length}`);
@@ -83,14 +95,26 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
     if (implOut && !r?.applied) actions.push(act('recover', 'Recuperar lo entregado (sin IA)', 'Vuelve a leer lo que el Desarrollador ya entregó y deja el diff listo para revisar, sin gastar nada.'));
     actions.push(act('retry_process', 'Volver a ejecutar con un presupuesto nuevo', 'Crea un proceso nuevo pendiente de autorización: eliges el presupuesto antes de que empiece.', ['authorization', 'ai_budget']));
   } else if (p.status === 'failed' || p.status === 'cancelled') {
-    const patch = /aplicable|BUSCAR|parche|no aparece en el archivo/i.test(p.error ?? '') || (r?.changes ?? []).some(c => c.error);
+    // Con la clasificación del fallo no se adivina por el texto: solo es «parche que no encaja» si hubo cambios con forma
+    // válida que no encajan; una entrega sin formato reconocible es un fallo del contrato de salida.
+    const contract = r?.failure?.kind === 'output_contract' && !!r.failure.assessment && r.failure.assessment.kind !== 'implementation';
+    const patch = !contract && (/aplicable|BUSCAR|parche|no aparece en el archivo/i.test(p.error ?? '') || (r?.changes ?? []).some(c => c.error));
     set('execute', 'failed', p.status === 'cancelled' ? 'Cancelado' : `Falló: ${(p.error ?? '').slice(0, 140)}`);
     if (p.status === 'cancelled') issue = { kind: 'cancelled', level: 'blocker', cause: 'decision', title: 'Proceso cancelado', explanation: 'Se canceló antes de terminar. Puedes recuperar lo entregado (sin IA) o volver a ejecutarlo.', details: [], files: [], responsible: [] };
     else if (patch) {
       const bad = (r?.changes ?? []).filter(c => c.error);
       issue = { kind: 'patch_failed', level: 'blocker', cause: 'code', title: 'Los cambios del equipo no encajan en el código actual', explanation: 'El Desarrollador propuso modificar texto que ya no existe (o cambió desde que lo leyó). No se escribió nada. Una nueva iteración le da el estado actual de esos archivos para rehacerlo.', details: bad.length ? bad.map(c => ({ text: c.error!, file: c.path })) : [{ text: p.error ?? 'parche no aplicable' }], files: bad.map(c => c.path), responsible: devs };
+    } else if (r?.failure?.kind === 'output_contract' || (!r?.failure && /formato acordado|no entregó ningún archivo|se cortó a mitad del archivo/i.test(p.error ?? ''))) {
+      const a = r?.failure?.assessment;
+      issue = { kind: 'output_contract', level: 'blocker', cause: 'code', title: 'El Desarrollador no entregó cambios en el formato acordado', explanation: `No es un problema del entorno (Docker, TypeScript o red): la respuesta del agente no se pudo convertir en cambios${a ? ` (${({ truncated: 'respuesta cortada', incomplete: 'entrega incompleta', malformed: 'formato no reconocible', refusal: 'el agente no completó la tarea', no_changes: 'sin cambios', implementation: 'cambios no aplicables' } as Record<string, string>)[a.kind] ?? a.kind})` : ''}. Primero se intenta recuperar lo entregado sin IA; si no basta, el mismo Desarrollador puede reparar su entrega sin repetir el plan del Coordinador.`, details: (a?.reasons.length ? a.reasons : [p.error ?? 'sin detalle']).map(t => ({ text: t })), files: a?.truncatedFile ? [a.truncatedFile] : [], responsible: devs };
+    } else if (r?.failure?.kind === 'refusal') {
+      const a = r.failure.assessment;
+      issue = { kind: 'agent_refused', level: 'blocker', cause: 'decision', title: 'El Desarrollador no completó la tarea', explanation: `${r.failure.detail} ${a?.requestedFiles.length ? 'Una reparación le dará el contenido de esos archivos.' : 'Quizá la historia necesita más contexto o un alcance más acotado.'}`, details: (a?.reasons ?? []).map(t => ({ text: t })), files: a?.requestedFiles ?? [], responsible: devs };
+    } else if (r?.failure?.kind === 'provider') {
+      issue = { kind: 'provider_failed', level: 'blocker', cause: 'environment', title: 'El proveedor de IA falló', explanation: `${r.failure.detail} No es un fallo del código ni del equipo. ${implOut ? 'Lo entregado se conserva y se puede continuar sin repetir lo hecho.' : 'Puedes volver a ejecutarlo cuando el proveedor responda.'}`, details: [{ text: r.failure.detail }], files: [], responsible: [] };
     } else issue = { kind: 'process_failed', level: 'blocker', cause: 'environment', title: 'La ejecución del equipo falló', explanation: `El proceso se detuvo con un error: ${p.error ?? 'desconocido'}. ${implOut ? 'El Desarrollador sí entregó su trabajo: puedes recuperarlo sin IA.' : 'Puedes volver a ejecutarlo (quizá acotando la historia).'}`, details: p.error ? [{ text: p.error }] : [], files: [], responsible: [] };
-    if (implOut && !r?.applied) actions.push(act('recover', 'Recuperar lo entregado (sin IA)', 'Vuelve a leer lo que el Desarrollador ya entregó con las reglas actuales, sin gastar nada.'));
+    if (implOut && !r?.applied) actions.push(act('recover', 'Recuperar lo entregado (sin IA)', 'Vuelve a leer lo que el Desarrollador ya entregó con las reglas actuales (formato canónico, variantes, diff), sin gastar nada.'));
+    if (implOut && !r?.applied && (issue?.kind === 'output_contract' || issue?.kind === 'agent_refused' || issue?.kind === 'provider_failed' || issue?.kind === 'patch_failed')) actions.push(act('repair_output', 'Reparar la entrega con IA (sin repetir el plan)', 'El mismo Desarrollador recibe su respuesta anterior y el diagnóstico, y reenvía solo lo necesario. Después el equipo aplica, verifica y QA valida automáticamente, dentro del presupuesto que autorices.', ['authorization', 'ai_budget'], { pipeline: {}, suggestedBudgetUsd: 0.5 }));
     if (issue?.kind === 'patch_failed') actions.push(fix('Pedir al equipo que lo rehaga sobre el código actual'));
     actions.push(act('retry_process', 'Volver a ejecutar la historia', 'Crea un proceso nuevo pendiente de autorización (eliges el presupuesto).', ['authorization', 'ai_budget']));
   } else set('execute', 'done', `${p.steps.filter(s => s.status === 'done').length} agentes · ${usd(p.spentUsd)} USD de ${usd(p.budgetUsd)} USD`);
@@ -102,9 +126,43 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
     const stages2: FlowStage[] = keys.map(k => ({ key: k, label: LABELS[k], ...st[k] }));
     if (actions.length && !actions.some(a => a.primary)) actions[0].primary = true;
     const resp = responsible.length ? responsible : (issue?.responsible ?? []).map(n => ({ agentName: n, role: devs.includes(n) ? 'implementa' : qa.includes(n) ? 'revisa' : 'responsable', status: 'responsable de corregirlo' }));
-    return { stages: stages2, current, progress: { done: stages2.filter(s => s.status === 'done' || s.status === 'warning').length, total: stages2.length }, issue, actions, responsible: resp, iteration: opts.iteration ?? null };
+    return { stages: stages2, current, progress: { done: stages2.filter(s => s.status === 'done' || s.status === 'warning').length, total: stages2.length }, issue, actions, responsible: resp, iteration: opts.iteration ?? null, headline };
   };
   if (p.status !== 'done' || !r) return finish();
+
+  if (pl && (pl.state === 'paused' || pl.state === 'stopped') && !r.merged && !r.rejected) {
+    const valid = r.changes.filter(c => !c.error).length;
+    const since = sinceApplied(p); const lastOf = (c: string) => since.filter(v => v.command === c).at(-1);
+    set('execute', valid ? 'done' : 'blocked', valid ? `${valid} archivo(s)` : 'Sin cambios aplicables todavía');
+    if (r.applied) set('apply', 'done', `${r.applied.branch} · ${r.applied.commit}`);
+    const verifyFailed = pl.config.commands.map(lastOf).find(v => v && v.exitCode !== 0 && v.exitCode !== null && v.exitCode !== DEPS_MISSING_EXIT && v.isolation !== 'unavailable');
+    const verifyOk = r.applied && pl.config.commands.every(c => lastOf(c)?.exitCode === 0);
+    if (verifyOk) set('verify', 'done', pl.config.commands.map(c => `${c}: ok`).join(' · '));
+    if (r.review?.verdict) set('review', r.review.verdict === 'approved' ? 'done' : r.review.verdict === 'rejected' ? 'rejected' : 'blocked', r.review.verdict === 'approved' ? 'QA aprobó con evidencia' : r.review.verdict === 'rejected' ? `QA rechaza · ${(r.review.findings ?? []).length} hallazgo(s)` : 'QA no pudo verificar');
+    const stageOf: Record<string, FlowStageKey> = { budget: !r.applied ? 'execute' : verifyOk ? 'review' : 'verify', network: 'verify', environment: 'verify', duration: !r.applied ? 'execute' : 'verify', limit: verifyFailed ? 'verify' : 'review', repeated_failure: verifyFailed ? 'verify' : 'review', qa: 'review', no_changes: 'execute', refusal: 'execute', cancelled: !r.applied ? 'execute' : 'verify' };
+    const k = pl.pauseKind ? stageOf[pl.pauseKind] ?? 'verify' : (!valid ? 'execute' : 'review');
+    forced = k; set(k, pl.state === 'paused' ? 'blocked' : 'failed', (pl.reason ?? '').slice(0, 140));
+    const cause = pl.pauseKind === 'environment' || pl.pauseKind === 'network' ? 'environment' : pl.pauseKind === 'limit' || pl.pauseKind === 'repeated_failure' ? 'code' : 'decision';
+    const fromVerify = verifyFailed ? verificationIssue(verifyFailed, devs) : null;
+    const qaDetails = (r.review?.findings ?? []).map(x => ({ text: x.text, file: x.file, severity: x.severity }));
+    const title = ({ budget: 'Pausado: el presupuesto autorizado no alcanza para el siguiente paso', network: 'Pausado: falta autorizar la instalación de dependencias', environment: 'Pausado por el entorno (sandbox)', duration: 'Pausado: se alcanzó la duración máxima', limit: 'Detenido: se alcanzó el máximo de correcciones', repeated_failure: 'Detenido: el mismo fallo se repite', qa: 'QA no pudo verificar: decides tú', no_changes: 'El Desarrollador concluye que no hacen falta cambios', refusal: 'El Desarrollador no completó la tarea', cancelled: 'Cancelado' } as Record<string, string>)[pl.pauseKind ?? ''] ?? 'El pipeline se detuvo';
+    issue = { kind: pl.state === 'paused' ? 'pipeline_paused' : pl.pauseKind === 'qa' ? 'qa_blocked' : 'pipeline_stopped', level: 'blocker', cause, command: fromVerify?.command, title, explanation: `${pl.reason ?? ''} Todo lo hecho se conserva (cambios, verificaciones y registro).`, details: fromVerify?.details.length ? fromVerify.details : qaDetails.length ? qaDetails : pl.failures.map(x => ({ text: `${x.label} · ${x.count} vez/veces` })), files: fromVerify?.files ?? Array.from(new Set(qaDetails.map(x => x.file).filter(Boolean) as string[])), evidence: fromVerify?.evidence ?? null, responsible: cause === 'code' ? devs : [] };
+    const resume = (label: string, description: string, requires: FlowAction['requires'], extra: Partial<FlowAction> = {}) => act('pipeline_resume', label, description, requires, { pipeline: {}, ...extra });
+    if (pl.pauseKind === 'budget') actions.push(resume('Continuar con más presupuesto', 'El equipo retoma donde lo dejó (no repite lo hecho). Fijas el presupuesto adicional máximo; solo se gasta lo necesario.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.5 }));
+    else if (pl.pauseKind === 'network') actions.push(resume('Permitir instalar dependencias y continuar', 'Instala las dependencias en el sandbox con red temporal (solo durante la instalación) y sigue verificando. No llama a la IA.', ['authorization', 'network'], { pipeline: { allowInstall: true } }));
+    else if (pl.pauseKind === 'environment') actions.push(act('refresh_sandbox', 'Comprobar el sandbox de nuevo', 'Vuelve a detectar Docker sin ejecutar nada.'), resume('Continuar cuando el entorno esté listo', 'Retoma la verificación; no llama a la IA salvo que haga falta corregir código.', ['authorization']));
+    else if (pl.pauseKind === 'limit' || pl.pauseKind === 'repeated_failure') actions.push(resume('Conceder otra corrección', 'Autoriza una corrección más con la evidencia actual (un intento, dentro del presupuesto que fijes).', ['authorization', 'ai_budget'], { pipeline: { maxCorrections: 1 }, suggestedBudgetUsd: 0.5 }), fix('Preparar una iteración con el diagnóstico'), ASK, act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
+    else if (pl.pauseKind === 'duration' || pl.pauseKind === 'cancelled') actions.push(resume('Continuar', 'Retoma donde lo dejó, sin repetir lo hecho.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0 }));
+    else if (pl.pauseKind === 'qa') { actions.push(act('review_diff', 'Revisar el diff y la evidencia', 'Decide tú con la verificación del sandbox a la vista.')); if (verifyOk) actions.push(act('merge', 'Integrar en main bajo tu criterio', 'La verificación automática está en verde; QA no pudo concluir. Requiere tu autorización.', ['authorization'])); actions.push(resume('Pedir a QA que vuelva a evaluar', 'Una nueva evaluación de QA con la misma evidencia.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.3 }), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama.')); }
+    else if (pl.pauseKind === 'no_changes') actions.push(act('close_resolved', 'Cerrar como resuelta', 'Si estás de acuerdo con la justificación, cierra la historia indicando el motivo.'), act('new_iteration', 'Preparar otra iteración', 'Si sí hacen falta cambios, explica qué en la nueva iteración.', ['confirmation']));
+    else if (!r.applied && valid) actions.push(resume('Aplicar, verificar y validar automáticamente', 'El equipo aplica en el worktree aislado, verifica en el sandbox y QA valida con evidencia, dentro del presupuesto que autorices.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.5 }), act('review_diff', 'Ver el diff', 'Revisa los cambios archivo por archivo.'));
+    else actions.push(resume('Continuar', 'Retoma donde lo dejó.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.3 }));
+    return finish();
+  }
+  // Proceso terminado sin pipeline con cambios sin aplicar: se puede encargar el resto al equipo (opción, no obligación).
+  const autoOffer = !pl && !r.applied && !r.rejected && r.changes.some(c => !c.error)
+    ? act('pipeline_resume', 'Aplicar, verificar y validar automáticamente', 'El equipo aplica en el worktree aislado, verifica en el sandbox (typecheck, test, build) y QA valida con evidencia, corrigiendo errores rutinarios dentro del presupuesto que autorices. Nunca integra ni publica.', ['authorization', 'ai_budget'], { pipeline: {}, suggestedBudgetUsd: 0.5 })
+    : null;
 
   // 2 · Revisión del diff y de QA
   const applicable = r.changes.filter(c => !c.error).length;
@@ -134,6 +192,7 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
       actions.push(fix('Pedir al equipo que corrija las observaciones'), ASK, TASKS, act('apply', 'Aplicar igualmente', 'Escribe los cambios en un worktree aislado pese a las observaciones (tu carpeta no cambia). Requiere tu autorización.', ['authorization']), act('reject', 'Rechazar el diff', 'La historia vuelve a pendiente; el diff queda archivado.'));
     } else {
       if (partial.length) issue = { kind: 'patch_failed', level: 'warning', cause: 'code', title: `${partial.length} cambio(s) no se pueden aplicar`, explanation: 'El resto sí. Si esos archivos son necesarios, pide al equipo que los rehaga sobre el código actual.', details: partial.map(c => ({ text: c.error!, file: c.path })), files: partial.map(c => c.path), responsible: devs };
+      if (autoOffer) actions.push(autoOffer);
       actions.push(act('apply', `Aplicar ${applicable} cambio(s) en un worktree`, 'Escribe los cambios en una rama propia, fuera de tu carpeta del Portal. Requiere tu autorización.', ['authorization']), act('review_diff', 'Ver el diff', 'Revisa los cambios archivo por archivo.'), ...(partial.length ? [fix('Pedir que rehagan los no aplicables')] : []), act('reject', 'Rechazar el diff', 'La historia vuelve a pendiente.'));
     }
     return finish();
@@ -203,6 +262,10 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
       return finish();
     }
     set('integrate', 'current', `Rama ${r.applied.branch} verificada`);
+    if (pl?.state === 'verified') {
+      headline = r.review?.verdict === 'approved' ? 'Implementación verificada por QA — lista para revisión del propietario.' : 'Implementación verificada en el sandbox — lista para revisión del propietario (QA omitida).';
+      actions.push(act('review_diff', 'Revisar el resultado verificado', 'Diff, verificación del sandbox y veredicto de QA, todo en esta página.'));
+    }
     actions.push(act('merge', 'Integrar en main', 'Merge sin fast-forward de la rama verificada en main. Requiere tu autorización.', ['authorization']), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama.'));
     return finish();
   }

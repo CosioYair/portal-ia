@@ -261,7 +261,8 @@ export interface FlowStage { key: FlowStageKey; label: string; status: FlowStage
 export type FlowIssueKind =
   | 'deps_missing' | 'sandbox_unavailable' | 'sandbox_timeout' | 'typecheck_failed' | 'test_failed' | 'build_failed' | 'qa_rejected' | 'patch_failed'
   | 'merge_conflict' | 'activation_failed' | 'runtime_failed' | 'runtime_unavailable' | 'manual_failed' | 'budget_exceeded'
-  | 'process_failed' | 'cancelled' | 'diff_rejected' | 'legacy';
+  | 'process_failed' | 'cancelled' | 'diff_rejected' | 'legacy'
+  | 'output_contract' | 'provider_failed' | 'agent_refused' | 'pipeline_paused' | 'pipeline_stopped' | 'qa_blocked';
 export type IssueSeverity = 'alta' | 'media' | 'baja';
 export interface FlowIssueDetail { text: string; file?: string | null; line?: number | null; code?: string | null; severity?: IssueSeverity | null }
 export interface FlowIssue {
@@ -284,7 +285,8 @@ export interface FlowIssue {
 export type FlowActionId =
   | 'authorize' | 'cancel' | 'review_diff' | 'apply' | 'reject' | 'install_and_retry' | 'verify' | 'retry_verification'
   | 'sandbox_help' | 'refresh_sandbox' | 'request_fix' | 'ask_team' | 'tasks_from_issue' | 'merge' | 'rebuild'
-  | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'retry_process' | 'recover' | 'new_iteration';
+  | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'retry_process' | 'recover' | 'new_iteration'
+  | 'pipeline_resume' | 'repair_output';
 export interface FlowAction {
   id: FlowActionId;
   label: string;
@@ -295,6 +297,9 @@ export interface FlowAction {
   requires: ('authorization' | 'network' | 'ai_budget' | 'confirmation')[];
   /** Comandos a (re)ejecutar (verify, retry_verification, install_and_retry). */
   commands?: string[];
+  /** Continuar el pipeline (pipeline_resume / repair_output): ajustes que propone la acción y presupuesto adicional sugerido. */
+  pipeline?: Partial<PipelineConfig>;
+  suggestedBudgetUsd?: number;
 }
 export interface StoryFlow {
   stages: FlowStage[];
@@ -305,6 +310,8 @@ export interface StoryFlow {
   /** Agentes que trabajan ahora o de los que depende la etapa actual. */
   responsible: { agentName: string; role: string; status: string }[];
   iteration: { number: number; total: number } | null;
+  /** Mensaje principal cuando el pipeline autorizado terminó bien o está trabajando (p. ej. «Implementación verificada por QA — lista para revisión del propietario»). */
+  headline?: string | null;
 }
 
 export interface KnowledgeDoc {
@@ -455,7 +462,78 @@ export interface ProposedChange {
   diff: string | null;
   before: number; after: number; // líneas
 }
-export interface ReviewVerdict { approve: boolean; issues: string[]; suggestedTests: string[]; summary: string; }
+export interface ReviewVerdict {
+  approve: boolean; issues: string[]; suggestedTests: string[]; summary: string;
+  /** Veredicto estructurado de la puerta de QA (procesos con pipeline): aprobado, rechazado, bloqueado por el entorno o sin poder verificar. */
+  verdict?: QaVerdictKind;
+  /** Hallazgos con su evidencia (archivo, salida de verificación o línea del diff). */
+  findings?: QaFinding[];
+  /** QA evaluó evidencia real del sandbox (diff + typecheck/test/build), no solo el diff. */
+  evidenceBased?: boolean;
+  /** El motor corrigió el veredicto narrativo de QA porque contradecía la verificación automática (motivo). */
+  overridden?: string | null;
+}
+export type QaVerdictKind = 'approved' | 'rejected' | 'blocked_environment' | 'unable_to_verify';
+export interface QaFinding { severity: IssueSeverity; text: string; file: string | null; evidence: string | null }
+
+// ---- Contrato de salida del Desarrollador y pipeline autónomo autorizado ----
+/** Qué entregó el Desarrollador, clasificado sin IA. */
+export type DevOutputKind = 'implementation' | 'no_changes' | 'incomplete' | 'truncated' | 'malformed' | 'refusal';
+export interface DevOutputAssessment {
+  kind: DevOutputKind;
+  /** Motivos concretos (marcadores ausentes, bloque sin cerrar, parche vacío, ruta inválida…). */
+  reasons: string[];
+  /** Variante del formato con la que se recuperaron los cambios (canonical, lenient-headers, conflict-markers, unified-diff, fenced-new-files, legacy-json). */
+  recoveredBy: string | null;
+  files: number;
+  /** Archivo cuyo bloque quedó abierto (respuesta cortada). */
+  truncatedFile: string | null;
+  /** Rutas del repositorio que el agente dice necesitar y no tenía en su contexto. */
+  requestedFiles: string[];
+}
+export interface PipelineConfig {
+  /** Aplicar los cambios válidos en el worktree aislado del proceso sin esperar al propietario. */
+  autoApply: boolean;
+  /** Ejecutar la verificación en sandbox tras aplicar. */
+  autoVerify: boolean;
+  /** Comandos de verificación autorizados (orden fijo). */
+  commands: ('typecheck' | 'test' | 'build')[];
+  /** Instalar dependencias en el sandbox con red temporal si faltan (código 86). */
+  allowInstall: boolean;
+  /** Reparaciones de formato con IA (misma salida del Desarrollador, sin repetir el plan). */
+  maxOutputRepairs: number;
+  /** Ciclos de corrección del código (verificación fallida o rechazo de QA). */
+  maxCorrections: number;
+  /** Fallos equivalentes tolerados antes de detenerse. */
+  maxIdenticalFailures: number;
+  /** Duración máxima del proceso (minutos). */
+  maxDurationMin: number;
+}
+export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'verify' | 'environment' | 'qa' | 'correction' | 'pause' | 'done' | 'error';
+export interface PipelineEvent { at: string; kind: PipelineEventKind; message: string; detail?: string | null; aiCall?: boolean; costUsd?: number | null }
+export type PipelineState = 'running' | 'verified' | 'paused' | 'stopped';
+export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' | 'repeated_failure' | 'duration' | 'no_changes' | 'refusal' | 'qa' | 'cancelled';
+export type PipelinePhase = 'implementing' | 'recovering' | 'repairing' | 'applying' | 'verifying' | 'installing' | 'qa' | 'correcting' | 'finished';
+export interface PipelineStatus {
+  config: PipelineConfig;
+  state: PipelineState;
+  phase: PipelinePhase;
+  /** Motivo de la pausa o de la parada (para el propietario). */
+  reason: string | null;
+  pauseKind: PipelinePauseKind | null;
+  events: PipelineEvent[];
+  outputRepairs: number;
+  corrections: number;
+  /** Firmas de fallos vistos (comando/archivo/código) y cuántas veces se repitieron. */
+  failures: { signature: string; count: number; label: string }[];
+  lastAssessment: DevOutputAssessment | null;
+  /** Commit del worktree que QA evaluó por última vez (si cambia, QA vuelve a evaluar). */
+  lastQaCommit?: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+/** Por qué terminó mal un proceso de historia (clasificado al fallar; evita adivinar por el texto del error). */
+export interface ProcessFailure { kind: 'output_contract' | 'provider' | 'budget' | 'cancelled' | 'internal' | 'refusal'; detail: string; assessment?: DevOutputAssessment | null }
 export type Isolation = 'docker' | 'wsl' | 'linux-ns' | 'host-min' | 'unavailable';
 export interface VerificationRun { command: string; exitCode: number | null; output: string; startedAt: string; finishedAt: string; durationMs: number; /** Dónde se ejecutó: sandbox real (docker/wsl), verificación mínima en el equipo (solo tsc) o no disponible. */ isolation?: Isolation; }
 export interface ExecutionResult {
@@ -490,6 +568,10 @@ export interface ExecutionResult {
   repairs?: ValidationRepairAttempt[];
   /** El propietario rechazó este diff (o replanteó la historia): no se aplicará; la historia volvió a pendiente. */
   rejected?: { at: string; reason: string } | null;
+  /** Pipeline autónomo autorizado (aplicar, verificar, QA con evidencia, correcciones acotadas). */
+  pipeline?: PipelineStatus | null;
+  /** Clasificación del fallo del proceso (si falló). */
+  failure?: ProcessFailure | null;
 }
 
 /** Estado del repositorio registrado (solo lectura, sin red). */
