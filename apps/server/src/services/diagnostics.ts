@@ -35,7 +35,8 @@ export function parseFailingTests(output: string, max = 15): FlowIssueDetail[] {
       if (/\.test\.[cm]?[jt]s$/.test(tap[1])) continue; // fila del archivo: los subtests ya se listan
       let reason = '', file: string | null = null;
       for (let j = i + 1; j < Math.min(lines.length, i + 30) && !/^\s*(not )?ok \d+ /.test(lines[j]); j++) {
-        const e = lines[j].match(/^\s*error: ['|]?(.*?)'?$/); if (e && !reason) reason = e[1].trim() || (lines[j + 1] ?? '').trim();
+        // `error: 'texto'` en una línea, o un bloque YAML (`error: |-`) cuyo texto empieza en la línea siguiente.
+        const e = lines[j].match(/^\s*error: ['|]?(.*?)'?$/); if (e && !reason) reason = /^[|>]?-?$/.test(e[1].trim()) ? (lines[j + 1] ?? '').trim() : e[1].trim();
         const loc = lines[j].match(/location: '(.+?):\d+:\d+'/); if (loc && !file) file = loc[1].replace(/^\/work\//, '');
       }
       out.push({ text: `${tap[1]}${reason ? ` — ${reason.slice(0, 220)}` : ''}`, file });

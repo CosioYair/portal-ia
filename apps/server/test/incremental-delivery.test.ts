@@ -852,7 +852,10 @@ test('revisión2 8/9 · una corrección que agota la salida falla ELLA (la ronda
     ]);
     const q = await runIt('Revisión2 · discutir el sandbox');
     assert.equal(q.result!.pipeline!.pauseKind, 'repeated_failure'); assert.equal(q.result!.pipeline!.corrections, 0, 'discutir un fallo objetivo no cuenta como corrección');
-    assert.match(q.result!.manifest!.units.find(u => u.kind === 'correction')!.error ?? '', /comprobación objetiva/);
+    // Con evidencia concreta no se paga un segundo intento: decide el propietario (HU-155), sin debilitar la comprobación.
+    assert.match(q.result!.manifest!.units.find(u => u.kind === 'correction')!.error ?? '', /contradice el criterio o el código real/);
+    assert.match(q.result!.pipeline!.reason ?? '', /src\/contract\.mjs:2/);
+    assert.equal(byRule('Corrige la implementación de esta historia').length, 1, 'una sola llamada');
     assert.equal(byRule(R.qa).length, 0);
   } finally { sandboxFail = null; }
 });

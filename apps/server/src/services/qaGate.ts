@@ -1,4 +1,4 @@
-import type { DeliveryCheck, ProposedChange, QaFinding, QaVerdictKind, ReviewVerdict, StoryManifest, StoryPlan, VerificationRun } from '@portal-ia/domain';
+import type { DeliveryCheck, ExternalCorrection, ProposedChange, QaFinding, QaVerdictKind, ReviewVerdict, StoryManifest, StoryPlan, VerificationRun } from '@portal-ia/domain';
 import { qaSeverity } from '@portal-ia/domain';
 import { diagnosticsFor, filesIn, tailOf } from './diagnostics.ts';
 
@@ -47,7 +47,7 @@ export function testsEvidence(verifications: VerificationRun[]): string {
   return `- test: ${t.exitCode === 0 ? 'OK' : 'FALLÓ'}${pass ? ` · ${pass} prueba(s) correctas` : ''}${files.length ? ` · archivos: ${files.join(', ')}` : ''}`;
 }
 
-export function qaEvidencePrompt(input: { criterion: string; plan: StoryPlan | null; summary: string; changes: ProposedChange[]; verifications: VerificationRun[]; required: string[]; attempts: string[]; consultText: string; manifest?: StoryManifest | null; previousFindings?: QaFinding[]; tests?: string; checks?: DeliveryCheck[]; unchangedSinceReview?: string[]; reviewedCommit?: string | null }): string {
+export function qaEvidencePrompt(input: { criterion: string; plan: StoryPlan | null; summary: string; changes: ProposedChange[]; verifications: VerificationRun[]; required: string[]; attempts: string[]; consultText: string; manifest?: StoryManifest | null; previousFindings?: QaFinding[]; tests?: string; checks?: DeliveryCheck[]; unchangedSinceReview?: string[]; reviewedCommit?: string | null; external?: ExternalCorrection[] }): string {
   const files = input.changes.filter(c => !c.error).map(c => `${c.action} ${c.path} (${c.before}→${c.after} líneas)`).join('\n');
   // Revisión siguiente: el diff completo solo de lo que cambió desde la anterior; lo demás ya lo revisaste (se lista).
   const same = new Set(input.unchangedSinceReview ?? []);
@@ -64,6 +64,7 @@ ${g ? `# Comprobación determinista previa (sin IA)\n${g.ok ? '- Sin problemas o
   const prev = input.previousFindings?.length ? `# Hallazgos de tu revisión anterior (comprueba uno por uno si se corrigieron)\n${input.previousFindings.map(f => `- [${f.severity}] ${f.text}${f.file ? ` (${f.file})` : ''}`).join('\n')}\n` : '';
   const lastRound = m?.rounds.length ? m.rounds.length - 1 : -1;
   const disputes = (m?.units ?? []).filter(u => u.round === lastRound && u.disputed);
+  const ext = input.external?.length ? `# Correcciones externas registradas por el propietario (hechas fuera del equipo de agentes; el diff las incluye)\n${input.external.map(x => `- commit ${x.commit} sobre ${x.previousCommit}: ${x.files.join(', ')}${x.note ? ` — ${x.note}` : ''}`).join('\n')}\nEvalúalas con el mismo rigor: que las registrara el propietario no las aprueba.\n` : '';
   const disputed = disputes.length ? `# El equipo discute estos hallazgos sin cambiar el código (decide con la evidencia; si tiene razón, no vuelvas a pedirlo)\n${disputes.map(u => `- «${(u.findings ?? [])[0]?.text ?? u.title}»: ${u.disputed}`).join('\n')}\n` : '';
   return `Evalúa la implementación con la EVIDENCIA real de este proceso (no solo con el diff). Eres la puerta de calidad: tu veredicto decide si se entrega al propietario o vuelve al Desarrollador.
 # Criterio de aceptación
@@ -76,7 +77,7 @@ ${input.consultText}# Archivos modificados
 ${files || '(ninguno)'}
 # Verificación automática en sandbox (sobre el worktree con los cambios aplicados)
 ${ran}
-${input.tests ? `${input.tests}\n` : ''}${checks}${manifest}${prev}${disputed}${sameList}${input.attempts.length ? `# Intentos anteriores y correcciones\n${input.attempts.map(a => `- ${a}`).join('\n')}\n` : ''}# Diff
+${input.tests ? `${input.tests}\n` : ''}${checks}${manifest}${prev}${ext}${disputed}${sameList}${input.attempts.length ? `# Intentos anteriores y correcciones\n${input.attempts.map(a => `- ${a}`).join('\n')}\n` : ''}# Diff
 ${diffs || '(vacío)'}
 
 Reglas:

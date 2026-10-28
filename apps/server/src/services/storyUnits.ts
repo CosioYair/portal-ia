@@ -8,10 +8,11 @@ import { processesRepo } from '../db/workspace.ts';
 import { clip, type ParsedDevOutput } from './devOutput.ts';
 import { diagnosticsFor, filesIn } from './diagnostics.ts';
 import { requirePolicy } from './executionPolicy.ts';
-import { applyChanges, changesSinceBase, commitInWorktree, readRepoFile, safeRelPath } from './repoWrite.ts';
+import { applyChanges, changesSinceBase, commitInWorktree, hashText, readRepoFile, safeRelPath } from './repoWrite.ts';
+import { diagnoseFailure, diagnosisPrompt } from './failureDiagnosis.ts';
 import { verificationEvidence, zeroTests } from './qaGate.ts';
 import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
-import { agentHeadroom, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, stepCall, updatePipeline, updateResult, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
+import { agentHeadroom, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, stepCall, updatePipeline, updateResult, verifyStage, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
 
 /**
  * Entrega INCREMENTAL de una historia (pipeline autorizado con aplicación automática).
@@ -230,14 +231,29 @@ FORMATO DE RESPUESTA (texto plano, sin JSON ni bloques de código alrededor de l
 ${last ? `${FILE_FORMAT}\n${DROP_FORMAT}` : UNIT_FORMAT}`;
 }
 
+/**
+ * Diagnóstico enfocado del fallo del sandbox que originó la ronda: la última verificación fallida y las anteriores del
+ * mismo comando (para ver si hay progreso). Sin IA; lee el worktree actual.
+ */
+function verificationDiagnosis(ctx: StoryRunCtx, man: StoryManifest, unit: WorkUnit): string {
+  const r = resultOf(ctx); const runs = r.verifications ?? [];
+  const i = runs.map(v => v.exitCode !== 0).lastIndexOf(true); if (i < 0) return '';
+  const run = runs[i];
+  const previous = runs.slice(0, i).filter(v => v.command === run.command && v.exitCode !== 0 && v.exitCode !== null).slice(-5);
+  const storyCreated = (r.changes ?? []).filter(c => !c.error && c.action === 'create').map(c => c.path);
+  const d = diagnoseFailure({ root: worktreeOf(ctx), run, previous, storyCreated, planned: man.deliverables.filter(x => x.planned).map(x => x.path), unitFiles: unit.files });
+  return diagnosisPrompt(d, worktreeOf(ctx));
+}
+
 function correctionPrompt(ctx: StoryRunCtx, man: StoryManifest, unit: WorkUnit, strategy: string | null): string {
   const bp = basePathOf(ctx);
   const p = pipelineOf(ctx.slug, ctx.processId);
   const tries = attemptsSummary(p).slice(-4);
+  const diagnosis = unit.source === 'verification' ? verificationDiagnosis(ctx, man, unit) : '';
   return `Corrige la implementación de esta historia: corrección dirigida («${unit.title}»). Tus cambios ya están aplicados en el worktree y se conservan; NO rehagas lo que funciona ni reescribas archivos enteros: usa patch con fragmentos EXACTOS del contenido actual que se muestra. Corrige SOLO lo de abajo.
 # Qué hay que corregir (evidencia real)
 ${(unit.findings ?? []).map(f => `- [${f.severity}] ${f.text}${f.file ? ` (${f.file})` : ''}${f.evidence ? `\n  evidencia: ${clip(f.evidence, 1_500).split('\n').join('\n  ')}` : ''}${f.expected ? `\n  esperado: ${f.expected}` : ''}`).join('\n')}
-${strategy ? `# Qué cambia en este intento\n${strategy}\n` : ''}${tries.length ? `# Intentos anteriores (no repitas lo que ya falló)\n${tries.map(t => `- ${t}`).join('\n')}\n` : ''}# Criterios de aceptación de la historia
+${diagnosis ? `${diagnosis}\n` : ''}${strategy ? `# Qué cambia en este intento\n${strategy}\n` : ''}${tries.length ? `# Intentos anteriores (no repitas lo que ya falló)\n${tries.map(t => `- ${t}`).join('\n')}\n` : ''}# Criterios de aceptación de la historia
 ${(ctx.plan?.acceptance ?? []).map(a => `- ${a}`).join('\n') || `- ${ctx.item.criterion || '(los de la historia)'}`}
 # Plan del Coordinador (resumen)
 ${ctx.plan ? ctx.plan.summary : '(sin plan)'}
@@ -247,7 +263,7 @@ ${unitContext(ctx, man, unit, unit.files.filter(f => readRepoFile(bp, f, 1) !== 
 FORMATO DE RESPUESTA:
 ${PATCH_ONLY_FORMAT}
 ${DROP_FORMAT}
-${unit.source === 'qa' ? '(si un hallazgo de QA es incorrecto, no inventes cambios: responde solo con === RESUMEN === y === SIN CAMBIOS === seguido de la evidencia concreta —archivo:línea, fragmento o salida—; QA lo volverá a evaluar una vez)' : '(es un fallo objetivo del sandbox o de la comprobación previa: corrígelo; si la causa está en otro archivo, parchea ese archivo)'}`;
+${unit.source === 'qa' ? '(si un hallazgo de QA es incorrecto, no inventes cambios: responde solo con === RESUMEN === y === SIN CAMBIOS === seguido de la evidencia concreta —archivo:línea, fragmento o salida—; QA lo volverá a evaluar una vez)' : '(es un fallo objetivo del sandbox o de la comprobación previa: corrígelo; si la causa está en otro archivo, parchea ese archivo. Una prueba que ya existía y no está en el plan no se modifica para que pase. Si la comprobación exige algo que contradice el criterio de aceptación o el código real, no la debilites ni inventes: responde solo con === RESUMEN === y === SIN CAMBIOS === con la evidencia concreta y el propietario decide)'}`;
 }
 
 function unitRepairPrompt(ctx: StoryRunCtx, unit: WorkUnit, prompt: string, a: DevOutputAssessment, previous: string, ok: ProposedChange[], bad: ProposedChange[]): string {
@@ -362,13 +378,19 @@ function mergeMeta(ctx: StoryRunCtx, unit: WorkUnit, meta: ParsedDevOutput) {
 /**
  * Reglas de ámbito sobre lo entregado (antes de escribir): no se regenera un archivo terminado en otra unidad (solo
  * parches), una corrección no reescribe entero un archivo grande y un archivo reconstruido por continuaciones (o un JSON)
- * debe ser sintácticamente válido. Lo demás (otros entregables pendientes, archivos fuera del plan) se acepta y se anota.
+ * debe ser sintácticamente válido. Una prueba que ya existía y no está en el plan no se modifica (salvo para restaurarla):
+ * hacerla pasar cambiándola debilitaría la verificación (HU-155). Lo demás (otros entregables pendientes, archivos fuera
+ * del plan) se acepta y se anota.
  */
-function scopeCheck(man: StoryManifest, unit: WorkUnit, s: Settled): ProposedChange[] {
+function scopeCheck(man: StoryManifest, unit: WorkUnit, s: Settled, base: ProposedChange[]): ProposedChange[] {
   const full = new Set(s.raw.filter(c => c.action === 'create' || c.action === 'modify').map(c => clean(c.path)));
   return s.changes.map(c => {
     if (c.error) return c;
     const d = man.deliverables.find(x => x.path === c.path);
+    const prior = base.find(x => x.path === c.path);
+    const existingTest = isTestEntry(c.path) && (c.before > 0 || c.action === 'delete') && prior?.action !== 'create' && !d?.planned;
+    const restores = !!prior?.baseHash && c.content !== null && hashText(c.content.replace(/\r\n/g, '\n')) === prior.baseHash;
+    if (existingTest && !restores) return { ...c, error: `«${c.path}» es una prueba que ya existía y no está en el plan: no se modifica para que pase (debilitaría la verificación). Corrige el código que la rompe; si esta historia debe cambiar esa prueba, el propietario la añade al plan. Restaurar su contenido original sí se permite.` };
     if (full.has(c.path) && c.before > 0 && d?.status === 'delivered' && d.unitId !== unit.id) return { ...c, error: `Ya se entregó en otra unidad (${d.unitId}): no se regenera un archivo terminado. Para cambiarlo, usa patch sobre su contenido actual.` };
     if (full.has(c.path) && unit.kind === 'correction' && c.before >= 60) return { ...c, error: `Una corrección no reescribe entero un archivo de ${c.before} líneas (regeneraría trabajo hecho y la respuesta puede cortarse): usa patch con fragmentos exactos.` };
     const stitched = (unit.continued?.[c.path] ?? 0) > 0;
@@ -381,7 +403,7 @@ function scopeCheck(man: StoryManifest, unit: WorkUnit, s: Settled): ProposedCha
 /** Aplica lo válido de una unidad y actualiza el manifiesto con la evidencia (commit, líneas, descartes). */
 async function applyUnit(ctx: StoryRunCtx, unitId: string, s: Settled): Promise<{ files: string[]; dropped: string[]; problems: string[] }> {
   const man = manifestOf(ctx); const unit = unitOf(ctx, unitId); const label = unitLabel(man, unit);
-  const changes = scopeCheck(man, unit, s);
+  const changes = scopeCheck(man, unit, s, (resultOf(ctx).changes ?? []).filter(c => !c.error));
   const valid = changes.filter(c => !c.error);
   const { commit, files } = valid.length ? await commitUnit(ctx, unit, label, valid) : { commit: null, files: [] as string[] };
   const wt = worktreeOf(ctx);
@@ -502,7 +524,17 @@ async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
     const missing = isCorrection ? [] : unit.files.filter(f => manifestOf(ctx).deliverables.find(d => d.path === f)?.status === 'pending');
     // Corrección que discute el hallazgo con evidencia (SIN CAMBIOS): resultado válido que QA vuelve a evaluar.
     const answer = isCorrection && unit.source === 'qa' && !applied.length && !dropped.length && s.outcome === 'no_changes' && s.meta.noChanges ? s.meta.noChanges.slice(0, 1500) : null;
-    if (isCorrection && unit.source !== 'qa' && s.outcome === 'no_changes' && s.meta.noChanges) problems.push('Este fallo viene de una comprobación objetiva (sandbox o comprobación previa): no se discute, se corrige.');
+    if (isCorrection && unit.source !== 'qa' && s.outcome === 'no_changes' && s.meta.noChanges) {
+      // Un fallo objetivo no se discute con QA; pero si el Desarrollador sostiene CON EVIDENCIA que la comprobación exige algo
+      // que contradice el criterio o el código real, repetir la llamada no lo arregla: decide el propietario (sin debilitar la prueba).
+      if (EVIDENCE.test(s.meta.noChanges)) {
+        const why = `${ctx.dev.config.name} no cambia el código: sostiene que la comprobación exige algo que contradice el criterio o el código real. Su evidencia: «${clip(s.meta.noChanges, 600)}»`;
+        setUnit(ctx, unitId, { status: 'failed', error: why, finishedAt: now() });
+        emit(ctx, 'correction', `«${clip(unit.title, 120)}»: el Desarrollador argumenta con evidencia que la comprobación no es correcta; no se paga otro intento. Decide el propietario.`, { detail: clip(s.meta.noChanges, 400) });
+        return;
+      }
+      problems.push('Este fallo viene de una comprobación objetiva (sandbox o comprobación previa): no se discute, se corrige; si la comprobación contradice el criterio o el código real, dilo con evidencia concreta (archivo:línea, fragmento o salida).');
+    }
     const disputed = answer && EVIDENCE.test(answer) ? answer : null;
     if (answer && !disputed) problems.push('La discusión del hallazgo no cita evidencia concreta (archivo:línea, un fragmento del código o la salida de una verificación): así no se puede comprobar.');
     if (disputed) { setUnit(ctx, unitId, { disputed }); saveManifest(ctx, m => { m.disputes = [...(m.disputes ?? []), ...(unit.findings ?? []).map(f => ({ file: f.file, finding: f.text, answer: disputed, round: unit.round ?? 0, at: now() }))]; }); emit(ctx, 'correction', `${ctx.dev.config.name} discute el hallazgo «${clip((unit.findings ?? [])[0]?.text ?? unit.title, 120)}» con evidencia, sin cambiar el código. QA lo volverá a evaluar.`, { detail: clip(disputed, 400) }); }
@@ -731,17 +763,23 @@ export function testFileExecuted(content: string | null, output: string | null):
  * Tras una verificación en verde y ANTES de pagar a QA: las pruebas nuevas, ¿se ejecutaron? Una que no se ejecutó es un
  * fallo objetivo (corrección dirigida sin QA); una indeterminada se declara como tal (nunca cuenta como evidencia).
  */
-export function afterVerification(ctx: StoryRunCtx, cfg: PipelineConfig): boolean {
+/** Evidencia de ejecución de las pruebas nuevas sobre el commit actual (sin IA): se guarda en el manifiesto y se anuncia. */
+export function testEvidence(ctx: StoryRunCtx, cfg: PipelineConfig): { notRun: { path: string; detail: string }[]; run: VerificationRun | null } | null {
   const r = resultOf(ctx); const man = manifestOf(ctx); const wt = worktreeOf(ctx);
-  if (!r.applied || !wt || man.testRun?.commit === r.applied.commit) return false;
+  if (!r.applied || !wt || man.testRun?.commit === r.applied.commit) return null;
   const run = sinceApplied(r).filter(v => v.command === 'test' && v.exitCode === 0).at(-1) ?? null;
   const tests = (r.changes ?? []).filter(c => !c.error && c.action !== 'delete' && isTestEntry(c.path)).map(c => c.path);
   const results = tests.map(p => ({ path: p, ...testFileExecuted(readRepoFile(wt, p, 200_000), cfg.commands.includes('test') ? run?.output ?? null : null) }));
   saveManifest(ctx, m => { m.testRun = { commit: r.applied!.commit, at: now(), results }; });
-  if (!results.length) return false;
+  if (!results.length) return null;
   const notRun = results.filter(x => x.state === 'failed'); const unknown = results.filter(x => x.state === 'undetermined');
   emit(ctx, 'gate', notRun.length ? `${notRun.length} prueba(s) nueva(s) no se ejecutaron en el sandbox: se corrigen antes de pagar a QA.` : unknown.length ? `No se pudo determinar si ${unknown.length} prueba(s) nueva(s) se ejecutaron; QA lo sabrá (no cuenta como evidencia).` : `Las ${results.length} prueba(s) nueva(s) se ejecutaron en el sandbox.`, { phase: 'verifying', detail: results.map(x => `${x.path}: ${x.detail}`).join(' · ') });
-  if (!notRun.length) return false;
+  return { notRun, run };
+}
+
+export function afterVerification(ctx: StoryRunCtx, cfg: PipelineConfig): boolean {
+  const t = testEvidence(ctx, cfg); if (!t?.notRun.length) return false;
+  const { notRun, run } = t;
   if (pipelineOf(ctx.slug, ctx.processId).corrections >= cfg.maxCorrections) throw new PipelinePause('incomplete', `${notRun.length} prueba(s) nueva(s) no se ejecutaron en el sandbox y no quedan correcciones autorizadas. No se paga a QA sin esa evidencia; lo hecho se conserva.`);
   startRound(ctx, cfg, 'completeness', notRun.map(x => ({ severity: 'alta' as IssueSeverity, text: `La prueba ${x.path} no se ejecutó en el sandbox: ${x.detail}`, file: x.path, evidence: clip(run?.output ?? '', 1_200), expected: 'que el script «test» la ejecute (ubicación del archivo o patrón del script)' })));
   return true;
@@ -804,6 +842,21 @@ export async function advanceUnits(ctx: StoryRunCtx, cfg: PipelineConfig): Promi
     ...gate.invalid.map(i => ({ severity: 'alta' as IssueSeverity, text: `${i.path}: ${i.problem}`, file: i.path, evidence: 'Comprobación determinista previa a QA.', expected: null }))
   ]);
   return true;
+}
+
+/**
+ * Comprobaciones objetivas SIN IA sobre el commit actual (tras registrar una corrección externa): completitud del plan,
+ * verificación en el sandbox y evidencia de las pruebas nuevas. Nunca abre una ronda de corrección ni llama a QA.
+ */
+export async function objectiveChecks(ctx: StoryRunCtx, cfg: PipelineConfig): Promise<{ gate: CompletenessGate | null; failed: VerificationRun | null; notRun: string[] }> {
+  let gate: CompletenessGate | null = null;
+  if (resultOf(ctx).manifest) {
+    const g = completenessGate(ctx); gate = g; saveManifest(ctx, m => { m.gate = g; });
+    emit(ctx, 'gate', g.ok ? 'Comprobación previa a QA (sin IA): todos los entregables del plan están en el worktree, sin problemas objetivos.' : `Comprobación previa a QA (sin IA): ${g.missing.length} entregable(s) sin entregar y ${g.invalid.length} problema(s) objetivos.`, { phase: 'verifying', detail: [...g.missing.map(m => `falta ${m}`), ...g.invalid.map(i => `${i.path}: ${i.problem}`)].join(' · ') || null });
+  }
+  const failed = cfg.autoVerify ? await verifyStage(ctx, cfg) : null;
+  const t = !failed && resultOf(ctx).manifest ? testEvidence(ctx, cfg) : null;
+  return { gate, failed, notRun: t?.notRun.map(x => x.path) ?? [] };
 }
 
 /** Al continuar tras una pausa por entrega incompleta, las unidades fallidas del plan vuelven a intentarse (con su motivo). */

@@ -329,7 +329,9 @@ export type FlowActionId =
   | 'authorize' | 'cancel' | 'review_diff' | 'apply' | 'reject' | 'install_and_retry' | 'verify' | 'retry_verification'
   | 'sandbox_help' | 'refresh_sandbox' | 'request_fix' | 'ask_team' | 'tasks_from_issue' | 'merge' | 'rebuild'
   | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'retry_process' | 'recover' | 'new_iteration'
-  | 'pipeline_resume' | 'repair_output';
+  | 'pipeline_resume' | 'repair_output'
+  /** Registrar como corrección del propietario un commit hecho fuera del equipo (consola) y verificarlo sin IA. */
+  | 'register_external';
 export interface FlowAction {
   id: FlowActionId;
   label: string;
@@ -345,6 +347,8 @@ export interface FlowAction {
   /** La acción exige responder antes a esta pregunta del equipo (información, permiso o decisión). */
   answer?: { question: string; why: string; options: string[] } | null;
   suggestedBudgetUsd?: number;
+  /** register_external: commit del worktree que se registraría, el último registrado y los archivos que cambian. */
+  external?: { commit: string; recorded: string; files: string[] } | null;
 }
 export interface StoryFlow {
   stages: FlowStage[];
@@ -609,7 +613,9 @@ export interface PipelineConfig {
 }
 export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'verify' | 'environment' | 'qa' | 'correction' | 'pause' | 'done' | 'error'
   /** Entrega incremental: unidad de trabajo, continuación de una respuesta cortada y comprobación determinista previa a QA. */
-  | 'unit' | 'continuation' | 'gate';
+  | 'unit' | 'continuation' | 'gate'
+  /** Corrección hecha fuera del equipo de agentes (consola), registrada por el propietario: sin IA ni tokens. */
+  | 'external';
 export interface PipelineEvent { at: string; kind: PipelineEventKind; message: string; detail?: string | null; aiCall?: boolean; costUsd?: number | null }
 export type PipelineState = 'running' | 'verified' | 'paused' | 'stopped';
 export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' | 'repeated_failure' | 'duration' | 'no_changes' | 'refusal' | 'qa' | 'cancelled'
@@ -617,7 +623,9 @@ export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' |
   /** Entrega incremental: un entregable no cabe en la salida del modelo ni por secciones, o faltan entregables tras los intentos permitidos. */
   | 'too_large' | 'incomplete'
   /** El plan no se puede ejecutar por partes (sin entregables, demasiados o rutas no permitidas) · QA y el equipo discrepan tras un intercambio con evidencia. */
-  | 'plan' | 'disagreement';
+  | 'plan' | 'disagreement'
+  /** Hay un commit en el worktree que el equipo no hizo (registrarlo), o una corrección externa ya verificada espera a QA. */
+  | 'external';
 export type PipelinePhase = 'implementing' | 'recovering' | 'repairing' | 'applying' | 'verifying' | 'installing' | 'qa' | 'correcting' | 'finished';
 export interface PipelineStatus {
   config: PipelineConfig;
@@ -652,6 +660,8 @@ export interface PipelineStatus {
   correctionAttempts?: number;
   /** Rondas de corrección sin ningún cambio aplicable (se detiene en vez de repetir lo mismo). */
   ineffectiveRounds?: number;
+  /** Commits en los que «test» se repitió una vez sin IA porque solo fallaban pruebas ajenas a la historia (posible prueba inestable). */
+  flakeRetries?: string[];
   startedAt: string;
   finishedAt: string | null;
 }
@@ -831,7 +841,15 @@ export interface ExecutionResult {
   failure?: ProcessFailure | null;
   /** Entrega incremental: entregables del plan, unidades de trabajo y comprobación previa a QA (puntos de control duraderos). */
   manifest?: StoryManifest | null;
+  /**
+   * Correcciones hechas fuera del equipo de agentes (por ejemplo, desde la consola) y registradas con autorización del
+   * propietario. No son actividad de los agentes: no tienen pasos, tokens ni coste, y no cuentan como correcciones.
+   */
+  externalCorrections?: ExternalCorrection[];
 }
+export interface ExternalCorrection { at: string; commit: string; previousCommit: string; files: string[]; note: string; by: 'owner' }
+/** Estado del worktree de una historia respecto al último commit que registró el pipeline (se calcula al leer, sin IA). */
+export interface WorktreeDrift { state: 'same' | 'ahead' | 'dirty' | 'diverged'; head: string; recorded: string; files: string[] }
 
 /** Estado del repositorio registrado (solo lectura, sin red). */
 export interface RepoStatus {

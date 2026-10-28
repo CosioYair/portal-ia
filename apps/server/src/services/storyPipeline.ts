@@ -8,6 +8,7 @@ import { decryptSecret } from '../security/crypto.ts';
 import { practicesFor } from './agentTemplates.ts';
 import { assessDeveloperOutput, clip, failureClassOf, mergeChanges, type ParsedDevOutput } from './devOutput.ts';
 import { diagnosticsFor, filesIn } from './diagnostics.ts';
+import { failingTests } from './failureDiagnosis.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall, withWatchdog } from './providerCalls.ts';
 import { injectLessons, recordDetections } from './lessons.ts';
@@ -18,6 +19,7 @@ import { annotateChanges, applyChanges, changesSinceBase, checkStaleChanges, com
 import { DEPS_MISSING_EXIT } from './sandbox.ts';
 import { DEV_MAX_TOKENS, FILE_FORMAT, PATCH_ONLY_FORMAT, sys } from './storyPrompts.ts';
 import { runVerification, sandboxDeps } from './verification.ts';
+import { driftMessage, worktreeDrift } from './worktreeDrift.ts';
 
 /**
  * Pipeline autónomo autorizado de una historia (sin supervisión del propietario entre pasos rutinarios).
@@ -592,6 +594,27 @@ export async function verifyStage(ctx: StoryRunCtx, cfg: PipelineConfig): Promis
   return null;
 }
 
+/**
+ * «test» falla y TODAS las pruebas que fallan son ajenas a la historia (ni creadas, ni planificadas, ni tocadas por ella):
+ * se repite una vez por commit, sin IA. Si pasa, era una prueba inestable y no se paga ninguna corrección; si vuelve a
+ * fallar, el pipeline sigue con esa ejecución. HU-155: dos pruebas inestables del propio Portal costaron tres correcciones
+ * pagadas y el equipo acabó modificándolas fuera del plan. true = se repitió (el pipeline vuelve a empezar la vuelta).
+ */
+export async function retryForeignFailure(ctx: StoryRunCtx, failed: VerificationRun): Promise<boolean> {
+  const r = processesRepo(ctx.slug).get(ctx.processId)!.result!; const p = pipelineOf(ctx.slug, ctx.processId);
+  if (failed.command !== 'test' || !r.applied || (p.flakeRetries ?? []).includes(r.applied.commit)) return false;
+  const files = failingTests(failed).map(f => f.file);
+  if (!files.length || files.some(f => !f)) return false;
+  const story = new Set([...r.changes.filter(c => !c.error).map(c => c.path), ...(r.manifest?.deliverables.map(d => d.path) ?? r.plan?.filesToChange ?? [])]);
+  if (files.some(f => story.has(f!))) return false;
+  const list = Array.from(new Set(files)).join(', ');
+  updatePipeline(ctx.slug, ctx.processId, { flakeRetries: [...(p.flakeRetries ?? []), r.applied.commit].slice(-20) });
+  emit(ctx, 'verify', `Solo fallan pruebas que esta historia no toca (${list}): se repite «test» una vez, sin IA, para descartar una prueba inestable antes de pagar una corrección.`, { phase: 'verifying' });
+  const again = await runVerification(ctx.slug, ctx.processId, 'test', false);
+  if (again.exitCode === 0) emit(ctx, 'environment', `«test» pasó al repetirlo: era una prueba inestable ajena a la historia (${list}). No se corrige nada ni se gasta en IA; conviene estabilizarla aparte.`);
+  return true;
+}
+
 export function attemptsSummary(p: PipelineStatus): string[] {
   return p.events.filter(e => e.kind === 'correction' || (e.kind === 'qa' && /rechaz/i.test(e.message)) || e.kind === 'repair').map(e => `${e.message}${e.detail ? ` — ${e.detail}` : ''}`).slice(-8);
 }
@@ -659,7 +682,7 @@ export async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
       catch { unchanged = []; /* commit anterior inalcanzable: revisión completa */ }
     }
   }
-  const user = qaEvidencePrompt({ criterion: ctx.item.criterion, plan: ctx.plan, summary: r.implementationSummary ?? '', changes: r.changes, verifications: sinceApplied(r), required: cfg.commands, attempts: attemptsSummary(p), consultText: ctx.consultText, manifest: r.manifest ?? null, previousFindings: r.review?.verdict === 'rejected' ? r.review.findings ?? [] : [], tests: testsEvidence(sinceApplied(r)), checks, unchangedSinceReview: unchanged, reviewedCommit: reviewed });
+  const user = qaEvidencePrompt({ criterion: ctx.item.criterion, plan: ctx.plan, summary: r.implementationSummary ?? '', changes: r.changes, verifications: sinceApplied(r), required: cfg.commands, attempts: attemptsSummary(p), consultText: ctx.consultText, manifest: r.manifest ?? null, previousFindings: r.review?.verdict === 'rejected' ? r.review.findings ?? [] : [], tests: testsEvidence(sinceApplied(r)), checks, unchangedSinceReview: unchanged, reviewedCommit: reviewed, external: r.externalCorrections ?? [] });
   const system = sys(qa, ctx.project, ctx.item);
   let res = await stepCall(ctx, qa, 'reviewer', pendingQa ? pendingQa.title : `Revisión de QA con evidencia (tras corrección ${p.corrections})`, 'Puerta de calidad con evidencia del sandbox', system, user, 6000, pendingQa?.id, QA_SCHEMA);
   let verdict = parseQaVerdict(res.text);
@@ -695,6 +718,8 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
     if (!r.applied) { await applyInWorktree(ctx); continue; }
     if (cfg.autoVerify) {
       const failed = await verifyStage(ctx, cfg);
+      // Solo fallan pruebas ajenas a la historia: se repite «test» una vez (sin IA) antes de pagar una corrección.
+      if (failed && await retryForeignFailure(ctx, failed)) continue;
       // Verificación en verde: antes de QA, ¿las pruebas nuevas se ejecutaron de verdad? (sin IA)
       if (!failed && units && units.afterVerification(ctx, cfg)) continue;
       if (failed) {
@@ -772,7 +797,8 @@ export function pausePipeline(ctx: StoryRunCtx, pause: PipelinePause) {
  * «Continuar» un proceso de historia con pipeline (pausado, detenido o terminado sin pipeline) o reparar una entrega
  * fallida: retoma desde el estado guardado. Lo llama la ruta tras la autorización del propietario.
  */
-export async function resumeStory(slug: string, processId: string, log: (o: any, m: string) => void, isCancelled: () => boolean) {
+/** Contexto de ejecución de un proceso de historia ya creado (para reanudarlo o verificarlo sin repetir lo hecho). */
+export function storyRunContext(slug: string, processId: string, log: (o: any, m: string) => void, isCancelled: () => boolean): { ctx: StoryRunCtx; involved: string[]; repoPath: string } {
   const procs = processesRepo(slug); const agents = agentsRepo(slug); const backlog = backlogRepo(slug);
   const proc = procs.get(processId)!; const item = backlog.get(proc.backlogItemId!)!;
   const project = projectsRepo(slug).get(proc.projectId)!; const repo = projectsRepo(slug).repository(project.id)!;
@@ -782,12 +808,21 @@ export async function resumeStory(slug: string, processId: string, log: (o: any,
   const consultText = r.consultations?.length ? `\n# Aportaciones de especialistas (tenlas en cuenta)\n${r.consultations.map(c => `## ${c.agentName} · ${c.role}\n${c.text}`).join('\n\n')}\n` : '';
   const team = Array.from(new Set(proc.steps.map(s => s.agentId))).map(id => agents.get(id)).filter(Boolean) as Agent[];
   const ctx: StoryRunCtx = { slug, processId, item, project, repoPath: repo.path, plan: r.plan, consultText, iterText: '', dev, qa, team, log, isCancelled, injected: new Map() };
-  const involved = Array.from(new Set([dev.id, ...(qa ? [qa.id] : [])]));
+  return { ctx, involved: Array.from(new Set([dev.id, ...(qa ? [qa.id] : [])])), repoPath: repo.path };
+}
+
+export async function resumeStory(slug: string, processId: string, log: (o: any, m: string) => void, isCancelled: () => boolean) {
+  const procs = processesRepo(slug); const agents = agentsRepo(slug); const backlog = backlogRepo(slug);
+  const { ctx, involved, repoPath } = storyRunContext(slug, processId, log, isCancelled);
+  const item = ctx.item; const repo = { path: repoPath };
   involved.forEach(id => agents.setStatus(id, 'active'));
   backlog.setStatus(item.id, 'in_progress', processId);
   let status: Process['status'] = 'done'; let error: string | null = null;
   try {
     updatePipeline(slug, processId, { state: 'running', reason: null, pauseKind: null, finishedAt: null }, { kind: 'info', message: 'El propietario autorizó continuar. El equipo retoma donde lo dejó.' });
+    // Un commit que el equipo no hizo (o cambios sin confirmar) deja obsoleta la evidencia guardada: no se paga nada contra ella.
+    const drift = await worktreeDrift(procs.get(processId)!.result);
+    if (drift && drift.state !== 'same') throw new PipelinePause('external', driftMessage(drift));
     const cur = procs.get(processId)!.result!;
     if (cur.manifest) (await import('./storyUnits.ts')).prepareResume(ctx);
     else if (!cur.applied && !cur.changes.some(c => !c.error)) {
