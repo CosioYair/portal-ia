@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { FlowAction, FlowIssue, LiveCall, Process, ProcessStep, StoryContext } from '@portal-ia/domain';
+import type { DeliveryProgress, FlowAction, FlowIssue, LiveCall, Process, ProcessStep, StoryContext } from '@portal-ia/domain';
 import { api, ApiError } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
@@ -149,6 +149,8 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         {flow.stages.filter(s => s.status === 'warning' || s.status === 'rejected').filter(s => s.key !== flow.current).map(s => <span key={s.key} className="small" style={{ color: '#7A4A00' }}>⚠ {s.label}: {s.detail}</span>)}
       </div>
 
+      {flow.delivery && <DeliveryPanel d={flow.delivery} running={proc.status === 'running' && !orphan} />}
+
       {cancelling && proc.status === 'running' && <div className="sf-headline" role="status" aria-label="Cancelando"><span className="spin" /><span>Cancelando… se abortó la llamada en curso; el proceso se cierra en cuanto el paso lo registre.</span></div>}
 
       {proc.status === 'running' && <ConnectionNotice />}
@@ -253,22 +255,58 @@ function ConnectionNotice() {
   return <div className="sf-conn" role="alert" aria-label="Conexión con el servidor">{Icon.warn()}<span>{c.kind === 'offline' ? `Sin conexión con el servidor del Portal (${c.error ?? 'error de red'}). ` : 'El servidor no ha respondido recientemente. '}Última respuesta: {last}. Lo que ves puede estar desactualizado; el proceso puede seguir trabajando en el servidor. Se sigue intentando.</span></div>;
 }
 
-const EV_ICON: Record<string, string> = { recovery: '♻', repair: '✎', apply: '⎇', verify: '✓', environment: '⚙', qa: '◎', correction: '✎', pause: '⏸', done: '★', error: '✕', info: '·' };
+const EV_ICON: Record<string, string> = { recovery: '♻', repair: '✎', apply: '⎇', verify: '✓', environment: '⚙', qa: '◎', correction: '✎', pause: '⏸', done: '★', error: '✕', info: '·', unit: '▸', continuation: '↪', gate: '⊙' };
 const QA_TXT: Record<string, string> = { approved: 'QA aprobó con evidencia', rejected: 'QA rechazó', blocked_environment: 'QA bloqueada por el entorno', unable_to_verify: 'QA no pudo verificar' };
+
+const DEL_TXT: Record<string, string> = { delivered: 'entregado', pending: 'pendiente', failed: 'no se pudo entregar', dropped: 'descartado con motivo (QA lo revisa)' };
+const DEL_ICON: Record<string, string> = { delivered: '✓', pending: '○', failed: '✕', dropped: '–' };
+const KIND_TXT: Record<string, string> = { code: 'código', test: 'pruebas', docs: 'documentación', config: 'configuración' };
+
+/**
+ * Entrega por entregables (procesos con manifiesto): qué está entregado de verdad en el worktree y qué falta, qué unidad
+ * se trabaja y quién, y tres niveles que no se confunden: compila ≠ funcionalidad completa ≠ QA aprobó los criterios.
+ */
+function DeliveryPanel({ d, running }: { d: DeliveryProgress; running: boolean }) {
+  const level = (ok: boolean | null, yes: string, no: string, unknown: string) => <li data-ok={ok === null ? 'unknown' : String(ok)}><span aria-hidden="true">{ok ? '✓' : ok === false ? '✕' : '…'}</span><span>{ok ? yes : ok === false ? no : unknown}</span></li>;
+  const pct = d.total ? Math.round(d.delivered / d.total * 100) : 0;
+  return <div className="sf-del" aria-label="Entregables">
+    <div className="sf-del-head">
+      <strong>Entrega: {d.delivered} de {d.total} entregables</strong>
+      <span className="sf-del-bar" role="progressbar" aria-valuemin={0} aria-valuemax={d.total} aria-valuenow={d.delivered} aria-label="Entregables entregados"><span style={{ width: `${pct}%` }} /></span>
+      <span className="small muted">unidades {d.units.done} de {d.units.total}</span>
+    </div>
+    {running && d.currentUnit && <div className="small" aria-label="Unidad en curso"><span className="spin" /> {d.currentUnit.kind === 'correction' ? 'Corrección dirigida' : `Unidad ${d.currentUnit.index} de ${d.currentUnit.total}`}: {d.currentUnit.title} — <strong>{d.currentUnit.agentName}</strong></div>}
+    <ul className="sf-del-levels" aria-label="Niveles de verificación">
+      {level(d.levels.compiles, 'El código compila (typecheck y build en el sandbox)', 'El código no compila', 'Compilación aún sin verificar')}
+      {level(d.levels.complete, 'Toda la funcionalidad planificada está entregada', 'Falta funcionalidad por entregar', '')}
+      {level(d.levels.qaApproved, 'QA aprobó los criterios de aceptación con evidencia', 'QA aún no ha aprobado los criterios de aceptación', '')}
+    </ul>
+    <ul className="sf-del-list" aria-label="Lista de entregables">
+      {d.deliverables.map(x => <li key={x.path} data-status={x.status} title={x.note ?? undefined}><span aria-hidden="true">{DEL_ICON[x.status]}</span><span className="mono">{x.path}</span><span className="small muted">{KIND_TXT[x.kind]}{x.planned ? '' : ' · fuera del plan'} · {DEL_TXT[x.status]}{x.lines ? ` · ${x.lines} líneas` : ''}</span></li>)}
+    </ul>
+    <div className="sf-del-meta small">
+      <span>Correcciones aplicadas {d.corrections.applied} de {d.corrections.max}{d.corrections.requested ? ` · ${d.corrections.requested} unidad(es) de corrección pedidas` : ''}{d.corrections.ineffective ? ` · ${d.corrections.ineffective} ronda(s) sin efecto` : ''}</span>
+      {d.continuations > 0 && <span>{d.continuations} continuación(es) de respuestas cortadas (no cuentan como correcciones)</span>}
+      <span className="mono">{fmtUsd(d.spentUsd)} confirmados · ≈ {fmtUsd(d.remainingEstimateUsd)} estimados para terminar</span>
+    </div>
+    {d.blocker && <div className="small sf-del-blocker"><strong>Bloqueo actual:</strong> {d.blocker}</div>}
+    <div className="small"><strong>Siguiente:</strong> {d.next}</div>
+  </div>;
+}
 
 /** Actividad del pipeline como una sola actividad coordinada: eventos breves, intentos, QA y presupuesto. */
 function PipelineActivity({ proc }: { proc: Process }) {
   const pl = proc.result!.pipeline!; const review = proc.result!.review;
   // Hitos siempre visibles (recuperación, reparación, aplicación, correcciones, QA, pausas, final) y los últimos pasos;
   // el detalle rutinario (cada comando verificado) queda en el registro técnico plegado.
-  const MILESTONE = new Set(['recovery', 'repair', 'apply', 'correction', 'qa', 'pause', 'error', 'done']);
+  const MILESTONE = new Set(['recovery', 'repair', 'apply', 'correction', 'qa', 'pause', 'error', 'done', 'unit', 'continuation', 'gate']);
   const events = pl.events.filter(e => e.kind !== 'info' || pl.events.length < 6);
   const recent = events.filter((e, i) => MILESTONE.has(e.kind) || i >= events.length - 3).slice(-8);
   const aiCost = pl.events.reduce((a, e) => a + (e.costUsd ?? 0), 0);
   return <div className="sf-pipe" aria-label="Actividad del equipo">
     <div className="sf-pipe-meta small">
       <span>Pipeline autorizado · {pl.config.autoApply ? `aplicar, ${pl.config.commands.join(', ')}, QA` : 'manual'}</span>
-      <span>Correcciones {pl.corrections}/{pl.config.maxCorrections} · reparaciones {pl.outputRepairs}/{pl.config.maxOutputRepairs}{pl.consultations?.length ? ` · consultas ${pl.consultations.length}/${pl.config.maxConsultations}` : ''}</span>
+      <span>Correcciones {pl.corrections}/{pl.config.maxCorrections}{pl.correctionAttempts && pl.correctionAttempts > pl.corrections ? ` (${pl.correctionAttempts} llamadas)` : ''} · reparaciones de formato {pl.outputRepairs}/{pl.config.maxOutputRepairs}{pl.continuations ? ` · continuaciones ${pl.continuations}/${pl.config.maxContinuations ?? 6}` : ''}{pl.consultations?.length ? ` · consultas ${pl.consultations.length}/${pl.config.maxConsultations}` : ''}</span>
       {pl.failureClass && <span className="mono" title="Clase de fallo que determinó la recuperación">{pl.failureClass}</span>}
       {review?.verdict && <span>{QA_TXT[review.verdict]}{review.overridden ? ' (corregido por la verificación)' : ''}</span>}
       <span className="mono">{fmtUsd(proc.spentUsd)} gastados (confirmados){(proc.unconfirmedUsd ?? 0) > 0 ? ` · ≈ ${fmtUsd(proc.unconfirmedUsd!)} sin confirmar` : ''} · quedan {fmtUsd(Math.max(0, proc.budgetUsd - proc.spentUsd - (proc.unconfirmedUsd ?? 0)))}{aiCost ? ` · reparaciones/correcciones ${fmtUsd(aiCost)}` : ''}</span>

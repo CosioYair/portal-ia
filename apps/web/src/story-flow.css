@@ -55,3 +55,21 @@
 .sf-ask { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid #E8D9A8; border-radius: 8px; background: #FFFBEF; }
 @media (max-width: 720px) { .sf-live-grid { grid-template-columns: minmax(0, 1fr); } .sf-live-grid dt { margin-top: 4px; } }
 .sf-conn { display: flex; gap: 8px; align-items: flex-start; padding: 8px 12px; border: 1px solid #E9B4AC; border-radius: 8px; background: #FDF5F3; font-size: 13px; line-height: 1.5; }
+/* Entrega por entregables (manifiesto): progreso, tres niveles de verificación y lista */
+.sf-del { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border: 1px solid #E4E2DA; border-radius: 10px; background: #FBFAF7; }
+.sf-del-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sf-del-bar { flex: 1 1 120px; min-width: 80px; height: 6px; border-radius: 3px; background: #ECEAE3; overflow: hidden; }
+.sf-del-bar > span { display: block; height: 100%; background: #0B7A75; }
+.sf-del-levels { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.sf-del-levels li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 6px; }
+.sf-del-levels li[data-ok="true"] { color: #0B5652; }
+.sf-del-levels li[data-ok="false"] { color: #8A3A00; }
+.sf-del-levels li[data-ok="unknown"] { color: #5C5F66; }
+.sf-del-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; font-size: 13px; }
+.sf-del-list li { display: grid; grid-template-columns: 16px minmax(0, auto) minmax(0, 1fr); gap: 6px; align-items: baseline; }
+.sf-del-list li .mono { overflow-wrap: anywhere; }
+.sf-del-list li[data-status="failed"] { color: #8A3A00; }
+.sf-del-list li[data-status="pending"], .sf-del-list li[data-status="dropped"] { color: #5C5F66; }
+.sf-del-meta { display: flex; gap: 14px; flex-wrap: wrap; color: #5C5F66; }
+.sf-del-blocker { color: #8A3A00; }
+@media (max-width: 520px) { .sf-del-list li { grid-template-columns: 16px minmax(0, 1fr); } .sf-del-list li > .small { grid-column: 2; } }
