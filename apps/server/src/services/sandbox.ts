@@ -88,6 +88,14 @@ const DEPS_READY = 'node_modules/.portal-ia-ready';
 /** Cachés que las herramientas escriben dentro de node_modules (vite, babel…): tmpfs privados sobre el volumen de solo lectura. */
 const NM_CACHES = ['.vite-temp', '.vite', '.cache'];
 export const DEPS_MISSING_EXIT = 86;
+/**
+ * Marca de salida que imprime el propio contenedor al terminar. Docker Desktop (Windows) a veces no registra el final
+ * de un contenedor con mucha actividad en paralelo: el proceso terminó, el contenedor sigue «Up» sin procesos y
+ * `docker run` no vuelve hasta el tiempo máximo. Con la marca, el Portal sabe que terminó y con qué código.
+ */
+export const EXIT_MARK = '__PORTAL_IA_EXIT__=';
+/** Espera tras la marca antes de dar el contenedor por colgado y retirarlo. */
+const STUCK_GRACE_MS = 15_000;
 
 export interface DockerRunSpec { worktree: string; command: string; script: string; image: string; volume: string; allowNetwork: boolean; name: string }
 
@@ -108,8 +116,17 @@ export function buildDockerRunArgs(spec: DockerRunSpec): string[] {
   const script = install
     ? `${spec.script} && mkdir -p ${NM_CACHES.map(c => `node_modules/${c}`).join(' ')} && touch ${DEPS_READY}`
     : `if [ ! -f ${DEPS_READY} ]; then echo "Faltan las dependencias Linux de este package-lock (volumen ${spec.volume}). Ejecuta una vez «npm ci (install)» con «Permitir red solo para install»; después typecheck, test y build corren sin red."; exit ${DEPS_MISSING_EXIT}; fi; ${spec.script}`;
-  args.push('-w', '/work', spec.image, 'sh', '-c', script);
+  // En un subshell (también un `exit` temprano) y con la marca de salida al final, siempre.
+  args.push('-w', '/work', spec.image, 'sh', '-c', wrapWithExitMark(script));
   return args;
+}
+
+/** Envuelve el script para que imprima su código de salida como última línea (ver EXIT_MARK). */
+export const wrapWithExitMark = (script: string) => `( ${script} ); __rc=$?; printf '\\n${EXIT_MARK}%s\\n' "$__rc"; exit $__rc`;
+/** Separa la marca de salida de la salida del comando. */
+export function splitExitMark(output: string): { output: string; code: number | null } {
+  const m = output.match(new RegExp(`\\r?\\n?${EXIT_MARK}(\\d+)\\r?\\n?`));
+  return m ? { output: output.replace(m[0], '\n').replace(/\n+$/, '\n'), code: Number(m[1]) } : { output, code: null };
 }
 
 /** Detecta el sandbox disponible (caché de 60 s). */
@@ -133,13 +150,21 @@ export async function detectSandbox(force = false): Promise<SandboxStatus> {
   return cached;
 }
 
-function run(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs: number; shell?: boolean; onTimeout?: () => void }): Promise<{ code: number | null; output: string }> {
+/** Ejecuta un proceso con tiempo máximo; con `onStuck`, vigila la marca de salida (exportado para las pruebas). */
+export function runProcess(cmd: string, args: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs: number; shell?: boolean; onTimeout?: () => void; onStuck?: () => void; stuckGraceMs?: number }): Promise<{ code: number | null; output: string; stuck?: boolean }> {
   return new Promise(resolve => {
-    let out = ''; const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? {}, shell: !!opts.shell, windowsHide: true });
+    let out = ''; let done = false; let grace: NodeJS.Timeout | null = null;
+    const end = (r: { code: number | null; output: string; stuck?: boolean }) => { if (done) return; done = true; clearTimeout(t); if (grace) clearTimeout(grace); resolve(r); };
+    const child = spawn(cmd, args, { cwd: opts.cwd, env: opts.env ?? {}, shell: !!opts.shell, windowsHide: true });
     const t = setTimeout(() => { try { opts.onTimeout?.(); } catch { /* sin limpieza */ } try { child.kill('SIGKILL'); } catch { /* ya terminó */ } out += '\n[tiempo máximo agotado]'; }, opts.timeoutMs);
-    child.stdout.on('data', d => { out += d; }); child.stderr.on('data', d => { out += d; });
-    child.on('error', e => { clearTimeout(t); resolve({ code: 1, output: out + `\n${e.message}` }); });
-    child.on('close', code => { clearTimeout(t); resolve({ code, output: out }); });
+    const onData = (d: Buffer) => {
+      out += d;
+      // El comando ya terminó (marca impresa): si el CLI no vuelve en el margen, el motor se colgó con el contenedor.
+      if (opts.onStuck && !grace && out.includes(EXIT_MARK)) grace = setTimeout(() => { try { opts.onStuck!(); } catch { /* sin limpieza */ } try { child.kill('SIGKILL'); } catch { /* ya terminó */ } end({ code: null, output: out, stuck: true }); }, opts.stuckGraceMs ?? STUCK_GRACE_MS);
+    };
+    child.stdout.on('data', onData); child.stderr.on('data', onData);
+    child.on('error', e => end({ code: 1, output: out + `\n${e.message}` }));
+    child.on('close', code => end({ code, output: out }));
   });
 }
 
@@ -165,14 +190,19 @@ export async function runInSandbox(worktree: string, repoRoot: string, command: 
     const args = buildDockerRunArgs({ worktree, command, script, image: SANDBOX_IMAGE, volume, allowNetwork, name });
     // Matar el CLI no detiene el contenedor: al agotar el tiempo se elimina por nombre.
     activeContainers.add(name);
-    const r = await run('docker', args, { timeoutMs, env, onTimeout: () => { spawn('docker', ['rm', '-f', name], { env, stdio: 'ignore', windowsHide: true }).on('error', () => { /* sin docker */ }); } });
+    const remove = () => { spawn('docker', ['rm', '-f', name], { env, stdio: 'ignore', windowsHide: true }).on('error', () => { /* sin docker */ }); };
+    const r = await runProcess('docker', args, { timeoutMs, env, onTimeout: remove, onStuck: remove });
     activeContainers.delete(name);
-    return finish(r.code, `[docker ${SANDBOX_IMAGE} · red ${allowNetwork ? 'activada solo para install' : 'desactivada'} · dependencias ${volume}${command === 'install' ? '' : ' (solo lectura)'}]\n` + r.output, 'docker');
+    const marked = splitExitMark(r.output);
+    // El código lo da el CLI; si el motor se quedó colgado tras terminar el comando, el que imprimió el propio contenedor.
+    const code = r.stuck ? marked.code : r.code;
+    const note = r.stuck ? `\n[el motor de Docker no informó del final del contenedor; se usó el código que imprimió el propio comando (${marked.code}) y se retiró el contenedor]` : '';
+    return finish(code, `[docker ${SANDBOX_IMAGE} · red ${allowNetwork ? 'activada solo para install' : 'desactivada'} · dependencias ${volume}${command === 'install' ? '' : ' (solo lectura)'}]\n` + marked.output + note, 'docker');
   }
   if (st.available === 'wsl') {
     const wslPath = (await has('wsl.exe', ['-d', WSL_DISTRO, '--', 'wslpath', '-a', worktree])) ?? worktree;
     const inner = `cd "${wslPath}" && ${command === 'install' && opts.allowNetwork ? '' : 'unshare -rn '}env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp CI=1 PORTAL_INSIDE_SANDBOX=1 ${script}`;
-    const r = await run('wsl.exe', ['-d', WSL_DISTRO, '--', 'bash', '-lc', inner], { timeoutMs, env: { PATH: process.env.PATH ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '' } });
+    const r = await runProcess('wsl.exe', ['-d', WSL_DISTRO, '--', 'bash', '-lc', inner], { timeoutMs, env: { PATH: process.env.PATH ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '' } });
     return finish(r.code, `[wsl ${WSL_DISTRO}]\n` + r.output, 'wsl');
   }
   if (st.available === 'linux-ns') {
@@ -193,7 +223,7 @@ export async function runInSandbox(worktree: string, repoRoot: string, command: 
       `exec env -i PATH=${q(`${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`)} HOME=${q(tmpInside)} TMPDIR=${q(tmpInside)} CI=1 PORTAL_INSIDE_SANDBOX=1 FORCE_COLOR=0 npm_config_cache=${q(path.join(tmpInside, 'npm-cache'))} npm_config_update_notifier=false sh -c ${q(script)}`
     ].join(' && ');
     const args = ['-r', ...(command === 'install' && opts.allowNetwork ? [] : ['-n']), '-m', '--', 'sh', '-c', inner];
-    const r = await run('unshare', args, { timeoutMs, env: { PATH: process.env.PATH ?? '' } });
+    const r = await runProcess('unshare', args, { timeoutMs, env: { PATH: process.env.PATH ?? '' } });
     return finish(r.code, `[linux-ns · red ${command === 'install' && opts.allowNetwork ? 'activada solo para install' : 'desactivada'} · solo lectura: ${ro.join(', ')}]\n` + r.output, 'linux-ns');
   }
   if (command === 'typecheck') return runHostTypecheckMin(worktree, repoRoot, timeoutMs, startedAt, t0);
@@ -209,7 +239,7 @@ export async function runHostTypecheckMin(worktree: string, repoRoot: string, ti
     if (!fs.existsSync(path.join(worktree, proj))) continue;
     const nmLink = path.join(worktree, 'node_modules');
     if (!fs.existsSync(nmLink)) { try { fs.symlinkSync(path.join(repoRoot, 'node_modules'), nmLink, 'junction'); } catch { /* sin enlace: tsc buscará hacia arriba */ } }
-    const r = await run(process.execPath, [tsc, '-p', proj, '--noEmit'], { cwd: worktree, timeoutMs, env: { PATH: process.env.PATH ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '' } });
+    const r = await runProcess(process.execPath, [tsc, '-p', proj, '--noEmit'], { cwd: worktree, timeoutMs, env: { PATH: process.env.PATH ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '' } });
     output += `\n> tsc -p ${proj}\n${r.output}`; if (r.code !== 0) code = r.code ?? 1;
   }
   return { command: 'typecheck', exitCode: code, output: redact(output), startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - t0, isolation: 'host-min' };

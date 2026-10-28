@@ -11,7 +11,7 @@ import { execSync, execFileSync } from 'node:child_process';
  */
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-docker-'));
 delete process.env.PORTAL_SANDBOX;
-const { buildDockerRunArgs, dockerCliEnv, dockerMountArg, depsVolumeName, detectSandbox, runInSandbox, DEFAULT_SANDBOX_IMAGE, SANDBOX_IMAGE, DEPS_MISSING_EXIT } = await import('../src/services/sandbox.ts');
+const { buildDockerRunArgs, dockerCliEnv, dockerMountArg, depsVolumeName, detectSandbox, runInSandbox, splitExitMark, wrapWithExitMark, EXIT_MARK, DEFAULT_SANDBOX_IMAGE, SANDBOX_IMAGE, DEPS_MISSING_EXIT } = await import('../src/services/sandbox.ts');
 
 const spec = (over: Partial<Parameters<typeof buildDockerRunArgs>[0]> = {}) => ({ worktree: 'C:\\Mis Proyectos\\Portal IA-worktrees\\p1', command: 'test', script: 'npm test', image: 'portal-ia-sandbox:1', volume: 'portal-ia-nm-abc', allowNetwork: false, name: 'portal-ia-sbx-x', ...over });
 /** Valores que siguen a cada aparición de una opción. */
@@ -59,13 +59,21 @@ test('docker: worktree con --mount bind (ruta con unidad y espacios); dependenci
   for (const c of ['.vite-temp', '.vite', '.cache']) assert.ok(mounts.includes(`type=tmpfs,target=/work/node_modules/${c},tmpfs-mode=1777`), c);
   assert.ok(mounts.includes('type=tmpfs,target=/tmp,tmpfs-mode=1777'));
   const script = args.at(-1)!;
-  assert.match(script, /^if \[ ! -f node_modules\/\.portal-ia-ready \]/); assert.match(script, new RegExp(`exit ${DEPS_MISSING_EXIT}; fi; npm test$`));
+  assert.match(script, /^\( if \[ ! -f node_modules\/\.portal-ia-ready \]/); assert.ok(script.includes(`exit ${DEPS_MISSING_EXIT}; fi; npm test )`), script);
+  assert.ok(script.endsWith(wrapWithExitMark('X').slice('( X )'.length)), 'termina con la marca de salida');
 
   const inst = buildDockerRunArgs(spec({ command: 'install', script: 'npm ci --ignore-scripts', allowNetwork: true }));
   const im = values(inst, '--mount');
   assert.ok(im.includes('type=volume,source=portal-ia-nm-abc,target=/work/node_modules'), 'install escribe en el volumen');
   assert.ok(!im.some(m => m.includes('node_modules/.vite')), 'sin tmpfs de cachés al instalar');
-  assert.match(inst.at(-1)!, /^npm ci --ignore-scripts && mkdir -p node_modules\/\.vite-temp node_modules\/\.vite node_modules\/\.cache && touch node_modules\/\.portal-ia-ready$/);
+  assert.equal(inst.at(-1)!, wrapWithExitMark('npm ci --ignore-scripts && mkdir -p node_modules/.vite-temp node_modules/.vite node_modules/.cache && touch node_modules/.portal-ia-ready'));
+});
+
+test('marca de salida: el código que imprime el contenedor (por si Docker Desktop no registra su final)', () => {
+  assert.equal(wrapWithExitMark('exit 3'), `( exit 3 ); __rc=$?; printf '\\n${EXIT_MARK}%s\\n' "$__rc"; exit $__rc`);
+  assert.deepEqual(splitExitMark(`sin errores\n${EXIT_MARK}0\n`), { output: 'sin errores\n', code: 0 });
+  assert.deepEqual(splitExitMark(`Faltan las dependencias\r\n${EXIT_MARK}86\r\n`), { output: 'Faltan las dependencias\n', code: 86 });
+  assert.deepEqual(splitExitMark('salida sin marca'), { output: 'salida sin marca', code: null });
 });
 
 test('docker: --mount escapa en CSV las rutas con comas o comillas', () => {
@@ -96,7 +104,9 @@ test('docker: el CLI recibe las variables de Windows que necesita y ninguna otra
 let st = await detectSandbox(true);
 for (let i = 0; i < 3 && st.available === 'unavailable'; i++) { await new Promise(r => setTimeout(r, 2000)); st = await detectSandbox(true); }
 
-test('docker: un script malicioso no ve el Portal ni los datos, no escribe fuera del worktree ni sale a la red; el worktree sí es escribible', { skip: process.env.PORTAL_INSIDE_SANDBOX ? 'ya dentro de un sandbox' : st.available !== 'docker' ? `sandbox disponible: ${st.available}` : false, timeout: 180_000 }, async () => {
+test('docker: un script malicioso no ve el Portal ni los datos, no escribe fuera del worktree ni sale a la red; el worktree sí es escribible', { skip: process.env.PORTAL_INSIDE_SANDBOX ? 'ya dentro de un sandbox' : st.available !== 'docker' && process.env.PORTAL_REQUIRE_DOCKER !== '1' ? `sandbox disponible: ${st.available}` : false, timeout: 180_000 }, async () => {
+  // Con PORTAL_REQUIRE_DOCKER=1 (verificación final) no se omite: si Docker no responde, falla.
+  assert.equal(st.available, 'docker', 'Docker no está disponible para la prueba de aislamiento real');
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-docker-repo-'));
   fs.writeFileSync(path.join(repo, 'README.md'), '# r\n'); execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm Base', { cwd: repo });
   const wt = path.resolve(repo, '..', `${path.basename(repo)}-worktrees`, 'p1'); fs.mkdirSync(path.dirname(wt), { recursive: true });
@@ -138,4 +148,17 @@ test('docker: un script malicioso no ve el Portal ni los datos, no escribe fuera
     try { execFileSync('docker', ['volume', 'rm', '-f', volume], { stdio: 'ignore' }); } catch { /* sin volumen */ }
     execSync(`git -C "${repo}" worktree remove --force "${wt}"`);
   }
+});
+
+test('motor colgado tras terminar el comando: con la marca de salida no se espera al tiempo máximo; se retira el contenedor y se usa su código', async () => {
+  const { runProcess } = await import('../src/services/sandbox.ts');
+  let removed = 0; const t0 = Date.now();
+  // Un «docker run» que ya imprimió la marca pero no vuelve (como Docker Desktop con el contenedor «Up» sin procesos).
+  const r = await runProcess(process.execPath, ['-e', `console.log('Faltan las dependencias'); console.log('${EXIT_MARK}86'); setTimeout(() => {}, 60000);`], { timeoutMs: 60_000, env: { PATH: process.env.PATH ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '' }, onStuck: () => { removed++; }, stuckGraceMs: 400 });
+  assert.equal(r.stuck, true); assert.equal(removed, 1, 'se retira el contenedor colgado');
+  assert.ok(Date.now() - t0 < 10_000, 'no espera al tiempo máximo');
+  assert.equal(splitExitMark(r.output).code, 86);
+  // Un proceso normal termina por sí mismo antes del margen: no se considera colgado.
+  const ok = await runProcess(process.execPath, ['-e', `console.log('${EXIT_MARK}0')`], { timeoutMs: 60_000, env: { PATH: process.env.PATH ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '' }, onStuck: () => { removed++; }, stuckGraceMs: 5000 });
+  assert.equal(ok.stuck, undefined); assert.equal(ok.code, 0); assert.equal(removed, 1);
 });
