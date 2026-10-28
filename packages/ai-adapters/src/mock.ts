@@ -11,7 +11,10 @@ import { ProviderRequestError, estimateTokens, type CompletionRequest, type Comp
  * para que las pruebas puedan afirmar qué recibió cada agente (p. ej. que una lección llegó al prompt) y contar llamadas.
  * Nunca se usa fuera de pruebas: el servidor lo rechaza si PORTAL_MOCK_PROVIDER no está definido.
  */
-interface Rule { match: string; text?: string; textFile?: string; stopReason?: string; error?: string; /** Solo responde si el prompt contiene este texto (p. ej. una lección). */ requires?: string; /** Texto alternativo si falta `requires`. */ otherwise?: string }
+interface Rule { match: string; text?: string; textFile?: string; stopReason?: string; error?: string; /** Solo responde si el prompt contiene este texto (p. ej. una lección). */ requires?: string; /** Texto alternativo si falta `requires`. */ otherwise?: string;
+  /** Tarda este tiempo en responder (respeta el plazo y la cancelación de la llamada, como una petición HTTP real). */ delayMs?: number;
+  /** Las primeras N llamadas que encajan fallan con `error` (o `network`); después responde normalmente. */ failTimes?: number;
+  /** Señal explícita de negativa del proveedor (como stop_reason «refusal»). */ refusal?: boolean }
 interface Script { rules: Rule[]; /** Marcadores a buscar en cada prompt para el registro. */ markers?: string[] }
 
 let cachedScript: { path: string; mtime: number; script: Script } | null = null;
@@ -26,14 +29,27 @@ function loadScript(): Script {
 }
 
 export let mockCalls = 0;
-export function resetMockCalls() { mockCalls = 0; }
+/** Llamadas por regla (para failTimes). */
+const ruleCalls = new Map<string, number>();
+export function resetMockCalls() { mockCalls = 0; ruleCalls.clear(); }
+
+/** Espera abortable: plazo de la llamada (`timeout`) o señal del llamante (`cancelled`), igual que fetchJson. */
+function wait(ms: number, timeoutMs: number | undefined, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const done = (fn: () => void) => { clearTimeout(a); clearTimeout(b); signal?.removeEventListener('abort', onAbort); fn(); };
+    const onAbort = () => done(() => reject(new ProviderRequestError({ code: 'cancelled', message: 'Llamada cancelada antes de terminar (simulado).' })));
+    const a = setTimeout(() => done(resolve), ms);
+    const b = setTimeout(() => done(() => reject(new ProviderRequestError({ code: 'timeout', message: `El proveedor no respondió dentro del plazo de esta llamada (${Math.round((timeoutMs ?? 0) / 1000)} s) y se abortó (simulado).` }))), timeoutMs ?? 2 ** 31 - 1);
+    if (signal?.aborted) onAbort(); else signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 const DEFAULT_TEXT = '=== RESUMEN ===\nRespuesta simulada sin regla aplicable.\n=== NOTAS ===\nEl guion de pruebas no define una regla para este prompt.';
 
 export const mockAdapter: ProviderAdapter = {
   id: 'anthropic',
   async listModels() { return ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5'].map(id => classifyModel('anthropic', id)); },
-  async complete(_apiKey: string, _options, req: CompletionRequest): Promise<CompletionResult> {
+  async complete(_apiKey: string, _options, req: CompletionRequest, signal?: AbortSignal): Promise<CompletionResult> {
     mockCalls++;
     const script = loadScript();
     const hay = `${req.system}\n---\n${(req.history ?? []).map(h => h.content).join('\n')}\n${req.user}`;
@@ -41,11 +57,17 @@ export const mockAdapter: ProviderAdapter = {
     const markers = (script.markers ?? []).filter(m => hay.includes(m));
     const log = process.env.PORTAL_MOCK_LOG;
     if (log) fs.appendFileSync(log, JSON.stringify({ at: new Date().toISOString(), model: req.model, chars: hay.length, rule: rule?.match ?? null, markers, images: req.images?.length ?? 0, history: req.history?.length ?? 0, schema: req.responseSchema?.name ?? null }) + '\n');
-    if (!rule) return { text: DEFAULT_TEXT, inputTokens: estimateTokens(hay), outputTokens: estimateTokens(DEFAULT_TEXT), stopReason: 'end_turn' };
-    if (rule.error) throw new ProviderRequestError({ code: rule.error as any, message: `Error simulado: ${rule.error}` });
+    req.onProgress?.('sent');
+    if (!rule) { req.onProgress?.('headers'); req.onProgress?.('body'); return { text: DEFAULT_TEXT, inputTokens: estimateTokens(hay), outputTokens: estimateTokens(DEFAULT_TEXT), stopReason: 'end_turn' }; }
+    const n = (ruleCalls.get(rule.match) ?? 0) + 1; ruleCalls.set(rule.match, n);
+    if (rule.delayMs) await wait(rule.delayMs, req.timeoutMs, signal);
+    else if (signal?.aborted) throw new ProviderRequestError({ code: 'cancelled', message: 'Llamada cancelada antes de terminar (simulado).' });
+    if (rule.failTimes !== undefined ? n <= rule.failTimes : !!rule.error) throw new ProviderRequestError({ code: (rule.error ?? 'network') as any, message: `Error simulado: ${rule.error ?? 'network'} (llamada ${n})`, httpStatus: rule.error === 'provider_error' ? 529 : undefined });
+    req.onProgress?.('headers');
     let text = rule.textFile ? fs.readFileSync(rule.textFile, 'utf8') : (rule.text ?? '');
     if (rule.requires && !hay.includes(rule.requires)) text = rule.otherwise ?? text;
-    return { text, inputTokens: estimateTokens(hay), outputTokens: estimateTokens(text), stopReason: rule.stopReason ?? 'end_turn' };
+    req.onProgress?.('body');
+    return { text, inputTokens: estimateTokens(hay), outputTokens: estimateTokens(text), stopReason: rule.refusal ? 'refusal' : rule.stopReason ?? 'end_turn', refusal: rule.refusal ? (text || 'refusal') : null };
   }
 };
 

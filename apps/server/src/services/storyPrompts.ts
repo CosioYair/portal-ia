@@ -48,7 +48,16 @@ Ej.: "- http GET /api/system/status | version" · "- ui /backlog | h1 | /\\(\\d+
 === NOTAS ===
 (opcional: decisiones, riesgos, pasos manuales)
 Reglas: la acción es create, modify, patch o delete; PREFIERE patch para modificar archivos existentes (mucho más rápido y barato) y modify solo para archivos pequeños; cada archivo abre con "=== ARCHIVO:" y cierra con "=== FIN ARCHIVO ==="; nada fuera de estos bloques salvo RESUMEN, PARA EL PROPIETARIO, PRUEBA MANUAL, COMPROBACIONES, VERIFICAR y NOTAS. Para renombrar: delete del antiguo + create del nuevo. Puedes tocar cualquier archivo del repositorio salvo .git, data/, node_modules y archivos de secretos (.env reales, claves).
-Si después de analizarlo la historia NO requiere cambios de código, no inventes cambios: responde solo con "=== RESUMEN ===" y "=== SIN CAMBIOS ===" seguido del motivo verificable. Si te falta el contenido de un archivo imprescindible, dilo en NOTAS citando su ruta exacta.`;
+Si después de analizarlo la historia NO requiere cambios de código, no inventes cambios: responde solo con "=== RESUMEN ===" y "=== SIN CAMBIOS ===" seguido del motivo verificable.
+Si NO puedes implementarla porque te falta algo que no está en tu contexto, no escribas una explicación libre ni código a medias: responde solo con
+=== RESUMEN ===
+(1-2 frases)
+=== BLOQUEO ===
+tipo: informacion | permiso | capacidad
+necesito: (qué te falta exactamente: un archivo con su ruta, un dato, una decisión, un permiso o una herramienta)
+pregunta: (la pregunta concreta que lo resolvería)
+consultar: (agente o papel del equipo que podría saberlo, o «ninguno»)
+El equipo te dará ese contexto (o se lo preguntará al especialista o al propietario) y volverás a intentarlo. Los datos reales del propietario (carpeta data/, credenciales, .env) NO son accesibles para ningún agente.`;
 
 /** Formato reducido para reparaciones y correcciones (sin repetir las secciones para el propietario si ya llegaron). */
 export const PATCH_ONLY_FORMAT = `=== RESUMEN ===

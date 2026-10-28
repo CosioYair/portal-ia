@@ -29,12 +29,18 @@ export interface CompletionRequest {
    * (400), se repite UNA vez sin él y el motor valida el JSON igualmente.
    */
   responseSchema?: { name: string; description?: string; schema: Record<string, unknown> };
+  /** Plazo de esta llamada (ms). Al agotarse se aborta la petición HTTP (código `timeout`). Por defecto, 10 minutos. */
+  timeoutMs?: number;
+  /** Hitos confirmados de la llamada (enviada, cabeceras recibidas, cuerpo recibido), para mostrar el estado real. */
+  onProgress?: (e: CallProgress) => void;
 }
 export interface CompletionResult {
   text: string;
   inputTokens: number;
   outputTokens: number;
   stopReason: string | null;
+  /** El proveedor o el modelo rechazó la petición (señal explícita del proveedor, no deducida del texto). */
+  refusal?: string | null;
 }
 
 export interface ProviderAdapter {
@@ -54,19 +60,36 @@ const COMPLETE_TIMEOUT_MS = 10 * 60_000;
 /** Estimación de tokens a partir de caracteres (código/markdown ≈ 3.5 caracteres por token). */
 export const estimateTokens = (text: string) => Math.ceil(text.length / 3.5);
 
-async function fetchJson(url: string, init: RequestInit, signal?: AbortSignal, timeoutMs = LIST_TIMEOUT_MS): Promise<any> {
+/** Hitos confirmados de una llamada (sin streaming, el proveedor no informa de progreso entre «enviada» y «cabeceras»). */
+export type CallProgress = 'sent' | 'headers' | 'body';
+
+/**
+ * Petición HTTP con plazo y cancelación reales: el plazo y la señal del llamante abortan la petición en curso (también
+ * la lectura del cuerpo). Distingue plazo agotado (`timeout`), cancelación (`cancelled`) y fallo de red (`network`).
+ * Abortar no garantiza que el proveedor no facture lo que ya procesó: los mensajes lo dicen.
+ */
+async function fetchJson(url: string, init: RequestInit, signal?: AbortSignal, timeoutMs = LIST_TIMEOUT_MS, onProgress?: (e: CallProgress) => void): Promise<any> {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  signal?.addEventListener('abort', () => ctrl.abort());
+  let timedOut = false;
+  const t = setTimeout(() => { timedOut = true; ctrl.abort(); }, timeoutMs);
+  const onAbort = () => ctrl.abort();
+  if (signal?.aborted) ctrl.abort(); else signal?.addEventListener('abort', onAbort, { once: true });
+  const cleanup = () => { clearTimeout(t); signal?.removeEventListener('abort', onAbort); };
+  const aborted = () => timedOut
+    ? new ProviderRequestError({ code: 'timeout', message: `El proveedor no respondió dentro del plazo de esta llamada (${Math.round(timeoutMs / 1000)} s) y se abortó. La solicitud pudo haberse procesado y facturado parcialmente.` })
+    : new ProviderRequestError({ code: 'cancelled', message: 'Llamada cancelada antes de terminar. El proveedor puede haber facturado lo que ya había procesado.' });
   let res: Response;
   try {
+    onProgress?.('sent');
     res = await fetch(url, { ...init, signal: ctrl.signal });
   } catch (e: any) {
-    clearTimeout(t);
-    throw new ProviderRequestError({ code: 'network', message: e?.name === 'AbortError' ? `Tiempo de espera agotado (${Math.round(timeoutMs / 1000)} s) esperando al proveedor. La solicitud pudo haberse procesado y facturado parcialmente.` : `No se pudo contactar con el proveedor: ${e?.message ?? 'error de red'}.` });
+    cleanup();
+    if (e?.name === 'AbortError' || ctrl.signal.aborted) throw aborted();
+    throw new ProviderRequestError({ code: 'network', message: `No se pudo contactar con el proveedor: ${e?.message ?? 'error de red'}.` });
   }
-  clearTimeout(t);
+  onProgress?.('headers');
   if (!res.ok) {
+    cleanup();
     let detail = '';
     try { const j: any = await res.json(); detail = j?.error?.message || j?.message || ''; } catch { /* sin cuerpo */ }
     const needsWorkspace = (res.status === 400 && /anthropic-workspace-id|scoped to a workspace/i.test(detail)) || (res.status === 404 && /workspace/i.test(detail));
@@ -81,7 +104,12 @@ async function fetchJson(url: string, init: RequestInit, signal?: AbortSignal, t
       : `El proveedor devolvió un error (${res.status}).`;
     throw new ProviderRequestError({ code, message: detail && code !== 'workspace_required' ? `${message} ${detail}` : message, httpStatus: res.status });
   }
-  return res.json();
+  try { const j = await res.json(); onProgress?.('body'); return j; }
+  catch (e: any) {
+    if (ctrl.signal.aborted) throw aborted();
+    throw new ProviderRequestError({ code: 'network', message: `La respuesta del proveedor llegó incompleta: ${e?.message ?? 'cuerpo no válido'}.` });
+  }
+  finally { cleanup(); }
 }
 
 export const anthropicAdapter: ProviderAdapter = {
@@ -116,16 +144,17 @@ export const anthropicAdapter: ProviderAdapter = {
     const withThinking = thinking ? { ...base, thinking: { type: 'enabled', budget_tokens: budget } } : structured;
     let j: any;
     try {
-      j = await fetchJson('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(withThinking) }, signal, COMPLETE_TIMEOUT_MS);
+      j = await fetchJson('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(withThinking) }, signal, req.timeoutMs ?? COMPLETE_TIMEOUT_MS, req.onProgress);
     } catch (e) {
       // Si el modelo no acepta el parámetro de razonamiento, reintentamos sin él (una sola vez).
       if (withThinking !== base && e instanceof ProviderRequestError && e.error.httpStatus === 400 && /thinking|budget_tokens|tool/i.test(e.error.message)) {
-        j = await fetchJson('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(base) }, signal, COMPLETE_TIMEOUT_MS);
+        j = await fetchJson('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(base) }, signal, req.timeoutMs ?? COMPLETE_TIMEOUT_MS, req.onProgress);
       } else throw e;
     }
     const tool = (j.content ?? []).find((c: any) => c.type === 'tool_use' && c.input && typeof c.input === 'object');
     const text = tool ? JSON.stringify(tool.input) : (j.content ?? []).filter((c: any) => c.type === 'text').map((c: any) => c.text).join('\n');
-    return { text, inputTokens: j.usage?.input_tokens ?? 0, outputTokens: (j.usage?.output_tokens ?? 0), stopReason: j.stop_reason ?? null };
+    // stop_reason «refusal»: el modelo se negó por sus políticas (señal explícita de la API).
+    return { text, inputTokens: j.usage?.input_tokens ?? 0, outputTokens: (j.usage?.output_tokens ?? 0), stopReason: j.stop_reason ?? null, refusal: j.stop_reason === 'refusal' ? (text || 'refusal') : null };
   }
 };
 
@@ -145,7 +174,7 @@ export const openaiAdapter: ProviderAdapter = {
     const body: any = { model: req.model, messages: [{ role: 'system', content: req.system }, ...(req.history ?? []), { role: 'user', content: userContent }], max_completion_tokens: req.maxTokens };
     if (req.supportsEffort) body.reasoning_effort = req.effort;
     if (req.responseSchema) body.response_format = { type: 'json_schema', json_schema: { name: req.responseSchema.name, schema: req.responseSchema.schema, strict: true } };
-    const post = (b: any) => fetchJson('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify(b) }, signal, COMPLETE_TIMEOUT_MS);
+    const post = (b: any) => fetchJson('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify(b) }, signal, req.timeoutMs ?? COMPLETE_TIMEOUT_MS, req.onProgress);
     let j: any;
     try { j = await post(body); }
     catch (e) {
@@ -154,7 +183,9 @@ export const openaiAdapter: ProviderAdapter = {
       else throw e;
     }
     const choice = j.choices?.[0];
-    return { text: choice?.message?.content ?? '', inputTokens: j.usage?.prompt_tokens ?? 0, outputTokens: j.usage?.completion_tokens ?? 0, stopReason: choice?.finish_reason ?? null };
+    // Negativa explícita: `message.refusal` (salidas estructuradas) o finish_reason «content_filter».
+    const refusal = typeof choice?.message?.refusal === 'string' && choice.message.refusal ? choice.message.refusal : choice?.finish_reason === 'content_filter' ? 'content_filter' : null;
+    return { text: choice?.message?.content ?? '', inputTokens: j.usage?.prompt_tokens ?? 0, outputTokens: j.usage?.completion_tokens ?? 0, stopReason: choice?.finish_reason ?? null, refusal };
   }
 };
 

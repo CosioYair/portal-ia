@@ -38,7 +38,7 @@ const S = 'portal-ia'; const W = `/api/workspaces/${S}`;
 const real = { ...sandboxDeps };
 
 // ---------- Unidades: contrato de salida del Desarrollador ----------
-test('contrato: distingue implementación, sin cambios, cortada, incompleta, mal formada y negativa (sin inventar cambios)', () => {
+test('contrato: distingue implementación, sin cambios, cortada, incompleta, mal formada y bloqueo por información (sin inventar cambios)', () => {
   const exists = (p: string) => p === 'src/a.ts';
   const ev = (t: string, stop: string | null = 'end_turn') => assessDeveloperOutput(t, { stopReason: stop, exists }).assessment;
   assert.equal(ev('=== RESUMEN ===\nx\n=== ARCHIVO: src/a.ts | patch ===\n<<<< BUSCAR\nexport const a = 1;\n==== REEMPLAZAR\nexport const a = 2;\n>>>> FIN\n=== FIN ARCHIVO ===').kind, 'implementation');
@@ -47,7 +47,8 @@ test('contrato: distingue implementación, sin cambios, cortada, incompleta, mal
   assert.equal(ev('=== ARCHIVO: src/a.ts | patch ===\n=== FIN ARCHIVO ===').kind, 'incomplete');
   assert.equal(ev('Aquí tienes el código:\n```ts\nexport const a = 2;\n```').kind, 'malformed', 'un fragmento suelto para un archivo existente no se acepta');
   const refused = ev('No puedo completar la tarea sin ver el contenido de src/a.ts.');
-  assert.equal(refused.kind, 'refusal'); assert.deepEqual(refused.requestedFiles, ['src/a.ts']);
+  // v0.12.2 (HU-155): pedir un archivo para poder seguir es información que falta, no una negativa del proveedor.
+  assert.equal(refused.kind, 'blocked'); assert.equal(refused.blocker?.type, 'information'); assert.deepEqual(refused.requestedFiles, ['src/a.ts']);
   assert.equal(ev('Hecho, he revisado la historia.').kind, 'malformed', 'un texto sin artefactos no es una implementación');
 });
 

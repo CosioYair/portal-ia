@@ -35,7 +35,11 @@ export interface ProviderView {
   models: ModelInfo[];
 }
 
-export type ProviderErrorCode = 'invalid_key' | 'forbidden' | 'rate_limited' | 'network' | 'provider_error' | 'no_credential' | 'workspace_required';
+export type ProviderErrorCode = 'invalid_key' | 'forbidden' | 'rate_limited' | 'network' | 'provider_error' | 'no_credential' | 'workspace_required'
+  /** El proveedor no respondió dentro del plazo de la llamada (se abortó). */
+  | 'timeout'
+  /** La llamada se abortó por decisión del propietario (cancelar). */
+  | 'cancelled';
 
 export interface ProviderError {
   code: ProviderErrorCode;
@@ -209,6 +213,38 @@ export interface ProcessStep {
   error: string | null;
   startedAt: string | null;
   finishedAt: string | null;
+  /** Llamada al proveedor en curso (solo mientras el paso está «en ejecución»): qué se sabe de verdad y qué es estimación. */
+  live?: LiveCall | null;
+  /** Costo posiblemente facturado pero NO confirmado por el proveedor (llamada abortada, caída de red, reinicio). Estimación. */
+  unconfirmedUsd?: number;
+}
+
+/**
+ * Estado real de una llamada al proveedor. Sin streaming, el proveedor no informa de progreso hasta terminar: «esperando
+ * respuesta» no significa que esté generando; solo se sabe cuándo se envió, cuándo llegaron las cabeceras y el plazo.
+ */
+export type LiveCallState = 'preparing' | 'sending' | 'waiting' | 'receiving' | 'processing' | 'retrying' | 'cancelling';
+export interface LiveCall {
+  state: LiveCallState;
+  provider: string;
+  model: string;
+  /** Inicio de la llamada (preparación del prompt). */
+  startedAt: string;
+  /** Último hecho confirmado (envío, cabeceras recibidas, cuerpo recibido) y cuándo. */
+  lastEvent: string;
+  lastEventAt: string;
+  /** Plazo máximo de esta llamada: al alcanzarlo se aborta. */
+  deadlineAt: string;
+  timeoutMs: number;
+  /** Intento actual (reintentos por errores de conexión). */
+  attempt: number;
+  maxAttempts: number;
+  /** Estimación del costo de esta llamada (no confirmada hasta que el proveedor la cierre). */
+  estimatedUsd: number;
+  inputTokensEstimated: number;
+  /** Costo estimado de la entrada enviada (lo mínimo que pudo facturarse si la llamada se interrumpe). */
+  inputUsd: number;
+  maxOutputTokens: number;
 }
 
 export interface Process {
@@ -233,6 +269,8 @@ export interface Process {
   /** Resultado de un encargo delegado (kind = delegated_task). */
   delegation: DelegationResult | null;
   backlogItemId: string | null;
+  /** Suma de costos posiblemente facturados y no confirmados (estimación; el gasto confirmado es spentUsd). */
+  unconfirmedUsd?: number;
   /** Archivado al iniciar una etapa: histórico, sin acciones. null = activo. */
   archivedAt?: string | null;
   archiveId?: string | null;
@@ -262,7 +300,8 @@ export type FlowIssueKind =
   | 'deps_missing' | 'sandbox_unavailable' | 'sandbox_timeout' | 'typecheck_failed' | 'test_failed' | 'build_failed' | 'qa_rejected' | 'patch_failed'
   | 'merge_conflict' | 'activation_failed' | 'runtime_failed' | 'runtime_unavailable' | 'manual_failed' | 'budget_exceeded'
   | 'process_failed' | 'cancelled' | 'diff_rejected' | 'legacy'
-  | 'output_contract' | 'provider_failed' | 'agent_refused' | 'pipeline_paused' | 'pipeline_stopped' | 'qa_blocked';
+  | 'output_contract' | 'provider_failed' | 'agent_refused' | 'pipeline_paused' | 'pipeline_stopped' | 'qa_blocked'
+  | 'agent_blocked' | 'provider_timeout' | 'process_interrupted';
 export type IssueSeverity = 'alta' | 'media' | 'baja';
 export interface FlowIssueDetail { text: string; file?: string | null; line?: number | null; code?: string | null; severity?: IssueSeverity | null }
 export interface FlowIssue {
@@ -281,6 +320,8 @@ export interface FlowIssue {
   evidence?: string | null;
   /** Agentes responsables de corregirlo (por papel en el equipo). */
   responsible: string[];
+  /** Lo que el equipo pide al propietario para seguir (si aplica). */
+  request?: OwnerRequest | null;
 }
 export type FlowActionId =
   | 'authorize' | 'cancel' | 'review_diff' | 'apply' | 'reject' | 'install_and_retry' | 'verify' | 'retry_verification'
@@ -299,6 +340,8 @@ export interface FlowAction {
   commands?: string[];
   /** Continuar el pipeline (pipeline_resume / repair_output): ajustes que propone la acción y presupuesto adicional sugerido. */
   pipeline?: Partial<PipelineConfig>;
+  /** La acción exige responder antes a esta pregunta del equipo (información, permiso o decisión). */
+  answer?: { question: string; why: string; options: string[] } | null;
   suggestedBudgetUsd?: number;
 }
 export interface StoryFlow {
@@ -478,7 +521,13 @@ export interface QaFinding { severity: IssueSeverity; text: string; file: string
 
 // ---- Contrato de salida del Desarrollador y pipeline autónomo autorizado ----
 /** Qué entregó el Desarrollador, clasificado sin IA. */
-export type DevOutputKind = 'implementation' | 'no_changes' | 'incomplete' | 'truncated' | 'malformed' | 'refusal';
+export type DevOutputKind = 'implementation' | 'no_changes' | 'incomplete' | 'truncated' | 'malformed'
+  /** El agente declara (sección BLOQUEO o texto inequívoco) que le falta información, un permiso o una capacidad. */
+  | 'blocked'
+  /** El proveedor o el modelo rechaza la petición (señal del proveedor o negativa breve e inequívoca). */
+  | 'provider_refusal'
+  /** Clasificación antigua (antes de v0.12.2): se trata como «bloqueado sin detalle». */
+  | 'refusal';
 export interface DevOutputAssessment {
   kind: DevOutputKind;
   /** Motivos concretos (marcadores ausentes, bloque sin cerrar, parche vacío, ruta inválida…). */
@@ -490,6 +539,39 @@ export interface DevOutputAssessment {
   truncatedFile: string | null;
   /** Rutas del repositorio que el agente dice necesitar y no tenía en su contexto. */
   requestedFiles: string[];
+  /** Bloqueo declarado por el agente (kind = blocked). */
+  blocker?: AgentBlocker | null;
+}
+/** Lo que el agente necesita para seguir y a quién preguntarlo. */
+export interface AgentBlocker {
+  type: 'information' | 'permission' | 'capability';
+  /** Qué falta, en palabras del agente. */
+  need: string;
+  /** Pregunta concreta (para otro agente o para el propietario). */
+  question: string;
+  /** Agente o papel que podría saberlo, si el agente lo indicó. */
+  consult: string | null;
+  /** true si salió de la sección BLOQUEO; false si se dedujo del texto (heurística conservadora). */
+  declared: boolean;
+}
+
+/** Clasificación explícita de por qué un agente no pudo seguir: decide la recuperación (y si se gasta IA en ella). */
+export type AgentFailureKind =
+  | 'INVALID_OUTPUT' | 'INCOMPLETE_OUTPUT' | 'RECOVERABLE_IMPLEMENTATION_ERROR' | 'MISSING_INFORMATION' | 'PERMISSION_REQUIRED'
+  | 'UNSUPPORTED_CAPABILITY' | 'PROVIDER_REFUSAL' | 'PROVIDER_TIMEOUT' | 'PROVIDER_CONNECTION_ERROR' | 'BUDGET_EXHAUSTED'
+  | 'ENVIRONMENT_FAILURE' | 'UNKNOWN_FAILURE';
+/** Lo que el equipo pide al propietario cuando no puede resolverlo dentro de su autoridad. */
+export interface OwnerRequest {
+  kind: 'information' | 'permission' | 'decision' | 'budget';
+  /** Pregunta concreta. */
+  question: string;
+  /** Por qué hace falta y qué pasará al responder. */
+  why: string;
+  /** Quién lo pide. */
+  askedBy: string;
+  /** Alternativas posibles (p. ej. cerrar como resuelta, acotar la historia). */
+  options: string[];
+  at: string;
 }
 export interface PipelineConfig {
   /** Aplicar los cambios válidos en el worktree aislado del proceso sin esperar al propietario. */
@@ -508,11 +590,18 @@ export interface PipelineConfig {
   maxIdenticalFailures: number;
   /** Duración máxima del proceso (minutos). */
   maxDurationMin: number;
+  /** Consultas a especialistas del equipo cuando a un agente le falta información (cada pregunta, una vez). */
+  maxConsultations: number;
+  /** Reintentos por errores de conexión con el proveedor (por llamada; con espera exponencial). */
+  maxProviderRetries: number;
+  /** Plazo fijo de cada llamada (s). null = automático según la salida máxima (ver providerCalls.ts). */
+  providerTimeoutSec: number | null;
 }
 export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'verify' | 'environment' | 'qa' | 'correction' | 'pause' | 'done' | 'error';
 export interface PipelineEvent { at: string; kind: PipelineEventKind; message: string; detail?: string | null; aiCall?: boolean; costUsd?: number | null }
 export type PipelineState = 'running' | 'verified' | 'paused' | 'stopped';
-export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' | 'repeated_failure' | 'duration' | 'no_changes' | 'refusal' | 'qa' | 'cancelled';
+export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' | 'repeated_failure' | 'duration' | 'no_changes' | 'refusal' | 'qa' | 'cancelled'
+  | 'missing_information' | 'permission' | 'unsupported' | 'provider_refusal' | 'provider_timeout' | 'provider_error' | 'interrupted' | 'unknown';
 export type PipelinePhase = 'implementing' | 'recovering' | 'repairing' | 'applying' | 'verifying' | 'installing' | 'qa' | 'correcting' | 'finished';
 export interface PipelineStatus {
   config: PipelineConfig;
@@ -529,11 +618,29 @@ export interface PipelineStatus {
   lastAssessment: DevOutputAssessment | null;
   /** Commit del worktree que QA evaluó por última vez (si cambia, QA vuelve a evaluar). */
   lastQaCommit?: string | null;
+  /** Clase del último fallo (decide la recuperación). */
+  failureClass?: AgentFailureKind | null;
+  /** Pregunta pendiente para el propietario (información, permiso o decisión). */
+  ownerRequest?: OwnerRequest | null;
+  /** Respuestas del propietario aún no entregadas al equipo. */
+  ownerAnswers?: { at: string; question: string; answer: string; delivered: boolean }[];
+  /** Consultas a especialistas del equipo (para no repetir la misma pregunta). */
+  consultations?: { at: string; agentName: string; question: string }[];
+  /** Entregas de contexto solicitado (archivos del repositorio que el agente pidió). */
+  contextSupplies?: number;
+  /** Reintentos por errores de conexión con el proveedor (en total). */
+  providerRetries?: number;
   startedAt: string;
   finishedAt: string | null;
 }
 /** Por qué terminó mal un proceso de historia (clasificado al fallar; evita adivinar por el texto del error). */
-export interface ProcessFailure { kind: 'output_contract' | 'provider' | 'budget' | 'cancelled' | 'internal' | 'refusal'; detail: string; assessment?: DevOutputAssessment | null }
+export interface ProcessFailure { kind: 'output_contract' | 'provider' | 'budget' | 'cancelled' | 'internal' | 'refusal'; detail: string; assessment?: DevOutputAssessment | null;
+  /** Clase explícita (v0.12.2): decide la recuperación y lo que se muestra. */
+  class?: AgentFailureKind;
+  /** Código del proveedor cuando aplica (timeout, network, rate_limited…). */
+  providerCode?: ProviderErrorCode | null;
+  /** Lo que se pide al propietario para seguir (procesos sin pipeline). */
+  request?: OwnerRequest | null }
 export type Isolation = 'docker' | 'wsl' | 'linux-ns' | 'host-min' | 'unavailable';
 export interface VerificationRun { command: string; exitCode: number | null; output: string; startedAt: string; finishedAt: string; durationMs: number; /** Dónde se ejecutó: sandbox real (docker/wsl), verificación mínima en el equipo (solo tsc) o no disponible. */ isolation?: Isolation; }
 export interface ExecutionResult {

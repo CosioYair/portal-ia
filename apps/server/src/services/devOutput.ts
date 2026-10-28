@@ -1,4 +1,4 @@
-import type { DevOutputAssessment, DevOutputKind, RuntimeCheck } from '@portal-ia/domain';
+import type { AgentBlocker, AgentFailureKind, DevOutputAssessment, DevOutputKind, RuntimeCheck } from '@portal-ia/domain';
 import type { RawChange } from './repoWrite.ts';
 
 /**
@@ -30,7 +30,7 @@ const OPS: Record<string, RawChange['action']> = {
   patch: 'patch', parche: 'patch', parchear: 'patch', edit: 'patch', editar: 'patch',
   delete: 'delete', borrar: 'delete', eliminar: 'delete', remove: 'delete'
 };
-const SECTION_NAMES = 'RESUMEN|NOTAS|PARA EL PROPIETARIO|PRUEBA MANUAL|COMPROBACIONES|SIN CAMBIOS|VERIFICAR:[^=]*';
+const SECTION_NAMES = 'RESUMEN|NOTAS|PARA EL PROPIETARIO|PRUEBA MANUAL|COMPROBACIONES|SIN CAMBIOS|BLOQUEO|VERIFICAR:[^=]*';
 const STRICT_HEADER = /^[ \t]*={3,}\s*ARCHIVO:\s*(.+?)\s*\|\s*(create|modify|patch|delete)\s*={3,}[ \t]*$/i;
 const LENIENT_HEADER = /^[ \t>*#_`]*={2,}\s*(?:ARCHIVO|FILE|FICHERO)\s*:?\s*(.+?)\s*={2,}[ \t*_`]*$/i;
 const FIN = /^[ \t>*#_`]*={2,}\s*(?:FIN(?:\s+(?:DE\s+)?ARCHIVO)?|END(?:\s+FILE)?)\s*={2,}[ \t*_`]*$/i;
@@ -206,7 +206,52 @@ export function parseFileBlocks(text: string, stopReason: string | null = null):
   return { ...sections(text), changes, truncatedFile, problems };
 }
 
-const REFUSAL = /(no puedo|no es posible (?:implementar|completar|hacer)|no tengo (?:acceso|suficiente)|necesito (?:ver|el contenido|m[aá]s (?:contexto|informaci[oó]n))|me falta(?:n)? (?:el|los|la|las) (?:archivo|contenido|c[oó]digo)|sin el contenido de|I can(?:not|'t)|I am unable|I'm unable|unable to (?:complete|implement))/i;
+/*
+ * Cuando la respuesta NO trae ningún artefacto de implementación, se distingue (de forma conservadora) por qué:
+ *  - negativa del PROVEEDOR: solo con su señal explícita (stop_reason «refusal», message.refusal) o una respuesta BREVE
+ *    que empieza negándose («No puedo ayudar con eso», «I can't help with that»). Un «no puedo» suelto dentro de una
+ *    explicación larga NO es una negativa del proveedor (falso positivo que causó la reparación ciega de HU-155).
+ *  - bloqueo del AGENTE (le falta algo que el equipo no le dio): permiso, capacidad o información; con la sección
+ *    BLOQUEO del contrato (declarado) o deducido de frases inequívocas (heurística, marcada como no declarada).
+ *  - si no encaja nada: formato no válido (reparable).
+ */
+const PROVIDER_REFUSAL_OPENING = /^\s*(?:lo siento[,.]?\s*(?:pero\s*)?)?(?:no puedo (?:ayudar(?:te)?|asistir(?:te)?) con (?:eso|esto|esta (?:solicitud|petici[oó]n))|no puedo (?:cumplir|realizar|atender) (?:esa|esta) (?:solicitud|petici[oó]n)|i can(?:not|'t|’t) (?:help|assist|comply) with (?:that|this)|i'?m (?:sorry|unable)[,.]?\s*(?:but\s*)?i can(?:not|'t|’t) (?:help|assist))/i;
+const BLOCKER_RX: { type: AgentBlocker['type']; re: RegExp }[] = [
+  { type: 'permission', re: /(no tengo (?:acceso|permiso)|sin (?:acceso|permiso) (?:a|para)|no (?:est[aá]|estoy) (?:permitid|autorizad)|requiere (?:tu )?(?:autorizaci[oó]n|permiso)|(?:carpeta|directorio) data\/|\bdata\/|datos (?:reales )?del propietario|credenciales|archivos? \.env|claves? (?:de api|maestra))/i },
+  { type: 'capability', re: /(no puedo (?:ejecutar|navegar|abrir el navegador|acceder a internet|conectarme|consultar la base de datos)|no dispongo de (?:herramientas?|acceso a)|no tengo (?:herramientas?|la capacidad|capacidad)|fuera de (?:mis|las) capacidades|no es posible (?:ejecutarlo|hacerlo) desde (?:aqu[ií]|este entorno))/i },
+  { type: 'information', re: /(necesito (?:ver|conocer|saber|el contenido|m[aá]s (?:contexto|informaci[oó]n)|que me (?:indiques|confirmes|des|aclares))|me falta(?:n)? (?:el|los|la|las|informaci[oó]n|datos|contexto)|no (?:se especifica|est[aá] claro|queda claro)|falta(?:n)? (?:informaci[oó]n|datos|detalles|el contenido)|sin el contenido de|¿(?:podr[ií]as|puedes) (?:indicar|confirmar|aclarar))/i }
+];
+/** Frase que contiene la coincidencia (para la pregunta), recortada. */
+function sentenceWith(text: string, re: RegExp): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  const m = flat.match(re); if (!m || m.index === undefined) return flat.slice(0, 280);
+  const start = Math.max(flat.lastIndexOf('. ', m.index) + 2, flat.lastIndexOf('? ', m.index) + 2, flat.lastIndexOf('\n', m.index) + 1, 0);
+  const endDot = flat.slice(m.index).search(/[.?!](\s|$)/);
+  return flat.slice(start, endDot >= 0 ? m.index + endDot + 1 : m.index + 280).trim().slice(0, 300);
+}
+/** Sección BLOQUEO del contrato: «tipo:», «necesito:», «pregunta:», «consultar:». */
+function parseBlocker(section: string): AgentBlocker | null {
+  if (!section.trim()) return null;
+  const field = (k: string) => section.match(new RegExp(`^\\s*[-*]?\\s*${k}\\s*:\\s*(.+)$`, 'im'))?.[1]?.trim() ?? '';
+  const t = field('tipo').toLowerCase();
+  const type: AgentBlocker['type'] = /permis/.test(t) ? 'permission' : /capacid|herramient/.test(t) ? 'capability' : 'information';
+  const need = field('necesito') || section.trim().split('\n')[0].slice(0, 300);
+  const question = field('pregunta') || need;
+  const consult = field('consultar') || null;
+  return { type, need: need.slice(0, 400), question: question.slice(0, 400), consult: consult && !/^(ninguno|nadie|-|no)$/i.test(consult) ? consult.slice(0, 120) : null, declared: true };
+}
+
+/** Clase explícita de fallo para una entrega del Desarrollador (null si es una implementación válida o «sin cambios»). */
+export function failureClassOf(a: DevOutputAssessment): AgentFailureKind | null {
+  switch (a.kind) {
+    case 'implementation': case 'no_changes': return null;
+    case 'malformed': return 'INVALID_OUTPUT';
+    case 'incomplete': case 'truncated': return 'INCOMPLETE_OUTPUT';
+    case 'provider_refusal': return 'PROVIDER_REFUSAL';
+    case 'blocked': return a.blocker?.type === 'permission' ? 'PERMISSION_REQUIRED' : a.blocker?.type === 'capability' ? 'UNSUPPORTED_CAPABILITY' : 'MISSING_INFORMATION';
+    case 'refusal': return 'MISSING_INFORMATION'; // clasificación antigua: se trata como bloqueo sin detalle
+  }
+}
 const ARTIFACT_HINT = /(={2,}\s*(?:ARCHIVO|FILE)|<{4,}\s*(?:BUSCAR|SEARCH)|^\+\+\+\s|^@@\s|```)/im;
 
 /**
@@ -214,8 +259,10 @@ const ARTIFACT_HINT = /(={2,}\s*(?:ARCHIVO|FILE)|<{4,}\s*(?:BUSCAR|SEARCH)|^\+\+
  * la más tolerante) y clasifica qué entregó. `exists` dice si una ruta existe en el repositorio (para deducir acciones y
  * para no aceptar fragmentos de archivos existentes); `knownFiles`, qué archivos ya tenía en su contexto.
  */
-export function assessDeveloperOutput(text: string, opts: { stopReason: string | null; exists: (p: string) => boolean; knownFiles?: string[] }): { parsed: ParsedDevOutput; assessment: DevOutputAssessment } {
+export function assessDeveloperOutput(text: string, opts: { stopReason: string | null; exists: (p: string) => boolean; knownFiles?: string[]; providerRefusal?: string | null }): { parsed: ParsedDevOutput; assessment: DevOutputAssessment } {
   const sec = sections(text);
+  const blockSection = text.replace(/\r\n/g, '\n').match(/^[ \t>*#_`]*={3,}\s*BLOQUEO\s*={3,}[ \t*_`]*\n([\s\S]*?)(?=^[ \t>*#_`]*={2,}\s*(?:ARCHIVO|FILE|FICHERO|RESUMEN|NOTAS|PARA EL PROPIETARIO|PRUEBA MANUAL|COMPROBACIONES|SIN CAMBIOS|VERIFICAR:)|(?![\s\S]))/mi)?.[1] ?? null;
+  let blocker: AgentBlocker | null = null;
   // El lector tolerante es un superconjunto del estricto: se usa salvo que el estricto recupere más.
   const sp: string[] = []; const strictBlocks = scanBlocks(text, false); const strict = blocksToChanges(strictBlocks, opts.stopReason, opts.exists, sp);
   const lp: string[] = []; const lenientBlocks = scanBlocks(text, true); const lenient = blocksToChanges(lenientBlocks, opts.stopReason, opts.exists, lp);
@@ -234,15 +281,28 @@ export function assessDeveloperOutput(text: string, opts: { stopReason: string |
   const reasons = [...problems];
   let kind: DevOutputKind;
   const truncated = isTruncatedStop(opts.stopReason);
+  const flat = text.trim();
+  // Con artefactos de implementación, una frase suelta («no puedo verificarlo en el navegador») nunca convierte la entrega en negativa ni bloqueo.
   if (changes.length) kind = truncatedFile ? 'truncated' : problems.some(p => /sin bloques|sin contenido|sin cerrar/.test(p)) ? 'incomplete' : 'implementation';
   else if (sec.noChanges !== null) { kind = 'no_changes'; reasons.push(`El Desarrollador indica que no hacen falta cambios: ${sec.noChanges.slice(0, 300)}`); }
+  else if (opts.providerRefusal) { kind = 'provider_refusal'; reasons.push(`El proveedor rechazó la petición (señal del proveedor: ${String(opts.providerRefusal).slice(0, 200)}).`); }
+  else if (blockSection !== null && (blocker = parseBlocker(blockSection))) { kind = 'blocked'; reasons.push(`El Desarrollador declara un bloqueo (${blocker.type === 'permission' ? 'permiso' : blocker.type === 'capability' ? 'capacidad' : 'información'}): ${blocker.need}`); }
   else if (truncatedFile || truncated) { kind = 'truncated'; reasons.push(truncatedFile ? `La respuesta se cortó dentro de «${truncatedFile}» y no llegó ningún archivo completo.` : 'La respuesta se cortó por el límite de salida antes de entregar archivos.'); }
   else if (ARTIFACT_HINT.test(text)) { kind = problems.some(p => /sin bloques|sin contenido/.test(p)) ? 'incomplete' : 'malformed'; if (!reasons.length) reasons.push('Hay marcadores de archivo o código, pero ninguno con el formato acordado (ruta + acción + contenido o parche).'); }
-  else if (REFUSAL.test(text)) { kind = 'refusal'; reasons.push(requestedFiles.length ? `El Desarrollador no completó la tarea y pide contexto: ${requestedFiles.join(', ')}.` : 'El Desarrollador declara que no puede completar la tarea.'); }
-  else { kind = 'malformed'; reasons.push('La respuesta no contiene bloques de archivo, parches ni la sección «SIN CAMBIOS»: no es una implementación.'); }
+  else if (flat.length <= 700 && PROVIDER_REFUSAL_OPENING.test(flat)) { kind = 'provider_refusal'; reasons.push(`Respuesta breve que se niega a la petición: «${flat.slice(0, 160)}».`); }
+  else {
+    const hit = BLOCKER_RX.find(b => b.re.test(text));
+    if (hit || requestedFiles.length) {
+      const type = hit?.type ?? 'information';
+      const sentence = hit ? sentenceWith(text, hit.re) : `Necesito el contenido de ${requestedFiles.join(', ')}.`;
+      blocker = { type, need: sentence, question: sentence, consult: null, declared: false };
+      kind = 'blocked';
+      reasons.push(`El Desarrollador no entregó cambios y explica un bloqueo (${type === 'permission' ? 'permiso' : type === 'capability' ? 'capacidad' : 'información'}, deducido del texto): «${sentence}»`);
+    } else { kind = 'malformed'; reasons.push('La respuesta no contiene bloques de archivo, parches, la sección «SIN CAMBIOS» ni un «BLOQUEO»: no es una implementación.'); }
+  }
   return {
     parsed: { ...sec, changes, truncatedFile, problems },
-    assessment: { kind, reasons: reasons.slice(0, 12), recoveredBy: changes.length ? recoveredBy : null, files: changes.length, truncatedFile, requestedFiles }
+    assessment: { kind, reasons: reasons.slice(0, 12), recoveredBy: changes.length ? recoveredBy : null, files: changes.length, truncatedFile, requestedFiles, blocker }
   };
 }
 

@@ -5,6 +5,7 @@ import { workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { cancelProcess, clearCancel, createAssessment, estimateAssessment, isCancelled, runAssessment } from '../services/assessment.ts';
 import { isActiveJob, trackJob } from '../services/activeJobs.ts';
+import { abortProcessCalls } from '../services/providerCalls.ts';
 import { createStoryProcess, estimateManualTest, estimateStory, generateManualTest, recoverStory, retryStory, runStory, stepByRole } from '../services/storyExecution.ts';
 import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
 import { describeProcess } from '../services/guidance.ts';
@@ -32,7 +33,7 @@ import { backlogRepo } from '../db/workspace.ts';
  * IA cuando el usuario lo autoriza con un presupuesto (POST /authorize). Puede cancelarse; se detiene entre pasos.
  */
 /** Configuración del pipeline autorizado (se normaliza y acota en el servidor). */
-const PIPELINE_INPUT = z.object({ autoApply: z.boolean().optional(), autoVerify: z.boolean().optional(), commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(), allowInstall: z.boolean().optional(), maxOutputRepairs: z.number().int().min(0).max(10).optional(), maxCorrections: z.number().int().min(0).max(10).optional(), maxIdenticalFailures: z.number().int().min(1).max(10).optional(), maxDurationMin: z.number().int().min(1).max(600).optional() });
+const PIPELINE_INPUT = z.object({ autoApply: z.boolean().optional(), autoVerify: z.boolean().optional(), commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(), allowInstall: z.boolean().optional(), maxOutputRepairs: z.number().int().min(0).max(10).optional(), maxCorrections: z.number().int().min(0).max(10).optional(), maxIdenticalFailures: z.number().int().min(1).max(10).optional(), maxDurationMin: z.number().int().min(1).max(600).optional(), maxConsultations: z.number().int().min(0).max(3).optional(), maxProviderRetries: z.number().int().min(0).max(3).optional(), providerTimeoutSec: z.number().int().min(5).max(900).nullable().optional() });
 
 export async function processRoutes(app: FastifyInstance) {
   // Al servir un proceso se calcula (no se persiste) su estado de activación en el Portal en marcha y la orientación.
@@ -89,7 +90,8 @@ export async function processRoutes(app: FastifyInstance) {
     app.log.info({ processId: id, kind: proc.kind, budget: body.data.budgetUsd }, 'proceso autorizado · inicia ejecución');
     const logger = (o: any, m: string) => app.log.info(o, m);
     const run = proc.kind === 'story_execution' ? runStory(slug, id, logger, () => isCancelled(id)).finally(() => clearCancel(id)) : proc.kind === 'delegated_task' ? runDelegation(slug, id, logger, () => isCancelled(id)).finally(() => clearCancel(id)) : runAssessment(slug, id, logger);
-    setImmediate(() => { trackJob(id, run).catch(e => app.log.error(e, 'fallo inesperado en el proceso')); });
+    // Se registra ya (no en el siguiente tick): un proceso en marcha nunca debe parecer huérfano.
+    trackJob(id, run).catch(e => app.log.error(e, 'fallo inesperado en el proceso'));
     return procs.get(id);
   });
 
@@ -98,7 +100,7 @@ export async function processRoutes(app: FastifyInstance) {
   // Lo ya hecho no se repite; el presupuesto adicional es un máximo, no un objetivo.
   app.post('/api/workspaces/:slug/processes/:id/continue', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ authorized: z.literal(true), addBudgetUsd: z.number().min(0).max(100).optional(), pipeline: PIPELINE_INPUT.optional() }).safeParse(req.body ?? {});
+    const body = z.object({ authorized: z.literal(true), addBudgetUsd: z.number().min(0).max(100).optional(), pipeline: PIPELINE_INPUT.optional(), answer: z.string().trim().min(2).max(8000).optional() }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Continuar exige tu autorización explícita.', code: 'authorization_required' });
     const procs = processesRepo(slug); const proc = procs.get(id);
     if (!proc || proc.kind !== 'story_execution' || !proc.result) return reply.code(404).send({ error: 'Proceso de historia no encontrado' });
@@ -108,17 +110,22 @@ export async function processRoutes(app: FastifyInstance) {
     if (!proc.result.applied && !proc.result.changes.some(c => !c.error) && !hasOutput) return reply.code(409).send({ error: 'El Desarrollador no entregó nada que continuar: vuelve a ejecutar la historia.', code: 'nothing_to_continue' });
     if (procs.running().length) return reply.code(409).send({ error: 'Ya hay un proceso en ejecución. Espera a que termine.' });
     const prev = proc.result.pipeline;
+    // Si el equipo preguntó algo (información, permiso o decisión), continuar sin respuesta solo repetiría la pregunta y gastaría créditos.
+    const request = prev?.ownerRequest ?? proc.result.failure?.request ?? null;
+    if (request && !body.data.answer) return reply.code(400).send({ error: `El equipo necesita tu respuesta para seguir: «${request.question}»`, code: 'answer_required', request });
     const cfg = normalizePipeline({ ...(prev?.config ?? {}), ...(body.data.pipeline ?? {}) });
     // Los límites nuevos se suman a lo ya consumido: continuar tras un tope concede ese margen otra vez, no más.
     const pipeline = prev
-      ? { ...prev, config: { ...cfg, maxCorrections: prev.corrections + cfg.maxCorrections, maxOutputRepairs: prev.outputRepairs + cfg.maxOutputRepairs }, failures: [], startedAt: new Date().toISOString() }
+      ? { ...prev, config: { ...cfg, maxCorrections: prev.corrections + cfg.maxCorrections, maxOutputRepairs: prev.outputRepairs + cfg.maxOutputRepairs, maxConsultations: (prev.consultations?.length ?? 0) + cfg.maxConsultations }, failures: [], startedAt: new Date().toISOString() }
       : newPipeline(cfg);
+    // La respuesta del propietario se entrega al agente que la pidió (una vez) al reanudar.
+    if (request && body.data.answer) { pipeline.ownerAnswers = [...(pipeline.ownerAnswers ?? []), { at: new Date().toISOString(), question: request.question, answer: body.data.answer, delivered: false }]; pipeline.ownerRequest = null; }
     procs.setResult(id, { ...proc.result, pipeline });
     procs.resume(id, Math.max(proc.budgetUsd, proc.spentUsd) + (body.data.addBudgetUsd ?? 0));
     app.log.info({ processId: id, addBudget: body.data.addBudgetUsd ?? 0, allowInstall: cfg.allowInstall }, 'pipeline de la historia: continuar (autorizado)');
     const logger = (o: any, m: string) => app.log.info(o, m);
     const run = resumeStory(slug, id, logger, () => isCancelled(id)).finally(() => clearCancel(id));
-    setImmediate(() => { trackJob(id, run).catch(e => app.log.error(e, 'fallo inesperado al continuar el proceso')); });
+    trackJob(id, run).catch(e => app.log.error(e, 'fallo inesperado al continuar el proceso'));
     return await withGuidance(slug, procs.get(id)!);
   });
 
@@ -130,7 +137,15 @@ export async function processRoutes(app: FastifyInstance) {
     if (proc.status === 'running' && !isActiveJob(id)) {
       // Huérfano: su ejecución murió con un servidor anterior. Se cierra como cancelado, igual que al cancelar en marcha.
       const procs = processesRepo(slug);
-      for (const s of proc.steps) if (s.status === 'pending' || s.status === 'running') procs.stepFinish(s.id, 'skipped', { error: 'interrumpido: el servidor se reinició durante la ejecución' });
+      for (const s of proc.steps) {
+        if (s.status === 'pending') procs.stepFinish(s.id, 'skipped', { error: 'interrumpido: el servidor se reinició durante la ejecución' });
+        else if (s.status === 'running') {
+          // La llamada interrumpida pudo facturarse: su entrada estimada queda como costo NO confirmado (nunca como gasto real).
+          const est = s.live?.inputUsd ? Number(s.live.inputUsd.toFixed(6)) : 0;
+          procs.stepFinish(s.id, 'failed', { tokensIn: s.inputTokens, tokensOut: s.outputTokens, cost: s.costUsd, outputMd: s.outputMd, error: `Interrumpido: el servidor se reinició durante esta llamada; no se sabe si el proveedor la completó${est ? `; posible costo NO confirmado ≈ ${est.toFixed(4)} USD` : ''}.` });
+          if (est) procs.addUnconfirmed(id, s.id, est);
+        }
+      }
       new Set(proc.steps.map(s => s.agentId)).forEach(aid => agentsRepo(slug).setStatus(aid, 'inactive'));
       const item = proc.backlogItemId ? backlogRepo(slug).get(proc.backlogItemId) : undefined;
       if (item?.status === 'in_progress') backlogRepo(slug).setStatus(item.id, 'pending', proc.id);
@@ -138,7 +153,12 @@ export async function processRoutes(app: FastifyInstance) {
       app.log.info({ processId: id }, 'proceso huérfano cancelado');
       return processesRepo(slug).get(id);
     }
-    if (proc.status === 'running') { cancelProcess(id); return { ...proc, cancelling: true }; }
+    if (proc.status === 'running') {
+      // Cancelar de verdad: además de la marca entre pasos, se abortan las llamadas al proveedor en curso.
+      cancelProcess(id); const aborted = abortProcessCalls(id);
+      app.log.info({ processId: id, abortedCalls: aborted }, 'cancelación solicitada');
+      return { ...proc, cancelling: true, abortedCalls: aborted };
+    }
     return proc;
   });
 

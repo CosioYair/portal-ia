@@ -11,8 +11,8 @@ import { currentPhase, phaseContext } from './operationalPhase.ts';
 import { buildRepoContext } from './repoContext.ts';
 import { annotateChanges, fileChangedSince, readRepoFile, type RawChange } from './repoWrite.ts';
 import { DEV_MAX_TOKENS, FILE_FORMAT, sys } from './storyPrompts.ts';
-import { assessDeveloperOutput, mergeChanges, type ParsedDevOutput } from './devOutput.ts';
-import { callAgentStep, implementerOutputs, isTruncatedStop, newPipeline, pausePipeline, PipelinePause, runPipelineStages, settleImplementation, StoryFailure, updateResult, type StoryRunCtx } from './storyPipeline.ts';
+import { assessDeveloperOutput, failureClassOf, mergeChanges, type ParsedDevOutput } from './devOutput.ts';
+import { callAgentStep, implementerOutputs, isTruncatedStop, newPipeline, pausePipeline, PipelinePause, providerPause, runPipelineStages, settleImplementation, StoryFailure, updateResult, type StoryRunCtx } from './storyPipeline.ts';
 export { parseFileBlocks, parseRuntimeChecks } from './devOutput.ts';
 import path from 'node:path';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
@@ -131,7 +131,10 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   let finalStatus: Process['status'] = 'done'; let finalError: string | null = null;
   let handedOff = false; // desde la entrega del Desarrollador, el resultado se actualiza en la base (no con el objeto local)
   const injected = new Map<string, string>();
-  const call = (stepId: string, system0: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[]) => callAgentStep(slug, processId, stepId, system0, user, maxTokens, { history, injected, log });
+  // Plazo y reintentos del proceso (si el propietario los fijó al autorizar) también para el plan y la implementación.
+  const call = (stepId: string, system0: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[]) => callAgentStep(slug, processId, stepId, system0, user, maxTokens, { history, injected, log, timeoutSec: config?.providerTimeoutSec ?? null, retries: config?.maxProviderRetries ?? null });
+  // Antes de la entrega el resultado vive en este objeto: al guardarlo se conservan los reintentos que la llamada anotó en la base.
+  const save = () => { const saved = procs.get(processId)?.result?.pipeline; if (result.pipeline && saved?.providerRetries) result.pipeline = { ...result.pipeline, providerRetries: saved.providerRetries }; procs.setResult(processId, result); };
   const cancelled = () => { if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true }); };
   let runCtx: StoryRunCtx | null = null;
 
@@ -147,7 +150,7 @@ ${treeText}
 Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "acceptance": string[], "risks": string[]}`, 2500);
     const planJson = extractJson(planRes.text);
     const plan: StoryPlan = { summary: String(planJson?.summary ?? planRes.text.slice(0, 500)), tasks: planJson?.tasks ?? [], filesToRead: (planJson?.filesToRead ?? []).slice(0, 8), filesToChange: (planJson?.filesToChange ?? []).slice(0, 10), acceptance: planJson?.acceptance ?? [], risks: planJson?.risks ?? [] };
-    result.plan = plan; procs.setResult(processId, result);
+    result.plan = plan; save();
 
     // 1b · Consultas de especialistas (M3): aportan recomendaciones concretas que recibe el implementador.
     for (const cs of proc.steps.filter(s => s.role === 'consultant')) {
@@ -159,7 +162,7 @@ ${JSON.stringify(plan, null, 2)}
 
 ${treeText}`, MAX_TOKENS.consultant);
       result.consultations!.push({ agentId: consultant.id, agentName: consultant.config.name, role: consultant.template.role, text: cRes.text.trim().slice(0, 8000) });
-      procs.setResult(processId, result);
+      save();
     }
     const consultText = result.consultations!.length ? `\n# Aportaciones de especialistas (tenlas en cuenta)\n${result.consultations!.map(c => `## ${c.agentName} · ${c.role}\n${c.text}`).join('\n\n')}\n` : '';
 
@@ -197,14 +200,16 @@ ${FILE_FORMAT}`;
     }
 
     // 3 · De la entrega a cambios válidos: recuperación local (sin IA) y, si está autorizado, reparación acotada.
-    handedOff = true; procs.setResult(processId, result);
-    runCtx = { slug, processId, item, project, repoPath: repo.path, plan, consultText, iterText, dev, qa, log, isCancelled, injected };
-    const outcome = await settleImplementation(runCtx, [{ text: implText, stopReason: implRes.stopReason }], { config });
+    handedOff = true; save();
+    const team = involved.map(id => agents.get(id)).filter(Boolean) as Agent[];
+    const rc: StoryRunCtx = { slug, processId, item, project, repoPath: repo.path, plan, consultText, iterText, dev, qa, team, log, isCancelled, injected };
+    runCtx = rc;
+    const outcome = await settleImplementation(rc, [{ text: implText, stopReason: implRes.stopReason, refusal: implRes.refusal ?? null }], { config });
     if (outcome === 'no_changes') throw new PipelinePause('no_changes', 'El Desarrollador concluye que la historia no requiere cambios de código. Revisa su justificación en el resumen.');
 
     if (config?.autoApply) {
       // 4 · Pipeline autorizado: aplicar → verificar → QA con evidencia → correcciones acotadas.
-      await runPipelineStages(runCtx);
+      await runPipelineStages(rc);
     } else if (qa && qaStep) {
       // 4' · Sin pipeline: QA revisa el diff (como antes) y el propietario sigue cada paso.
       cancelled();
@@ -227,16 +232,19 @@ Responde SOLO con JSON: {"approve": boolean, "summary": string, "issues": string
     knowledge.add({ projectId: project.id, title: `${item.storyId} · Plan e implementación propuesta — ${item.title}`, body: `# Plan\n${plan.summary}\n\n${plan.tasks.map(t => '- ' + t).join('\n')}\n\n# Implementación\n${fin.implementationSummary}\n\nArchivos: ${fin.changes.map(c => `${c.action} ${c.path}`).join(', ')}\n\n# Revisión QA\n${fin.review ? `${fin.review.approve ? 'Aprobada' : 'Con observaciones'} — ${fin.review.summary}\n${fin.review.issues.map(i => '- ' + i).join('\n')}` : 'Omitida por el propietario'}${fin.pipeline ? `\n\n# Pipeline\n${fin.pipeline.events.map(e => `- ${e.message}`).join('\n')}` : ''}`, authorAgentId: coord.id, authorAgentName: coord.config.name, processId });
     backlog.setStatus(item.id, 'review', processId);
   } catch (e: any) {
-    if (e instanceof PipelinePause && runCtx) {
+    // Fallo del proveedor tras la entrega del Desarrollador (con pipeline): pausa, no fallo; lo hecho se conserva.
+    const pp = runCtx && config && !(e instanceof PipelinePause) ? providerPause(e) : null;
+    if (pp && e?.failure) updateResult(slug, processId, x => ({ ...x, failure: e.failure }));
+    if ((e instanceof PipelinePause || pp) && runCtx) {
       // Pausa o parada del pipeline: el proceso termina «done» con lo hecho conservado y el motivo; «Continuar» lo retoma.
-      pausePipeline(runCtx, e);
+      pausePipeline(runCtx, e instanceof PipelinePause ? e : pp!);
       const fin = procs.get(processId)!.result!;
       backlog.setStatus(item.id, fin.applied || fin.changes.some(c => !c.error) ? 'review' : 'pending', processId);
     } else {
       if (e?.cancelled) { finalStatus = 'cancelled'; } else if (e?.budget) { finalStatus = 'budget_exceeded'; finalError = e.message; } else { finalStatus = 'failed'; finalError = e.message; }
       const failure = e instanceof StoryFailure ? e.failure : e?.cancelled ? { kind: 'cancelled' as const, detail: 'Cancelado por el propietario.' } : e?.budget ? { kind: 'budget' as const, detail: e.message } : e?.failure ?? { kind: 'internal' as const, detail: e?.message ?? String(e) };
       if (handedOff) updateResult(slug, processId, x => ({ ...x, failure, pipeline: x.pipeline ? { ...x.pipeline, state: 'stopped', phase: 'finished', reason: failure.detail, finishedAt: new Date().toISOString(), events: [...x.pipeline.events, { at: new Date().toISOString(), kind: 'error', message: failure.detail }] } : null }));
-      else { result.failure = failure; procs.setResult(processId, result); }
+      else { result.failure = failure; save(); }
       for (const s of procs.get(processId)!.steps) if (s.status === 'pending') procs.stepFinish(s.id, 'skipped', { error: finalStatus === 'cancelled' ? 'cancelado por el usuario' : null });
       const fin = procs.get(processId)!.result!;
       backlog.setStatus(item.id, fin.applied ? 'review' : 'pending', processId);
@@ -283,7 +291,7 @@ export async function recoverStory(slug: string, processId: string): Promise<Pro
   const a = assessment!; const m = meta!;
   if (!pool.length) {
     const base: ExecutionResult = proc.result ?? { plan, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [] };
-    procs.setResult(processId, { ...base, failure: { kind: a.kind === 'refusal' ? 'refusal' : 'output_contract', detail: `Recuperación sin IA: ${a.reasons.join(' ')}`, assessment: a } });
+    procs.setResult(processId, { ...base, failure: { kind: a.kind === 'refusal' || a.kind === 'blocked' || a.kind === 'provider_refusal' ? 'refusal' : 'output_contract', class: failureClassOf(a) ?? undefined, detail: `Recuperación sin IA: ${a.reasons.join(' ')}`, assessment: a } });
     throw Object.assign(new Error(`No se pudo recuperar ningún cambio sin IA (${a.kind}): ${a.reasons.slice(0, 3).join(' ')} Puedes pedir al Desarrollador que repare su entrega (sin repetir el plan) o volver a ejecutar la historia.`), { statusCode: 409, code: 'not_recoverable', assessment: a });
   }
   const changes = annotateChanges(repo.path, pool);

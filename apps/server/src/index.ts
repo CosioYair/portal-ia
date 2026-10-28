@@ -6,6 +6,8 @@ import { attachApp } from './services/system.ts';
 const app = await buildApp();
 // Mantenimiento puntual del backlog interno (una vez por versión; ver services/backlogMaintenance.ts).
 try { const { runBacklogMaintenance } = await import('./services/backlogMaintenance.ts'); const r = runBacklogMaintenance((o, m) => app.log.info(o, m)); r.summary.forEach(l => app.log.info(l)); } catch (e) { app.log.warn({ err: (e as Error).message }, 'saneamiento del backlog omitido'); }
+// Procesos «en ejecución» de un arranque anterior: se marcan como interrumpidos sin reenviar ninguna llamada (ver interruptions.ts).
+try { const { recoverInterruptedProcesses } = await import('./services/interruptions.ts'); const n = recoverInterruptedProcesses((o, m) => app.log.info(o, m)); if (n) app.log.warn({ interrupted: n }, 'procesos interrumpidos por el reinicio: pausados sin reenviar nada'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'recuperación de procesos interrumpidos omitida'); }
 // HU-144: Ctrl+C, SIGTERM y SIGHUP hacen el mismo apagado limpio que «Reiniciar» (puerto libre, sin hijos huérfanos).
 installSignalHandlers(app);
 attachApp(app);

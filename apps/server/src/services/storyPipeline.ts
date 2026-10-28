@@ -1,21 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Agent, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
+import type { Agent, AgentBlocker, AgentFailureKind, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { practicesFor } from './agentTemplates.ts';
-import { assessDeveloperOutput, clip, mergeChanges, type ParsedDevOutput } from './devOutput.ts';
+import { assessDeveloperOutput, clip, failureClassOf, mergeChanges, type ParsedDevOutput } from './devOutput.ts';
 import { filesIn, parseBuildErrors, parseFailingTests, parseTypeScriptErrors } from './diagnostics.ts';
 import { requirePolicy } from './executionPolicy.ts';
-import { injectLessons } from './lessons.ts';
+import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall } from './providerCalls.ts';
+import { injectLessons, recordDetections } from './lessons.ts';
 import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, verificationEvidence } from './qaGate.ts';
 /** Veredicto de QA con salida estructurada nativa del proveedor (si la admite); el motor lo valida igualmente. */
 const QA_SCHEMA = { name: 'veredicto_qa', description: 'Veredicto de la puerta de calidad con hallazgos y evidencia.', schema: QA_VERDICT_SCHEMA as unknown as Record<string, unknown> };
 import { annotateChanges, applyChanges, changesSinceBase, checkStaleChanges, commitInWorktree, readRepoFile, safeRelPath, type RawChange } from './repoWrite.ts';
 import { DEPS_MISSING_EXIT } from './sandbox.ts';
-import { FILE_FORMAT, PATCH_ONLY_FORMAT, sys } from './storyPrompts.ts';
+import { DEV_MAX_TOKENS, FILE_FORMAT, PATCH_ONLY_FORMAT, sys } from './storyPrompts.ts';
 import { runVerification, sandboxDeps } from './verification.ts';
 
 /**
@@ -42,7 +43,7 @@ export class StoryFailure extends Error { constructor(public failure: ProcessFai
 
 // ---------------------------------------------------------------- Llamadas a agentes
 
-export interface CallResult { text: string; stopReason: string | null; inputTokens: number; outputTokens: number; costUsd: number }
+export interface CallResult { text: string; stopReason: string | null; inputTokens: number; outputTokens: number; costUsd: number; refusal?: string | null }
 
 /** Lo que se exige que quede de presupuesto antes de una llamada: la entrada más la mitad de la salida máxima (criterio único del Portal). */
 export function estimateCallUsd(agent: Agent, system: string, user: string, maxTokens: number): number {
@@ -52,16 +53,29 @@ export function estimateCallUsd(agent: Agent, system: string, user: string, maxT
 
 export function budgetCheck(slug: string, processId: string, agent: Agent, system: string, user: string, maxTokens: number): { ok: boolean; needed: number; remaining: number } {
   const cur = processesRepo(slug).get(processId)!;
-  const needed = estimateCallUsd(agent, system, user, maxTokens); const remaining = cur.budgetUsd - cur.spentUsd;
+  // Lo no confirmado (llamadas abortadas o interrumpidas que pudieron facturarse) cuenta como gastado: criterio prudente.
+  const needed = estimateCallUsd(agent, system, user, maxTokens); const remaining = cur.budgetUsd - cur.spentUsd - (cur.unconfirmedUsd ?? 0);
   return { ok: needed <= remaining, needed, remaining };
+}
+
+export interface CallOptions {
+  history?: { role: 'user' | 'assistant'; content: string }[];
+  injected: Map<string, string>;
+  log: (o: any, m: string) => void;
+  schema?: { name: string; description?: string; schema: Record<string, unknown> };
+  /** Plazo fijo de la llamada (s); por defecto se calcula de la salida máxima (providerCalls.callTimeoutMs). */
+  timeoutSec?: number | null;
+  /** Reintentos por errores de conexión (por defecto 2). */
+  retries?: number | null;
 }
 
 /**
  * Una llamada de un paso (con lecciones validadas y prácticas inyectadas, registro de tokens/costo y política).
  * Con `history` (continuación) acumula en el mismo paso. Lanza `{ budget: true }` si el presupuesto no alcanza.
+ * La llamada tiene plazo y se aborta de verdad al cancelar; el estado real (enviada, esperando, recibiendo…) queda en el
+ * paso para la interfaz. Los errores de conexión se reintentan con espera exponencial; un plazo agotado no.
  */
-export async function callAgentStep(slug: string, processId: string, stepId: string, system0: string, user: string, maxTokens: number,
-  opts: { history?: { role: 'user' | 'assistant'; content: string }[]; injected: Map<string, string>; log: (o: any, m: string) => void; schema?: { name: string; description?: string; schema: Record<string, unknown> } }): Promise<CallResult> {
+export async function callAgentStep(slug: string, processId: string, stepId: string, system0: string, user: string, maxTokens: number, opts: CallOptions): Promise<CallResult> {
   const procs = processesRepo(slug); const proc = procs.get(processId)!;
   const step = proc.steps.find(s => s.id === stepId)!; const agent = agentsRepo(slug).get(step.agentId)!;
   if (!opts.injected.has(stepId)) {
@@ -71,34 +85,68 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   const system = opts.injected.get(stepId)!;
   const providerId = agent.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-  if (!cred || prow.status !== 'connected') throw Object.assign(new Error(`El proveedor ${providerId} no está conectado.`), { failure: { kind: 'provider', detail: `El proveedor ${providerId} no está conectado.` } });
+  if (!cred || prow.status !== 'connected') throw Object.assign(new Error(`El proveedor ${providerId} no está conectado.`), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'no_credential', detail: `El proveedor ${providerId} no está conectado: conéctalo en Proveedores.` } satisfies ProcessFailure });
   const models: ModelInfo[] = JSON.parse(prow.models_json);
   const b = budgetCheck(slug, processId, agent, system, user, maxTokens);
-  if (!b.ok) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${proc.spentUsd.toFixed(2)} de ${proc.budgetUsd.toFixed(2)} USD; esta llamada necesita ≈ ${b.needed.toFixed(2)} USD).`), { budget: true, needed: b.needed, remaining: b.remaining });
-  procs.stepStart(step.id);
-  const startedAt = now();
-  try {
-    requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
-    const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history: opts.history, responseSchema: opts.schema });
-    const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
-    const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
-    // Un paso puede necesitar varias llamadas (continuación de una respuesta cortada): acumulamos.
-    const acc = opts.history?.length ? prev : { inputTokens: 0, outputTokens: 0, costUsd: 0 };
-    procs.stepFinish(step.id, 'done', { tokensIn: acc.inputTokens + res.inputTokens, tokensOut: acc.outputTokens + res.outputTokens, cost: acc.costUsd + cost, outputMd: opts.history?.length ? `${opts.history.filter(h => h.role === 'assistant').map(h => h.content).join('')}${res.text}` : res.text });
-    procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
-    procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
-    opts.log({ step: step.title, tokens: res.inputTokens + res.outputTokens, cost: cost.toFixed(4), stop: res.stopReason }, 'paso completado');
-    return { text: res.text, stopReason: res.stopReason, inputTokens: res.inputTokens, outputTokens: res.outputTokens, costUsd: cost };
-  } catch (e) {
-    const err = e instanceof ProviderRequestError ? e.error : null;
-    let msg = err ? err.message : (e as Error).message;
-    const maybeBilled = !err || err.code === 'network' || (err.httpStatus ?? 0) >= 500;
-    const estIn = maybeBilled ? estimateTokens(system + user) : 0; const estCost = maybeBilled ? costUsd(providerId, agent.config.model, estIn, 0) : 0;
-    if (maybeBilled) msg += ` Costo estimado de la entrada enviada: ${estCost.toFixed(4)} USD (sin confirmación del proveedor).`;
-    procs.stepFinish(step.id, 'failed', { tokensIn: estIn, cost: estCost, error: msg });
-    if (maybeBilled) procs.addUsage(processId, estIn, 0, estCost);
-    procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'failed', tokensIn: estIn, tokensOut: 0, cost: estCost, startedAt });
-    throw Object.assign(new Error(msg), { failure: { kind: err ? 'provider' : 'internal', detail: msg } satisfies ProcessFailure });
+  if (!b.ok) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${proc.spentUsd.toFixed(2)} de ${proc.budgetUsd.toFixed(2)} USD${proc.unconfirmedUsd ? ` + ${proc.unconfirmedUsd.toFixed(2)} sin confirmar` : ''}; esta llamada necesita ≈ ${b.needed.toFixed(2)} USD).`), { budget: true, needed: b.needed, remaining: b.remaining, failure: { kind: 'budget', class: 'BUDGET_EXHAUSTED', detail: 'Presupuesto insuficiente para la siguiente llamada.' } satisfies ProcessFailure });
+  const timeoutMs = callTimeoutMs(maxTokens, agent.config.effort, opts.timeoutSec);
+  const maxAttempts = 1 + maxProviderRetries(opts.retries);
+  const inTok = estimateTokens(system + user + (opts.history ?? []).map(h => h.content).join(''));
+  const p = estimatePricing(providerId, agent.config.model);
+  const callEstimate = (inTok * p.inPerM + maxTokens * p.outPerM * 0.5) / 1_000_000;
+  const now0 = new Date();
+  let live: LiveCall = { state: 'preparing', provider: providerId, model: agent.config.model, startedAt: now0.toISOString(), lastEvent: 'Preparando la solicitud', lastEventAt: now0.toISOString(), deadlineAt: new Date(now0.getTime() + timeoutMs).toISOString(), timeoutMs, attempt: 1, maxAttempts, estimatedUsd: callEstimate, inputTokensEstimated: inTok, inputUsd: costUsd(providerId, agent.config.model, inTok, 0), maxOutputTokens: maxTokens };
+  const setLive = (patch: Partial<LiveCall>) => { live = { ...live, ...patch }; try { procs.setStepLive(step.id, live); } catch { /* el estado en vivo nunca rompe la llamada */ } };
+  procs.stepStart(step.id); setLive({});
+  const startedAt = now0.toISOString();
+  for (let attempt = 1; ; attempt++) {
+    const ctrl = registerCall(processId);
+    const sentAt = new Date();
+    setLive({ state: 'sending', attempt, lastEvent: attempt > 1 ? `Reenviando la solicitud (intento ${attempt} de ${maxAttempts})` : 'Enviando la solicitud al proveedor', lastEventAt: sentAt.toISOString(), deadlineAt: new Date(sentAt.getTime() + timeoutMs).toISOString() });
+    try {
+      requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
+      const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
+        model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history: opts.history, responseSchema: opts.schema, timeoutMs,
+        onProgress: e => setLive(e === 'sent' ? { state: 'waiting', lastEvent: 'Solicitud enviada; esperando la respuesta del proveedor', lastEventAt: new Date().toISOString() }
+          : e === 'headers' ? { state: 'receiving', lastEvent: 'El proveedor empezó a responder', lastEventAt: new Date().toISOString() }
+          : { state: 'processing', lastEvent: 'Respuesta recibida; procesándola', lastEventAt: new Date().toISOString() })
+      }, ctrl.signal);
+      const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
+      const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
+      // Un paso puede necesitar varias llamadas (continuación de una respuesta cortada): acumulamos.
+      const acc = opts.history?.length ? prev : { inputTokens: 0, outputTokens: 0, costUsd: 0 };
+      procs.stepFinish(step.id, 'done', { tokensIn: acc.inputTokens + res.inputTokens, tokensOut: acc.outputTokens + res.outputTokens, cost: acc.costUsd + cost, outputMd: opts.history?.length ? `${opts.history.filter(h => h.role === 'assistant').map(h => h.content).join('')}${res.text}` : res.text });
+      procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
+      procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
+      opts.log({ step: step.title, tokens: res.inputTokens + res.outputTokens, cost: cost.toFixed(4), stop: res.stopReason, attempt }, 'paso completado');
+      return { text: res.text, stopReason: res.stopReason, inputTokens: res.inputTokens, outputTokens: res.outputTokens, costUsd: cost, refusal: res.refusal ?? null };
+    } catch (e) {
+      const err = e instanceof ProviderRequestError ? e.error : null;
+      // Reintento acotado solo para errores de conexión (sin respuesta útil), con espera exponencial y cancelable.
+      if (isTransient(e) && attempt < maxAttempts && !ctrl.signal.aborted) {
+        const wait = backoffMs(attempt);
+        setLive({ state: 'retrying', lastEvent: `${err?.message ?? 'Error de conexión'} · reintento ${attempt + 1} de ${maxAttempts} en ${Math.round(wait / 1000)} s`, lastEventAt: new Date().toISOString() });
+        opts.log({ step: step.title, attempt, wait, code: err?.code }, 'error transitorio del proveedor: reintento');
+        try { updateResult(slug, processId, r => r.pipeline ? { ...r, pipeline: { ...r.pipeline, providerRetries: (r.pipeline.providerRetries ?? 0) + 1 } } : r); } catch { /* sin resultado */ }
+        unregisterCall(processId, ctrl);
+        const waitCtrl = registerCall(processId);
+        await sleepAbortable(wait, waitCtrl.signal);
+        const cancelledWhileWaiting = waitCtrl.signal.aborted; unregisterCall(processId, waitCtrl);
+        if (!cancelledWhileWaiting) continue;
+        e = new ProviderRequestError({ code: 'cancelled', message: 'Cancelado mientras esperaba para reintentar.' });
+      }
+      const cls = providerFailureClass(e);
+      const finalErr = e instanceof ProviderRequestError ? e.error : err;
+      let msg = finalErr ? finalErr.message : (e as Error).message;
+      // Lo que pudo facturarse sin confirmación del proveedor se guarda aparte del gasto confirmado (estimación de la entrada).
+      const billed = maybeBilled(e); const estCost = billed ? costUsd(providerId, agent.config.model, inTok, 0) : 0;
+      if (billed) msg += ` Posible costo NO confirmado por el proveedor: ≈ ${estCost.toFixed(4)} USD (estimación de la entrada enviada).`;
+      procs.stepFinish(step.id, 'failed', { error: msg });
+      if (billed) procs.addUnconfirmed(processId, step.id, estCost);
+      procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });
+      const cancelled = finalErr?.code === 'cancelled';
+      throw Object.assign(new Error(msg), { cancelled, failure: { kind: cancelled ? 'cancelled' : finalErr ? 'provider' : 'internal', class: cls.kind, providerCode: cls.code, detail: msg } satisfies ProcessFailure });
+    } finally { unregisterCall(processId, ctrl); }
   }
 }
 
@@ -127,6 +175,8 @@ export interface StoryRunCtx {
   slug: string; processId: string; item: BacklogItem; project: { id: string; name: string; description: string };
   repoPath: string; plan: StoryPlan | null; consultText: string; iterText: string;
   dev: Agent; qa: Agent | null;
+  /** Equipo AUTORIZADO del proceso (los agentes de sus pasos): los únicos a los que se puede consultar. */
+  team: Agent[];
   log: (o: any, m: string) => void; isCancelled: () => boolean; injected: Map<string, string>;
 }
 
@@ -138,13 +188,14 @@ async function stepCall(ctx: StoryRunCtx, agent: Agent, role: TeamRole, title: s
   const b = budgetCheck(ctx.slug, ctx.processId, agent, system, user, maxTokens);
   if (!b.ok) throw new PipelinePause('budget', `La siguiente llamada («${title}», ≈ ${b.needed.toFixed(2)} USD) superaría el presupuesto autorizado: quedan ${Math.max(0, b.remaining).toFixed(2)} USD. No se ha llamado a la IA; lo hecho se conserva.`);
   const stepId = reuseStepId ?? processesRepo(ctx.slug).addStep(ctx.processId, { agentId: agent.id, agentName: agent.config.name, title, model: agent.config.model, role, reason }).id;
-  const res = await callAgentStep(ctx.slug, ctx.processId, stepId, system, user, maxTokens, { injected: ctx.injected, log: ctx.log, schema });
+  const cfg = processesRepo(ctx.slug).get(ctx.processId)?.result?.pipeline?.config;
+  const res = await callAgentStep(ctx.slug, ctx.processId, stepId, system, user, maxTokens, { injected: ctx.injected, log: ctx.log, schema, timeoutSec: cfg?.providerTimeoutSec ?? null, retries: cfg?.maxProviderRetries ?? null });
   return { ...res, stepId };
 }
 
 // ---------------------------------------------------------------- 1 · De la respuesta del Desarrollador a cambios válidos
 
-export interface DevOutput { text: string; stopReason: string | null }
+export interface DevOutput { text: string; stopReason: string | null; /** Señal explícita de negativa del proveedor. */ refusal?: string | null }
 
 /** Salidas del Desarrollador de este proceso en orden (entrega original + reparaciones), para reanudar sin IA. */
 export function implementerOutputs(p: Process): DevOutput[] {
@@ -184,10 +235,120 @@ FORMATO DE RESPUESTA (texto plano; cada archivo con su bloque y su cierre):
 ${partial ? PATCH_ONLY_FORMAT : FILE_FORMAT}`;
 }
 
+/** Preguntas que solo puede responder el propietario (sus datos, credenciales, presupuesto o decisiones de negocio). */
+const OWNER_ONLY = /(propietario|\bdata\/|datos reales|credencial|\.env\b|clave(?:s)? (?:de api|maestra)|presupuesto|decisi[oó]n de negocio|prioridad(?:es)? del negocio|cliente final)/i;
+const norm = (t: string) => t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+
 /**
- * Convierte las salidas del Desarrollador en cambios válidos: recuperación local primero (sin IA) y, si no basta y está
- * autorizado, reparaciones acotadas del mismo Desarrollador. Devuelve 'ok' (cambios listos), 'no_changes' o lanza
- * StoryFailure / PipelinePause.
+ * Especialista del equipo AUTORIZADO del proceso que podría responder la pregunta (nunca uno de fuera: ampliar el
+ * equipo es decisión del propietario). Por la indicación del propio agente o por el tema de la pregunta.
+ */
+export function pickConsultant(team: Agent[], devId: string, blocker: AgentBlocker): Agent | null {
+  const others = team.filter(a => a.id !== devId);
+  if (!others.length || OWNER_ONLY.test(`${blocker.need} ${blocker.question}`)) return null;
+  if (blocker.consult) {
+    const c = norm(blocker.consult);
+    const byHint = others.find(a => [a.config.name, a.template.role, a.key].some(x => { const n = norm(x); return n && (c.includes(n) || n.includes(c)); }));
+    if (byHint) return byHint;
+  }
+  const q = `${blocker.need} ${blocker.question}`;
+  const caps: [RegExp, string][] = [
+    [/(arquitect|estructura|m[oó]dulo|\bapi\b|servicio|base de datos|esquema|dependencia|patr[oó]n)/i, 'consultar_arquitectura'],
+    [/(\bux\b|dise[nñ]o|interfaz|pantalla|accesib|usabilidad|texto visible|bot[oó]n)/i, 'consultar_ux'],
+    [/(prueba|\btest|qa\b|calidad|verificaci[oó]n)/i, 'revisar_calidad'],
+    [/(alcance|criterio|historia|plan|prioridad|requisito)/i, 'planificar']
+  ];
+  for (const [re, cap] of caps) if (re.test(q)) { const a = others.find(x => (x.config.capabilities ?? []).includes(cap as any)); if (a) return a; }
+  return null;
+}
+
+/** Contexto que pidió el agente y que el equipo puede darle sin preguntar a nadie: archivos del repositorio. */
+function suppliedFiles(ctx: StoryRunCtx, files: string[]): string {
+  let budget = 90_000;
+  return files.map(f => { const c = readRepoFile(ctx.repoPath, f, 30_000); if (c === null || budget <= 0) return null; budget -= c.length; return `## ${f}\n\`\`\`\n${c}\n\`\`\``; }).filter(Boolean).join('\n\n');
+}
+
+function continuationPrompt(ctx: StoryRunCtx, need: string, info: string, previous: string): string {
+  return `Antes no pudiste implementar la historia porque te faltaba: «${need}». Ya tienes esa información:
+${info}
+
+# Plan del Coordinador (resumen; no lo rehagas)
+${ctx.plan ? `${ctx.plan.summary}\nArchivos: ${ctx.plan.filesToChange.join(', ')}` : '(sin plan)'}
+# Tu respuesta anterior (recortada)
+${clip(previous, 12_000)}
+
+Ahora entrega la implementación completa en el formato acordado. Si aún falta algo imprescindible, responde con la sección BLOQUEO indicando exactamente qué y por qué (no repitas la misma petición si ya se te dio).
+
+FORMATO DE RESPUESTA (texto plano; cada archivo con su bloque y su cierre):
+${FILE_FORMAT}`;
+}
+
+/**
+ * MISSING_INFORMATION dentro de la autoridad del proceso, de lo más barato a lo más caro y cada cosa UNA vez:
+ * 1) la respuesta del propietario pendiente de entregar; 2) archivos del repositorio que el agente pidió (sin IA para
+ * obtenerlos); 3) una consulta a un especialista del equipo autorizado. Devuelve la nueva entrega del Desarrollador o
+ * null si no queda nada que intentar (entonces se pregunta al propietario).
+ */
+const blockerOf = (a: DevOutputAssessment): AgentBlocker => a.blocker ?? { type: 'information', need: a.reasons[0] ?? 'información no especificada', question: a.reasons[0] ?? '', consult: null, declared: false };
+
+/** La respuesta del propietario (información, permiso o decisión) se entrega UNA vez al agente que la pidió. */
+async function deliverOwnerAnswers(ctx: StoryRunCtx, a: DevOutputAssessment, previous: string): Promise<DevOutput | null> {
+  const p = pipelineOf(ctx.slug, ctx.processId);
+  const pending = (p?.ownerAnswers ?? []).filter(x => !x.delivered);
+  if (!pending.length) return null;
+  const n = ctx.dev.config.name;
+  emit(ctx, 'info', `${n} recibe tu respuesta y retoma la implementación.`, { phase: 'implementing', aiCall: true, detail: pending.map(x => `«${x.question}» → ${x.answer.slice(0, 200)}`).join(' · ') });
+  updatePipeline(ctx.slug, ctx.processId, { ownerAnswers: (p.ownerAnswers ?? []).map(x => ({ ...x, delivered: true })), ownerRequest: null });
+  const info = pending.map(x => `## Respuesta del propietario a «${x.question}»\n${x.answer}`).join('\n\n');
+  const res = await stepCall(ctx, ctx.dev, 'implementer', 'Implementación con la respuesta del propietario', 'El propietario respondió a lo que el agente necesitaba', sys(ctx.dev, ctx.project, ctx.item), continuationPrompt(ctx, blockerOf(a).need, info, previous), DEV_MAX_TOKENS);
+  return { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null };
+}
+
+async function resolveMissingInformation(ctx: StoryRunCtx, cfg: PipelineConfig, a: DevOutputAssessment, previous: string): Promise<DevOutput | null> {
+  const blocker = blockerOf(a);
+  const p = pipelineOf(ctx.slug, ctx.processId);
+  const system = sys(ctx.dev, ctx.project, ctx.item);
+  const n = ctx.dev.config.name;
+  if (a.requestedFiles.length && (p.contextSupplies ?? 0) < 1) {
+    const files = suppliedFiles(ctx, a.requestedFiles);
+    if (files) {
+      emit(ctx, 'info', `${n} necesitaba archivos del repositorio que no tenía; el equipo se los entrega (sin consultar a nadie).`, { phase: 'implementing', aiCall: true, detail: a.requestedFiles.join(', ') });
+      updatePipeline(ctx.slug, ctx.processId, { contextSupplies: (p.contextSupplies ?? 0) + 1 });
+      const res = await stepCall(ctx, ctx.dev, 'implementer', 'Implementación con el contexto solicitado', `Faltaba el contenido de ${a.requestedFiles.join(', ')}`, system, continuationPrompt(ctx, blocker.need, `# Contenido actual de los archivos solicitados\n${files}`, previous), DEV_MAX_TOKENS);
+      return { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null };
+    }
+  }
+  const asked = (p.consultations ?? []).map(c => norm(c.question));
+  const consultant = (p.consultations ?? []).length < cfg.maxConsultations && !asked.includes(norm(blocker.question)) ? pickConsultant(ctx.team, ctx.dev.id, blocker) : null;
+  if (consultant) {
+    emit(ctx, 'info', `${n} necesita información: «${blocker.question}». Se la pregunta a ${consultant.config.name} (${consultant.template.role}, del equipo autorizado).`, { phase: 'implementing', aiCall: true });
+    updatePipeline(ctx.slug, ctx.processId, { consultations: [...(p.consultations ?? []), { at: new Date().toISOString(), agentName: consultant.config.name, question: blocker.question }] });
+    const cRes = await stepCall(ctx, consultant, 'consultant', `Consulta de ${n}: ${blocker.question.slice(0, 80)}`, `${n} necesita esta información para implementar la historia`, sys(consultant, ctx.project, ctx.item),
+      `${n} está implementando esta historia y necesita tu respuesta para seguir. Responde con hechos concretos de tu especialidad, en 3-10 puntos; si no lo sabes con certeza, dilo y explica qué faltaría (no inventes).
+# Pregunta
+${blocker.question}
+# Lo que necesita
+${blocker.need}
+# Plan del Coordinador
+${ctx.plan ? JSON.stringify(ctx.plan, null, 2) : '(sin plan)'}`, 2500);
+    const res = await stepCall(ctx, ctx.dev, 'implementer', `Implementación con la respuesta de ${consultant.config.name}`, `Consultó a ${consultant.config.name}`, system, continuationPrompt(ctx, blocker.need, `## Respuesta de ${consultant.config.name} (${consultant.template.role})\n${cRes.text.trim().slice(0, 8000)}`, previous), DEV_MAX_TOKENS);
+    return { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null };
+  }
+  return null;
+}
+
+/** Corta sin reintentar: con pipeline, pausa/detiene con la petición al propietario; sin pipeline, el proceso falla con su clase. */
+function blockedStop(ctx: StoryRunCtx, cfg: PipelineConfig | null, kind: PipelinePauseKind, cls: AgentFailureKind, a: DevOutputAssessment, request: OwnerRequest, message: string): never {
+  updateResult(ctx.slug, ctx.processId, r => ({ ...r, failure: { kind: 'refusal', class: cls, detail: message, assessment: a, request } }));
+  if (cfg) { updatePipeline(ctx.slug, ctx.processId, { failureClass: cls, ownerRequest: request }); throw new PipelinePause(kind, message); }
+  throw new StoryFailure({ kind: 'refusal', class: cls, detail: message, assessment: a, request });
+}
+
+/**
+ * Convierte las salidas del Desarrollador en cambios válidos según la CLASE del problema:
+ * formato no válido o incompleto → recuperación local y reparación acotada; falta información → contexto, especialista
+ * o propietario; permiso, capacidad o negativa del proveedor → NUNCA se reintenta a ciegas: se pide o se explica.
+ * Devuelve 'ok' (cambios listos), 'no_changes' o lanza StoryFailure / PipelinePause.
  */
 export async function settleImplementation(ctx: StoryRunCtx, outputs: DevOutput[], opts: { config: PipelineConfig | null }): Promise<'ok' | 'no_changes'> {
   const knownFiles = ctx.plan ? [...ctx.plan.filesToRead, ...ctx.plan.filesToChange] : [];
@@ -195,7 +356,7 @@ export async function settleImplementation(ctx: StoryRunCtx, outputs: DevOutput[
   const evaluate = () => {
     let pool: RawChange[] = []; let meta: ParsedDevOutput | null = null; let last: DevOutputAssessment | null = null; let lastText = '';
     for (const o of outputs) {
-      const { parsed, assessment } = assessDeveloperOutput(o.text, { stopReason: o.stopReason, exists, knownFiles });
+      const { parsed, assessment } = assessDeveloperOutput(o.text, { stopReason: o.stopReason, exists, knownFiles, providerRefusal: o.refusal ?? null });
       pool = mergeChanges(pool, parsed.changes); last = assessment; lastText = o.text;
       if (!meta || (!meta.summary && parsed.summary) || (!meta.manualSteps.length && parsed.manualSteps.length)) meta = meta ? { ...parsed, summary: meta.summary || parsed.summary, userFacing: meta.userFacing || parsed.userFacing, manualSteps: meta.manualSteps.length ? meta.manualSteps : parsed.manualSteps, runtimeChecks: meta.runtimeChecks.length ? meta.runtimeChecks : parsed.runtimeChecks } : parsed;
     }
@@ -206,10 +367,12 @@ export async function settleImplementation(ctx: StoryRunCtx, outputs: DevOutput[
   };
   let ev = evaluate();
   let announced = false;
+  const who = ctx.dev.config.name;
   for (;;) {
     checkCancelled(ctx);
     const valid = ev.changes.filter(c => !c.error); const invalid = ev.changes.filter(c => c.error);
-    if (opts.config) updatePipeline(ctx.slug, ctx.processId, { lastAssessment: ev.assessment, phase: 'recovering' });
+    const cls: AgentFailureKind | null = failureClassOf(ev.assessment) ?? (invalid.length ? 'INVALID_OUTPUT' : null);
+    if (opts.config) updatePipeline(ctx.slug, ctx.processId, { lastAssessment: ev.assessment, failureClass: cls, phase: 'recovering' });
     if (!announced && ev.assessment.recoveredBy && ev.assessment.recoveredBy !== 'canonical' && opts.config) {
       emit(ctx, 'recovery', 'El Desarrollador entregó un formato incompleto. Recuperando los cambios existentes sin consumir IA.', { detail: `${valid.length} archivo(s) recuperados (${ev.assessment.recoveredBy}). ${ev.assessment.reasons.slice(0, 4).join(' ')}` });
       announced = true;
@@ -218,24 +381,49 @@ export async function settleImplementation(ctx: StoryRunCtx, outputs: DevOutput[
       updateResult(ctx.slug, ctx.processId, r => ({ ...r, changes: [], implementationSummary: `${ev.meta.summary}\n\nSin cambios: ${ev.meta.noChanges ?? ''}`.trim() }));
       return 'no_changes';
     }
-    const needsRepair = ev.assessment.kind !== 'implementation' || invalid.length > 0;
-    if (!needsRepair) { finalizeImplementation(ctx, ev.meta, ev.changes, ev.assessment); return 'ok'; }
+    if (!cls) { finalizeImplementation(ctx, ev.meta, ev.changes, ev.assessment); return 'ok'; }
+    const a = ev.assessment; const blocker = a.blocker;
+    const now = new Date().toISOString();
+    // Si el propietario ya respondió a lo que el agente necesitaba, se le entrega (una vez) antes de volver a parar.
+    if (opts.config && (cls === 'MISSING_INFORMATION' || cls === 'PERMISSION_REQUIRED' || cls === 'UNSUPPORTED_CAPABILITY')) {
+      const answered = await deliverOwnerAnswers(ctx, a, ev.lastText);
+      if (answered) { outputs = [...outputs, answered]; ev = evaluate(); continue; }
+    }
+    // Lo que NO se arregla reintentando: se conserva, se explica y se pide lo que haga falta.
+    if (cls === 'PROVIDER_REFUSAL') {
+      blockedStop(ctx, opts.config, 'provider_refusal', cls, a, { kind: 'decision', question: '¿Cómo quieres seguir con esta historia?', why: `El proveedor rechazó la petición del ${who}. Repetirla igual no cambiaría el resultado y gastaría créditos; la respuesta queda guardada como evidencia.`, askedBy: who, options: ['Reformular o acotar la historia (nueva iteración)', 'Cerrarla como resuelta fuera del flujo', 'Rechazarla'], at: now },
+        `El proveedor rechazó la petición (${a.reasons[0] ?? 'negativa'}). No se reintenta: repetir la misma petición no cambiaría el resultado.`);
+    }
+    if (cls === 'PERMISSION_REQUIRED') {
+      const dataAccess = /\bdata\/|datos (?:reales )?del propietario|credencial|\.env\b/i.test(`${blocker?.need} ${blocker?.question}`);
+      blockedStop(ctx, opts.config, 'permission', cls, a, { kind: 'permission', question: blocker?.question ?? '¿Qué permiso necesita?', why: dataAccess ? `${who} necesita acceder a tus datos reales (data/, credenciales o .env). Ningún agente puede acceder a ellos: es una regla de seguridad del Portal que no se amplía. Puedes responder con la información necesaria (sin secretos), acotar la historia a lo verificable en el repositorio o cerrarla.` : `${who} necesita un permiso que no tiene en este proceso: ${blocker?.need ?? ''}. No se amplía ningún permiso sin tu decisión explícita.`, askedBy: who, options: dataAccess ? ['Responder con la información necesaria (sin secretos)', 'Acotar la historia a lo verificable en el código', 'Cerrarla como resuelta fuera del flujo'] : ['Responder concediendo o denegando el permiso', 'Acotar la historia', 'Rechazarla'], at: now },
+        `Pausado: ${who} necesita un permiso que no tiene (${blocker?.need ?? 'sin detalle'}). No se reintenta ni se amplía nada sin tu decisión.`);
+    }
+    if (cls === 'UNSUPPORTED_CAPABILITY') {
+      blockedStop(ctx, opts.config, 'unsupported', cls, a, { kind: 'decision', question: blocker?.question ?? '¿Cómo quieres seguir?', why: `${who} no puede hacer esto con las herramientas disponibles: ${blocker?.need ?? ''}. Volver a pedírselo no cambiaría el resultado.`, askedBy: who, options: ['Responder con el dato o el resultado que falta (lo obtienes tú)', 'Acotar la historia a lo que sí puede hacerse', 'Cerrarla como resuelta fuera del flujo'], at: now },
+        `Detenido: ${who} no dispone de la capacidad necesaria (${blocker?.need ?? 'sin detalle'}). No se reintenta.`);
+    }
+    if (cls === 'MISSING_INFORMATION') {
+      const next = opts.config ? await resolveMissingInformation(ctx, opts.config, a, ev.lastText) : null;
+      if (next) { outputs = [...outputs, next]; ev = evaluate(); continue; }
+      blockedStop(ctx, opts.config, 'missing_information', cls, a, { kind: 'information', question: blocker?.question ?? a.reasons[0] ?? '¿Qué información falta?', why: `${who} no puede seguir sin esta información${blocker?.need && blocker.need !== blocker.question ? ` (${blocker.need})` : ''}. ${opts.config ? 'Nadie del equipo autorizado puede responderla (o ya se intentó).' : 'Este proceso no tiene el pipeline autorizado para consultar a nadie.'} Con tu respuesta, el equipo retoma donde lo dejó.`, askedBy: who, options: ['Responder la pregunta', 'Acotar la historia', 'Cerrarla como resuelta fuera del flujo'], at: now },
+        `Pausado: ${who} necesita información para seguir: «${blocker?.question ?? a.reasons[0] ?? 'sin detalle'}».`);
+    }
+    // INVALID_OUTPUT / INCOMPLETE_OUTPUT: reparación acotada del formato (solo esto se repara «a ciegas»).
     const repairs = opts.config ? pipelineOf(ctx.slug, ctx.processId).outputRepairs : 0;
     const canRepair = !!opts.config && repairs < opts.config.maxOutputRepairs;
     if (!canRepair) {
       if (valid.length) { finalizeImplementation(ctx, ev.meta, ev.changes, ev.assessment); return 'ok'; }
-      const failure: ProcessFailure = ev.assessment.kind === 'refusal'
-        ? { kind: 'refusal', detail: `El Desarrollador no completó la tarea: ${ev.assessment.reasons.join(' ')}`, assessment: ev.assessment }
-        : { kind: 'output_contract', detail: invalid.length && !ev.assessment.reasons.length ? `Ninguno de los ${invalid.length} cambio(s) del Desarrollador es aplicable: ${invalid.map(c => `${c.path}: ${c.error}`).join(' · ')}` : `El Desarrollador no entregó cambios aplicables en el formato acordado (${ev.assessment.kind}). ${ev.assessment.reasons.slice(0, 4).join(' ')}`, assessment: ev.assessment };
+      const failure: ProcessFailure = { kind: 'output_contract', class: cls, detail: invalid.length && !a.reasons.length ? `Ninguno de los ${invalid.length} cambio(s) del Desarrollador es aplicable: ${invalid.map(c => `${c.path}: ${c.error}`).join(' · ')}` : `El Desarrollador no entregó cambios aplicables en el formato acordado (${a.kind}). ${a.reasons.slice(0, 4).join(' ')}`, assessment: a };
       updateResult(ctx.slug, ctx.processId, r => ({ ...r, changes: ev.changes }));
       throw new StoryFailure(failure);
     }
-    emit(ctx, 'repair', 'Corrigiendo la entrega del Desarrollador dentro del presupuesto autorizado.', { phase: 'repairing', aiCall: true, detail: `Intento ${repairs + 1} de ${opts.config!.maxOutputRepairs} · ${ev.assessment.kind}: ${ev.assessment.reasons.slice(0, 3).join(' ')}` });
+    emit(ctx, 'repair', 'Corrigiendo la entrega del Desarrollador dentro del presupuesto autorizado.', { phase: 'repairing', aiCall: true, detail: `Intento ${repairs + 1} de ${opts.config!.maxOutputRepairs} · ${cls === 'INCOMPLETE_OUTPUT' ? 'entrega incompleta' : 'formato no válido'} (${a.kind}): ${a.reasons.slice(0, 3).join(' ')}` });
     const system = sys(ctx.dev, ctx.project, ctx.item);
-    const res = await stepCall(ctx, ctx.dev, 'implementer', `Reparación de la entrega (intento ${repairs + 1})`, `Entrega no aplicable (${ev.assessment.kind}): reparación acotada sin repetir el plan`, system, repairPrompt(ctx, ev.assessment, ev.lastText, valid, invalid), 12_000);
+    const res = await stepCall(ctx, ctx.dev, 'implementer', `Reparación de la entrega (intento ${repairs + 1})`, `Entrega no aplicable (${a.kind}): reparación acotada sin repetir el plan`, system, repairPrompt(ctx, a, ev.lastText, valid, invalid), 12_000);
     updatePipeline(ctx.slug, ctx.processId, { outputRepairs: repairs + 1 });
-    outputs = [...outputs, { text: res.text, stopReason: res.stopReason }];
-    const before = JSON.stringify(ev.assessment.reasons);
+    outputs = [...outputs, { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null }];
+    const before = JSON.stringify(a.reasons);
     ev = evaluate();
     emit(ctx, 'repair', ev.assessment.kind === 'implementation' && !ev.changes.some(c => c.error) ? `Entrega reparada: ${ev.changes.length} archivo(s) aplicables.` : `La reparación no resolvió todo (${ev.assessment.kind}).`, { costUsd: res.costUsd, detail: ev.assessment.reasons.slice(0, 3).join(' ') || null });
     if (ev.assessment.kind !== 'implementation' && JSON.stringify(ev.assessment.reasons) === before) {
@@ -438,10 +626,25 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
   throw new PipelinePause('limit', 'El pipeline alcanzó su número máximo de pasos internos.');
 }
 
+/**
+ * Fallo del PROVEEDOR durante el pipeline (tras la entrega del Desarrollador): no tumba el proceso. Plazo agotado o
+ * conexión caída tras los reintentos → pausa con lo hecho conservado; «Continuar» repite solo la llamada que falló.
+ * Credenciales → pausa por permiso. Lo desconocido no se convierte en pausa (se detiene con su diagnóstico).
+ */
+export function providerPause(e: any): PipelinePause | null {
+  const f: ProcessFailure | undefined = e?.failure; if (!f?.class) return null;
+  if (f.class === 'PROVIDER_TIMEOUT') return new PipelinePause('provider_timeout', `El proveedor no respondió a tiempo: ${f.detail} No se reintenta solo (la llamada pudo facturarse); lo hecho se conserva y «Continuar» repite solo esta llamada.`);
+  if (f.class === 'PROVIDER_CONNECTION_ERROR') return new PipelinePause('provider_error', `No se pudo completar la llamada al proveedor tras los reintentos permitidos: ${f.detail} Lo hecho se conserva; «Continuar» la repite.`);
+  if (f.class === 'PERMISSION_REQUIRED' && f.providerCode) return new PipelinePause('permission', `El proveedor rechazó la credencial o el permiso (${f.providerCode}): ${f.detail} Revisa el proveedor en Proveedores y continúa.`);
+  return null;
+}
+
 /** Cierra el pipeline en pausa/parada con el motivo (sin perder nada) y lo deja listo para «Continuar». */
 export function pausePipeline(ctx: StoryRunCtx, pause: PipelinePause) {
-  const stopped = pause.kind === 'repeated_failure' || pause.kind === 'limit' || pause.kind === 'qa' || pause.kind === 'no_changes' || pause.kind === 'refusal';
-  updatePipeline(ctx.slug, ctx.processId, { state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, reason: pause.message, phase: 'finished', finishedAt: now() }, { kind: 'pause', message: pause.message });
+  const stopped = ['repeated_failure', 'limit', 'qa', 'no_changes', 'refusal', 'provider_refusal', 'unsupported', 'unknown'].includes(pause.kind);
+  const CLASS: Partial<Record<PipelinePauseKind, AgentFailureKind>> = { budget: 'BUDGET_EXHAUSTED', network: 'PERMISSION_REQUIRED', environment: 'ENVIRONMENT_FAILURE', limit: 'RECOVERABLE_IMPLEMENTATION_ERROR', repeated_failure: 'RECOVERABLE_IMPLEMENTATION_ERROR', missing_information: 'MISSING_INFORMATION', permission: 'PERMISSION_REQUIRED', unsupported: 'UNSUPPORTED_CAPABILITY', provider_refusal: 'PROVIDER_REFUSAL', provider_timeout: 'PROVIDER_TIMEOUT', provider_error: 'PROVIDER_CONNECTION_ERROR', interrupted: 'UNKNOWN_FAILURE', unknown: 'UNKNOWN_FAILURE' };
+  const cur = pipelineOf(ctx.slug, ctx.processId);
+  updatePipeline(ctx.slug, ctx.processId, { state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, reason: pause.message, phase: 'finished', finishedAt: now(), failureClass: cur.failureClass && ['missing_information', 'permission', 'unsupported', 'provider_refusal'].includes(pause.kind) ? cur.failureClass : CLASS[pause.kind] ?? cur.failureClass ?? null }, { kind: 'pause', message: pause.message });
 }
 
 // ---------------------------------------------------------------- Reanudar (sin repetir lo hecho)
@@ -458,7 +661,8 @@ export async function resumeStory(slug: string, processId: string, log: (o: any,
   const dev = agents.get(devStep.agentId)!; const qa = qaStep ? agents.get(qaStep.agentId) ?? null : null;
   const r = proc.result!;
   const consultText = r.consultations?.length ? `\n# Aportaciones de especialistas (tenlas en cuenta)\n${r.consultations.map(c => `## ${c.agentName} · ${c.role}\n${c.text}`).join('\n\n')}\n` : '';
-  const ctx: StoryRunCtx = { slug, processId, item, project, repoPath: repo.path, plan: r.plan, consultText, iterText: '', dev, qa, log, isCancelled, injected: new Map() };
+  const team = Array.from(new Set(proc.steps.map(s => s.agentId))).map(id => agents.get(id)).filter(Boolean) as Agent[];
+  const ctx: StoryRunCtx = { slug, processId, item, project, repoPath: repo.path, plan: r.plan, consultText, iterText: '', dev, qa, team, log, isCancelled, injected: new Map() };
   const involved = Array.from(new Set([dev.id, ...(qa ? [qa.id] : [])]));
   involved.forEach(id => agents.setStatus(id, 'active'));
   backlog.setStatus(item.id, 'in_progress', processId);
@@ -467,14 +671,20 @@ export async function resumeStory(slug: string, processId: string, log: (o: any,
     updatePipeline(slug, processId, { state: 'running', reason: null, pauseKind: null, finishedAt: null }, { kind: 'info', message: 'El propietario autorizó continuar. El equipo retoma donde lo dejó.' });
     const cur = procs.get(processId)!.result!;
     if (!cur.applied && !cur.changes.some(c => !c.error)) {
-      const outcome = await settleImplementation(ctx, implementerOutputs(procs.get(processId)!), { config: cur.pipeline!.config });
+      const outs = implementerOutputs(procs.get(processId)!);
+      // Sin entrega del Desarrollador no hay nada que retomar (p. ej. interrumpido durante el plan): no se inventa nada.
+      if (!outs.length) throw new StoryFailure({ kind: 'internal', class: 'UNKNOWN_FAILURE', detail: 'No hay ninguna entrega del Desarrollador que retomar (se interrumpió antes). Vuelve a ejecutar la historia con un presupuesto nuevo.' });
+      const outcome = await settleImplementation(ctx, outs, { config: cur.pipeline!.config });
       if (outcome === 'no_changes') throw new PipelinePause('no_changes', 'El Desarrollador concluye que la historia no requiere cambios de código. Revisa su justificación.');
     }
     updateResult(slug, processId, x => ({ ...x, failure: null }));
     if (procs.get(processId)!.result!.pipeline!.config.autoApply) await runPipelineStages(ctx);
     else updatePipeline(slug, processId, { state: 'stopped', phase: 'finished', finishedAt: now(), reason: 'Cambios listos para revisar (sin aplicar automáticamente).' });
   } catch (e: any) {
+    const pp = e instanceof PipelinePause ? null : providerPause(e);
+    if (pp && e?.failure) updateResult(slug, processId, x => ({ ...x, failure: e.failure }));
     if (e instanceof PipelinePause) pausePipeline(ctx, e);
+    else if (pp) pausePipeline(ctx, pp);
     else if (e?.cancelled) { status = 'cancelled'; pausePipeline(ctx, new PipelinePause('cancelled', 'Cancelado por el propietario. Lo hecho se conserva.')); }
     else if (e?.budget) pausePipeline(ctx, new PipelinePause('budget', e.message));
     else { status = 'failed'; error = e.message; updateResult(slug, processId, x => ({ ...x, failure: e instanceof StoryFailure ? e.failure : e?.failure ?? { kind: 'internal', detail: e.message } })); updatePipeline(slug, processId, { state: 'stopped', phase: 'finished', finishedAt: now(), reason: e.message }, { kind: 'error', message: e.message }); }
@@ -484,5 +694,7 @@ export async function resumeStory(slug: string, processId: string, log: (o: any,
     backlog.setStatus(item.id, fin.applied || fin.changes.some(c => !c.error) ? 'review' : 'pending', processId);
     procs.finish(processId, status, error);
     log({ processId, state: fin.pipeline?.state, spent: procs.get(processId)?.spentUsd.toFixed(4) }, 'pipeline de la historia detenido');
+    // Detección determinista (sin IA) también al reanudar: bloqueos, negativas, plazos, verificaciones fallidas.
+    try { const ls = recordDetections(slug, processId, repo.path); if (ls.length) log({ processId, lessons: ls.map(l => l.detector) }, 'lecciones detectadas'); } catch (e: any) { log({ err: e.message }, 'detección de lecciones fallida'); }
   }
 }

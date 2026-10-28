@@ -78,6 +78,11 @@ export function workspaceDb(slug: string): DatabaseSync {
   if (!scols.includes('role')) db.exec(`ALTER TABLE process_steps ADD COLUMN role TEXT`);
   if (!scols.includes('reason')) db.exec(`ALTER TABLE process_steps ADD COLUMN reason TEXT`);
   if (!scols.includes('lessons_used')) db.exec(`ALTER TABLE process_steps ADD COLUMN lessons_used TEXT`);
+  // v0.12.2: estado real de la llamada en curso y costo posiblemente facturado pero no confirmado (estimación).
+  if (!scols.includes('live_json')) db.exec(`ALTER TABLE process_steps ADD COLUMN live_json TEXT`);
+  if (!scols.includes('unconfirmed_usd')) db.exec(`ALTER TABLE process_steps ADD COLUMN unconfirmed_usd REAL NOT NULL DEFAULT 0`);
+  const pcols3 = (db.prepare(`PRAGMA table_info(processes)`).all() as any[]).map(c => c.name);
+  if (!pcols3.includes('unconfirmed_usd')) db.exec(`ALTER TABLE processes ADD COLUMN unconfirmed_usd REAL NOT NULL DEFAULT 0`);
   // M5: versión de plantilla aplicada a cada agente.
   const acols = (db.prepare(`PRAGMA table_info(agents)`).all() as any[]).map(c => c.name);
   if (!acols.includes('template_version')) db.exec(`ALTER TABLE agents ADD COLUMN template_version TEXT`);
@@ -210,9 +215,9 @@ export function knowledgeRepo(slug: string) {
 
 export function processesRepo(slug: string) {
   const db = workspaceDb(slug);
-  const mapStep = (r: any): ProcessStep => ({ id: r.id, processId: r.process_id, position: r.position, agentId: r.agent_id, agentName: r.agent_name, title: r.title, status: r.status, model: r.model, inputTokens: r.tokens_in, outputTokens: r.tokens_out, costUsd: r.cost_usd, outputMd: r.output_md, error: r.error, startedAt: r.started_at, finishedAt: r.finished_at, role: r.role ?? null, reason: r.reason ?? null, lessonsUsed: r.lessons_used ? JSON.parse(r.lessons_used) : [] });
+  const mapStep = (r: any): ProcessStep => ({ id: r.id, processId: r.process_id, position: r.position, agentId: r.agent_id, agentName: r.agent_name, title: r.title, status: r.status, model: r.model, inputTokens: r.tokens_in, outputTokens: r.tokens_out, costUsd: r.cost_usd, outputMd: r.output_md, error: r.error, startedAt: r.started_at, finishedAt: r.finished_at, role: r.role ?? null, reason: r.reason ?? null, lessonsUsed: r.lessons_used ? JSON.parse(r.lessons_used) : [], live: r.live_json ? JSON.parse(r.live_json) : null, unconfirmedUsd: r.unconfirmed_usd ?? 0 });
   const mapProc = (r: any): Process => ({ id: r.id, projectId: r.project_id, kind: r.kind, title: r.title, status: r.status, budgetUsd: r.budget_usd, estimatedUsd: r.estimated_usd, spentUsd: r.spent_usd, inputTokens: r.tokens_in, outputTokens: r.tokens_out, createdAt: r.created_at, authorizedAt: r.authorized_at, startedAt: r.started_at, finishedAt: r.finished_at, error: r.error,
-    result: r.result_json ? JSON.parse(r.result_json) : null, delegation: r.delegation_json ? JSON.parse(r.delegation_json) : null, backlogItemId: r.backlog_item_id ?? null,
+    result: r.result_json ? JSON.parse(r.result_json) : null, delegation: r.delegation_json ? JSON.parse(r.delegation_json) : null, backlogItemId: r.backlog_item_id ?? null, unconfirmedUsd: r.unconfirmed_usd ?? 0,
     archivedAt: r.archived_at ?? null, archiveId: r.archive_id ?? null,
     steps: (db.prepare(`SELECT * FROM process_steps WHERE process_id = ? ORDER BY position`).all(r.id) as any[]).map(mapStep) });
   return {
@@ -254,12 +259,20 @@ export function processesRepo(slug: string) {
     finish(id: string, status: ProcessStatus, error: string | null = null) {
       db.prepare(`UPDATE processes SET status = ?, finished_at = ?, error = ? WHERE id = ?`).run(status, now(), error, id);
     },
+    /** Estado real de la llamada en curso de un paso (null al terminar). */
+    setStepLive(stepId: string, live: unknown | null) { db.prepare(`UPDATE process_steps SET live_json = ? WHERE id = ?`).run(live ? JSON.stringify(live) : null, stepId); },
+    /** Costo posiblemente facturado y NO confirmado (llamada abortada, caída, reinicio): se registra aparte del gasto confirmado. */
+    addUnconfirmed(processId: string, stepId: string | null, usd: number) {
+      if (!(usd > 0)) return;
+      db.prepare(`UPDATE processes SET unconfirmed_usd = unconfirmed_usd + ? WHERE id = ?`).run(usd, processId);
+      if (stepId) db.prepare(`UPDATE process_steps SET unconfirmed_usd = unconfirmed_usd + ? WHERE id = ?`).run(usd, stepId);
+    },
     addUsage(id: string, tokensIn: number, tokensOut: number, cost: number) {
       db.prepare(`UPDATE processes SET tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, spent_usd = spent_usd + ? WHERE id = ?`).run(tokensIn, tokensOut, cost, id);
     },
     stepStart(stepId: string) { db.prepare(`UPDATE process_steps SET status = 'running', started_at = ? WHERE id = ?`).run(now(), stepId); },
     stepFinish(stepId: string, status: StepStatus, data: { tokensIn?: number; tokensOut?: number; cost?: number; outputMd?: string | null; error?: string | null }) {
-      db.prepare(`UPDATE process_steps SET status = ?, tokens_in = ?, tokens_out = ?, cost_usd = ?, output_md = ?, error = ?, finished_at = ? WHERE id = ?`)
+      db.prepare(`UPDATE process_steps SET status = ?, tokens_in = ?, tokens_out = ?, cost_usd = ?, output_md = ?, error = ?, finished_at = ?, live_json = NULL WHERE id = ?`)
         .run(status, data.tokensIn ?? 0, data.tokensOut ?? 0, data.cost ?? 0, data.outputMd ?? null, data.error ?? null, now(), stepId);
     },
     logExecution(e: { projectId: string; agentId: string; kind: string; status: string; tokensIn: number; tokensOut: number; cost: number; startedAt: string }) {

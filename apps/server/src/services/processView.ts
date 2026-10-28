@@ -4,6 +4,7 @@ import type { GuidanceOptions } from './guidance.ts';
 import { listFeedback } from './manual-test-feedback.ts';
 import { detectSandbox } from './sandbox.ts';
 import { lastUpdate } from './system.ts';
+import { isActiveJob } from './activeJobs.ts';
 
 /**
  * Datos que necesita el recorrido guiado de un proceso de historia (sin IA, solo lectura): pasos con falla de la prueba,
@@ -23,5 +24,7 @@ export async function flowOptions(slug: string, p: Process, item?: BacklogItem |
   const it = item ?? (p.backlogItemId ? backlogRepo(slug).get(p.backlogItemId) : null);
   const siblings = it ? processesRepo(slug).listAll(p.projectId).filter(x => x.backlogItemId === it.id && x.kind === 'story_execution') : [];
   const idx = siblings.findIndex(x => x.id === p.id);
-  return { failedStepDetails, sandbox, updateFailedLog, iteration: idx >= 0 ? { number: siblings.length - idx, total: siblings.length } : null };
+  // «En ejecución» sin ejecución viva en este servidor: nada trabaja de verdad (no se muestra como actividad sana).
+  const orphan = p.status === 'running' && !isActiveJob(p.id);
+  return { failedStepDetails, sandbox, updateFailedLog, iteration: idx >= 0 ? { number: siblings.length - idx, total: siblings.length } : null, orphan };
 }
