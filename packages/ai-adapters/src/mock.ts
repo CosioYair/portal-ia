@@ -26,15 +26,15 @@ interface Script { rules: Rule[]; /** Marcadores a buscar en cada prompt para el
   /** Límite de salida REAL: el texto que no cabe en max_tokens (menos el razonamiento oculto) se corta con stop «max_tokens». */
   enforceMaxTokens?: boolean }
 
-let cachedScript: { path: string; mtime: number; script: Script } | null = null;
+/**
+ * El guion se lee en CADA llamada. Antes se guardaba en caché por fecha de modificación: en Linux (sandbox Docker) dos
+ * escrituras dentro del mismo tic del reloj de archivos tienen la misma fecha y una prueba respondía con las reglas de la
+ * anterior (HU-155: dos pruebas del Portal fallaron así en el sandbox y costaron tres correcciones pagadas).
+ */
 function loadScript(): Script {
   const p = process.env.PORTAL_MOCK_SCRIPT;
   if (!p || !fs.existsSync(p)) return { rules: [] };
-  const mtime = fs.statSync(p).mtimeMs;
-  if (cachedScript && cachedScript.path === p && cachedScript.mtime === mtime) return cachedScript.script;
-  const script = JSON.parse(fs.readFileSync(p, 'utf8')) as Script;
-  cachedScript = { path: p, mtime, script };
-  return script;
+  return JSON.parse(fs.readFileSync(p, 'utf8')) as Script;
 }
 
 export let mockCalls = 0;
