@@ -261,6 +261,8 @@ const QA_TXT: Record<string, string> = { approved: 'QA aprobó con evidencia', r
 const DEL_TXT: Record<string, string> = { delivered: 'entregado', pending: 'pendiente', failed: 'no se pudo entregar', dropped: 'descartado con motivo (QA lo revisa)' };
 const DEL_ICON: Record<string, string> = { delivered: '✓', pending: '○', failed: '✕', dropped: '–' };
 const KIND_TXT: Record<string, string> = { code: 'código', test: 'pruebas', docs: 'documentación', config: 'configuración' };
+const CHECK_TXT: Record<string, string> = { passed: 'superada', failed: 'fallida', not_applicable: 'no aplica', undetermined: 'no determinada' };
+const CHECK_ICON: Record<string, string> = { passed: '✓', failed: '✕', not_applicable: '–', undetermined: '?' };
 
 /**
  * Entrega por entregables (procesos con manifiesto): qué está entregado de verdad en el worktree y qué falta, qué unidad
@@ -281,6 +283,7 @@ function DeliveryPanel({ d, running }: { d: DeliveryProgress; running: boolean }
       {level(d.levels.complete, 'Toda la funcionalidad planificada está entregada', 'Falta funcionalidad por entregar', '')}
       {level(d.levels.qaApproved, 'QA aprobó los criterios de aceptación con evidencia', 'QA aún no ha aprobado los criterios de aceptación', '')}
     </ul>
+    {d.checks?.length > 0 && <ul className="sf-del-checks" aria-label="Comprobaciones">{d.checks.map(c => <li key={c.name} data-state={c.state} title={c.detail}><span aria-hidden="true">{CHECK_ICON[c.state]}</span><span>{c.name}: <strong>{CHECK_TXT[c.state]}</strong> <span className="muted">· {c.detail}</span></span></li>)}</ul>}
     <ul className="sf-del-list" aria-label="Lista de entregables">
       {d.deliverables.map(x => <li key={x.path} data-status={x.status} title={x.note ?? undefined}><span aria-hidden="true">{DEL_ICON[x.status]}</span><span className="mono">{x.path}</span><span className="small muted">{KIND_TXT[x.kind]}{x.planned ? '' : ' · fuera del plan'} · {DEL_TXT[x.status]}{x.lines ? ` · ${x.lines} líneas` : ''}</span></li>)}
     </ul>

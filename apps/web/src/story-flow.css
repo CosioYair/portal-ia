@@ -73,3 +73,9 @@
 .sf-del-meta { display: flex; gap: 14px; flex-wrap: wrap; color: #5C5F66; }
 .sf-del-blocker { color: #8A3A00; }
 @media (max-width: 520px) { .sf-del-list li { grid-template-columns: 16px minmax(0, 1fr); } .sf-del-list li > .small { grid-column: 2; } }
+.sf-del-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.sf-del-checks li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 6px; overflow-wrap: anywhere; }
+.sf-del-checks li[data-state="passed"] { color: #0B5652; }
+.sf-del-checks li[data-state="failed"] { color: #8A3A00; }
+.sf-del-checks li[data-state="undetermined"] { color: #7A4A00; }
+.sf-del-checks li[data-state="not_applicable"] { color: #5C5F66; }
