@@ -270,7 +270,8 @@ export function processesRepo(slug: string) {
     addUsage(id: string, tokensIn: number, tokensOut: number, cost: number) {
       db.prepare(`UPDATE processes SET tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, spent_usd = spent_usd + ? WHERE id = ?`).run(tokensIn, tokensOut, cost, id);
     },
-    stepStart(stepId: string) { db.prepare(`UPDATE process_steps SET status = 'running', started_at = ? WHERE id = ?`).run(now(), stepId); },
+    // Una continuación reutiliza el paso: el final y el error de la llamada anterior no pueden seguir visibles mientras corre.
+    stepStart(stepId: string) { db.prepare(`UPDATE process_steps SET status = 'running', started_at = ?, finished_at = NULL, error = NULL WHERE id = ?`).run(now(), stepId); },
     stepFinish(stepId: string, status: StepStatus, data: { tokensIn?: number; tokensOut?: number; cost?: number; outputMd?: string | null; error?: string | null }) {
       db.prepare(`UPDATE process_steps SET status = ?, tokens_in = ?, tokens_out = ?, cost_usd = ?, output_md = ?, error = ?, finished_at = ?, live_json = NULL WHERE id = ?`)
         .run(status, data.tokensIn ?? 0, data.tokensOut ?? 0, data.cost ?? 0, data.outputMd ?? null, data.error ?? null, now(), stepId);

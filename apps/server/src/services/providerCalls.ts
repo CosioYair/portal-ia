@@ -89,6 +89,23 @@ export function abortProcessCalls(processId: string): number {
 }
 export const inflightCount = (processId: string) => inflight.get(processId)?.size ?? 0;
 
+/**
+ * Vigilante de la llamada: si al pasar el plazo (más un margen) la promesa del adaptador sigue sin terminar —un adaptador
+ * que no respeta la señal, una lectura que no se corta—, se aborta y se da por agotada. Ninguna llamada puede quedar
+ * «esperando» para siempre. PORTAL_PROVIDER_WATCHDOG_GRACE_MS cambia el margen (pruebas).
+ */
+export function withWatchdog<T>(call: Promise<T>, ctrl: AbortController, timeoutMs: number): Promise<T> {
+  const grace = Number(process.env.PORTAL_PROVIDER_WATCHDOG_GRACE_MS) || 15_000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      ctrl.abort();
+      reject(new ProviderRequestError({ code: 'timeout', message: `La llamada superó su plazo (${Math.round(timeoutMs / 1000)} s) y no terminó al abortarla; el Portal la da por agotada. La solicitud pudo haberse procesado y facturado.` }));
+    }, timeoutMs + grace);
+  });
+  return Promise.race([call, guard]).finally(() => clearTimeout(timer));
+}
+
 /** Espera abortable (entre reintentos): si se cancela el proceso, deja de esperar. */
 export function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise(resolve => { const t = setTimeout(resolve, ms); signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true }); });

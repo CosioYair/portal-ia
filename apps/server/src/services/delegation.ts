@@ -7,7 +7,7 @@ import { requirePolicy } from './executionPolicy.ts';
 import { buildRepoContext } from './repoContext.ts';
 import { addManualItem, resetStory } from './backlog.ts';
 import { phaseContext } from './operationalPhase.ts';
-import { callTimeoutMs, maybeBilled, registerCall, unregisterCall } from './providerCalls.ts';
+import { callTimeoutMs, maybeBilled, registerCall, unregisterCall, withWatchdog } from './providerCalls.ts';
 
 /**
  * Encargos delegados: el Asistente (o el propietario) encarga una tarea a un agente responsable —revisar y replantear
@@ -163,7 +163,8 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
     const ctrl = registerCall(processId);
     try {
       requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
-      const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history, timeoutMs: callTimeoutMs(maxTokens, agent.config.effort) }, ctrl.signal);
+      const timeoutMs = callTimeoutMs(maxTokens, agent.config.effort);
+      const res = await withWatchdog(getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history, timeoutMs }, ctrl.signal), ctrl, timeoutMs);
       const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
       const prev = procs.get(processId)!.steps[stepIdx]; const acc = history?.length ? prev : { inputTokens: 0, outputTokens: 0, costUsd: 0 };
       procs.stepFinish(step.id, 'done', { tokensIn: acc.inputTokens + res.inputTokens, tokensOut: acc.outputTokens + res.outputTokens, cost: acc.costUsd + cost, outputMd: history?.length ? `${history.filter(h => h.role === 'assistant').map(h => h.content).join('')}${res.text}` : res.text });

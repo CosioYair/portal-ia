@@ -28,6 +28,8 @@ const LABELS: Record<FlowStageKey, string> = {
   runtime: 'Comprobar en ejecución', manual: 'Prueba de aceptación paso a paso', close: 'Cerrar o iterar'
 };
 const usd = (n: number | null | undefined) => (n ?? 0).toFixed(2);
+/** Margen tras el plazo de una llamada antes de declararla «sin cerrar»: vigilante (15 s por defecto) + 30 s. */
+export const OVERDUE_GRACE_MS = 45_000;
 /** Estado real de una llamada al proveedor (lo que de verdad se sabe; sin streaming no hay progreso intermedio). */
 export const LIVE_LABEL: Record<string, string> = { preparing: 'preparando la solicitud', sending: 'enviando la solicitud al proveedor', waiting: 'esperando la respuesta del proveedor', receiving: 'recibiendo la respuesta', processing: 'procesando la respuesta', retrying: 'esperando para reintentar', cancelling: 'cancelando' };
 const ROLE: Record<string, string> = { planner: 'planifica', implementer: 'implementa', reviewer: 'revisa', consultant: 'consulta' };
@@ -74,6 +76,8 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
   let forced: FlowStageKey | null = null; // etapa actual cuando una advertencia aún espera tu decisión
   const responsible = p.steps.filter(s => s.status === 'running').map(s => ({ agentName: s.agentName, role: ROLE[s.role ?? ''] ?? 'trabaja', status: 'trabajando' }));
   const implOut = !!p.steps.find(s => s.role === 'implementer')?.outputMd?.trim() || !!p.steps[1]?.outputMd?.trim();
+  // Llamada «en curso» más allá de su plazo + el margen del vigilante + 30 s: algo impidió cerrarla (nunca se da por sana).
+  const overdue = p.steps.find(s => s.status === 'running' && s.live && Date.now() > Date.parse(s.live.deadlineAt) + OVERDUE_GRACE_MS);
 
   // 1 · Ejecución de los agentes
   if (p.status === 'pending_authorization') {
@@ -83,6 +87,12 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
     set('execute', 'blocked', 'Sin ejecución activa: el Portal se reinició o perdió el proceso');
     issue = { kind: 'process_interrupted', level: 'blocker', cause: 'environment', title: 'Nadie está trabajando en este proceso', explanation: 'Figura «en ejecución», pero no hay ninguna ejecución viva en el Portal (se reinició o se cayó a mitad). Ninguna llamada al proveedor sigue en curso. Ciérralo: lo terminado se conserva y el paso interrumpido queda registrado con su posible costo no confirmado.', details: p.steps.filter(s => s.status === 'running').map(s => ({ text: `${s.agentName}: ${s.title} — interrumpido` })), files: [], responsible: [] };
     actions.push(act('cancel', 'Cerrar el proceso interrumpido', 'Lo marca como interrumpido sin reenviar nada; después podrás continuar o volver a ejecutar.'));
+  } else if (p.status === 'running' && overdue) {
+    // El plazo y el vigilante deberían haberla cerrado: si sigue «en curso» pasado el margen, no se muestra como sana.
+    const l = overdue.live!; const late = Math.round((Date.now() - Date.parse(l.deadlineAt)) / 1000);
+    set('execute', 'blocked', `${overdue.agentName}: la llamada superó su plazo hace ${late} s y no se ha cerrado`);
+    issue = { kind: 'call_overdue', level: 'blocker', cause: 'environment', title: 'Una llamada al proveedor superó su plazo y no se cerró', explanation: `La llamada de ${overdue.agentName} («${overdue.title}») debía terminar o abortarse antes de ${new Date(l.deadlineAt).toLocaleTimeString('es-MX')} y sigue sin cerrarse. No se sabe si el proveedor la completó ni si la facturó. Cancelar aborta lo que quede y conserva lo terminado.`, details: [{ text: `Último hecho confirmado: ${l.lastEvent} (${new Date(l.lastEventAt).toLocaleTimeString('es-MX')})` }, { text: `${l.provider} · ${l.model} · intento ${l.attempt} de ${l.maxAttempts}` }], files: [], responsible: [] };
+    actions.push(act('cancel', 'Cancelar el proceso', 'Aborta la llamada y detiene el proceso; lo terminado se conserva.'));
   } else if (p.status === 'running' && pl && pl.phase !== 'implementing') {
     const valid = (r?.changes ?? []).filter(c => !c.error).length;
     headline = pl.events.at(-1)?.message ?? null;

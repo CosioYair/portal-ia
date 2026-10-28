@@ -14,7 +14,8 @@ import { ProviderRequestError, estimateTokens, type CompletionRequest, type Comp
 interface Rule { match: string; text?: string; textFile?: string; stopReason?: string; error?: string; /** Solo responde si el prompt contiene este texto (p. ej. una lección). */ requires?: string; /** Texto alternativo si falta `requires`. */ otherwise?: string;
   /** Tarda este tiempo en responder (respeta el plazo y la cancelación de la llamada, como una petición HTTP real). */ delayMs?: number;
   /** Las primeras N llamadas que encajan fallan con `error` (o `network`); después responde normalmente. */ failTimes?: number;
-  /** Señal explícita de negativa del proveedor (como stop_reason «refusal»). */ refusal?: boolean }
+  /** Señal explícita de negativa del proveedor (como stop_reason «refusal»). */ refusal?: boolean;
+  /** No termina nunca e ignora el plazo y la cancelación (adaptador roto o lectura que no se corta): lo cierra el vigilante. */ hang?: boolean }
 interface Script { rules: Rule[]; /** Marcadores a buscar en cada prompt para el registro. */ markers?: string[] }
 
 let cachedScript: { path: string; mtime: number; script: Script } | null = null;
@@ -60,6 +61,7 @@ export const mockAdapter: ProviderAdapter = {
     req.onProgress?.('sent');
     if (!rule) { req.onProgress?.('headers'); req.onProgress?.('body'); return { text: DEFAULT_TEXT, inputTokens: estimateTokens(hay), outputTokens: estimateTokens(DEFAULT_TEXT), stopReason: 'end_turn' }; }
     const n = (ruleCalls.get(rule.match) ?? 0) + 1; ruleCalls.set(rule.match, n);
+    if (rule.hang) { req.onProgress?.('headers'); return new Promise<CompletionResult>(() => { /* nunca */ }); }
     if (rule.delayMs) await wait(rule.delayMs, req.timeoutMs, signal);
     else if (signal?.aborted) throw new ProviderRequestError({ code: 'cancelled', message: 'Llamada cancelada antes de terminar (simulado).' });
     if (rule.failTimes !== undefined ? n <= rule.failTimes : !!rule.error) throw new ProviderRequestError({ code: (rule.error ?? 'network') as any, message: `Error simulado: ${rule.error ?? 'network'} (llamada ${n})`, httpStatus: rule.error === 'provider_error' ? 529 : undefined });

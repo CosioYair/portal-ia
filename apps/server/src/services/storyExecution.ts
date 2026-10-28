@@ -132,7 +132,7 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   let handedOff = false; // desde la entrega del Desarrollador, el resultado se actualiza en la base (no con el objeto local)
   const injected = new Map<string, string>();
   // Plazo y reintentos del proceso (si el propietario los fijó al autorizar) también para el plan y la implementación.
-  const call = (stepId: string, system0: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[]) => callAgentStep(slug, processId, stepId, system0, user, maxTokens, { history, injected, log, timeoutSec: config?.providerTimeoutSec ?? null, retries: config?.maxProviderRetries ?? null });
+  const call = (stepId: string, system0: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[], operation?: string) => callAgentStep(slug, processId, stepId, system0, user, maxTokens, { history, injected, log, timeoutSec: config?.providerTimeoutSec ?? null, retries: config?.maxProviderRetries ?? null, operation });
   // Antes de la entrega el resultado vive en este objeto: al guardarlo se conservan los reintentos que la llamada anotó en la base.
   const save = () => { const saved = procs.get(processId)?.result?.pipeline; if (result.pipeline && saved?.providerRetries) result.pipeline = { ...result.pipeline, providerRetries: saved.providerRetries }; procs.setResult(processId, result); };
   const cancelled = () => { if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true }); };
@@ -195,7 +195,7 @@ ${FILE_FORMAT}`;
     for (let i = 0; i < 2 && isTruncatedStop(implRes.stopReason); i++) {
       cancelled();
       log({ step: 'Implementación', continuation: i + 1 }, 'respuesta cortada: se pide continuación');
-      implRes = await call(implStep.id, sys(dev, project, item), 'Tu respuesta anterior se cortó por el límite de longitud. Continúa EXACTAMENTE desde el último carácter que escribiste, sin repetir nada de lo anterior, sin saludos ni explicaciones, manteniendo el mismo formato de marcadores.', DEV_MAX_TOKENS, [{ role: 'user', content: implPrompt }, { role: 'assistant', content: implText }]);
+      implRes = await call(implStep.id, sys(dev, project, item), 'Tu respuesta anterior se cortó por el límite de longitud. Continúa EXACTAMENTE desde el último carácter que escribiste, sin repetir nada de lo anterior, sin saludos ni explicaciones, manteniendo el mismo formato de marcadores.', DEV_MAX_TOKENS, [{ role: 'user', content: implPrompt }, { role: 'assistant', content: implText }], `Continuación ${i + 1} de 2: la respuesta anterior se cortó por longitud (se reenvía la petición con lo ya escrito)`);
       implText += implRes.text;
     }
 

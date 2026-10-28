@@ -6,7 +6,7 @@ import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { buildRepoContext, renderRepoContext } from './repoContext.ts';
 import { importBacklogFromKnowledge } from './backlog.ts';
-import { callTimeoutMs, maybeBilled, registerCall, unregisterCall } from './providerCalls.ts';
+import { callTimeoutMs, maybeBilled, registerCall, unregisterCall, withWatchdog } from './providerCalls.ts';
 
 /**
  * HU-004 · Evaluación inicial del proyecto.
@@ -124,11 +124,12 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
       const ctrl = registerCall(processId);
       try {
         requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
-      const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
+      const timeoutMs = callTimeoutMs(STEP_PLAN[i].maxTokens, agent.config.effort);
+      const res = await withWatchdog(getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
           model: agent.config.model, system: systemPrompt, user: userPrompt,
           maxTokens: STEP_PLAN[i].maxTokens, effort: agent.config.effort, supportsEffort: !!modelInfo?.supportsEffort,
-          timeoutMs: callTimeoutMs(STEP_PLAN[i].maxTokens, agent.config.effort)
-        }, ctrl.signal);
+          timeoutMs
+        }, ctrl.signal), ctrl, timeoutMs);
         const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
         procs.stepFinish(step.id, 'done', { tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, outputMd: res.text });
         procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);

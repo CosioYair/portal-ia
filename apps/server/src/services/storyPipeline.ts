@@ -9,7 +9,7 @@ import { practicesFor } from './agentTemplates.ts';
 import { assessDeveloperOutput, clip, failureClassOf, mergeChanges, type ParsedDevOutput } from './devOutput.ts';
 import { filesIn, parseBuildErrors, parseFailingTests, parseTypeScriptErrors } from './diagnostics.ts';
 import { requirePolicy } from './executionPolicy.ts';
-import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall } from './providerCalls.ts';
+import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall, withWatchdog } from './providerCalls.ts';
 import { injectLessons, recordDetections } from './lessons.ts';
 import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, verificationEvidence } from './qaGate.ts';
 /** Veredicto de QA con salida estructurada nativa del proveedor (si la admite); el motor lo valida igualmente. */
@@ -67,6 +67,8 @@ export interface CallOptions {
   timeoutSec?: number | null;
   /** Reintentos por errores de conexión (por defecto 2). */
   retries?: number | null;
+  /** Qué es esta llamada dentro del paso (p. ej. «Continuación 1: la respuesta anterior se cortó por longitud»). */
+  operation?: string | null;
 }
 
 /**
@@ -95,22 +97,29 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   const p = estimatePricing(providerId, agent.config.model);
   const callEstimate = (inTok * p.inPerM + maxTokens * p.outPerM * 0.5) / 1_000_000;
   const now0 = new Date();
-  let live: LiveCall = { state: 'preparing', provider: providerId, model: agent.config.model, startedAt: now0.toISOString(), lastEvent: 'Preparando la solicitud', lastEventAt: now0.toISOString(), deadlineAt: new Date(now0.getTime() + timeoutMs).toISOString(), timeoutMs, attempt: 1, maxAttempts, estimatedUsd: callEstimate, inputTokensEstimated: inTok, inputUsd: costUsd(providerId, agent.config.model, inTok, 0), maxOutputTokens: maxTokens };
+  let live: LiveCall = { state: 'preparing', provider: providerId, model: agent.config.model, startedAt: now0.toISOString(), lastEvent: 'Preparando la solicitud', lastEventAt: now0.toISOString(), deadlineAt: new Date(now0.getTime() + timeoutMs).toISOString(), timeoutMs, attempt: 1, maxAttempts, estimatedUsd: callEstimate, inputTokensEstimated: inTok, inputUsd: costUsd(providerId, agent.config.model, inTok, 0), maxOutputTokens: maxTokens, operation: opts.operation ?? null };
   const setLive = (patch: Partial<LiveCall>) => { live = { ...live, ...patch }; try { procs.setStepLive(step.id, live); } catch { /* el estado en vivo nunca rompe la llamada */ } };
   procs.stepStart(step.id); setLive({});
   const startedAt = now0.toISOString();
+  // Registro del ciclo de vida (sin prompts ni respuestas): qué, a quién, cuándo, cuánto tardó y cómo terminó.
+  const who = { processId, step: step.title, operation: opts.operation ?? undefined, provider: providerId, model: agent.config.model };
   for (let attempt = 1; ; attempt++) {
     const ctrl = registerCall(processId);
     const sentAt = new Date();
+    const ms = () => Date.now() - sentAt.getTime();
     setLive({ state: 'sending', attempt, lastEvent: attempt > 1 ? `Reenviando la solicitud (intento ${attempt} de ${maxAttempts})` : 'Enviando la solicitud al proveedor', lastEventAt: sentAt.toISOString(), deadlineAt: new Date(sentAt.getTime() + timeoutMs).toISOString() });
+    opts.log({ ...who, attempt, maxAttempts, timeoutMs, inputTokensEstimated: inTok, maxOutputTokens: maxTokens }, 'llamada al proveedor: enviando');
     try {
       requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
-      const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
+      const res = await withWatchdog(getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
         model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history: opts.history, responseSchema: opts.schema, timeoutMs,
-        onProgress: e => setLive(e === 'sent' ? { state: 'waiting', lastEvent: 'Solicitud enviada; esperando la respuesta del proveedor', lastEventAt: new Date().toISOString() }
-          : e === 'headers' ? { state: 'receiving', lastEvent: 'El proveedor empezó a responder', lastEventAt: new Date().toISOString() }
-          : { state: 'processing', lastEvent: 'Respuesta recibida; procesándola', lastEventAt: new Date().toISOString() })
-      }, ctrl.signal);
+        onProgress: e => {
+          setLive(e === 'sent' ? { state: 'waiting', lastEvent: 'Solicitud enviada; esperando la respuesta del proveedor', lastEventAt: new Date().toISOString() }
+            : e === 'headers' ? { state: 'receiving', lastEvent: 'El proveedor empezó a responder', lastEventAt: new Date().toISOString() }
+            : { state: 'processing', lastEvent: 'Respuesta recibida; procesándola', lastEventAt: new Date().toISOString() });
+          if (e !== 'sent') opts.log({ ...who, attempt, ms: ms() }, e === 'headers' ? 'llamada al proveedor: cabeceras recibidas' : 'llamada al proveedor: respuesta completa');
+        }
+      }, ctrl.signal), ctrl, timeoutMs);
       const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
       const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
       // Un paso puede necesitar varias llamadas (continuación de una respuesta cortada): acumulamos.
@@ -118,7 +127,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       procs.stepFinish(step.id, 'done', { tokensIn: acc.inputTokens + res.inputTokens, tokensOut: acc.outputTokens + res.outputTokens, cost: acc.costUsd + cost, outputMd: opts.history?.length ? `${opts.history.filter(h => h.role === 'assistant').map(h => h.content).join('')}${res.text}` : res.text });
       procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
-      opts.log({ step: step.title, tokens: res.inputTokens + res.outputTokens, cost: cost.toFixed(4), stop: res.stopReason, attempt }, 'paso completado');
+      opts.log({ ...who, attempt, ms: ms(), tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost: cost.toFixed(4), stop: res.stopReason }, 'paso completado');
       return { text: res.text, stopReason: res.stopReason, inputTokens: res.inputTokens, outputTokens: res.outputTokens, costUsd: cost, refusal: res.refusal ?? null };
     } catch (e) {
       const err = e instanceof ProviderRequestError ? e.error : null;
@@ -141,7 +150,10 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       // Lo que pudo facturarse sin confirmación del proveedor se guarda aparte del gasto confirmado (estimación de la entrada).
       const billed = maybeBilled(e); const estCost = billed ? costUsd(providerId, agent.config.model, inTok, 0) : 0;
       if (billed) msg += ` Posible costo NO confirmado por el proveedor: ≈ ${estCost.toFixed(4)} USD (estimación de la entrada enviada).`;
-      procs.stepFinish(step.id, 'failed', { error: msg });
+      opts.log({ ...who, attempt, ms: ms(), code: finalErr?.code ?? null, httpStatus: finalErr?.httpStatus ?? null, class: cls.kind, billed }, finalErr?.code === 'cancelled' ? 'llamada al proveedor: cancelada' : finalErr?.code === 'timeout' ? 'llamada al proveedor: plazo agotado' : 'llamada al proveedor: fallida');
+      // Lo ya confirmado en este paso (llamadas anteriores de una continuación) se conserva: uso, costo y salida parcial.
+      const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
+      procs.stepFinish(step.id, 'failed', { tokensIn: prev.inputTokens, tokensOut: prev.outputTokens, cost: prev.costUsd, outputMd: prev.outputMd, error: msg });
       if (billed) procs.addUnconfirmed(processId, step.id, estCost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });
       const cancelled = finalErr?.code === 'cancelled';
