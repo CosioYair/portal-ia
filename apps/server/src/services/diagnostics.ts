@@ -1,4 +1,4 @@
-import type { FlowIssueDetail } from '@portal-ia/domain';
+import type { FlowIssueDetail, VerificationRun } from '@portal-ia/domain';
 
 /**
  * Lectura de la salida de las verificaciones y de la revisión de QA para explicar un fallo sin obligar al propietario a
@@ -10,6 +10,11 @@ const clean = (s: string) => s.replace(ANSI, '').replace(/\r/g, '');
 const uniq = <T,>(xs: T[], key: (x: T) => string) => { const seen = new Set<string>(); return xs.filter(x => { const k = key(x); if (seen.has(k)) return false; seen.add(k); return true; }); };
 
 /** Errores de TypeScript: `src/a.ts(3,7): error TS2322: …` (tsc) y `src/a.ts:3:7 - error TS2322: …` (pretty). */
+/** Diagnósticos de una verificación según su comando (un solo sitio: firma de fallos, correcciones y evidencia de QA). */
+export function diagnosticsFor(v: Pick<VerificationRun, 'command' | 'output'>): FlowIssueDetail[] {
+  return v.command === 'typecheck' ? parseTypeScriptErrors(v.output) : v.command === 'test' ? parseFailingTests(v.output) : parseBuildErrors(v.output);
+}
+
 export function parseTypeScriptErrors(output: string, max = 20): FlowIssueDetail[] {
   const out: FlowIssueDetail[] = [];
   for (const raw of clean(output).split('\n')) {

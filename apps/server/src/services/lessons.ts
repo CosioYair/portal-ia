@@ -78,7 +78,8 @@ export function detectInProcess(slug: string, proc: Process, repoPath: string | 
   const impl = proc.steps.find(s => s.role === 'implementer') ?? proc.steps[1];
   const ev = (file: string | null, detail: string, step = impl): LessonEvidence => ({ processId: proc.id, processTitle: proc.title, stepId: step?.id ?? null, agentId: step?.agentId ?? null, agentName: step?.agentName ?? null, file, detail: detail.slice(0, 600), at: now() });
   const key = (d: string, f: string | null) => `${proc.id}:${d}:${f ?? ''}`;
-  for (const c of r?.changes ?? []) {
+  // Entrega incremental: lo que una unidad entregó y no se aplicó (o llegó con aviso) queda en el manifiesto.
+  for (const c of [...(r?.changes ?? []), ...(r?.manifest?.rejected ?? [])]) {
     if (c.error && /no aparece|aparece más de una vez|búsqueda está vacía|no existe en el repositorio/.test(c.error)) out.push({ detector: 'patch_mismatch', title: `Parche que no encaja en ${c.path}`, role: 'implementer', tags: ['patch', 'implementar'], evidence: ev(c.path, c.error), dedupeKey: key('patch_mismatch', c.path) });
     if (c.error && /cambió en el repositorio|ya no existe/.test(c.error)) out.push({ detector: 'stale_file', title: `Cambio omitido por archivo desactualizado: ${c.path}`, role: 'implementer', tags: ['stale', 'implementar'], evidence: ev(c.path, c.error), dedupeKey: key('stale_file', c.path) });
     if (c.warning && /reemplazo completo/.test(c.warning)) out.push({ detector: 'big_rewrite', title: `Reemplazo completo que reduce ${c.path}`, role: 'implementer', tags: ['modify', 'implementar'], evidence: ev(c.path, c.warning), dedupeKey: key('big_rewrite', c.path) });

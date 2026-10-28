@@ -1,16 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import type { Agent, CompletenessGate, Deliverable, DeliverableKind, DeliveryProgress, DevOutputAssessment, IssueSeverity, PipelineConfig, Process, ProposedChange, QaFinding, StoryManifest, VerificationRun, WorkUnit } from '@portal-ia/domain';
+import type { Agent, CheckState, CompletenessGate, Deliverable, DeliverableKind, DeliveryCheck, DeliveryProgress, DevOutputAssessment, IssueSeverity, PipelineConfig, Process, ProposedChange, QaFinding, StoryManifest, StoryPlan, VerificationRun, WorkUnit } from '@portal-ia/domain';
 import { estimatePricing } from '@portal-ia/ai-adapters';
 import { processesRepo } from '../db/workspace.ts';
 import { clip, type ParsedDevOutput } from './devOutput.ts';
-import { filesIn, parseBuildErrors, parseFailingTests, parseTypeScriptErrors } from './diagnostics.ts';
+import { diagnosticsFor, filesIn } from './diagnostics.ts';
 import { requirePolicy } from './executionPolicy.ts';
-import { applyChanges, changesSinceBase, commitInWorktree, readRepoFile } from './repoWrite.ts';
-import { verificationEvidence } from './qaGate.ts';
+import { applyChanges, changesSinceBase, commitInWorktree, readRepoFile, safeRelPath } from './repoWrite.ts';
+import { verificationEvidence, zeroTests } from './qaGate.ts';
 import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
-import { agentHeadroom, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, stepCall, updatePipeline, updateResult, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
+import { agentHeadroom, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, stepCall, updatePipeline, updateResult, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
 
 /**
  * Entrega INCREMENTAL de una historia (pipeline autorizado con aplicación automática).
@@ -39,6 +40,9 @@ const LABEL: Record<DeliverableKind, string> = { code: 'Código', config: 'Confi
 const CODE_EXT = /\.(?:[cm]?[jt]sx?)$/i;
 const clean = (p: string) => p.trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/^[`'"]+|[`'"]+$/g, '');
 const base = (p: string) => p.split('/').pop() ?? p;
+
+/** Punto de entrada de pruebas (lo que el script «test» debe ejecutar); un ayudante o un fixture en test/ no lo es. */
+export const isTestEntry = (p: string) => /\.(test|spec)\.[cm]?[jt]sx?$/i.test(p);
 
 export function kindOf(p: string): DeliverableKind {
   if (/(^|\/)(test|tests|__tests__)\/|\.(test|spec|e2e)\.[cm]?[jt]sx?$/i.test(p)) return 'test';
@@ -118,6 +122,21 @@ export function buildManifest(ctx: StoryRunCtx): StoryManifest {
   return { version: 1, deliverables, units, unitOutputBudget: UNIT_TEXT_BUDGET, rounds: [], gate: null, createdAt: now() };
 }
 
+/** Entregables por historia: más se explica y se pide dividir (nunca se descartan en silencio). */
+export const MAX_DELIVERABLES = 16;
+/**
+ * ¿Se puede ejecutar el plan por partes? null = sí. Si no trae entregables, trae demasiados o rutas que no se pueden
+ * escribir (protegidas, absolutas, con «..» o comodines), se explica ANTES de gastar en consultas o unidades.
+ */
+export function planProblem(plan: StoryPlan): string | null {
+  const paths = Array.from(new Set([...(plan.deliverables ?? []).map(d => clean(d.path)), ...plan.filesToChange.map(clean)])).filter(Boolean);
+  if (!paths.length) return 'El Coordinador no entregó un plan con archivos, tampoco al pedírselo otra vez en formato compacto. No se implementa a ciegas: una respuesta con la historia entera es lo que se cortó en HU-155. Reformula o acota la historia (nueva iteración) o vuelve a ejecutarla.';
+  if (paths.length > MAX_DELIVERABLES) return `El plan tiene ${paths.length} archivos; una historia admite hasta ${MAX_DELIVERABLES} para entregarse por partes con garantías. No se descartó ninguno: divide la historia (nueva iteración). Archivos: ${paths.join(', ')}.`;
+  const bad = paths.map(p => { if (/[*?<>|"]/.test(p)) return `${p} (ruta con comodines o caracteres no válidos)`; try { safeRelPath(p); return null; } catch (e: any) { return `${p} (${e.message})`; } }).filter(Boolean);
+  if (bad.length) return `El plan incluye rutas que no se pueden escribir: ${bad.join(' · ')}. No se empieza: corrige el plan (nueva iteración) o acota la historia.`;
+  return null;
+}
+
 /**
  * Inicio de la entrega incremental: guarda el manifiesto (punto de control) y comprueba ANTES de gastar que el
  * presupuesto alcanza para implementar todas las unidades; si no, pausa sin llamar a la IA.
@@ -161,7 +180,13 @@ function unitContext(ctx: StoryRunCtx, man: StoryManifest, unit: WorkUnit, files
   const wants = (d: Deliverable) => kind === 'config' ? false : kind === 'docs' ? d.kind !== 'docs' : unit.kind === 'correction' ? kind === 'test' && d.kind === 'code' : d.kind === 'code';
   const done = man.deliverables.filter(d => d.status === 'delivered' && !files.includes(d.path) && wants(d)).sort((a, b) => RANK[a.kind] - RANK[b.kind]);
   for (const d of done) { const c = readRepoFile(bp, d.path, 40_000); if (c !== null) add(`${d.path} (ya entregado${kind === 'docs' ? ', con números de línea' : ''})`, kind === 'docs' ? numbered(c) : c, kind === 'code' ? 10_000 : 14_000); }
-  if (kind === 'code' || kind === 'config') for (const f of (ctx.plan?.filesToRead ?? []).filter(f => !files.includes(f)).slice(0, 6)) { const c = readRepoFile(bp, f, 20_000); if (c !== null) add(`${f} (referencia del plan, recortado)`, c, 6_000); }
+  if (kind === 'code' || kind === 'config') {
+    // Referencias del plan: completas para la primera unidad; en las demás, solo las que la unidad nombra (no se repite el mismo contexto en cada llamada).
+    const first = man.units.find(u => (u.source ?? 'plan') === 'plan')?.id === unit.id;
+    const text = `${unit.purpose} ${files.join(' ')}`.toLowerCase();
+    const refs = (ctx.plan?.filesToRead ?? []).filter(f => !files.includes(f)).filter(f => first || text.includes(f.toLowerCase()) || text.includes(base(f).replace(/\.[^.]+$/, '').toLowerCase()));
+    for (const f of refs.slice(0, first ? 6 : 3)) { const c = readRepoFile(bp, f, 20_000); if (c !== null) add(`${f} (referencia del plan, recortado)`, c, 6_000); }
+  }
   return parts.join('\n\n');
 }
 
@@ -222,7 +247,7 @@ ${unitContext(ctx, man, unit, unit.files.filter(f => readRepoFile(bp, f, 1) !== 
 FORMATO DE RESPUESTA:
 ${PATCH_ONLY_FORMAT}
 ${DROP_FORMAT}
-(si un hallazgo es incorrecto, no inventes cambios: responde solo con === RESUMEN === y === SIN CAMBIOS === seguido de la evidencia concreta; QA lo volverá a evaluar)`;
+${unit.source === 'qa' ? '(si un hallazgo de QA es incorrecto, no inventes cambios: responde solo con === RESUMEN === y === SIN CAMBIOS === seguido de la evidencia concreta —archivo:línea, fragmento o salida—; QA lo volverá a evaluar una vez)' : '(es un fallo objetivo del sandbox o de la comprobación previa: corrígelo; si la causa está en otro archivo, parchea ese archivo)'}`;
 }
 
 function unitRepairPrompt(ctx: StoryRunCtx, unit: WorkUnit, prompt: string, a: DevOutputAssessment, previous: string, ok: ProposedChange[], bad: ProposedChange[]): string {
@@ -268,8 +293,6 @@ async function continueFile(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
   // La última línea casi seguro quedó a medias: se descarta y se pide reescribirla entera (unión determinista, sin solapes).
   const lines = partial.body.replace(/\r\n/g, '\n').split('\n');
   const keep = lines.slice(0, -1); const cut = lines.at(-1) ?? '';
-  updatePipeline(ctx.slug, ctx.processId, { continuations: used + 1 });
-  setUnit(ctx, unitId, u => { u.continuations++; u.continued = { ...(u.continued ?? {}), [partial.path]: perFile + 1 }; });
   emit(ctx, 'continuation', `La respuesta se cortó por longitud dentro de «${partial.path}». Se pide SOLO la continuación de ese archivo; lo ya recibido se conserva. No consume correcciones ni reparaciones.`, { phase: 'implementing', aiCall: true, detail: `${unit.title} · ${keep.length} líneas recibidas · continuación ${perFile + 1} de 2 para este archivo (${used + 1} de ${max} en el proceso)` });
   const user = `Continúa el archivo «${partial.path}» (${unit.title}). Tu respuesta anterior se cortó por el límite de longitud dentro de este archivo; lo demás que entregaste llegó completo y se conserva.
 # Lo que llevas escrito de «${partial.path}» (${keep.length} líneas completas)
@@ -282,13 +305,23 @@ ${partial.op === 'patch' ? 'Es un parche: sigue el bloque BUSCAR/REEMPLAZAR dond
 # Encargo de la unidad (para el contexto)
 ${clip(prompt, 12_000)}`;
   const res = await stepCall(ctx, ctx.dev, 'implementer', `Continuación de ${base(partial.path)} (${unit.title})`.slice(0, 160), `La respuesta se cortó dentro de ${partial.path}`, sys(ctx.dev, ctx.project, ctx.item), user, DEV_MAX_TOKENS, undefined, undefined, `Continuación ${perFile + 1} de 2 del archivo ${partial.path}`);
-  setUnit(ctx, unitId, u => { u.stepIds.push(res.stepId); u.costUsd += res.costUsd; });
-  let cont = res.text.replace(/\r\n/g, '\n').replace(/^\s*```[\w-]*\n/, '');
-  cont = cont.replace(/^[ \t>*#_`]*={2,}\s*(?:ARCHIVO|FILE)\s*:[^\n]*\n/i, '');
-  // Solape: si repite las últimas líneas completas recibidas, se quitan (hasta 5).
-  for (let k = Math.min(5, keep.length); k > 0; k--) { const tail = keep.slice(-k).join('\n'); if (tail.trim() && cont.startsWith(tail + '\n')) { cont = cont.slice(tail.length + 1); break; } }
+  // Los contadores suben con la llamada HECHA: una pausa (presupuesto, duración) antes de llamar no gasta la continuación.
+  updatePipeline(ctx.slug, ctx.processId, { continuations: (pipelineOf(ctx.slug, ctx.processId).continuations ?? 0) + 1 });
+  setUnit(ctx, unitId, u => { u.stepIds.push(res.stepId); u.costUsd += res.costUsd; u.continuations++; u.continued = { ...(u.continued ?? {}), [partial.path]: (u.continued?.[partial.path] ?? 0) + 1 }; });
   const prefix = `=== ARCHIVO: ${partial.path} | ${partial.op} ===\n${keep.join('\n')}${keep.length ? '\n' : ''}`;
-  return { text: prefix + cont, stopReason: res.stopReason, refusal: res.refusal ?? null, stepId: res.stepId, prefix };
+  return { text: stitch(prefix, res.text), stopReason: res.stopReason, refusal: res.refusal ?? null, stepId: res.stepId, prefix };
+}
+
+/**
+ * Une lo recibido de un archivo cortado (prefijo: cabecera + líneas completas) con su continuación: sin la valla de código,
+ * sin una cabecera ARCHIVO repetida y sin las últimas líneas repetidas. Igual en vivo y al reanudar (relectura de salidas).
+ */
+export function stitch(prefix: string, raw: string): string {
+  const keep = prefix.replace(/\r\n/g, '\n').split('\n').slice(1, -1);
+  let cont = raw.replace(/\r\n/g, '\n').replace(/^\s*```[\w-]*\n/, '');
+  cont = cont.replace(/^[ \t>*#_`]*={2,}\s*(?:ARCHIVO|FILE)\s*:[^\n]*\n/i, '');
+  for (let k = Math.min(5, keep.length); k > 0; k--) { const tail = keep.slice(-k).join('\n'); if (tail.trim() && cont.startsWith(tail + '\n')) { cont = cont.slice(tail.length + 1); break; } }
+  return prefix + cont;
 }
 
 /** Escribe en el worktree lo validado de una unidad (primer commit: crea el worktree aislado) y actualiza el diff acumulado. */
@@ -367,6 +400,9 @@ async function applyUnit(ctx: StoryRunCtx, unitId: string, s: Settled): Promise<
     // Un descarte solo cuenta si cambia de verdad un entregable (no uno ya entregado).
     for (const dr of s.drops) { const d = m.deliverables.find(x => x.path === dr.path); if (d && d.status !== 'delivered' && d.status !== 'dropped') { d.status = 'dropped'; d.note = dr.reason; dropped.push(d.path); } }
     const u = m.units.find(x => x.id === unitId)!; u.applied = Array.from(new Set([...(u.applied ?? []), ...files])); if (dropped.length) u.dropped = Array.from(new Set([...(u.dropped ?? []), ...dropped]));
+    if (dropped.length) m.gate = null;
+    const flagged = changes.filter(c => c.error || c.warning).map(c => ({ path: c.path, error: c.error ?? null, warning: c.warning ?? null, unitId, at: now() }));
+    if (flagged.length) m.rejected = [...(m.rejected ?? []), ...flagged].slice(-60);
   });
   mergeMeta(ctx, unit, s.meta);
   // Lo rechazado por las reglas de ámbito queda registrado (evidencia para el propietario y para las lecciones).
@@ -379,7 +415,7 @@ async function applyUnit(ctx: StoryRunCtx, unitId: string, s: Settled): Promise<
 }
 
 /** Resultado de una llamada sin texto con la salida agotada: todo se fue en razonamiento oculto (pagado). Cambia de estrategia o se detiene. */
-function outputExhausted(ctx: StoryRunCtx, unitId: string, outputTokens: number, costUsd: number): string {
+function outputExhausted(ctx: StoryRunCtx, unitId: string, outputTokens: number, costUsd: number): string | null {
   const unit = unitOf(ctx, unitId); const p = pipelineOf(ctx.slug, ctx.processId);
   updatePipeline(ctx.slug, ctx.processId, { continuations: (p.continuations ?? 0) + 1 });
   const n = (unit.exhausted ?? 0) + 1;
@@ -400,6 +436,7 @@ function outputExhausted(ctx: StoryRunCtx, unitId: string, outputTokens: number,
   }
   if (n >= 2) {
     setUnit(ctx, unitId, { status: 'failed', error: 'El modelo agotó dos veces toda la salida en razonamiento interno sin entregar texto.', finishedAt: now() });
+    if (unit.kind === 'correction') return null;
     throw new PipelinePause('too_large', `«${unit.title}»: el modelo ${ctx.dev.config.model} agotó dos veces toda su salida en razonamiento interno sin entregar texto (${outputTokens} tokens facturados la última vez). No se insiste. Recomendación: bajar el esfuerzo de razonamiento de ${ctx.dev.config.name} (Equipo → agente) o dividir este entregable en partes más pequeñas. Lo entregado se conserva.`);
   }
   return 'La vez anterior agotaste toda la salida razonando sin escribir nada. Ve directo al formato de respuesta: escribe los archivos ya; no hace falta un análisis largo.';
@@ -425,7 +462,7 @@ async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
   const isCorrection = unit.kind === 'correction';
   setUnit(ctx, unitId, { status: 'running', startedAt: unit.startedAt ?? now() });
   if (!unit.outputs?.length) emit(ctx, 'unit', `${label[0].toUpperCase()}${label.slice(1)}: ${unit.title} — ${agent.config.name}.`, { phase: isCorrection ? 'correcting' : 'implementing', aiCall: true, detail: `${unit.files.join(', ')} · ≈ ${unit.estimatedUsd.toFixed(2)} USD estimados` });
-  let strategy: string | null = unit.error && unit.attempts ? `Intento anterior: ${unit.error}` : null;
+  let strategy: string | null = unit.error ? `Intento anterior: ${unit.error}` : null;
   for (;;) {
     checkCancelled(ctx); checkDuration(ctx, cfg);
     unit = unitOf(ctx, unitId); const man = manifestOf(ctx);
@@ -438,11 +475,12 @@ async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
       // Formato: una reparación por unidad de construcción; en una corrección, el segundo intento (con otra estrategia) ya lo cubre.
       canRepair: () => !isCorrection && unitOf(ctx, unitId).repairs < 1 && pipelineOf(ctx.slug, ctx.processId).outputRepairs < cfg.maxOutputRepairs + manifestOf(ctx).units.length,
       onRepair: () => setUnit(ctx, unitId, u => { u.repairs++; }),
+      relevant: (p: string) => isCorrection ? unitOf(ctx, unitId).files.includes(p) : manifestOf(ctx).deliverables.find(d => d.path === p)?.status !== 'delivered',
       record: (o: DevOutput) => { if (o.stepId) setUnit(ctx, unitId, u => { u.outputs = [...(u.outputs ?? []), { stepId: o.stepId!, stopReason: o.stopReason, prefix: o.prefix ?? null }]; if (!u.stepIds.includes(o.stepId!)) u.stepIds.push(o.stepId!); }); }
     };
     // Reanudar: las salidas ya pagadas de este intento se releen antes de volver a llamar.
     const steps = processesRepo(ctx.slug).get(ctx.processId)!.steps;
-    let outputs: DevOutput[] = (unit.outputs ?? []).map(o => { const s = steps.find(x => x.id === o.stepId); return s?.outputMd != null ? { text: (o.prefix ?? '') + s.outputMd, stopReason: o.stopReason, stepId: o.stepId } : null; }).filter(Boolean) as DevOutput[];
+    let outputs: DevOutput[] = (unit.outputs ?? []).map(o => { const s = steps.find(x => x.id === o.stepId); return s?.outputMd != null ? { text: o.prefix ? stitch(o.prefix, s.outputMd) : s.outputMd, stopReason: o.stopReason, stepId: o.stepId, prefix: o.prefix ?? null } : null; }).filter(Boolean) as DevOutput[];
     if (!outputs.length) {
       const n = unit.attempts + 1;
       const title = isCorrection ? `Corrección ${(unit.round ?? 0) + 1}${man.units.filter(u => u.round === unit.round).length > 1 ? `.${man.units.filter(u => u.round === unit.round).findIndex(u => u.id === unitId) + 1}` : ''}${n > 1 ? ` (intento ${n})` : ''}` : `Unidad ${label.replace(/^unidad /, '')}: ${unit.title}${n > 1 ? ` (intento ${n})` : ''}`;
@@ -450,7 +488,7 @@ async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
       const res = await stepCall(ctx, agent, 'implementer', title.slice(0, 180), isCorrection ? `Corrección dirigida: ${(unit.findings ?? [])[0]?.text.slice(0, 120) ?? unit.title}` : `Entrega incremental (${label}): ${unit.files.join(', ')}`.slice(0, 300), sys(agent, ctx.project, ctx.item), prompt, unitMaxTokens(unit), reuse);
       setUnit(ctx, unitId, u => { u.attempts++; u.stepIds.push(res.stepId); u.costUsd += res.costUsd; });
       if (isCorrection) updatePipeline(ctx.slug, ctx.processId, { correctionAttempts: (pipelineOf(ctx.slug, ctx.processId).correctionAttempts ?? 0) + 1 });
-      if (isTruncatedStop(res.stopReason) && !res.text.trim()) { strategy = outputExhausted(ctx, unitId, res.outputTokens, res.costUsd); continue; }
+      if (isTruncatedStop(res.stopReason) && !res.text.trim()) { const next = outputExhausted(ctx, unitId, res.outputTokens, res.costUsd); if (next === null) return; strategy = next; continue; }
       outputs = [{ text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null, stepId: res.stepId }];
       hooks.record(outputs[0]);
     }
@@ -463,8 +501,11 @@ async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
     setUnit(ctx, unitId, { outputs: [] });
     const missing = isCorrection ? [] : unit.files.filter(f => manifestOf(ctx).deliverables.find(d => d.path === f)?.status === 'pending');
     // Corrección que discute el hallazgo con evidencia (SIN CAMBIOS): resultado válido que QA vuelve a evaluar.
-    const disputed = isCorrection && !applied.length && !dropped.length && s.outcome === 'no_changes' && s.meta.noChanges ? s.meta.noChanges.slice(0, 1500) : null;
-    if (disputed) { setUnit(ctx, unitId, { disputed }); emit(ctx, 'correction', `${ctx.dev.config.name} discute el hallazgo «${clip((unit.findings ?? [])[0]?.text ?? unit.title, 120)}» con evidencia, sin cambiar el código. QA lo volverá a evaluar.`, { detail: clip(disputed, 400) }); }
+    const answer = isCorrection && unit.source === 'qa' && !applied.length && !dropped.length && s.outcome === 'no_changes' && s.meta.noChanges ? s.meta.noChanges.slice(0, 1500) : null;
+    if (isCorrection && unit.source !== 'qa' && s.outcome === 'no_changes' && s.meta.noChanges) problems.push('Este fallo viene de una comprobación objetiva (sandbox o comprobación previa): no se discute, se corrige.');
+    const disputed = answer && EVIDENCE.test(answer) ? answer : null;
+    if (answer && !disputed) problems.push('La discusión del hallazgo no cita evidencia concreta (archivo:línea, un fragmento del código o la salida de una verificación): así no se puede comprobar.');
+    if (disputed) { setUnit(ctx, unitId, { disputed }); saveManifest(ctx, m => { m.disputes = [...(m.disputes ?? []), ...(unit.findings ?? []).map(f => ({ file: f.file, finding: f.text, answer: disputed, round: unit.round ?? 0, at: now() }))]; }); emit(ctx, 'correction', `${ctx.dev.config.name} discute el hallazgo «${clip((unit.findings ?? [])[0]?.text ?? unit.title, 120)}» con evidencia, sin cambiar el código. QA lo volverá a evaluar.`, { detail: clip(disputed, 400) }); }
     const done = isCorrection ? applied.length > 0 || dropped.length > 0 || !!disputed : !missing.length;
     if (done) { setUnit(ctx, unitId, { status: 'done', error: null, finishedAt: now() }); return; }
     const why = problems.slice(0, 4).join(' · ') || `${s.assessment.kind}: sin cambios aplicables`;
@@ -488,6 +529,17 @@ async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
     }
   }
   setUnit(ctx, unitId, { status: 'done', error: null, finishedAt: now() });
+}
+
+/** Evidencia verificable en una discusión: una ruta (con línea), un fragmento entre comillas o la salida de un comando. */
+const EVIDENCE = /[\w./-]+\.[A-Za-z]{1,6}(?::\d+)?|l[ií]nea \d+|`[^`]{3,}`|«[^»]{3,}»|"[^"]{6,}"|exit(?:Code)? \d|c[oó]digo \d/i;
+const words = (t: string) => new Set((t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').match(/[a-z0-9]{4,}/g) ?? []));
+/** ¿QA repite un hallazgo que el equipo ya discutió? (mismo archivo y la mitad de las palabras en común). */
+function sameFinding(d: { file: string | null; finding: string }, f: { file: string | null; text: string }): boolean {
+  if ((d.file ? clean(d.file) : null) !== (f.file ? clean(f.file) : null)) return false;
+  const a = words(d.finding), b = words(f.text); if (!a.size || !b.size) return false;
+  let common = 0; for (const w of a) if (b.has(w)) common++;
+  return common / Math.min(a.size, b.size) >= 0.5;
 }
 
 /** Cambio de estrategia: un especialista del equipo AUTORIZADO responde una vez (si queda margen de consultas). */
@@ -515,7 +567,7 @@ type Finding = NonNullable<WorkUnit['findings']>[number];
 
 /** Hallazgos de una verificación que falla, por archivo (con la evidencia real del sandbox). */
 export function verificationFindings(v: VerificationRun): Finding[] {
-  const d = v.command === 'typecheck' ? parseTypeScriptErrors(v.output) : v.command === 'test' ? parseFailingTests(v.output) : parseBuildErrors(v.output);
+  const d = diagnosticsFor(v);
   const ev = verificationEvidence(v);
   const byFile = new Map<string, string[]>();
   for (const x of d) { const k = x.file ?? ''; byFile.set(k, [...(byFile.get(k) ?? []), `${x.line ? `línea ${x.line}: ` : ''}${x.code ? `${x.code} ` : ''}${x.text}`]); }
@@ -529,12 +581,21 @@ export function verificationFindings(v: VerificationRun): Finding[] {
  */
 export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' | 'verification' | 'completeness', findings: (Finding | QaFinding)[]) {
   const man = manifestOf(ctx); const wt = worktreeOf(ctx);
+  // Un intercambio por hallazgo: si QA mantiene lo que el equipo ya discutió con evidencia, decide el propietario (sin bucle pagado).
+  const persisting = source === 'qa' ? findings.filter(f => (man.disputes ?? []).some(d => sameFinding(d, { file: f.file ?? null, text: f.text }))) : [];
+  if (persisting.length) {
+    const lines = persisting.map(f => { const d = (man.disputes ?? []).find(x => sameFinding(x, { file: f.file ?? null, text: f.text }))!; return `QA: «${clip(f.text, 200)}»${f.file ? ` (${f.file})` : ''} — equipo: «${clip(d.answer, 300)}»`; });
+    throw new PipelinePause('disagreement', `QA mantiene ${persisting.length} hallazgo(s) que el equipo ya discutió con evidencia${findings.length > persisting.length ? ` (y ${findings.length - persisting.length} más)` : ''}. No se repite el intercambio (cada vuelta se paga): decides tú con la evidencia. ${lines.join(' · ')}`);
+  }
   const round = man.rounds.length;
   const byFile = new Map<string, Finding[]>();
   const changed = (resultOf(ctx).changes ?? []).filter(c => !c.error).map(c => c.path);
+  const resolve = resolver(wt, [...changed, ...man.deliverables.map(d => d.path)]);
   for (const f of findings) {
-    const file = f.file ? clean(f.file) : (filesIn(`${f.text} ${f.evidence ?? ''}`)[0] ?? '');
-    const key = file || '*';
+    const raw = f.file ? clean(f.file) : (filesIn(`${f.text} ${f.evidence ?? ''}`)[0] ?? '');
+    const file = raw ? resolve(raw) : '';
+    // Una ruta que no existe y no es un entregable no da una unidad útil: el hallazgo va con el código cambiado.
+    const key = file && (man.deliverables.some(d => d.path === file) || (wt && fs.existsSync(path.join(wt, file)))) ? file : '*';
     byFile.set(key, [...(byFile.get(key) ?? []), { severity: f.severity, text: f.text, file: file || null, evidence: f.evidence ?? null, expected: (f as any).expected ?? null }]);
   }
   // Sin archivo: se asocia a los archivos de código cambiados (como mucho 3).
@@ -552,6 +613,23 @@ export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' |
   });
   saveManifest(ctx, m => { m.rounds.push({ at: now(), source, units: units.length, applied: 0 }); m.units.push(...units); for (const u of units) if (u.kind === 'build') { const d = m.deliverables.find(x => x.path === u.files[0]); if (d) { d.status = 'pending'; d.unitId = u.id; } } });
   emit(ctx, 'unit', `Corrección dirigida (${source === 'qa' ? 'hallazgos de QA' : source === 'verification' ? 'verificación del sandbox' : 'comprobación previa a QA'}): ${units.length} unidad(es), solo los archivos afectados. Lo que ya funciona no se regenera.`, { phase: 'correcting', detail: units.map(u => `${u.files[0]}: ${u.findings?.length ?? 0} hallazgo(s)`).join(' · ') });
+}
+
+/**
+ * Resuelve la ruta de un hallazgo contra el worktree: tal cual si existe; si no, el único archivo cambiado, entregable o
+ * rastreado por git que termina en ella (p. ej. «src/x.ts» de tsc ejecutado dentro de «apps/server» → «apps/server/src/x.ts»).
+ */
+function resolver(wt: string | null, known: string[]): (file: string) => string {
+  let tracked: string[] | null = null;
+  return (file: string) => {
+    if (known.includes(file) || (wt && fs.existsSync(path.join(wt, file)))) return file;
+    const suffix = `/${file}`;
+    const hit = Array.from(new Set(known)).filter(k => k.endsWith(suffix));
+    if (hit.length === 1) return hit[0];
+    if (wt && tracked === null) { try { tracked = execFileSync('git', ['ls-files'], { cwd: wt, encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 }).split('\n').filter(Boolean); } catch { tracked = []; } }
+    const t = (tracked ?? []).filter(k => k.endsWith(suffix));
+    return t.length === 1 ? t[0] : file;
+  };
 }
 
 /**
@@ -578,6 +656,19 @@ function closeRound(ctx: StoryRunCtx, round: number) {
 
 // ---------------------------------------------------------------- Comprobación determinista previa a QA
 
+/** Glob → fuente de expresión regular, en una pasada: «**\/» = cualquier número de carpetas, «**» = cualquier cosa, «*» = dentro de una carpeta. */
+export function globSource(g: string): string {
+  let re = '';
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    if (c === '*' && g[i + 1] === '*' && g[i + 2] === '/') { re += '(?:.*/)?'; i += 2; }
+    else if (c === '*' && g[i + 1] === '*') { re += '.*'; i += 1; }
+    else if (c === '*') re += '[^/]*';
+    else re += c.replace(/[.+^${}()|[\]\\/]/, '\\$&');
+  }
+  return re;
+}
+
 /** Script «test» del package.json más cercano a la prueba y si su ruta/patrón la incluye (null = no comprobable). */
 export function testDiscovered(wt: string, file: string): { ok: boolean; script: string } | null {
   let dir = path.posix.dirname(file);
@@ -590,7 +681,7 @@ export function testDiscovered(wt: string, file: string): { ok: boolean; script:
       const rel = dir === '.' ? file : path.posix.relative(dir, file);
       const checkable = tokens.filter(t => !/[{}?[\]!]/.test(t));
       if (!checkable.length) return null;
-      const ok = checkable.some(t => { const g = t.replace(/^\.\//, ''); const re = new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*\//g, '(?:.*/)?').replace(/\*\*/g, '.*').replace(/\*/g, '[^/]*')}${g.endsWith('/') || !/[.*]/.test(base(g)) ? '' : '$'}`); return re.test(rel) || (!/[*]/.test(g) && rel.startsWith(g.replace(/\/?$/, '/'))); });
+      const ok = checkable.some(t => { const g = t.replace(/^\.\//, ''); const re = new RegExp(`^${globSource(g)}${g.endsWith('/') || !/[.*]/.test(base(g)) ? '' : '$'}`); return re.test(rel) || (!/[*]/.test(g) && rel.startsWith(g.replace(/\/?$/, '/'))); });
       // Si alguna ruta del script no se pudo interpretar, podría ser la que incluye la prueba: no se afirma nada.
       if (!ok && checkable.length < tokens.length) return null;
       return { ok, script };
@@ -612,7 +703,7 @@ export function completenessGate(ctx: StoryRunCtx): CompletenessGate {
     const syn = /\.json$/i.test(p) ? syntaxProblem(p, text) : null; if (syn) invalid.push({ path: p, problem: syn });
     if (/^(<{7}|>{7})( |$)/m.test(text)) invalid.push({ path: p, problem: 'contiene marcadores de conflicto de git' });
     if (CODE_EXT.test(p) && /^\s*(?:\/\/|\/\*)\s*\.\.\.\s*(?:\*\/)?\s*$|\/\/\s*\.\.\.\s*(?:resto|rest|existing|c[oó]digo existente|igual que antes)/im.test(text)) invalid.push({ path: p, problem: 'contiene contenido omitido («...»): no es un archivo completo' });
-    if (kindOf(p) === 'test' && CODE_EXT.test(p)) { const t = testDiscovered(wt, p); if (t && !t.ok) invalid.push({ path: p, problem: `el script «test» no ejecuta esta prueba (${t.script})` }); }
+    if (isTestEntry(p)) { const t = testDiscovered(wt, p); if (t && !t.ok) invalid.push({ path: p, problem: `el script «test» no ejecuta esta prueba (${t.script})` }); }
   }
   const testsChanged = Array.from(changed.keys()).filter(p => kindOf(p) === 'test');
   const newCode = Array.from(changed.values()).filter(c => c.action === 'create' && kindOf(c.path) === 'code' && CODE_EXT.test(c.path));
@@ -620,6 +711,60 @@ export function completenessGate(ctx: StoryRunCtx): CompletenessGate {
   const dropped = man.deliverables.filter(d => d.status === 'dropped').map(d => ({ path: d.path, reason: d.note ?? '' }));
   const extra = Array.from(changed.keys()).filter(p => !man.deliverables.some(d => d.path === p && d.planned));
   return { at: now(), commit: r.applied?.commit ?? null, ok: !missing.length && !invalid.length, missing, invalid, dropped, extra, testsChanged, notes };
+}
+
+// ---------------------------------------------------------------- Ejecución real de las pruebas nuevas
+
+/** Un archivo de prueba se ejecutó si alguno de sus casos aparece en la salida de «test»; si no se puede saber, se dice. */
+export function testFileExecuted(content: string | null, output: string | null): { state: CheckState; detail: string } {
+  if (content === null) return { state: 'undetermined', detail: 'no se pudo leer el archivo' };
+  const names = Array.from(content.matchAll(/\b(?:test|it|describe)(?:\.\w+)?\s*\(\s*(['"`])((?:(?!\1)[^\\\n]){3,140})\1/g)).map(m => m[2]);
+  if (output === null) return { state: 'undetermined', detail: 'no hay una ejecución de «test» en verde sobre este commit' };
+  if (!names.length) return { state: 'undetermined', detail: 'no se encontraron nombres de casos en el archivo' };
+  const seen = names.filter(n => output.includes(n));
+  if (seen.length) return { state: 'passed', detail: `${seen.length} de ${names.length} caso(s) aparecen en la salida de «test»` };
+  const listsTests = /^\s*(?:ok|not ok) \d+ - |^\s*[✔✓√] |^# Subtest: |\bpassing\b/m.test(output);
+  return listsTests ? { state: 'failed', detail: `la salida de «test» lista otras pruebas, pero ninguno de sus ${names.length} caso(s)` } : { state: 'undetermined', detail: 'la salida de «test» no muestra los nombres de los casos' };
+}
+
+/**
+ * Tras una verificación en verde y ANTES de pagar a QA: las pruebas nuevas, ¿se ejecutaron? Una que no se ejecutó es un
+ * fallo objetivo (corrección dirigida sin QA); una indeterminada se declara como tal (nunca cuenta como evidencia).
+ */
+export function afterVerification(ctx: StoryRunCtx, cfg: PipelineConfig): boolean {
+  const r = resultOf(ctx); const man = manifestOf(ctx); const wt = worktreeOf(ctx);
+  if (!r.applied || !wt || man.testRun?.commit === r.applied.commit) return false;
+  const run = sinceApplied(r).filter(v => v.command === 'test' && v.exitCode === 0).at(-1) ?? null;
+  const tests = (r.changes ?? []).filter(c => !c.error && c.action !== 'delete' && isTestEntry(c.path)).map(c => c.path);
+  const results = tests.map(p => ({ path: p, ...testFileExecuted(readRepoFile(wt, p, 200_000), cfg.commands.includes('test') ? run?.output ?? null : null) }));
+  saveManifest(ctx, m => { m.testRun = { commit: r.applied!.commit, at: now(), results }; });
+  if (!results.length) return false;
+  const notRun = results.filter(x => x.state === 'failed'); const unknown = results.filter(x => x.state === 'undetermined');
+  emit(ctx, 'gate', notRun.length ? `${notRun.length} prueba(s) nueva(s) no se ejecutaron en el sandbox: se corrigen antes de pagar a QA.` : unknown.length ? `No se pudo determinar si ${unknown.length} prueba(s) nueva(s) se ejecutaron; QA lo sabrá (no cuenta como evidencia).` : `Las ${results.length} prueba(s) nueva(s) se ejecutaron en el sandbox.`, { phase: 'verifying', detail: results.map(x => `${x.path}: ${x.detail}`).join(' · ') });
+  if (!notRun.length) return false;
+  if (pipelineOf(ctx.slug, ctx.processId).corrections >= cfg.maxCorrections) throw new PipelinePause('incomplete', `${notRun.length} prueba(s) nueva(s) no se ejecutaron en el sandbox y no quedan correcciones autorizadas. No se paga a QA sin esa evidencia; lo hecho se conserva.`);
+  startRound(ctx, cfg, 'completeness', notRun.map(x => ({ severity: 'alta' as IssueSeverity, text: `La prueba ${x.path} no se ejecutó en el sandbox: ${x.detail}`, file: x.path, evidence: clip(run?.output ?? '', 1_200), expected: 'que el script «test» la ejecute (ubicación del archivo o patrón del script)' })));
+  return true;
+}
+
+/** Estado explícito de cada comprobación: superada, fallida, no aplica o no determinada. */
+export function deliveryChecks(p: Process): DeliveryCheck[] {
+  const r = p.result; if (!r) return [];
+  const cmds = r.pipeline?.config.commands ?? [];
+  const since = r.applied ? (r.verifications ?? []).filter(v => new Date(v.startedAt).getTime() >= new Date(r.applied!.appliedAt).getTime()) : [];
+  const out: DeliveryCheck[] = (['typecheck', 'test', 'build'] as const).map(cmd => {
+    if (!cmds.includes(cmd)) return { name: cmd, state: 'not_applicable' as CheckState, detail: 'no se pidió en esta autorización' };
+    const v = since.filter(x => x.command === cmd).at(-1);
+    if (!v) return { name: cmd, state: 'undetermined' as CheckState, detail: 'aún no se ejecutó sobre el último commit' };
+    if (v.exitCode === 0) return cmd === 'test' && zeroTests(v.output) ? { name: cmd, state: 'undetermined' as CheckState, detail: 'terminó sin ejecutar ninguna prueba' } : { name: cmd, state: 'passed' as CheckState, detail: `${v.isolation ?? 'sandbox'} · ${Math.round(v.durationMs / 1000)} s` };
+    if (v.exitCode === null || v.exitCode === 86 || v.isolation === 'unavailable') return { name: cmd, state: 'undetermined' as CheckState, detail: 'el entorno no permitió completarla' };
+    return { name: cmd, state: 'failed' as CheckState, detail: `código ${v.exitCode}` };
+  });
+  const man = r.manifest; const tr = man?.testRun && man.testRun.commit === r.applied?.commit ? man.testRun : null;
+  const hasTests = (r.changes ?? []).some(c => !c.error && c.action !== 'delete' && isTestEntry(c.path));
+  const st: CheckState = !hasTests ? 'not_applicable' : !tr ? 'undetermined' : tr.results.some(x => x.state === 'failed') ? 'failed' : tr.results.some(x => x.state === 'undetermined') ? 'undetermined' : 'passed';
+  out.push({ name: 'pruebas nuevas ejecutadas', state: st, detail: !hasTests ? 'sin pruebas nuevas en el diff' : !tr ? 'aún sin comprobar sobre el último commit' : tr.results.map(x => `${x.path}: ${x.detail}`).join(' · ') });
+  return out;
 }
 
 // ---------------------------------------------------------------- Avance (lo llama el pipeline en cada vuelta)
@@ -702,6 +847,7 @@ export function deliveryProgress(p: Process): DeliveryProgress | null {
     units: { done: man.units.filter(u => u.status === 'done').length, total: man.units.length },
     currentUnit: running ? { title: running.title, agentName: running.agentName, kind: running.kind, index: (running.source ?? 'plan') === 'plan' ? planUnits.findIndex(u => u.id === running.id) + 1 : man.units.findIndex(u => u.id === running.id) + 1, total: (running.source ?? 'plan') === 'plan' ? planUnits.length : man.units.length } : null,
     levels: { compiles, complete, qaApproved },
+    checks: deliveryChecks(p),
     corrections: { applied: pl?.corrections ?? 0, max: pl?.config.maxCorrections ?? 0, requested: corrUnits.length, ineffective: pl?.ineffectiveRounds ?? 0, attempts: pl?.correctionAttempts ?? 0 },
     continuations: pl?.continuations ?? 0,
     spentUsd: p.spentUsd,

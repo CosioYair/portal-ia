@@ -79,8 +79,8 @@ const EIGHT: Del[] = [['src/contract.mjs', 'code', 30], ['src/service.mjs', 'cod
 const planOf = (dels: Del[]) => JSON.stringify({ summary: 'Validador de contratos con servicio, CLI, pruebas y documentación', tasks: dels.map(d => `Entregar ${d[0]}`), filesToRead: ['src/index.mjs', 'package.json'], filesToChange: dels.map(d => d[0]), deliverables: dels.map(d => ({ path: d[0], purpose: `Entregable ${d[0]}`, kind: d[1], estimatedLines: d[2] })), acceptance: ['El validador comprueba datos, gasto y lecciones', 'Tiene CLI, pruebas y documentación'], risks: [] });
 const QA_OK = JSON.stringify({ verdict: 'approved', summary: 'Cumple el criterio con evidencia: todo entregado y probado.', findings: [], suggestedTests: [] });
 const qaReject = (findings: { text: string; file: string; expected?: string }[]) => JSON.stringify({ verdict: 'rejected', summary: 'Faltan requisitos del criterio.', findings: findings.map(f => ({ severity: 'alta', text: f.text, file: f.file, evidence: 'revisión del diff', requirement: 'criterio 1', expected: f.expected ?? 'corregirlo', verify: 'QA lo comprueba' })), suggestedTests: [] });
-const MARKERS = ['MARCA_SERVICIO', 'MARCA_CONTRATO', 'MARCA_CLI', 'MARCA_PRUEBA', 'MARCA_DOCS', 'MARCA_GUIA', 'MARCA_ARQUITECTO', 'MARCA_CONSEJO', '- crear src/contract.mjs', '- crear src/service.mjs', '- crear src/cli.mjs', '- crear test/service.test.mjs', 'Faltan src/service.mjs', 'Entregables del plan', 'Que compile no basta', 'test: OK', 'HALLAZGO_SERVICIO_1', 'HALLAZGO_SERVICIO_2', 'HALLAZGO_CLI', '[entregado] src/cli.mjs', 'Comprobación determinista previa', 'Criterio de', 'MARCA_HELPER', 'MARCA_DISPUTA'];
-type Rule = { match: string; text?: string; stopReason?: string; delayMs?: number; responses?: { text: string; stopReason?: string; thinkingTokens?: number }[]; thinkingTokens?: number };
+const MARKERS = ['MARCA_SERVICIO', 'MARCA_CONTRATO', 'MARCA_CLI', 'MARCA_PRUEBA', 'MARCA_DOCS', 'MARCA_GUIA', 'MARCA_ARQUITECTO', 'MARCA_CONSEJO', '- crear src/contract.mjs', '- crear src/service.mjs', '- crear src/cli.mjs', '- crear test/service.test.mjs', 'Faltan src/service.mjs', 'Entregables del plan', 'Que compile no basta', 'test: OK', 'HALLAZGO_SERVICIO_1', 'HALLAZGO_SERVICIO_2', 'HALLAZGO_CLI', '[entregado] src/cli.mjs', 'Comprobación determinista previa', 'Criterio de', 'MARCA_HELPER', 'MARCA_DISPUTA', 'Estado de cada comprobación', 'Qué cambia en este intento'];
+type Rule = { match: string; text?: string; stopReason?: string; delayMs?: number; responses?: { text: string; stopReason?: string; thinkingTokens?: number }[]; thinkingTokens?: number; continueFromLines?: string };
 const R = { plan: 'plan técnico', consult: 'aporta recomendaciones concretas', repair: 'Tu entrega anterior para esta historia no se pudo convertir', fix: 'Corrige la implementación de esta historia', advice: 'necesita tu criterio para corregir esto', qa: 'Evalúa la implementación con la EVIDENCIA real', cont: 'Continúa el archivo', dev: 'Implementa la historia' };
 /** Las reglas específicas van antes (la primera que encaja responde): continuación, reparación, corrección, consulta, QA, unidades. */
 function setRules(plan: string, rules: Rule[], qa: Rule | null = { match: R.qa, text: QA_OK }) {
@@ -294,7 +294,7 @@ test('H · la comprobación determinista evita pagar a QA: prueba que el script 
   const p = await runIt('H · prueba no descubierta');
   const pl = p.result!.pipeline!; const man = p.result!.manifest!;
   assert.equal(pl.state, 'verified', pl.reason ?? '');
-  const gates = pl.events.filter(e => e.kind === 'gate');
+  const gates = pl.events.filter(e => e.kind === 'gate' && /^Comprobación previa a QA/.test(e.message));
   assert.match(gates[0].detail ?? '', /el script «test» no ejecuta esta prueba/); assert.match(gates.at(-1)!.message, /sin problemas objetivos/);
   assert.equal(man.rounds[0].source, 'completeness');
   assert.equal(byRule(R.qa).length, 1, 'QA se llamó UNA vez, cuando ya no había nada objetivo que corregir');
@@ -510,19 +510,24 @@ test('lecciones: los problemas de HU-155 quedan como evidencia «detectada» (nu
     assert.ok(ls.length >= 1, `lección detectada: ${d}`);
     for (const l of ls) { assert.equal(l.status, 'detected'); assert.equal(l.lessonText, null); assert.equal(l.validatedAt, null); }
   }
+  // Entrega incremental: un parche que no encaja dentro de una unidad sigue dando su lección (antes solo se miraba el diff final).
+  assert.ok(all.some(l => l.detector === 'patch_mismatch' && l.evidence.processId === pK), 'parche que no encaja (corrección de K) detectado desde el manifiesto');
 });
 
 // ---------- Revisión de código: casos límite del motor incremental ----------
-test('revisión 1/2 · un plan con formas inesperadas no rompe el manifiesto; un plan sin archivos va en una sola respuesta', async () => {
+test('revisión 1/2 · un plan con formas inesperadas no rompe el manifiesto; un plan sin archivos NO acaba en una respuesta enorme', async () => {
   const odd = JSON.stringify({ summary: 'Raro', tasks: [{ text: 'Crear el contrato' }], filesToRead: 'src/index.mjs', filesToChange: [{ path: 'src/contract.mjs' }], acceptance: 'El contrato existe', risks: null });
   setRules(odd, [{ match: 'Esta es la unidad 1 de 1', text: resp(F('src/contract.mjs', C.contract)) }]);
   const p = await runIt('Revisión · plan raro');
   assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
   assert.deepEqual(p.result!.plan!.filesToChange, ['src/contract.mjs']); assert.deepEqual(p.result!.plan!.acceptance, ['El contrato existe']); assert.deepEqual(p.result!.plan!.tasks, ['Crear el contrato']);
+  // Ilegible dos veces (también en formato compacto): se detiene ANTES de consultas e implementación, con explicación.
   setRules('No pude escribir el plan en JSON.', [{ match: R.dev, text: resp(F('src/contract.mjs', C.contract)) }]);
   const q = await runIt('Revisión · plan ilegible');
-  assert.equal(q.result!.manifest ?? null, null, 'sin entregables no hay manifiesto: la historia va en una respuesta');
-  assert.equal(q.result!.pipeline!.state, 'verified', q.result!.pipeline!.reason ?? ''); assert.equal(byRule(R.dev).length, 1, 'el Desarrollador sí trabaja (antes: cero unidades y nada implementado)');
+  assert.equal(q.result!.pipeline!.pauseKind, 'plan'); assert.match(q.result!.pipeline!.reason!, /No se implementa a ciegas/);
+  assert.equal(byRule(R.plan).length, 2, 'plan + UNA petición en formato compacto (mismo paso)');
+  assert.equal(byRule(R.dev).length + byRule(R.consult).length, 0, 'ni una respuesta enorme del Desarrollador ni consultas pagadas sobre un plan vacío');
+  assert.equal(q.steps.find(s => s.role === 'planner')!.status, 'done');
 });
 
 test('revisión 3 · una unidad dividida termina ANTES que las unidades que dependen de ella', async () => {
@@ -616,6 +621,240 @@ test('revisión 10 · patrones del script de test con llaves o «?» no se dan p
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node --test test/*.test.mjs' } }));
   assert.deepEqual(testDiscovered(dir, 'test/x.test.mjs')?.ok, true); assert.deepEqual(testDiscovered(dir, 'tests/x.spec.mjs')?.ok, false);
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// ---------- Prioridades de la revisión: planes, evidencia, desacuerdos, completitud real y costo ----------
+/** Guion completo a mano (reglas en el orden dado) con límite de salida real opcional. */
+function setRaw(rules: Rule[], enforceMaxTokens = false) {
+  fs.writeFileSync(scriptPath, JSON.stringify({ rules, markers: [...MARKERS, 'Sin cambios desde tu revisión anterior', 'Hallazgos de tu revisión anterior', 'Estado de cada comprobación', 'Faltan docs/qa-guide.md', 'NO DETERMINADA'], enforceMaxTokens }));
+  resetMockCalls(); try { fs.unlinkSync(logPath); } catch { /* vacío */ }
+}
+
+test('prioridad 1/4 · plan mal formado: se pide UNA vez compacto; nada se descarta en silencio (archivos, criterios); demasiados archivos o rutas no permitidas se explican antes de gastar', async () => {
+  const good = planOf([['src/contract.mjs', 'code', 30]]);
+  setRaw([{ match: 'no se pudo leer como un plan con archivos', text: good }, { match: R.plan, text: '{"summary": "Plan cortado", "tasks": ["Crear el contr' }, { match: R.qa, text: QA_OK }, { match: 'Esta es la unidad 1 de 1', text: resp(F('src/contract.mjs', C.contract)) }]);
+  const p = await runIt('Prioridad · plan cortado');
+  assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? ''); assert.ok(p.result!.manifest, 'entrega por partes, no una respuesta enorme');
+  assert.equal(byRule('no se pudo leer como un plan con archivos').length, 1, 'una sola petición compacta');
+  const planner = p.steps.find(s => s.role === 'planner')!; assert.ok(planner.costUsd > 0 && planner.outputMd!.includes('src/contract.mjs'), 'la petición compacta va en el mismo paso del plan (contabilizada)');
+
+  const many = Array.from({ length: 20 }, (_, i) => `src/m${i + 1}.mjs`);
+  setRaw([{ match: R.plan, text: JSON.stringify({ summary: 'Enorme', tasks: [], filesToRead: [], filesToChange: many, acceptance: Array.from({ length: 15 }, (_, i) => `criterio ${i + 1}`), risks: [] }) }, { match: R.dev, text: resp(F('src/m1.mjs', C.contract)) }]);
+  const q = await runIt('Prioridad · 20 archivos');
+  assert.equal(q.result!.pipeline!.pauseKind, 'plan'); assert.match(q.result!.pipeline!.reason!, /tiene 20 archivos.*No se descartó ninguno/);
+  assert.equal(q.result!.plan!.filesToChange.length, 20, 'los 20 se conservan en el plan'); assert.equal(q.result!.plan!.acceptance.length, 15, 'los 15 criterios se conservan (antes se recortaban a 12)');
+  assert.equal(byRule(R.dev).length + byRule(R.consult).length, 0, 'nada se gasta en consultas ni unidades');
+  assert.equal((await flowOf(q.id)).guidance.flow.issue.title, 'Detenido: el plan no se puede ejecutar por partes');
+
+  setRaw([{ match: R.plan, text: JSON.stringify({ summary: 'Rutas', tasks: [], filesToRead: [], filesToChange: ['data/secretos.json', '../fuera.mjs', 'apps/*.ts', '`src/ok.mjs` (nuevo)'], acceptance: [], risks: [] }) }]);
+  const w = await runIt('Prioridad · rutas no permitidas');
+  assert.equal(w.result!.pipeline!.pauseKind, 'plan'); for (const bad of ['data/secretos.json', '../fuera.mjs', 'apps/*.ts']) assert.ok(w.result!.pipeline!.reason!.includes(bad), `explica ${bad}`);
+  assert.ok(w.result!.plan!.filesToChange.includes('src/ok.mjs'), 'una ruta con adornos se normaliza'); assert.deepEqual(w.result!.plan!.acceptance, [CRITERION], 'sin criterios en el plan: el criterio de la historia es obligatorio');
+});
+
+test('prioridad 2 · evidencia de pruebas: una prueba nueva que no se ejecutó se corrige antes de QA; «0 pruebas» o lo no determinable nunca cuenta como superado', async () => {
+  const { enforceQaGate, parseQaVerdict } = await import('../src/services/qaGate.ts');
+  const run = (command: string, exitCode: number | null, output: string) => ({ command, exitCode, output, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), durationMs: 1000, isolation: 'docker' as const });
+  const ok = parseQaVerdict(QA_OK);
+  assert.equal(enforceQaGate(ok, ['typecheck', 'test'], [run('typecheck', 0, 'ok'), run('test', 0, '# tests 0\n# pass 0')]).verdict, 'unable_to_verify', '«test» en verde sin ninguna prueba no es evidencia');
+  const { testFileExecuted } = await import('../src/services/storyUnits.ts');
+  assert.equal(testFileExecuted("test('suma', () => {});", '✔ suma (1ms)').state, 'passed');
+  assert.equal(testFileExecuted("test('suma', () => {});", '✔ otra (1ms)').state, 'failed');
+  assert.equal(testFileExecuted("test('suma', () => {});", 'ok').state, 'undetermined', 'si la salida no muestra nombres, no se afirma nada');
+
+  // Pipeline: la prueba nueva llega con test.skip → la salida de «test» no la muestra → corrección dirigida SIN pagar a QA.
+  const skipTest = "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest.skip('valida las tres áreas', () => assert.ok(true));\n";
+  sandboxFail = (wt, command) => command !== 'test' ? null : { exitCode: 0, output: `✔ humo (0.5ms)\n${fs.readFileSync(path.join(wt, 'test/service.test.mjs'), 'utf8').includes('test.skip') ? '' : '✔ valida las tres áreas (0.8ms)\n'}ℹ tests 2` };
+  try {
+    setRules(planOf([['src/contract.mjs', 'code', 30], ['test/service.test.mjs', 'test', 20]]), [
+      { match: 'Corrige la implementación de esta historia', text: `=== RESUMEN ===\nSe ejecuta.\n${P('test/service.test.mjs', "test.skip('valida las tres áreas'", "test('valida las tres áreas'")}` },
+      { match: 'Esta es la unidad 1 de 2', text: resp(F('src/contract.mjs', C.contract)) },
+      { match: 'Esta es la unidad 2 de 2', text: resp(F('test/service.test.mjs', skipTest)) }
+    ]);
+    const p = await runIt('Prioridad · prueba no ejecutada');
+    const pl = p.result!.pipeline!;
+    assert.equal(pl.state, 'verified', pl.reason ?? '');
+    assert.equal(byRule(R.qa).length, 1, 'QA solo una vez, con la prueba ya ejecutada');
+    assert.ok(pl.events.some(e => e.kind === 'gate' && /no se ejecutaron en el sandbox/.test(e.message)));
+    assert.equal(p.result!.manifest!.rounds[0].source, 'completeness');
+    const checks = (await flowOf(p.id)).guidance.flow.delivery.checks;
+    assert.deepEqual(checks.map((c: any) => `${c.name}:${c.state}`), ['typecheck:passed', 'test:passed', 'build:passed', 'pruebas nuevas ejecutadas:passed']);
+    assert.ok(byRule(R.qa)[0].markers.includes('Estado de cada comprobación'), 'QA recibe el estado explícito de cada comprobación');
+
+    // «test» en verde que no ejecutó nada: QA no puede aprobar; la interfaz lo muestra como NO determinado.
+    sandboxFail = (_wt, command) => command === 'test' ? { exitCode: 0, output: '# tests 0\n# pass 0' } : null;
+    setRules(planOf([['src/contract.mjs', 'code', 30]]), [{ match: 'Esta es la unidad 1 de 1', text: resp(F('src/contract.mjs', C.contract)) }]);
+    const z = await runIt('Prioridad · cero pruebas');
+    assert.equal(z.result!.review?.verdict, 'unable_to_verify'); assert.notEqual(z.result!.pipeline!.state, 'verified');
+    const zc = (await flowOf(z.id)).guidance.flow.delivery.checks;
+    assert.equal(zc.find((c: any) => c.name === 'test').state, 'undetermined'); assert.equal(zc.find((c: any) => c.name === 'pruebas nuevas ejecutadas').state, 'not_applicable');
+  } finally { sandboxFail = null; }
+});
+
+test('prioridad 3 · desacuerdo QA-Desarrollador: discutir exige evidencia concreta y hay UN intercambio; si QA mantiene el hallazgo, decides tú (sin bucle pagado)', async () => {
+  const plan = planOf([['src/contract.mjs', 'code', 30]]); const dev = { match: 'Esta es la unidad 1 de 1', text: resp(F('src/contract.mjs', C.contract)) };
+  const finding = qaReject([{ text: 'CHECKS debería tener cuatro áreas', file: 'src/contract.mjs' }]);
+  setRules(plan, [{ match: 'Corrige la implementación de esta historia', text: '=== RESUMEN ===\nNo.\n=== SIN CAMBIOS ===\nNo estoy de acuerdo con el hallazgo.\n' }, dev], { match: R.qa, text: finding });
+  const p = await runIt('Prioridad · discusión sin evidencia');
+  assert.equal(p.result!.pipeline!.pauseKind, 'repeated_failure', 'sin evidencia no es una discusión válida');
+  assert.match(p.result!.manifest!.units.find(u => u.kind === 'correction')!.error ?? '', /no cita evidencia concreta/);
+  assert.equal(byRule(R.qa).length, 1, 'QA no se vuelve a pagar por una opinión sin evidencia');
+
+  setRules(plan, [{ match: 'Corrige la implementación de esta historia', text: '=== RESUMEN ===\nEl hallazgo no aplica.\n=== SIN CAMBIOS ===\nMARCA_DISPUTA: el criterio pide tres áreas y CHECKS las tiene en src/contract.mjs:2.\n' }, dev], { match: R.qa, text: finding });
+  const q = await runIt('Prioridad · desacuerdo persistente');
+  const pl = q.result!.pipeline!;
+  assert.equal(pl.pauseKind, 'disagreement'); assert.match(pl.reason!, /QA mantiene 1 hallazgo/); assert.ok(pl.reason!.includes('MARCA_DISPUTA') && pl.reason!.includes('cuatro áreas'), 'muestra las dos posiciones');
+  assert.equal(byRule(R.fix).length, 1); assert.equal(byRule(R.qa).length, 2, 'un intercambio: rechazo → discusión con evidencia → QA reevalúa → al propietario');
+  const flow = (await flowOf(q.id)).guidance.flow;
+  assert.equal(flow.issue.title, 'QA y el Desarrollador no están de acuerdo: decides tú'); assert.ok(!flow.actions.some((a: any) => a.id === 'pipeline_resume'), 'continuar no reabriría el bucle');
+});
+
+test('prioridad 5/6 · historia de 8 archivos con límites de salida REALES: unidades, corte recuperado, falta detectada, corrección dirigida, QA con evidencia completa y medición de costo', async (t) => {
+  const big = Array.from({ length: 900 }, (_, i) => `export const valor${String(i + 1).padStart(4, '0')} = ${i + 1}; // línea de relleno del servicio`).join('\n') + '\n';
+  const service = `// MARCA_SERVICIO\nimport { CHECKS } from './contract.mjs';\nexport function validate(input) { const missing = CHECKS.filter(c => !(c in input)); return { ok: missing.length === 0, missing }; }\n${big}`;
+  const dels: Del[] = [['src/contract.mjs', 'code', 30], ['src/service.mjs', 'code', 900], ['src/cli.mjs', 'code', 30], ['package.json', 'config', 5], ['test/service.test.mjs', 'test', 40], ['docs/contract.md', 'docs', 40], ['docs/qa-guide.md', 'docs', 40], ['docs/incident.md', 'docs', 5]];
+  const docsFull = resp(F('docs/contract.md', C.doc), F('docs/qa-guide.md', C.guide), INCIDENT);
+  setRaw([
+    { match: R.plan, text: planOf(dels) },
+    { match: R.consult, text: 'MARCA_ARQUITECTO: servicio aparte; prueba con node:test.' },
+    { match: 'Continúa el archivo «src/service\\.mjs»', continueFromLines: service, thinkingTokens: 1500 },
+    { match: 'Corrige la implementación de esta historia', text: `=== RESUMEN ===\nCita.\n${P('docs/contract.md', 'MARCA_DOCS: el servicio está en src/service.mjs:3.', 'MARCA_DOCS: validate() está en src/service.mjs:3 y CHECKS en src/contract.mjs:2.')}`, thinkingTokens: 800 },
+    { match: R.qa, responses: [{ text: qaReject([{ text: 'El contrato no cita CHECKS con archivo:línea', file: 'docs/contract.md' }]), thinkingTokens: 1500 }, { text: QA_OK, thinkingTokens: 1000 }] },
+    { match: 'Esta es la unidad 1 de 6', text: resp(F('src/contract.mjs', C.contract)), thinkingTokens: 2500 },
+    { match: 'Esta es la unidad 2 de 6', text: `=== RESUMEN ===\nServicio.\n=== ARCHIVO: src/service.mjs | create ===\n${service}=== FIN ARCHIVO ===\n`, thinkingTokens: 4000 },
+    { match: 'Esta es la unidad 3 de 6', text: resp(F('src/cli.mjs', C.cli)), thinkingTokens: 2500 },
+    { match: 'Esta es la unidad 4 de 6', text: resp(PKG), thinkingTokens: 2500 },
+    { match: 'Esta es la unidad 5 de 6', text: resp(F('test/service.test.mjs', C.test)), thinkingTokens: 2500 },
+    { match: 'Esta es la unidad 6 de 6', responses: [{ text: resp(F('docs/contract.md', C.doc), INCIDENT), thinkingTokens: 2500 }, { text: docsFull, thinkingTokens: 2500 }] }
+  ], true);
+  const p = await runIt('Prioridad · ocho archivos con límites reales', {}, 8);
+  const pl = p.result!.pipeline!; const man = p.result!.manifest!; const c = calls();
+  assert.equal(pl.state, 'verified', pl.reason ?? '');
+  // División correcta y nada regenerado
+  assert.equal(man.units.filter(u => u.source === 'plan').length, 6); assert.deepEqual(man.units.find(u => u.files.includes('src/service.mjs'))!.files, ['src/service.mjs']);
+  const unitCalls = c.filter(x => /^Esta es la unidad/.test(x.rule ?? ''));
+  for (const f of ['src/contract.mjs', 'src/service.mjs', 'src/cli.mjs', 'test/service.test.mjs']) assert.equal(unitCalls.filter(x => x.markers.includes(`- crear ${f}`)).length, 1, `${f} se pidió una sola vez`);
+  assert.equal(byRule(R.plan).length, 1, 'sin replanificar');
+  // Corte recuperado de forma segura: el archivo grande queda EXACTO
+  assert.ok(pl.continuations! >= 1); assert.equal(wtFile(p, 'src/service.mjs'), service);
+  // Falta detectada: la unidad de documentación entregó 2 de 3; el segundo intento pidió SOLO la que faltaba
+  const docsCalls = byRule('Esta es la unidad 6 de 6'); assert.equal(docsCalls.length, 2); assert.ok(docsCalls[1].markers.includes('Faltan docs/qa-guide.md'));
+  // Corrección dirigida y QA con evidencia completa (la segunda revisión, centrada en lo que cambió)
+  assert.equal(pl.corrections, 1); assert.deepEqual(man.units.find(u => u.kind === 'correction')!.applied, ['docs/contract.md']);
+  const qa = byRule(R.qa); assert.equal(qa.length, 2);
+  assert.ok(qa[0].markers.includes('Entregables del plan') && qa[0].markers.includes('Estado de cada comprobación'));
+  assert.ok(qa[1].markers.includes('Sin cambios desde tu revisión anterior') && qa[1].markers.includes('Hallazgos de tu revisión anterior'), 'la segunda revisión recibe lo que cambió y sus hallazgos');
+  assert.ok(qa[1].chars < qa[0].chars * 0.6, `la segunda revisión no repite el diff entero (${qa[1].chars} vs ${qa[0].chars} caracteres)`);
+  for (const [f, content] of [['src/contract.mjs', C.contract], ['src/cli.mjs', C.cli], ['test/service.test.mjs', C.test], ['docs/qa-guide.md', C.guide]] as const) assert.equal(wtFile(p, f), content, `${f} terminado y conservado`);
+  assertAccounting(p, 'prioridad 5');
+  // Medición de costo (simulado): llamadas, entrada y salida por tipo; ningún prompt arrastra el repositorio entero.
+  const kind = (r: string | null) => !r ? 'otra' : /^Esta es la unidad/.test(r) ? 'unidad' : r === R.qa ? 'QA' : /Continúa/.test(r) ? 'continuación' : /Corrige/.test(r) ? 'corrección' : r === R.plan ? 'plan' : r === R.consult ? 'consulta' : 'otra';
+  const byKind = new Map<string, { n: number; inTok: number; maxIn: number }>();
+  for (const x of c) { const k = kind(x.rule); const e = byKind.get(k) ?? { n: 0, inTok: 0, maxIn: 0 }; const tok = Math.ceil(x.chars / 3.5); byKind.set(k, { n: e.n + 1, inTok: e.inTok + tok, maxIn: Math.max(e.maxIn, tok) }); }
+  const steps = p.steps.filter(s => s.inputTokens > 0); const outTok = steps.reduce((a, s) => a + s.outputTokens, 0); const inTok = steps.reduce((a, s) => a + s.inputTokens, 0);
+  t.diagnostic(`costo simulado · ${c.length} llamadas · entrada ${inTok} tok · salida ${outTok} tok (incluye razonamiento oculto) · ${p.spentUsd.toFixed(4)} USD con la tarifa del modelo simulado`);
+  for (const [k, v] of byKind) t.diagnostic(`  ${k}: ${v.n} llamada(s) · entrada ≈ ${v.inTok} tok (máx ${v.maxIn} por llamada)`);
+  assert.equal(c.length, 1 + byRule(R.consult).length + 7 + pl.continuations! + 1 + 2, 'plan + consultas + 7 llamadas de unidad (6 + 1 intento por la falta) + continuaciones + 1 corrección + 2 QA: ninguna de más');
+  assert.ok(byKind.get('unidad')!.maxIn < 16_000, `ninguna unidad supera ≈16k tokens de entrada (máx ${byKind.get('unidad')!.maxIn})`);
+});
+
+// ---------- Segunda revisión de código ----------
+test('revisión2 1 · una continuación pagada se relee igual al reanudar (sin valla ni solapes) y una pausa antes de llamar no gasta la continuación', async () => {
+  const { stitch } = await import('../src/services/storyUnits.ts');
+  assert.equal(stitch('=== ARCHIVO: a.mjs | create ===\nl1\nl2\n', '```js\n=== ARCHIVO: a.mjs | create ===\nl2\nl3\n'), '=== ARCHIVO: a.mjs | create ===\nl1\nl2\nl3\n');
+  const lines = Array.from({ length: 30 }, (_, i) => `export const v${i + 1} = ${i + 1};`);
+  const full = lines.join('\n') + '\n';
+  const cut = `=== RESUMEN ===\nGrande.\n=== ARCHIVO: src/service.mjs | create ===\n${lines.slice(0, 10).join('\n')}\nexport const v11 =`;
+  const c1 = `\`\`\`js\n${lines.slice(10, 20).join('\n')}\nexport const v21 =`;
+  const c2 = `${lines.slice(20).join('\n')}\n=== FIN ARCHIVO ===\n`;
+  setRules(planOf([['src/service.mjs', 'code', 30]]), [
+    { match: 'Continúa el archivo «src/service\\.mjs»', responses: [{ text: c1, stopReason: 'max_tokens' }, { text: c2 }] },
+    { match: 'Esta es la unidad 1 de 1', text: cut, stopReason: 'max_tokens' }
+  ]);
+  const id = newRun('Revisión2 · reanudar una continuación');
+  let seen = 0;
+  // Antes de la segunda continuación, el presupuesto se queda corto: pausa SIN llamar.
+  await runStory(S, id, (_o, m) => { if (/^La respuesta se cortó por longitud dentro de/.test(m) && ++seen === 2) { const cur = processesRepo(S).get(id)!; processesRepo(S).authorize(id, cur.spentUsd + 0.0001); } }, () => false);
+  let p = processesRepo(S).get(id)!;
+  assert.equal(p.result!.pipeline!.pauseKind, 'budget'); assert.equal(p.result!.manifest!.units[0].continued?.['src/service.mjs'], 1, 'la continuación no hecha no se cuenta');
+  const cont = await app.inject({ method: 'POST', url: `${W}/processes/${id}/continue`, payload: { authorized: true, addBudgetUsd: 2 } });
+  assert.equal(cont.statusCode, 200, cont.body); p = await waitDone(id);
+  assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
+  assert.equal(wtFile(p, 'src/service.mjs'), full, 'archivo exacto: la valla y el solape de la continuación ya pagada se limpian también al reanudar');
+  assert.equal(byRule('Esta es la unidad 1 de 1').length, 1, 'la unidad no se vuelve a pedir');
+});
+
+test('revisión2 2/5 · un descarte en la comprobación previa la repite (no queda «Falta» obsoleto); un ayudante en test/ no se toma por prueba no ejecutada', async () => {
+  // b.mjs se entrega y una unidad posterior lo borra: la comprobación previa lo echa en falta; el equipo lo descarta con motivo.
+  setRules(planOf([['src/a.mjs', 'code', 10], ['src/b.mjs', 'code', 10], ['test/helpers/fixture.mjs', 'test', 10]]), [
+    { match: 'Implementa la historia por partes. Esta es la corrección 1', text: '=== RESUMEN ===\nNo hace falta.\n=== DESCARTE: src/b.mjs ===\nLo sustituye src/a.mjs (ver src/a.mjs:1).\n' },
+    { match: 'Esta es la unidad 1 de 2', text: resp(F('src/a.mjs', 'export const a = 1;\n'), F('src/b.mjs', 'export const b = 1;\n')) },
+    { match: 'Esta es la unidad 2 de 2', text: `=== RESUMEN ===\nAyudante.\n${F('test/helpers/fixture.mjs', 'export const fixture = {};\n')}=== ARCHIVO: src/b.mjs | delete ===\n=== FIN ARCHIVO ===\n${OWNER}` }
+  ]);
+  const p = await runIt('Revisión2 · descarte en la comprobación previa');
+  const man = p.result!.manifest!;
+  assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
+  assert.equal(man.deliverables.find(d => d.path === 'src/b.mjs')!.status, 'dropped');
+  assert.equal(man.gate!.ok, true, 'la comprobación se repitió tras el descarte'); assert.equal((await flowOf(p.id)).guidance.flow.delivery.levels.complete, true);
+  assert.ok(!man.gate!.invalid.some(i => i.path === 'test/helpers/fixture.mjs'), 'un ayudante no es un punto de entrada de pruebas');
+});
+
+test('revisión2 3 · «Reintentar solo lo que falta» vuelve a intentarlo CON el motivo del fallo como instrucción', async () => {
+  setRules(planOf([['src/contract.mjs', 'code', 30], ['src/service.mjs', 'code', 40]]), [{ match: 'Esta es la unidad 1 de 1', text: resp(F('src/contract.mjs', C.contract)) }]);
+  const id = newRun('Revisión2 · reintento con motivo');
+  await runStory(S, id, () => undefined, () => false);
+  assert.equal(processesRepo(S).get(id)!.result!.pipeline!.pauseKind, 'incomplete');
+  const before = byRule('Esta es la unidad 1 de 1').length;
+  await app.inject({ method: 'POST', url: `${W}/processes/${id}/continue`, payload: { authorized: true, addBudgetUsd: 1 } }); await waitDone(id);
+  const retry = byRule('Esta es la unidad 1 de 1')[before];
+  assert.ok(retry.markers.includes('Qué cambia en este intento'), 'el reintento lleva el motivo del fallo anterior');
+});
+
+test('revisión2 4 · globs recursivos del script de test («**») a cualquier profundidad', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-glob2-'));
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: "node --test 'test/**/*.test.mjs'" } }));
+  assert.equal(testDiscovered(dir, 'test/a/b/x.test.mjs')?.ok, true); assert.equal(testDiscovered(dir, 'test/x.test.mjs')?.ok, true); assert.equal(testDiscovered(dir, 'tests/x.test.mjs')?.ok, false);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('revisión2 6 · una ruta relativa a un workspace (tsc dentro de un paquete) se resuelve al archivo real: la corrección recibe su contenido', async () => {
+  sandboxFail = (wt, command) => command === 'typecheck' && /: number = "/.test(fs.readFileSync(path.join(wt, 'pkg/src/contract.mjs'), 'utf8')) ? { exitCode: 2, output: "src/contract.mjs(2,14): error TS2322: Type 'string' is not assignable to type 'number'." } : null;
+  try {
+    setRules(planOf([['pkg/src/contract.mjs', 'code', 10]]), [
+      { match: 'Corrige la implementación de esta historia', text: `=== RESUMEN ===\nTipo.\n${P('pkg/src/contract.mjs', 'export const n: number = "2";', 'export const n: number = 2;')}` },
+      { match: 'Esta es la unidad 1 de 1', text: resp(F('pkg/src/contract.mjs', '// MARCA_CONTRATO\nexport const n: number = "2";\n')) }
+    ]);
+    const p = await runIt('Revisión2 · ruta de workspace');
+    assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
+    const fixUnit = p.result!.manifest!.units.find(u => u.kind === 'correction')!;
+    assert.deepEqual(fixUnit.files, ['pkg/src/contract.mjs'], 'src/contract.mjs (relativa al paquete) → pkg/src/contract.mjs');
+    assert.ok(byRule('Corrige la implementación de esta historia')[0].markers.includes('MARCA_CONTRATO'), 'la corrección ve el código real');
+  } finally { sandboxFail = null; }
+});
+
+test('revisión2 8/9 · una corrección que agota la salida falla ELLA (la ronda sigue); un fallo objetivo del sandbox no se «discute»', async () => {
+  setRules(planOf([['src/contract.mjs', 'code', 30], ['src/service.mjs', 'code', 40], ['src/cli.mjs', 'code', 30]]), [
+    { match: 'corrección dirigida \\(«cli\\.mjs', text: '', stopReason: 'max_tokens', thinkingTokens: 4000 },
+    { match: 'corrección dirigida \\(«service\\.mjs', text: `=== RESUMEN ===\nMensaje.\n${P('src/service.mjs', '  return { ok: missing.length === 0, missing };', '  return { ok: missing.length === 0, missing, message: missing.join(\', \') };')}` },
+    { match: 'Esta es la unidad 1 de 1', text: resp(F('src/contract.mjs', C.contract), F('src/service.mjs', C.service), F('src/cli.mjs', C.cli)) }
+  ], { match: R.qa, responses: [{ text: qaReject([{ text: 'HALLAZGO_SERVICIO_1: falta el mensaje', file: 'src/service.mjs' }, { text: 'HALLAZGO_CLI: falta la ayuda', file: 'src/cli.mjs' }]) }, { text: QA_OK }] });
+  const p = await runIt('Revisión2 · corrección agotada');
+  assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
+  const round = p.result!.manifest!.units.filter(u => u.round === 0);
+  assert.equal(round.find(u => u.files[0] === 'src/cli.mjs')!.status, 'failed'); assert.equal(round.find(u => u.files[0] === 'src/service.mjs')!.status, 'done');
+  assert.equal(p.result!.pipeline!.corrections, 1);
+
+  sandboxFail = (wt, command) => command === 'typecheck' ? { exitCode: 2, output: "src/contract.mjs(2,14): error TS2322: Type 'string' is not assignable to type 'number'." } : null;
+  try {
+    setRules(planOf([['src/contract.mjs', 'code', 30]]), [
+      { match: 'Corrige la implementación de esta historia', text: '=== RESUMEN ===\nNo es mío.\n=== SIN CAMBIOS ===\nEl error está en src/contract.mjs:2 pero no lo causó este cambio.\n' },
+      { match: 'Esta es la unidad 1 de 1', text: resp(F('src/contract.mjs', C.contract)) }
+    ]);
+    const q = await runIt('Revisión2 · discutir el sandbox');
+    assert.equal(q.result!.pipeline!.pauseKind, 'repeated_failure'); assert.equal(q.result!.pipeline!.corrections, 0, 'discutir un fallo objetivo no cuenta como corrección');
+    assert.match(q.result!.manifest!.units.find(u => u.kind === 'correction')!.error ?? '', /comprobación objetiva/);
+    assert.equal(byRule(R.qa).length, 0);
+  } finally { sandboxFail = null; }
 });
 
 // ---------- R · Docker real ----------

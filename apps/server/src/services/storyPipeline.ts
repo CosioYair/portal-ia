@@ -7,14 +7,14 @@ import { agentsRepo, backlogRepo, processesRepo, projectsRepo } from '../db/work
 import { decryptSecret } from '../security/crypto.ts';
 import { practicesFor } from './agentTemplates.ts';
 import { assessDeveloperOutput, clip, failureClassOf, mergeChanges, type ParsedDevOutput } from './devOutput.ts';
-import { filesIn, parseBuildErrors, parseFailingTests, parseTypeScriptErrors } from './diagnostics.ts';
+import { diagnosticsFor, filesIn } from './diagnostics.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall, withWatchdog } from './providerCalls.ts';
 import { injectLessons, recordDetections } from './lessons.ts';
 import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, testsEvidence, verificationEvidence } from './qaGate.ts';
 /** Veredicto de QA con salida estructurada nativa del proveedor (si la admite); el motor lo valida igualmente. */
 const QA_SCHEMA = { name: 'veredicto_qa', description: 'Veredicto de la puerta de calidad con hallazgos y evidencia.', schema: QA_VERDICT_SCHEMA as unknown as Record<string, unknown> };
-import { annotateChanges, applyChanges, changesSinceBase, checkStaleChanges, commitInWorktree, readRepoFile, safeRelPath, type RawChange } from './repoWrite.ts';
+import { annotateChanges, applyChanges, changesSinceBase, checkStaleChanges, commitInWorktree, git, readRepoFile, safeRelPath, type RawChange } from './repoWrite.ts';
 import { DEPS_MISSING_EXIT } from './sandbox.ts';
 import { DEV_MAX_TOKENS, FILE_FORMAT, PATCH_ONLY_FORMAT, sys } from './storyPrompts.ts';
 import { runVerification, sandboxDeps } from './verification.ts';
@@ -393,6 +393,8 @@ export interface UnitHooks {
   repairPrompt: (a: DevOutputAssessment, previous: string, ok: ProposedChange[], bad: ProposedChange[]) => string;
   canRepair: () => boolean;
   onRepair: () => void;
+  /** ¿Importa este archivo para esta unidad? (un parche repetido sobre algo ya entregado no justifica una reparación pagada) */
+  relevant?: (path: string) => boolean;
   /** Cada salida pagada dentro de la unidad (reparación, contexto, respuesta del propietario, continuación) queda registrada. */
   record: (o: DevOutput) => void;
 }
@@ -432,7 +434,8 @@ async function settleCore(ctx: StoryRunCtx, outputs: DevOutput[], opts: { config
   for (;;) {
     checkCancelled(ctx);
     const valid = ev.changes.filter(c => !c.error); const invalid = ev.changes.filter(c => c.error);
-    const cls: AgentFailureKind | null = failureClassOf(ev.assessment) ?? (invalid.length ? 'INVALID_OUTPUT' : null);
+    const invalidRelevant = opts.unit?.relevant ? invalid.filter(c => opts.unit!.relevant!(c.path)) : invalid;
+    const cls: AgentFailureKind | null = failureClassOf(ev.assessment) ?? (invalidRelevant.length ? 'INVALID_OUTPUT' : null);
     if (opts.config) updatePipeline(ctx.slug, ctx.processId, { lastAssessment: ev.assessment, failureClass: cls, phase: opts.unit ? 'implementing' : 'recovering' });
     if (!announced && ev.assessment.recoveredBy && ev.assessment.recoveredBy !== 'canonical' && opts.config) {
       emit(ctx, 'recovery', 'El Desarrollador entregó un formato incompleto. Recuperando los cambios existentes sin consumir IA.', { detail: `${valid.length} archivo(s) recuperados (${ev.assessment.recoveredBy}). ${ev.assessment.reasons.slice(0, 4).join(' ')}` });
@@ -520,7 +523,7 @@ export function bumpFailure(list: PipelineStatus['failures'], signature: string,
   return f ? list.map(x => x === f ? { ...x, count: x.count + 1 } : x) : [...list, { signature, count: 1, label }];
 }
 export function verificationSignature(v: VerificationRun): string {
-  const d = v.command === 'typecheck' ? parseTypeScriptErrors(v.output) : v.command === 'test' ? parseFailingTests(v.output) : parseBuildErrors(v.output);
+  const d = diagnosticsFor(v);
   return `${v.command}|${d.slice(0, 3).map(x => `${x.file ?? ''}:${x.code ?? ''}:${x.text.slice(0, 40)}`).join(',') || v.output.trim().split('\n').slice(-2).join(' ').slice(0, 80)}`;
 }
 const FAIL_MSG: Record<string, string> = {
@@ -647,7 +650,16 @@ export async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
   emit(ctx, 'qa', 'QA está evaluando la evidencia: diff, typecheck, pruebas y compilación.', { phase: 'qa', aiCall: true });
   const pendingQa = proc.steps.find(s => s.role === 'reviewer' && s.status === 'pending');
   // QA recibe también el manifiesto (qué estaba planificado, qué está de verdad en el worktree), la comprobación previa sin IA, la evidencia de las pruebas y sus hallazgos anteriores.
-  const user = qaEvidencePrompt({ criterion: ctx.item.criterion, plan: ctx.plan, summary: r.implementationSummary ?? '', changes: r.changes, verifications: sinceApplied(r), required: cfg.commands, attempts: attemptsSummary(p), consultText: ctx.consultText, manifest: r.manifest ?? null, previousFindings: r.review?.verdict === 'rejected' ? r.review.findings ?? [] : [], tests: testsEvidence(sinceApplied(r)) });
+  // Entrega incremental: estado de cada comprobación y, si QA ya revisó un commit anterior, el diff completo solo de lo que cambió.
+  let unchanged: string[] = []; const reviewed = r.manifest?.reviewedCommit ?? null; let checks: import('@portal-ia/domain').DeliveryCheck[] = [];
+  if (r.manifest) {
+    const units = await import('./storyUnits.ts'); checks = units.deliveryChecks(proc);
+    if (reviewed && r.applied?.worktree) {
+      try { const changed = new Set((await git(r.applied.worktree, ['diff', '--name-only', reviewed, 'HEAD'])).split('\n').map(x => x.trim()).filter(Boolean)); unchanged = r.changes.filter(c => !c.error && !changed.has(c.path)).map(c => c.path); }
+      catch { unchanged = []; /* commit anterior inalcanzable: revisión completa */ }
+    }
+  }
+  const user = qaEvidencePrompt({ criterion: ctx.item.criterion, plan: ctx.plan, summary: r.implementationSummary ?? '', changes: r.changes, verifications: sinceApplied(r), required: cfg.commands, attempts: attemptsSummary(p), consultText: ctx.consultText, manifest: r.manifest ?? null, previousFindings: r.review?.verdict === 'rejected' ? r.review.findings ?? [] : [], tests: testsEvidence(sinceApplied(r)), checks, unchangedSinceReview: unchanged, reviewedCommit: reviewed });
   const system = sys(qa, ctx.project, ctx.item);
   let res = await stepCall(ctx, qa, 'reviewer', pendingQa ? pendingQa.title : `Revisión de QA con evidencia (tras corrección ${p.corrections})`, 'Puerta de calidad con evidencia del sandbox', system, user, 6000, pendingQa?.id, QA_SCHEMA);
   let verdict = parseQaVerdict(res.text);
@@ -661,6 +673,7 @@ export async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
   const gated = enforceQaGate(verdict, cfg.commands, sinceApplied(fresh));
   updateResult(ctx.slug, ctx.processId, x => ({ ...x, review: gated }));
   updatePipeline(ctx.slug, ctx.processId, { lastQaCommit: fresh.applied?.commit ?? null });
+  if (fresh.manifest) updateResult(ctx.slug, ctx.processId, x => x.manifest ? { ...x, manifest: { ...x.manifest, reviewedCommit: fresh.applied?.commit ?? null } } : x);
   const label = gated.verdict === 'approved' ? 'QA aprobó la implementación con evidencia.' : gated.verdict === 'rejected' ? `QA rechazó: ${actionableFindings(gated).length} hallazgo(s) con evidencia.` : gated.verdict === 'blocked_environment' ? 'QA no pudo validar por el entorno.' : 'QA no pudo verificar con la evidencia disponible.';
   emit(ctx, 'qa', label, { costUsd: res.costUsd, detail: [gated.overridden, gated.summary].filter(Boolean).join(' ') });
 }
@@ -682,6 +695,8 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
     if (!r.applied) { await applyInWorktree(ctx); continue; }
     if (cfg.autoVerify) {
       const failed = await verifyStage(ctx, cfg);
+      // Verificación en verde: antes de QA, ¿las pruebas nuevas se ejecutaron de verdad? (sin IA)
+      if (!failed && units && units.afterVerification(ctx, cfg)) continue;
       if (failed) {
         const sig = verificationSignature(failed);
         const failures = bumpFailure(p.failures, sig, `${failed.command} falla`);
@@ -691,7 +706,7 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
         if (p.corrections >= cfg.maxCorrections) throw new PipelinePause('limit', `${failed.command} sigue fallando y se alcanzó el máximo de correcciones autorizadas (${cfg.maxCorrections}). Lo hecho se conserva.`);
         emit(ctx, 'verify', FAIL_MSG[failed.command] ?? `${failed.command} falla. El equipo está preparando una corrección.`, { phase: 'correcting', detail: verificationEvidence(failed).split('\n').slice(0, 6).join(' ') });
         if (units) { units.startRound(ctx, cfg, 'verification', units.verificationFindings(failed)); continue; }
-        const d = failed.command === 'typecheck' ? parseTypeScriptErrors(failed.output) : failed.command === 'test' ? parseFailingTests(failed.output) : parseBuildErrors(failed.output);
+        const d = diagnosticsFor(failed);
         if (!await correct(ctx, cfg, `La verificación «${failed.command}» falla en el sandbox:\n${verificationEvidence(failed)}`, Array.from(new Set([...d.map(x => x.file).filter(Boolean) as string[], ...filesIn(failed.output)])))) ineffectiveCorrection(ctx);
         continue;
       }
@@ -745,8 +760,8 @@ export function providerPause(e: any): PipelinePause | null {
 
 /** Cierra el pipeline en pausa/parada con el motivo (sin perder nada) y lo deja listo para «Continuar». */
 export function pausePipeline(ctx: StoryRunCtx, pause: PipelinePause) {
-  const stopped = ['repeated_failure', 'limit', 'qa', 'no_changes', 'refusal', 'provider_refusal', 'unsupported', 'unknown'].includes(pause.kind);
-  const CLASS: Partial<Record<PipelinePauseKind, AgentFailureKind>> = { budget: 'BUDGET_EXHAUSTED', network: 'PERMISSION_REQUIRED', environment: 'ENVIRONMENT_FAILURE', limit: 'RECOVERABLE_IMPLEMENTATION_ERROR', repeated_failure: 'RECOVERABLE_IMPLEMENTATION_ERROR', missing_information: 'MISSING_INFORMATION', permission: 'PERMISSION_REQUIRED', unsupported: 'UNSUPPORTED_CAPABILITY', provider_refusal: 'PROVIDER_REFUSAL', provider_timeout: 'PROVIDER_TIMEOUT', provider_error: 'PROVIDER_CONNECTION_ERROR', interrupted: 'UNKNOWN_FAILURE', unknown: 'UNKNOWN_FAILURE' };
+  const stopped = ['repeated_failure', 'limit', 'qa', 'no_changes', 'refusal', 'provider_refusal', 'unsupported', 'unknown', 'plan', 'disagreement'].includes(pause.kind);
+  const CLASS: Partial<Record<PipelinePauseKind, AgentFailureKind>> = { budget: 'BUDGET_EXHAUSTED', network: 'PERMISSION_REQUIRED', environment: 'ENVIRONMENT_FAILURE', limit: 'RECOVERABLE_IMPLEMENTATION_ERROR', repeated_failure: 'RECOVERABLE_IMPLEMENTATION_ERROR', missing_information: 'MISSING_INFORMATION', permission: 'PERMISSION_REQUIRED', unsupported: 'UNSUPPORTED_CAPABILITY', provider_refusal: 'PROVIDER_REFUSAL', provider_timeout: 'PROVIDER_TIMEOUT', provider_error: 'PROVIDER_CONNECTION_ERROR', interrupted: 'UNKNOWN_FAILURE', unknown: 'UNKNOWN_FAILURE', too_large: 'INCOMPLETE_OUTPUT', incomplete: 'RECOVERABLE_IMPLEMENTATION_ERROR' };
   const cur = pipelineOf(ctx.slug, ctx.processId);
   updatePipeline(ctx.slug, ctx.processId, { state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, reason: pause.message, phase: 'finished', finishedAt: now(), failureClass: cur.failureClass && ['missing_information', 'permission', 'unsupported', 'provider_refusal'].includes(pause.kind) ? cur.failureClass : CLASS[pause.kind] ?? cur.failureClass ?? null }, { kind: 'pause', message: pause.message });
 }

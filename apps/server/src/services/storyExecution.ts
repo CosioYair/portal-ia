@@ -47,11 +47,22 @@ export function stepByRole(proc: Process, role: TeamRole): ProcessStep | undefin
 }
 
 /** Lista de textos a partir de lo que devuelva el modelo: un texto suelto, objetos con ruta/texto o valores sueltos. */
-export function asStrings(v: unknown, max: number): string[] {
+export function asStrings(v: unknown, max = Infinity): string[] {
   const arr = Array.isArray(v) ? v : typeof v === 'string' ? [v] : [];
-  return arr.map(x => typeof x === 'string' ? x : x && typeof x === 'object' ? String((x as any).path ?? (x as any).text ?? (x as any).title ?? (x as any).description ?? JSON.stringify(x)) : x == null ? '' : String(x)).map(s => s.trim()).filter(Boolean).slice(0, max);
+  return arr.map(x => typeof x === 'string' ? x : x && typeof x === 'object' ? String((x as any).path ?? (x as any).file ?? (x as any).ruta ?? (x as any).text ?? (x as any).title ?? (x as any).description ?? JSON.stringify(x)) : x == null ? '' : String(x)).map(s => s.trim()).filter(Boolean).slice(0, max);
 }
-const planFrom = (j: any, fallbackSummary: string): StoryPlan => ({ summary: String(j?.summary ?? fallbackSummary), tasks: asStrings(j?.tasks, 20), filesToRead: asStrings(j?.filesToRead, 8), filesToChange: asStrings(j?.filesToChange, 10), acceptance: asStrings(j?.acceptance, 12), risks: asStrings(j?.risks, 10) });
+/** «`apps/x.ts` (nuevo)», «- apps/x.ts: crear…» → «apps/x.ts». */
+const planPath = (s: string) => s.trim().replace(/^[-*•\s`'"]+/, '').split(/\s+/)[0].replace(/[`'",;:)]+$/, '').replace(/\\/g, '/').replace(/^\.\//, '');
+/**
+ * Plan del Coordinador normalizado SIN perder nada en silencio: los archivos a cambiar y los criterios de aceptación se
+ * conservan todos (antes se recortaban a 10 y 12); el exceso se detecta después y se explica, no se descarta.
+ */
+export function planFrom(j: any, fallbackSummary: string): StoryPlan {
+  const deliverables = (Array.isArray(j?.deliverables) ? j.deliverables : []).map((d: any) => typeof d === 'string' ? { path: d } : d).filter((d: any) => d && typeof (d.path ?? d.file ?? d.ruta) === 'string')
+    .map((d: any) => ({ path: planPath(String(d.path ?? d.file ?? d.ruta)), purpose: String(d.purpose ?? d.proposito ?? '').slice(0, 300), kind: ['code', 'test', 'docs', 'config'].includes(d.kind) ? d.kind : undefined, estimatedLines: Number.isFinite(Number(d.estimatedLines)) ? Number(d.estimatedLines) : undefined })).filter((d: any) => d.path);
+  return { summary: String(j?.summary ?? fallbackSummary), tasks: asStrings(j?.tasks, 40), filesToRead: asStrings(j?.filesToRead, 8).map(planPath).filter(Boolean), filesToChange: Array.from(new Set(asStrings(j?.filesToChange).map(planPath).filter(Boolean))), acceptance: asStrings(j?.acceptance), risks: asStrings(j?.risks, 20), ...(deliverables.length ? { deliverables } : {}) };
+}
+const planHasFiles = (p: StoryPlan) => p.filesToChange.length > 0 || (p.deliverables?.length ?? 0) > 0;
 
 function extractJson(text: string): any | null {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
@@ -156,10 +167,26 @@ ${treeText}
 
 El equipo implementará por partes (unidades que caben en una respuesta), así que indica también, por cada archivo a crear o modificar, su propósito, tipo y tamaño previsto en líneas.
 Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "deliverables": [{"path": string, "purpose": string (una frase), "kind": "code"|"test"|"docs"|"config", "estimatedLines": number}] (uno por cada ruta de filesToChange, en orden de dependencia), "acceptance": string[], "risks": string[]}`, 4000);
-    const planJson = extractJson(planRes.text);
-    const deliverables = Array.isArray(planJson?.deliverables) ? planJson.deliverables.filter((d: any) => d && typeof d.path === 'string').slice(0, 10).map((d: any) => ({ path: String(d.path), purpose: String(d.purpose ?? '').slice(0, 300), kind: ['code', 'test', 'docs', 'config'].includes(d.kind) ? d.kind : undefined, estimatedLines: Number.isFinite(Number(d.estimatedLines)) ? Number(d.estimatedLines) : undefined })) : undefined;
-    const plan: StoryPlan = { ...planFrom(planJson, planRes.text.slice(0, 500)), ...(deliverables?.length ? { deliverables } : {}) };
+    let plan: StoryPlan = planFrom(extractJson(planRes.text), planRes.text.slice(0, 500));
+    // Entrega incremental: un plan sin entregables legibles (JSON cortado o mal formado) se pide UNA vez más, compacto y en
+    // el mismo paso; nunca se convierte en una respuesta enorme del Desarrollador con la historia entera.
+    if (config?.autoApply && !planHasFiles(plan)) {
+      log({ processId, stop: planRes.stopReason }, 'plan sin entregables legibles: se pide una vez en formato compacto');
+      const again = await call(planStep.id, sys(coord, project, item), `Tu respuesta anterior no se pudo leer como un plan con archivos (JSON cortado o sin «filesToChange»). Devuelve SOLO el JSON del plan, compacto y completo: "summary" (máximo 3 frases), "tasks" (máximo 10, una línea cada una), "filesToRead" (máximo 6), "filesToChange" (TODAS las rutas a crear o modificar), "deliverables" (una por ruta: path, purpose de 12 palabras como mucho, kind, estimatedLines), "acceptance" (todos los criterios) y "risks" (máximo 3). Sin texto alrededor.`, 3000, [{ role: 'user', content: 'Elabora el plan técnico de la historia (JSON).' }, { role: 'assistant', content: planRes.text.slice(0, 12_000) }], 'Plan en formato compacto: el anterior no traía entregables legibles');
+      plan = planFrom(extractJson(again.text), plan.summary);
+    }
+    // El criterio de la historia es obligatorio: si el plan no trae criterios, se usa el del propietario.
+    if (!plan.acceptance.length && item.criterion?.trim()) plan.acceptance = [item.criterion.trim()];
     result.plan = plan; save();
+    if (config?.autoApply) {
+      // Antes de pagar consultas: un plan sin entregables, con demasiados o con rutas no permitidas se explica y se pausa.
+      const team0 = involved.map(id => agents.get(id)).filter(Boolean) as Agent[];
+      const implStep0 = roleStep('implementer'); const qaStep0 = stepByRole(proc, 'reviewer');
+      runCtx = { slug, processId, item, project, repoPath: repo.path, plan, consultText: '', iterText, dev: agents.get(implStep0.agentId)!, qa: qaStep0 ? agents.get(qaStep0.agentId)! : null, team: team0, log, isCancelled, injected };
+      const problem = (await import('./storyUnits.ts')).planProblem(plan);
+      if (problem) { handedOff = true; throw new PipelinePause('plan', problem); }
+      runCtx = null;
+    }
 
     // 1b · Consultas de especialistas (M3): aportan recomendaciones concretas que recibe el implementador.
     for (const cs of proc.steps.filter(s => s.role === 'consultant')) {
@@ -179,8 +206,7 @@ ${treeText}`, MAX_TOKENS.consultant);
     cancelled();
     const implStep = roleStep('implementer'); const dev = agents.get(implStep.agentId)!;
     const qaStep = stepByRole(proc, 'reviewer'); const qa = qaStep ? agents.get(qaStep.agentId)! : null;
-    // Sin archivos en el plan (JSON cortado o ilegible) no hay entregables que dividir: la historia va en una respuesta y el Desarrollador elige los archivos.
-    if (config?.autoApply && (plan.filesToChange.length || plan.deliverables?.length)) {
+    if (config?.autoApply) {
       // Pipeline con aplicación automática: entrega INCREMENTAL por unidades (manifiesto duradero, continuaciones por
       // archivo, comprobación previa a QA y correcciones dirigidas). El paso «Implementación» planificado pasa a ser
       // la primera unidad; cada llamada siguiente es su propio paso con su modelo, tokens y costo.

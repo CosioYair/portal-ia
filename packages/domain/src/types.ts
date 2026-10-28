@@ -615,7 +615,9 @@ export type PipelineState = 'running' | 'verified' | 'paused' | 'stopped';
 export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' | 'repeated_failure' | 'duration' | 'no_changes' | 'refusal' | 'qa' | 'cancelled'
   | 'missing_information' | 'permission' | 'unsupported' | 'provider_refusal' | 'provider_timeout' | 'provider_error' | 'interrupted' | 'unknown'
   /** Entrega incremental: un entregable no cabe en la salida del modelo ni por secciones, o faltan entregables tras los intentos permitidos. */
-  | 'too_large' | 'incomplete';
+  | 'too_large' | 'incomplete'
+  /** El plan no se puede ejecutar por partes (sin entregables, demasiados o rutas no permitidas) · QA y el equipo discrepan tras un intercambio con evidencia. */
+  | 'plan' | 'disagreement';
 export type PipelinePhase = 'implementing' | 'recovering' | 'repairing' | 'applying' | 'verifying' | 'installing' | 'qa' | 'correcting' | 'finished';
 export interface PipelineStatus {
   config: PipelineConfig;
@@ -750,8 +752,19 @@ export interface StoryManifest {
   /** Rondas de corrección: de dónde vienen, cuántas unidades y cuántas aplicaron cambios. */
   rounds: { at: string; source: 'qa' | 'verification' | 'completeness'; units: number; applied: number }[];
   gate: CompletenessGate | null;
+  /** Comprobación posterior a la verificación: ¿cada prueba nueva se ejecutó de verdad en el sandbox? */
+  testRun?: { commit: string | null; at: string; results: { path: string; state: CheckState; detail: string }[] } | null;
+  /** Hallazgos de QA que el equipo discutió con evidencia (cada uno, como mucho un intercambio). */
+  disputes?: { file: string | null; finding: string; answer: string; round: number; at: string }[];
+  /** Último commit que QA revisó (las revisiones siguientes reciben completo solo lo que cambió desde entonces). */
+  reviewedCommit?: string | null;
+  /** Cambios que una unidad entregó y no se aplicaron o llegaron con aviso (evidencia para las lecciones). */
+  rejected?: { path: string; error: string | null; warning: string | null; unitId: string; at: string }[];
   createdAt: string;
 }
+/** Estado de una comprobación: superada, fallida, no aplica o no se pudo determinar (nunca cuenta como evidencia). */
+export type CheckState = 'passed' | 'failed' | 'not_applicable' | 'undetermined';
+export interface DeliveryCheck { name: string; state: CheckState; detail: string }
 /** Resumen de la entrega para la interfaz (calculado al servir el proceso). */
 export interface DeliveryProgress {
   deliverables: { path: string; kind: DeliverableKind; status: DeliverableStatus; planned: boolean; note: string | null; unit: string | null; lines: number | null }[];
@@ -760,6 +773,8 @@ export interface DeliveryProgress {
   currentUnit: { title: string; agentName: string; kind: WorkUnitKind; index: number; total: number } | null;
   /** Tres niveles distintos: compila ≠ funcionalidad completa ≠ QA aprobó los criterios. */
   levels: { compiles: boolean | null; complete: boolean; qaApproved: boolean };
+  /** Cada comprobación con su estado explícito (typecheck, test, build y que las pruebas nuevas se ejecutaron). */
+  checks: DeliveryCheck[];
   corrections: { applied: number; max: number; requested: number; ineffective: number; attempts: number };
   continuations: number;
   spentUsd: number;

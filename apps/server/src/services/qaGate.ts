@@ -1,6 +1,6 @@
-import type { ProposedChange, QaFinding, QaVerdictKind, ReviewVerdict, StoryManifest, StoryPlan, VerificationRun } from '@portal-ia/domain';
+import type { DeliveryCheck, ProposedChange, QaFinding, QaVerdictKind, ReviewVerdict, StoryManifest, StoryPlan, VerificationRun } from '@portal-ia/domain';
 import { qaSeverity } from '@portal-ia/domain';
-import { filesIn, parseBuildErrors, parseFailingTests, parseTypeScriptErrors, tailOf } from './diagnostics.ts';
+import { diagnosticsFor, filesIn, tailOf } from './diagnostics.ts';
 
 /**
  * Puerta de QA con evidencia real (pipeline autorizado). QA recibe el criterio, el plan, el diff, los archivos y el
@@ -27,11 +27,14 @@ function extractJson(text: string): any | null {
   return null;
 }
 
+/** «test» terminó en verde sin ejecutar ninguna prueba (patrón que no encuentra archivos, carpeta vacía…): no es evidencia. */
+export const zeroTests = (output: string) => /^#\s*tests\s+0\b/m.test(output) || /^ℹ\s*tests\s+0\b/m.test(output) || /\b0 passing\b/.test(output) || /no test files? (?:were )?found/i.test(output) || /Tests:\s+0 total/.test(output);
+
 /** Resultado de un comando para QA: estado, duración y, si falló, los diagnósticos y la cola de la salida. */
 export function verificationEvidence(v: VerificationRun): string {
   const head = `- ${v.command}: ${v.exitCode === 0 ? 'OK' : v.exitCode === null ? 'NO TERMINÓ (tiempo agotado)' : `FALLÓ (código ${v.exitCode})`} · ${v.isolation} · ${Math.round(v.durationMs / 1000)} s`;
   if (v.exitCode === 0) return head;
-  const d = v.command === 'typecheck' ? parseTypeScriptErrors(v.output) : v.command === 'test' ? parseFailingTests(v.output) : parseBuildErrors(v.output);
+  const d = diagnosticsFor(v);
   return `${head}\n${d.slice(0, 12).map(x => `  · ${x.file ? `${x.file}${x.line ? `:${x.line}` : ''} ` : ''}${x.code ? `${x.code} ` : ''}${x.text}`).join('\n')}\n  Salida (final):\n${tailOf(v.output, 15).split('\n').map(l => `    ${l}`).join('\n')}`;
 }
 
@@ -44,9 +47,14 @@ export function testsEvidence(verifications: VerificationRun[]): string {
   return `- test: ${t.exitCode === 0 ? 'OK' : 'FALLÓ'}${pass ? ` · ${pass} prueba(s) correctas` : ''}${files.length ? ` · archivos: ${files.join(', ')}` : ''}`;
 }
 
-export function qaEvidencePrompt(input: { criterion: string; plan: StoryPlan | null; summary: string; changes: ProposedChange[]; verifications: VerificationRun[]; required: string[]; attempts: string[]; consultText: string; manifest?: StoryManifest | null; previousFindings?: QaFinding[]; tests?: string }): string {
+export function qaEvidencePrompt(input: { criterion: string; plan: StoryPlan | null; summary: string; changes: ProposedChange[]; verifications: VerificationRun[]; required: string[]; attempts: string[]; consultText: string; manifest?: StoryManifest | null; previousFindings?: QaFinding[]; tests?: string; checks?: DeliveryCheck[]; unchangedSinceReview?: string[]; reviewedCommit?: string | null }): string {
   const files = input.changes.filter(c => !c.error).map(c => `${c.action} ${c.path} (${c.before}→${c.after} líneas)`).join('\n');
-  const diffs = input.changes.filter(c => !c.error).map(c => c.diff ?? '').join('\n\n').slice(0, 50_000);
+  // Revisión siguiente: el diff completo solo de lo que cambió desde la anterior; lo demás ya lo revisaste (se lista).
+  const same = new Set(input.unchangedSinceReview ?? []);
+  const diffs = input.changes.filter(c => !c.error && !same.has(c.path)).map(c => c.diff ?? '').join('\n\n').slice(0, 50_000);
+  const sameList = same.size ? `# Sin cambios desde tu revisión anterior (commit ${input.reviewedCommit ?? '?'}): ya los revisaste; el diff de abajo es solo lo que cambió\n${Array.from(same).map(p => `- ${p}`).join('\n')}\n` : '';
+  const STATE: Record<string, string> = { passed: 'SUPERADA', failed: 'FALLIDA', not_applicable: 'no aplica', undetermined: 'NO DETERMINADA (no es evidencia)' };
+  const checks = input.checks?.length ? `# Estado de cada comprobación\n${input.checks.map(c => `- ${c.name}: ${STATE[c.state]} · ${c.detail}`).join('\n')}\n` : '';
   const ran = input.required.map(cmd => { const v = input.verifications.filter(x => x.command === cmd).at(-1); return v ? verificationEvidence(v) : `- ${cmd}: NO SE EJECUTÓ`; }).join('\n');
   const m = input.manifest; const g = m?.gate;
   const STATUS: Record<string, string> = { delivered: 'entregado', pending: 'SIN ENTREGAR', failed: 'NO SE PUDO ENTREGAR', dropped: 'DESCARTADO por el equipo' };
@@ -68,11 +76,11 @@ ${input.consultText}# Archivos modificados
 ${files || '(ninguno)'}
 # Verificación automática en sandbox (sobre el worktree con los cambios aplicados)
 ${ran}
-${input.tests ? `${input.tests}\n` : ''}${manifest}${prev}${disputed}${input.attempts.length ? `# Intentos anteriores y correcciones\n${input.attempts.map(a => `- ${a}`).join('\n')}\n` : ''}# Diff
+${input.tests ? `${input.tests}\n` : ''}${checks}${manifest}${prev}${disputed}${sameList}${input.attempts.length ? `# Intentos anteriores y correcciones\n${input.attempts.map(a => `- ${a}`).join('\n')}\n` : ''}# Diff
 ${diffs || '(vacío)'}
 
 Reglas:
-- "approved" solo si el cambio cumple el criterio Y todas las verificaciones requeridas (${input.required.join(', ')}) están en OK. Que compile no basta: comprueba que TODA la funcionalidad del criterio está implementada y probada (pruebas nuevas para lo nuevo).
+- "approved" solo si el cambio cumple el criterio Y todas las verificaciones requeridas (${input.required.join(', ')}) están en OK. Que compile no basta: comprueba que TODA la funcionalidad del criterio está implementada y probada (pruebas nuevas para lo nuevo). Una comprobación NO DETERMINADA no es evidencia: no apruebes un criterio que dependa solo de ella.
 - "rejected" si hay errores en el código o no cumple el criterio. Cada hallazgo debe ser accionable y citar evidencia: "file" (ruta) y/o "evidence" (línea del diff o de la salida de verificación); indica también "requirement" (criterio afectado), "expected" (la corrección esperada, concreta) y "verify" (cómo se comprobará). Un hallazgo por problema y por archivo: el equipo corrige cada uno por separado, sin rehacer lo que funciona.
 - "blocked_environment" si no se pudo verificar por el entorno (sandbox, dependencias), no por el código.
 - "unable_to_verify" si con esta evidencia no puedes decidir.
@@ -107,7 +115,8 @@ export const actionableFindings = (v: ReviewVerdict) => (v.findings ?? []).filte
 export function enforceQaGate(v: ReviewVerdict, required: string[], verifications: VerificationRun[]): ReviewVerdict {
   const last = (c: string) => verifications.filter(x => x.command === c).at(-1);
   const failed = required.filter(c => { const r = last(c); return r && r.exitCode !== 0 && r.exitCode !== null && r.isolation !== 'unavailable' && r.exitCode !== 86; });
-  const missing = required.filter(c => { const r = last(c); return !r || r.exitCode !== 0; }).filter(c => !failed.includes(c));
+  // Un «test» en verde que no ejecutó ninguna prueba cuenta como verificación que falta, no como evidencia.
+  const missing = required.filter(c => { const r = last(c); return !r || r.exitCode !== 0 || (c === 'test' && zeroTests(r.output)); }).filter(c => !failed.includes(c));
   const env = missing.some(c => { const r = last(c); return r && (r.isolation === 'unavailable' || r.exitCode === 86 || r.exitCode === null); });
   let out: ReviewVerdict = { ...v, findings: [...(v.findings ?? [])] };
   if (failed.length && out.verdict === 'approved') {

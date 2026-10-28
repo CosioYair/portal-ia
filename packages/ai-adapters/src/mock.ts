@@ -19,8 +19,12 @@ interface Rule { match: string; text?: string; textFile?: string; stopReason?: s
   /** Respuestas sucesivas: la llamada N que encaja usa responses[N-1] (la última se repite). */
   responses?: { text: string; stopReason?: string; thinkingTokens?: number }[];
   /** Tokens de razonamiento oculto que se facturan además del texto (como en Opus 5.5: cuentan en output_tokens). */
-  thinkingTokens?: number }
-interface Script { rules: Rule[]; /** Marcadores a buscar en cada prompt para el registro. */ markers?: string[] }
+  thinkingTokens?: number;
+  /** Continuación realista: el resto de este contenido a partir de la línea que el prompt dice llevar («N líneas completas»). */
+  continueFromLines?: string }
+interface Script { rules: Rule[]; /** Marcadores a buscar en cada prompt para el registro. */ markers?: string[];
+  /** Límite de salida REAL: el texto que no cabe en max_tokens (menos el razonamiento oculto) se corta con stop «max_tokens». */
+  enforceMaxTokens?: boolean }
 
 let cachedScript: { path: string; mtime: number; script: Script } | null = null;
 function loadScript(): Script {
@@ -72,9 +76,12 @@ export const mockAdapter: ProviderAdapter = {
     req.onProgress?.('headers');
     const seq = rule.responses?.length ? rule.responses[Math.min(n, rule.responses.length) - 1] : null;
     let text = seq ? seq.text : rule.textFile ? fs.readFileSync(rule.textFile, 'utf8') : (rule.text ?? '');
+    if (rule.continueFromLines !== undefined) { const n = Number(req.user.match(/\((\d+) líneas completas\)/)?.[1] ?? 0); text = rule.continueFromLines.replace(/\r\n/g, '\n').split('\n').slice(n).join('\n').replace(/\n?$/, '\n') + '=== FIN ARCHIVO ===\n'; }
     if (rule.requires && !hay.includes(rule.requires)) text = rule.otherwise ?? text;
     req.onProgress?.('body');
     const thinking = seq?.thinkingTokens ?? rule.thinkingTokens ?? 0;
+    // Como un modelo real: el razonamiento oculto y el texto comparten max_tokens; lo que no cabe se corta.
+    if (script.enforceMaxTokens) { const room = Math.max(0, req.maxTokens - thinking); if (estimateTokens(text) > room) return { text: text.slice(0, Math.floor(room * 3.5)), inputTokens: estimateTokens(hay), outputTokens: req.maxTokens, stopReason: 'max_tokens', refusal: null }; }
     return { text, inputTokens: estimateTokens(hay), outputTokens: estimateTokens(text) + thinking, stopReason: rule.refusal ? 'refusal' : (seq?.stopReason ?? rule.stopReason ?? 'end_turn'), refusal: rule.refusal ? (text || 'refusal') : null };
   }
 };
