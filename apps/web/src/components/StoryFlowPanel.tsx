@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { FlowAction, FlowIssue, Process, StoryContext } from '@portal-ia/domain';
+import type { FlowAction, FlowIssue, LiveCall, Process, ProcessStep, StoryContext } from '@portal-ia/domain';
 import { api, ApiError } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
@@ -14,6 +14,10 @@ const CAUSE: Record<FlowIssue['cause'], string> = { environment: 'Entorno (no es
 const REQ: Record<string, string> = { authorization: 'requiere tu autorización', network: 'red temporal', ai_budget: 'gasta IA con tu presupuesto', confirmation: 'pide confirmación' };
 const ROLE: Record<string, string> = { planner: 'planifica', implementer: 'implementa', reviewer: 'revisa', consultant: 'consulta' };
 const elapsed = (from: string | null, to: string | null) => { if (!from) return ''; const s = Math.max(0, Math.round(((to ? new Date(to) : new Date()).getTime() - new Date(from).getTime()) / 1000)); return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`; };
+const secs = (ms: number) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min ${s % 60} s`; };
+const hhmm = (iso: string) => new Date(iso).toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const LIVE_TXT: Record<LiveCall['state'], string> = { preparing: 'Preparando la solicitud', sending: 'Enviando la solicitud', waiting: 'Esperando la respuesta del proveedor', receiving: 'Recibiendo la respuesta', processing: 'Procesando la respuesta', retrying: 'Esperando para reintentar', cancelling: 'Cancelando' };
+const LIVE_NEXT: Record<LiveCall['state'], string> = { preparing: 'enviar la solicitud al proveedor', sending: 'que el proveedor confirme la recepción', waiting: 'que el proveedor empiece a responder (o abortar al llegar al plazo)', receiving: 'terminar de recibir la respuesta', processing: 'validar la entrega y pasar a la siguiente etapa', retrying: 'reenviar la solicitud', cancelling: 'detener el proceso' };
 const go = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
 interface Props {
@@ -46,9 +50,12 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const [composer, setComposer] = useState<StoryContext | null>(null);
   const [showAll, setShowAll] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const [answer, setAnswer] = useState('');
+  const [cancelling, setCancelling] = useState(false);
   const [, tick] = useState(0);
   useEffect(() => { if (proc.status !== 'running') return; const t = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(t); }, [proc.status]);
-  useEffect(() => { setConfirming(null); setComposer(null); setErr(null); setMsg(null); setOkAuth(false); }, [proc.id, flow?.current, flow?.issue?.kind]);
+  useEffect(() => { setConfirming(null); setComposer(null); setErr(null); setMsg(null); setOkAuth(false); setAnswer(''); }, [proc.id, flow?.current, flow?.issue?.kind]);
+  useEffect(() => { if (proc.status !== 'running') setCancelling(false); }, [proc.status]);
   if (!flow) return null;
   const itemId = proc.backlogItemId ?? story?.id ?? null;
   const issue = flow.issue;
@@ -69,7 +76,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
     if (a.id === 'ask_team') { if (!itemId) return; if (onAsk) onAsk(askText); else navigate(`/historias/${itemId}#chat`, { state: { ask: askText } }); return; }
     if ((a.id === 'request_fix' || a.id === 'new_iteration') && itemId) { setBusy(a.id); try { setComposer(await api.story(slug, itemId)); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } return; }
     // El resto se ejecuta aquí: las que exigen autorización/red piden confirmación explícita antes
-    if (a.requires.some(r => r === 'authorization' || r === 'network') && confirming?.id !== a.id) { setConfirming(a); setOkAuth(false); setAddBudget((a.suggestedBudgetUsd ?? 0.5).toFixed(2)); setAllowInstall(!!a.pipeline?.allowInstall); return; }
+    if (a.requires.some(r => r === 'authorization' || r === 'network') && confirming?.id !== a.id) { setConfirming(a); setOkAuth(false); setAnswer(''); setAddBudget((a.suggestedBudgetUsd ?? 0.5).toFixed(2)); setAllowInstall(!!a.pipeline?.allowInstall); return; }
     setBusy(a.id);
     try {
       if (a.id === 'install_and_retry') { const p = await api.installAndRetry(slug, proc.id, a.commands ?? []); onChange(p); const v = p.result?.verifications ?? []; const inst = v.filter(x => x.command === 'install').at(-1); flash(inst?.exitCode === 0 ? 'Dependencias instaladas; verificación repetida' : 'La instalación no terminó bien: revisa el detalle', inst?.exitCode === 0 ? 'ok' : 'err'); }
@@ -90,11 +97,16 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       else if (a.id === 'retry_process') { const p = await api.retryProcess(slug, proc.id); flash('Proceso nuevo creado: elige el presupuesto y autorízalo'); navigate(`/procesos/${p.id}`); }
       else if (a.id === 'pipeline_resume' || a.id === 'repair_output') {
         const add = a.requires.includes('ai_budget') ? Math.max(0, Number(addBudget) || 0) : 0;
-        const p = await api.continueProcess(slug, proc.id, { addBudgetUsd: add, pipeline: { ...(a.pipeline ?? {}), ...(allowInstall ? { allowInstall: true } : {}) } });
-        onChange(p); flash(a.id === 'repair_output' ? 'El Desarrollador está reparando su entrega (sin repetir el plan)' : 'El equipo retoma el trabajo donde lo dejó');
+        const p = await api.continueProcess(slug, proc.id, { addBudgetUsd: add, pipeline: { ...(a.pipeline ?? {}), ...(allowInstall ? { allowInstall: true } : {}) }, ...(a.answer ? { answer: answer.trim() } : {}) });
+        onChange(p); flash(a.answer ? 'Tu respuesta llegó al equipo; retoma el trabajo' : a.id === 'repair_output' ? 'El Desarrollador está reparando su entrega (sin repetir el plan)' : 'El equipo retoma el trabajo donde lo dejó');
       }
       else if (a.id === 'recover') { const p = await api.recoverProcess(slug, proc.id); onChange(p); flash('Resultado recuperado sin IA'); }
-      else if (a.id === 'cancel') { if (!confirm('¿Cancelar el proceso? Se detendrá al terminar el paso en curso.')) return; await api.cancelProcess(slug, proc.id); flash('Cancelación solicitada'); }
+      else if (a.id === 'cancel') {
+        const orphan = issue?.kind === 'process_interrupted';
+        if (!confirm(orphan ? '¿Cerrar el proceso interrumpido? Lo terminado se conserva; nada se reenvía.' : '¿Cancelar el proceso? Se aborta la llamada en curso al proveedor; lo terminado se conserva.')) return;
+        await api.cancelProcess(slug, proc.id);
+        if (orphan) { await reload(); flash('Proceso interrumpido cerrado'); } else { setCancelling(true); flash('Cancelando: se aborta la llamada en curso'); }
+      }
       setConfirming(null);
     } catch (e: any) { setErr(explainError(e)); } finally { setBusy(null); }
   };
@@ -103,6 +115,9 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const secondary = flow.actions.filter(a => !a.primary);
   const details = issue ? (showAll ? issue.details : issue.details.slice(0, 6)) : [];
   const agents = proc.steps;
+  const orphan = issue?.kind === 'process_interrupted';
+  const liveSteps = proc.status === 'running' && !orphan ? proc.steps.filter(s => s.status === 'running' && s.live) : [];
+  const needsAnswer = !!confirming?.answer;
 
   return (
     <section className="sf" aria-label="Estado de la historia">
@@ -113,6 +128,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         </div>
         <div className="sf-meta">
           <Chip xs className="mono">{fmtUsd(proc.spentUsd)} de {fmtUsd(proc.budgetUsd)} autorizados</Chip>
+          {(proc.unconfirmedUsd ?? 0) > 0 && <span title="Costo posible de llamadas interrumpidas o fallidas que el proveedor no confirmó. No se suma al gasto real, pero sí se reserva del presupuesto."><Chip xs tone="warn" className="mono">≈ {fmtUsd(proc.unconfirmedUsd!)} sin confirmar</Chip></span>}
           <Chip xs>{flow.progress.done} de {flow.progress.total} etapas</Chip>
           {variant === 'story' ? <Link className="btn btn-ghost btn-sm" to={`/procesos/${proc.id}`}>Ver el proceso y los agentes</Link> : itemId && <Link className="btn btn-ghost btn-sm" to={`/historias/${itemId}`}>{Icon.back()} Espacio de la historia</Link>}
         </div>
@@ -133,9 +149,13 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         {flow.stages.filter(s => s.status === 'warning' || s.status === 'rejected').filter(s => s.key !== flow.current).map(s => <span key={s.key} className="small" style={{ color: '#7A4A00' }}>⚠ {s.label}: {s.detail}</span>)}
       </div>
 
+      {cancelling && proc.status === 'running' && <div className="sf-headline" role="status" aria-label="Cancelando"><span className="spin" /><span>Cancelando… se abortó la llamada en curso; el proceso se cierra en cuanto el paso lo registre.</span></div>}
+
+      {liveSteps.map(s => <LiveCallCard key={s.id} step={s} proc={proc} cancelling={cancelling} />)}
+
       {(proc.status === 'running' || proc.status === 'pending_authorization') && <div className="sf-agents" aria-label="Agentes">
         {agents.map(s => <div key={s.id} className="sf-agent">
-          <span>{s.status === 'done' ? Icon.check(14) : s.status === 'running' ? <span className="spin" /> : s.status === 'failed' ? '✕' : '·'}</span>
+          <span>{s.status === 'done' ? Icon.check(14) : s.status === 'running' ? (orphan ? '!' : <span className="spin" />) : s.status === 'failed' ? '✕' : '·'}</span>
           <span><strong>{s.agentName}</strong> · {ROLE[s.role ?? ''] ?? s.title}{s.status === 'running' ? ` · ${s.title}` : ''}</span>
           <span className="small muted mono">{s.status === 'pending' ? 'en espera' : `${elapsed(s.startedAt, s.finishedAt)}${s.inputTokens + s.outputTokens ? ` · ${s.inputTokens + s.outputTokens} tokens · ${fmtUsd(s.costUsd)}` : ''}`}</span>
         </div>)}
@@ -164,11 +184,16 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       {confirming && <div className="sf-confirm" aria-label="Confirmar acción">
         <strong className="sm13">{confirming.label}</strong>
         <span className="sm13">{confirming.description}</span>
+        {confirming.answer && <div className="sf-ask" aria-label="Pregunta del equipo">
+          <span className="sm13"><strong>El equipo pregunta:</strong> {confirming.answer.question}</span>
+          {confirming.answer.why && <span className="small muted">{confirming.answer.why}</span>}
+          <textarea className="input" rows={4} value={answer} onChange={e => setAnswer(e.target.value)} placeholder="Tu respuesta (llega una sola vez al agente que preguntó; no amplía ningún permiso)" aria-label="Tu respuesta" style={{ height: 'auto', padding: 8 }} />
+        </div>}
         <label className="ck"><input className="cb" type="checkbox" checked={okAuth} onChange={e => setOkAuth(e.target.checked)} />
           <span>{confirming.requires.includes('network') ? <>Autorizo ejecutar en el sandbox y <strong>permitir red solo durante la instalación de dependencias</strong> (npm ci, sin scripts del repositorio); lo demás se ejecuta sin red.</> : confirming.id === 'pipeline_resume' || confirming.id === 'repair_output' ? <>Autorizo al equipo a continuar {confirming.requires.includes('ai_budget') ? <>con hasta <strong>{fmtUsd(Number(addBudget) || 0)}</strong> adicionales (máximo, no objetivo)</> : 'sin gasto de IA adicional'}. No integra, no reinicia el Portal ni publica.</> : <>Autorizo esta acción{confirming.id === 'merge' ? ' (merge en main)' : confirming.id === 'runtime_check' ? ' (el Portal se consulta a sí mismo)' : ' en el sandbox, sobre el worktree del proceso'}.</>}</span></label>
         {(confirming.id === 'pipeline_resume' || confirming.id === 'repair_output') && confirming.requires.includes('ai_budget') && <label className="small" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>Presupuesto adicional (USD) <input className="input mono" type="number" min={0} step={0.25} value={addBudget} onChange={e => setAddBudget(e.target.value)} style={{ width: 100, height: 30 }} aria-label="Presupuesto adicional" /><span className="muted">quedan {fmtUsd(Math.max(0, proc.budgetUsd - proc.spentUsd))} del autorizado</span></label>}
         {(confirming.id === 'pipeline_resume' || confirming.id === 'repair_output') && !confirming.requires.includes('network') && <label className="ck small"><input className="cb" type="checkbox" checked={allowInstall} onChange={e => setAllowInstall(e.target.checked)} /><span>Si faltan dependencias en el sandbox, instalarlas con red temporal (solo durante la instalación).</span></label>}
-        <div className="sf-actions"><button className="btn btn-primary btn-sm" disabled={!okAuth || busy !== null} onClick={() => void run(confirming)}>{busy === confirming.id ? <span className="spin spin-light" /> : Icon.check()}Confirmar y ejecutar</button><button className="btn btn-ghost btn-sm" onClick={() => setConfirming(null)} disabled={busy !== null}>Cancelar</button></div>
+        <div className="sf-actions"><button className="btn btn-primary btn-sm" disabled={!okAuth || busy !== null || (needsAnswer && answer.trim().length < 2)} onClick={() => void run(confirming)}>{busy === confirming.id ? <span className="spin spin-light" /> : Icon.check()}{needsAnswer ? 'Enviar respuesta y continuar' : 'Confirmar y ejecutar'}</button><button className="btn btn-ghost btn-sm" onClick={() => setConfirming(null)} disabled={busy !== null}>Cancelar</button></div>
       </div>}
 
       {composer && itemId && <div className="sf-confirm" aria-label="Iteración correctiva">
@@ -183,6 +208,32 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       {err && <Notice kind="err">{err}</Notice>}
     </section>
   );
+}
+
+/**
+ * La llamada al proveedor en curso, con hechos (no animación): estado, último evento CONFIRMADO, plazo, reintentos y
+ * costo. El reloj que avanza es local; lo único que indica actividad del modelo es «Última actividad del proveedor».
+ */
+function LiveCallCard({ step, proc, cancelling }: { step: ProcessStep; proc: Process; cancelling: boolean }) {
+  const l = step.live!; const now = Date.now();
+  const left = new Date(l.deadlineAt).getTime() - now;
+  const quiet = now - new Date(l.lastEventAt).getTime();
+  const remaining = Math.max(0, proc.budgetUsd - proc.spentUsd - (proc.unconfirmedUsd ?? 0));
+  const state = cancelling ? 'cancelling' : l.state;
+  return <div className="sf-live" aria-label="Llamada en curso" data-state={state} data-overdue={left < 0 ? 'true' : undefined}>
+    <div className="sf-live-head"><span className="spin" /><strong>{step.agentName}</strong><span className="small">· {ROLE[step.role ?? ''] ?? 'trabaja'} · {step.title}</span><Chip xs tone={left < 0 ? 'err' : 'accent'}>{LIVE_TXT[state]}</Chip></div>
+    <dl className="sf-live-grid small">
+      <dt>Proveedor · modelo</dt><dd className="mono">{l.provider} · {l.model}</dd>
+      <dt>Inicio de la solicitud</dt><dd className="mono">{hhmm(l.startedAt)} · hace {secs(now - new Date(l.startedAt).getTime())} <span className="muted">(reloj local)</span></dd>
+      <dt>Última actividad del proveedor</dt><dd>{l.lastEvent} · <span className="mono">hace {secs(quiet)}</span></dd>
+      <dt>Plazo máximo</dt><dd className="mono">{hhmm(l.deadlineAt)} · {left >= 0 ? `quedan ${secs(left)}` : `superado hace ${secs(-left)}: se aborta`}</dd>
+      <dt>Intento</dt><dd className="mono">{l.attempt} de {l.maxAttempts}{l.attempt > 1 ? ' (reintento por error de conexión)' : ''}</dd>
+      <dt>Gasto confirmado</dt><dd className="mono">{fmtUsd(proc.spentUsd)} · quedan {fmtUsd(remaining)} del presupuesto</dd>
+      {(proc.unconfirmedUsd ?? 0) > 0 && <><dt>Sin confirmar</dt><dd className="mono">≈ {fmtUsd(proc.unconfirmedUsd!)} de llamadas interrumpidas</dd></>}
+      <dt>Esta llamada</dt><dd><span className="mono">estimación ≈ {fmtUsd(l.estimatedUsd)}</span> <span className="muted">(≈ {l.inputTokensEstimated.toLocaleString('es-MX')} tokens de entrada, hasta {l.maxOutputTokens.toLocaleString('es-MX')} de salida)</span> · <em>Consumo de esta llamada aún no confirmado</em></dd>
+      <dt>Siguiente operación</dt><dd>{LIVE_NEXT[state]}</dd>
+    </dl>
+  </div>;
 }
 
 const EV_ICON: Record<string, string> = { recovery: '♻', repair: '✎', apply: '⎇', verify: '✓', environment: '⚙', qa: '◎', correction: '✎', pause: '⏸', done: '★', error: '✕', info: '·' };
@@ -200,9 +251,10 @@ function PipelineActivity({ proc }: { proc: Process }) {
   return <div className="sf-pipe" aria-label="Actividad del equipo">
     <div className="sf-pipe-meta small">
       <span>Pipeline autorizado · {pl.config.autoApply ? `aplicar, ${pl.config.commands.join(', ')}, QA` : 'manual'}</span>
-      <span>Correcciones {pl.corrections}/{pl.config.maxCorrections} · reparaciones {pl.outputRepairs}/{pl.config.maxOutputRepairs}</span>
+      <span>Correcciones {pl.corrections}/{pl.config.maxCorrections} · reparaciones {pl.outputRepairs}/{pl.config.maxOutputRepairs}{pl.consultations?.length ? ` · consultas ${pl.consultations.length}/${pl.config.maxConsultations}` : ''}</span>
+      {pl.failureClass && <span className="mono" title="Clase de fallo que determinó la recuperación">{pl.failureClass}</span>}
       {review?.verdict && <span>{QA_TXT[review.verdict]}{review.overridden ? ' (corregido por la verificación)' : ''}</span>}
-      <span className="mono">{fmtUsd(proc.spentUsd)} gastados · quedan {fmtUsd(Math.max(0, proc.budgetUsd - proc.spentUsd))}{aiCost ? ` · reparaciones/correcciones ${fmtUsd(aiCost)}` : ''}</span>
+      <span className="mono">{fmtUsd(proc.spentUsd)} gastados (confirmados){(proc.unconfirmedUsd ?? 0) > 0 ? ` · ≈ ${fmtUsd(proc.unconfirmedUsd!)} sin confirmar` : ''} · quedan {fmtUsd(Math.max(0, proc.budgetUsd - proc.spentUsd - (proc.unconfirmedUsd ?? 0)))}{aiCost ? ` · reparaciones/correcciones ${fmtUsd(aiCost)}` : ''}</span>
     </div>
     <ol className="sf-pipe-events">
       {recent.map((e, i) => <li key={i} data-kind={e.kind}><span aria-hidden="true">{EV_ICON[e.kind] ?? '·'}</span><span>{e.message}{e.costUsd ? <span className="muted mono"> · {fmtUsd(e.costUsd)}</span> : null}</span></li>)}

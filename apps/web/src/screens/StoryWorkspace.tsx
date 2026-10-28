@@ -33,8 +33,10 @@ export function StoryWorkspace() {
   const { hash, state: navState } = useLocation();
   const [tab, setTab] = useState<Tab>(() => tabFromHash(hash) ?? 'estado');
   const load = async () => { try { const c = await api.story(slug, storyId!); setCtx(c); setErr(null); return c; } catch (e: any) { setErr(e.message); return null; } };
-  useEffect(() => { let alive = true; const tick = async () => { const c = await load(); if (!alive) return; if (c?.lastProcess && (c.lastProcess.status === 'running' || c.lastProcess.status === 'pending_authorization')) setTimeout(tick, 3000); }; void tick(); return () => { alive = false; }; // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slug, storyId]);
+  // El sondeo se reanuda cuando el último proceso vuelve a estar activo (p. ej. al continuar desde la cabecera).
+  const active = ctx?.lastProcess?.status === 'running' || ctx?.lastProcess?.status === 'pending_authorization';
+  useEffect(() => { let alive = true; let timer: ReturnType<typeof setTimeout> | undefined; const tick = async () => { const c = await load(); if (!alive) return; if (c?.lastProcess && (c.lastProcess.status === 'running' || c.lastProcess.status === 'pending_authorization')) timer = setTimeout(tick, 3000); }; void tick(); return () => { alive = false; clearTimeout(timer); }; // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slug, storyId, active]);
   // La pestaña vive en el hash (#estado, #iteraciones…): así navegar a /historias/:id#iteraciones desde cualquier pestaña
   // (p. ej. tras enviar el feedback de la prueba) siempre la abre y recarga el contexto.
   const openTab = (t: Tab) => { setTab(t); if (tabFromHash(hash) !== t) navigate({ hash: t }, { replace: true }); };

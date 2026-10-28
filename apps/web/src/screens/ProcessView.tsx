@@ -30,16 +30,18 @@ export function ProcessView() {
   const [open, setOpen] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // El sondeo se reanuda cuando el proceso vuelve a estar activo (p. ej. al continuar): nunca se muestra un estado congelado.
+  const active = proc?.status === 'running' || proc?.status === 'pending_authorization';
   useEffect(() => {
-    let alive = true;
-    const tick = async () => { try { const p = await api.process(slug, processId!); if (!alive) return; setProc(p); if (p.status === 'running' || p.status === 'pending_authorization') setTimeout(tick, p.status === 'running' ? 2000 : 5000); } catch (e: any) { if (alive) setError(e.message); } };
+    let alive = true; let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => { try { const p = await api.process(slug, processId!); if (!alive) return; setProc(p); if (p.status === 'running' || p.status === 'pending_authorization') timer = setTimeout(tick, p.status === 'running' ? 2000 : 5000); } catch (e: any) { if (alive) setError(e.message); } };
     void tick();
-    return () => { alive = false; };
-  }, [slug, processId]);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [slug, processId, active]);
 
   useEffect(() => { if (proc && !open) { const last = [...proc.steps].reverse().find(s => s.status === 'done' || s.status === 'running'); if (last) setOpen(last.id); } }, [proc, open]);
 
-  const cancel = async () => { if (!proc || !confirm('¿Cancelar el proceso? Se detendrá al terminar el paso en curso.')) return; await api.cancelProcess(slug, proc.id); flash('Cancelación solicitada'); };
+  const cancel = async () => { if (!proc || !confirm('¿Cancelar el proceso? Se aborta la llamada en curso al proveedor; lo terminado se conserva.')) return; await api.cancelProcess(slug, proc.id); flash('Cancelando: se aborta la llamada en curso'); };
   const [fixBusy, setFixBusy] = useState<'recover' | 'retry' | null>(null);
   const [fixErr, setFixErr] = useState<string | null>(null);
   const recover = async () => { if (!proc) return; setFixBusy('recover'); setFixErr(null); try { const p = await api.recoverProcess(slug, proc.id); setProc(p); flash(`Resultado recuperado: ${p.result?.changes.filter(c => !c.error).length ?? 0} cambio(s) listos para revisar`); } catch (e: any) { setFixErr(e.message); } finally { setFixBusy(null); } };
@@ -70,7 +72,7 @@ export function ProcessView() {
             <h1 className="h1" style={{ fontSize: 26 }}>{proc.title}</h1>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone={st.tone} dot={st.dot}>{st.label}</Chip><Chip className="mono">{tokens} tokens · {fmtUsd(proc.spentUsd)} de {fmtUsd(proc.budgetUsd)}</Chip><Chip xs>{proc.steps.filter(s => s.status === 'done').length} de {proc.steps.length} pasos</Chip></div>
           </div>
-          <div style={{ display: 'flex', gap: 10 }}>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             {proc.kind === 'story_execution' && proc.backlogItemId && <Link className="btn btn-secondary" to={`/historias/${proc.backlogItemId}`}>Espacio de la historia {Icon.arrow()}</Link>}
             {proc.status === 'running' && !proc.archivedAt && <button className="btn btn-secondary" onClick={cancel}>Cancelar proceso</button>}
             {proc.status === 'done' && proc.kind === 'initial_assessment' && <Link className="btn btn-primary" to="/backlog">Ver backlog y ejecutar {Icon.arrow()}</Link>}
