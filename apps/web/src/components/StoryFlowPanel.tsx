@@ -101,6 +101,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         onChange(p); flash(a.answer ? 'Tu respuesta llegó al equipo; retoma el trabajo' : a.id === 'repair_output' ? 'El Desarrollador está reparando su entrega (sin repetir el plan)' : 'El equipo retoma el trabajo donde lo dejó');
       }
       else if (a.id === 'recover') { const p = await api.recoverProcess(slug, proc.id); onChange(p); flash('Resultado recuperado sin IA'); }
+      else if (a.id === 'register_external' && a.external) { const p = await api.registerExternalCorrection(slug, proc.id, { commit: a.external.commit, note: answer.trim() }); onChange(p); flash('Corrección externa registrada: se verifica en el sandbox sin IA y se detiene antes de QA'); }
       else if (a.id === 'cancel') {
         const orphan = issue?.kind === 'process_interrupted';
         if (!confirm(orphan ? '¿Cerrar el proceso interrumpido? Lo terminado se conserva; nada se reenvía.' : '¿Cancelar el proceso? Se aborta la llamada en curso al proveedor; lo terminado se conserva.')) return;
@@ -117,7 +118,8 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const agents = proc.steps;
   const orphan = issue?.kind === 'process_interrupted';
   const liveSteps = proc.status === 'running' && !orphan ? proc.steps.filter(s => s.status === 'running' && s.live) : [];
-  const needsAnswer = !!confirming?.answer;
+  // Registrar una corrección externa exige una nota (qué se corrigió y por qué); se reutiliza el campo de respuesta.
+  const needsAnswer = !!confirming?.answer || confirming?.id === 'register_external';
 
   return (
     <section className="sf" aria-label="Estado de la historia">
@@ -194,11 +196,16 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
           {confirming.answer.why && <span className="small muted">{confirming.answer.why}</span>}
           <textarea className="input" rows={4} value={answer} onChange={e => setAnswer(e.target.value)} placeholder="Tu respuesta (llega una sola vez al agente que preguntó; no amplía ningún permiso)" aria-label="Tu respuesta" style={{ height: 'auto', padding: 8 }} />
         </div>}
+        {confirming.id === 'register_external' && confirming.external && <div className="sf-ask" aria-label="Corrección externa">
+          <span className="sm13">Commit <span className="mono">{confirming.external.commit}</span> sobre <span className="mono">{confirming.external.recorded}</span> (último registrado por el equipo):</span>
+          <ul className="sf-details">{confirming.external.files.map(f => <li key={f} className="mono">{f}</li>)}</ul>
+          <textarea className="input" rows={3} value={answer} onChange={e => setAnswer(e.target.value)} placeholder="Qué se corrigió y por qué (queda en el historial del proceso y lo lee QA)" aria-label="Nota de la corrección externa" style={{ height: 'auto', padding: 8 }} />
+        </div>}
         <label className="ck"><input className="cb" type="checkbox" checked={okAuth} onChange={e => setOkAuth(e.target.checked)} />
-          <span>{confirming.requires.includes('network') ? <>Autorizo ejecutar en el sandbox y <strong>permitir red solo durante la instalación de dependencias</strong> (npm ci, sin scripts del repositorio); lo demás se ejecuta sin red.</> : confirming.id === 'pipeline_resume' || confirming.id === 'repair_output' ? <>Autorizo al equipo a continuar {confirming.requires.includes('ai_budget') ? <>con hasta <strong>{fmtUsd(Number(addBudget) || 0)}</strong> adicionales (máximo, no objetivo)</> : 'sin gasto de IA adicional'}. No integra, no reinicia el Portal ni publica.</> : <>Autorizo esta acción{confirming.id === 'merge' ? ' (merge en main)' : confirming.id === 'runtime_check' ? ' (el Portal se consulta a sí mismo)' : ' en el sandbox, sobre el worktree del proceso'}.</>}</span></label>
+          <span>{confirming.id === 'register_external' ? <>Autorizo registrar este commit como <strong>corrección mía, hecha fuera del equipo de agentes</strong>. Se verifica en el sandbox sin IA; no aprueba QA, no cambia las correcciones del equipo, no integra ni publica.</> : confirming.requires.includes('network') ? <>Autorizo ejecutar en el sandbox y <strong>permitir red solo durante la instalación de dependencias</strong> (npm ci, sin scripts del repositorio); lo demás se ejecuta sin red.</> : confirming.id === 'pipeline_resume' || confirming.id === 'repair_output' ? <>Autorizo al equipo a continuar {confirming.requires.includes('ai_budget') ? <>con hasta <strong>{fmtUsd(Number(addBudget) || 0)}</strong> adicionales (máximo, no objetivo)</> : 'sin gasto de IA adicional'}. No integra, no reinicia el Portal ni publica.</> : <>Autorizo esta acción{confirming.id === 'merge' ? ' (merge en main)' : confirming.id === 'runtime_check' ? ' (el Portal se consulta a sí mismo)' : ' en el sandbox, sobre el worktree del proceso'}.</>}</span></label>
         {(confirming.id === 'pipeline_resume' || confirming.id === 'repair_output') && confirming.requires.includes('ai_budget') && <label className="small" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>Presupuesto adicional (USD) <input className="input mono" type="number" min={0} step={0.25} value={addBudget} onChange={e => setAddBudget(e.target.value)} style={{ width: 100, height: 30 }} aria-label="Presupuesto adicional" /><span className="muted">quedan {fmtUsd(Math.max(0, proc.budgetUsd - proc.spentUsd))} del autorizado</span></label>}
         {(confirming.id === 'pipeline_resume' || confirming.id === 'repair_output') && !confirming.requires.includes('network') && <label className="ck small"><input className="cb" type="checkbox" checked={allowInstall} onChange={e => setAllowInstall(e.target.checked)} /><span>Si faltan dependencias en el sandbox, instalarlas con red temporal (solo durante la instalación).</span></label>}
-        <div className="sf-actions"><button className="btn btn-primary btn-sm" disabled={!okAuth || busy !== null || (needsAnswer && answer.trim().length < 2)} onClick={() => void run(confirming)}>{busy === confirming.id ? <span className="spin spin-light" /> : Icon.check()}{needsAnswer ? 'Enviar respuesta y continuar' : 'Confirmar y ejecutar'}</button><button className="btn btn-ghost btn-sm" onClick={() => setConfirming(null)} disabled={busy !== null}>Cancelar</button></div>
+        <div className="sf-actions"><button className="btn btn-primary btn-sm" disabled={!okAuth || busy !== null || (needsAnswer && answer.trim().length < (confirming.id === 'register_external' ? 3 : 2))} onClick={() => void run(confirming)}>{busy === confirming.id ? <span className="spin spin-light" /> : Icon.check()}{confirming.id === 'register_external' ? 'Registrar y verificar (sin IA)' : needsAnswer ? 'Enviar respuesta y continuar' : 'Confirmar y ejecutar'}</button><button className="btn btn-ghost btn-sm" onClick={() => setConfirming(null)} disabled={busy !== null}>Cancelar</button></div>
       </div>}
 
       {composer && itemId && <div className="sf-confirm" aria-label="Iteración correctiva">
@@ -255,7 +262,7 @@ function ConnectionNotice() {
   return <div className="sf-conn" role="alert" aria-label="Conexión con el servidor">{Icon.warn()}<span>{c.kind === 'offline' ? `Sin conexión con el servidor del Portal (${c.error ?? 'error de red'}). ` : 'El servidor no ha respondido recientemente. '}Última respuesta: {last}. Lo que ves puede estar desactualizado; el proceso puede seguir trabajando en el servidor. Se sigue intentando.</span></div>;
 }
 
-const EV_ICON: Record<string, string> = { recovery: '♻', repair: '✎', apply: '⎇', verify: '✓', environment: '⚙', qa: '◎', correction: '✎', pause: '⏸', done: '★', error: '✕', info: '·', unit: '▸', continuation: '↪', gate: '⊙' };
+const EV_ICON: Record<string, string> = { recovery: '♻', repair: '✎', apply: '⎇', verify: '✓', environment: '⚙', qa: '◎', correction: '✎', pause: '⏸', done: '★', error: '✕', info: '·', unit: '▸', continuation: '↪', gate: '⊙', external: '⚑' };
 const QA_TXT: Record<string, string> = { approved: 'QA aprobó con evidencia', rejected: 'QA rechazó', blocked_environment: 'QA bloqueada por el entorno', unable_to_verify: 'QA no pudo verificar' };
 
 const DEL_TXT: Record<string, string> = { delivered: 'entregado', pending: 'pendiente', failed: 'no se pudo entregar', dropped: 'descartado con motivo (QA lo revisa)' };
@@ -302,7 +309,7 @@ function PipelineActivity({ proc }: { proc: Process }) {
   const pl = proc.result!.pipeline!; const review = proc.result!.review;
   // Hitos siempre visibles (recuperación, reparación, aplicación, correcciones, QA, pausas, final) y los últimos pasos;
   // el detalle rutinario (cada comando verificado) queda en el registro técnico plegado.
-  const MILESTONE = new Set(['recovery', 'repair', 'apply', 'correction', 'qa', 'pause', 'error', 'done', 'unit', 'continuation', 'gate']);
+  const MILESTONE = new Set(['recovery', 'repair', 'apply', 'correction', 'qa', 'pause', 'error', 'done', 'unit', 'continuation', 'gate', 'external']);
   const events = pl.events.filter(e => e.kind !== 'info' || pl.events.length < 6);
   const recent = events.filter((e, i) => MILESTONE.has(e.kind) || i >= events.length - 3).slice(-8);
   const aiCost = pl.events.reduce((a, e) => a + (e.costUsd ?? 0), 0);

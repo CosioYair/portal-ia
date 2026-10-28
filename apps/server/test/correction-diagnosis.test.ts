@@ -178,3 +178,74 @@ test('una prueba existente fuera del plan no se modifica para que pase (se recha
     assert.ok(byRule(R.fix).length >= 1); assert.ok(calls().filter(c => c.rule === R.fix).every(c => c.markers.includes('[existing_test]')), 'el diagnóstico lo advierte');
   } finally { smoke = 'ok'; }
 });
+
+test('G/H/I · corrección externa autorizada: se registra con su commit y archivos, se verifica sin IA, conserva todo y no aprueba QA ni integra', async () => {
+  setRules([], { match: R.qa, text: QA_OK });
+  const p0 = await runIt('Rescate · corrección externa', { maxCorrections: 0 });
+  assert.equal(p0.result!.pipeline!.pauseKind, 'limit', p0.result!.pipeline!.reason ?? '');
+  const id = p0.id; const wt = p0.result!.applied!.worktree!;
+  const before = { steps: p0.steps.length, spent: p0.spentUsd, tokensIn: p0.inputTokens, corrections: p0.result!.pipeline!.corrections, attempts: p0.result!.pipeline!.correctionAttempts ?? 0, events: p0.result!.pipeline!.events.length, verifs: p0.result!.verifications.length, calls: calls().length, commit: p0.result!.applied!.commit, review: p0.result!.review };
+  const post = (body: unknown) => app.inject({ method: 'POST', url: `${W}/processes/${id}/external-correction`, payload: body as any });
+
+  // Sin commit nuevo no hay nada que registrar; sin autorización tampoco.
+  assert.equal((await post({ authorized: true, note: 'nada' })).json().code, 'nothing_new');
+  // Un cambio sin confirmar bloquea (se registra por commit, con sus archivos reales).
+  fs.writeFileSync(path.join(wt, 'src/catalog.mjs'), "export const RUTAS = ['/api/workspaces/:ws/inbox'];\n");
+  assert.equal((await post({ authorized: true, note: 'sin confirmar' })).json().code, 'dirty');
+  // El propietario confirma la corrección desde la consola.
+  fs.writeFileSync(path.join(wt, 'src/catalog.mjs'), "// MARCA_CONSOLA\nexport const RUTAS = ['/api/workspaces/:ws/inbox', '/api/budgets/:level/:id/balance'];\n");
+  git(wt, 'commit -qam "Corrección desde la consola"');
+  const head = git(wt, 'rev-parse --short HEAD');
+
+  // Antes de registrarla, la interfaz ofrece registrarla y NO ofrece continuar; continuar se detiene sin IA.
+  const f0 = (await flowOf(id)).guidance.flow;
+  assert.equal(f0.actions[0].id, 'register_external'); assert.ok(f0.actions[0].primary); assert.deepEqual(f0.actions[0].external, { commit: head, recorded: before.commit, files: ['src/catalog.mjs'] });
+  assert.ok(!f0.actions.some((a: any) => a.id === 'pipeline_resume'));
+  const cont = await app.inject({ method: 'POST', url: `${W}/processes/${id}/continue`, payload: { authorized: true } });
+  assert.equal(cont.statusCode, 200); const pc = await waitDone(id);
+  assert.equal(pc.result!.pipeline!.pauseKind, 'external'); assert.match(pc.result!.pipeline!.reason ?? '', /commits que el equipo no hizo/);
+  assert.equal(calls().length, before.calls, 'continuar con un commit sin registrar no llama a la IA');
+
+  assert.equal((await post({ note: 'sin autorización' })).statusCode, 400);
+  assert.equal((await post({ authorized: true, commit: 'abcdef0', note: 'no existe' })).json().code, 'unknown_commit');
+  const ok = await post({ authorized: true, commit: head, note: 'Rutas reales del servidor (MARCA_CONSOLA)' });
+  assert.equal(ok.statusCode, 200, ok.body);
+  const p = await waitDone(id); const r = p.result!; const pl = r.pipeline!;
+  // Registro fiel: commit y archivos reales; nada de actividad de agentes inventada.
+  assert.deepEqual(r.externalCorrections!.map(x => ({ commit: x.commit, previous: x.previousCommit, files: x.files, by: x.by })), [{ commit: head, previous: before.commit, files: ['src/catalog.mjs'], by: 'owner' }]);
+  assert.equal(r.applied!.commit, head);
+  assert.equal(p.steps.length, before.steps); assert.equal(p.spentUsd, before.spent); assert.equal(p.inputTokens, before.tokensIn);
+  assert.equal(pl.corrections, before.corrections); assert.equal(pl.correctionAttempts ?? 0, before.attempts);
+  assert.equal(calls().length, before.calls, 'registrar y verificar no llama a la IA');
+  // Se conserva todo lo anterior (eventos y verificaciones) y se vuelve a verificar sobre el commit nuevo.
+  assert.ok(pl.events.length > before.events); assert.deepEqual(pl.events.slice(0, before.events).map(e => e.message), p0.result!.pipeline!.events.map(e => e.message));
+  assert.ok(r.verifications.length > before.verifs); assert.ok(r.verifications.slice(before.verifs).every(v => v.exitCode === 0));
+  assert.ok(pl.events.some(e => e.kind === 'external' && /no es trabajo de los agentes/i.test(e.message)));
+  assert.equal(pl.state, 'paused'); assert.equal(pl.pauseKind, 'external'); assert.match(pl.reason ?? '', /verificada sin IA/);
+  // I · QA separada: nada aprobado ni integrado.
+  assert.deepEqual(r.review, before.review); assert.ok(!r.merged);
+  const f1 = (await flowOf(id)).guidance.flow;
+  const toQa = f1.actions.find((a: any) => a.id === 'pipeline_resume');
+  assert.ok(toQa && /Pasar a QA \(sin correcciones nuevas\)/.test(toQa.label)); assert.deepEqual(toQa.pipeline, { maxCorrections: 0 });
+
+  // El propietario decide pasar a QA sin correcciones nuevas: una revisión de QA y ninguna llamada del Desarrollador.
+  const res = await app.inject({ method: 'POST', url: `${W}/processes/${id}/continue`, payload: { authorized: true, pipeline: toQa.pipeline } });
+  assert.equal(res.statusCode, 200);
+  const done = await waitDone(id);
+  assert.equal(done.result!.pipeline!.state, 'verified', done.result!.pipeline!.reason ?? '');
+  assert.equal(byRule(R.qa).length, 1); assert.equal(byRule(R.fix).length, 0); assert.equal(byRule('Esta es la unidad').length, 0);
+  assert.ok(byRule(R.qa)[0].markers.includes('Correcciones externas registradas por el propietario'), 'QA sabe qué hizo el propietario');
+  assert.ok(!done.result!.merged, 'nunca se integra solo');
+});
+
+test('una corrección externa que toca una ruta protegida no se registra (y el worktree no se mueve)', async () => {
+  setRules([]);
+  const p0 = await runIt('Rescate · ruta protegida', { maxCorrections: 0 });
+  const wt = p0.result!.applied!.worktree!;
+  fs.writeFileSync(path.join(wt, '.env'), 'SECRET=1\n'); git(wt, 'add -f .env'); git(wt, 'commit -qm "toca .env"');
+  const head = git(wt, 'rev-parse HEAD');
+  const r = await app.inject({ method: 'POST', url: `${W}/processes/${p0.id}/external-correction`, payload: { authorized: true, note: 'protegida' } });
+  assert.equal(r.statusCode, 400); assert.equal(r.json().code, 'protected_path');
+  assert.equal(processesRepo(S).get(p0.id)!.result!.externalCorrections, undefined);
+  assert.equal(git(wt, 'rev-parse HEAD'), head);
+});

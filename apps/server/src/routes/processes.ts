@@ -18,6 +18,7 @@ import { requirePolicy, PolicyError } from '../services/executionPolicy.ts';
 import { detectSandbox } from '../services/sandbox.ts';
 import { runVerification } from '../services/verification.ts';
 import { newPipeline, resumeStory } from '../services/storyPipeline.ts';
+import { registerExternalCorrection, verifyExternalCorrection } from '../services/externalCorrection.ts';
 import { normalizePipeline } from '@portal-ia/domain';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -127,6 +128,25 @@ export async function processRoutes(app: FastifyInstance) {
     const run = resumeStory(slug, id, logger, () => isCancelled(id)).finally(() => clearCancel(id));
     trackJob(id, run).catch(e => app.log.error(e, 'fallo inesperado al continuar el proceso'));
     return await withGuidance(slug, procs.get(id)!);
+  });
+
+  // Corrección externa (consola) autorizada por el propietario: se registra con su commit y sus archivos reales, se verifica
+  // en el sandbox SIN IA y se detiene antes de QA. No crea pasos de agentes ni tokens, y no cambia las correcciones del equipo.
+  app.post('/api/workspaces/:slug/processes/:id/external-correction', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ authorized: z.literal(true), commit: z.string().trim().regex(/^[0-9a-f]{4,40}$/i).optional(), note: z.string().trim().min(3).max(2000) }).safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Registrar una corrección externa exige tu autorización explícita y una nota con lo que se corrigió.', code: 'authorization_required' });
+    const procs = processesRepo(slug); const proc0 = procs.get(id);
+    try {
+      if (proc0) requirePolicy('write_worktree', { slug, processId: id, agentId: null, projectId: proc0.projectId, authorized: true });
+      const entry = await registerExternalCorrection(slug, id, { commit: body.data.commit ?? null, note: body.data.note });
+      const proc = procs.get(id)!;
+      procs.resume(id, Math.max(proc.budgetUsd, proc.spentUsd));
+      app.log.info({ processId: id, commit: entry.commit, files: entry.files.length }, 'corrección externa registrada (autorizada)');
+      const run = verifyExternalCorrection(slug, id, (o: any, m: string) => app.log.info(o, m), () => isCancelled(id)).finally(() => clearCancel(id));
+      trackJob(id, run).catch(e => app.log.error(e, 'fallo inesperado al verificar la corrección externa'));
+      return await withGuidance(slug, procs.get(id)!);
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : e.code }); }
   });
 
   app.post('/api/workspaces/:slug/processes/:id/cancel', async (req, reply) => {

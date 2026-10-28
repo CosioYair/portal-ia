@@ -5,6 +5,7 @@ import { listFeedback } from './manual-test-feedback.ts';
 import { detectSandbox } from './sandbox.ts';
 import { lastUpdate } from './system.ts';
 import { isActiveJob } from './activeJobs.ts';
+import { worktreeDrift } from './worktreeDrift.ts';
 
 /**
  * Datos que necesita el recorrido guiado de un proceso de historia (sin IA, solo lectura): pasos con falla de la prueba,
@@ -26,5 +27,8 @@ export async function flowOptions(slug: string, p: Process, item?: BacklogItem |
   const idx = siblings.findIndex(x => x.id === p.id);
   // «En ejecución» sin ejecución viva en este servidor: nada trabaja de verdad (no se muestra como actividad sana).
   const orphan = p.status === 'running' && !isActiveJob(p.id);
-  return { failedStepDetails, sandbox, updateFailedLog, iteration: idx >= 0 ? { number: siblings.length - idx, total: siblings.length } : null, orphan };
+  // Solo para historias detenidas con worktree vivo: ¿alguien confirmó o cambió algo fuera del equipo? (git, sin IA)
+  const pl = r?.pipeline;
+  const drift = r && pl && (pl.state === 'paused' || pl.state === 'stopped') && p.status !== 'running' && !r.merged && !r.rejected ? await worktreeDrift(r) : null;
+  return { failedStepDetails, sandbox, updateFailedLog, iteration: idx >= 0 ? { number: siblings.length - idx, total: siblings.length } : null, orphan, drift };
 }
