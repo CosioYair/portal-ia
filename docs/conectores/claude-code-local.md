@@ -129,6 +129,7 @@ la memoria, el flujo, el worktree, la verificación en Docker, QA y la aprobaci�
 | Sin sesión, facturación por API, CLI ausente, consola desconectada, proyecto o agente no autorizado | Pausa con el motivo; no cambia de origen |
 | Proyecto sin autorizar, antes de empezar o al continuar | «Autorizar la ejecución» y «Continuar» se rechazan (409 `backend_not_ready`) sin eventos ni pasos. La historia ofrece «Autorizar «proyecto» para Claude Code», que guarda la autorización y la comprueba en la configuración guardada. Solo entonces ofrece «Continuar la operación pendiente», sin correcciones nuevas |
 | Plazo agotado, cancelación, salida mal formada, error de la CLI | Error claro, paso fallido, sin reintento automático |
+| Turnos agotados (`error_max_turns`) | `CLAUDE_CODE_MAX_TURNS_EXHAUSTED`, pausa `max_turns`. No es un fallo de conexión, así que no se ofrece «repetir la llamada». Se registra el uso (tokens, turnos y herramientas usadas) y se conserva lo hecho. El siguiente intento, con tu autorización y los mismos límites, es acotado: lleva el contenido de los archivos relacionados e indica cuánto enviará. Una segunda vez en la misma unidad no se insiste: «volver a verificar sin IA». El límite de turnos no se sube de forma global |
 
 La alternativa por la API del agente solo actúa si la autorizaste en «Si la suscripción no está disponible». Entonces factura y descuenta del presupuesto del proceso, y el paso queda marcado como «alternativa autorizada».
 
