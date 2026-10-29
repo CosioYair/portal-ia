@@ -24,6 +24,14 @@ Fecha: 27 de octubre de 2026. Sobre la entrega v0.12.0 (abajo). Todo verificado 
   Pruebas en Docker: typecheck, test y build en verde; 31 de 31 casos de HU-155 ejecutados. CLI real contra una instancia aislada: 14 de 14 (9 capturas con Chromium, publicación única, activación pendiente detectada, 0 llamadas a IA).
 
   En `main` (`0b8e417`): la evidencia de «pruebas nuevas ejecutadas» sobrevive al recorte de la salida del sandbox (antes abría correcciones pagadas en falso) y la verificación de una corrección externa repite una vez las pruebas ajenas inestables. `PORTAL_REQUIRE_DOCKER=1 npm test` 241/243 (2 omitidas por plataforma).
+- **Conector «Claude Code — Local»** — `docs/conectores/claude-code-local.md`:
+  - **Qué es:** backend de ejecución por agente (`api` · `claude-code` · `claude-code-terminal`) para los pasos de los procesos autorizados, integrado en `callAgentStep`. El agente, el flujo, el worktree, Docker y QA no cambian.
+  - **Ejecución:** la CLI oficial en `claude -p` restringido: `--tools ""`, `--strict-mcp-config`, `dontAsk`, entorno mínimo sin credenciales y doble barrera de facturación (`auth status` y `apiKeySource`).
+  - **Puente MCP:** `scripts/portal-mcp.mjs`, de solo lectura, con alcance por token y la consola del propietario como cola de tareas.
+  - **Uso y fallos:** el uso con suscripción va aparte del gasto (0 USD de la API; el equivalente se muestra como estimación). Ante un límite, pausa `subscription_limit`; solo pasa a la API si el propietario la autorizó.
+  - **Datos:** versión de esquema 0.13, aditiva, con copia de `data/` al arrancar.
+  - **Pruebas:** `claude-code-connector.test.ts` (10) y `claude-code-execution.test.ts` (15, Docker real), con una CLI simulada. Instancia aislada con Chromium: 16 de 16.
+  - **Falta:** la prueba de humo con la suscripción real, que requiere autorización. **No activo hasta reconstruir y reiniciar el Portal.**
 - Pendiente de la validación del propietario en su instalación real: ver la lista de prueba final de la sesión.
 
 ---
