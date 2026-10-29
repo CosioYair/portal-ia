@@ -37,6 +37,12 @@ Fecha: 27 de octubre de 2026. Sobre la entrega v0.12.0 (abajo). Todo verificado 
   - **Claude Code:** la puerta se comprueba antes de crear pasos. «Backends del equipo» es visible antes de empezar, y «Autorizar el proyecto o pasar a gestionado y continuar» retoma sin repetir lo hecho. Una consola desconectada no deja tareas esperando.
   - **Asistente:** catálogo cerrado de operaciones con tarjeta de autorización (`publish_main`, el mismo servicio que el Panel, con auditoría). Su backend es explícito, y ninguna llamada de agente pasa a la API sin autorización.
   - **Pruebas:** `assistant-operations.test.ts` (5), `test-cancellations.test.ts` (4) y casos nuevos en `claude-code-*` (F/G, D/E, H). `PORTAL_REQUIRE_DOCKER=1 npm test` 288/286 (2 omitidas por plataforma). Chromium 13/13 en una instancia aislada.
+- **HU-159, bloqueo real tras activar** — `docs/incidentes/HU-159.md` §5:
+  - **Causa:** junto a la acción de autorizar se ofrecía «Continuar cuando Claude Code esté disponible», que solo podía volver a pausar (80 eventos). La confirmación no nombraba el proyecto y no había comprobación previa. Proyecto e identificadores, correctos.
+  - **Ahora:** «Autorizar la ejecución» y «Continuar» se rechazan sin eventos mientras falte algo. La historia dice el bloqueo exacto, con la tarjeta de Claude Code y enlace a la configuración; autorizar se comprueba con lo guardado antes de ofrecer «Continuar la operación pendiente».
+  - **Datos:** sin correcciones nuevas; la corrección planificada con pruebas canceladas, y con bloques TAP recortados, se sustituye sin IA por una nueva verificación.
+  - **Navegación:** Presupuestos accesible, enlace a «Claude Code — Local», aviso de interfaz desactualizada e historial sin repeticiones.
+  - **Pruebas:** `settings-navigation-wiring.test.ts` (5) y casos nuevos en `claude-code-execution`, `incremental-delivery` y `test-cancellations`. `PORTAL_REQUIRE_DOCKER=1 npm test` 294/296 (2 omitidas por plataforma). Chromium 23/23 en una instancia aislada.
 - Pendiente de la validación del propietario en su instalación real: ver la lista de prueba final de la sesión.
 
 ---
