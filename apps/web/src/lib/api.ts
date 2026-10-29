@@ -2,7 +2,7 @@ import type { PipelineConfig, PhaseTransition, PhaseTransitionPreview, ProjectAr
 
 import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
 import type { ClaudeCodeRun, ClaudeCodeStatusView, ClaudeCodeUsage, ClaudeCodeWorkerView, ClaudeCodeWorkspaceView, ExecutionBackend } from '@portal-ia/domain';
-import { noteFailure, noteResponse } from './liveStatus.ts';
+import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public body?: any) { super(message); }
@@ -20,7 +20,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     noteFailure(e?.name === 'TimeoutError' ? 'El servidor no respondió en 20 s' : 'No se pudo contactar con el servidor del Portal');
     throw new ApiError(0, e?.name === 'TimeoutError' ? 'El servidor no respondió a tiempo.' : 'No se pudo contactar con el servidor del Portal.', { code: 'unreachable' });
   }
-  noteResponse(res.headers.get('x-server-time'), sentAt, Date.now());
+  noteResponse(res.headers.get('x-server-time'), sentAt, Date.now()); noteBundle(res.headers.get('x-portal-web'));
   const text = await res.text();
   const body = text ? JSON.parse(text) : null;
   if (!res.ok) throw new ApiError(res.status, body?.error ?? body?.lastError?.message ?? `Error ${res.status}`, body);
@@ -38,7 +38,12 @@ export interface AssistantAction {
   live?: { status: string; phase: string; next: string; tone: 'info' | 'warn' | 'ok' | 'err'; settled: boolean };
 }
 export interface ProcessBackends { processId: string; projectId: string; projectName: string | null; connectorEnabled: boolean; subscriptionVerified: boolean; projectAuthorized: boolean; fallback: 'none' | 'api'; ready: boolean;
-  team: { agentId: string; name: string; roles: string[]; backend: ExecutionBackend; label: string; ready: boolean; reason: string | null; problem: string | null }[] }
+  team: { agentId: string; name: string; roles: string[]; backend: ExecutionBackend; label: string; ready: boolean; reason: string | null; problem: string | null }[];
+  cli: { installed: boolean; version: string | null; authMethod: string | null; subscriptionType: string | null; verified: boolean; checkedAt: string | null };
+  worker: { managedAvailable: boolean; running: number; maxConcurrent: number };
+  scope: string[]; nextOperation: string | null; staleCorrections: number; corrections: { used: number; max: number } | null;
+  /** Solo en la respuesta de «autorizar»: comprobado contra la configuración guardada. */
+  verified?: boolean }
 export interface AssistantAttachment { name: string; mediaType: string; bytes: number }
 export interface AssistantImage { mediaType: string; data: string; name?: string }
 export interface AssistantMessage { id: string; role: 'user' | 'assistant'; content: string; actions: AssistantAction[]; attachments: AssistantAttachment[]; tokensIn: number; tokensOut: number; costUsd: number; model: string | null; createdAt: string }

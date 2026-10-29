@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ClaudeCodeWorkspaceView, ExecutionBackend } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
@@ -37,12 +37,26 @@ export function ClaudeCodePanel() {
   const [smoke, setSmoke] = useState<string | null>(null);
 
   const load = async () => {
-    if (!slug) return;
+    if (!slug) return null;
     const v = await api.claudeCodeWorkspace(slug); setView(v);
     setLimits(l => l ?? { maxConcurrent: v.status.settings.maxConcurrent, maxDurationMin: Math.round(v.status.settings.maxDurationSec / 60), maxTurns: v.status.settings.maxTurns, repoRead: v.status.settings.repoRead, cliPath: v.status.settings.cliPath ?? '' });
+    return v;
   };
   useEffect(() => { void load().catch(() => undefined); const t = setInterval(() => { void load().catch(() => undefined); }, 10_000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug]);
+  // Enlace directo (#claude-code, #claude-code-proyectos): se desplaza al cargar, que es cuando la sección existe.
+  const scrolled = useRef(false);
+  useEffect(() => { if (!view || scrolled.current || !window.location.hash.startsWith('#claude-code')) return; scrolled.current = true; requestAnimationFrame(() => document.getElementById(window.location.hash.slice(1))?.scrollIntoView({ behavior: 'smooth', block: 'start' })); }, [view]);
+  /** Autorizar o retirar un proyecto: se informa con lo que quedó GUARDADO (se relee), nunca con lo que se pidió. */
+  const setProject = async (id: string, name: string, on: boolean) => {
+    setBusy('proj');
+    try {
+      await api.claudeCodeProjects(slug!, on ? [...new Set([...(view?.projects ?? []), id])] : (view?.projects ?? []).filter(x => x !== id));
+      const v = await load(); const saved = !!v?.projects.includes(id);
+      if (saved === on) flash(on ? `«${name}» autorizado para Claude Code (comprobado en la configuración guardada)` : `«${name}» ya no usa Claude Code`);
+      else flash(`No quedó guardado: «${name}» sigue ${saved ? 'autorizado' : 'sin autorizar'} para Claude Code.`, 'err');
+    } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(null); }
+  };
   const act = async (key: string, fn: () => Promise<unknown>, ok?: string) => {
     setBusy(key);
     try { await fn(); await load(); if (ok) flash(ok); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(null); }
@@ -103,15 +117,16 @@ export function ClaudeCodePanel() {
           <label className="krow"><input className="rd" type="radio" name="cc-fb" checked={s.fallback === 'api'} onChange={() => { if (confirm('¿Autorizas que, si Claude Code no está disponible, el agente use la API de su proveedor? Esa llamada se FACTURA y descuenta del presupuesto del proceso.')) void act('fb', () => api.claudeCodeSettings({ fallback: 'api', authorized: true }), 'Alternativa por API autorizada'); }} />
             <span className="small"><strong>Usar la API del agente</strong> (facturable, con el presupuesto del proceso). Solo con tu autorización.</span></label>
 
-          <div className="h3" style={{ fontSize: 14 }}>Proyectos autorizados · {status.workspace?.name}</div>
+          <div className="h3" style={{ fontSize: 14 }} id="claude-code-proyectos">Proyectos autorizados · {status.workspace?.name}</div>
+          <div className="help" style={{ marginTop: -8 }}>Solo los agentes de estos proyectos pueden ejecutar con Claude Code. Marcar uno lo guarda y se comprueba al momento.</div>
           {projects.map(p => (
-            <label key={p.id} className="krow"><input className="cb" type="checkbox" checked={authorizedProjects.has(p.id)} disabled={busy !== null}
-              onChange={e => act('proj', () => api.claudeCodeProjects(slug, e.target.checked ? [...authorizedProjects, p.id] : [...authorizedProjects].filter(x => x !== p.id)), e.target.checked ? `«${p.name}» autorizado para Claude Code` : `«${p.name}» ya no usa Claude Code`)} />
-              <span className="small">{p.name}</span></label>
+            <label key={p.id} className="krow" data-cc-project={p.id}><input className="cb" type="checkbox" checked={authorizedProjects.has(p.id)} disabled={busy !== null}
+              onChange={e => void setProject(p.id, p.name, e.target.checked)} />
+              <span className="small" style={{ flex: 1 }}>{p.name}</span><Chip xs tone={authorizedProjects.has(p.id) ? 'ok' : ''}>{authorizedProjects.has(p.id) ? 'autorizado' : 'no autorizado'}</Chip></label>
           ))}
 
           <div className="h3" style={{ fontSize: 14 }}>Agentes</div>
-          <div className="help" style={{ marginTop: -8 }}>El backend solo decide dónde se ejecutan los pasos de los procesos autorizados (plan, implementación, correcciones y revisión de QA). La identidad, el papel, los permisos y el historial del agente no cambian. El chat, el backlog y las lecciones siguen usando la API.</div>
+          <div className="help" style={{ marginTop: -8 }}>El backend solo decide dónde se ejecutan los pasos de los procesos autorizados (plan, implementación, correcciones y revisión de QA). La identidad, el papel, los permisos y el historial del agente no cambian. El Asistente, las preguntas al equipo, el backlog y las lecciones también respetan este backend: si Claude Code no está disponible lo dicen y no pasan a la API.</div>
           {view.agents.map(a => (
             <div key={a.id} className="krow" style={{ alignItems: 'center' }}>
               <span style={{ flex: 1, minWidth: 0 }} className="small">{a.name}{a.provider !== 'anthropic' && <span className="muted"> · {a.provider} (solo API)</span>}</span>

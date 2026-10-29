@@ -21,6 +21,15 @@ import { phaseRoutes, registerArchivedGuard } from './routes/phase.ts';
 import { claudeCodeRoutes } from './routes/claudeCode.ts';
 import { VERSION } from './services/system.ts';
 
+/** Script principal del paquete de la interfaz que se sirve (p. ej. «index-BYW4Vz5N.js»), o null sin paquete construido. Se relee cada 10 s. */
+let bundleCache: { at: number; name: string | null } | null = null;
+function currentWebBundle(): string | null {
+  if (bundleCache && Date.now() - bundleCache.at < 10_000) return bundleCache.name;
+  let name: string | null = null;
+  try { name = fs.readFileSync(path.join(config.webDist, 'index.html'), 'utf8').match(/\/assets\/(index-[\w-]+\.js)/)?.[1] ?? null; } catch { /* sin paquete construido */ }
+  bundleCache = { at: Date.now(), name }; return name;
+}
+
 export async function buildApp() {
   const app = Fastify({
     bodyLimit: 25 * 1024 * 1024, // adjuntos (imágenes) del asistente
@@ -29,10 +38,12 @@ export async function buildApp() {
   });
 
   // El frontend de desarrollo (Vite, puerto 5173) habla con este backend; en producción se sirve desde aquí mismo.
-  await app.register(cors, { origin: [/^http:\/\/(localhost|127\.0\.0\.1):\d+$/], exposedHeaders: ['x-server-time'] });
+  await app.register(cors, { origin: [/^http:\/\/(localhost|127\.0\.0\.1):\d+$/], exposedHeaders: ['x-server-time', 'x-portal-web'] });
   // Cada respuesta de la API lleva la hora del servidor (la interfaz mide con ella, no con el reloj del navegador, y sabe
   // cuándo habló por última vez con el servidor) y nunca se guarda en caché: recargar siempre muestra el estado real.
-  app.addHook('onSend', async (req, reply, payload) => { if (req.url.startsWith('/api/')) reply.header('x-server-time', String(Date.now())).header('cache-control', 'no-store'); return payload; });
+  // También el paquete de la interfaz que sirve ahora: una pestaña abierta con un paquete anterior (tras reconstruir y
+  // reiniciar) lo detecta y pide recargar, en vez de ignorar acciones que no conoce (HU-159).
+  app.addHook('onSend', async (req, reply, payload) => { if (req.url.startsWith('/api/')) { reply.header('x-server-time', String(Date.now())).header('cache-control', 'no-store'); const web = currentWebBundle(); if (web) reply.header('x-portal-web', web); } return payload; });
 
   app.get('/api/health', async () => ({ ok: true, name: 'portal-ia', version: VERSION, dataDir: config.dataDir, repoRoot: REPO_ROOT }));
 

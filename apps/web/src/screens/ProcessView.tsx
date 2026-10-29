@@ -22,6 +22,16 @@ const P_LABEL: Record<Process['status'], { label: string; tone: '' | 'ok' | 'war
   cancelled: { label: 'Cancelado', tone: '', dot: '' },
   budget_exceeded: { label: 'Presupuesto agotado', tone: 'err', dot: 'err' }
 };
+/**
+ * Estado que ve el propietario: un proceso «terminado» cuyo pipeline está pausado o detenido NO está completado
+ * (HU-159 figuraba «Completado» mientras esperaba una autorización). Pausado = espera tu decisión; detenido = se paró.
+ */
+function procLabel(p: Process) {
+  const pl = p.result?.pipeline;
+  if (p.status === 'done' && pl?.state === 'paused') return { label: 'Pausado · espera tu decisión', tone: 'warn' as const, dot: '' as const };
+  if (p.status === 'done' && pl?.state === 'stopped' && pl.pauseKind && pl.pauseKind !== 'no_changes') return { label: 'Detenido · decides tú', tone: 'warn' as const, dot: '' as const };
+  return P_LABEL[p.status];
+}
 
 export function ProcessView() {
   const { processId } = useParams();
@@ -63,7 +73,7 @@ export function ProcessView() {
 
   if (error) return <Shell crumb="Proceso"><main className="page"><Notice kind="err">{error}</Notice></main></Shell>;
   if (!proc) return <Shell crumb="Proceso"><main className="page"><span className="spin" aria-label="Cargando" /></main></Shell>;
-  const st = P_LABEL[proc.status];
+  const st = procLabel(proc);
   const tokens = proc.inputTokens + proc.outputTokens;
   const pct = proc.budgetUsd ? Math.min(100, Math.round((proc.spentUsd / proc.budgetUsd) * 100)) : 0;
 
@@ -109,7 +119,7 @@ export function ProcessView() {
               <div className="help" style={{ paddingBottom: 26 }}>El proceso se detiene entre pasos si el gasto se acerca al límite.</div>
             </div>
             {proc.kind === 'story_execution' && <PipelineOptions value={pipeline} onChange={setPipeline} team={proc.steps.map(s => ({ agentName: s.agentName, role: s.title, model: s.model ?? '' }))} />}
-            {proc.kind === 'story_execution' && <TeamBackends slug={slug} processId={proc.id} />}
+            {proc.kind === 'story_execution' && <TeamBackends slug={slug} processId={proc.id} refreshKey={`${proc.status}|${proc.guidance?.flow?.issue?.title ?? ''}`} />}
             <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo a los agentes indicados a trabajar en este proceso hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. Los resultados son propuestas que revisaré antes de aplicarse.</span></label>
             <button className="btn btn-primary" style={{ alignSelf: 'flex-start' }} onClick={authorize} disabled={!auth || authBusy || !(Number(budget) > 0)}>{authBusy ? <span className="spin spin-light" /> : Icon.arrow()}{authBusy ? 'Autorizando…' : 'Autorizar y comenzar'}</button>
           </div></section>}
@@ -175,7 +185,7 @@ export function ProcessList() {
           <div className="card-h"><div className="h3">Procesos</div><span className="small muted">{list?.length ?? 0} en total</span></div>
           {list && list.length === 0 && <div className="card-b"><p className="muted sm13">Aún no hay procesos. La evaluación inicial se lanza desde el panel; las historias, desde el backlog.</p></div>}
           {list && list.length > 0 && <div style={{ overflowX: 'auto' }}><table className="tbl"><thead><tr><th>Proceso</th><th>Estado</th><th>Pasos</th><th>Tokens</th><th>Costo</th><th>Creado</th></tr></thead>
-            <tbody>{list.map(p => { const st = P_LABEL[p.status]; return <tr key={p.id}><td><button className="lnk" onClick={() => navigate(`/procesos/${p.id}`)}>{p.title}</button></td><td><Chip tone={st.tone} xs dot={st.dot}>{st.label}</Chip></td><td className="med">{p.steps.filter(s => s.status === 'done').length}/{p.steps.length}</td><td className="mono" style={{ fontSize: 12 }}>{p.inputTokens + p.outputTokens}</td><td className="mono" style={{ fontSize: 12 }}>{fmtUsd(p.spentUsd)}</td><td className="med">{new Date(p.createdAt).toLocaleString('es-MX')}</td></tr>; })}</tbody></table></div>}
+            <tbody>{list.map(p => { const st = procLabel(p); return <tr key={p.id}><td><button className="lnk" onClick={() => navigate(`/procesos/${p.id}`)}>{p.title}</button></td><td><Chip tone={st.tone} xs dot={st.dot}>{st.label}</Chip></td><td className="med">{p.steps.filter(s => s.status === 'done').length}/{p.steps.length}</td><td className="mono" style={{ fontSize: 12 }}>{p.inputTokens + p.outputTokens}</td><td className="mono" style={{ fontSize: 12 }}>{fmtUsd(p.spentUsd)}</td><td className="med">{new Date(p.createdAt).toLocaleString('es-MX')}</td></tr>; })}</tbody></table></div>}
         </section>
       </main>
     </Shell>
@@ -183,9 +193,10 @@ export function ProcessList() {
 }
 
 /** Backends del equipo ANTES de autorizar (o al retomar): con qué ejecutará cada agente y si puede hacerlo ya. */
-function TeamBackends({ slug, processId }: { slug: string; processId: string }) {
+/** Backends del equipo según la configuración guardada; se relee cuando cambia el estado del proceso (p. ej. tras autorizar). */
+function TeamBackends({ slug, processId, refreshKey }: { slug: string; processId: string; refreshKey: string }) {
   const [b, setB] = useState<ProcessBackends | null>(null);
-  useEffect(() => { api.processBackends(slug, processId).then(setB).catch(() => setB(null)); }, [slug, processId]);
+  useEffect(() => { api.processBackends(slug, processId).then(setB).catch(() => setB(null)); }, [slug, processId, refreshKey]);
   if (!b || !b.team.some(t => t.backend !== 'api')) return null;
   return <div className="card card-b" style={{ display: 'flex', flexDirection: 'column', gap: 6 }} data-team-backends>
     <div className="h3" style={{ fontSize: 14 }}>Backends del equipo {b.ready ? <Chip xs tone="ok">listos</Chip> : <Chip xs tone="warn">falta algo</Chip>}</div>

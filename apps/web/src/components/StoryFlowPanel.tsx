@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { DeliveryProgress, FlowAction, FlowIssue, LiveCall, Process, ProcessStep, StoryContext } from '@portal-ia/domain';
-import { api, ApiError } from '../lib/api.ts';
+import type { DeliveryProgress, FlowAction, FlowActionId, FlowIssue, LiveCall, PipelineEvent, Process, ProcessStep, StoryContext } from '@portal-ia/domain';
+import { api, ApiError, type ProcessBackends } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
 import { callTiming, connection, serverNow, stepDurationMs } from '../lib/liveStatus.ts';
@@ -19,6 +19,9 @@ const hhmm = (iso: string) => new Date(iso).toLocaleTimeString('es-MX', { hour: 
 const LIVE_TXT: Record<LiveCall['state'], string> = { preparing: 'Preparando la solicitud', sending: 'Enviando la solicitud', waiting: 'Esperando la respuesta del proveedor', receiving: 'Recibiendo la respuesta', processing: 'Procesando la respuesta', retrying: 'Esperando para reintentar', cancelling: 'Cancelando' };
 const LIVE_NEXT: Record<LiveCall['state'], string> = { preparing: 'enviar la solicitud al proveedor', sending: 'que el proveedor confirme la recepción', waiting: 'que el proveedor empiece a responder (o abortar al llegar al plazo)', receiving: 'terminar de recibir la respuesta', processing: 'validar la entrega y pasar a la siguiente etapa', retrying: 'reenviar la solicitud', cancelling: 'detener el proceso' };
 const go = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+/** Acciones que esta versión de la interfaz sabe ejecutar. Una desconocida (servidor más nuevo) se dice, no se ignora. */
+const HANDLED = new Set<FlowActionId>(['authorize', 'cancel', 'review_diff', 'apply', 'reject', 'install_and_retry', 'verify', 'retry_verification', 'sandbox_help', 'refresh_sandbox', 'request_fix', 'ask_team', 'tasks_from_issue', 'merge', 'rebuild', 'runtime_check', 'manual_test', 'close', 'close_resolved', 'retry_process', 'recover', 'new_iteration', 'pipeline_resume', 'repair_output', 'claude_code_fix', 'register_external', 'open_settings']);
+const AUTH_TXT: Record<string, string> = { 'claude.ai': 'sesión de tu suscripción', oauth_token: 'token OAuth', api_key: 'clave de API (no válida aquí)', none: 'sin sesión' };
 
 interface Props {
   proc: Process;
@@ -52,6 +55,12 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const [msg, setMsg] = useState<string | null>(null);
   const [answer, setAnswer] = useState('');
   const [cancelling, setCancelling] = useState(false);
+  // Claude Code: estado real (configuración guardada, CLI, ejecutor, alcance, siguiente operación) y la última comprobación tras autorizar.
+  const [cc, setCc] = useState<ProcessBackends | null>(null);
+  const [verified, setVerified] = useState<string | null>(null);
+  const ccRelevant = !!flow && (flow.actions.some(a => a.id === 'claude_code_fix') || !!flow.issue?.links?.some(l => l.href.includes('claude-code')) || flow.issue?.title === 'Claude Code ya está listo: falta continuar');
+  useEffect(() => { if (!ccRelevant) { setCc(null); return; } let alive = true; void api.processBackends(slug, proc.id).then(r => { if (alive) setCc(r); }).catch(() => undefined); return () => { alive = false; }; }, [slug, proc.id, ccRelevant, flow?.issue?.title]);
+  useEffect(() => { setVerified(null); }, [proc.id]);
   const [, tick] = useState(0);
   useEffect(() => { if (proc.status !== 'running') return; const t = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(t); }, [proc.status]);
   useEffect(() => { setConfirming(null); setComposer(null); setErr(null); setMsg(null); setOkAuth(false); setAnswer(''); }, [proc.id, flow?.current, flow?.issue?.kind]);
@@ -65,7 +74,9 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const reload = async () => { try { onChange(await api.process(slug, proc.id)); } catch { /* sin cambios */ } };
   const askText = issue ? `Sobre «${issue.title}»${issue.command ? ` (${issue.command})` : ''}: ¿por qué ocurre y cómo propones corregirlo? Responde con las causas y los cambios concretos.` : '¿Qué falta para cerrar esta historia?';
   const run = async (a: FlowAction) => {
-    setErr(null); setMsg(null);
+    setErr(null); setMsg(null); if (a.id !== 'claude_code_fix') setVerified(null);
+    if (!HANDLED.has(a.id)) { setErr(`Esta página no reconoce la acción «${a.label}»: es de una versión más nueva del Portal. Recarga la página (Ctrl+F5) y vuelve a intentarlo; no se ha hecho nada.`); return; }
+    if (a.id === 'open_settings') { if (a.href) navigate(a.href); return; }
     // Acciones que solo llevan a la sección donde se completan (con su propia autorización y opciones)
     if (a.id === 'review_diff') return go('sec-diff');
     if (a.id === 'apply') return go('sec-apply');
@@ -101,10 +112,14 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         onChange(p); flash(a.answer ? 'Tu respuesta llegó al equipo; retoma el trabajo' : a.id === 'repair_output' ? 'El Desarrollador está reparando su entrega (sin repetir el plan)' : 'El equipo retoma el trabajo donde lo dejó');
       }
       else if (a.id === 'claude_code_fix' && a.backendFix) {
-        // Solo la autorización que falta (proyecto y/o pasar a «gestionado»), y después el «Continuar» de siempre: retoma lo pendiente sin repetir lo hecho.
-        await api.claudeCodeFix(slug, proc.id, a.backendFix);
-        const p = await api.continueProcess(slug, proc.id, {});
-        onChange(p); flash('Autorización aplicada: el equipo retoma la operación pendiente (sin repetir lo hecho ni usar la API)');
+        // Solo la autorización que falta (proyecto y/o pasar a «gestionado»). NO continúa: el servidor la comprueba contra
+        // la configuración guardada y, solo si queda verificada, la historia ofrece «Continuar la operación pendiente».
+        try {
+          const rd = await api.claudeCodeFix(slug, proc.id, a.backendFix);
+          setCc(rd); await reload();
+          if (rd.ready) { setVerified(`Comprobado en la configuración guardada: ${rd.projectAuthorized ? `«${rd.projectName ?? 'el proyecto'}» está autorizado para Claude Code` : 'Claude Code está disponible'} y el equipo puede ejecutar${rd.cli.subscriptionType ? ` con tu suscripción (${rd.cli.subscriptionType})` : ''}. ${proc.status === 'pending_authorization' ? 'Ahora puedes revisar y autorizar la ejecución.' : 'Ahora puedes continuar la operación pendiente.'}`); flash('Autorización guardada y verificada'); }
+          else setErr(`La autorización se guardó, pero el equipo todavía no puede usar Claude Code: ${rd.team.find(t => !t.ready)?.reason ?? 'motivo desconocido'}`);
+        } catch (e: any) { if (e instanceof ApiError && e.body?.readiness) setCc(e.body.readiness); throw e; }
       }
       else if (a.id === 'recover') { const p = await api.recoverProcess(slug, proc.id); onChange(p); flash('Resultado recuperado sin IA'); }
       else if (a.id === 'register_external' && a.external) { const p = await api.registerExternalCorrection(slug, proc.id, { commit: a.external.commit, note: answer.trim() }); onChange(p); flash('Corrección externa registrada: se verifica en el sandbox sin IA y se detiene antes de QA'); }
@@ -115,7 +130,11 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         if (orphan) { await reload(); flash('Proceso interrumpido cerrado'); } else { setCancelling(true); flash('Cancelando: se aborta la llamada en curso'); }
       }
       setConfirming(null);
-    } catch (e: any) { setErr(explainError(e)); } finally { setBusy(null); }
+    } catch (e: any) {
+      setErr(explainError(e));
+      // Continuar rechazado porque Claude Code no está listo: se muestra el estado real (nada se registró en el proceso).
+      if (e instanceof ApiError && e.body?.code === 'backend_not_ready') { setConfirming(null); if (e.body.readiness) setCc(e.body.readiness); await reload(); }
+    } finally { setBusy(null); }
   };
 
   const primary = flow.actions.find(a => a.primary);
@@ -157,7 +176,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         {flow.stages.filter(s => s.status === 'warning' || s.status === 'rejected').filter(s => s.key !== flow.current).map(s => <span key={s.key} className="small" style={{ color: '#7A4A00' }}>⚠ {s.label}: {s.detail}</span>)}
       </div>
 
-      {flow.delivery && <DeliveryPanel d={flow.delivery} running={proc.status === 'running' && !orphan} />}
+      {flow.delivery && <DeliveryPanel d={flow.delivery} running={proc.status === 'running' && !orphan} next={issue && primary ? primary.label : null} />}
 
       {cancelling && proc.status === 'running' && <div className="sf-headline" role="status" aria-label="Cancelando"><span className="spin" /><span>Cancelando… se abortó la llamada en curso; el proceso se cierra en cuanto el paso lo registre.</span></div>}
 
@@ -186,7 +205,11 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         {issue.files.length > 0 && <span className="small muted">Archivos: <span className="mono">{issue.files.join(', ')}</span></span>}
         {issue.responsible.length > 0 && <span className="small muted">Responsables de corregirlo: {issue.responsible.join(', ')}</span>}
         {issue.evidence && <details><summary className="small" style={{ cursor: 'pointer' }}>Ver la salida técnica</summary><pre className="sf-evidence mono">{issue.evidence}</pre></details>}
+        {(issue.links?.length ?? 0) > 0 && <span className="small">Dónde se corrige: {issue.links!.map((l, i) => <span key={l.href}>{i ? ' · ' : ''}<Link className="lnk" to={l.href}>{l.label}</Link></span>)}</span>}
       </div>}
+
+      {cc && ccRelevant && <ClaudeCodeCard cc={cc} />}
+      {verified && <div className="sf-headline is-ok" role="status" aria-label="Autorización verificada">{Icon.okc()}<span>{verified}</span></div>}
 
       {flow.actions.length > 0 && <div className="sf-actions" aria-label="Acciones">
         {primary && <button className="btn btn-primary btn-sm" onClick={() => void run(primary)} disabled={busy !== null} title={primary.description}>{busy === primary.id ? <span className="spin spin-light" /> : Icon.arrow()}{primary.label}</button>}
@@ -208,10 +231,10 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
           <textarea className="input" rows={3} value={answer} onChange={e => setAnswer(e.target.value)} placeholder="Qué se corrigió y por qué (queda en el historial del proceso y lo lee QA)" aria-label="Nota de la corrección externa" style={{ height: 'auto', padding: 8 }} />
         </div>}
         <label className="ck"><input className="cb" type="checkbox" checked={okAuth} onChange={e => setOkAuth(e.target.checked)} />
-          <span>{confirming.id === 'register_external' ? <>Autorizo registrar este commit como <strong>corrección mía, hecha fuera del equipo de agentes</strong>. Se verifica en el sandbox sin IA; no aprueba QA, no cambia las correcciones del equipo, no integra ni publica.</> : confirming.requires.includes('network') ? <>Autorizo ejecutar en el sandbox y <strong>permitir red solo durante la instalación de dependencias</strong> (npm ci, sin scripts del repositorio); lo demás se ejecuta sin red.</> : confirming.id === 'pipeline_resume' || confirming.id === 'repair_output' ? <>Autorizo al equipo a continuar {confirming.requires.includes('ai_budget') ? <>con hasta <strong>{fmtUsd(Number(addBudget) || 0)}</strong> adicionales (máximo, no objetivo)</> : 'sin gasto de IA adicional'}. No integra, no reinicia el Portal ni publica.</> : <>Autorizo esta acción{confirming.id === 'merge' ? ' (merge en main)' : confirming.id === 'runtime_check' ? ' (el Portal se consulta a sí mismo)' : ' en el sandbox, sobre el worktree del proceso'}.</>}</span></label>
+          <span>{confirming.id === 'claude_code_fix' ? <>Autorizo {confirming.backendFix?.authorizeProject ? <>que <strong>«{cc?.projectName ?? 'este proyecto'}»</strong> use Claude Code con mi suscripción (solo este proyecto)</> : null}{confirming.backendFix?.authorizeProject && confirming.backendFix.switchToManaged.length ? ' y ' : ''}{confirming.backendFix?.switchToManaged.length ? <>pasar {confirming.backendFix.switchToManaged.length} agente(s) a <strong>Claude Code gestionado</strong></> : null}. Solo se guarda y se comprueba: <strong>no continúa ni llama a la IA</strong>.</> : confirming.id === 'register_external' ? <>Autorizo registrar este commit como <strong>corrección mía, hecha fuera del equipo de agentes</strong>. Se verifica en el sandbox sin IA; no aprueba QA, no cambia las correcciones del equipo, no integra ni publica.</> : confirming.requires.includes('network') ? <>Autorizo ejecutar en el sandbox y <strong>permitir red solo durante la instalación de dependencias</strong> (npm ci, sin scripts del repositorio); lo demás se ejecuta sin red.</> : confirming.id === 'pipeline_resume' || confirming.id === 'repair_output' ? <>Autorizo al equipo a continuar {confirming.requires.includes('ai_budget') ? <>con hasta <strong>{fmtUsd(Number(addBudget) || 0)}</strong> adicionales (máximo, no objetivo)</> : cc?.team.some(t => t.backend !== 'api') ? <>la operación pendiente con <strong>Claude Code (tu suscripción, 0 USD de la API)</strong>{cc.nextOperation ? <>: {cc.nextOperation}</> : null}</> : 'sin gasto de IA adicional'}. No integra, no reinicia el Portal ni publica.</> : <>Autorizo esta acción{confirming.id === 'merge' ? ' (merge en main)' : confirming.id === 'runtime_check' ? ' (el Portal se consulta a sí mismo)' : ' en el sandbox, sobre el worktree del proceso'}.</>}</span></label>
         {(confirming.id === 'pipeline_resume' || confirming.id === 'repair_output') && confirming.requires.includes('ai_budget') && <label className="small" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>Presupuesto adicional (USD) <input className="input mono" type="number" min={0} step={0.25} value={addBudget} onChange={e => setAddBudget(e.target.value)} style={{ width: 100, height: 30 }} aria-label="Presupuesto adicional" /><span className="muted">quedan {fmtUsd(Math.max(0, proc.budgetUsd - proc.spentUsd))} del autorizado</span></label>}
         {(confirming.id === 'pipeline_resume' || confirming.id === 'repair_output') && !confirming.requires.includes('network') && <label className="ck small"><input className="cb" type="checkbox" checked={allowInstall} onChange={e => setAllowInstall(e.target.checked)} /><span>Si faltan dependencias en el sandbox, instalarlas con red temporal (solo durante la instalación).</span></label>}
-        <div className="sf-actions"><button className="btn btn-primary btn-sm" disabled={!okAuth || busy !== null || (needsAnswer && answer.trim().length < (confirming.id === 'register_external' ? 3 : 2))} onClick={() => void run(confirming)}>{busy === confirming.id ? <span className="spin spin-light" /> : Icon.check()}{confirming.id === 'register_external' ? 'Registrar y verificar (sin IA)' : needsAnswer ? 'Enviar respuesta y continuar' : 'Confirmar y ejecutar'}</button><button className="btn btn-ghost btn-sm" onClick={() => setConfirming(null)} disabled={busy !== null}>Cancelar</button></div>
+        <div className="sf-actions"><button className="btn btn-primary btn-sm" disabled={!okAuth || busy !== null || (needsAnswer && answer.trim().length < (confirming.id === 'register_external' ? 3 : 2))} onClick={() => void run(confirming)}>{busy === confirming.id ? <span className="spin spin-light" /> : Icon.check()}{confirming.id === 'register_external' ? 'Registrar y verificar (sin IA)' : confirming.id === 'claude_code_fix' ? 'Autorizar y comprobar' : needsAnswer ? 'Enviar respuesta y continuar' : 'Confirmar y ejecutar'}</button><button className="btn btn-ghost btn-sm" onClick={() => setConfirming(null)} disabled={busy !== null}>Cancelar</button></div>
       </div>}
 
       {composer && itemId && <div className="sf-confirm" aria-label="Iteración correctiva">
@@ -281,7 +304,7 @@ const CHECK_ICON: Record<string, string> = { passed: '✓', failed: '✕', not_a
  * Entrega por entregables (procesos con manifiesto): qué está entregado de verdad en el worktree y qué falta, qué unidad
  * se trabaja y quién, y tres niveles que no se confunden: compila ≠ funcionalidad completa ≠ QA aprobó los criterios.
  */
-function DeliveryPanel({ d, running }: { d: DeliveryProgress; running: boolean }) {
+function DeliveryPanel({ d, running, next }: { d: DeliveryProgress; running: boolean; next: string | null }) {
   const level = (ok: boolean | null, yes: string, no: string, unknown: string) => <li data-ok={ok === null ? 'unknown' : String(ok)}><span aria-hidden="true">{ok ? '✓' : ok === false ? '✕' : '…'}</span><span>{ok ? yes : ok === false ? no : unknown}</span></li>;
   const pct = d.total ? Math.round(d.delivered / d.total * 100) : 0;
   return <div className="sf-del" aria-label="Entregables">
@@ -305,8 +328,8 @@ function DeliveryPanel({ d, running }: { d: DeliveryProgress; running: boolean }
       {d.continuations > 0 && <span>{d.continuations} continuación(es) de respuestas cortadas (no cuentan como correcciones)</span>}
       <span className="mono">{fmtUsd(d.spentUsd)} confirmados · ≈ {fmtUsd(d.remainingEstimateUsd)} estimados para terminar</span>
     </div>
-    {d.blocker && <div className="small sf-del-blocker"><strong>Bloqueo actual:</strong> {d.blocker}</div>}
-    <div className="small"><strong>Siguiente:</strong> {d.next}</div>
+    {d.blocker && !next && <div className="small sf-del-blocker"><strong>Bloqueo actual:</strong> {d.blocker}</div>}
+    <div className="small"><strong>Siguiente:</strong> {next ? <>{next} <span className="muted">(ver «Problema actual»)</span></> : d.next}</div>
   </div>;
 }
 
@@ -316,8 +339,12 @@ function PipelineActivity({ proc }: { proc: Process }) {
   // Hitos siempre visibles (recuperación, reparación, aplicación, correcciones, QA, pausas, final) y los últimos pasos;
   // el detalle rutinario (cada comando verificado) queda en el registro técnico plegado.
   const MILESTONE = new Set(['recovery', 'repair', 'apply', 'correction', 'qa', 'pause', 'error', 'done', 'unit', 'continuation', 'gate', 'external']);
-  const events = pl.events.filter(e => e.kind !== 'info' || pl.events.length < 6);
-  const recent = events.filter((e, i) => MILESTONE.has(e.kind) || i >= events.length - 3).slice(-8);
+  const events = pl.events.filter(e => e.kind !== 'info' || pl.events.length < 6 || /autorizó continuar/.test(e.message));
+  // Eventos idénticos (p. ej. la misma pausa tras cada «Continuar») se agrupan: una línea con ×N y la hora de la última,
+  // en el orden de su última aparición. El registro técnico de abajo conserva cada uno.
+  const grouped = new Map<string, { e: PipelineEvent; n: number }>();
+  for (const e of events.filter((e, i) => MILESTONE.has(e.kind) || i >= events.length - 3)) { const k = `${e.kind}|${e.message}`; const g = grouped.get(k); grouped.delete(k); grouped.set(k, { e, n: (g?.n ?? 0) + 1 }); }
+  const recent = Array.from(grouped.values()).slice(-8);
   const aiCost = pl.events.reduce((a, e) => a + (e.costUsd ?? 0), 0);
   return <div className="sf-pipe" aria-label="Actividad del equipo">
     <div className="sf-pipe-meta small">
@@ -328,11 +355,29 @@ function PipelineActivity({ proc }: { proc: Process }) {
       <span className="mono">{fmtUsd(proc.spentUsd)} gastados (confirmados){(proc.unconfirmedUsd ?? 0) > 0 ? ` · ≈ ${fmtUsd(proc.unconfirmedUsd!)} sin confirmar` : ''} · quedan {fmtUsd(Math.max(0, proc.budgetUsd - proc.spentUsd - (proc.unconfirmedUsd ?? 0)))}{aiCost ? ` · reparaciones/correcciones ${fmtUsd(aiCost)}` : ''}</span>
     </div>
     <ol className="sf-pipe-events">
-      {recent.map((e, i) => <li key={i} data-kind={e.kind}><span aria-hidden="true">{EV_ICON[e.kind] ?? '·'}</span><span>{e.message}{e.costUsd ? <span className="muted mono"> · {fmtUsd(e.costUsd)}</span> : null}</span></li>)}
+      {recent.map(({ e, n }, i) => <li key={i} data-kind={e.kind} data-latest={i === recent.length - 1 ? 'true' : undefined} aria-current={i === recent.length - 1 ? 'step' : undefined}><span aria-hidden="true">{EV_ICON[e.kind] ?? '·'}</span><span>{i === recent.length - 1 && <strong>Último · </strong>}{e.message}{n > 1 && <span className="muted" data-repeat={n}> · ×{n}, la última a las {hhmm(e.at)}</span>}{e.costUsd ? <span className="muted mono"> · {fmtUsd(e.costUsd)}</span> : null}</span></li>)}
     </ol>
     {pl.events.length > 0 && <details><summary className="small" style={{ cursor: 'pointer' }}>Registro técnico completo ({pl.events.length} eventos)</summary>
       <ol className="sf-pipe-log small mono">{pl.events.map((e, i) => <li key={i}>{new Date(e.at).toLocaleTimeString('es-MX')} · {e.kind} · {e.message}{e.detail ? ` — ${e.detail}` : ''}</li>)}</ol>
     </details>}
+  </div>;
+}
+
+/** Claude Code para este proceso: lo que dice la configuración GUARDADA, la CLI, el ejecutor gestionado y qué se retomará. */
+function ClaudeCodeCard({ cc }: { cc: ProcessBackends }) {
+  const blocked = cc.team.filter(t => !t.ready);
+  return <div className="sf-live" aria-label="Claude Code para este proceso" data-cc-ready={String(cc.ready)}>
+    <div className="sf-live-head"><strong>Claude Code para «{cc.projectName ?? 'este proyecto'}»</strong>
+      <Chip xs tone={cc.ready ? 'ok' : 'warn'}>{cc.ready ? 'listo' : 'espera tu autorización'}</Chip></div>
+    <dl className="sf-live-grid small">
+      <dt>Proyecto</dt><dd data-cc-project-authorized={String(cc.projectAuthorized)}>{cc.projectAuthorized ? '✓ autorizado' : '✕ NO autorizado'} <span className="muted">(configuración guardada)</span></dd>
+      <dt>CLI</dt><dd>{cc.cli.installed ? <>instalada{cc.cli.version ? <> · <span className="mono">{cc.cli.version}</span></> : null} · {AUTH_TXT[cc.cli.authMethod ?? 'none'] ?? cc.cli.authMethod}{cc.cli.subscriptionType ? ` (${cc.cli.subscriptionType})` : ''} · {cc.cli.verified ? 'verificada' : 'sin verificar'}</> : 'no encontrada'}</dd>
+      <dt>Ejecutor gestionado</dt><dd>{cc.worker.managedAvailable ? `disponible · ${cc.worker.running} de ${cc.worker.maxConcurrent} en uso` : cc.connectorEnabled ? 'no disponible: la suscripción no está verificada' : 'no disponible: el conector está desactivado'}</dd>
+      <dt>Equipo</dt><dd>{cc.team.map(t => `${t.name}: ${t.label}${t.ready ? '' : ' ✕'}`).join(' · ')}</dd>
+      {blocked.length > 0 && <><dt>Qué falta</dt><dd>{blocked[0].reason}</dd></>}
+      {!cc.projectAuthorized && cc.scope.length > 0 && <><dt>Qué autorizas</dt><dd><ul className="sf-details">{cc.scope.map(s => <li key={s}>{s}</li>)}</ul></dd></>}
+      <dt>Al continuar</dt><dd>{cc.nextOperation ?? 'nada pendiente'}{cc.corrections ? ` · correcciones ${cc.corrections.used} de ${cc.corrections.max} (continuar no concede nuevas)` : ''}</dd>
+    </dl>
   </div>;
 }
 
@@ -342,5 +387,7 @@ export function explainError(e: any): string {
   if (code === 'tool_not_granted') return `${e.message} Actívala en Equipo de IA → el agente → Herramientas, o elige otro agente para este papel.`;
   if (code === 'authorization_required' || code === 'network_confirmation_required') return `${e.message} Marca la autorización y vuelve a intentarlo.`;
   if (code === 'merge_conflict') return 'No se pudo integrar por conflictos con main. Arriba tienes la explicación y la corrección.';
+  if (code === 'backend_not_ready') return `${e.message} No se ha registrado nada en el proceso: resuelve lo que falta (arriba) y continúa después.`;
+  if (code === 'not_persisted') return e.message;
   return e?.message ?? String(e);
 }

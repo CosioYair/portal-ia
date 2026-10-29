@@ -3,13 +3,14 @@ import { useEffect, useState } from 'react';
 import { NavLink, Link } from 'react-router-dom';
 import type { UsageToday } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
+import { onBundleChange, staleInterface } from '../lib/liveStatus.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
 import { SystemBar } from './SystemBar.tsx';
 import { AssistantDock } from './AssistantDock.tsx';
 
-const SOON = [['Herramientas y MCP', Icon.plug], ['Presupuestos', Icon.wallet], ['Organización', Icon.org]] as const;
+const SOON = [['Herramientas y MCP', Icon.plug], ['Organización', Icon.org]] as const;
 
 /** Diálogo mínimo para crear empresa o proyecto (operación local, sin IA). */
 function CreateDialog({ kind, onClose }: { kind: 'company' | 'project'; onClose: () => void }) {
@@ -46,6 +47,10 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
     void tick(); return () => { alive = false; };
   }, [ws.slug]);
   const connected = providers.filter(p => p.status === 'connected');
+  // Pestaña abierta con una interfaz anterior a la que sirve ahora el Portal (reconstruido y reiniciado): sus acciones
+  // pueden no existir o comportarse distinto. Se pide recargar en vez de seguir con botones obsoletos.
+  const [stale, setStale] = useState(staleInterface());
+  useEffect(() => onBundleChange(() => setStale(staleInterface())), []);
 
   return (
     <div className="screen shell">
@@ -73,11 +78,13 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/backlog">{Icon.inbox()}<span>Backlog</span></NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/actividad">{Icon.activity()}<span>Actividad</span>{usage && usage.running > 0 && <span className="dot dot-warn dot-pulse" style={{ marginLeft: 'auto' }} />}</NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/conocimiento">{Icon.book()}<span>Conocimiento</span></NavLink>
+          <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/presupuestos">{Icon.wallet()}<span>Presupuestos</span></NavLink>
           {SOON.map(([label, icon]) => <button key={label} className="navi" disabled>{icon()}<span>{label}</span><span className="soon">próx.</span></button>)}
         </nav>
         <div style={{ flex: 1 }} />
         <div className="side-sec">Proveedores</div>
         {connected.map(p => <Link key={p.id} className="navi" to="/configuracion/proveedor"><span className="dot dot-ok" /><span style={{ flex: 1 }}>{p.name}</span><span className="small muted">conectado</span></Link>)}
+        <Link className="navi" to="/configuracion/proveedor#claude-code">{Icon.plug()}<span style={{ flex: 1 }}>Claude Code — Local</span></Link>
         <Link className="navi" to="/configuracion/proveedor"><span className="dot" /><span style={{ flex: 1 }}>Añadir proveedor</span></Link>
         <button className="navi" disabled>{Icon.gear()}<span>Configuración</span><span className="soon">próx.</span></button>
       </aside>
@@ -90,6 +97,7 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
             <span className="avatar" role="img" aria-label="Propietario">{Icon.user()}</span>
           </div>
         </header>
+        {stale && <div className="sf-conn" role="alert" aria-label="Interfaz desactualizada" style={{ margin: '8px 24px 0' }}>{Icon.warn()}<span>Hay una versión nueva del Portal: esta pestaña usa la interfaz anterior y algunas acciones podrían no funcionar. </span><button className="btn btn-primary btn-sm" onClick={() => window.location.reload()}>Recargar</button></div>}
         <SystemBar />
         {children}
       </div>

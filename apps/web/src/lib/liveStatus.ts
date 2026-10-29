@@ -50,6 +50,18 @@ export function noteResponse(serverTimeHeader: string | null, sentAtMs: number, 
   lastOkAt = receivedAtMs; lastError = null;
 }
 export function noteFailure(message: string, at = Date.now()) { lastFailAt = at; lastError = message; }
+
+// ---------------------------------------------------------------- Versión de la interfaz
+
+/** Script principal con el que se cargó ESTA pestaña (null en desarrollo). */
+const doc = (globalThis as any).document as { querySelectorAll(sel: string): ArrayLike<{ src: string }> } | undefined;
+const loadedBundle: string | null = doc ? (Array.from(doc.querySelectorAll('script[type="module"][src]')).map(s => s.src.match(/\/assets\/(index-[\w-]+\.js)/)?.[1]).find(Boolean) ?? null) : null;
+let servedBundle: string | null = null;
+const bundleListeners = new Set<() => void>();
+/** El servidor dice qué paquete sirve ahora; si cambió desde que se abrió la pestaña, la interfaz está desactualizada. */
+export function noteBundle(header: string | null) { if (header && header !== servedBundle) { servedBundle = header; bundleListeners.forEach(f => f()); } }
+export const staleInterface = () => !!loadedBundle && !!servedBundle && loadedBundle !== servedBundle;
+export const onBundleChange = (f: () => void) => { bundleListeners.add(f); return () => { bundleListeners.delete(f); }; };
 /** Hora del servidor estimada ahora mismo. */
 export const serverNow = () => Date.now() + offsetMs;
 export const clockOffsetMs = () => offsetMs;
