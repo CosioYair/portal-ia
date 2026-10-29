@@ -1,15 +1,16 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { CompletionRequest, CompletionResult } from '@portal-ia/ai-adapters';
-import { backendLabel, type Agent, type ClaudeCodeBilling, type ExecutionBackend, type LiveCall } from '@portal-ia/domain';
+import { getAdapter, type CompletionRequest, type CompletionResult } from '@portal-ia/ai-adapters';
+import { decryptSecret } from '../../security/crypto.ts';
+import { backendLabel, type Agent, type ClaudeCodeBilling, type ExecutionBackend, type LiveCall, type ProviderId } from '@portal-ia/domain';
 import { config, REPO_ROOT } from '../../config.ts';
-import { claudeCodeRunsRepo, processesRepo, projectsRepo } from '../../db/workspace.ts';
+import { agentsRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } from '../../db/workspace.ts';
 import { repoRoot } from '../repoWrite.ts';
-import { registerJobTask, setProgressListener, submitTerminalTask } from './bridge.ts';
+import { connectedWorkersFor, registerJobTask, setProgressListener, submitTerminalTask } from './bridge.ts';
 import { BRIDGE_SCRIPT, ccError, runCliTask, type CliEvent } from './cli.ts';
 export { BRIDGE_SCRIPT };
-import { cliCommandFor, findCli, verifiedDetection } from './detect.ts';
+import { cliCommandFor, findCli, lastDetection, verifiedDetection } from './detect.ts';
 import { getClaudeCodeSettings, projectAuthorized } from './settings.ts';
 
 /**
@@ -28,13 +29,69 @@ let bridgeUrl = `http://${config.host}:${config.port}`;
 export function setBridgeUrl(url: string) { bridgeUrl = url.replace(/\/+$/, ''); }
 export const getBridgeUrl = () => bridgeUrl;
 
-export function claudeCodeGate(slug: string, agent: Agent, projectId: string): { ok: true } | { ok: false; reason: string } {
+export type GateProblem = 'api' | 'disabled' | 'provider' | 'project' | 'console';
+/**
+ * ¿Puede este agente ejecutar AHORA con su backend de Claude Code? `projectId` null = llamada del espacio (p. ej. el
+ * Asistente), sin proyecto que autorizar. La consola exige una consola conectada, vigente y autorizada para el agente:
+ * no es un ejecutor desatendido y no debe parecerlo.
+ */
+export function claudeCodeGate(slug: string, agent: Agent, projectId: string | null): { ok: true } | { ok: false; reason: string; problem: GateProblem } {
   const s = getClaudeCodeSettings();
-  if (!usesClaudeCode(agent)) return { ok: false, reason: 'El agente usa la API de su proveedor.' };
-  if (!s.enabled) return { ok: false, reason: 'El conector «Claude Code — Local» está desactivado (Proveedores → Claude Code).' };
-  if (agent.config.provider !== 'anthropic') return { ok: false, reason: 'Solo los agentes con modelos de Anthropic pueden ejecutarse con Claude Code.' };
-  if (!projectAuthorized(s, slug, projectId)) return { ok: false, reason: 'Este proyecto no está autorizado para Claude Code (Proveedores → Claude Code → Proyectos autorizados).' };
+  if (!usesClaudeCode(agent)) return { ok: false, reason: 'El agente usa la API de su proveedor.', problem: 'api' };
+  if (!s.enabled) return { ok: false, reason: 'El conector «Claude Code — Local» está desactivado (Proveedores → Claude Code).', problem: 'disabled' };
+  if (agent.config.provider !== 'anthropic') return { ok: false, reason: 'Solo los agentes con modelos de Anthropic pueden ejecutarse con Claude Code.', problem: 'provider' };
+  if (projectId !== null && !projectAuthorized(s, slug, projectId)) {
+    const name = projectsRepo(slug).get(projectId)?.name ?? 'Este proyecto';
+    return { ok: false, reason: `El proyecto «${name}» no está autorizado para Claude Code: autorízalo (aquí mismo o en Proveedores → Claude Code → Proyectos autorizados).`, problem: 'project' };
+  }
+  if (agentBackend(agent) === 'claude-code-terminal' && !connectedWorkersFor(slug, agent.id).some(w => !w.expired)) {
+    return { ok: false, reason: `«${agent.config.name}» usa tu consola de Claude Code, pero no hay ninguna consola conectada y autorizada para él. La consola no trabaja sola: ábrela con el puente del Portal o cambia el agente a «Claude Code (gestionado)».`, problem: 'console' };
+  }
   return { ok: true };
+}
+
+/** Preparación del equipo de un proceso: backend de cada agente, si puede ejecutar ya y por qué no. Sin efectos. */
+export function teamReadiness(slug: string, processId: string) {
+  const proc = processesRepo(slug).get(processId); if (!proc) return null;
+  const s = getClaudeCodeSettings(); const det = lastDetection(); const agents = agentsRepo(slug);
+  const ids = Array.from(new Set(proc.steps.map(st => st.agentId)));
+  const team = ids.map(id => agents.get(id)).filter((a): a is Agent => !!a).map(a => {
+    const b = agentBackend(a); const g = b === 'api' ? null : claudeCodeGate(slug, a, proc.projectId);
+    return {
+      agentId: a.id, name: a.config.name, roles: Array.from(new Set(proc.steps.filter(st => st.agentId === a.id).map(st => st.role ?? 'implementer'))),
+      backend: b, label: backendLabel(b, det?.billing, a.config.provider), ready: !g || g.ok,
+      reason: g && !g.ok ? g.reason : null, problem: g && !g.ok ? g.problem : null
+    };
+  });
+  return {
+    processId, projectId: proc.projectId, projectName: projectsRepo(slug).get(proc.projectId)?.name ?? null,
+    connectorEnabled: s.enabled, subscriptionVerified: det?.billing === 'subscription', projectAuthorized: projectAuthorized(s, slug, proc.projectId),
+    fallback: s.fallback, team, ready: team.every(t => t.ready)
+  };
+}
+
+/** La llamada con el backend resuelto: Claude Code (suscripción) o, si el agente usa la API, su proveedor de siempre. */
+export function completeWith(cc: ReturnType<typeof agentCaller>, providerId: ProviderId, cred: { ciphertext: string } | undefined, prow: { workspace_id: string | null }, req: CompletionRequest, signal?: AbortSignal): Promise<CompletionResult> {
+  if (cc) return cc.complete(req, signal);
+  return getAdapter(providerId)!.complete(decryptSecret(cred!.ciphertext), { workspaceId: prow.workspace_id }, req, signal);
+}
+
+/**
+ * Llamada de un agente fuera del pipeline (Asistente, preguntas al equipo, backlog, lecciones, encargos…) con SU backend.
+ * Con Claude Code: gestionado por el Portal, sin cargo a la API; la consola no sirve para estas respuestas inmediatas. Si
+ * no está disponible, se dice por qué y NO se usa la API en su lugar (la alternativa por API es solo de los pasos de
+ * procesos autorizados y la decide el propietario en los ajustes del conector).
+ */
+export function agentCaller(slug: string, agent: Agent, projectId: string | null, title: string): { backend: ExecutionBackend; label: string; subscription: boolean; complete: (req: CompletionRequest, signal?: AbortSignal) => Promise<CompletionResult> } | null {
+  const b = agentBackend(agent);
+  if (b === 'api') return null;
+  if (b === 'claude-code-terminal') throw Object.assign(new Error(`«${agent.config.name}» usa tu consola de Claude Code, que atiende tareas de procesos y no respuestas inmediatas. Cambia su backend a «Claude Code (gestionado)» o a la API para esto. No se ha usado la API.`), { statusCode: 409 });
+  const g = claudeCodeGate(slug, agent, projectId);
+  if (!g.ok) throw Object.assign(new Error(`${g.reason} No se ha usado la API en su lugar.`), { statusCode: 409 });
+  return {
+    backend: b, label: backendLabel(b, lastDetection()?.billing), subscription: true,
+    complete: (req, signal) => claudeCodeComplete({ slug, projectId: projectId ?? '', processId: null, stepId: null, agent, role: null, title }, req, signal ?? new AbortController().signal, () => undefined)
+  };
 }
 
 // ---------------------------------------------------------------- Concurrencia y duplicados
@@ -80,10 +137,10 @@ No puedes escribir archivos ni ejecutar órdenes: entrega los cambios en el form
 /** Una llamada del agente a través de Claude Code (CLI gestionada o consola del propietario). */
 export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequest, signal: AbortSignal, onLive: (patch: Partial<LiveCall>) => void): Promise<ClaudeCodeCompletion> {
   const s = getClaudeCodeSettings();
-  const g = claudeCodeGate(t.slug, t.agent, t.projectId);
+  const g = claudeCodeGate(t.slug, t.agent, t.projectId || null);
   if (!g.ok) throw ccError('backend_unavailable', g.reason);
   const backend = agentBackend(t.agent); const runs = claudeCodeRunsRepo(t.slug);
-  const timeoutMs = s.maxDurationSec * 1000; const readRoot = readRootFor(t.slug, t.processId, t.projectId);
+  const timeoutMs = s.maxDurationSec * 1000; const readRoot = t.projectId ? readRootFor(t.slug, t.processId, t.projectId) : null;
   const say = (lastEvent: string, state: LiveCall['state'] = 'waiting') => onLive({ state, lastEvent, lastEventAt: new Date().toISOString() });
   const base = { slug: t.slug, projectId: t.projectId, processId: t.processId, stepId: t.stepId, agentId: t.agent.id, agentName: t.agent.config.name, role: t.role, title: t.title };
 

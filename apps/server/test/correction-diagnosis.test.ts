@@ -105,7 +105,7 @@ const flowOf = async (id: string) => (await app.inject({ method: 'GET', url: `${
 // ---------- Unidades (sin IA) ----------
 test('el fallo de una prueba se lee entero: mensaje de un bloque YAML, archivo y línea de la aserción', () => {
   const run = { command: 'test', output: tap('caso', 'la ruta /api/inbox no está declarada', 'test/catalog.test.mjs'), exitCode: 1, startedAt: '', finishedAt: '', durationMs: 1, isolation: 'docker' as const };
-  assert.deepEqual(failingTests(run), [{ name: 'caso', message: 'la ruta /api/inbox no está declarada', file: 'test/catalog.test.mjs', line: 7 }]);
+  assert.deepEqual(failingTests(run), [{ name: 'caso', message: 'la ruta /api/inbox no está declarada', file: 'test/catalog.test.mjs', line: 7, kind: 'assertion' }]);
   assert.equal(parseFailingTests(run.output)[0].text, 'caso — la ruta /api/inbox no está declarada', 'antes salía «caso — -»');
 });
 

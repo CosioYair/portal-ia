@@ -122,8 +122,10 @@ function ensureWatchdog() {
   if (watchdog) return;
   watchdog = setInterval(() => {
     for (const p of tasks.values()) {
-      if (p.task.mode !== 'terminal' || p.task.status !== 'claimed' || !p.task.claimedBy) continue;
-      if (!workerConnected(p.task.claimedBy)) finishTask(p.task.id, 'failed', ccError('backend_unavailable', 'La consola de Claude Code que atendía la tarea se desconectó. Lo hecho en el proceso se conserva; «Continuar» la vuelve a poner en cola.'));
+      if (p.task.mode !== 'terminal') continue;
+      if (p.task.status === 'claimed' && p.task.claimedBy && !workerConnected(p.task.claimedBy)) finishTask(p.task.id, 'failed', ccError('backend_unavailable', 'La consola de Claude Code que atendía la tarea se desconectó. Lo hecho en el proceso se conserva; «Continuar» la vuelve a poner en cola.'));
+      // Pendiente y sin ninguna consola conectada para su agente: no se deja «en ejecución» hasta el plazo (15 min).
+      else if (p.task.status === 'pending' && !connectedWorkersFor(p.task.slug, p.task.agentId).some(w => !w.expired)) finishTask(p.task.id, 'failed', ccError('backend_unavailable', `Ninguna consola de Claude Code conectada puede atender la tarea de «${p.task.agentName}» (se desconectó antes de tomarla). Lo hecho se conserva; conéctala o cambia el agente a «Claude Code (gestionado)» y pulsa «Continuar».`));
     }
     if (!tasks.size && watchdog) { clearInterval(watchdog); watchdog = null; }
   }, 5_000);

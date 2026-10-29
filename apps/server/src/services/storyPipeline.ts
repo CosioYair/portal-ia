@@ -9,7 +9,7 @@ import { decryptSecret } from '../security/crypto.ts';
 import { practicesFor } from './agentTemplates.ts';
 import { assessDeveloperOutput, clip, failureClassOf, mergeChanges, type ParsedDevOutput } from './devOutput.ts';
 import { diagnosticsFor, filesIn } from './diagnostics.ts';
-import { failingTests } from './failureDiagnosis.ts';
+import { failingTests, testRunSummary } from './failureDiagnosis.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall, withWatchdog } from './providerCalls.ts';
 import { injectLessons, recordDetections } from './lessons.ts';
@@ -266,6 +266,14 @@ export const checkCancelled = (ctx: StoryRunCtx) => { if (ctx.isCancelled()) thr
 export async function stepCall(ctx: StoryRunCtx, agent: Agent, role: TeamRole, title: string, reason: string, system: string, user: string, maxTokens: number, reuseStepId?: string, schema?: { name: string; description?: string; schema: Record<string, unknown> }, operation?: string): Promise<CallResult & { stepId: string }> {
   const b = budgetCheck(ctx.slug, ctx.processId, agent, system, user, maxTokens);
   if (!b.ok) throw new PipelinePause('budget', `La siguiente llamada («${title}», ≈ ${b.needed.toFixed(2)} USD) superaría el presupuesto autorizado: quedan ${Math.max(0, b.remaining).toFixed(2)} USD. No se ha llamado a la IA; lo hecho se conserva.`);
+  // Claude Code no disponible (proyecto sin autorizar, consola desconectada…): se pausa ANTES de crear el paso, como con el
+  // presupuesto. Antes quedaba un paso «pendiente» huérfano por cada «Continuar» (HU-159, pasos 21 y 22).
+  if (!reuseStepId && usesClaudeCode(agent)) {
+    const g = claudeCodeGate(ctx.slug, agent, processesRepo(ctx.slug).get(ctx.processId)!.projectId);
+    const prov = providersRepo.get(agent.config.provider as ProviderId);
+    const apiFallback = getClaudeCodeSettings().fallback === 'api' && !!providersRepo.credential(agent.config.provider as ProviderId) && prov?.status === 'connected';
+    if (!g.ok && !apiFallback) throw Object.assign(new Error(g.reason), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'backend_unavailable', detail: g.reason } satisfies ProcessFailure });
+  }
   const stepId = reuseStepId ?? processesRepo(ctx.slug).addStep(ctx.processId, { agentId: agent.id, agentName: agent.config.name, title, model: agent.config.model, role, reason }).id;
   const cfg = processesRepo(ctx.slug).get(ctx.processId)?.result?.pipeline?.config;
   const res = await callAgentStep(ctx.slug, ctx.processId, stepId, system, user, maxTokens, { injected: ctx.injected, log: ctx.log, schema, timeoutSec: cfg?.providerTimeoutSec ?? null, retries: cfg?.maxProviderRetries ?? null, operation });
@@ -650,6 +658,16 @@ export async function verifyStage(ctx: StoryRunCtx, cfg: PipelineConfig): Promis
  */
 export async function retryForeignFailure(ctx: StoryRunCtx, failed: VerificationRun): Promise<boolean> {
   const r = processesRepo(ctx.slug).get(ctx.processId)!.result!; const p = pipelineOf(ctx.slug, ctx.processId);
+  // Solo pruebas CANCELADAS y la causa no está en la evidencia (HU-159): no es un fallo de la implementación. Se repite
+  // «test» una vez, sin IA, para ver la causa; si sigue igual, es el ejecutor de pruebas o el entorno: pausa, sin corrección pagada.
+  const summary = failed.command === 'test' ? testRunSummary(failed) : null;
+  if (summary?.onlyCancellations && r.applied) {
+    if ((p.flakeRetries ?? []).includes(r.applied.commit)) throw new PipelinePause('environment', `«test» sigue terminando con ${summary.cancelled} prueba(s) canceladas y ningún fallo propio a la vista, también al repetirlo sin IA. No es un defecto de la implementación: revisa el ejecutor de pruebas (plazo, fin del proceso) en la salida de la verificación. No se ha gastado ninguna corrección.`);
+    updatePipeline(ctx.slug, ctx.processId, { flakeRetries: [...(p.flakeRetries ?? []), r.applied.commit].slice(-20) });
+    emit(ctx, 'verify', `«test» solo tiene ${summary.cancelled} prueba(s) canceladas por su suite y la evidencia guardada no dice por qué: no son fallos de la implementación. Se repite «test» una vez, sin IA, para obtener la causa real antes de pagar una corrección.`, { phase: 'verifying' });
+    await runVerification(ctx.slug, ctx.processId, 'test', false);
+    return true;
+  }
   if (failed.command !== 'test' || !r.applied || (p.flakeRetries ?? []).includes(r.applied.commit)) return false;
   const files = failingTests(failed).map(f => f.file);
   if (!files.length || files.some(f => !f)) return false;

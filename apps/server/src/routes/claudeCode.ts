@@ -4,8 +4,8 @@ import path from 'node:path';
 import { z } from 'zod';
 import { backendLabel, type ClaudeCodeStatusView, type ClaudeCodeWorkspaceView } from '@portal-ia/domain';
 import { claudeCodeWorkersRepo, providersRepo, workspacesRepo } from '../db/platform.ts';
-import { agentsRepo, claudeCodeRunsRepo, projectsRepo } from '../db/workspace.ts';
-import { agentBackend, BRIDGE_SCRIPT, getBridgeUrl, runningClaudeCode } from '../services/claudeCode/backend.ts';
+import { agentsRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
+import { agentBackend, BRIDGE_SCRIPT, getBridgeUrl, runningClaudeCode, teamReadiness } from '../services/claudeCode/backend.ts';
 import {
   claimTask, createWorker, disconnectWorker, isDenied, listTaskFiles, listTasks, readTaskFile, reportBlocker, reportProgress, scopeFor,
   submitResult, taskContext, taskFor, taskKnowledge, touchWorker, workerView, type BridgeScope, type BridgeTask
@@ -149,6 +149,45 @@ export async function claudeCodeRoutes(app: FastifyInstance) {
     const updated = agents.updateConfig(id, { ...agent.config, backend });
     req.log.info({ slug, agent: id, backend }, 'backend de ejecución del agente actualizado');
     return updated;
+  });
+
+  // Preparación de los backends del equipo de un proceso (antes de autorizarlo o al retomarlo). Solo lectura.
+  app.get('/api/workspaces/:slug/processes/:id/backends', async (req, reply) => {
+    const { slug, id } = req.params as { slug: string; id: string };
+    if (!guard(slug, reply)) return;
+    const r = teamReadiness(slug, id);
+    return r ?? reply.code(404).send({ error: 'Proceso no encontrado' });
+  });
+
+  /**
+   * Corrige lo que bloquea a Claude Code en un proceso, con autorización explícita: autorizar el proyecto del proceso y/o
+   * pasar a «gestionado» agentes de su equipo que usan la consola sin ninguna conectada. No continúa por sí solo: después
+   * se usa el «Continuar» de siempre, que retoma la operación pendiente sin repetir lo hecho. Nunca pasa a la API.
+   */
+  app.post('/api/workspaces/:slug/processes/:id/claude-code/fix', async (req, reply) => {
+    const { slug, id } = req.params as { slug: string; id: string };
+    if (!guard(slug, reply)) return;
+    const body = z.object({ authorized: z.literal(true), authorizeProject: z.boolean().optional(), switchToManaged: z.array(z.string().min(1).max(80)).max(20).optional() }).strict().safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'Indica qué autorizar y confirma tu autorización.' });
+    const proc = processesRepo(slug).get(id);
+    if (!proc) return reply.code(404).send({ error: 'Proceso no encontrado' });
+    const s = getClaudeCodeSettings();
+    if (!s.enabled) return reply.code(409).send({ error: 'Activa primero el conector «Claude Code — Local».' });
+    const team = new Set(proc.steps.map(st => st.agentId)); const agents = agentsRepo(slug);
+    const switching = body.data.switchToManaged ?? [];
+    for (const aid of switching) {
+      const a = agents.get(aid);
+      if (!a || !team.has(aid)) return reply.code(404).send({ error: 'Ese agente no pertenece al equipo de este proceso.' });
+      if (a.config.backend !== 'claude-code-terminal') return reply.code(409).send({ error: `«${a.config.name}» no usa la consola.` });
+    }
+    if (switching.length) {
+      const d = await verifiedDetection(s);
+      if (d.billing !== 'subscription') return reply.code(409).send({ error: `La suscripción no está verificada: ${d.problems[0] ?? 'No verificado'}` });
+      for (const aid of switching) { const a = agents.get(aid)!; agents.updateConfig(aid, { ...a.config, backend: 'claude-code' }); }
+    }
+    if (body.data.authorizeProject) saveClaudeCodeSettings({ ...s, projects: { ...s.projects, [slug]: Array.from(new Set([...(s.projects[slug] ?? []), proc.projectId])) } });
+    req.log.info({ slug, processId: id, authorizeProject: !!body.data.authorizeProject, switched: switching.length }, 'Claude Code: autorización corregida para el proceso');
+    return teamReadiness(slug, id);
   });
 
   // Vista por agente: su backend, si su proyecto está autorizado, los límites del conector, su uso con Claude Code (aparte

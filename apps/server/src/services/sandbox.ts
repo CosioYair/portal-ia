@@ -168,14 +168,25 @@ export function runProcess(cmd: string, args: string[], opts: { cwd?: string; en
   });
 }
 
-/** Bloques de fallo del tramo omitido (prueba «not ok»/✖, error de TypeScript, aserción), hasta `max` caracteres. */
-function failureBlocks(mid: string, max = 10_000): string {
-  const lines = mid.split('\n'); const out: string[] = []; let len = 0;
-  for (let i = 0; i < lines.length && len < max; i++) {
+/**
+ * Bloques de fallo del tramo omitido (prueba «not ok»/✖, error de TypeScript, aserción), hasta `max` caracteres. Las
+ * causas van primero y completas (el bloque YAML de node --test hasta su cierre «...», con el error y la pila); las
+ * pruebas canceladas por su suite se resumen en una línea. HU-159: ocho canceladas llenaban el tope y el error real
+ * (el `before` de la suite que fallaba) quedaba fuera de la evidencia.
+ */
+export function failureBlocks(mid: string, max = 10_000): string {
+  const lines = mid.split('\n'); const causes: string[] = []; const cancelled: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
     if (!/^\s*not ok\b|^\s*✖|\berror TS\d{4}\b|AssertionError/.test(lines[i])) continue;
-    const block = lines.slice(i, i + 25).join('\n'); out.push(block); len += block.length; i += 24;
+    let end = i + 24;
+    if (/^\s*not ok\b/.test(lines[i])) { end = i + 1; while (end < lines.length && end - i < 40 && !/^\s*\.\.\.\s*$/.test(lines[end])) end++; }
+    const block = lines.slice(i, end + 1).join('\n');
+    if (/failureType: 'cancelledByParent'/.test(block)) { const n = lines[i].match(/not ok \d+ - (.+)$/)?.[1]; if (n) cancelled.push(n.trim()); }
+    else causes.push(block);
+    i = end;
   }
-  return out.join('\n…\n').slice(0, max);
+  const tail = cancelled.length ? `\n[${cancelled.length} prueba(s) canceladas por su suite, sin ejecutarse (no son fallos propios): ${cancelled.slice(0, 15).join(' · ')}${cancelled.length > 15 ? ' …' : ''}]` : '';
+  return `${causes.join('\n…\n').slice(0, Math.max(0, max - tail.length))}${tail}`.trim();
 }
 /**
  * Redacta posibles claves y recorta: conserva el inicio, el final (resumen) y los bloques de fallo del medio. En la

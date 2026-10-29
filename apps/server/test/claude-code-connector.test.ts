@@ -159,7 +159,7 @@ test('activación: exige autorización explícita y suscripción verificada; pro
   assert.equal(put.statusCode, 200, put.body); assert.equal(agentsRepo(S).get(dev.id)!.config.backend, 'claude-code');
   // Proyecto aún no autorizado: la puerta lo dice
   const g = claudeCodeGate(S, agentsRepo(S).get(dev.id)!, project.id);
-  assert.equal(g.ok, false); assert.match((g as any).reason, /proyecto no está autorizado/);
+  assert.equal(g.ok, false); assert.match((g as any).reason, /no está autorizado para Claude Code/);
   const pr = await inject('PUT', `/api/workspaces/${S}/claude-code/projects`, { authorized: true, projectIds: [project.id] });
   assert.equal(pr.statusCode, 200, pr.body);
   assert.equal(claudeCodeGate(S, agentsRepo(S).get(dev.id)!, project.id).ok, true);
@@ -325,6 +325,17 @@ test('consolas: el token caduca (por defecto 30 días) y el puente se registra c
   const v = (await inject('GET', `/api/workspaces/${S}/claude-code`)).json().workers.find((w: any) => w.id === worker.id);
   assert.equal(v.expired, true); assert.equal(v.connected, false);
   assert.equal((await inject('POST', `/api/workspaces/${S}/claude-code/workers`, { authorized: true, name: 'Eterna', agentIds: [qa.id], days: 3650 })).statusCode, 400, 'máximo 90 días');
+});
+
+test('E · una consola que se desconecta ANTES de tomar la tarea no deja el proceso esperando el plazo entero (15 min)', async () => {
+  // Proyecto autorizado y consola conectada al encolar; después deja de latir (cerró Claude Code).
+  assert.equal(agentsRepo(S).get(qa.id)!.config.backend, 'claude-code-terminal');
+  const fresh = (await inject('POST', `/api/workspaces/${S}/claude-code/workers`, { authorized: true, name: 'Se va', agentIds: [qa.id] })).json();
+  bridge.touchWorker(fresh.worker.id);
+  const started = Date.now();
+  const { result } = bridge.submitTerminalTask({ slug: S, projectId: project.id, processId: null, stepId: null, agentId: qa.id, agentName: qa.config.name, role: 'reviewer', title: 'R', mode: 'terminal', system: 's', prompt: 'p', schema: null, readRoot: repo, runId: 'r-e' }, 15 * 60_000, new AbortController().signal);
+  await assert.rejects(result, (e: any) => e.error.code === 'backend_unavailable' && /se desconectó antes de tomarla/.test(e.message));
+  assert.ok(Date.now() - started < 15_000, `falló en ${Date.now() - started} ms, no al agotar el plazo`);
 });
 
 test('peticiones malformadas u hostiles al puente: ni otra tarea, ni rutas codificadas, ni campos de más, ni token en la URL', async () => {

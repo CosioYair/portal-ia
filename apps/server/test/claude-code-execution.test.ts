@@ -321,7 +321,7 @@ test('conector desactivado o proyecto no autorizado: los agentes no pueden invoc
   assert.equal((await inject('PUT', `${W}/claude-code/projects`, { authorized: true, projectIds: [] })).statusCode, 200);
   try {
     const done = await run(b.p.id);
-    assert.match(done.result!.pipeline!.reason!, /proyecto no está autorizado/); assert.equal(ccRuns().length, 0);
+    assert.match(done.result!.pipeline!.reason!, /no está autorizado para Claude Code/); assert.equal(ccRuns().length, 0);
   } finally { assert.equal((await inject('PUT', `${W}/claude-code/projects`, { authorized: true, projectIds: [project.id] })).statusCode, 200); }
 });
 
@@ -340,6 +340,77 @@ test('cancelar el proceso desde el Portal detiene la ejecución de Claude Code e
   await waitFor(() => !alive(pid));
   assert.equal(processesRepo(S).get(p.id)!.status, 'cancelled');
   assert.equal(claudeCodeRunsRepo(S).recent(5).find(r => r.processId === p.id)?.status, 'cancelled');
+});
+
+const waitIdle = async (id: string) => { for (let i = 0; i < 600; i++) { if (processesRepo(S).get(id)!.status !== 'running') return processesRepo(S).get(id)!; await new Promise(r => setTimeout(r, 50)); } throw new Error('sigue en ejecución'); };
+
+test('F/G · proyecto sin autorizar: se ve antes, pausa SIN pasos huérfanos y «autorizar y continuar» retoma sin repetir lo hecho', async () => {
+  useFakeSandbox(); apiScript(); ccRules();
+  assert.equal((await inject('PUT', `${W}/claude-code/projects`, { authorized: true, projectIds: [] })).statusCode, 200);
+  const { p, devId } = await storyWith('CC · autorizar y continuar');
+  const before = (await inject('GET', `${W}/processes/${p.id}/backends`)).json();
+  assert.equal(before.projectAuthorized, false); assert.equal(before.ready, false, 'visible ANTES de empezar');
+  assert.equal(before.team.find((t: any) => t.agentId === devId).problem, 'project');
+  const paused = await run(p.id);
+  assert.equal(paused.result!.pipeline!.pauseKind, 'permission');
+  for (let i = 0; i < 2; i++) { // dos «Continuar» sin arreglar nada: ningún paso nuevo pendiente (antes, uno huérfano por intento)
+    const steps = processesRepo(S).get(p.id)!.steps.length;
+    assert.equal((await inject('POST', `${W}/processes/${p.id}/continue`, { authorized: true })).statusCode, 200);
+    await waitIdle(p.id);
+    assert.equal(processesRepo(S).get(p.id)!.steps.length, steps, 'sin pasos huérfanos');
+  }
+  assert.equal(ccRuns().length, 0, 'Claude Code nunca se llamó'); assert.deepEqual(apiCalls().map(c => c.rule), [R.plan], 'ni la API en su lugar');
+  const fix = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow.actions.find((a: any) => a.id === 'claude_code_fix');
+  assert.ok(fix, 'acción «autorizar y continuar»'); assert.deepEqual(fix.backendFix, { authorizeProject: true, switchToManaged: [] }); assert.match(fix.label, /Autorizar «.+» para Claude Code y continuar/);
+  assert.equal((await inject('POST', `${W}/processes/${p.id}/claude-code/fix`, { authorizeProject: true })).statusCode, 400, 'exige autorización explícita');
+  const fixed = await inject('POST', `${W}/processes/${p.id}/claude-code/fix`, { authorized: true, ...fix.backendFix });
+  assert.equal(fixed.statusCode, 200, fixed.body); assert.equal(fixed.json().ready, true);
+  assert.equal((await inject('POST', `${W}/processes/${p.id}/continue`, { authorized: true })).statusCode, 200);
+  const done = await waitIdle(p.id);
+  assert.equal(done.result!.pipeline!.state, 'verified', done.result!.pipeline!.reason ?? '');
+  assert.deepEqual(apiCalls().map(c => c.rule), [R.plan], 'el plan (pagado) NO se repite');
+  assert.equal(ccRuns().filter((r: any) => r.rule === R.dev).length, 1); assert.equal(ccRuns().filter((r: any) => r.rule === R.qa).length, 1);
+});
+
+test('D/E · «tu consola» sin consola conectada: no aparenta trabajar; pausa explicada y «pasar a gestionado y continuar» (sin API)', async () => {
+  useFakeSandbox(); apiScript(); ccRules();
+  const { p, devId, qaId } = await storyWith('CC · consola sin conectar', 'claude-code-terminal' as any);
+  const rd = (await inject('GET', `${W}/processes/${p.id}/backends`)).json();
+  const dev = rd.team.find((t: any) => t.agentId === devId);
+  assert.equal(dev.label, 'Claude Code — Consola (no verificado)'); assert.equal(dev.problem, 'console'); assert.match(dev.reason, /no hay ninguna consola conectada/);
+  const paused = await run(p.id);
+  assert.equal(paused.status === 'running', false, 'no queda «en ejecución»'); assert.equal(paused.result!.pipeline!.pauseKind, 'permission');
+  assert.match(paused.result!.pipeline!.reason!, /consola/);
+  const fix = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow.actions.find((a: any) => a.id === 'claude_code_fix');
+  assert.deepEqual(fix.backendFix.switchToManaged.sort(), [devId, qaId].sort()); assert.equal(fix.backendFix.authorizeProject, false);
+  assert.equal((await inject('POST', `${W}/processes/${p.id}/claude-code/fix`, { authorized: true, ...fix.backendFix })).statusCode, 200);
+  assert.equal(agentsRepo(S).get(devId)!.config.backend, 'claude-code', 'cambio de backend solo con la autorización');
+  assert.equal((await inject('POST', `${W}/processes/${p.id}/continue`, { authorized: true })).statusCode, 200);
+  const done = await waitIdle(p.id);
+  assert.equal(done.result!.pipeline!.state, 'verified'); assert.deepEqual(apiCalls().map(c => c.rule), [R.plan], 'sin API para dev ni QA');
+});
+
+test('H · «test» solo con canceladas y sin causa: se repite UNA vez sin IA (no se paga una corrección); si sigue igual, pausa de entorno', async () => {
+  const CANCELLED = "not ok 1 - suite\n  ---\n  type: 'suite'\n  ...\n    not ok 1 - caso\n      ---\n      failureType: 'cancelledByParent'\n      error: 'test did not finish before its parent and was cancelled'\n      ...\n# tests 1\n# pass 0\n# fail 0\n# cancelled 1";
+  for (const second of ['pass', 'cancelled'] as const) {
+    apiScript(); ccRules();
+    let tests = 0;
+    sandboxDeps.detect = async () => ({ available: 'docker', docker: true, wsl: false, detail: 'simulado', checkedAt: new Date().toISOString() });
+    sandboxDeps.run = async (_wt, _root, command) => {
+      const t = new Date().toISOString(); let exitCode = 0; let output = `${command} ok`;
+      if (command === 'test') { tests++; if (tests === 1 || second === 'cancelled') { exitCode = 1; output = CANCELLED; } else output = '# tests 1\n# pass 1\n# fail 0'; }
+      return { command, exitCode, output, startedAt: t, finishedAt: new Date().toISOString(), durationMs: 5, isolation: 'docker' };
+    };
+    const { p } = await storyWith(`CC · canceladas (${second})`);
+    const done = await run(p.id); const pl = done.result!.pipeline!;
+    assert.equal(tests, 2, 'test se ejecutó exactamente dos veces');
+    assert.ok(pl.events.some(e => /solo tiene 1 prueba\(s\) canceladas.*sin IA/.test(e.message)));
+    assert.equal(pl.corrections, 0); assert.equal(pl.correctionAttempts ?? 0, 0, 'ninguna corrección pagada');
+    assert.equal(ccRuns().filter((r: any) => r.rule !== R.dev && r.rule !== R.qa).length, 0, 'ninguna llamada extra a Claude Code');
+    if (second === 'pass') assert.equal(pl.state, 'verified', pl.reason ?? '');
+    else { assert.equal(pl.pauseKind, 'environment'); assert.match(pl.reason!, /No es un defecto de la implementación/); }
+  }
+  useFakeSandbox();
 });
 
 // ---------------------------------------------------------------- Reinicio, duplicados y concurrencia (19, 20)
@@ -389,7 +460,7 @@ test('consola del propietario: toma la tarea por MCP, lee con permiso, informa y
   const target = { slug: S, projectId: project.id, processId: null, stepId: 'paso-consola', agent, role: 'reviewer', title: 'Revisión desde la consola' };
   const req = { model: 'claude-sonnet-4-5', system: 'Eres QA.', user: 'Revisa el cambio de src/a.ts', maxTokens: 100, effort: 'low' as const, supportsEffort: false };
   // 6 · sin consola conectada: falla en el acto, sin esperar ni cambiar de origen
-  await assert.rejects(claudeCodeComplete(target, req, new AbortController().signal, () => undefined), (e: any) => e.error.code === 'backend_unavailable' && /No hay ninguna consola/.test(e.message));
+  await assert.rejects(claudeCodeComplete(target, req, new AbortController().signal, () => undefined), (e: any) => e.error.code === 'backend_unavailable' && /no hay ninguna consola conectada/.test(e.message));
   const w = (await inject('POST', `${W}/claude-code/workers`, { authorized: true, name: 'Consola de Yair', agentIds: [qaAgentId] })).json();
   const mcp = mcpClient(w.token);
   await mcp.rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'consola', version: '1' } });

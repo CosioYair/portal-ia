@@ -339,6 +339,8 @@ export type FlowActionId =
   | 'sandbox_help' | 'refresh_sandbox' | 'request_fix' | 'ask_team' | 'tasks_from_issue' | 'merge' | 'rebuild'
   | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'retry_process' | 'recover' | 'new_iteration'
   | 'pipeline_resume' | 'repair_output'
+  /** Conector Claude Code: autorizar el proyecto o pasar a «gestionado» los agentes sin consola, y continuar (sin repetir lo hecho). */
+  | 'claude_code_fix'
   /** Registrar como corrección del propietario un commit hecho fuera del equipo (consola) y verificarlo sin IA. */
   | 'register_external';
 export interface FlowAction {
@@ -358,6 +360,8 @@ export interface FlowAction {
   suggestedBudgetUsd?: number;
   /** register_external: commit del worktree que se registraría, el último registrado y los archivos que cambian. */
   external?: { commit: string; recorded: string; files: string[] } | null;
+  /** claude_code_fix: lo que se autoriza antes de continuar (el proyecto del proceso y/o agentes que pasan a «gestionado»). */
+  backendFix?: { authorizeProject: boolean; switchToManaged: string[] } | null;
 }
 export interface StoryFlow {
   stages: FlowStage[];

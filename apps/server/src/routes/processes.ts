@@ -12,6 +12,7 @@ import { describeProcess } from '../services/guidance.ts';
 import { flowOptions } from '../services/processView.ts';
 import { DEPS_MISSING_EXIT } from '../services/sandbox.ts';
 import { recordContextEdit } from '../services/storyThread.ts';
+import { teamReadiness } from '../services/claudeCode/backend.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { applyChanges, checkStaleChanges, discardBranch, mergeBranch, pushBranches, removeWorktree, worktreePathFor } from '../services/repoWrite.ts';
 import { requirePolicy, PolicyError } from '../services/executionPolicy.ts';
@@ -48,7 +49,7 @@ export async function processRoutes(app: FastifyInstance) {
     }
     const item = q.kind === 'story_execution' && q.backlogItemId ? backlogRepo(slug).get(q.backlogItemId) : undefined;
     const fo = await flowOptions(slug, q, item);
-    return { ...q, guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, ...fo }) };
+    return { ...q, guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, ...fo, backends: q.kind === 'story_execution' ? teamReadiness(slug, q.id) : null }) };
   };
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
 

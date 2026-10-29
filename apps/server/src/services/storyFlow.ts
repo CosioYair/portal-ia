@@ -3,6 +3,8 @@ import { filesIn, parseBuildErrors, parseFailingTests, parseTypeScriptErrors, qa
 import { deliveryProgress } from './storyUnits.ts';
 import { runtimeVerified } from './runtimeChecks.ts';
 import { driftMessage } from './worktreeDrift.ts';
+import { testRunSummary } from './failureDiagnosis.ts';
+import type { teamReadiness } from './claudeCode/backend.ts';
 
 /**
  * Recorrido guiado de una historia (una sola fuente de verdad, sin IA): en qué etapa está, qué la bloquea, de qué tipo
@@ -17,6 +19,8 @@ export interface FlowOptions {
   failedSteps?: { index: number; text: string; comment: string }[];
   /** Sandbox disponible ahora (null = desconocido). */
   sandbox?: Isolation | null;
+  /** Preparación de los backends del equipo (conector Claude Code): qué falta para que puedan ejecutar. */
+  backends?: ReturnType<typeof teamReadiness> | null;
   /** La última reconstrucción del Portal falló (log). */
   updateFailedLog?: string | null;
   iteration?: { number: number; total: number } | null;
@@ -56,6 +60,11 @@ export function verificationIssue(v: VerificationRun, responsible: string[]): Fl
     return { kind: 'typecheck_failed', level: 'blocker', cause: 'code', command: 'typecheck', title: `El código no compila: ${d.length ? `${d.length} error(es) de TypeScript` : 'typecheck falló'}`, explanation: 'TypeScript encontró errores en los cambios del equipo. No se puede integrar código que no compila; el equipo debe corregirlo en una nueva iteración.', details: d.length ? d : [{ text: tailOf(v.output, 6) || `typecheck terminó con código ${v.exitCode}` }], files: files(d).length ? files(d) : filesIn(v.output), evidence: tailOf(v.output), responsible };
   }
   if (v.command === 'test') {
+    // Canceladas ≠ fallidas (HU-159): una suite cuya preparación falla cancela sus pruebas sin ejecutarlas.
+    const sum = testRunSummary(v);
+    const hooks = sum.causes.filter(c => c.kind === 'hook');
+    if (sum.onlyCancellations) return { kind: 'test_failed', level: 'blocker', cause: 'environment', command: 'test', title: `Pruebas canceladas sin un fallo propio (${sum.cancelled}): no es un error de la implementación`, explanation: 'Ninguna aserción falló: las pruebas se cancelaron y la causa no aparece en la evidencia (fin del proceso de pruebas, plazo o salida recortada). El equipo repite «test» una vez sin IA para ver la causa antes de corregir nada.', details: [{ text: `${sum.cancelled} prueba(s) canceladas · ${sum.failed} fallida(s)` }], files: filesIn(v.output).slice(0, 4), evidence: tailOf(v.output), responsible };
+    if (hooks.length && !sum.causes.some(c => c.kind === 'assertion')) return { kind: 'test_failed', level: 'blocker', cause: 'code', command: 'test', title: `Falla la preparación de la prueba (${hooks.length}); ${sum.cancelled} prueba(s) canceladas sin ejecutarse`, explanation: 'No falla ninguna aserción de la implementación: falla la preparación (before/after) de la suite de pruebas y sus pruebas quedan canceladas. La corrección va a la preparación de la prueba, con la pila del error.', details: hooks.map(h => ({ text: `${h.name}: ${h.message}`, file: h.file ?? undefined })), files: Array.from(new Set(hooks.map(h => h.file).filter(Boolean) as string[])), evidence: tailOf(v.output), responsible };
     const d = parseFailingTests(v.output);
     return { kind: 'test_failed', level: 'blocker', cause: 'code', command: 'test', title: `Fallan las pruebas: ${d.length ? `${d.length} prueba(s)` : 'npm test terminó con error'}`, explanation: 'Las pruebas automáticas fallan con los cambios aplicados. Puede ser un error del cambio o una prueba que hay que actualizar: el equipo lo corrige en una nueva iteración. Si crees que es intermitente, repite la verificación.', details: d.length ? d : [{ text: tailOf(v.output, 6) || `test terminó con código ${v.exitCode}` }], files: files(d).length ? files(d) : filesIn(v.output), evidence: tailOf(v.output), responsible };
   }
@@ -199,7 +208,16 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
     else if (pl.pauseKind === 'provider_refusal') actions.push(act('new_iteration', 'Reformular la historia (nueva iteración)', 'Una petición distinta; la negativa queda guardada como evidencia.', ['confirmation']), act('close_resolved', 'Cerrar como resuelta', 'Indica el motivo.'), act('reject', 'Rechazar', 'La historia vuelve a pendiente.'));
     else if (pl.pauseKind === 'provider_timeout' || pl.pauseKind === 'provider_error' || pl.pauseKind === 'interrupted') actions.push(resume('Repetir la llamada y continuar', 'Repite SOLO la llamada que no terminó (lo hecho no se repite ni se vuelve a cobrar). Puede facturarse de nuevo.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.5 }));
     // Conector Claude Code: límite de la suscripción o backend no disponible. Continuar repite solo la llamada pendiente con Claude Code (sin pasar a la API).
-    else if (pl.pauseKind === 'subscription_limit' || (pl.pauseKind === 'permission' && !req)) actions.push(resume(pl.pauseKind === 'subscription_limit' ? 'Continuar cuando se renueve el límite' : 'Continuar cuando Claude Code esté disponible', 'Repite SOLO la llamada pendiente con el mismo backend del agente; lo hecho no se repite. No cambia a la API salvo que lo hayas autorizado como alternativa.', ['authorization']));
+    else if (pl.pauseKind === 'subscription_limit' || (pl.pauseKind === 'permission' && !req)) {
+      // Claude Code bloqueado: la autorización concreta que falta, en una sola acción que después retoma lo pendiente.
+      const rd = opts.backends; const consoleAgents = rd?.team.filter(t => t.problem === 'console').map(t => t.agentId) ?? [];
+      const needProject = !!rd && !rd.projectAuthorized && rd.team.some(t => t.backend !== 'api');
+      if (pl.pauseKind === 'permission' && (needProject || consoleAgents.length)) {
+        const what = [needProject ? `autorizar «${rd!.projectName ?? 'el proyecto'}» para Claude Code` : null, consoleAgents.length ? `pasar ${consoleAgents.length === 1 ? `a «${rd!.team.find(t => t.agentId === consoleAgents[0])!.name}»` : `${consoleAgents.length} agentes`} a Claude Code gestionado (tu suscripción; sin consola conectada)` : null].filter(Boolean).join(' y ');
+        actions.push(act('claude_code_fix', `${what[0].toUpperCase()}${what.slice(1)} y continuar`, 'Aplica solo esa autorización y retoma la operación pendiente: lo hecho no se repite ni se vuelve a cobrar. No usa la API.', ['authorization'], { primary: true, backendFix: { authorizeProject: needProject, switchToManaged: consoleAgents } }));
+      }
+      actions.push(resume(pl.pauseKind === 'subscription_limit' ? 'Continuar cuando se renueve el límite' : 'Continuar cuando Claude Code esté disponible', 'Repite SOLO la llamada pendiente con el mismo backend del agente; lo hecho no se repite. No cambia a la API salvo que lo hayas autorizado como alternativa.', ['authorization']));
+    }
     else if (pl.pauseKind === 'unknown') actions.push(ASK, act('retry_process', 'Volver a ejecutar la historia', 'Crea un proceso nuevo pendiente de autorización.', ['authorization', 'ai_budget']));
     else if (pl.pauseKind === 'budget') actions.push(resume('Continuar con más presupuesto', 'El equipo retoma donde lo dejó (no repite lo hecho). Fijas el presupuesto adicional máximo; solo se gasta lo necesario.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.5 }));
     else if (pl.pauseKind === 'network') actions.push(resume('Permitir instalar dependencias y continuar', 'Instala las dependencias en el sandbox con red temporal (solo durante la instalación) y sigue verificando. No llama a la IA.', ['authorization', 'network'], { pipeline: { allowInstall: true } }));
