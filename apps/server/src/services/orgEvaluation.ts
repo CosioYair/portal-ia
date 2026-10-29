@@ -276,8 +276,8 @@ export function listOrgEvaluations(slug: string, filter: { projectId?: string | 
  * Decisión del propietario sobre UNA propuesta. Aceptar la aplica (validación previa, transacción, auditoría y
  * deshacer) y solo entonces registra la decisión; si falla, la propuesta sigue pendiente. Rechazar solo registra.
  */
-export function decideProposal(slug: string, evalId: string, proposalId: string, decision: Exclude<OrgDecision, 'pending'>) {
-  if (decision === 'accepted') return acceptProposal(slug, evalId, proposalId);
+export function decideProposal(slug: string, evalId: string, proposalId: string, decision: Exclude<OrgDecision, 'pending'>, confirmed = false) {
+  if (decision === 'accepted') return acceptProposal(slug, evalId, proposalId, confirmed);
   const evals = orgEvaluationsRepo(slug);
   const cur = evals.get(evalId);
   if (!cur) throw httpError(404, 'Evaluación no encontrada');

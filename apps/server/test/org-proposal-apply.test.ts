@@ -176,7 +176,10 @@ test('f · fusionar: ajusta el que se conserva y retira el resto; deshacer resta
   assert.equal(r.statusCode, 200, r.body);
   assert.deepEqual(byKey('pj-arquitecto').config.responsibilities, ['Arquitectura y diseño de producto']);
   assert.equal(typeof (byKey('pj-ux').template as any).retiredAt, 'string');
-  assert.deepEqual(r.json().proposal.application.changes.map((c: any) => c.op).sort(), ['retire', 'update']);
+  const changes = r.json().proposal.application.changes;
+  assert.equal(changes.find((c: any) => c.agentId === arq0.id)?.op, 'update', 'el que se conserva se ajusta');
+  assert.equal(changes.find((c: any) => c.agentId === ux0.id)?.op, 'retire', 'el resto se retira');
+  assert.ok(changes.every((c: any) => c.agentId === ux0.id || c.op === 'update'), 'jefes y subordinados afectados solo se ajustan (jerarquía)');
   assert.equal((await undo(a, 'p5')).statusCode, 200);
   assert.deepEqual(byKey('pj-arquitecto').config, arq0.config);
   assert.deepEqual(byKey('pj-ux').template, ux0.template);

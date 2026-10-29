@@ -349,10 +349,13 @@ function loadProposal(slug: string, evalId: string, proposalId: string) {
  * Acepta y aplica UNA propuesta. Valida antes de escribir (422/409 → sigue pendiente, sin cambios parciales).
  * Propuestas antiguas sin spec en add/adjust: solo se registra la decisión (no hay configuración que aplicar).
  */
-export function acceptProposal(slug: string, evalId: string, proposalId: string): { evaluation: OrgEvaluation; proposal: OrgProposal } {
+export function acceptProposal(slug: string, evalId: string, proposalId: string, confirmed = false): { evaluation: OrgEvaluation; proposal: OrgProposal } {
   const { evals, ev, p } = loadProposal(slug, evalId, proposalId);
   if (p.decision !== 'pending') throw httpError(409, `La propuesta ya está ${p.decision === 'accepted' ? 'aceptada' : 'rechazada'}.`, 'already_decided');
-  if (!p.spec && (p.action === 'add' || p.action === 'adjust')) {
+  const recordOnly = !p.spec && (p.action === 'add' || p.action === 'adjust');
+  // Aplicar cambia la organización: exige confirmación explícita. Registrar una propuesta sin spec no la necesita.
+  if (!recordOnly && !confirmed) throw httpError(400, 'Aceptar aplica cambios en la organización: requiere confirmación explícita (confirm: true).', 'confirmation_required');
+  if (recordOnly) {
     return withTx(slug, () => {
       const r = evals.setProposalDecision(evalId, proposalId, 'accepted', 'owner');
       appendDoc(slug, ev, `\n- ${stamp(r.proposal.decidedAt)} · ${p.id} · Aceptada: ${title(p)}. Sin configuración propuesta (evaluación anterior): no se aplicó automáticamente.`);

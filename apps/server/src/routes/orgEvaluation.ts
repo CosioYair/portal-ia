@@ -14,8 +14,8 @@ const listQuery = z.object({ projectId: idSchema.optional(), scope: z.enum(['wor
 const startBody = z.object({ projectId: idSchema.nullable().optional(), anchorProjectId: idSchema.nullable().optional(), budgetUsd: z.number().finite().positive().max(1000), authorized: z.literal(true) });
 // Aceptar aplica cambios estructurales (sin costo de IA): exige confirmación explícita (confirm: true), igual que deshacer.
 // Rechazar solo registra la decisión y no la necesita.
-const decisionBody = z.object({ decision: z.enum(['accepted', 'rejected']), confirm: z.literal(true).optional() })
-  .refine(b => b.decision !== 'accepted' || b.confirm === true, { message: 'confirmation_required', path: ['confirm'] });
+// La exigencia se comprueba en el servicio: solo cuando aceptar va a aplicar cambios (las propuestas sin spec solo registran).
+const decisionBody = z.object({ decision: z.enum(['accepted', 'rejected']), confirm: z.boolean().optional() });
 const undoBody = z.object({ confirm: z.literal(true) });
 
 export async function orgEvaluationRoutes(app: FastifyInstance) {
@@ -64,14 +64,9 @@ export async function orgEvaluationRoutes(app: FastifyInstance) {
   app.post('/api/workspaces/:slug/org-evaluations/:id/proposals/:proposalId', async (req, reply) => {
     const { slug, id, proposalId } = req.params as any; if (!guard(slug, reply)) return;
     const body = decisionBody.safeParse(req.body ?? {});
-    if (!body.success) {
-      if (body.error.issues.some(i => i.path[0] === 'confirm')) {
-        return reply.code(400).send({ error: 'Aceptar aplica cambios en la organización: requiere confirmación explícita (confirm: true).', code: 'confirmation_required' });
-      }
-      return reply.code(400).send({ error: 'Indica la decisión: accepted o rejected.' });
-    }
+    if (!body.success) return reply.code(400).send({ error: 'Indica la decisión: accepted o rejected.' });
     // La respuesta incluye proposal.application (cambios aplicados con sus fotos previas) al aceptar.
-    try { return decideProposal(slug, id, proposalId, body.data.decision); } catch (e: any) { return fail(reply, e); }
+    try { return decideProposal(slug, id, proposalId, body.data.decision, body.data.confirm === true); } catch (e: any) { return fail(reply, e); }
   });
 
   /** Deshace una propuesta aplicada (restaura las fotos previas). Sin IA; exige confirmación explícita. */
