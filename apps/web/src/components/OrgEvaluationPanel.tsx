@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { OrgAction, OrgDecision, OrgEvaluationStatus, OrgProposal, OrgTarget } from '@portal-ia/domain';
-import { api, ApiError, type OrgEvaluationEstimate, type OrgEvaluationFilter, type OrgEvaluationView } from '../lib/api.ts';
+import { api, ApiError, type OrgChange, type OrgEvaluationEstimate, type OrgEvaluationFilter, type OrgEvaluationView, type OrgProposalResult } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
 
 /**
  * HU-159 · Evaluación organizativa. Selector de ámbito (empresa o proyecto), estimación sin costo, autorización explícita
- * con presupuesto, seguimiento del proceso, propuestas con decisión individual e historial. Decidir NO aplica cambios.
+ * con presupuesto, seguimiento del proceso, propuestas con decisión individual e historial. Aceptar (con confirmación
+ * explícita y sin costo de IA) APLICA la propuesta con su configuración y permite «Deshacer»; rechazar solo registra.
  */
 const ACTION: Record<OrgAction, string> = { add: 'Añadir', merge: 'Fusionar', retire: 'Retirar', adjust: 'Ajustar' };
 const TARGET: Record<OrgTarget, string> = { agent: 'agente', department: 'departamento' };
@@ -25,9 +26,48 @@ const usd = (n: number) => `${n.toFixed(n < 1 ? 3 : 2)} USD`;
 const errMsg = (e: unknown) => (e instanceof ApiError || e instanceof Error ? e.message : 'Error inesperado');
 const backendNotReady = (e: unknown) => e instanceof ApiError && e.body?.code === 'backend_not_ready';
 const when = (iso: string) => iso.slice(0, 16).replace('T', ' ');
+const listOr = (l?: string[]) => (l && l.length ? l.join(', ') : 'ninguna');
+const OP: Record<OrgChange['op'], string> = { create: 'Creado', update: 'Ajustado', retire: 'Retirado', unretire: 'Reactivado' };
+const APP: Record<'applied' | 'reverted' | 'failed', { label: string; tone: '' | 'ok' | 'err' }> = { applied: { label: 'Aplicada', tone: 'ok' }, reverted: { label: 'Revertida', tone: '' }, failed: { label: 'Error al aplicar', tone: 'err' } };
+
+/** Qué hará «Aceptar y aplicar» (texto de la confirmación). */
+function impact(p: OrgProposal): string {
+  const s = `«${p.subject}»`;
+  if (!p.spec && (p.action === 'add' || p.action === 'adjust')) return 'no hay configuración propuesta (evaluación anterior), así que solo se registrará la decisión';
+  if (p.action === 'add') return p.target === 'agent' ? `se creará el agente «${p.spec?.name ?? p.subject}»` : `se crearán o etiquetarán los agentes del departamento ${s}`;
+  if (p.action === 'adjust') return `se ajustarán la configuración y la jerarquía de ${s}`;
+  if (p.action === 'retire') return `se retirará ${s} (se desactiva sin borrarlo y se puede revertir)`;
+  return `se conservará «${p.keep ?? '?'}» con la configuración propuesta y se retirará el resto de ${s}`;
+}
+
+function SpecView({ p }: { p: OrgProposal }) {
+  const s = p.spec;
+  if (!s) return <div className="small muted">Sin configuración propuesta.</div>;
+  const rows: [string, string | undefined][] = [
+    ['Nombre', s.name ? `${s.name}${s.role ? ` · ${s.role}` : ''}` : undefined],
+    ['Especialización', s.specialization],
+    ['Reporta a', s.reportsTo],
+    ['Herramientas', s.tools ? listOr(s.tools) : undefined],
+    ['Capacidades', s.capabilities ? listOr(s.capabilities) : undefined],
+    ['Modelo', s.model ? `${s.model}${s.effort ? ` (${s.effort})` : ''}` : undefined],
+    ['Departamento', s.department],
+    ['Se conserva', p.keep],
+    ['Agentes nuevos', s.agents?.length ? s.agents.map(a => a.name).join(', ') : undefined],
+    ['Miembros', s.members?.length ? s.members.join(', ') : undefined],
+    ['Responsabilidades', s.responsibilities?.length ? s.responsibilities.join('; ') : undefined]
+  ];
+  return <div className="small" style={{ marginTop: 6 }}>
+    <dl style={{ margin: 0, display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '2px 8px' }}>
+      {rows.filter(r => r[1]).map(([k, v]) => <div key={k} style={{ display: 'contents' }}><dt className="muted">{k}</dt><dd style={{ margin: 0 }}>{v}</dd></div>)}
+    </dl>
+    {p.specWarnings?.length ? <div className="muted" style={{ marginTop: 4 }}>⚠ {p.specWarnings.join(' ')}</div> : null}
+  </div>;
+}
 
 export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: string; defaultProjectId: string | null; onClose: () => void }) {
-  const { projects, flash } = useApp();
+  const { projects, flash, status } = useApp();
+  // Ancla de una evaluación de empresa: el proyecto activo (el servidor comprueba que pertenece a la empresa).
+  const anchorId = status.project?.id ?? defaultProjectId ?? null;
   const projectName = (id: string | null) => (id ? projects.find(p => p.id === id)?.name ?? id : null);
   const scopeLabel = (ev: { scopeKind: string; projectId: string | null }) => (ev.scopeKind === 'project' ? `Proyecto «${projectName(ev.projectId)}»` : 'Empresa completa');
 
@@ -40,7 +80,11 @@ export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: 
   const [starting, setStarting] = useState(false);
   const [startErr, setStartErr] = useState<unknown>(null);
   const [current, setCurrent] = useState<OrgEvaluationView | null>(null);
-  const [deciding, setDeciding] = useState<string | null>(null);
+  const [deciding, setDeciding] = useState<{ id: string; decision: Exclude<OrgDecision, 'pending'> } | null>(null);
+  const [undoing, setUndoing] = useState<string | null>(null);
+  /** Confirmación en curso: id de la propuesta (aceptar) o «undo:id» (deshacer). */
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [propErr, setPropErr] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<OrgEvaluationView[] | null>(null);
   const [histErr, setHistErr] = useState<string | null>(null);
   const [histFilter, setHistFilter] = useState<string>('all');
@@ -49,12 +93,12 @@ export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: 
   useEffect(() => {
     let alive = true;
     setEstimate(null); setEstErr(null); setAuthorized(false); setEstimating(true);
-    api.orgEvaluationEstimate(slug, scope || null)
+    api.orgEvaluationEstimate(slug, scope || null, anchorId)
       .then(e => { if (!alive) return; setEstimate(e); setBudget(String(e.suggestedBudgetUsd)); })
       .catch(e => { if (alive) setEstErr(e); })
       .finally(() => { if (alive) setEstimating(false); });
     return () => { alive = false; };
-  }, [slug, scope]);
+  }, [slug, scope, anchorId]);
 
   const loadHistory = useCallback(() => {
     const f: OrgEvaluationFilter = histFilter === 'all' ? { scope: 'all' } : histFilter === 'workspace' ? { scope: 'workspace' } : { projectId: histFilter };
@@ -80,7 +124,7 @@ export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: 
   const start = async () => {
     if (!canStart) return;
     setStarting(true); setStartErr(null);
-    try { const ev = await api.startOrgEvaluation(slug, scope || null, budgetNum); setCurrent(ev); setAuthorized(false); void loadHistory(); }
+    try { const ev = await api.startOrgEvaluation(slug, scope || null, budgetNum, anchorId); setCurrent(ev); setAuthorized(false); void loadHistory(); }
     catch (e) { setStartErr(e); }
     finally { setStarting(false); }
   };
@@ -95,16 +139,71 @@ export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: 
     try { setCurrent(await api.orgEvaluation(slug, id)); } catch (e) { flash(errMsg(e), 'err'); }
   };
 
+  const mergeResult = (r: OrgProposalResult) => setCurrent(c => (c && c.id === r.evaluation.id ? { ...c, ...r.evaluation, process: c.process } : c));
+  const clearErr = (id: string) => setPropErr(x => { const n = { ...x }; delete n[id]; return n; });
+
   const decide = async (p: OrgProposal, decision: Exclude<OrgDecision, 'pending'>) => {
     if (!current) return;
-    setDeciding(p.id);
+    setDeciding({ id: p.id, decision }); setConfirming(null); clearErr(p.id);
     try {
       const r = await api.decideOrgProposal(slug, current.id, p.id, decision);
-      setCurrent(c => (c && c.id === r.evaluation.id ? { ...c, ...r.evaluation, process: c.process } : c));
-      flash(decision === 'accepted' ? 'Propuesta aceptada (pendiente de aplicar desde Equipo)' : 'Propuesta rechazada');
+      mergeResult(r);
+      flash(decision === 'rejected' ? 'Propuesta rechazada (sin cambios en la organización)' : r.proposal.application?.status === 'applied' ? 'Propuesta aceptada y aplicada' : 'Propuesta aceptada');
       void loadHistory();
-    } catch (e) { flash(errMsg(e), 'err'); }
+    } catch (e) { setPropErr(x => ({ ...x, [p.id]: errMsg(e) })); flash(errMsg(e), 'err'); }
     finally { setDeciding(null); }
+  };
+
+  const undo = async (p: OrgProposal) => {
+    if (!current) return;
+    setUndoing(p.id); setConfirming(null); clearErr(p.id);
+    try { mergeResult(await api.undoOrgProposal(slug, current.id, p.id)); flash('Cambios deshechos: se restauró el estado previo'); void loadHistory(); }
+    catch (e) { setPropErr(x => ({ ...x, [p.id]: errMsg(e) })); flash(errMsg(e), 'err'); }
+    finally { setUndoing(null); }
+  };
+
+  const decisionCell = (p: OrgProposal) => {
+    const busy = deciding?.id === p.id || undoing === p.id;
+    const app = p.application;
+    const err = propErr[p.id] ?? (p.decision === 'pending' && app?.status === 'failed' ? app.error : null);
+    if (p.decision === 'pending') return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {deciding?.id === p.id
+        ? <div className="small muted"><span className="spin" aria-hidden="true" /> {deciding.decision === 'accepted' ? 'Aplicando…' : 'Registrando…'}</div>
+        : confirming === p.id
+          ? <>
+            <div className="small"><strong>Aceptar y aplicar:</strong> {impact(p)}. No tiene costo de IA y podrás deshacerlo.</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button className="btn btn-primary" onClick={() => decide(p, 'accepted')}>Confirmar y aplicar</button>
+              <button className="btn btn-secondary" onClick={() => setConfirming(null)}>Volver</button>
+            </div>
+          </>
+          : <div style={{ display: 'flex', gap: 6 }}>
+            <button className="btn btn-primary" disabled={busy} onClick={() => setConfirming(p.id)}>Aceptar y aplicar</button>
+            <button className="btn btn-secondary" disabled={busy} onClick={() => decide(p, 'rejected')}>Rechazar</button>
+          </div>}
+      {err && <Notice kind="err">No se aplicó nada y la propuesta sigue pendiente: {err}</Notice>}
+    </div>;
+    return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <Chip xs tone={DECISION[p.decision].tone}>{DECISION[p.decision].label}{p.decidedAt ? ` · ${when(p.decidedAt)}` : ''}</Chip>
+      {app && <Chip xs tone={APP[app.status].tone}>{APP[app.status].label}{app.status === 'reverted' && app.revertedAt ? ` · ${when(app.revertedAt)}` : ''}</Chip>}
+      {p.decision === 'accepted' && !app && <span className="small muted">Sin cambios aplicados: la propuesta no traía configuración.</span>}
+      {app && app.changes.length > 0 && <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{app.changes.map(c => <li key={`${c.op}-${c.agentId}`}>
+        {OP[c.op]}: {app.status === 'reverted' && c.op === 'create' ? `${c.agentName} (eliminado al deshacer)` : <Link className="lnk" to={`/equipo/${c.agentId}`}>{c.agentName}</Link>} <span className="mono muted">({c.agentKey})</span>
+      </li>)}</ul>}
+      {app?.warnings?.length ? <div className="small muted">⚠ {app.warnings.join(' ')}</div> : null}
+      {app?.status === 'applied' && (undoing === p.id
+        ? <div className="small muted"><span className="spin" aria-hidden="true" /> Deshaciendo…</div>
+        : confirming === `undo:${p.id}`
+          ? <>
+            <div className="small">Deshacer: se restaurará el estado previo de los agentes afectados (se borran los creados y se reactivan los retirados).</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button className="btn btn-primary" onClick={() => undo(p)}>Confirmar deshacer</button>
+              <button className="btn btn-secondary" onClick={() => setConfirming(null)}>Volver</button>
+            </div>
+          </>
+          : <div><button className="btn btn-secondary" disabled={busy} onClick={() => setConfirming(`undo:${p.id}`)}>Deshacer</button></div>)}
+      {propErr[p.id] && <Notice kind="err">{propErr[p.id]}</Notice>}
+    </div>;
   };
 
   const errorNotice = (e: unknown) => backendNotReady(e)
@@ -170,23 +269,15 @@ export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: 
           {current.status === 'done' && <>
             {current.summary && <Markdown text={current.summary} />}
             {current.knowledgeDocId && <div><Link className="lnk" to={`/empresa/${slug}/proyecto/${current.anchorProjectId}/conocimiento`}>{Icon.book()} Ver el documento completo en Conocimiento{current.scopeKind === 'workspace' ? ` (proyecto «${projectName(current.anchorProjectId)}»)` : ''}</Link></div>}
-            <Notice kind="info">Aceptar no crea ni elimina nada; aplícalo desde Equipo.</Notice>
+            <Notice kind="info">Al confirmar «Aceptar y aplicar», el Portal aplica la propuesta con su configuración, sin costo de IA, y puedes deshacerla. Rechazar solo registra la decisión. Nada se crea, ajusta ni retira sin tu aprobación.</Notice>
             {current.proposals.length === 0
               ? <div className="small muted">Sin propuestas: el Gestor considera adecuada la organización actual.</div>
               : <div style={{ overflowX: 'auto' }}><table className="tbl">
                 <thead><tr><th>Propuesta</th><th>Justificación</th><th>Decisión</th></tr></thead>
                 <tbody>{current.proposals.map(p => <tr key={p.id}>
-                  <td><strong>{ACTION[p.action]} {TARGET[p.target]}</strong><div className="med">{p.subject}</div>{p.details && <div className="small muted">{p.details}</div>}</td>
+                  <td><strong>{ACTION[p.action]} {TARGET[p.target]}</strong><div className="med">{p.subject}</div>{p.details && <div className="small muted">{p.details}</div>}<SpecView p={p} /></td>
                   <td className="med" style={{ maxWidth: '48ch' }}>{p.rationale}</td>
-                  <td>{p.decision === 'pending'
-                    ? <div style={{ display: 'flex', gap: 6 }}>
-                      <button className="btn btn-primary" disabled={deciding === p.id} onClick={() => decide(p, 'accepted')}>Aceptar</button>
-                      <button className="btn btn-secondary" disabled={deciding === p.id} onClick={() => decide(p, 'rejected')}>Rechazar</button>
-                    </div>
-                    : <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      <Chip xs tone={DECISION[p.decision].tone}>{DECISION[p.decision].label}{p.decidedAt ? ` · ${when(p.decidedAt)}` : ''}</Chip>
-                      {p.decision === 'accepted' && p.action === 'add' && p.target === 'agent' && <Link className="lnk small" to="/equipo/nuevo">Crear el agente</Link>}
-                    </div>}</td>
+                  <td style={{ minWidth: 240 }}>{decisionCell(p)}</td>
                 </tr>)}</tbody>
               </table></div>}
           </>}
