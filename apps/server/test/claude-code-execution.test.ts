@@ -1,0 +1,356 @@
+import { after, test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync, execSync, spawn } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+/**
+ * Conector «Claude Code — Local» (fases 3 y 5): adaptador de la CLI (resultado estructurado, salida mal formada, plazo,
+ * cancelación, límite de la suscripción, clave de API, herramientas no autorizadas), el pipeline completo con el
+ * Desarrollador y QA en Claude Code (worktree aislado, verificación, QA con evidencia, atribución, uso aparte del gasto),
+ * sin cambio silencioso a la API, alternativa SOLO autorizada, reinicio, duplicados y la consola del propietario por MCP.
+ * CLI SIMULADA y proveedor de API simulado: ningún modelo real, ningún crédito.
+ */
+process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-ccx-'));
+process.env.PORTAL_ALLOW_FOREIGN_REPO = '1';
+process.env.PORTAL_MOCK_PROVIDER = '1';
+process.env.LOG_LEVEL = 'warn';
+delete process.env.PORTAL_SANDBOX;
+const scriptPath = path.join(process.env.PORTAL_DATA_DIR, 'mock-script.json'); const logPath = path.join(process.env.PORTAL_DATA_DIR, 'mock-log.jsonl');
+process.env.PORTAL_MOCK_SCRIPT = scriptPath; process.env.PORTAL_MOCK_LOG = logPath;
+const here = path.dirname(fileURLToPath(import.meta.url));
+const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-fakeccx-'));
+const FAKE = path.join(fakeDir, 'claude.mjs');
+fs.copyFileSync(path.join(here, 'fixtures', 'fake-claude.mjs'), FAKE);
+const ccLog = path.join(fakeDir, 'fake-claude.log.jsonl');
+const scenario = (s: Record<string, unknown>) => { fs.writeFileSync(path.join(fakeDir, 'fake-claude.scenario.json'), JSON.stringify(s)); try { fs.unlinkSync(ccLog); } catch { /* vacío */ } };
+const ccRuns = () => fs.existsSync(ccLog) ? fs.readFileSync(ccLog, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)).filter((e: any) => e.kind === 'run') : [];
+scenario({});
+
+const { encryptSecret } = await import('../src/security/crypto.ts');
+const { classifyModel, DEFAULT_PIPELINE, normalizePipeline } = await import('@portal-ia/domain');
+const { providersRepo } = await import('../src/db/platform.ts');
+const { runBootstrap } = await import('../src/routes/bootstrap.ts');
+const { agentsRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
+const { buildApp } = await import('../src/app.ts');
+const { addManualItem } = await import('../src/services/backlog.ts');
+const { createStoryProcess, runStory } = await import('../src/services/storyExecution.ts');
+const { estimateCallUsd, newPipeline } = await import('../src/services/storyPipeline.ts');
+const { sandboxDeps } = await import('../src/services/verification.ts');
+const { runCliTask } = await import('../src/services/claudeCode/cli.ts');
+const { cliCommandFor, resetDetectionCache } = await import('../src/services/claudeCode/detect.ts');
+const { claudeCodeComplete, setBridgeUrl } = await import('../src/services/claudeCode/backend.ts');
+const { getClaudeCodeSettings, saveClaudeCodeSettings } = await import('../src/services/claudeCode/settings.ts');
+
+providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');
+providersRepo.setConnected('anthropic', ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5'].map(id => classifyModel('anthropic', id)));
+runBootstrap();
+const S = 'portal-ia'; const W = `/api/workspaces/${S}`;
+const project = projectsRepo(S).list()[0];
+const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-ccx-repo-'));
+const uniq = `ccx-${Date.now().toString(36)}`;
+fs.mkdirSync(path.join(repo, 'src'), { recursive: true }); fs.mkdirSync(path.join(repo, 'scripts'), { recursive: true });
+fs.writeFileSync(path.join(repo, 'src/a.ts'), 'export const a = 1;\n');
+fs.writeFileSync(path.join(repo, '.env'), 'SECRETO=no-debe-salir\n');
+fs.writeFileSync(path.join(repo, '.gitignore'), '.env\n');
+fs.writeFileSync(path.join(repo, 'scripts/tc.mjs'), "import fs from 'node:fs';\nconst src = fs.readFileSync('src/a.ts', 'utf8');\nif (/: number = \"/.test(src)) { console.log(\"src/a.ts(1,14): error TS2322\"); process.exit(2); }\nconsole.log('typecheck ok');\n");
+fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: uniq, version: '1.0.0', private: true, scripts: { typecheck: 'node scripts/tc.mjs', test: 'node -e "console.log(\'1 prueba ok\')"', build: 'node -e "console.log(\'build ok\')"' } }, null, 2));
+fs.writeFileSync(path.join(repo, 'package-lock.json'), JSON.stringify({ name: uniq, version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: uniq, version: '1.0.0' } } }, null, 2));
+execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm Base', { cwd: repo, env: { ...process.env, GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z' } });
+projectsRepo(S).setRepository(project.id, repo, 'main');
+const app = await buildApp();
+await app.listen({ port: 0, host: '127.0.0.1' });
+const url = `http://127.0.0.1:${(app.server.address() as any).port}`;
+setBridgeUrl(url);
+after(async () => { await app.close(); });
+const inject = (method: string, u: string, payload?: unknown) => app.inject({ method: method as any, url: u, payload: payload as any });
+
+const PLAN = '{"summary":"Cambiar a","tasks":["Editar src/a.ts"],"filesToRead":["src/a.ts"],"filesToChange":["src/a.ts"],"acceptance":["a = 2"],"risks":[]}';
+const OWNER = '=== PARA EL PROPIETARIO ===\nEl contador muestra 2.\n=== PRUEBA MANUAL ===\n1. Abre el contador. Esperado: muestra 2.';
+const PATCH = `=== RESUMEN ===\nCambia a.\n=== ARCHIVO: src/a.ts | patch ===\n<<<< BUSCAR\nexport const a = 1;\n==== REEMPLAZAR\nexport const a = 2;\n>>>> FIN\n=== FIN ARCHIVO ===\n${OWNER}`;
+const QA_OK = { verdict: 'approved', summary: 'Cumple el criterio; typecheck, test y build en verde.', findings: [], suggestedTests: [] };
+const R = { plan: 'plan técnico', dev: 'Implementa la historia', qa: 'Evalúa la implementación con la EVIDENCIA real' };
+/** Proveedor de API simulado (solo lo usa quien sigue en la API: el Coordinador, o la alternativa autorizada). */
+function apiScript() {
+  fs.writeFileSync(scriptPath, JSON.stringify({ rules: [{ match: R.plan, text: PLAN }, { match: R.qa, text: JSON.stringify(QA_OK) }, { match: R.dev, text: PATCH }], markers: ['typecheck: OK'] }));
+  try { fs.unlinkSync(logPath); } catch { /* vacío */ }
+}
+const apiCalls = () => fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : [];
+const ccRules = (extra: Record<string, unknown> = {}) => scenario({ auth: 'subscription', rules: [{ match: R.qa, structured: QA_OK }, { match: R.dev, text: PATCH }], ...extra });
+
+function useFakeSandbox() {
+  sandboxDeps.detect = async () => ({ available: 'docker', docker: true, wsl: false, detail: 'simulado', checkedAt: new Date().toISOString() });
+  sandboxDeps.run = async (_wt, _root, command) => { const t = new Date().toISOString(); return { command, exitCode: 0, output: `${command} ok`, startedAt: t, finishedAt: new Date().toISOString(), durationMs: 5, isolation: 'docker' }; };
+}
+const real = { ...sandboxDeps };
+function useRealSandbox() { sandboxDeps.detect = real.detect; sandboxDeps.run = real.run; }
+
+/** Proceso de historia creado y autorizado; el Desarrollador y QA del proceso pasan a `backend` (con autorización). */
+async function storyWith(title: string, backend: 'claude-code' | 'api' = 'claude-code', budget = 2) {
+  const it = addManualItem(S, project.id, { title, criterion: 'a vale 2 (número)' });
+  const p = createStoryProcess(S, project.id, it.id);
+  const devId = p.steps.find(s => s.role === 'implementer')!.agentId; const qaId = p.steps.find(s => s.role === 'reviewer')!.agentId;
+  for (const id of new Set([devId, qaId])) { const r = await inject('PUT', `${W}/agents/${id}/backend`, { backend, authorized: true }); assert.equal(r.statusCode, 200, r.body); }
+  processesRepo(S).setResult(p.id, { ...p.result!, pipeline: newPipeline(normalizePipeline({ ...DEFAULT_PIPELINE, allowInstall: true })) });
+  processesRepo(S).authorize(p.id, budget);
+  return { p, devId, qaId, planner: p.steps.find(s => s.role === 'planner')! };
+}
+const run = async (id: string) => { await runStory(S, id, () => undefined, () => false); return processesRepo(S).get(id)!; };
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const waitFor = async (fn: () => boolean, ms = 8000) => { const t = Date.now(); while (Date.now() - t < ms) { if (fn()) return; await new Promise(r => setTimeout(r, 100)); } throw new Error('tiempo agotado'); };
+
+// Conector activado con la CLI simulada y el proyecto autorizado (como lo haría el propietario desde la interfaz).
+saveClaudeCodeSettings({ ...getClaudeCodeSettings(), cliPath: FAKE });
+scenario({ auth: 'subscription' }); resetDetectionCache();
+assert.equal((await inject('PUT', '/api/claude-code/settings', { enabled: true, authorized: true, maxDurationSec: 120 })).statusCode, 200);
+assert.equal((await inject('PUT', `${W}/claude-code/projects`, { authorized: true, projectIds: [project.id] })).statusCode, 200);
+
+// ---------------------------------------------------------------- Adaptador de la CLI (13-17)
+
+const cli = cliCommandFor(FAKE)!;
+const det = { checkedAt: '', installed: true, path: FAKE, version: '2.1.311', loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max', apiProvider: 'firstParty', billing: 'subscription' as const, portalEnvCredentials: [], problems: [], capabilities: ['permission-prompts'] };
+const task = (o: Partial<Parameters<typeof runCliTask>[0]> = {}) => runCliTask({ cli, detection: det, model: 'claude-sonnet-4-5', system: 'Eres el agente X.', prompt: 'Implementa la historia de prueba', maxTurns: 4, timeoutMs: 20_000, signal: new AbortController().signal, ...o });
+
+test('13 · resultado estructurado: structured_output → JSON; opciones restringidas y entorno sin credenciales', async () => {
+  scenario({ rules: [{ match: 'veredicto', structured: { verdict: 'approved', summary: 'ok', findings: [], suggestedTests: [] } }] });
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-del-portal-no-debe-pasar';
+  try {
+    const r = await task({ prompt: 'Da tu veredicto', schema: { name: 'veredicto_qa', schema: { type: 'object' } } });
+    assert.deepEqual(JSON.parse(r.text), { verdict: 'approved', summary: 'ok', findings: [], suggestedTests: [] });
+    assert.equal(r.inputTokens, 2000, 'entrada + caché'); assert.equal(r.outputTokens, 400); assert.equal(r.apiEquivalentUsd, 0.0421);
+  } finally { delete process.env.ANTHROPIC_API_KEY; }
+  const e = ccRuns()[0]; const a: string[] = e.args;
+  assert.equal(a[a.indexOf('--tools') + 1], '', 'sin herramientas integradas');
+  assert.equal(a[a.indexOf('--permission-mode') + 1], 'dontAsk'); assert.equal(a[a.indexOf('--permission-prompts') + 1], 'none');
+  for (const f of ['--strict-mcp-config', '--no-session-persistence', '--disable-slash-commands', '--json-schema', '--system-prompt-file']) assert.ok(a.includes(f), f);
+  assert.ok(!a.some(x => /dangerously|bypassPermissions|^--bare$|acceptEdits/.test(x)), 'nunca se saltan los permisos');
+  assert.ok(!e.envKeys.includes('ANTHROPIC_API_KEY') && !e.envKeys.some((k: string) => /^CLAUDE_CODE_OAUTH/.test(k)), 'la clave del Portal no llega a Claude Code');
+  assert.equal(e.system, 'Eres el agente X.'); assert.equal(e.prompt, 'Da tu veredicto');
+  assert.ok(e.cwd.startsWith(fs.realpathSync(os.tmpdir())) || e.cwd.startsWith(os.tmpdir()), 'carpeta de trabajo temporal');
+  assert.ok(!fs.existsSync(path.dirname(e.cwd)), 'y se borra al terminar (prompt de sistema y configuración MCP incluidos)');
+});
+
+test('14 · salida mal formada o error de la CLI → error claro, sin inventar un resultado', async () => {
+  scenario({ behavior: 'malformed' });
+  await assert.rejects(task(), (e: any) => e.error.code === 'provider_error' && /terminó sin resultado/.test(e.message));
+  scenario({ behavior: 'error' });
+  await assert.rejects(task(), (e: any) => e.error.code === 'provider_error' && /algo falló/.test(e.message));
+});
+
+test('15 · plazo agotado: se detiene el proceso de la CLI y se informa (sin reintento automático)', async () => {
+  scenario({ behavior: 'hang' });
+  await assert.rejects(task({ timeoutMs: 1500 }), (e: any) => e.error.code === 'timeout');
+  const pid = Number(fs.readFileSync(path.join(fakeDir, 'fake-claude.pid'), 'utf8'));
+  await waitFor(() => !alive(pid));
+});
+
+test('16 · cancelación: abortar mata el árbol de procesos de la CLI', async () => {
+  scenario({ behavior: 'hang' });
+  const ctrl = new AbortController(); setTimeout(() => ctrl.abort(), 600);
+  await assert.rejects(task({ signal: ctrl.signal }), (e: any) => e.error.code === 'cancelled');
+  const pid = Number(fs.readFileSync(path.join(fakeDir, 'fake-claude.pid'), 'utf8'));
+  await waitFor(() => !alive(pid));
+});
+
+test('17 · límite de la suscripción: error «usage_limit» con la renovación; nunca compra créditos', async () => {
+  scenario({ behavior: 'limit' });
+  await assert.rejects(task(), (e: any) => e.error.code === 'usage_limit' && /límite de uso/.test(e.message) && /Se renueva/.test(e.message));
+  scenario({ behavior: 'limit', creditsRequired: true });
+  await assert.rejects(task(), (e: any) => e.error.code === 'usage_limit' && /NO compra créditos/.test(e.message));
+});
+
+test('facturación por API en el arranque o herramientas no autorizadas → se detiene antes de seguir', async () => {
+  scenario({ apiKeySource: 'ANTHROPIC_API_KEY' });
+  await assert.rejects(task(), (e: any) => e.error.code === 'backend_unavailable' && /facturación por API/.test(e.message));
+  scenario({ behavior: 'foreign_tools' });
+  await assert.rejects(task(), (e: any) => e.error.code === 'backend_unavailable' && /herramientas no autorizadas/.test(e.message));
+});
+
+// ---------------------------------------------------------------- Pipeline completo (8, 21, 22, 24, 25)
+
+test('8 · tarea autorizada de punta a punta: Desarrollador y QA en Claude Code; el Portal aplica, verifica y QA evalúa la evidencia', async () => {
+  useFakeSandbox(); apiScript();
+  ccRules({ mcpRead: [{ path: 'src/a.ts' }, { path: '.env' }] });
+  const { p, devId, qaId, planner } = await storyWith('CC · punta a punta');
+  const done = await run(p.id);
+  const pl = done.result!.pipeline!;
+  assert.equal(done.status, 'done', done.error ?? ''); assert.equal(pl.state, 'verified', pl.reason ?? '');
+  // 22 · worktree aislado: los cambios viven en el worktree; la carpeta del propietario no cambia; la CLI nunca trabajó en ellos
+  assert.equal(fs.readFileSync(path.join(done.result!.applied!.worktree!, 'src/a.ts'), 'utf8').replace(/\r\n/g, '\n'), 'export const a = 2;\n');
+  assert.equal(fs.readFileSync(path.join(repo, 'src/a.ts'), 'utf8'), 'export const a = 1;\n');
+  const runs = ccRuns();
+  assert.equal(runs.length, 2, 'dos ejecuciones de Claude Code: implementación y QA');
+  for (const r of runs) { assert.ok(!r.cwd.startsWith(repo) && !r.cwd.includes('worktrees'), 'la CLI no corre en el repositorio ni en el worktree'); }
+  // Lectura por el puente MCP: solo lectura, ruta protegida denegada, solo herramientas de ejecución
+  const dev = runs.find((r: any) => r.rule === R.dev)!;
+  assert.deepEqual(dev.mcp.tools.sort(), ['portal_knowledge', 'portal_list_files', 'portal_read_file', 'portal_report_progress', 'portal_task_context']);
+  assert.equal(dev.mcp.results[0].isError, false); assert.match(dev.mcp.results[0].text, /export const a = 1/);
+  assert.equal(dev.mcp.results[1].isError, true); assert.match(dev.mcp.results[1].text, /protegida/);
+  // 24 · QA recibe la evidencia real de la verificación (resultado estructurado nativo de la CLI)
+  const qa = runs.find((r: any) => r.rule === R.qa)!;
+  assert.match(qa.prompt, /typecheck: OK/); assert.ok(qa.args.includes('--json-schema'));
+  assert.equal(done.result!.review?.verdict, 'approved'); assert.equal(done.result!.review?.evidenceBased, true);
+  // 21 · atribución: cada ejecución vuelve a SU agente y SU paso; el uso va aparte del gasto en USD
+  const steps = done.steps; const devStep = steps.find(s => s.role === 'implementer' && s.agentId === devId)!; const qaStep = steps.find(s => s.role === 'reviewer' && s.agentId === qaId && s.status === 'done')!;
+  for (const s of [devStep, qaStep]) { assert.equal(s.backend, 'Claude Code — Suscripción'); assert.equal(s.costUsd, 0); assert.equal(s.inputTokens, 2000); }
+  const recorded = claudeCodeRunsRepo(S).recent(10).filter(r => r.processId === p.id);
+  assert.deepEqual(recorded.map(r => [r.agentId, r.stepId, r.status, r.billing]).sort(), [[devId, devStep.id, 'done', 'subscription'], [qaId, qaStep.id, 'done', 'subscription']].sort());
+  assert.ok(recorded.every(r => r.apiEquivalentUsd === 0.0421 && r.numTurns && r.authMethod === 'claude.ai'), 'equivalente estimado registrado aparte, no como gasto');
+  // 25 · la API sigue igual para quien la usa: el Coordinador planifica con la API (con costo); nadie más la llamó
+  const plan = steps.find(s => s.id === planner.id)!;
+  assert.ok(plan.costUsd > 0 && !plan.backend); assert.deepEqual(apiCalls().map(c => c.rule), [R.plan]);
+  assert.ok(Math.abs(done.spentUsd - plan.costUsd) < 1e-9, 'el gasto del proceso es solo el de la API');
+  const view = (await inject('GET', `${W}/claude-code`)).json();
+  assert.equal(view.usageToday.runs >= 2, true); assert.ok(view.usageToday.apiEquivalentUsd > 0);
+  assert.ok(!done.result!.merged, 'nunca integra solo');
+});
+
+test('17-18 · límite de la suscripción en el pipeline: pausa con explicación, lo hecho se conserva y NO se llama a la API', async () => {
+  useFakeSandbox(); apiScript(); scenario({ auth: 'subscription', behavior: 'limit' });
+  const { p } = await storyWith('CC · límite');
+  const done = await run(p.id);
+  const pl = done.result!.pipeline!;
+  assert.equal(pl.state, 'paused'); assert.equal(pl.pauseKind, 'subscription_limit');
+  assert.match(pl.reason!, /límite de uso/); assert.match(pl.reason!, /no se ha cambiado a otro proveedor facturable/);
+  assert.deepEqual(apiCalls().map(c => c.rule), [R.plan], 'ninguna llamada de API para sustituir a Claude Code');
+  assert.equal(claudeCodeRunsRepo(S).recent(5).find(r => r.processId === p.id)?.status, 'limit');
+  const flow = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow;
+  assert.equal(flow.issue.title, 'Pausado: la suscripción de Claude alcanzó su límite de uso');
+  assert.ok(flow.actions.some((a: any) => a.label === 'Continuar cuando se renueve el límite' && !a.requires.includes('ai_budget')), 'continuar no pide presupuesto de API');
+});
+
+test('alternativa por API SOLO si el propietario la autorizó: se usa con su presupuesto y queda señalada', async () => {
+  useFakeSandbox(); apiScript(); scenario({ auth: 'subscription', behavior: 'limit' });
+  assert.equal((await inject('PUT', '/api/claude-code/settings', { fallback: 'api', authorized: true })).statusCode, 200);
+  try {
+    const { p, devId } = await storyWith('CC · alternativa autorizada');
+    const done = await run(p.id);
+    assert.equal(done.result!.pipeline!.state, 'verified', done.result!.pipeline!.reason ?? '');
+    const devStep = done.steps.find(s => s.role === 'implementer' && s.agentId === devId)!;
+    assert.match(devStep.backend ?? '', /alternativa autorizada a Claude Code/); assert.ok(devStep.costUsd > 0, 'con costo de API');
+    assert.ok(apiCalls().some(c => c.rule === R.dev));
+  } finally { assert.equal((await inject('PUT', '/api/claude-code/settings', { fallback: 'none' })).statusCode, 200); }
+});
+
+test('25 · un agente en la API conserva el comportamiento de siempre (presupuesto, costo, sin registro del conector)', async () => {
+  useFakeSandbox(); apiScript(); scenario({ auth: 'subscription' });
+  const { p, devId } = await storyWith('API · sin cambios', 'api');
+  const ag = agentsRepo(S).get(devId)!;
+  assert.ok(estimateCallUsd(ag, 'sistema', 'usuario', 1000) > 0);
+  assert.equal(estimateCallUsd({ ...ag, config: { ...ag.config, backend: 'claude-code' } }, 'sistema', 'usuario', 1000), 0);
+  const done = await run(p.id);
+  assert.equal(done.result!.pipeline!.state, 'verified');
+  assert.equal(ccRuns().length, 0, 'Claude Code no se invoca'); assert.ok(done.steps.every(s => !s.backend));
+  assert.deepEqual(apiCalls().map(c => c.rule), [R.plan, R.dev, R.qa]);
+});
+
+test('prueba de humo: solo con autorización; UNA llamada mínima (haiku, 1 turno, sin herramientas ni puente) que queda registrada', async () => {
+  scenario({ auth: 'subscription', defaultText: 'OK' });
+  assert.equal((await inject('POST', '/api/claude-code/smoke-test', {})).statusCode, 403);
+  assert.equal(ccRuns().length, 0, 'sin autorización no se lanza nada');
+  const r = await inject('POST', '/api/claude-code/smoke-test', { authorized: true });
+  assert.equal(r.statusCode, 200, r.body);
+  const j = r.json();
+  assert.equal(j.answer, 'OK'); assert.equal(j.authMethod, 'claude.ai'); assert.equal(j.apiKeySource, 'none'); assert.equal(j.apiBudgetChargedUsd, 0);
+  const runs = ccRuns(); assert.equal(runs.length, 1);
+  const a: string[] = runs[0].args;
+  assert.equal(a[a.indexOf('--model') + 1], 'haiku'); assert.equal(a[a.indexOf('--max-turns') + 1], '1'); assert.ok(!a.includes('--mcp-config'));
+  assert.equal(claudeCodeRunsRepo(S).get(j.runId)?.agentName, 'Prueba de humo del conector');
+  scenario({ auth: 'api_key' }); resetDetectionCache();
+  assert.equal((await inject('POST', '/api/claude-code/smoke-test', { authorized: true })).statusCode, 409, 'con facturación por API no se ejecuta');
+  assert.equal(ccRuns().length, 0);
+  scenario({ auth: 'subscription' }); resetDetectionCache();
+});
+
+// ---------------------------------------------------------------- Reinicio, duplicados y concurrencia (19, 20)
+
+test('19 · reinicio: una ejecución «en curso» de un arranque anterior queda «interrumpida» (no se reenvía nada)', async () => {
+  const r = claudeCodeRunsRepo(S).start({ mode: 'cli', projectId: project.id, processId: null, stepId: null, agentId: 'a', agentName: 'A', model: 'm', billing: 'subscription', authMethod: 'claude.ai', subscriptionType: 'max' });
+  const mod = pathToFileURL(path.resolve(here, '../src/db/workspace.ts')).href;
+  const out = execFileSync(process.execPath, ['--import', 'tsx', '-e', `const { claudeCodeRunsRepo } = await import(${JSON.stringify(mod)}); console.log(JSON.stringify(claudeCodeRunsRepo(${JSON.stringify(S)}).get(${JSON.stringify(r.id)})));`],
+    { cwd: path.resolve(here, '..'), env: { ...process.env }, encoding: 'utf8' });
+  const after = JSON.parse(out.trim().split('\n').at(-1)!);
+  assert.equal(after.status, 'interrupted'); assert.match(after.error, /reinició/);
+});
+
+test('20 · sin ejecuciones duplicadas: la misma llamada en curso no se lanza dos veces; el límite de concurrencia pone en cola', async () => {
+  scenario({ auth: 'subscription', slowMs: 1200, defaultText: 'hecho' });
+  const ag = agentsRepo(S).get(processesRepo(S).list(project.id)[0].steps.find(s => s.role === 'implementer')!.agentId)!;
+  assert.equal((await inject('PUT', `${W}/agents/${ag.id}/backend`, { backend: 'claude-code', authorized: true })).statusCode, 200);
+  const agent = agentsRepo(S).get(ag.id)!;
+  const target = { slug: S, projectId: project.id, processId: null, stepId: 'paso-x', agent, role: 'implementer', title: 'Paso X' };
+  const req = { model: 'claude-sonnet-4-5', system: 's', user: 'misma petición', maxTokens: 100, effort: 'low' as const, supportsEffort: false };
+  const live: string[] = [];
+  const [a, b] = await Promise.allSettled([claudeCodeComplete(target, req, new AbortController().signal, l => live.push(l.lastEvent ?? '')), claudeCodeComplete(target, req, new AbortController().signal, () => undefined)]);
+  assert.equal([a, b].filter(x => x.status === 'fulfilled').length, 1);
+  assert.match(((a.status === 'rejected' ? a : b) as PromiseRejectedResult).reason.message, /idéntica.*no se duplica/);
+  // Dos llamadas distintas con máximo 1 a la vez: la segunda espera su turno y ambas terminan
+  const queued: string[] = [];
+  const [c, d] = await Promise.all([claudeCodeComplete(target, { ...req, user: 'uno' }, new AbortController().signal, () => undefined), claudeCodeComplete({ ...target, stepId: 'paso-y' }, { ...req, user: 'dos' }, new AbortController().signal, l => queued.push(l.lastEvent ?? ''))]);
+  assert.equal(c.text, 'hecho'); assert.equal(d.text, 'hecho');
+  assert.ok(queued.some(m => /En cola/.test(m)), 'la segunda esperó turno');
+});
+
+// ---------------------------------------------------------------- Consola del propietario por MCP
+
+function mcpClient(token: string) {
+  const child = spawn(process.execPath, [path.resolve(here, '../../../scripts/portal-mcp.mjs')], { env: { ...process.env, PORTAL_URL: url, PORTAL_BRIDGE_TOKEN: token }, stdio: ['pipe', 'pipe', 'pipe'] });
+  let buf = ''; let next = 1; const waiting = new Map<number, (m: any) => void>();
+  child.stdout.on('data', d => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); const m = JSON.parse(l); waiting.get(m.id)?.(m); } });
+  const rpc = (method: string, params: unknown = {}) => new Promise<any>(r => { const id = next++; waiting.set(id, r); child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`); });
+  const tool = async (name: string, args: unknown = {}) => { const m = await rpc('tools/call', { name, arguments: args }); const text = m.result?.content?.[0]?.text as string; let json = null; try { json = JSON.parse(text); } catch { /* texto */ } return { isError: !!m.result?.isError, text, json }; };
+  return { rpc, tool, close: () => new Promise<void>(r => { child.on('close', () => r()); child.stdin.end(); }) };
+}
+
+test('consola del propietario: toma la tarea por MCP, lee con permiso, informa y entrega; el resultado vuelve al mismo agente', async () => {
+  const qaAgentId = processesRepo(S).list(project.id)[0].steps.find(s => s.role === 'reviewer')!.agentId;
+  assert.equal((await inject('PUT', `${W}/agents/${qaAgentId}/backend`, { backend: 'claude-code-terminal', authorized: true })).statusCode, 200);
+  const agent = agentsRepo(S).get(qaAgentId)!;
+  const target = { slug: S, projectId: project.id, processId: null, stepId: 'paso-consola', agent, role: 'reviewer', title: 'Revisión desde la consola' };
+  const req = { model: 'claude-sonnet-4-5', system: 'Eres QA.', user: 'Revisa el cambio de src/a.ts', maxTokens: 100, effort: 'low' as const, supportsEffort: false };
+  // 6 · sin consola conectada: falla en el acto, sin esperar ni cambiar de origen
+  await assert.rejects(claudeCodeComplete(target, req, new AbortController().signal, () => undefined), (e: any) => e.error.code === 'backend_unavailable' && /No hay ninguna consola/.test(e.message));
+  const w = (await inject('POST', `${W}/claude-code/workers`, { authorized: true, name: 'Consola de Yair', agentIds: [qaAgentId] })).json();
+  const mcp = mcpClient(w.token);
+  await mcp.rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'consola', version: '1' } });
+  await new Promise(r => setTimeout(r, 300));
+  const live: string[] = [];
+  const pending = claudeCodeComplete(target, req, new AbortController().signal, l => live.push(l.lastEvent ?? ''));
+  await new Promise(r => setTimeout(r, 100));
+  const list = await mcp.tool('portal_list_tasks');
+  assert.equal(list.json.tasks.length, 1); assert.equal(list.json.tasks[0].agent, agent.config.name);
+  const id = list.json.tasks[0].id;
+  assert.equal((await mcp.tool('portal_read_file', { task_id: id, path: 'src/a.ts' })).isError, true, 'leer exige tomar la tarea antes');
+  const claimed = await mcp.tool('portal_claim_task', { task_id: id });
+  assert.equal(claimed.json.instructions, 'Eres QA.'); assert.equal(claimed.json.prompt, 'Revisa el cambio de src/a.ts'); assert.equal(claimed.json.context.agent.name, agent.config.name);
+  assert.match((await mcp.tool('portal_read_file', { task_id: id, path: 'src/a.ts' })).text, /export const a = 1/);
+  assert.equal((await mcp.tool('portal_read_file', { task_id: id, path: '.env' })).isError, true);
+  assert.equal((await mcp.tool('portal_report_progress', { task_id: id, message: 'Revisando el diff' })).isError, false);
+  assert.equal((await mcp.tool('portal_submit_result', { task_id: id, text: `clave sk-ant-${'x'.repeat(30)}` })).isError, true, 'un secreto en el resultado se rechaza');
+  assert.equal((await mcp.tool('portal_submit_result', { task_id: id, text: '{"verdict":"approved","summary":"ok","findings":[],"suggestedTests":[]}' })).isError, false);
+  const res = await pending;
+  assert.match(res.text, /approved/); assert.equal(res.backendLabel, 'Claude Code — Consola (no verificado)'); assert.equal(res.billing, 'unverified');
+  assert.ok(live.some(m => /Revisando el diff/.test(m)), 'el progreso de la consola se ve en el paso');
+  const runRow = claudeCodeRunsRepo(S).byStep('paso-consola').at(-1)!;
+  assert.equal(runRow.mode, 'terminal'); assert.equal(runRow.status, 'done'); assert.equal(runRow.agentId, qaAgentId); assert.equal(runRow.progress, 'Revisando el diff');
+  assert.equal((await mcp.tool('portal_submit_result', { task_id: id, text: 'otra vez' })).isError, true, 'una tarea entregada no se entrega dos veces');
+  await mcp.close();
+});
+
+// ---------------------------------------------------------------- Docker real (23)
+
+let dockerReady = (await real.detect(true)).available === 'docker';
+for (let i = 0; i < 3 && !dockerReady; i++) { await new Promise(r => setTimeout(r, 2000)); dockerReady = (await real.detect(true)).available === 'docker'; }
+const requireDocker = process.env.PORTAL_REQUIRE_DOCKER === '1';
+test('23 · verificación en Docker real con el Desarrollador y QA en Claude Code (typecheck, test y build aislados)', { skip: dockerReady || requireDocker ? false : 'Docker no disponible en este equipo' }, async () => {
+  assert.ok(dockerReady, 'Docker no está disponible');
+  useRealSandbox(); apiScript(); ccRules();
+  const { p } = await storyWith('CC · Docker real');
+  const done = await run(p.id);
+  const pl = done.result!.pipeline!; const r = done.result!;
+  assert.equal(pl.state, 'verified', pl.reason ?? '');
+  for (const cmd of ['typecheck', 'test', 'build']) assert.ok(r.verifications.some(v => v.command === cmd && v.exitCode === 0 && v.isolation === 'docker'), `${cmd} en Docker`);
+  assert.match(ccRuns().find((x: any) => x.rule === R.qa)!.prompt, /typecheck: OK/);
+});

@@ -168,6 +168,8 @@ export async function workspaceRoutes(app: FastifyInstance) {
     const body = agentConfigSchema.safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Configuración no válida', issues: body.error.issues });
     const cfg = body.data as AgentConfig;
+    // El backend de ejecución (Claude Code) solo cambia con su propia autorización (PUT …/backend): editar la configuración lo conserva.
+    if (agent.config.backend) cfg.backend = agent.config.backend;
     // Validaciones de dominio: proveedor conectado, modelo en catálogo, herramientas/conocimiento conocidos.
     const prov = providersRepo.get(cfg.provider);
     if (!prov || prov.status !== 'connected') return reply.code(409).send({ error: 'El proveedor elegido no está conectado.' });

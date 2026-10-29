@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { backendLabel } from '@portal-ia/domain';
 import type { Agent, AgentBlocker, AgentFailureKind, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError, reasoningHeadroom } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -20,6 +21,9 @@ import { DEPS_MISSING_EXIT } from './sandbox.ts';
 import { DEV_MAX_TOKENS, FILE_FORMAT, PATCH_ONLY_FORMAT, sys } from './storyPrompts.ts';
 import { runVerification, sandboxDeps } from './verification.ts';
 import { driftMessage, worktreeDrift } from './worktreeDrift.ts';
+import { agentBackend, claudeCodeComplete, claudeCodeGate, usesClaudeCode } from './claudeCode/backend.ts';
+import { lastDetection } from './claudeCode/detect.ts';
+import { getClaudeCodeSettings } from './claudeCode/settings.ts';
 
 /**
  * Pipeline autónomo autorizado de una historia (sin supervisión del propietario entre pasos rutinarios).
@@ -57,15 +61,17 @@ export function agentHeadroom(agent: Agent): number {
  * Lo que se exige que quede de presupuesto antes de una llamada: la entrada más la mitad de la salida máxima, contando
  * también el margen del razonamiento oculto (criterio único del Portal; antes se ignoraba y la estimación se quedaba corta).
  */
-export function estimateCallUsd(agent: Agent, system: string, user: string, maxTokens: number): number {
+export function estimateCallUsd(agent: Agent, system: string, user: string, maxTokens: number, route?: 'api' | 'claude-code'): number {
+  // Claude Code con la suscripción no descuenta del presupuesto de API (si no está disponible, la alternativa por API se comprueba aparte).
+  if ((route ?? (usesClaudeCode(agent) ? 'claude-code' : 'api')) === 'claude-code') return 0;
   const p = estimatePricing(agent.config.provider, agent.config.model);
   return (estimateTokens(system + user) * p.inPerM + (maxTokens + agentHeadroom(agent)) * p.outPerM * 0.5) / 1_000_000;
 }
 
-export function budgetCheck(slug: string, processId: string, agent: Agent, system: string, user: string, maxTokens: number): { ok: boolean; needed: number; remaining: number } {
+export function budgetCheck(slug: string, processId: string, agent: Agent, system: string, user: string, maxTokens: number, route?: 'api' | 'claude-code'): { ok: boolean; needed: number; remaining: number } {
   const cur = processesRepo(slug).get(processId)!;
   // Lo no confirmado (llamadas abortadas o interrumpidas que pudieron facturarse) cuenta como gastado: criterio prudente.
-  const needed = estimateCallUsd(agent, system, user, maxTokens); const remaining = cur.budgetUsd - cur.spentUsd - (cur.unconfirmedUsd ?? 0);
+  const needed = estimateCallUsd(agent, system, user, maxTokens, route); const remaining = cur.budgetUsd - cur.spentUsd - (cur.unconfirmedUsd ?? 0);
   return { ok: needed <= remaining, needed, remaining };
 }
 
@@ -98,19 +104,37 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   const system = opts.injected.get(stepId)!;
   const providerId = agent.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-  if (!cred || prow.status !== 'connected') throw Object.assign(new Error(`El proveedor ${providerId} no está conectado.`), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'no_credential', detail: `El proveedor ${providerId} no está conectado: conéctalo en Proveedores.` } satisfies ProcessFailure });
-  const models: ModelInfo[] = JSON.parse(prow.models_json);
-  const b = budgetCheck(slug, processId, agent, system, user, maxTokens);
-  if (!b.ok) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${proc.spentUsd.toFixed(2)} de ${proc.budgetUsd.toFixed(2)} USD${proc.unconfirmedUsd ? ` + ${proc.unconfirmedUsd.toFixed(2)} sin confirmar` : ''}; esta llamada necesita ≈ ${b.needed.toFixed(2)} USD).`), { budget: true, needed: b.needed, remaining: b.remaining, failure: { kind: 'budget', class: 'BUDGET_EXHAUSTED', detail: 'Presupuesto insuficiente para la siguiente llamada.' } satisfies ProcessFailure });
+  const apiConnected = !!cred && prow.status === 'connected';
+  // Backend de ejecución (conector Claude Code): sin cambio silencioso a un origen facturable. La API solo sustituye a
+  // Claude Code si el propietario lo autorizó en los ajustes del conector, y entonces con su presupuesto de siempre.
+  let route: 'api' | 'claude-code' = usesClaudeCode(agent) ? 'claude-code' : 'api';
+  let fallbackReason: string | null = null;
+  const apiFallbackAllowed = () => getClaudeCodeSettings().fallback === 'api' && apiConnected;
+  if (route === 'claude-code') {
+    const g = claudeCodeGate(slug, agent, proc.projectId);
+    if (!g.ok && apiFallbackAllowed()) { route = 'api'; fallbackReason = g.reason; }
+    else if (!g.ok) throw Object.assign(new Error(g.reason), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'backend_unavailable', detail: g.reason } satisfies ProcessFailure });
+  }
+  const requireApi = () => {
+    if (!apiConnected) throw Object.assign(new Error(`El proveedor ${providerId} no está conectado.`), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'no_credential', detail: `El proveedor ${providerId} no está conectado: conéctalo en Proveedores.` } satisfies ProcessFailure });
+    const b = budgetCheck(slug, processId, agent, system, user, maxTokens, 'api');
+    if (!b.ok) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${proc.spentUsd.toFixed(2)} de ${proc.budgetUsd.toFixed(2)} USD${proc.unconfirmedUsd ? ` + ${proc.unconfirmedUsd.toFixed(2)} sin confirmar` : ''}; esta llamada necesita ≈ ${b.needed.toFixed(2)} USD).`), { budget: true, needed: b.needed, remaining: b.remaining, failure: { kind: 'budget', class: 'BUDGET_EXHAUSTED', detail: 'Presupuesto insuficiente para la siguiente llamada.' } satisfies ProcessFailure });
+  };
+  if (route === 'api') requireApi();
+  const models: ModelInfo[] = (() => { try { return JSON.parse(prow.models_json); } catch { return []; } })();
   // El plazo cuenta la salida que la llamada puede facturar de verdad: texto pedido + margen del razonamiento oculto.
   const headroom = agentHeadroom(agent);
-  const timeoutMs = headroom ? callTimeoutMs(maxTokens + headroom, 'low', opts.timeoutSec) : callTimeoutMs(maxTokens, agent.config.effort, opts.timeoutSec);
+  const apiTimeoutMs = headroom ? callTimeoutMs(maxTokens + headroom, 'low', opts.timeoutSec) : callTimeoutMs(maxTokens, agent.config.effort, opts.timeoutSec);
+  const ccTimeoutMs = getClaudeCodeSettings().maxDurationSec * 1000;
+  let timeoutMs = route === 'claude-code' ? ccTimeoutMs : apiTimeoutMs;
   const maxAttempts = 1 + maxProviderRetries(opts.retries);
   const inTok = estimateTokens(system + user + (opts.history ?? []).map(h => h.content).join(''));
   const p = estimatePricing(providerId, agent.config.model);
-  const callEstimate = (inTok * p.inPerM + (maxTokens + headroom) * p.outPerM * 0.5) / 1_000_000;
+  const apiEstimate = (inTok * p.inPerM + (maxTokens + headroom) * p.outPerM * 0.5) / 1_000_000;
   const now0 = new Date();
-  let live: LiveCall = { state: 'preparing', provider: providerId, model: agent.config.model, startedAt: now0.toISOString(), lastEvent: 'Preparando la solicitud', lastEventAt: now0.toISOString(), deadlineAt: new Date(now0.getTime() + timeoutMs).toISOString(), timeoutMs, attempt: 1, maxAttempts, estimatedUsd: callEstimate, inputTokensEstimated: inTok, inputUsd: costUsd(providerId, agent.config.model, inTok, 0), maxOutputTokens: maxTokens + headroom, operation: opts.operation ?? null };
+  // Con la suscripción no hay cargo en USD que estimar: la ejecución no descuenta del presupuesto de API.
+  const ccLive = (): Partial<LiveCall> => ({ provider: backendLabel(agentBackend(agent), lastDetection()?.billing), estimatedUsd: 0, inputUsd: 0 });
+  let live: LiveCall = { state: 'preparing', provider: providerId, model: agent.config.model, startedAt: now0.toISOString(), lastEvent: 'Preparando la solicitud', lastEventAt: now0.toISOString(), deadlineAt: new Date(now0.getTime() + timeoutMs).toISOString(), timeoutMs, attempt: 1, maxAttempts, estimatedUsd: apiEstimate, inputTokensEstimated: inTok, inputUsd: costUsd(providerId, agent.config.model, inTok, 0), maxOutputTokens: maxTokens + headroom, operation: opts.operation ?? null, ...(route === 'claude-code' ? ccLive() : {}) };
   const setLive = (patch: Partial<LiveCall>) => { live = { ...live, ...patch }; try { procs.setStepLive(step.id, live); } catch { /* el estado en vivo nunca rompe la llamada */ } };
   procs.stepStart(step.id); setLive({});
   const startedAt = now0.toISOString();
@@ -121,29 +145,52 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
     const sentAt = new Date();
     const ms = () => Date.now() - sentAt.getTime();
     setLive({ state: 'sending', attempt, lastEvent: attempt > 1 ? `Reenviando la solicitud (intento ${attempt} de ${maxAttempts})` : 'Enviando la solicitud al proveedor', lastEventAt: sentAt.toISOString(), deadlineAt: new Date(sentAt.getTime() + timeoutMs).toISOString() });
-    opts.log({ ...who, attempt, maxAttempts, timeoutMs, inputTokensEstimated: inTok, maxOutputTokens: maxTokens }, 'llamada al proveedor: enviando');
+    opts.log({ ...who, attempt, maxAttempts, timeoutMs, inputTokensEstimated: inTok, maxOutputTokens: maxTokens, route }, 'llamada al proveedor: enviando');
     try {
       requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
-      const res = await withWatchdog(getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
-        model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history: opts.history, responseSchema: opts.schema, timeoutMs,
-        onProgress: e => {
-          setLive(e === 'sent' ? { state: 'waiting', lastEvent: 'Solicitud enviada; esperando la respuesta del proveedor', lastEventAt: new Date().toISOString() }
-            : e === 'headers' ? { state: 'receiving', lastEvent: 'El proveedor empezó a responder', lastEventAt: new Date().toISOString() }
-            : { state: 'processing', lastEvent: 'Respuesta recibida; procesándola', lastEventAt: new Date().toISOString() });
-          if (e !== 'sent') opts.log({ ...who, attempt, ms: ms() }, e === 'headers' ? 'llamada al proveedor: cabeceras recibidas' : 'llamada al proveedor: respuesta completa');
-        }
-      }, ctrl.signal), ctrl, timeoutMs);
-      const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
+      const request = { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history: opts.history, responseSchema: opts.schema, timeoutMs };
+      let res: { text: string; inputTokens: number; outputTokens: number; stopReason: string | null; refusal?: string | null };
+      let cost: number; let backend: string | null = null;
+      if (route === 'claude-code') {
+        // Suscripción: 0 USD del presupuesto de API. El uso (tokens, turnos, duración, equivalente estimado) va al registro del conector.
+        const cc = await withWatchdog(claudeCodeComplete({ slug, projectId: proc.projectId, processId, stepId, agent, role: step.role ?? null, title: step.title }, request, ctrl.signal, setLive), ctrl, timeoutMs);
+        res = cc; cost = 0; backend = cc.backendLabel;
+      } else {
+        res = await withWatchdog(getAdapter(providerId)!.complete(decryptSecret(cred!.ciphertext), { workspaceId: prow.workspace_id }, {
+          ...request,
+          onProgress: e => {
+            setLive(e === 'sent' ? { state: 'waiting', lastEvent: 'Solicitud enviada; esperando la respuesta del proveedor', lastEventAt: new Date().toISOString() }
+              : e === 'headers' ? { state: 'receiving', lastEvent: 'El proveedor empezó a responder', lastEventAt: new Date().toISOString() }
+              : { state: 'processing', lastEvent: 'Respuesta recibida; procesándola', lastEventAt: new Date().toISOString() });
+            if (e !== 'sent') opts.log({ ...who, attempt, ms: ms() }, e === 'headers' ? 'llamada al proveedor: cabeceras recibidas' : 'llamada al proveedor: respuesta completa');
+          }
+        }, ctrl.signal), ctrl, timeoutMs);
+        cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
+        if (fallbackReason) backend = `${backendLabel('api', null, providerId)} (alternativa autorizada a Claude Code)`;
+      }
       const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
       // Un paso puede necesitar varias llamadas (continuación de una respuesta cortada): acumulamos.
       const acc = opts.history?.length ? prev : { inputTokens: 0, outputTokens: 0, costUsd: 0 };
-      procs.stepFinish(step.id, 'done', { tokensIn: acc.inputTokens + res.inputTokens, tokensOut: acc.outputTokens + res.outputTokens, cost: acc.costUsd + cost, outputMd: opts.history?.length ? `${opts.history.filter(h => h.role === 'assistant').map(h => h.content).join('')}${res.text}` : res.text });
+      procs.stepFinish(step.id, 'done', { tokensIn: acc.inputTokens + res.inputTokens, tokensOut: acc.outputTokens + res.outputTokens, cost: acc.costUsd + cost, outputMd: opts.history?.length ? `${opts.history.filter(h => h.role === 'assistant').map(h => h.content).join('')}${res.text}` : res.text, backend });
       procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
-      opts.log({ ...who, attempt, ms: ms(), tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost: cost.toFixed(4), stop: res.stopReason }, 'paso completado');
+      opts.log({ ...who, attempt, ms: ms(), tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost: cost.toFixed(4), stop: res.stopReason, backend }, 'paso completado');
       return { text: res.text, stopReason: res.stopReason, inputTokens: res.inputTokens, outputTokens: res.outputTokens, costUsd: cost, refusal: res.refusal ?? null };
     } catch (e) {
       const err = e instanceof ProviderRequestError ? e.error : null;
+      // Claude Code no disponible o límite de la suscripción: la API solo si el propietario la autorizó como alternativa.
+      if (route === 'claude-code' && (err?.code === 'usage_limit' || err?.code === 'backend_unavailable') && apiFallbackAllowed()) {
+        unregisterCall(processId, ctrl);
+        route = 'api'; fallbackReason = err.message; timeoutMs = apiTimeoutMs;
+        opts.log({ ...who, code: err.code }, 'Claude Code no disponible: alternativa autorizada por el propietario (API del proveedor)');
+        try { requireApi(); } catch (b) {
+          const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
+          procs.stepFinish(step.id, 'failed', { tokensIn: prev.inputTokens, tokensOut: prev.outputTokens, cost: prev.costUsd, outputMd: prev.outputMd, error: (b as Error).message });
+          throw b;
+        }
+        setLive({ provider: providerId, estimatedUsd: apiEstimate, inputUsd: costUsd(providerId, agent.config.model, inTok, 0), lastEvent: `Claude Code no disponible (${err.message}). Se usa la API del proveedor porque lo autorizaste como alternativa.`, lastEventAt: new Date().toISOString() });
+        continue;
+      }
       // Reintento acotado solo para errores de conexión (sin respuesta útil), con espera exponencial y cancelable.
       if (isTransient(e) && attempt < maxAttempts && !ctrl.signal.aborted) {
         const wait = backoffMs(attempt);
@@ -161,7 +208,8 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       const finalErr = e instanceof ProviderRequestError ? e.error : err;
       let msg = finalErr ? finalErr.message : (e as Error).message;
       // Lo que pudo facturarse sin confirmación del proveedor se guarda aparte del gasto confirmado (estimación de la entrada).
-      const billed = maybeBilled(e); const estCost = billed ? costUsd(providerId, agent.config.model, inTok, 0) : 0;
+      // Con Claude Code (suscripción) no hay cargo en USD posible que registrar como «sin confirmar».
+      const billed = route === 'api' && maybeBilled(e); const estCost = billed ? costUsd(providerId, agent.config.model, inTok, 0) : 0;
       if (billed) msg += ` Posible costo NO confirmado por el proveedor: ≈ ${estCost.toFixed(4)} USD (estimación de la entrada enviada).`;
       opts.log({ ...who, attempt, ms: ms(), code: finalErr?.code ?? null, httpStatus: finalErr?.httpStatus ?? null, class: cls.kind, billed }, finalErr?.code === 'cancelled' ? 'llamada al proveedor: cancelada' : finalErr?.code === 'timeout' ? 'llamada al proveedor: plazo agotado' : 'llamada al proveedor: fallida');
       // Lo ya confirmado en este paso (llamadas anteriores de una continuación) se conserva: uso, costo y salida parcial.
@@ -778,6 +826,9 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
  */
 export function providerPause(e: any): PipelinePause | null {
   const f: ProcessFailure | undefined = e?.failure; if (!f?.class) return null;
+  // Conector Claude Code: nunca se cambia solo a un origen facturable; se pausa con el motivo y lo hecho se conserva.
+  if (f.providerCode === 'usage_limit') return new PipelinePause('subscription_limit', `${f.detail} Lo hecho se conserva y no se ha cambiado a otro proveedor facturable. «Continuar» cuando se renueve el límite, o asigna otro backend al agente.`);
+  if (f.providerCode === 'backend_unavailable') return new PipelinePause('permission', `Claude Code no está disponible para este paso: ${f.detail} Lo hecho se conserva y no se ha cambiado a otro proveedor facturable. Corrígelo y pulsa «Continuar».`);
   if (f.class === 'PROVIDER_TIMEOUT') return new PipelinePause('provider_timeout', `El proveedor no respondió a tiempo: ${f.detail} No se reintenta solo (la llamada pudo facturarse); lo hecho se conserva y «Continuar» repite solo esta llamada.`);
   if (f.class === 'PROVIDER_CONNECTION_ERROR') return new PipelinePause('provider_error', `No se pudo completar la llamada al proveedor tras los reintentos permitidos: ${f.detail} Lo hecho se conserva; «Continuar» la repite.`);
   if (f.class === 'PERMISSION_REQUIRED' && f.providerCode) return new PipelinePause('permission', `El proveedor rechazó la credencial o el permiso (${f.providerCode}): ${f.detail} Revisa el proveedor en Proveedores y continúa.`);

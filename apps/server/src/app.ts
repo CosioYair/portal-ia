@@ -18,6 +18,7 @@ import { manualTestFeedbackRoutes } from './routes/manual-test-feedback.ts';
 import { learningRoutes } from './routes/learning.ts';
 import { storyRoutes } from './routes/stories.ts';
 import { phaseRoutes, registerArchivedGuard } from './routes/phase.ts';
+import { claudeCodeRoutes } from './routes/claudeCode.ts';
 import { VERSION } from './services/system.ts';
 
 export async function buildApp() {
@@ -50,6 +51,7 @@ export async function buildApp() {
   await app.register(learningRoutes);
   await app.register(storyRoutes);
   await app.register(phaseRoutes);
+  await app.register(claudeCodeRoutes);
 
   // Producción local: sirve apps/web/dist si existe (npm run build). SPA fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {

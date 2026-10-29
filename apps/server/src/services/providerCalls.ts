@@ -55,8 +55,8 @@ export function providerFailureClass(e: unknown): { kind: AgentFailureKind; code
   if (!(e instanceof ProviderRequestError)) return { kind: 'UNKNOWN_FAILURE', code: null };
   const code = e.error.code;
   if (code === 'timeout') return { kind: 'PROVIDER_TIMEOUT', code };
-  if (code === 'invalid_key' || code === 'forbidden' || code === 'no_credential' || code === 'workspace_required') return { kind: 'PERMISSION_REQUIRED', code };
-  if (code === 'network' || code === 'rate_limited' || code === 'provider_error') return { kind: 'PROVIDER_CONNECTION_ERROR', code };
+  if (code === 'invalid_key' || code === 'forbidden' || code === 'no_credential' || code === 'workspace_required' || code === 'backend_unavailable') return { kind: 'PERMISSION_REQUIRED', code };
+  if (code === 'network' || code === 'rate_limited' || code === 'provider_error' || code === 'usage_limit') return { kind: 'PROVIDER_CONNECTION_ERROR', code };
   return { kind: 'UNKNOWN_FAILURE', code };
 }
 
