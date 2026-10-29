@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { Agent, AgentConfig, ProviderId } from '@portal-ia/domain';
-import { CAPABILITIES, KNOWLEDGE, TOOLS } from '@portal-ia/domain';
+import type { Agent, AgentConfig, ClaudeCodeStatusView, ExecutionBackend, ProviderId } from '@portal-ia/domain';
+import { backendLabel, CAPABILITIES, KNOWLEDGE, TOOLS } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS, KNOWLEDGE_LABELS, TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
@@ -16,6 +16,10 @@ export function AgentDetail() {
   const [draft, setDraft] = useState<AgentConfig | null>(null);
   const [newResp, setNewResp] = useState('');
   const [saving, setSaving] = useState(false);
+  const [cc, setCc] = useState<ClaudeCodeStatusView | null>(null);
+  const [backendPick, setBackendPick] = useState<ExecutionBackend | null>(null);
+  useEffect(() => { api.claudeCode().then(setCc).catch(() => setCc(null)); }, []);
+  useEffect(() => { setBackendPick(null); }, [agentId]);
 
   const load = () => api.agents(ws.slug).then(list => setAgents(list.filter(a => a.scope === 'workspace' || a.projectId === status.project?.id)));
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -50,6 +54,12 @@ export function AgentDetail() {
     setSaving(true);
     try { await api.updateAgentConfig(ws.slug, agent.id, draft); await load(); setDraft(null); flash(`Configuración de ${draft.name} guardada`); }
     catch (e: any) { flash(e.message, 'err'); } finally { setSaving(false); }
+  };
+  const applyBackend = async () => {
+    if (!backendPick) return;
+    if (backendPick !== 'api' && !confirm(`¿Autorizas que «${agent.config.name}» ejecute sus pasos con ${backendPick === 'claude-code' ? 'Claude Code gestionado por el Portal' : 'tu consola de Claude Code'} (tu suscripción de Claude)?`)) return;
+    try { await api.setAgentBackend(ws.slug, agent.id, backendPick); await load(); setBackendPick(null); flash(`Backend de ${agent.config.name}: ${backendLabel(backendPick, cc?.detection?.billing, agent.config.provider)}`); }
+    catch (e: any) { flash(e.message, 'err'); }
   };
   const changeProvider = (pid: ProviderId) => {
     const p = providers.find(x => x.id === pid); if (!p) return;
@@ -134,6 +144,19 @@ export function AgentDetail() {
                     {(prov?.models ?? []).map(m => <option key={m.id} value={m.id}>{m.name}  ·  {m.id}</option>)}
                   </select>
                   <div className="help">{model ? `${model.description} ${model.supportsEffort ? 'Admite esfuerzo de razonamiento ajustable.' : 'No admite ajuste de esfuerzo.'}` : 'Modelo no disponible en el proveedor conectado.'}</div></div>
+              </div></section>
+
+            <section className="card" id="backend"><div className="card-h"><div className="h3">Backend de ejecución</div><Chip xs tone={agent.config.backend && agent.config.backend !== 'api' ? 'accent' : ''}>{backendLabel(agent.config.backend, cc?.detection?.billing, agent.config.provider)}</Chip></div>
+              <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  <select className="input" style={{ flex: '1 1 260px' }} aria-label="Backend de ejecución" value={backendPick ?? agent.config.backend ?? 'api'} onChange={e => setBackendPick(e.target.value as ExecutionBackend)}>
+                    <option value="api">API del proveedor · presupuesto en USD</option>
+                    <option value="claude-code" disabled={!cc?.ready || agent.config.provider !== 'anthropic'}>Claude Code — gestionado por el Portal (suscripción)</option>
+                    <option value="claude-code-terminal" disabled={!cc?.settings.enabled || agent.config.provider !== 'anthropic'}>Claude Code — tu consola (puente MCP)</option>
+                  </select>
+                  <button className="btn btn-secondary" disabled={!backendPick || backendPick === (agent.config.backend ?? 'api')} onClick={applyBackend}>Aplicar</button>
+                </div>
+                <div className="help">El backend solo decide dónde se ejecutan los pasos de los procesos autorizados (plan, implementación, correcciones y revisión de QA). La identidad, el papel, los permisos y el historial de este agente no cambian, y el resultado vuelve a él. El chat, el backlog y las lecciones siguen usando la API. {!cc?.settings.enabled && <>Para usar Claude Code, actívalo en <Link to="/configuracion/proveedor">Proveedores → Claude Code — Local</Link>.</>}</div>
               </div></section>
 
             <section className="card"><div className="card-h"><div className="h3">Modelos alternativos autorizados</div><span className="small muted">{fbCount} autorizado{fbCount === 1 ? '' : 's'}</span></div>

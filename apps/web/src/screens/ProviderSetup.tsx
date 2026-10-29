@@ -4,6 +4,7 @@ import type { ProviderId, ProviderView } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, KV, Notice, Stepper, Wordmark } from '../components/ui.tsx';
+import { ClaudeCodePanel } from '../components/ClaudeCodePanel.tsx';
 
 const CONN: Record<ProviderView['status'], { label: string; tone: '' | 'warn' | 'ok' | 'err'; dot: '' | 'pulse' | 'ok' | 'err' }> = {
   not_configured: { label: 'Sin configurar', tone: '', dot: '' },
@@ -158,6 +159,8 @@ export function ProviderSetup() {
               </div>
             </section>
           )}
+
+          {setupDone && <ClaudeCodePanel />}
 
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
             <Link className="btn btn-ghost" to={setupDone ? '/panel' : '/'}>{setupDone ? 'Cancelar' : 'Atrás'}</Link>
