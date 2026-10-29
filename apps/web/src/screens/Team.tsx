@@ -17,7 +17,17 @@ export function Team() {
 
   const byKey = (k: string) => agents.find(a => a.key === k);
   const model = (a: Agent) => providers.find(p => p.id === a.config.provider)?.models.find(m => m.id === a.config.model);
-  const active = agents.filter(a => a.status === 'active').length;
+  // Retirado = desactivado de forma reversible por una propuesta aceptada (template.retiredAt), sin borrar la fila.
+  const retiredAt = (a: Agent): string | null => (a.template as unknown as { retiredAt?: string | null }).retiredAt ?? null;
+  const isRetired = (a: Agent) => !!retiredAt(a);
+  const retiredLabel = (a: Agent) => {
+    const at = retiredAt(a); if (!at) return 'Retirado';
+    const d = new Date(at);
+    return Number.isNaN(d.getTime()) ? 'Retirado' : `Retirado · ${d.toLocaleDateString('es-ES')}`;
+  };
+  const current = agents.filter(a => !isRetired(a));
+  const retiredCount = agents.length - current.length;
+  const active = current.filter(a => a.status === 'active').length;
 
   // Organigrama dinámico: se construye desde las relaciones reales «reporta a», así los agentes nuevos aparecen en su sitio.
   const childrenOf = (parentKey: string) => agents.filter(a => a.template.reportsTo === parentKey).sort((a, b) => (a.scope === b.scope ? 0 : a.scope === 'workspace' ? -1 : 1) || a.createdAt.localeCompare(b.createdAt));
@@ -28,10 +38,13 @@ export function Team() {
   const Node = ({ k }: { k: string }) => {
     const a = byKey(k); if (!a) return <div className="onode" style={{ opacity: .4 }} />;
     const ws = a.scope === 'workspace';
-    return <button className="onode" onClick={() => navigate(`/equipo/${a.id}`)}>
+    const retired = isRetired(a);
+    return <button className="onode" onClick={() => navigate(`/equipo/${a.id}`)} style={retired ? { opacity: .55 } : undefined} title={retired ? retiredLabel(a) : undefined}>
       <span className="onode-top"><Avatar initials={a.template.initials} ws={ws} /><Chip tone={ws ? 'accent' : ''} xs>{ws ? 'Espacio' : 'Proyecto'}</Chip></span>
       <span className="onode-name">{a.config.name}</span><span className="small muted">{a.template.role}</span>
-      <span className="onode-foot"><span className={`dot ${a.status === 'active' ? 'dot-ok' : ''}`} /><span className="small muted">{a.status === 'active' ? 'Activo' : 'Inactivo'}</span><span className="small mono muted" style={{ marginLeft: 'auto' }}>{model(a)?.short ?? a.config.model}</span></span>
+      <span className="onode-foot">{retired
+        ? <Chip xs>{retiredLabel(a)}</Chip>
+        : <><span className={`dot ${a.status === 'active' ? 'dot-ok' : ''}`} /><span className="small muted">{a.status === 'active' ? 'Activo' : 'Inactivo'}</span></>}<span className="small mono muted" style={{ marginLeft: 'auto' }}>{model(a)?.short ?? a.config.model}</span></span>
     </button>;
   };
 
@@ -42,7 +55,7 @@ export function Team() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div className="eyebrow">Equipo de IA</div>
             <h1 className="h1" style={{ fontSize: 26 }}>Organización del espacio y del proyecto</h1>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone="accent">{agents.filter(a => a.scope === 'workspace').length} agentes del espacio</Chip><Chip>{agents.filter(a => a.scope === 'project').length} agentes del proyecto</Chip><Chip dot={active ? 'ok' : ''}>{active} activos · {agents.length} configurados</Chip></div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone="accent">{agents.filter(a => a.scope === 'workspace').length} agentes del espacio</Chip><Chip>{agents.filter(a => a.scope === 'project').length} agentes del proyecto</Chip><Chip dot={active ? 'ok' : ''}>{active} activos · {current.length} configurados</Chip>{retiredCount > 0 && <Chip>{retiredCount} retirados</Chip>}</div>
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}><button className="btn btn-secondary" onClick={() => setEvalOpen(o => !o)} aria-expanded={evalOpen}>{Icon.org()}Evaluar organización</button><Link className="btn btn-secondary" to="/equipo/nuevo">{Icon.arrow()}Nuevo agente especializado</Link><button className="btn btn-primary" disabled title="Requiere autorización de ejecución y presupuesto aprobado">Activar equipo</button></div>
         </div>
@@ -50,7 +63,7 @@ export function Team() {
         <Notice kind="info">Todos los agentes están <strong>configurados pero inactivos</strong>. Ningún agente realiza llamadas a modelos ni consume créditos hasta que lo actives y autorices su ejecución. Selecciona un agente para revisar o editar su configuración.</Notice>
 
         <section className="card">
-          <div className="card-h"><div className="h3">Estructura organizativa</div><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone="accent" xs>Espacio</Chip><Chip xs>Proyecto</Chip><Chip xs dot="">Inactivo</Chip></div></div>
+          <div className="card-h"><div className="h3">Estructura organizativa</div><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone="accent" xs>Espacio</Chip><Chip xs>Proyecto</Chip><Chip xs dot="">Inactivo</Chip><Chip xs>Retirado</Chip></div></div>
           <div className="card-b" style={{ overflowX: 'auto', padding: '24px 18px 28px' }}>
             <ul className="org"><li>
               <div className="onode-owner"><span className="avatar" style={{ width: 28, height: 28 }}>{Icon.user(13)}</span><span style={{ display: 'flex', flexDirection: 'column' }}><span style={{ fontWeight: 600, fontSize: 13, color: '#1A1B1E' }}>Tú</span><span className="small muted">Propietario del espacio</span></span></div>
@@ -63,12 +76,12 @@ export function Team() {
           <div className="card-h"><div className="h3">Relaciones y configuración</div><span className="small muted">Editable desde cada agente</span></div>
           <div style={{ overflowX: 'auto' }}><table className="tbl">
             <thead><tr><th>Agente</th><th>Rol</th><th>Ámbito</th><th>Reporta a</th><th>Modelo preferido</th><th>Esfuerzo</th><th>Estado</th></tr></thead>
-            <tbody>{agents.map(a => { const m = model(a); const ws = a.scope === 'workspace'; return <tr key={a.id}>
+            <tbody>{agents.map(a => { const m = model(a); const ws = a.scope === 'workspace'; return <tr key={a.id} style={isRetired(a) ? { opacity: .6 } : undefined}>
               <td><button className="lnk" onClick={() => navigate(`/equipo/${a.id}`)}>{a.config.name}</button></td><td className="med">{a.template.role}</td>
               <td><Chip tone={ws ? 'accent' : ''} xs>{ws ? 'Espacio' : 'Proyecto'}</Chip></td>
               <td className="med">{a.template.reportsTo === 'owner' ? 'Tú (propietario)' : byKey(a.template.reportsTo)?.config.name ?? a.template.reportsTo}</td>
               <td className="mono" style={{ fontSize: 12 }}>{m?.name ?? a.config.model}</td><td className="med">{m?.supportsEffort ? EFFORT_LABELS[a.config.effort] : 'no aplica'}</td>
-              <td><Chip xs dot={a.status === 'active' ? 'ok' : ''}>{a.status === 'active' ? 'Activo' : 'Inactivo'}</Chip></td></tr>; })}</tbody>
+              <td>{isRetired(a) ? <Chip xs>{retiredLabel(a)}</Chip> : <Chip xs dot={a.status === 'active' ? 'ok' : ''}>{a.status === 'active' ? 'Activo' : 'Inactivo'}</Chip>}</td></tr>; })}</tbody>
           </table></div>
         </section>
       </main>
