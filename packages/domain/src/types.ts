@@ -333,6 +333,8 @@ export interface FlowIssue {
   responsible: string[];
   /** Lo que el equipo pide al propietario para seguir (si aplica). */
   request?: OwnerRequest | null;
+  /** Pantallas del Portal donde se corrige (navegación directa: cada error que remite a una pantalla la enlaza). */
+  links?: { label: string; href: string }[];
 }
 export type FlowActionId =
   | 'authorize' | 'cancel' | 'review_diff' | 'apply' | 'reject' | 'install_and_retry' | 'verify' | 'retry_verification'
@@ -342,7 +344,9 @@ export type FlowActionId =
   /** Conector Claude Code: autorizar el proyecto o pasar a «gestionado» los agentes sin consola, y continuar (sin repetir lo hecho). */
   | 'claude_code_fix'
   /** Registrar como corrección del propietario un commit hecho fuera del equipo (consola) y verificarlo sin IA. */
-  | 'register_external';
+  | 'register_external'
+  /** Ir a la pantalla del Portal donde se corrige (`href`); no cambia nada por sí sola. */
+  | 'open_settings';
 export interface FlowAction {
   id: FlowActionId;
   label: string;
@@ -362,6 +366,8 @@ export interface FlowAction {
   external?: { commit: string; recorded: string; files: string[] } | null;
   /** claude_code_fix: lo que se autoriza antes de continuar (el proyecto del proceso y/o agentes que pasan a «gestionado»). */
   backendFix?: { authorizeProject: boolean; switchToManaged: string[] } | null;
+  /** open_settings: ruta del Portal a la que lleva. */
+  href?: string | null;
 }
 export interface StoryFlow {
   stages: FlowStage[];

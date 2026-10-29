@@ -4,6 +4,7 @@ import path from 'node:path';
 import { getAdapter, type CompletionRequest, type CompletionResult } from '@portal-ia/ai-adapters';
 import { decryptSecret } from '../../security/crypto.ts';
 import { backendLabel, type Agent, type ClaudeCodeBilling, type ExecutionBackend, type LiveCall, type ProviderId } from '@portal-ia/domain';
+import { staleCorrectionUnits } from '../failureDiagnosis.ts';
 import { config, REPO_ROOT } from '../../config.ts';
 import { agentsRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } from '../../db/workspace.ts';
 import { repoRoot } from '../repoWrite.ts';
@@ -63,10 +64,32 @@ export function teamReadiness(slug: string, processId: string) {
       reason: g && !g.ok ? g.reason : null, problem: g && !g.ok ? g.problem : null
     };
   });
+  const projectName = projectsRepo(slug).get(proc.projectId)?.name ?? null;
+  const cc = team.filter(t => t.backend !== 'api');
+  // Qué se retomará exactamente al continuar (para decidirlo ANTES de cualquier llamada).
+  const stale = staleCorrectionUnits(proc.result);
+  const pendingUnit = proc.result?.manifest?.units.find(u => (u.status === 'pending' || u.status === 'running') && !stale.includes(u.id));
+  const pl = proc.result?.pipeline;
+  const nextOperation = stale.length
+    ? 'Repetir «test» sin IA para ver la causa real (la corrección pendiente se planificó con pruebas canceladas, no con un fallo) y, con esa causa, una corrección dirigida'
+    : pendingUnit ? `${pendingUnit.title} — ${pendingUnit.agentName}` : pl && pl.state !== 'verified' ? 'Retomar el pipeline donde se detuvo (sin repetir lo hecho)' : null;
   return {
-    processId, projectId: proc.projectId, projectName: projectsRepo(slug).get(proc.projectId)?.name ?? null,
+    processId, projectId: proc.projectId, projectName,
     connectorEnabled: s.enabled, subscriptionVerified: det?.billing === 'subscription', projectAuthorized: projectAuthorized(s, slug, proc.projectId),
-    fallback: s.fallback, team, ready: team.every(t => t.ready)
+    fallback: s.fallback, team, ready: team.every(t => t.ready),
+    /** CLI instalada y sesión (de la última comprobación, sin llamar al modelo). */
+    cli: { installed: !!det?.installed, version: det?.version ?? null, authMethod: det?.authMethod ?? null, subscriptionType: det?.subscriptionType ?? null, verified: det?.billing === 'subscription' && det?.probe?.ok !== false, checkedAt: det?.checkedAt ?? null },
+    /** Ejecutor gestionado: disponible si el conector está activo con la suscripción verificada; ocupación actual. */
+    worker: { managedAvailable: s.enabled && det?.billing === 'subscription', running: runningClaudeCode(), maxConcurrent: s.maxConcurrent },
+    /** Lo que se autoriza (alcance), en lenguaje llano. */
+    scope: cc.length ? [
+      `Proyecto «${projectName ?? proc.projectId}» de este espacio (no otros proyectos ni empresas)`,
+      `Agentes: ${cc.map(t => t.name).join(', ')}, con tu suscripción de Claude (0 USD de la API)`,
+      s.repoRead ? 'Lectura (solo lectura) de la carpeta de trabajo del proceso a través del Portal; sin .env, claves, .git ni data/' : 'Sin acceso a archivos: solo el contexto que prepara el Portal',
+      'Claude Code no ejecuta órdenes ni escribe archivos: el Portal aplica los cambios en el worktree aislado'
+    ] : [],
+    nextOperation, staleCorrections: stale.length,
+    corrections: pl ? { used: pl.corrections, max: pl.config.maxCorrections } : null
   };
 }
 

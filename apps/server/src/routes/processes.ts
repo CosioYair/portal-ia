@@ -85,6 +85,10 @@ export async function processRoutes(app: FastifyInstance) {
     if (!proc) return reply.code(404).send({ error: 'Proceso no encontrado' });
     if (proc.status !== 'pending_authorization') return reply.code(409).send({ error: 'El proceso ya fue autorizado o finalizado.' });
     if (procs.running().length) return reply.code(409).send({ error: 'Ya hay un proceso en ejecución. Espera a que termine.' });
+    // Claude Code: un equipo que no puede ejecutar (proyecto sin autorizar, consola sin conectar…) no empieza: el
+    // proceso seguiría «autorizado» y fallaría en el primer paso. Se rechaza sin cambiar nada y se dice qué falta.
+    const readiness = proc.kind === 'story_execution' ? teamReadiness(slug, id) : null;
+    if (readiness && !readiness.ready && readiness.fallback !== 'api') return reply.code(409).send({ error: `No se inicia: ${readiness.team.find(t => !t.ready)!.reason}`, code: 'backend_not_ready', readiness });
     // El pipeline (aplicar, verificar, QA con evidencia, correcciones acotadas) forma parte de ESTA autorización; sin él, cada paso se autoriza a mano como antes.
     if (proc.kind === 'story_execution' && body.data.pipeline && proc.result) procs.setResult(id, { ...proc.result, pipeline: newPipeline(normalizePipeline(body.data.pipeline)) });
     procs.authorize(id, body.data.budgetUsd);
@@ -110,13 +114,26 @@ export async function processRoutes(app: FastifyInstance) {
     const hasOutput = proc.steps.some(s => s.role === 'implementer' && s.outputMd?.trim());
     if (!proc.result.applied && !proc.result.changes.some(c => !c.error) && !hasOutput && !proc.result.manifest) return reply.code(409).send({ error: 'El Desarrollador no entregó nada que continuar: vuelve a ejecutar la historia.', code: 'nothing_to_continue' });
     if (procs.running().length) return reply.code(409).send({ error: 'Ya hay un proceso en ejecución. Espera a que termine.' });
+    // Claude Code: si la configuración GUARDADA no deja ejecutar al equipo (proyecto sin autorizar, conector desactivado,
+    // consola sin conectar) y no autorizaste la API como alternativa, continuar solo volvería a detenerse. Se rechaza
+    // aquí, sin eventos, pasos ni cambios en el proceso (HU-159 acumuló pausas idénticas por cada «Continuar»).
+    const readiness = teamReadiness(slug, id);
+    if (readiness && !readiness.ready && readiness.fallback !== 'api') {
+      const first = readiness.team.find(t => !t.ready)!;
+      return reply.code(409).send({ error: `No se continúa: ${first.reason}`, code: 'backend_not_ready', readiness });
+    }
     const prev = proc.result.pipeline;
     // Si el equipo preguntó algo (información, permiso o decisión), continuar sin respuesta solo repetiría la pregunta y gastaría créditos.
     const request = prev?.ownerRequest ?? proc.result.failure?.request ?? null;
     if (request && !body.data.answer) return reply.code(400).send({ error: `El equipo necesita tu respuesta para seguir: «${request.question}»`, code: 'answer_required', request });
     const cfg = normalizePipeline({ ...(prev?.config ?? {}), ...(body.data.pipeline ?? {}) });
     // Los límites nuevos se suman a lo ya consumido: continuar tras un tope concede ese margen otra vez, no más.
-    const pipeline = prev
+    // Una pausa de Claude Code (proyecto sin autorizar, consola, límite de la suscripción) no consumió ningún margen:
+    // continuar tras ella conserva los límites que había, sin conceder correcciones nuevas.
+    const backendPause = !!prev && (prev.pauseKind === 'subscription_limit' || (prev.pauseKind === 'permission' && !request && /Claude Code/.test(prev.reason ?? '')));
+    const pipeline = prev && backendPause
+      ? { ...prev, config: { ...prev.config, ...(body.data.pipeline ? { allowInstall: cfg.allowInstall } : {}) }, failures: [], ineffectiveRounds: 0, startedAt: new Date().toISOString() }
+      : prev
       ? { ...prev, config: { ...cfg, maxCorrections: prev.corrections + cfg.maxCorrections, maxOutputRepairs: prev.outputRepairs + cfg.maxOutputRepairs, maxConsultations: (prev.consultations?.length ?? 0) + cfg.maxConsultations, maxContinuations: (prev.continuations ?? 0) + (cfg.maxContinuations ?? 6) }, failures: [], ineffectiveRounds: 0, startedAt: new Date().toISOString() }
       : newPipeline(cfg);
     // La respuesta del propietario se entrega al agente que la pidió (una vez) al reanudar.

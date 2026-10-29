@@ -879,8 +879,10 @@ test('HU-159 · al continuar, una corrección planificada con pruebas solo cance
   const orphan = procs.addStep(p.id, { agentId: u0.agentId, agentName: u0.agentName, title: 'Corrección 1', model: 'm', role: 'implementer' });
   const at = new Date().toISOString();
   const stale = { ...u0, id: 'r1-1', kind: 'correction' as const, title: 'org.test.mjs: test falla: caso 1 con presupuesto no positivo', purpose: 'x', files: ['src/contract.mjs'], status: 'pending' as const, attempts: 0, continuations: 0, repairs: 0, costUsd: 0, stepIds: [], reservedStepId: null, source: 'verification' as const, findings: [{ severity: 'alta' as const, text: 'test falla: caso 1 con presupuesto no positivo — test did not finish before its parent and was cancelled', file: 'test/org.test.mjs', evidence: null }], error: null, startedAt: null, finishedAt: null, round: man.rounds.length, applied: [], outputs: [] };
-  procs.setResult(p.id, { ...r, review: null, verifications: [...r.verifications, { command: 'test', exitCode: 1, output: CLIPPED, startedAt: at, finishedAt: at, durationMs: 1, isolation: 'docker' }], manifest: { ...man, units: [...man.units, stale], rounds: [...man.rounds, { at, source: 'verification', units: 1, applied: 0 }] }, pipeline: { ...r.pipeline!, state: 'paused', phase: 'finished', pauseKind: 'permission', reason: 'Claude Code no está disponible para este paso: El proyecto «X» no está autorizado para Claude Code. Lo hecho se conserva.', lastQaCommit: null } });
+  procs.setResult(p.id, { ...r, review: null, verifications: [...r.verifications, { command: 'test', exitCode: 1, output: CLIPPED, startedAt: at, finishedAt: at, durationMs: 1, isolation: 'docker' }], manifest: { ...man, units: [...man.units, stale], rounds: [...man.rounds, { at, source: 'verification', units: 1, applied: 0 }] }, pipeline: { ...r.pipeline!, corrections: 1, state: 'paused', phase: 'finished', pauseKind: 'permission', reason: 'Claude Code no está disponible para este paso: El proyecto «X» no está autorizado para Claude Code. Lo hecho se conserva.', lastQaCommit: null } });
   const maxBefore = procs.get(p.id)!.result!.pipeline!.config.maxCorrections;
+  const rd = (await app.inject({ method: 'GET', url: `${W}/processes/${p.id}/backends` })).json();
+  assert.equal(rd.staleCorrections, 1); assert.match(rd.nextOperation, /Repetir «test» sin IA/);
   let tests = 0;
   sandboxFail = (_wt, command) => command !== 'test' ? null : ++tests === 1 ? { exitCode: 1, output: FULL } : null;
   try {
@@ -898,7 +900,7 @@ test('HU-159 · al continuar, una corrección planificada con pruebas solo cance
     assert.equal(calls().slice(before).filter(c => c.rule === FIX).length, 1); assert.ok(calls().slice(before).find(c => c.rule === FIX)!.markers.includes('SQLite parameter 2'), 'el error de la preparación llega a la corrección');
     const order = ['sustituida(s) sin IA', 'Se repite «test» una vez, sin IA', 'Corrección dirigida'].map(t => pl.events.findIndex(e => e.message.includes(t)));
     assert.ok(order.every(i => i >= 0) && order[0] < order[1] && order[1] < order[2], `orden: ${order}`);
-    assert.equal(pl.config.maxCorrections, maxBefore, 'continuar tras una pausa de Claude Code no concede correcciones nuevas');
+    assert.equal(pl.config.maxCorrections, maxBefore, 'continuar tras una pausa de Claude Code no concede correcciones nuevas (antes: usadas + máximo)'); assert.equal(pl.corrections, 2);
   } finally { sandboxFail = null; }
 });
 

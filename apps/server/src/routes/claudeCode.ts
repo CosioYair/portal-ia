@@ -186,8 +186,11 @@ export async function claudeCodeRoutes(app: FastifyInstance) {
       for (const aid of switching) { const a = agents.get(aid)!; agents.updateConfig(aid, { ...a.config, backend: 'claude-code' }); }
     }
     if (body.data.authorizeProject) saveClaudeCodeSettings({ ...s, projects: { ...s.projects, [slug]: Array.from(new Set([...(s.projects[slug] ?? []), proc.projectId])) } });
-    req.log.info({ slug, processId: id, authorizeProject: !!body.data.authorizeProject, switched: switching.length }, 'Claude Code: autorización corregida para el proceso');
-    return teamReadiness(slug, id);
+    // Se comprueba contra lo GUARDADO (no contra lo que se pidió): nunca se informa de un éxito que la configuración no refleja.
+    const after = teamReadiness(slug, id)!;
+    if (body.data.authorizeProject && !after.projectAuthorized) return reply.code(500).send({ error: 'La autorización no quedó guardada: la configuración sigue sin incluir el proyecto. No se ha continuado.', code: 'not_persisted', readiness: after });
+    req.log.info({ slug, processId: id, authorizeProject: !!body.data.authorizeProject, switched: switching.length, ready: after.ready }, 'Claude Code: autorización corregida para el proceso');
+    return { ...after, verified: true };
   });
 
   // Vista por agente: su backend, si su proyecto está autorizado, los límites del conector, su uso con Claude Code (aparte

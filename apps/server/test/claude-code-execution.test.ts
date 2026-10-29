@@ -344,6 +344,30 @@ test('cancelar el proceso desde el Portal detiene la ejecución de Claude Code e
 
 const waitIdle = async (id: string) => { for (let i = 0; i < 600; i++) { if (processesRepo(S).get(id)!.status !== 'running') return processesRepo(S).get(id)!; await new Promise(r => setTimeout(r, 50)); } throw new Error('sigue en ejecución'); };
 
+test('antes de empezar: con el proyecto sin autorizar, autorizar la ejecución se rechaza sin cambiar nada y la historia ofrece autorizar el proyecto', async () => {
+  useFakeSandbox(); apiScript(); ccRules();
+  assert.equal((await inject('PUT', `${W}/claude-code/projects`, { authorized: true, projectIds: [] })).statusCode, 200);
+  const it = addManualItem(S, project.id, { title: 'CC · antes de empezar', criterion: 'a vale 2' });
+  const p = createStoryProcess(S, project.id, it.id);
+  const devId = p.steps.find(s => s.role === 'implementer')!.agentId;
+  assert.equal((await inject('PUT', `${W}/agents/${devId}/backend`, { backend: 'claude-code', authorized: true })).statusCode, 200);
+  const res = await inject('POST', `${W}/processes/${p.id}/authorize`, { budgetUsd: 1, authorized: true });
+  assert.equal(res.statusCode, 409); assert.equal(res.json().code, 'backend_not_ready'); assert.match(res.json().error, /^No se inicia: El proyecto «.+» no está autorizado para Claude Code/);
+  const still = processesRepo(S).get(p.id)!;
+  assert.equal(still.status, 'pending_authorization'); assert.equal(still.budgetUsd, p.budgetUsd); assert.equal(still.authorizedAt ?? null, null, 'no se autorizó nada');
+  assert.equal(apiCalls().length, 0, 'ni el plan se pagó'); assert.equal(ccRuns().length, 0);
+  const flow = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow;
+  assert.match(flow.issue.title, /^Falta autorizar «.+» para Claude Code$/);
+  assert.equal(flow.actions[0].id, 'claude_code_fix'); assert.ok(flow.actions[0].primary); assert.ok(!flow.actions.some((a: any) => a.id === 'authorize'), 'autorizar la ejecución solo fallaría');
+  const fixed = await inject('POST', `${W}/processes/${p.id}/claude-code/fix`, { authorized: true, ...flow.actions[0].backendFix });
+  assert.equal(fixed.statusCode, 200); assert.equal(fixed.json().verified, true);
+  assert.equal(processesRepo(S).get(p.id)!.status, 'pending_authorization', 'autorizar el proyecto no inicia el proceso');
+  const after = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow;
+  assert.equal(after.issue, null); assert.equal(after.actions[0].id, 'authorize');
+  assert.equal((await inject('PUT', `${W}/agents/${devId}/backend`, { backend: 'api', authorized: true })).statusCode, 200);
+  processesRepo(S).finish(p.id, 'cancelled');
+});
+
 test('F/G · proyecto sin autorizar: se ve antes, pausa SIN pasos huérfanos y «autorizar y continuar» retoma sin repetir lo hecho', async () => {
   useFakeSandbox(); apiScript(); ccRules();
   assert.equal((await inject('PUT', `${W}/claude-code/projects`, { authorized: true, projectIds: [] })).statusCode, 200);
@@ -353,19 +377,37 @@ test('F/G · proyecto sin autorizar: se ve antes, pausa SIN pasos huérfanos y �
   assert.equal(before.team.find((t: any) => t.agentId === devId).problem, 'project');
   const paused = await run(p.id);
   assert.equal(paused.result!.pipeline!.pauseKind, 'permission');
-  for (let i = 0; i < 2; i++) { // dos «Continuar» sin arreglar nada: ningún paso nuevo pendiente (antes, uno huérfano por intento)
-    const steps = processesRepo(S).get(p.id)!.steps.length;
-    assert.equal((await inject('POST', `${W}/processes/${p.id}/continue`, { authorized: true })).statusCode, 200);
-    await waitIdle(p.id);
-    assert.equal(processesRepo(S).get(p.id)!.steps.length, steps, 'sin pasos huérfanos');
+  for (let i = 0; i < 2; i++) { // dos «Continuar» sin arreglar nada: rechazados ANTES de tocar el proceso (HU-159: 80 eventos de pausas repetidas)
+    const cur = processesRepo(S).get(p.id)!;
+    const res = await inject('POST', `${W}/processes/${p.id}/continue`, { authorized: true });
+    assert.equal(res.statusCode, 409); assert.equal(res.json().code, 'backend_not_ready'); assert.match(res.json().error, /no está autorizado para Claude Code/);
+    const now = processesRepo(S).get(p.id)!;
+    assert.equal(now.steps.length, cur.steps.length, 'sin pasos nuevos'); assert.equal(now.result!.pipeline!.events.length, cur.result!.pipeline!.events.length, 'sin eventos nuevos');
+    assert.equal(now.status, cur.status); assert.equal(now.budgetUsd, cur.budgetUsd);
   }
   assert.equal(ccRuns().length, 0, 'Claude Code nunca se llamó'); assert.deepEqual(apiCalls().map(c => c.rule), [R.plan], 'ni la API en su lugar');
-  const fix = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow.actions.find((a: any) => a.id === 'claude_code_fix');
-  assert.ok(fix, 'acción «autorizar y continuar»'); assert.deepEqual(fix.backendFix, { authorizeProject: true, switchToManaged: [] }); assert.match(fix.label, /Autorizar «.+» para Claude Code y continuar/);
+  const flow = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow;
+  assert.match(flow.issue.title, /^Falta autorizar «.+» para Claude Code$/, 'el bloqueo exacto, no «hace falta un permiso»');
+  assert.deepEqual(flow.issue.links, [{ label: 'Proveedores → Claude Code — Local', href: '/configuracion/proveedor#claude-code' }]);
+  assert.ok(!flow.actions.some((a: any) => a.id === 'pipeline_resume'), 'mientras no esté resuelto no se ofrece «Continuar» (solo volvería a pausar)');
+  assert.equal(flow.actions.find((a: any) => a.id === 'open_settings')?.href, '/configuracion/proveedor#claude-code');
+  const fix = flow.actions.find((a: any) => a.id === 'claude_code_fix');
+  assert.ok(fix?.primary, 'acción «autorizar»'); assert.deepEqual(fix.backendFix, { authorizeProject: true, switchToManaged: [] }); assert.match(fix.label, /^Autorizar «.+» para Claude Code$/);
   assert.equal((await inject('POST', `${W}/processes/${p.id}/claude-code/fix`, { authorizeProject: true })).statusCode, 400, 'exige autorización explícita');
+  const eventsBefore = processesRepo(S).get(p.id)!.result!.pipeline!.events.length;
   const fixed = await inject('POST', `${W}/processes/${p.id}/claude-code/fix`, { authorized: true, ...fix.backendFix });
-  assert.equal(fixed.statusCode, 200, fixed.body); assert.equal(fixed.json().ready, true);
+  assert.equal(fixed.statusCode, 200, fixed.body); assert.equal(fixed.json().ready, true); assert.equal(fixed.json().verified, true); assert.equal(fixed.json().projectAuthorized, true);
+  assert.equal(processesRepo(S).get(p.id)!.result!.pipeline!.events.length, eventsBefore, 'autorizar no continúa por sí solo');
+  assert.equal(ccRuns().length, 0, 'autorizar no llama a Claude Code');
+  // Verificado: la pausa guardada pasa a «listo, falta continuar» y solo entonces se ofrece continuar lo pendiente.
+  const ready = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow;
+  assert.equal(ready.issue.title, 'Claude Code ya está listo: falta continuar'); assert.equal(ready.issue.level, 'warning');
+  assert.ok(!ready.actions.some((a: any) => a.id === 'claude_code_fix'));
+  const resume = ready.actions.find((a: any) => a.id === 'pipeline_resume');
+  assert.equal(resume.label, 'Continuar la operación pendiente'); assert.ok(resume.primary); assert.deepEqual(resume.requires, ['authorization']);
+  const cfgBefore = processesRepo(S).get(p.id)!.result!.pipeline!.config;
   assert.equal((await inject('POST', `${W}/processes/${p.id}/continue`, { authorized: true })).statusCode, 200);
+  assert.deepEqual(processesRepo(S).get(p.id)!.result!.pipeline!.config, cfgBefore, 'sin correcciones ni márgenes nuevos');
   const done = await waitIdle(p.id);
   assert.equal(done.result!.pipeline!.state, 'verified', done.result!.pipeline!.reason ?? '');
   assert.deepEqual(apiCalls().map(c => c.rule), [R.plan], 'el plan (pagado) NO se repite');

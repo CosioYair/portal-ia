@@ -97,7 +97,18 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
   // 1 · Ejecución de los agentes
   if (p.status === 'pending_authorization') {
     set('execute', 'waiting', `Pendiente de autorización · estimación ≈ ${usd(p.estimatedUsd)} USD · ${p.steps.length} agentes`);
-    actions.push(act('authorize', 'Revisar y autorizar la iteración', 'Revisa el equipo, el contexto que recibirá y fija un presupuesto máximo. Nada se gasta hasta que lo autorices.', ['authorization', 'ai_budget']));
+    // Claude Code no listo para este equipo: se resuelve ANTES de autorizar la ejecución (si no, fallaría en el primer paso).
+    const rd = opts.backends;
+    if (rd && !rd.ready && rd.fallback !== 'api') {
+      const needProject = !rd.projectAuthorized && rd.team.some(t => t.backend !== 'api');
+      const consoleAgents = rd.team.filter(t => t.problem === 'console').map(t => t.agentId);
+      const first = rd.team.find(t => !t.ready);
+      const settings = { label: 'Proveedores → Claude Code — Local', href: '/configuracion/proveedor#claude-code' };
+      issue = { kind: 'pipeline_paused', level: 'blocker', cause: 'decision', title: needProject ? `Falta autorizar «${rd.projectName ?? 'el proyecto'}» para Claude Code` : consoleAgents.length ? 'Falta una consola de Claude Code conectada' : 'Claude Code no está disponible para este equipo', explanation: `${first?.reason ?? ''} Hasta resolverlo no se puede autorizar la ejecución: fallaría en el primer paso. Nada se ha gastado.`, details: [], files: [], responsible: [], links: [settings] };
+      if (needProject || consoleAgents.length) actions.push(act('claude_code_fix', needProject ? `Autorizar «${rd.projectName ?? 'el proyecto'}» para Claude Code` : `Pasar ${consoleAgents.length} agente(s) a Claude Code gestionado`, 'Guarda solo esa autorización y la vuelve a comprobar. No inicia el proceso ni llama a la IA.', ['authorization'], { primary: true, backendFix: { authorizeProject: needProject, switchToManaged: consoleAgents } }));
+      actions.push(act('open_settings', 'Abrir Proveedores → Claude Code', 'Conector, CLI y sesión, proyectos autorizados y límites. No cambia nada por sí solo.', [], { href: settings.href }));
+    }
+    else actions.push(act('authorize', 'Revisar y autorizar la iteración', 'Revisa el equipo, el contexto que recibirá y fija un presupuesto máximo. Nada se gasta hasta que lo autorices.', ['authorization', 'ai_budget']));
   } else if (p.status === 'running' && opts.orphan) {
     set('execute', 'blocked', 'Sin ejecución activa: el Portal se reinició o perdió el proceso');
     issue = { kind: 'process_interrupted', level: 'blocker', cause: 'environment', title: 'Nadie está trabajando en este proceso', explanation: 'Figura «en ejecución», pero no hay ninguna ejecución viva en el Portal (se reinició o se cayó a mitad). Ninguna llamada al proveedor sigue en curso. Ciérralo: lo terminado se conserva y el paso interrumpido queda registrado con su posible costo no confirmado.', details: p.steps.filter(s => s.status === 'running').map(s => ({ text: `${s.agentName}: ${s.title} — interrumpido` })), files: [], responsible: [] };
@@ -212,11 +223,34 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
       // Claude Code bloqueado: la autorización concreta que falta, en una sola acción que después retoma lo pendiente.
       const rd = opts.backends; const consoleAgents = rd?.team.filter(t => t.problem === 'console').map(t => t.agentId) ?? [];
       const needProject = !!rd && !rd.projectAuthorized && rd.team.some(t => t.backend !== 'api');
-      if (pl.pauseKind === 'permission' && (needProject || consoleAgents.length)) {
-        const what = [needProject ? `autorizar «${rd!.projectName ?? 'el proyecto'}» para Claude Code` : null, consoleAgents.length ? `pasar ${consoleAgents.length === 1 ? `a «${rd!.team.find(t => t.agentId === consoleAgents[0])!.name}»` : `${consoleAgents.length} agentes`} a Claude Code gestionado (tu suscripción; sin consola conectada)` : null].filter(Boolean).join(' y ');
-        actions.push(act('claude_code_fix', `${what[0].toUpperCase()}${what.slice(1)} y continuar`, 'Aplica solo esa autorización y retoma la operación pendiente: lo hecho no se repite ni se vuelve a cobrar. No usa la API.', ['authorization'], { primary: true, backendFix: { authorizeProject: needProject, switchToManaged: consoleAgents } }));
+      // La pausa la causó Claude Code (no un permiso pedido por el equipo ni la credencial de la API).
+      const ccPause = pl.pauseKind === 'subscription_limit' || /Claude Code/.test(pl.reason ?? '');
+      const settings = { label: 'Proveedores → Claude Code — Local', href: '/configuracion/proveedor#claude-code' };
+      const next = rd?.nextOperation ? ` Al continuar se retoma solo: ${rd.nextOperation}.` : '';
+      if (ccPause && rd && !rd.ready && rd.fallback !== 'api') {
+        // Sigue bloqueado según la configuración GUARDADA: se dice exactamente qué falta y no se ofrece «Continuar»
+        // (solo volvería a detenerse y llenaría el historial de pausas repetidas, como en HU-159).
+        const first = rd.team.find(t => !t.ready);
+        issue = { ...issue!, title: needProject ? `Falta autorizar «${rd.projectName ?? 'el proyecto'}» para Claude Code` : first?.problem === 'console' ? 'Falta una consola de Claude Code conectada' : first?.problem === 'disabled' ? 'El conector «Claude Code — Local» está desactivado' : 'Claude Code no está disponible para este equipo', explanation: `${first?.reason ?? pl.reason ?? ''} Todo lo hecho se conserva (cambios, verificaciones, costos y correcciones) y no se ha llamado a la IA.${next}`, links: [settings] };
+        if (needProject || consoleAgents.length) {
+          const what = [needProject ? `autorizar «${rd.projectName ?? 'el proyecto'}» para Claude Code` : null, consoleAgents.length ? `pasar ${consoleAgents.length === 1 ? `a «${rd.team.find(t => t.agentId === consoleAgents[0])!.name}»` : `${consoleAgents.length} agentes`} a Claude Code gestionado (tu suscripción; sin consola conectada)` : null].filter(Boolean).join(' y ');
+          actions.push(act('claude_code_fix', `${what[0].toUpperCase()}${what.slice(1)}`, 'Guarda solo esa autorización y la vuelve a comprobar en la configuración guardada. No continúa ni llama a la IA: cuando quede verificada aparece «Continuar la operación pendiente».', ['authorization'], { primary: true, backendFix: { authorizeProject: needProject, switchToManaged: consoleAgents } }));
+        }
+        actions.push(act('open_settings', 'Abrir Proveedores → Claude Code', 'Conector, CLI y sesión, proyectos autorizados y límites. No cambia nada por sí solo.', [], { href: settings.href }));
       }
-      actions.push(resume(pl.pauseKind === 'subscription_limit' ? 'Continuar cuando se renueve el límite' : 'Continuar cuando Claude Code esté disponible', 'Repite SOLO la llamada pendiente con el mismo backend del agente; lo hecho no se repite. No cambia a la API salvo que lo hayas autorizado como alternativa.', ['authorization']));
+      else if (ccPause && rd?.ready) {
+        // Ya resuelto y verificado: la pausa guardada es historia; lo que toca es continuar lo pendiente.
+        if (pl.pauseKind !== 'subscription_limit') issue = { ...issue!, level: 'warning', title: 'Claude Code ya está listo: falta continuar', explanation: `Se detuvo porque: «${pl.reason ?? ''}». Ahora está resuelto y comprobado en la configuración guardada (proyecto autorizado y backend disponible).${next} Lo hecho no se repite ni se vuelve a cobrar.` };
+        actions.push(resume(pl.pauseKind === 'subscription_limit' ? 'Continuar cuando se renueve el límite' : 'Continuar la operación pendiente', `Retoma solo lo pendiente${rd.nextOperation ? ` (${rd.nextOperation})` : ''} con el backend de cada agente. No se conceden correcciones nuevas ni se cambia a la API.`, ['authorization'], { primary: true }));
+      }
+      else {
+        if (pl.pauseKind === 'permission' && (needProject || consoleAgents.length)) {
+          const what = [needProject ? `autorizar «${rd!.projectName ?? 'el proyecto'}» para Claude Code` : null, consoleAgents.length ? `pasar ${consoleAgents.length === 1 ? `a «${rd!.team.find(t => t.agentId === consoleAgents[0])!.name}»` : `${consoleAgents.length} agentes`} a Claude Code gestionado (tu suscripción; sin consola conectada)` : null].filter(Boolean).join(' y ');
+          actions.push(act('claude_code_fix', `${what[0].toUpperCase()}${what.slice(1)}`, 'Guarda solo esa autorización y la vuelve a comprobar. No continúa ni llama a la IA.', ['authorization'], { primary: true, backendFix: { authorizeProject: needProject, switchToManaged: consoleAgents } }));
+        }
+        actions.push(resume(pl.pauseKind === 'subscription_limit' ? 'Continuar cuando se renueve el límite' : 'Continuar cuando el proveedor esté disponible', 'Repite SOLO la llamada pendiente con el mismo backend del agente; lo hecho no se repite. No cambia a la API salvo que lo hayas autorizado como alternativa.', ['authorization']));
+        if (ccPause) issue = { ...issue!, links: [settings] };
+      }
     }
     else if (pl.pauseKind === 'unknown') actions.push(ASK, act('retry_process', 'Volver a ejecutar la historia', 'Crea un proceso nuevo pendiente de autorización.', ['authorization', 'ai_budget']));
     else if (pl.pauseKind === 'budget') actions.push(resume('Continuar con más presupuesto', 'El equipo retoma donde lo dejó (no repite lo hecho). Fijas el presupuesto adicional máximo; solo se gasta lo necesario.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.5 }));
