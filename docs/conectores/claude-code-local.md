@@ -13,8 +13,9 @@ la memoria, el flujo, el worktree, la verificación en Docker, QA y la aprobaci�
 |---|---|
 | Implementado | Detección sin modelo, activación con autorización, proyectos y agentes autorizados, CLI gestionada (`claude -p`), puente MCP de solo lectura, consola del propietario por MCP, integración en el pipeline, registro de uso aparte del gasto, pausa por límite, alternativa por API solo autorizada, interfaz |
 | Verificado con CLI simulada | Todo lo anterior: `claude-code-connector.test.ts` (10), `claude-code-execution.test.ts` (15, con Docker real), y una instancia aislada con Chromium (16 de 16) |
-| Verificado con la suscripción real | **Nada todavía.** Solo `claude --version`, `claude --help` y `claude auth status`, que no llaman al modelo |
-| No verificado | El valor real de `apiKeySource` con la suscripción; que la CLI 2.1.311 acepte `--system-prompt-file` y `--max-turns` (documentadas, pero ocultas en `--help`); lo que la CLI real lista como herramientas con `--tools ""`. Lo dirá la prueba de humo (§9) |
+| Verificado con la CLI real, SIN llamar al modelo (§11) | `--restricted` combinado con todas las opciones gestionadas; `auth status` en modo restringido (`claude.ai`, plan `max`); `apiKeySource: "none"`; herramientas reales (`StructuredOutput` + las 5 del puente); puente conectado; modelo `haiku` → `claude-haiku-5-5` |
+| Verificado con la suscripción real | **Nada todavía**: ninguna llamada al modelo. Lo hará la prueba de humo autorizada (§9) |
+| No verificado | La respuesta real del modelo, el registro de uso real y que no haya cargos de API (eso último solo se comprueba en claude.ai y en la consola de la API) |
 
 ## 2. Investigación (documentación oficial, consultada el 28/10/2026)
 
@@ -103,7 +104,7 @@ la memoria, el flujo, el worktree, la verificación en Docker, QA y la aprobaci�
 
 **Riesgos residuales:**
 - No es aislamiento del sistema operativo: la CLI corre con tu usuario y las restricciones son las de Claude Code (`--tools ""` y permisos). Un fallo de Claude Code podría saltárselas.
-- Sin `--bare` se cargan tus hooks, plugins y `~/.claude/CLAUDE.md`. Tus hooks se ejecutan; tu `CLAUDE.md` entra en el contexto.
+- ~~Sin `--bare` se cargan tus hooks, plugins y `~/.claude/CLAUDE.md`~~. Resuelto en §11: con `--restricted` y `CLAUDE_CODE_DISABLE_CLAUDE_MDS` no se cargan; solo quedan los 3 plugins incluidos en Claude Code.
 - La **consola** es tu sesión normal de Claude Code, con las herramientas y la autenticación que tú tengas:
   - el Portal no puede verificar su facturación («No verificado»); avisa si ve credenciales en su entorno;
   - no puede impedir que edites a mano.
@@ -136,7 +137,7 @@ La alternativa por la API del agente solo actúa si la autorizaste en «Si la su
 2. Proveedores → «Claude Code — Local» → «Comprobar instalación y sesión». Debe decir «Claude Code — Suscripción · plan max».
 3. Marcar la autorización y pulsar «Activar».
 4. Elegir los proyectos autorizados y el backend de cada agente (cada cambio pide confirmación).
-5. Opcional, consola: asignar «Claude Code (tu consola)» a un agente, «Crear consola» y ejecutar en una terminal la orden `claude mcp add --scope user portal-ia …` que se muestra (el token aparece una sola vez). En Claude Code, pide «muéstrame mis tareas del Portal».
+5. Opcional, consola: asignar «Claude Code (tu consola)» a un agente, «Crear consola» y ejecutar en una terminal las órdenes que se muestran: `mkdir` y `cd` a la carpeta dedicada, y `claude mcp add --scope local portal-ia …`. El token aparece una sola vez y caduca en 30 días. Abre Claude Code en esa carpeta y pide «muéstrame mis tareas del Portal».
 
 Al arrancar, nada se ejecuta solo: el conector empieza desactivado y una historia solo corre cuando la autorizas.
 
@@ -158,6 +159,73 @@ Una sola ejecución gestionada, de solo lectura, sin datos del proyecto y sin es
    Una respuesta correcta de la CLI **no prueba** por sí sola que no haya cargos de API.
 
 Si la CLI real rechaza alguna opción o lista herramientas inesperadas, la ejecución se detiene antes de llamar al modelo y se ajusta el conector. Nada se elude.
+
+## 11. Revisión de seguridad previa a la activación (28/10/2026)
+
+### Modo restringido
+
+Documentación oficial (`--restricted`, ≥ 2.1.248):
+- quita las herramientas que ejecutan código y WebFetch;
+- ignora los ajustes de usuario, proyecto y locales (solo valen los gestionados y `--settings`);
+- limita las herramientas de archivos a las carpetas de trabajo;
+- rechaza bypassPermissions;
+- con `--strict-mcp-config`, tampoco carga otros servidores MCP.
+
+A diferencia de `--bare`, la documentación no dice que deje de leer la sesión OAuth.
+
+Comprobado en la CLI 2.1.311 sin llamar al modelo, con un mensaje en blanco: la documentación dice que «nothing was sent to the model» y el resultado fue 0 turnos, 0 tokens, 0 USD.
+
+| Comprobación | Resultado |
+|---|---|
+| `claude --restricted auth status --json` | `loggedIn: true`, `claude.ai`, `firstParty`, plan `max` |
+| Opciones gestionadas + `--restricted` | Aceptadas todas, también `--system-prompt-file` y `--max-turns` |
+| `apiKeySource` del init | `"none"`: sin clave de API, sesión de la suscripción |
+| Herramientas | Solo `StructuredOutput` (por `--json-schema`) y las 5 del puente: `portal_task_context`, `portal_list_files`, `portal_read_file`, `portal_knowledge`, `portal_report_progress` |
+| Servidores MCP | Solo `portal`, `connected` |
+| Plugins | Solo los 3 incluidos en Claude Code (`cc-plugin-agents-md`, `cc-plugin-telemetry`, `cc-plugin-plugin-authoring`). Los tuyos no se cargan |
+| Subagentes | Los 5 incluidos; inutilizables, porque no hay herramienta Agent |
+| Modo seguro (`CLAUDE_CODE_SAFE_MODE`) | Descartado: quita también el servidor de `--mcp-config` (sin puente no hay lectura del repositorio) y no quita los plugins incluidos |
+
+### Hallazgos y correcciones
+
+1. **Error real.** Con `--json-schema`, la CLI expone `StructuredOutput`, y la comprobación de herramientas lo trataba como ajeno: todas las revisiones de QA reales se habrían detenido. Ahora se admite solo cuando se pidió esquema (prueba de regresión).
+2. **La comprobación del init no era una barrera.** La CLI solo emite `init` al leer el primer mensaje, así que el encargo ya estaba enviado. Ahora:
+   - `--input-format stream-json`: primero un mensaje en blanco, que no llega al modelo;
+   - se comprueba el `init`: origen de la clave, herramientas, modo de permisos `dontAsk` y el puente `connected`;
+   - el encargo va en un segundo mensaje de la misma sesión;
+   - si el mensaje en blanco informara turnos o tokens, se detiene.
+3. **`apiKeySource`:** lista blanca, solo `"none"`. Cualquier otro valor, conocido o no, detiene antes del encargo.
+4. **Ajustes personales:** `--restricted` en la ejecución y en `auth status`. Tu `env`, `apiKeyHelper`, hooks y plugins de usuario no entran y no pueden reintroducir la facturación por API. CLI anterior a 2.1.248: bloqueada, «actualiza Claude Code».
+5. **Entorno**, además de la lista blanca sin credenciales:
+   - `CLAUDE_CODE_RESTRICTED=1`;
+   - `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`: ningún CLAUDE.md, ni de usuario, ni de proyecto, ni de memoria;
+   - `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`;
+   - `ENABLE_CLAUDEAI_MCP_SERVERS=false`: sin los conectores de claude.ai;
+   - `DISABLE_AUTOUPDATER=1`.
+6. **Sonda en la detección:** al comprobar o activar se repite la sonda sin modelo con la configuración exacta. Si no la supera, el origen queda «No verificado» y no se ejecuta.
+7. **Consolas:** el token caduca (30 días por defecto, de 1 a 90) y se registra con `--scope local` en una carpeta dedicada (`%USERPROFILE%\PortalIA-consola\<espacio>`). El puente ya no aparece en todos tus proyectos de Claude Code.
+8. **Peticiones hostiles al puente:** rutas codificadas (`%2e%2e`, `%5C%5C`, `%00`, `C:\`), otra tarea por la URL, campos de más en el cuerpo, token en la URL o con otro esquema, JSON-RPC mal formado, herramientas inexistentes y argumentos de tipo incorrecto: todo rechazado (pruebas).
+
+### Configuración exacta de una ejecución gestionada
+
+```text
+claude --restricted -p --output-format stream-json --verbose --model <modelo del agente>
+  --system-prompt-file <temporal>/system-prompt.md --tools "" --permission-mode dontAsk --max-turns <N>
+  --no-session-persistence --disable-slash-commands --strict-mcp-config --permission-prompts none
+  [--mcp-config <temporal>/mcp.json --allowedTools mcp__portal__portal_task_context,…]   (lectura por el puente)
+  [--json-schema <esquema>]                                                               (veredicto de QA)
+  --input-format stream-json
+```
+
+- Carpeta de trabajo: temporal y vacía, borrada al terminar.
+- Entorno: lista blanca + los controles del punto 5.
+- stdin: mensaje en blanco → comprobación del init → encargo.
+
+### Lo que la revisión deja como riesgo (sin cambio)
+
+- **API local del Portal sin autenticación** (diseño local de siempre): cualquier proceso local puede llamarla. Las ejecuciones gestionadas no pueden: no tienen Bash ni WebFetch. Tu **consola** sí podría, porque es tu sesión normal de Claude Code con tus herramientas. El puente no amplía nada, pero la consola no está aislada de tu equipo. Úsala para tareas que atiendes tú.
+- **Política de ejecución:** cada llamada pasa por `requirePolicy('ai_call')` en `callAgentStep`, también las de la consola. Lo que entrega la consola es texto que el motor valida y aplica en el worktree, verifica en Docker y somete a QA, igual que lo de la API.
+- Siguen cargándose los 3 plugins incluidos en Claude Code (uno es de telemetría de Anthropic).
 
 ## 10. Pruebas (CLI y proveedor simulados)
 
