@@ -20,6 +20,8 @@ export function AgentDetail() {
   const [backendPick, setBackendPick] = useState<ExecutionBackend | null>(null);
   useEffect(() => { api.claudeCode().then(setCc).catch(() => setCc(null)); }, []);
   useEffect(() => { setBackendPick(null); }, [agentId]);
+  const [agentCc, setAgentCc] = useState<Awaited<ReturnType<typeof api.agentClaudeCode>> | null>(null);
+  useEffect(() => { if (agentId) api.agentClaudeCode(ws.slug, agentId).then(setAgentCc).catch(() => setAgentCc(null)); }, [agentId, ws.slug]);
 
   const load = () => api.agents(ws.slug).then(list => setAgents(list.filter(a => a.scope === 'workspace' || a.projectId === status.project?.id)));
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -157,6 +159,14 @@ export function AgentDetail() {
                   <button className="btn btn-secondary" disabled={!backendPick || backendPick === (agent.config.backend ?? 'api')} onClick={applyBackend}>Aplicar</button>
                 </div>
                 <div className="help">El backend solo decide dónde se ejecutan los pasos de los procesos autorizados (plan, implementación, correcciones y revisión de QA). La identidad, el papel, los permisos y el historial de este agente no cambian, y el resultado vuelve a él. El chat, el backlog y las lecciones siguen usando la API. {!cc?.settings.enabled && <>Para usar Claude Code, actívalo en <Link to="/configuracion/proveedor">Proveedores → Claude Code — Local</Link>.</>}</div>
+                {agentCc && <div>
+                  <KV k="Proyectos autorizados para Claude Code">{agentCc.projects.length ? agentCc.projects.map(p => `${p.authorized ? '✓' : '✗'} ${status.project && p.id === status.project.id ? status.project.name : 'otro proyecto'}`).join(' · ') : '—'}</KV>
+                  <KV k="Límites del conector">{agentCc.limits.maxConcurrent} a la vez · {Math.round(agentCc.limits.maxDurationSec / 60)} min · {agentCc.limits.maxTurns} turnos · {agentCc.limits.fallback === 'api' ? 'alternativa por API autorizada' : 'sin alternativa facturable'}</KV>
+                  <KV k="Uso con Claude Code (suscripción)">{agentCc.usage.runs} ejecuciones · {agentCc.usage.tokensIn + agentCc.usage.tokensOut} tokens · {Math.round(agentCc.usage.durationMs / 1000)} s · equivalente estimado {fmtUsd(agentCc.usage.apiEquivalentUsd)} (no es un cargo)</KV>
+                  <KV k="Gasto en la API (USD)">{stats ? fmtUsd(stats.costUsd) : '—'}</KV>
+                  {agentCc.consoles.length > 0 && <KV k="Consolas">{agentCc.consoles.map(c => `${c.name}: ${c.expired ? 'caducada' : c.connected ? 'conectada' : 'desconectada'}`).join(' · ')}</KV>}
+                  {agentCc.runs.filter(r => r.error).slice(0, 3).map(r => <Notice key={r.id} kind={r.status === 'limit' ? 'warn' : 'err'}><strong>{r.status === 'limit' ? 'Límite de uso' : r.status === 'interrupted' ? 'Interrumpida' : r.status === 'cancelled' ? 'Cancelada' : 'Error'}</strong> · {new Date(r.startedAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })} · {r.error!.slice(0, 220)} Lo hecho en el proceso se conserva; «Continuar» en el proceso la retoma.</Notice>)}
+                </div>}
               </div></section>
 
             <section className="card"><div className="card-h"><div className="h3">Modelos alternativos autorizados</div><span className="small muted">{fbCount} autorizado{fbCount === 1 ? '' : 's'}</span></div>

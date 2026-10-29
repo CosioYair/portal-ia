@@ -352,6 +352,14 @@ export function claudeCodeRunsRepo(slug: string) {
     get(id: string): ClaudeCodeRun | undefined { const r = db.prepare(`SELECT * FROM claude_code_runs WHERE id = ?`).get(id); return r ? map(r) : undefined; },
     recent(limit = 20): ClaudeCodeRun[] { return (db.prepare(`SELECT * FROM claude_code_runs ORDER BY started_at DESC LIMIT ?`).all(limit) as any[]).map(map); },
     byStep(stepId: string): ClaudeCodeRun[] { return (db.prepare(`SELECT * FROM claude_code_runs WHERE step_id = ? ORDER BY started_at`).all(stepId) as any[]).map(map); },
+    byAgent(agentId: string, limit = 10): ClaudeCodeRun[] { return (db.prepare(`SELECT * FROM claude_code_runs WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?`).all(agentId, limit) as any[]).map(map); },
+    /** Uso total de un agente con Claude Code (suscripción o consola): aparte de su gasto en USD de la API. */
+    usageByAgent(agentId: string): ClaudeCodeUsage {
+      const r = db.prepare(`SELECT COUNT(*) AS runs, SUM(CASE WHEN status IN ('failed','interrupted') THEN 1 ELSE 0 END) AS failed, SUM(CASE WHEN status = 'limit' THEN 1 ELSE 0 END) AS limited,
+        COALESCE(SUM(duration_ms),0) AS dur, COALESCE(SUM(tokens_in),0) AS tin, COALESCE(SUM(tokens_out),0) AS tout, COALESCE(SUM(api_equivalent_usd),0) AS eq, MAX(started_at) AS last
+        FROM claude_code_runs WHERE agent_id = ?`).get(agentId) as any;
+      return { runs: r.runs ?? 0, failed: r.failed ?? 0, limited: r.limited ?? 0, durationMs: r.dur, tokensIn: r.tin, tokensOut: r.tout, apiEquivalentUsd: r.eq, lastRunAt: r.last ?? null };
+    },
     usageToday(): ClaudeCodeUsage {
       const day = new Date().toISOString().slice(0, 10);
       const r = db.prepare(`SELECT COUNT(*) AS runs, SUM(CASE WHEN status IN ('failed','interrupted') THEN 1 ELSE 0 END) AS failed, SUM(CASE WHEN status = 'limit' THEN 1 ELSE 0 END) AS limited,

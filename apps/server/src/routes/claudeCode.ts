@@ -151,6 +151,24 @@ export async function claudeCodeRoutes(app: FastifyInstance) {
     return updated;
   });
 
+  // Vista por agente: su backend, si su proyecto está autorizado, los límites del conector, su uso con Claude Code (aparte
+  // del gasto en USD de la API) y sus últimas ejecuciones con errores e interrupciones. Solo lectura.
+  app.get('/api/workspaces/:slug/agents/:id/claude-code', async (req, reply) => {
+    const { slug, id } = req.params as { slug: string; id: string };
+    if (!guard(slug, reply)) return;
+    const agent = agentsRepo(slug).get(id);
+    if (!agent) return reply.code(404).send({ error: 'Agente no encontrado' });
+    const s = getClaudeCodeSettings(); const runs = claudeCodeRunsRepo(slug);
+    const authorized = s.projects[slug] ?? [];
+    return {
+      backend: agentBackend(agent), status: claudeCodeStatus(),
+      projects: agent.projectId ? [{ id: agent.projectId, authorized: authorized.includes(agent.projectId) }] : projectsRepo(slug).list().map(p => ({ id: p.id, authorized: authorized.includes(p.id) })),
+      limits: { maxConcurrent: s.maxConcurrent, maxDurationSec: s.maxDurationSec, maxTurns: s.maxTurns, repoRead: s.repoRead, fallback: s.fallback },
+      usage: runs.usageByAgent(id), runs: runs.byAgent(id, 10),
+      consoles: claudeCodeWorkersRepo.list(slug).map(workerView).filter(w => !w.revokedAt && w.agentIds.includes(id)).map(w => ({ id: w.id, name: w.name, connected: w.connected, expired: w.expired }))
+    };
+  });
+
   app.post('/api/workspaces/:slug/claude-code/workers', async (req, reply) => {
     const { slug } = req.params as { slug: string };
     if (!guard(slug, reply)) return;

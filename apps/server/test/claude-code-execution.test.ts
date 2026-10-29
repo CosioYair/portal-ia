@@ -230,6 +230,11 @@ test('8 · tarea autorizada de punta a punta: Desarrollador y QA en Claude Code;
   assert.ok(Math.abs(done.spentUsd - plan.costUsd) < 1e-9, 'el gasto del proceso es solo el de la API');
   const view = (await inject('GET', `${W}/claude-code`)).json();
   assert.equal(view.usageToday.runs >= 2, true); assert.ok(view.usageToday.apiEquivalentUsd > 0);
+  // Vista por agente: su participación real con Claude Code, aparte de su gasto en la API
+  const perAgent = (await inject('GET', `${W}/agents/${devId}/claude-code`)).json();
+  assert.equal(perAgent.backend, 'claude-code'); assert.ok(perAgent.usage.runs >= 1 && perAgent.runs.every((r: any) => r.agentId === devId));
+  assert.deepEqual(perAgent.projects, [{ id: project.id, authorized: true }]); assert.equal(perAgent.limits.fallback, 'none');
+  assert.equal((await inject('GET', `${W}/agents/no-existe/claude-code`)).statusCode, 404);
   assert.ok(!done.result!.merged, 'nunca integra solo');
 });
 
