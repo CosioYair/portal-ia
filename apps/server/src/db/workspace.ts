@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { config } from '../config.ts';
 import { defaultCapabilitiesFor } from '@portal-ia/domain';
-import type { DelegationResult, Agent, AgentConfig, AgentStatus, AgentTemplate, BacklogItem, BacklogStatus, ContextItem, ExecutionResult, KnowledgeDoc, Objective, Process, ProcessStatus, ProcessStep, Project, Repository, Scope, StepStatus, UsageToday } from '@portal-ia/domain';
+import type { ClaudeCodeRun, ClaudeCodeRunStatus, ClaudeCodeUsage, DelegationResult, Agent, AgentConfig, AgentStatus, AgentTemplate, BacklogItem, BacklogStatus, ContextItem, ExecutionResult, KnowledgeDoc, Objective, Process, ProcessStatus, ProcessStep, Project, Repository, Scope, StepStatus, UsageToday } from '@portal-ia/domain';
 
 /**
  * Una base SQLite por espacio de trabajo: data/workspaces/<slug>/<slug>.sqlite
@@ -97,6 +97,17 @@ export function workspaceDb(slug: string): DatabaseSync {
   const pcols2 = (db.prepare(`PRAGMA table_info(processes)`).all() as any[]).map(c => c.name);
   if (!pcols2.includes('archived_at')) db.exec(`ALTER TABLE processes ADD COLUMN archived_at TEXT`);
   if (!pcols2.includes('archive_id')) db.exec(`ALTER TABLE processes ADD COLUMN archive_id TEXT`);
+  // v0.13 · Conector Claude Code: origen de ejecución de cada paso y registro de ejecuciones con suscripción (sin USD).
+  if (!scols.includes('backend')) db.exec(`ALTER TABLE process_steps ADD COLUMN backend TEXT`);
+  db.exec(`
+  CREATE TABLE IF NOT EXISTS claude_code_runs (
+    id TEXT PRIMARY KEY, mode TEXT NOT NULL, project_id TEXT NOT NULL, process_id TEXT, step_id TEXT, agent_id TEXT NOT NULL, agent_name TEXT NOT NULL,
+    model TEXT NOT NULL, status TEXT NOT NULL, billing TEXT NOT NULL, auth_method TEXT, subscription_type TEXT, started_at TEXT NOT NULL, finished_at TEXT,
+    duration_ms INTEGER, num_turns INTEGER, tokens_in INTEGER, tokens_out INTEGER, api_equivalent_usd REAL, error TEXT, rate_limit_json TEXT, progress TEXT
+  );
+  `);
+  // Ejecuciones que quedaron «en curso» al apagarse el servidor: la CLI ya no existe (murió con él) → interrumpidas.
+  db.prepare(`UPDATE claude_code_runs SET status = 'interrupted', finished_at = ?, error = COALESCE(error, 'El Portal se reinició durante la ejecución; lo hecho en el proceso se conserva.') WHERE status IN ('queued','running')`).run(now());
   open.set(slug, db);
   return db;
 }
@@ -215,7 +226,7 @@ export function knowledgeRepo(slug: string) {
 
 export function processesRepo(slug: string) {
   const db = workspaceDb(slug);
-  const mapStep = (r: any): ProcessStep => ({ id: r.id, processId: r.process_id, position: r.position, agentId: r.agent_id, agentName: r.agent_name, title: r.title, status: r.status, model: r.model, inputTokens: r.tokens_in, outputTokens: r.tokens_out, costUsd: r.cost_usd, outputMd: r.output_md, error: r.error, startedAt: r.started_at, finishedAt: r.finished_at, role: r.role ?? null, reason: r.reason ?? null, lessonsUsed: r.lessons_used ? JSON.parse(r.lessons_used) : [], live: r.live_json ? JSON.parse(r.live_json) : null, unconfirmedUsd: r.unconfirmed_usd ?? 0 });
+  const mapStep = (r: any): ProcessStep => ({ id: r.id, processId: r.process_id, position: r.position, agentId: r.agent_id, agentName: r.agent_name, title: r.title, status: r.status, model: r.model, inputTokens: r.tokens_in, outputTokens: r.tokens_out, costUsd: r.cost_usd, outputMd: r.output_md, error: r.error, startedAt: r.started_at, finishedAt: r.finished_at, role: r.role ?? null, reason: r.reason ?? null, lessonsUsed: r.lessons_used ? JSON.parse(r.lessons_used) : [], live: r.live_json ? JSON.parse(r.live_json) : null, unconfirmedUsd: r.unconfirmed_usd ?? 0, backend: r.backend ?? null });
   const mapProc = (r: any): Process => ({ id: r.id, projectId: r.project_id, kind: r.kind, title: r.title, status: r.status, budgetUsd: r.budget_usd, estimatedUsd: r.estimated_usd, spentUsd: r.spent_usd, inputTokens: r.tokens_in, outputTokens: r.tokens_out, createdAt: r.created_at, authorizedAt: r.authorized_at, startedAt: r.started_at, finishedAt: r.finished_at, error: r.error,
     result: r.result_json ? JSON.parse(r.result_json) : null, delegation: r.delegation_json ? JSON.parse(r.delegation_json) : null, backlogItemId: r.backlog_item_id ?? null, unconfirmedUsd: r.unconfirmed_usd ?? 0,
     archivedAt: r.archived_at ?? null, archiveId: r.archive_id ?? null,
@@ -274,9 +285,9 @@ export function processesRepo(slug: string) {
     },
     // Una continuación reutiliza el paso: el final y el error de la llamada anterior no pueden seguir visibles mientras corre.
     stepStart(stepId: string) { db.prepare(`UPDATE process_steps SET status = 'running', started_at = ?, finished_at = NULL, error = NULL WHERE id = ?`).run(now(), stepId); },
-    stepFinish(stepId: string, status: StepStatus, data: { tokensIn?: number; tokensOut?: number; cost?: number; outputMd?: string | null; error?: string | null }) {
-      db.prepare(`UPDATE process_steps SET status = ?, tokens_in = ?, tokens_out = ?, cost_usd = ?, output_md = ?, error = ?, finished_at = ?, live_json = NULL WHERE id = ?`)
-        .run(status, data.tokensIn ?? 0, data.tokensOut ?? 0, data.cost ?? 0, data.outputMd ?? null, data.error ?? null, now(), stepId);
+    stepFinish(stepId: string, status: StepStatus, data: { tokensIn?: number; tokensOut?: number; cost?: number; outputMd?: string | null; error?: string | null; backend?: string | null }) {
+      db.prepare(`UPDATE process_steps SET status = ?, tokens_in = ?, tokens_out = ?, cost_usd = ?, output_md = ?, error = ?, finished_at = ?, live_json = NULL, backend = COALESCE(?, backend) WHERE id = ?`)
+        .run(status, data.tokensIn ?? 0, data.tokensOut ?? 0, data.cost ?? 0, data.outputMd ?? null, data.error ?? null, now(), data.backend ?? null, stepId);
     },
     logExecution(e: { projectId: string; agentId: string; kind: string; status: string; tokensIn: number; tokensOut: number; cost: number; startedAt: string }) {
       db.prepare(`INSERT INTO execution_history (id, project_id, agent_id, kind, status, tokens_in, tokens_out, cost_usd, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -314,5 +325,39 @@ export function backlogRepo(slug: string) {
     },
     setPosition(id: string, position: number) { db.prepare(`UPDATE backlog_items SET position = ?, updated_at = ? WHERE id = ?`).run(position, now(), id); },
     delete(id: string) { db.prepare(`DELETE FROM backlog_items WHERE id = ?`).run(id); }
+  };
+}
+
+/** Ejecuciones del conector Claude Code (suscripción o consola): uso aparte del gasto en USD de la API. */
+export function claudeCodeRunsRepo(slug: string) {
+  const db = workspaceDb(slug);
+  const map = (r: any): ClaudeCodeRun => ({
+    id: r.id, mode: r.mode, projectId: r.project_id, processId: r.process_id, stepId: r.step_id, agentId: r.agent_id, agentName: r.agent_name, model: r.model,
+    status: r.status, billing: r.billing, authMethod: r.auth_method, subscriptionType: r.subscription_type, startedAt: r.started_at, finishedAt: r.finished_at,
+    durationMs: r.duration_ms, numTurns: r.num_turns, tokensIn: r.tokens_in, tokensOut: r.tokens_out, apiEquivalentUsd: r.api_equivalent_usd, error: r.error,
+    rateLimit: r.rate_limit_json ? JSON.parse(r.rate_limit_json) : null, progress: r.progress
+  });
+  return {
+    start(r: Pick<ClaudeCodeRun, 'mode' | 'projectId' | 'processId' | 'stepId' | 'agentId' | 'agentName' | 'model' | 'billing' | 'authMethod' | 'subscriptionType'>): ClaudeCodeRun {
+      const id = uuid();
+      db.prepare(`INSERT INTO claude_code_runs (id, mode, project_id, process_id, step_id, agent_id, agent_name, model, status, billing, auth_method, subscription_type, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)`)
+        .run(id, r.mode, r.projectId, r.processId, r.stepId, r.agentId, r.agentName, r.model, r.billing, r.authMethod, r.subscriptionType, now());
+      return this.get(id)!;
+    },
+    progress(id: string, text: string) { db.prepare(`UPDATE claude_code_runs SET progress = ? WHERE id = ?`).run(text.slice(0, 500), id); },
+    finish(id: string, status: ClaudeCodeRunStatus, d: { durationMs?: number | null; numTurns?: number | null; tokensIn?: number | null; tokensOut?: number | null; apiEquivalentUsd?: number | null; error?: string | null; rateLimit?: ClaudeCodeRun['rateLimit'] }) {
+      db.prepare(`UPDATE claude_code_runs SET status = ?, finished_at = ?, duration_ms = ?, num_turns = ?, tokens_in = ?, tokens_out = ?, api_equivalent_usd = ?, error = ?, rate_limit_json = ? WHERE id = ?`)
+        .run(status, now(), d.durationMs ?? null, d.numTurns ?? null, d.tokensIn ?? null, d.tokensOut ?? null, d.apiEquivalentUsd ?? null, d.error ?? null, d.rateLimit ? JSON.stringify(d.rateLimit) : null, id);
+    },
+    get(id: string): ClaudeCodeRun | undefined { const r = db.prepare(`SELECT * FROM claude_code_runs WHERE id = ?`).get(id); return r ? map(r) : undefined; },
+    recent(limit = 20): ClaudeCodeRun[] { return (db.prepare(`SELECT * FROM claude_code_runs ORDER BY started_at DESC LIMIT ?`).all(limit) as any[]).map(map); },
+    byStep(stepId: string): ClaudeCodeRun[] { return (db.prepare(`SELECT * FROM claude_code_runs WHERE step_id = ? ORDER BY started_at`).all(stepId) as any[]).map(map); },
+    usageToday(): ClaudeCodeUsage {
+      const day = new Date().toISOString().slice(0, 10);
+      const r = db.prepare(`SELECT COUNT(*) AS runs, SUM(CASE WHEN status IN ('failed','interrupted') THEN 1 ELSE 0 END) AS failed, SUM(CASE WHEN status = 'limit' THEN 1 ELSE 0 END) AS limited,
+        COALESCE(SUM(duration_ms),0) AS dur, COALESCE(SUM(tokens_in),0) AS tin, COALESCE(SUM(tokens_out),0) AS tout, COALESCE(SUM(api_equivalent_usd),0) AS eq, MAX(started_at) AS last
+        FROM claude_code_runs WHERE substr(started_at,1,10) = ?`).get(day) as any;
+      return { runs: r.runs ?? 0, failed: r.failed ?? 0, limited: r.limited ?? 0, durationMs: r.dur, tokensIn: r.tin, tokensOut: r.tout, apiEquivalentUsd: r.eq, lastRunAt: r.last ?? null };
+    }
   };
 }

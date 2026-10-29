@@ -107,3 +107,28 @@ export const settingsRepo = {
   get(key: string): string | null { const r = platform.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as any; return r ? r.value : null; },
   set(key: string, value: string) { platform.prepare(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, value); }
 };
+
+// v0.13 · Conector Claude Code: consolas autorizadas (puente MCP). El token se guarda solo como hash SHA-256.
+platform.exec(`
+CREATE TABLE IF NOT EXISTS claude_code_workers (
+  id TEXT PRIMARY KEY, workspace_slug TEXT NOT NULL, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, agent_ids_json TEXT NOT NULL,
+  created_at TEXT NOT NULL, revoked_at TEXT, last_seen_at TEXT, client_json TEXT
+);
+`);
+
+export interface ClaudeCodeWorkerRow {
+  id: string; workspace_slug: string; name: string; token_hash: string; agent_ids_json: string;
+  created_at: string; revoked_at: string | null; last_seen_at: string | null; client_json: string | null;
+}
+
+export const claudeCodeWorkersRepo = {
+  create(w: { id: string; workspaceSlug: string; name: string; tokenHash: string; agentIds: string[] }) {
+    platform.prepare(`INSERT INTO claude_code_workers (id, workspace_slug, name, token_hash, agent_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(w.id, w.workspaceSlug, w.name, w.tokenHash, JSON.stringify(w.agentIds), now());
+  },
+  byHash(hash: string): ClaudeCodeWorkerRow | undefined { return platform.prepare(`SELECT * FROM claude_code_workers WHERE token_hash = ?`).get(hash) as ClaudeCodeWorkerRow | undefined; },
+  get(id: string): ClaudeCodeWorkerRow | undefined { return platform.prepare(`SELECT * FROM claude_code_workers WHERE id = ?`).get(id) as ClaudeCodeWorkerRow | undefined; },
+  list(slug: string): ClaudeCodeWorkerRow[] { return platform.prepare(`SELECT * FROM claude_code_workers WHERE workspace_slug = ? ORDER BY created_at DESC`).all(slug) as unknown as ClaudeCodeWorkerRow[]; },
+  revoke(id: string) { platform.prepare(`UPDATE claude_code_workers SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`).run(now(), id); },
+  seen(id: string, client: unknown) { platform.prepare(`UPDATE claude_code_workers SET last_seen_at = ?, client_json = COALESCE(?, client_json) WHERE id = ?`).run(now(), client === undefined ? null : JSON.stringify(client), id); }
+};

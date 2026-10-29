@@ -1,5 +1,6 @@
 // Tipos de dominio compartidos entre backend y frontend.
 // Todo texto visible al usuario vive en el frontend; aquí solo identificadores y estructuras.
+import type { ExecutionBackend } from './claude-code.ts';
 
 export type ProviderId = 'anthropic' | 'openai';
 
@@ -39,7 +40,11 @@ export type ProviderErrorCode = 'invalid_key' | 'forbidden' | 'rate_limited' | '
   /** El proveedor no respondió dentro del plazo de la llamada (se abortó). */
   | 'timeout'
   /** La llamada se abortó por decisión del propietario (cancelar). */
-  | 'cancelled';
+  | 'cancelled'
+  /** Claude Code: la suscripción alcanzó su límite de uso (no se cambia solo a otro origen facturable). */
+  | 'usage_limit'
+  /** Claude Code: el backend no está disponible o no está autorizado (desactivado, sin sesión, conflicto de facturación, consola desconectada). */
+  | 'backend_unavailable';
 
 export interface ProviderError {
   code: ProviderErrorCode;
@@ -118,6 +123,8 @@ export interface AgentConfig {
   perTaskAuthUsd: number;
   /** Capacidades (M3). */
   capabilities?: Capability[];
+  /** Backend de ejecución (conector Claude Code). Sin valor = API del proveedor. Se cambia con autorización explícita. */
+  backend?: ExecutionBackend;
 }
 
 export interface Agent {
@@ -217,6 +224,8 @@ export interface ProcessStep {
   live?: LiveCall | null;
   /** Costo posiblemente facturado pero NO confirmado por el proveedor (llamada abortada, caída de red, reinicio). Estimación. */
   unconfirmedUsd?: number;
+  /** Origen de ejecución de la última llamada del paso (p. ej. «Claude Code — Suscripción»). Sin valor = API del proveedor. */
+  backend?: string | null;
 }
 
 /**
@@ -625,7 +634,9 @@ export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' |
   /** El plan no se puede ejecutar por partes (sin entregables, demasiados o rutas no permitidas) · QA y el equipo discrepan tras un intercambio con evidencia. */
   | 'plan' | 'disagreement'
   /** Hay un commit en el worktree que el equipo no hizo (registrarlo), o una corrección externa ya verificada espera a QA. */
-  | 'external';
+  | 'external'
+  /** Claude Code: la suscripción alcanzó su límite de uso; se espera a la renovación o a otra autorización del propietario. */
+  | 'subscription_limit';
 export type PipelinePhase = 'implementing' | 'recovering' | 'repairing' | 'applying' | 'verifying' | 'installing' | 'qa' | 'correcting' | 'finished';
 export interface PipelineStatus {
   config: PipelineConfig;
