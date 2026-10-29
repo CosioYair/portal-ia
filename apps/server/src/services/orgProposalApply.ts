@@ -78,14 +78,16 @@ function departmentAgents(slug: string, ev: OrgEvaluation, label: string): Agent
   return scopeAgents(slug, ev).filter(a => !isRetired(a.template) && norm(departmentOf(a.template) ?? '') === q);
 }
 
-function resolveKey(all: Agent[], ref: string): string {
+/** Jefe válido dentro del ámbito: agentes de empresa o del mismo proyecto (projectId) que el subordinado. */
+function resolveKey(all: Agent[], ref: string, projectId: string | null): string {
   const q = norm(ref);
   if (q === 'owner' || q === 'propietario') return 'owner';
-  const active = all.filter(a => !isRetired(a.template));
-  const byKey = active.find(a => norm(a.key) === q); if (byKey) return byKey.key;
-  const byName = active.filter(a => norm(a.config.name) === q);
-  if (byName.length === 1) return byName[0].key;
-  throw httpError(422, `«${ref}» no es un agente activo al que se pueda reportar.`, 'invalid_spec');
+  const active = all.filter(a => !isRetired(a.template) && (a.scope === 'workspace' || (projectId !== null && a.projectId === projectId)));
+  const byKey = active.filter(a => norm(a.key) === q);
+  const hits = byKey.length ? byKey : active.filter(a => norm(a.config.name) === q);
+  if (hits.length === 1) return hits[0].key;
+  if (hits.length > 1) throw httpError(422, `«${ref}» es ambiguo: coincide con ${hits.map(a => `${a.config.name} (${a.key})`).join(', ')}.`, 'invalid_spec');
+  throw httpError(422, `«${ref}» no es un agente activo del ámbito al que se pueda reportar.`, 'invalid_spec');
 }
 
 function toolsFor(list: string[], caps: readonly string[], warnings: string[]): Record<string, boolean> {
@@ -123,7 +125,7 @@ function createOp(all: Agent[], ev: OrgEvaluation, spec: OrgProposalSpec, depart
   const caps = validCaps(spec.capabilities); const capabilities: Capability[] = caps.length ? caps : ['consultar'];
   const tools = spec.tools ? toolsFor(spec.tools, capabilities, warnings) : { read_repo: true };
   const coordinator = ev.projectId ? all.find(a => a.key === 'pj-coordinador' && a.projectId === ev.projectId && !isRetired(a.template)) : undefined;
-  const reportsTo = spec.reportsTo ? resolveKey(all, spec.reportsTo) : (coordinator?.key ?? 'ws-gestor');
+  const reportsTo = spec.reportsTo ? resolveKey(all, spec.reportsTo, ev.projectId ?? null) : (coordinator?.key ?? 'ws-gestor');
   const config: AgentConfig = {
     ...gestor.config, name: spec.name, specialization: spec.specialization || spec.role || spec.name,
     responsibilities: spec.responsibilities?.length ? spec.responsibilities : [spec.specialization || spec.name],
@@ -153,7 +155,7 @@ export function planProposal(slug: string, ev: OrgEvaluation, p: OrgProposal): P
     if (a.status === 'active') throw httpError(409, `«${a.config.name}» participa ahora en un proceso: espera a que termine.`, 'agent_busy');
     const s: OrgProposalSpec = { ...spec };
     if (s.reportsTo) {
-      const k = resolveKey(all, s.reportsTo);
+      const k = resolveKey(all, s.reportsTo, a.projectId ?? null);
       if (k === a.key) { if (identity) throw httpError(422, 'Un agente no puede reportarse a sí mismo.', 'invalid_spec'); delete s.reportsTo; }
       else s.reportsTo = k;
     }
@@ -218,14 +220,16 @@ function execute(slug: string, plan: Plan): OrgChange[] {
     if (!before.has(id)) { const a = agents.get(id); if (a) before.set(id, snapOf(a)); }
     const prev = opOf.get(id); if (!prev || RANK[op] > RANK[prev]) opOf.set(id, op);
   };
+  // Jefe dentro del ámbito: primero el del mismo proyecto, luego el de empresa (nunca el de otro proyecto).
   const findBoss = (key: string, projectId: string | null) => {
     const all = agents.list();
-    return all.find(a => a.key === key && a.projectId === projectId) ?? all.find(a => a.key === key && a.scope === 'workspace') ?? all.find(a => a.key === key);
+    return all.find(a => a.key === key && projectId !== null && a.projectId === projectId) ?? all.find(a => a.key === key && a.scope === 'workspace');
   };
+  const retiringIds = new Set(plan.ops.flatMap(o => (o.kind === 'retire' ? [o.agentId] : [])));
   for (const op of plan.ops) {
     if (op.kind === 'create') {
       // createAgent añade el nuevo a «supervisa» de su jefe: foto previa del jefe ANTES de crear.
-      if (op.input.reportsTo !== 'owner') { const boss = agents.list().find(a => a.key === op.input.reportsTo); if (boss) touch(boss.id, 'update'); }
+      if (op.input.reportsTo !== 'owner') { const boss = findBoss(op.input.reportsTo, op.input.scope === 'project' ? (op.input.projectId ?? null) : null); if (boss) touch(boss.id, 'update'); }
       const created = createAgent(slug, op.input);
       before.set(created.id, null); opOf.set(created.id, 'create');
       if (op.department) agents.updateTemplateMeta(created.id, withExtra(agents.get(created.id)!.template, { department: op.department }));
@@ -235,7 +239,40 @@ function execute(slug: string, plan: Plan): OrgChange[] {
     if (!cur) throw httpError(409, 'Un agente afectado cambió durante la aplicación.', 'conflict');
     if (op.kind === 'retire') {
       touch(cur.id, 'retire');
-      agents.updateTemplateMeta(cur.id, withExtra(cur.template, { retiredAt: now(), retiredBy: 'owner' }));
+      // Nuevo jefe de sus subordinados: el jefe del retirado, saltando a los que esta propuesta también retira.
+      let up: Agent = cur; let nb: Agent | undefined; let guard = 0;
+      while (up.template.reportsTo !== 'owner' && guard++ < 50) {
+        const b = findBoss(up.template.reportsTo, up.projectId ?? null);
+        if (!b || b.id === up.id) break;
+        if (!retiringIds.has(b.id) && !isRetired(b.template)) { nb = b; break; }
+        up = agents.get(b.id) ?? b;
+      }
+      const newBossKey = nb?.key ?? 'owner';
+      // El retirado sale de «supervisa» de su jefe directo.
+      if (cur.template.reportsTo !== 'owner') {
+        const old = findBoss(cur.template.reportsTo, cur.projectId ?? null);
+        if (old && old.id !== cur.id) {
+          const o = agents.get(old.id)!;
+          if (o.template.supervises.includes(cur.key)) {
+            touch(o.id, 'update');
+            agents.updateTemplateMeta(o.id, { ...o.template, supervises: o.template.supervises.filter(k => k !== cur.key) });
+          }
+        }
+      }
+      // Subordinados activos (que no se retiran aquí) pasan a reportar al nuevo jefe; foto previa para «Deshacer».
+      const subs = agents.list().filter(x => x.id !== cur.id && x.template.reportsTo === cur.key && !isRetired(x.template)
+        && !retiringIds.has(x.id) && findBoss(x.template.reportsTo, x.projectId ?? null)?.id === cur.id);
+      for (const sub of subs) {
+        touch(sub.id, 'update');
+        agents.updateTemplateMeta(sub.id, { ...agents.get(sub.id)!.template, reportsTo: newBossKey });
+        if (nb) {
+          const n = agents.get(nb.id)!;
+          if (!n.template.supervises.includes(sub.key)) { touch(n.id, 'update'); agents.updateTemplateMeta(n.id, { ...n.template, supervises: [...n.template.supervises, sub.key] }); }
+        }
+        plan.warnings.push(`${sub.config.name} pasa a reportar a ${nb ? nb.config.name : 'el propietario'} porque ${cur.config.name} se retira.`);
+      }
+      const fresh = agents.get(cur.id)!;
+      agents.updateTemplateMeta(cur.id, withExtra({ ...fresh.template, supervises: fresh.template.supervises.filter(k => !subs.some(s => s.key === k)) }, { retiredAt: now(), retiredBy: 'owner' }));
       continue;
     }
     touch(cur.id, 'update');
