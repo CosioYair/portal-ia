@@ -96,3 +96,82 @@ test('el recorrido de la historia no presenta cancelaciones como «fallan las pr
   assert.match(b.title, /Falla la preparación de la prueba \(1\); 8 prueba\(s\) canceladas sin ejecutarse/); assert.match(b.details[0].text, /SQLite parameter 2/);
   assert.deepEqual(b.files, ['apps/server/test/org-evaluation.test.ts']);
 });
+
+// ---------------------------------------------------------------- HU-159 · iteración 3 (bloqueo por turnos agotados)
+
+// Salida REAL de «test» en 4e31b6b: active-agents.test.ts falla al cargarse (runBootstrap sin proveedor) y ninguna de sus
+// pruebas llega a ejecutarse. Antes la fila del archivo se ignoraba y el fallo no tenía causa.
+const LOAD = `TAP version 13
+# /work/apps/server/src/routes/bootstrap.ts:25
+#   if (!connected.length) throw Object.assign(new Error('Conecta y verifica un proveedor de IA antes de inicializar el espacio interno.'), { statusCode: 409 });
+#                                              ^
+# Error: Conecta y verifica un proveedor de IA antes de inicializar el espacio interno.
+#     at runBootstrap (/work/apps/server/src/routes/bootstrap.ts:25:46)
+#     at <anonymous> (/work/apps/server/test/active-agents.test.ts:25:1) {
+#   statusCode: 409
+# }
+# Node.js v22.23.4
+# Subtest: test/active-agents.test.ts
+not ok 1 - test/active-agents.test.ts
+  ---
+  duration_ms: 1368.671163
+  type: 'test'
+  location: '/work/apps/server/test/active-agents.test.ts:1:1'
+  failureType: 'testCodeFailure'
+  exitCode: 1
+  signal: ~
+  error: 'test failed'
+  code: 'ERR_TEST_FAILURE'
+  ...
+# Subtest: A · otra prueba
+ok 2 - A · otra prueba
+  ---
+  duration_ms: 5.3
+  type: 'test'
+  ...
+# tests 314
+# pass 304
+# fail 1
+# cancelled 0`;
+
+test('un archivo de prueba que falla AL CARGARSE es una causa con su error y su pila (antes: fallo sin causa)', () => {
+  const f = failingTests(run(LOAD));
+  assert.equal(f.length, 1); assert.equal(f[0].kind, 'load');
+  assert.match(f[0].name, /test\/active-agents\.test\.ts \(el archivo falla al cargarse/);
+  assert.match(f[0].message, /Error: Conecta y verifica un proveedor de IA/); assert.match(f[0].message, /apps\/server\/src\/routes\/bootstrap\.ts:25/);
+  assert.equal(f[0].file, 'apps/server/test/active-agents.test.ts'); assert.equal(f[0].line, 25);
+  const s = testRunSummary(run(LOAD));
+  assert.equal(s.onlyCancellations, false); assert.equal(s.causes.length, 1);
+  // Un archivo cuyas pruebas fallan (subtestsFailed) sigue sin ser una causa: lo son sus pruebas.
+  assert.equal(failingTests(run("TAP version 13\nnot ok 1 - test/x.test.ts\n  ---\n  failureType: 'subtestsFailed'\n  error: '1 subtest failed'\n  ...")).filter(x => x.kind === 'load').length, 0);
+});
+
+test('una corrección pendiente cuyos archivos ya cambió otra de su ronda es obsoleta (HU-159 «Corrección 2.2»): se sustituye sin IA', async () => {
+  const { staleCorrectionUnits } = await import('../src/services/failureDiagnosis.ts');
+  const unit = (id: string, status: string, files: string[], applied: string[] = [], finding = 'test falla: línea 179: falla «f · fusionar»') => ({ id, kind: 'correction', source: 'verification', status, attempts: status === 'done' ? 1 : 0, round: 1, files, applied, findings: [{ severity: 'alta', text: finding, file: files[0], evidence: null }] });
+  const base = { applied: { commit: 'c1', branch: 'b', files: [], appliedAt: '' }, verifications: [{ command: 'test', exitCode: 1, output: "not ok 1 - f\n  ---\n  failureType: 'testCodeFailure'\n  error: 'x'\n  ...", startedAt: '', finishedAt: '', durationMs: 1 }] };
+  const r = (units: any[]) => ({ ...base, manifest: { units, deliverables: [], rounds: [] } }) as any;
+  // r2-1 aplicó org-proposal-apply.test.ts (el archivo de r2-2): r2-2 ya no vale.
+  const hu159 = r([unit('r2-1', 'done', ['apps/server/test/org-evaluation.test.ts'], ['apps/server/src/services/orgProposalApply.ts', 'apps/server/test/org-proposal-apply.test.ts']), unit('r2-2', 'pending', ['apps/server/test/org-proposal-apply.test.ts'])]);
+  assert.deepEqual(staleCorrectionUnits(hu159), [{ id: 'r2-2', reason: 'overlap', files: ['apps/server/test/org-proposal-apply.test.ts'] }]);
+  // Archivos distintos: la evidencia sigue valiendo y la corrección se ejecuta.
+  assert.deepEqual(staleCorrectionUnits(r([unit('r2-1', 'done', ['a.ts'], ['a.ts']), unit('r2-2', 'pending', ['b.ts'])])), []);
+  // Con un intento ya hecho no se sustituye (no se tira trabajo pagado).
+  const tried = r([unit('r2-1', 'done', ['a.ts'], ['b.ts']), { ...unit('r2-2', 'pending', ['b.ts']), attempts: 1 }]);
+  assert.deepEqual(staleCorrectionUnits(tried), []);
+});
+
+test('HU-159 tal como está guardada (provider_error «máximo de turnos» + Corrección 2.2 obsoleta): se presenta como turnos agotados y la acción vuelve a verificar sin IA, nunca «repetir la llamada»', async () => {
+  const { buildStoryFlow } = await import('../src/services/storyFlow.ts');
+  const t = new Date().toISOString();
+  const unit = (id: string, status: string, files: string[], applied: string[] = []) => ({ id, kind: 'correction', title: id, source: 'verification', status, attempts: status === 'done' ? 1 : 0, round: 1, files, applied, findings: [{ severity: 'alta', text: 'test falla: línea 179', file: files[0], evidence: null }], agentName: 'Dev', stepIds: [] });
+  const p: any = { id: 'p', projectId: 'x', kind: 'story_execution', title: 'HU-159', status: 'done', budgetUsd: 16, estimatedUsd: 1, spentUsd: 0, inputTokens: 0, outputTokens: 0, createdAt: t, authorizedAt: t, startedAt: t, finishedAt: t, error: null, steps: [], backlogItemId: 'i',
+    result: { plan: null, implementationSummary: 'x', changes: [{ path: 'a.ts', action: 'modify', content: '', diff: '', before: 1, after: 1 }], verifyCommands: [], review: null, applied: { branch: 'portal-ia/hu-159', commit: '4e31b6b', files: ['a.ts'], appliedAt: t, worktree: '/wt' },
+      verifications: [{ command: 'test', exitCode: 1, output: "not ok 1 - f\n  ---\n  failureType: 'testCodeFailure'\n  error: 'x'\n  ...", startedAt: t, finishedAt: t, durationMs: 1, isolation: 'docker' }],
+      manifest: { units: [unit('r2-1', 'done', ['org-evaluation.test.ts'], ['org-proposal-apply.test.ts']), unit('r2-2', 'pending', ['org-proposal-apply.test.ts'])], deliverables: [], rounds: [] },
+      pipeline: { config: { autoApply: true, autoVerify: true, commands: ['typecheck', 'test', 'build'], maxCorrections: 5, maxOutputRepairs: 1, maxIdenticalFailures: 3, maxDurationMin: 120, maxConsultations: 2, maxProviderRetries: 2 }, state: 'paused', phase: 'finished', pauseKind: 'provider_error', failureClass: 'PROVIDER_CONNECTION_ERROR', reason: 'No se pudo completar la llamada al proveedor tras los reintentos permitidos: Claude Code alcanzó el máximo de turnos autorizado (9) sin terminar la respuesta. Lo hecho se conserva; «Continuar» la repite.', events: [], outputRepairs: 0, corrections: 1, failures: [], lastAssessment: null, lastQaCommit: null, startedAt: t, finishedAt: t } } };
+  const f = buildStoryFlow(p, { isPortalRepo: true, sandbox: 'docker' });
+  assert.match(f.issue!.title, /Claude Code agotó sus turnos sin terminar \(no es un error de conexión\)/);
+  assert.ok(!f.actions.some(a => /Repetir la llamada/.test(a.label)), 'nunca se ofrece repetir el mismo encargo');
+  assert.equal(f.actions[0].label, 'Volver a verificar sin IA y corregir solo lo que falle'); assert.match(f.actions[0].description, /otra de su ronda ya cambió org-proposal-apply\.test\.ts/);
+});

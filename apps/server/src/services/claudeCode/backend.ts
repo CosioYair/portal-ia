@@ -9,7 +9,7 @@ import { config, REPO_ROOT } from '../../config.ts';
 import { agentsRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } from '../../db/workspace.ts';
 import { repoRoot } from '../repoWrite.ts';
 import { connectedWorkersFor, registerJobTask, setProgressListener, submitTerminalTask } from './bridge.ts';
-import { BRIDGE_SCRIPT, ccError, runCliTask, type CliEvent } from './cli.ts';
+import { BRIDGE_SCRIPT, ccError, runCliTask, type CliEvent, type CliFailedUsage } from './cli.ts';
 export { BRIDGE_SCRIPT };
 import { cliCommandFor, findCli, lastDetection, verifiedDetection } from './detect.ts';
 import { getClaudeCodeSettings, projectAuthorized } from './settings.ts';
@@ -68,10 +68,13 @@ export function teamReadiness(slug: string, processId: string) {
   const cc = team.filter(t => t.backend !== 'api');
   // Qué se retomará exactamente al continuar (para decidirlo ANTES de cualquier llamada).
   const stale = staleCorrectionUnits(proc.result);
-  const pendingUnit = proc.result?.manifest?.units.find(u => (u.status === 'pending' || u.status === 'running') && !stale.includes(u.id));
+  const staleIds = stale.map(s => s.id);
+  const pendingUnit = proc.result?.manifest?.units.find(u => (u.status === 'pending' || u.status === 'running') && !staleIds.includes(u.id));
   const pl = proc.result?.pipeline;
   const nextOperation = stale.length
-    ? 'Repetir «test» sin IA para ver la causa real (la corrección pendiente se planificó con pruebas canceladas, no con un fallo) y, con esa causa, una corrección dirigida'
+    ? stale.some(s => s.reason === 'overlap')
+      ? `Volver a verificar sin IA (la corrección pendiente quedó obsoleta: otra de su ronda ya cambió ${Array.from(new Set(stale.flatMap(s => s.files))).join(', ')}) y corregir solo lo que siga fallando`
+      : 'Repetir «test» sin IA para ver la causa real (la corrección pendiente se planificó con pruebas canceladas, no con un fallo) y, con esa causa, una corrección dirigida'
     : pendingUnit ? `${pendingUnit.title} — ${pendingUnit.agentName}` : pl && pl.state !== 'verified' ? 'Retomar el pipeline donde se detuvo (sin repetir lo hecho)' : null;
   return {
     processId, projectId: proc.projectId, projectName,
@@ -219,7 +222,9 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
       return { text: r.text, inputTokens: r.inputTokens, outputTokens: r.outputTokens, stopReason: r.stopReason, refusal: r.refusal, backendLabel: label, billing: det.billing, apiEquivalentUsd: r.apiEquivalentUsd, runId: run.id };
     } catch (e: any) {
       const code = e?.error?.code;
-      runs.finish(run.id, code === 'usage_limit' ? 'limit' : code === 'cancelled' ? 'cancelled' : 'failed', { durationMs: Date.now() - started, error: e?.message ?? String(e) });
+      // Turnos agotados (u otra ejecución sin respuesta útil): el uso que consumió la suscripción también se registra.
+      const u = e?.usage as CliFailedUsage | undefined;
+      runs.finish(run.id, code === 'usage_limit' ? 'limit' : code === 'cancelled' ? 'cancelled' : 'failed', { durationMs: u?.durationMs ?? Date.now() - started, error: e?.message ?? String(e), ...(u ? { numTurns: u.numTurns, tokensIn: u.inputTokens, tokensOut: u.outputTokens, apiEquivalentUsd: u.apiEquivalentUsd } : {}) });
       throw e;
     } finally { liveListeners.delete(run.id); job?.done(); releaseSlot(); }
   } finally { runningKeys.delete(key); }

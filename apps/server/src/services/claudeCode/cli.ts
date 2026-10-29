@@ -79,7 +79,9 @@ export function allowedSessionTool(name: string, structured: boolean): boolean {
 }
 
 /** Error del conector con el código del Portal (los reintentos automáticos solo existen para errores de red de la API). */
-export const ccError = (code: 'usage_limit' | 'backend_unavailable' | 'timeout' | 'cancelled' | 'provider_error' | 'invalid_key', message: string) => new ProviderRequestError({ code, message });
+export const ccError = (code: 'usage_limit' | 'backend_unavailable' | 'timeout' | 'cancelled' | 'provider_error' | 'invalid_key' | 'max_turns', message: string) => new ProviderRequestError({ code, message });
+/** Uso de una ejecución que terminó sin respuesta útil (p. ej. turnos agotados): se registra igual (consumió la suscripción). */
+export interface CliFailedUsage { inputTokens: number; outputTokens: number; numTurns: number | null; apiEquivalentUsd: number | null; durationMs: number; tools: Record<string, number>; maxTurns: number | null }
 
 export function buildArgs(o: Pick<CliTaskOptions, 'detection' | 'model' | 'schema' | 'maxTurns'>, files: { system: string; mcp: string | null }, mcpTools: string[]): string[] {
   const args = ['--restricted', '-p', '--output-format', 'stream-json', '--verbose', '--model', o.model, '--system-prompt-file', files.system,
@@ -134,7 +136,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
   try {
     return await new Promise<CliTaskResult>((resolve, reject) => {
       const child = spawn(o.cli.command, [...o.cli.prefixArgs, ...args], { cwd, env: managedEnv(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, detached: process.platform !== 'win32' });
-      let settled = false; let buf = ''; let stderr = ''; let turns = 0;
+      let settled = false; let buf = ''; let stderr = ''; let turns = 0; const toolUse: Record<string, number> = {};
       let apiKeySource: string | null = null; let session: CliTaskResult['session'] = null; let rateLimit: CliTaskResult['rateLimit'] = null; let result: any = null; let failure: Error | null = null;
       // BARRERA PREVIA. La CLI solo emite «init» al leer el primer mensaje, así que primero va un mensaje en blanco (la CLI
       // lo rechaza sin llamar al modelo: «Blank prompt … nothing was sent to the model») y, con «init» ya comprobado
@@ -169,6 +171,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
         } else if (j.type === 'assistant') {
           turns++;
           const tools = (j.message?.content ?? []).filter((c: any) => c?.type === 'tool_use').map((c: any) => String(c.name ?? '').replace(/^mcp__portal__/, ''));
+          for (const t of tools) toolUse[t] = (toolUse[t] ?? 0) + 1;
           o.onEvent?.({ kind: 'turn', turn: turns, tools });
         } else if (j.type === 'result' && phase === 'gate') {
           // Resultado del mensaje en blanco: debe confirmar que no se llamó al modelo; solo entonces se envía el encargo.
@@ -200,7 +203,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
             if (/unknown option|error: option/i.test(why)) return reject(ccError('backend_unavailable', `La CLI instalada no aceptó las opciones del conector: ${why}`));
             return reject(ccError('provider_error', `Claude Code terminó sin resultado (código ${code ?? 'desconocido'})${why ? `: ${why}` : ''}.`));
           }
-          try { resolve({ ...interpretResult(result, { apiKeySource, rateLimit, turns, started }), session, exitCode: code }); } catch (e) { reject(e); }
+          try { resolve({ ...interpretResult(result, { apiKeySource, rateLimit, turns, started, maxTurns: o.maxTurns, tools: toolUse }), session, exitCode: code }); } catch (e) { reject(e); }
         });
       });
       child.stdin!.on('error', () => { /* la CLI cerró la entrada antes de tiempo: lo dirá su resultado */ });
@@ -285,7 +288,7 @@ function limitError(rl: CliTaskResult['rateLimit'], detail?: string): ProviderRe
 }
 
 /** Convierte el mensaje `result` de Claude Code en el resultado del Portal (o en un error clasificado). */
-export function interpretResult(r: any, ctx: { apiKeySource: string | null; rateLimit: CliTaskResult['rateLimit']; turns: number; started: number }): CliTaskResult {
+export function interpretResult(r: any, ctx: { apiKeySource: string | null; rateLimit: CliTaskResult['rateLimit']; turns: number; started: number; maxTurns?: number; tools?: Record<string, number> }): CliTaskResult {
   const u = r.usage ?? {};
   const inputTokens = (Number(u.input_tokens) || 0) + (Number(u.cache_creation_input_tokens) || 0) + (Number(u.cache_read_input_tokens) || 0);
   const outputTokens = Number(u.output_tokens) || 0;
@@ -295,7 +298,13 @@ export function interpretResult(r: any, ctx: { apiKeySource: string | null; rate
     const detail = [resultText, ...errors].filter(Boolean).join(' · ').slice(0, 600);
     if (r.api_error_status === 429 || ctx.rateLimit?.status === 'rejected' || LIMIT_TEXT.test(detail)) throw limitError(ctx.rateLimit, detail || undefined);
     if (r.api_error_status === 401 || r.api_error_status === 403 || /authenticat|log ?in|oauth/i.test(detail)) throw ccError('backend_unavailable', `Claude Code rechazó la sesión: ${detail || 'sin detalle'}. Revisa «claude auth status».`);
-    if (r.subtype === 'error_max_turns') throw ccError('provider_error', `Claude Code alcanzó el máximo de turnos autorizado (${r.num_turns ?? '?'}) sin terminar la respuesta.`);
+    if (r.subtype === 'error_max_turns') {
+      // Capacidad de la ejecución, no conexión: se informa del límite configurado, de lo que se usó y en qué (herramientas),
+      // y el uso se registra aunque no haya respuesta (consumió la suscripción). No se reintenta solo con el mismo encargo.
+      const tools = ctx.tools ?? {}; const used = Object.entries(tools).sort((a, b) => b[1] - a[1]).map(([t, n]) => `${n}× ${t}`).join(', ');
+      const usage: CliFailedUsage = { inputTokens, outputTokens, numTurns: typeof r.num_turns === 'number' ? r.num_turns : ctx.turns || null, apiEquivalentUsd: typeof r.total_cost_usd === 'number' ? r.total_cost_usd : null, durationMs: typeof r.duration_ms === 'number' ? r.duration_ms : Date.now() - ctx.started, tools, maxTurns: ctx.maxTurns ?? null };
+      throw Object.assign(ccError('max_turns', `Claude Code agotó los turnos autorizados (${ctx.maxTurns ?? '?'}) sin entregar la respuesta${used ? `: los usó en herramientas (${used})` : ''}. No es un error de conexión.`), { usage });
+    }
     throw ccError('provider_error', `Claude Code devolvió un error (${r.subtype ?? 'error'}): ${detail || 'sin detalle'}`);
   }
   const structured = r.structured_output;

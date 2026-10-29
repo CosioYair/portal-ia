@@ -130,9 +130,10 @@ export async function processRoutes(app: FastifyInstance) {
     // Los límites nuevos se suman a lo ya consumido: continuar tras un tope concede ese margen otra vez, no más.
     // Una pausa de Claude Code (proyecto sin autorizar, consola, límite de la suscripción) no consumió ningún margen:
     // continuar tras ella conserva los límites que había, sin conceder correcciones nuevas.
-    const backendPause = !!prev && (prev.pauseKind === 'subscription_limit' || (prev.pauseKind === 'permission' && !request && /Claude Code/.test(prev.reason ?? '')));
+    const backendPause = !!prev && (prev.pauseKind === 'subscription_limit' || prev.pauseKind === 'max_turns' || (prev.pauseKind === 'provider_error' && /m[aá]ximo de turnos|agot[oó] los turnos/i.test(prev.reason ?? '')) || (prev.pauseKind === 'permission' && !request && /Claude Code/.test(prev.reason ?? '')));
     const pipeline = prev && backendPause
-      ? { ...prev, config: { ...prev.config, ...(body.data.pipeline ? { allowInstall: cfg.allowInstall } : {}) }, failures: [], ineffectiveRounds: 0, startedAt: new Date().toISOString() }
+      // «Volver a verificar sin IA» (maxCorrections: 0) cierra además el margen restante: si algo sigue fallando, se detiene sin pagar.
+      ? { ...prev, config: { ...prev.config, ...(body.data.pipeline ? { allowInstall: cfg.allowInstall } : {}), ...(body.data.pipeline?.maxCorrections === 0 ? { maxCorrections: prev.corrections } : {}) }, failures: [], ineffectiveRounds: 0, startedAt: new Date().toISOString() }
       : prev
       ? { ...prev, config: { ...cfg, maxCorrections: prev.corrections + cfg.maxCorrections, maxOutputRepairs: prev.outputRepairs + cfg.maxOutputRepairs, maxConsultations: (prev.consultations?.length ?? 0) + cfg.maxConsultations, maxContinuations: (prev.continuations ?? 0) + (cfg.maxContinuations ?? 6) }, failures: [], ineffectiveRounds: 0, startedAt: new Date().toISOString() }
       : newPipeline(cfg);

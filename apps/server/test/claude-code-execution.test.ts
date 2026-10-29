@@ -530,6 +530,82 @@ test('consola del propietario: toma la tarea por MCP, lee con permiso, informa y
   await mcp.close();
 });
 
+// ---------------------------------------------------------------- HU-159 · turnos agotados (A–D)
+
+/** Plan con un entregable (entrega incremental); «test» falla hasta que src/a.ts tenga la corrección. */
+async function maxTurnsStory(title: string, focusedOk: boolean) {
+  const PLAN_U = JSON.stringify({ summary: 'a vale 2', tasks: ['Editar src/a.ts'], filesToRead: ['src/a.ts'], filesToChange: ['src/a.ts'], deliverables: [{ path: 'src/a.ts', purpose: 'a vale 2', kind: 'code', estimatedLines: 3 }], acceptance: ['a = 2'], risks: [] });
+  fs.writeFileSync(scriptPath, JSON.stringify({ rules: [{ match: R.plan, text: PLAN_U }], markers: [] }));
+  try { fs.unlinkSync(logPath); } catch { /* vacío */ }
+  const FIXED = '=== RESUMEN ===\nCorrige.\n=== ARCHIVO: src/a.ts | patch ===\n<<<< BUSCAR\nexport const a = 2;\n==== REEMPLAZAR\nexport const a = 2; // corregido\n>>>> FIN\n=== FIN ARCHIVO ===\n';
+  scenario({ auth: 'subscription', rules: [
+    { match: R.qa, structured: QA_OK },
+    { match: 'El intento anterior agotó los turnos', ...(focusedOk ? { text: FIXED } : { maxTurns: true }) },
+    { match: 'Corrige la implementación de esta historia', maxTurns: true },
+    { match: 'Esta es la unidad 1 de 1', text: PATCH }
+  ] });
+  sandboxDeps.detect = async () => ({ available: 'docker', docker: true, wsl: false, detail: 'simulado', checkedAt: new Date().toISOString() });
+  sandboxDeps.run = async (wt, _root, command) => {
+    const t = new Date().toISOString(); const ok = command !== 'test' || /corregido/.test(fs.readFileSync(path.join(wt, 'src/a.ts'), 'utf8'));
+    return { command, exitCode: ok ? 0 : 1, output: ok ? `${command} ok` : "TAP version 13\nnot ok 1 - a vale 2 y está corregido\n  ---\n  location: '/work/test/a.test.ts:1:1'\n  failureType: 'testCodeFailure'\n  error: 'falta la corrección en src/a.ts'\n  ...\n# tests 1\n# pass 0\n# fail 1", startedAt: t, finishedAt: new Date().toISOString(), durationMs: 5, isolation: 'docker' };
+  };
+  assert.equal((await inject('PUT', `${W}/claude-code/projects`, { authorized: true, projectIds: [project.id] })).statusCode, 200);
+  return storyWith(title, 'claude-code', 2, { autoApply: true, commands: ['typecheck', 'test', 'build'] });
+}
+const corrCalls = () => ccRuns().filter((r: any) => r.rule === 'Corrige la implementación de esta historia' || r.rule === 'El intento anterior agotó los turnos');
+
+test('A/B/C · turnos agotados: CLAUDE_CODE_MAX_TURNS_EXHAUSTED (no conexión), uso registrado, lo hecho se conserva y el reintento es ACOTADO sin repetir lo terminado', async () => {
+  const { p } = await maxTurnsStory('CC · turnos agotados', true);
+  const limit = getClaudeCodeSettings().maxTurns;
+  const paused = await run(p.id); const pl = paused.result!.pipeline!; const man = paused.result!.manifest!;
+  // A · clasificación propia, con el límite configurado, lo que se usó y sin confundirlo con la conexión
+  assert.equal(pl.pauseKind, 'max_turns', pl.reason ?? ''); assert.equal(pl.failureClass, 'CLAUDE_CODE_MAX_TURNS_EXHAUSTED');
+  assert.match(pl.reason!, new RegExp(`agotó los turnos autorizados \\(${limit}\\)`)); assert.match(pl.reason!, /portal_read_file/); assert.match(pl.reason!, /No es un error de conexión/);
+  assert.match(pl.reason!, /tokens de entrada con tu suscripción de Claude \(0 USD de la API\)/, 'el uso del siguiente intento se dice antes');
+  const failed = paused.steps.filter(s => s.status === 'failed');
+  assert.equal(failed.length, 1); assert.equal(failed[0].inputTokens, 30_000, 'el uso de la suscripción se registra (no «0 tokens»)'); assert.equal(failed[0].costUsd, 0);
+  const runRec = claudeCodeRunsRepo(S).byStep(failed[0].id)[0];
+  assert.equal(runRec.status, 'failed'); assert.equal(runRec.numTurns, limit + 1); assert.equal(runRec.tokensIn, 30_000);
+  // B · lo terminado se conserva: la unidad del plan aplicada y su commit; la corrección queda pendiente (no fallida)
+  assert.equal(man.units[0].status, 'done'); assert.deepEqual(man.units[0].applied, ['src/a.ts']);
+  const corr = man.units.find(u => u.kind === 'correction')!;
+  assert.equal(corr.status, 'pending'); assert.equal(corr.maxTurns, 1);
+  assert.match(fs.readFileSync(path.join(paused.result!.applied!.worktree!, 'src/a.ts'), 'utf8'), /export const a = 2;/);
+  const flow = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow;
+  assert.match(flow.issue.title, /Claude Code agotó sus turnos/); assert.equal(flow.actions[0].label, 'Reintentar solo lo pendiente, acotado');
+  assert.ok(!flow.actions.some((a: any) => /Repetir la llamada/.test(a.label)), 'no se ofrece repetir el mismo encargo');
+  // C · continuar: un intento acotado (contexto incluido), sin repetir el plan ni la unidad terminada, sin correcciones nuevas
+  const cfg0 = processesRepo(S).get(p.id)!.result!.pipeline!.config;
+  assert.equal((await inject('POST', `${W}/processes/${p.id}/continue`, { authorized: true })).statusCode, 200);
+  const done = await waitIdle(p.id);
+  assert.equal(done.result!.pipeline!.state, 'verified', done.result!.pipeline!.reason ?? '');
+  assert.deepEqual(apiCalls().map(c => c.rule), [R.plan], 'el plan no se repite');
+  assert.equal(ccRuns().filter((r: any) => r.rule === 'Esta es la unidad 1 de 1').length, 1, 'la unidad terminada no se vuelve a pedir');
+  assert.deepEqual(corrCalls().map((r: any) => r.rule), ['Corrige la implementación de esta historia', 'El intento anterior agotó los turnos'], 'un intento normal y uno acotado, distinto');
+  assert.match(corrCalls()[1].prompt, /NO uses herramientas de lectura/);
+  assert.equal(done.result!.pipeline!.config.maxCorrections, cfg0.maxCorrections, 'continuar no concede correcciones nuevas');
+  useFakeSandbox();
+});
+
+test('D · turnos agotados dos veces en la misma unidad: no hay bucle; no se insiste solo y «volver a verificar sin IA» no paga otra corrección', async () => {
+  const { p } = await maxTurnsStory('CC · turnos agotados dos veces', false);
+  await run(p.id);
+  assert.equal((await inject('POST', `${W}/processes/${p.id}/continue`, { authorized: true })).statusCode, 200);
+  const twice = await waitIdle(p.id); const pl = twice.result!.pipeline!;
+  assert.equal(pl.pauseKind, 'max_turns'); assert.match(pl.reason!, /por segunda vez/); assert.match(pl.reason!, /No se insiste/);
+  const corr = twice.result!.manifest!.units.find(u => u.kind === 'correction')!;
+  assert.equal(corr.status, 'failed'); assert.equal(corr.maxTurns, 2);
+  assert.equal(corrCalls().length, 2, 'dos llamadas en total, ninguna automática más');
+  const flow = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow;
+  const again = flow.actions[0];
+  assert.equal(again.label, 'Volver a verificar sin IA'); assert.deepEqual(again.pipeline, { maxCorrections: 0 });
+  assert.equal((await inject('POST', `${W}/processes/${p.id}/continue`, { authorized: true, pipeline: again.pipeline })).statusCode, 200);
+  const after = await waitIdle(p.id);
+  assert.equal(after.result!.pipeline!.pauseKind, 'limit', after.result!.pipeline!.reason ?? '');
+  assert.equal(corrCalls().length, 2, 'volver a verificar no llama a Claude Code');
+  useFakeSandbox();
+});
+
 // ---------------------------------------------------------------- Docker real (23)
 
 let dockerReady = (await real.detect(true)).available === 'docker';

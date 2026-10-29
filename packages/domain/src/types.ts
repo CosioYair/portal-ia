@@ -44,7 +44,9 @@ export type ProviderErrorCode = 'invalid_key' | 'forbidden' | 'rate_limited' | '
   /** Claude Code: la suscripción alcanzó su límite de uso (no se cambia solo a otro origen facturable). */
   | 'usage_limit'
   /** Claude Code: el backend no está disponible o no está autorizado (desactivado, sin sesión, conflicto de facturación, consola desconectada). */
-  | 'backend_unavailable';
+  | 'backend_unavailable'
+  /** Claude Code agotó los turnos autorizados (--max-turns) sin entregar la respuesta: capacidad de la ejecución, no conexión. */
+  | 'max_turns';
 
 export interface ProviderError {
   code: ProviderErrorCode;
@@ -590,7 +592,9 @@ export interface AgentBlocker {
 export type AgentFailureKind =
   | 'INVALID_OUTPUT' | 'INCOMPLETE_OUTPUT' | 'RECOVERABLE_IMPLEMENTATION_ERROR' | 'MISSING_INFORMATION' | 'PERMISSION_REQUIRED'
   | 'UNSUPPORTED_CAPABILITY' | 'PROVIDER_REFUSAL' | 'PROVIDER_TIMEOUT' | 'PROVIDER_CONNECTION_ERROR' | 'BUDGET_EXHAUSTED'
-  | 'ENVIRONMENT_FAILURE' | 'UNKNOWN_FAILURE';
+  | 'ENVIRONMENT_FAILURE' | 'UNKNOWN_FAILURE'
+  /** Claude Code agotó sus turnos sin terminar (no es un fallo de conexión ni de la implementación). */
+  | 'CLAUDE_CODE_MAX_TURNS_EXHAUSTED';
 /** Lo que el equipo pide al propietario cuando no puede resolverlo dentro de su autoridad. */
 export interface OwnerRequest {
   kind: 'information' | 'permission' | 'decision' | 'budget';
@@ -638,6 +642,8 @@ export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'veri
 export interface PipelineEvent { at: string; kind: PipelineEventKind; message: string; detail?: string | null; aiCall?: boolean; costUsd?: number | null }
 export type PipelineState = 'running' | 'verified' | 'paused' | 'stopped';
 export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' | 'repeated_failure' | 'duration' | 'no_changes' | 'refusal' | 'qa' | 'cancelled'
+  /** Claude Code agotó sus turnos sin terminar una llamada: se conserva todo y el siguiente intento es acotado (o decides tú). */
+  | 'max_turns'
   | 'missing_information' | 'permission' | 'unsupported' | 'provider_refusal' | 'provider_timeout' | 'provider_error' | 'interrupted' | 'unknown'
   /** Entrega incremental: un entregable no cabe en la salida del modelo ni por secciones, o faltan entregables tras los intentos permitidos. */
   | 'too_large' | 'incomplete'
@@ -754,6 +760,8 @@ export interface WorkUnit {
   /** Entregables que esta unidad descartó de verdad (con motivo) y respuesta del equipo que discute un hallazgo (correcciones). */
   dropped?: string[];
   disputed?: string | null;
+  /** Veces que Claude Code agotó sus turnos en esta unidad: el siguiente intento es acotado; tras dos, no se insiste solo. */
+  maxTurns?: number;
   /** Salidas pagadas del intento en curso (paso + motivo de parada + prefijo de una continuación): al reanudar se releen sin volver a llamar. */
   outputs?: { stepId: string; stopReason: string | null; prefix?: string | null }[];
 }
