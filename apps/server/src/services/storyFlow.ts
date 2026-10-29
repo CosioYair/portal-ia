@@ -1,4 +1,4 @@
-import type { FlowAction, FlowActionId, FlowIssue, FlowIssueDetail, FlowStage, FlowStageKey, FlowStageStatus, Isolation, Process, StoryFlow, VerificationRun, WorktreeDrift } from '@portal-ia/domain';
+import type { FlowAction, FlowActionId, FlowIssue, FlowIssueDetail, FlowStage, FlowStageKey, FlowStageStatus, Isolation, Process, StoryFlow, VerificationRun, WorktreeDrift, BranchIntegration } from '@portal-ia/domain';
 import { filesIn, parseBuildErrors, parseFailingTests, parseTypeScriptErrors, qaSeverity, tailOf } from './diagnostics.ts';
 import { deliveryProgress } from './storyUnits.ts';
 import { runtimeVerified } from './runtimeChecks.ts';
@@ -28,6 +28,8 @@ export interface FlowOptions {
   orphan?: boolean;
   /** Worktree respecto al último commit registrado (commits o cambios hechos fuera del equipo). */
   drift?: WorktreeDrift | null;
+  /** Integración con la rama principal (git, sin IA): avanzó main, se combina limpio o hay conflictos reales. */
+  integration?: BranchIntegration | null;
 }
 
 const LABELS: Record<FlowStageKey, string> = {
@@ -275,6 +277,21 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
     else if (pl.pauseKind === 'limit' || pl.pauseKind === 'repeated_failure') actions.push(resume('Conceder otra corrección', 'Autoriza una corrección más con la evidencia actual (un intento, dentro del presupuesto que fijes).', ['authorization', 'ai_budget'], { pipeline: { maxCorrections: 1 }, suggestedBudgetUsd: 0.5 }), fix('Preparar una iteración con el diagnóstico'), ASK, act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
     else if (pl.pauseKind === 'duration' || pl.pauseKind === 'cancelled') actions.push(resume('Continuar', 'Retoma donde lo dejó, sin repetir lo hecho.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0 }));
     else if (pl.pauseKind === 'qa') { actions.push(act('review_diff', 'Revisar el diff y la evidencia', 'Decide tú con la verificación del sandbox a la vista.')); if (verifyOk) actions.push(act('merge', 'Integrar en main bajo tu criterio', 'La verificación automática está en verde; QA no pudo concluir. Requiere tu autorización.', ['authorization'])); actions.push(resume('Pedir a QA que vuelva a evaluar', 'Una nueva evaluación de QA con la misma evidencia.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.3 }), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama.')); }
+    else if (pl.pauseKind === 'integration') {
+      // Candidato de integración (main incorporado en la rama) verificado o no, sin IA. Integrar lo decide el propietario.
+      const cand = r.integration;
+      issue = { ...issue!, cause: verifyOk ? 'decision' : 'code', title: verifyOk ? `Candidato de integración verificado contra ${cand?.target ?? 'main'} ${cand?.targetHead ?? ''}`.trim() : 'El candidato de integración no pasa la verificación', level: verifyOk ? 'warning' : 'blocker' };
+      if (verifyOk) {
+        actions.push(resume('Pedir a QA que revise el candidato (sin correcciones nuevas)', 'QA evalúa el candidato (la historia con el main actual incorporado) con la evidencia del sandbox. No se autoriza ninguna corrección nueva: si QA rechaza, se detiene y decides tú.', ['authorization', 'ai_budget'], { pipeline: { maxCorrections: 0 }, suggestedBudgetUsd: 0.5, primary: true }));
+        actions.push(act('merge', 'Integrar en main sin nueva revisión de QA', `El candidato está verificado en el sandbox con el main actual incorporado; QA ${pl.lastQaCommit === r.applied?.commit ? 'ya revisó este commit' : 'no ha revisado este commit'}. Merge sin fast-forward en main. Requiere tu autorización.`, ['authorization']));
+      } else actions.push(resume('Pedir al equipo que corrija el candidato', 'Una corrección dirigida con la evidencia del sandbox sobre el candidato (la historia con el main actual incorporado), dentro del presupuesto que autorices.', ['authorization', 'ai_budget'], { pipeline: { maxCorrections: 1 }, suggestedBudgetUsd: 0.5, primary: true }), ASK);
+      actions.push(act('review_diff', 'Revisar el diff del candidato', 'Incluye lo que aporta main y lo de la historia.'), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
+    }
+    else if (pl.pauseKind === 'integration_conflict') {
+      const files = opts.integration?.state === 'conflicts' ? opts.integration.conflicts.map(c => c.path) : r.integration?.conflicts ?? [];
+      issue = { ...issue!, cause: 'decision', title: `Conflictos reales con main en ${files.length} archivo(s): no hace falta otra iteración`, details: [...files.map(f => ({ text: opts.integration?.conflicts.find(c => c.path === f)?.message ?? 'archivo en conflicto', file: f })), ...issue!.details], files };
+      actions.push(act('integration_resolve', `Pedir al equipo que resuelva solo ${files.length === 1 ? 'el conflicto' : `los ${files.length} conflictos`}`, 'Una llamada del Desarrollador autorizado con SOLO las secciones en conflicto (base común, versión de main y de la historia, y los criterios de aceptación). Después se verifica en el sandbox sin IA y se detiene: no integra.', ['authorization', 'ai_budget'], { primary: true, suggestedBudgetUsd: 0.5 }), act('integration_prepare', 'Volver a comprobar la integración (sin IA)', 'Por si main cambió: vuelve a calcular la combinación y, si ya no hay conflictos, prepara el candidato con git.', ['authorization']), ASK, fix('Rehacer en una nueva iteración (último recurso)'));
+    }
     else if (pl.pauseKind === 'external') {
       actions.push(act('review_diff', 'Revisar el diff', 'Incluye la corrección externa y todo lo del equipo.'));
       if (verifyOk) actions.push(resume('Pasar a QA (sin correcciones nuevas)', 'QA evalúa el commit actual con la evidencia del sandbox. No se autoriza ninguna corrección nueva del equipo: si QA rechaza, se detiene y decides tú.', ['authorization', 'ai_budget'], { pipeline: { maxCorrections: 0 }, suggestedBudgetUsd: 0.5 }));
@@ -390,10 +407,20 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
     }
     set('verify', 'done', summary);
     // 5 · Integrar
-    if (r.mergeError) {
-      set('integrate', 'failed', 'Conflicto al integrar');
-      issue = { kind: 'merge_conflict', level: 'blocker', cause: 'code', command: 'merge', title: 'No se pudo integrar: hay conflictos con main', explanation: 'Mientras esta iteración estaba en su rama, main cambió en los mismos archivos. Nada se modificó (el merge se deshizo). La forma controlada de resolverlo es que el equipo rehaga los cambios sobre el main actual en una nueva iteración.', details: [{ text: r.mergeError.message.slice(0, 400) }, ...r.mergeError.files.map(f => ({ text: 'archivo en conflicto', file: f }))], files: r.mergeError.files, evidence: r.mergeError.message, responsible: devs };
-      actions.push(fix('Pedir al equipo que lo rehaga sobre el main actual'), ASK, act('merge', 'Reintentar la integración', 'Vuelve a intentar el merge (por si main cambió). Requiere tu autorización.', ['authorization']));
+    const ig = opts.integration ?? null;
+    if ((r.mergeError && ig?.state !== 'clean' && ig?.state !== 'up_to_date') || ig?.state === 'conflicts') {
+      // Conflictos REALES (los archivos que dice git): la implementación verificada se conserva y solo se resuelven esas
+      // secciones. Antes se proponía rehacer la historia en una iteración nueva (HU-159 regeneró 1650 líneas por 2 archivos).
+      const files = ig?.state === 'conflicts' ? ig.conflicts.map(c => c.path) : r.mergeError!.files;
+      set('integrate', 'failed', `Conflictos reales con ${ig?.target ?? 'main'} en ${files.length} archivo(s)`);
+      issue = { kind: 'merge_conflict', level: 'blocker', cause: 'decision', command: 'merge', title: `${ig?.target ?? 'main'} avanzó y hay conflictos reales en ${files.length} archivo(s): no hace falta otra iteración`, explanation: `La implementación verificada se conserva y nada se modificó (ni la rama ni ${ig?.target ?? 'main'}). ${ig ? `${ig.target} tiene ${ig.behindCount} commit(s) que la rama no tiene; ${ig.overlap.length} archivo(s) cambiaron en ambos lados y ${files.length} no se pueden combinar solos. ` : ''}El equipo puede resolver SOLO esas secciones (con la base común, la versión de ${ig?.target ?? 'main'} y la de la historia); el candidato se verifica en el sandbox antes de que decidas integrar.`, details: [...files.map(f => ({ text: ig?.conflicts.find(c => c.path === f)?.message ?? 'archivo en conflicto', file: f })), ...(ig?.behind ?? []).slice(0, 6).map(b => ({ text: `${ig!.target}: ${b.sha} ${b.subject}` }))], files, evidence: r.mergeError?.message ?? null, responsible: devs };
+      actions.push(act('integration_resolve', `Pedir al equipo que resuelva solo ${files.length === 1 ? 'el conflicto' : `los ${files.length} conflictos`}`, 'Una llamada del Desarrollador autorizado con SOLO las secciones en conflicto y los criterios de aceptación; después se verifica en el sandbox sin IA y se detiene. No integra.', ['authorization', 'ai_budget'], { primary: true, suggestedBudgetUsd: 0.5 }), act('integration_prepare', 'Volver a comprobar la integración (sin IA)', 'Por si main cambió: si ya no hay conflictos, git prepara el candidato.', ['authorization']), ASK, fix('Rehacer en una nueva iteración (último recurso)'));
+      return finish();
+    }
+    if (ig && ig.state === 'clean' && ig.behindCount > 0) {
+      set('integrate', 'current', `${ig.target} avanzó ${ig.behindCount} commit(s): falta el candidato de integración`);
+      issue = { kind: 'integration_behind', level: 'warning', cause: 'decision', command: 'merge', title: `${ig.target} avanzó ${ig.behindCount} commit(s) desde que nació la rama: se combinan sin conflictos`, explanation: `Antes de integrar, el Portal prepara el candidato: incorpora ${ig.target} (${ig.targetHead}) en la rama con un merge, sin IA y sin tocar ${ig.target}, y lo verifica en el sandbox. La implementación verificada se conserva. ${ig.overlap.length ? `${ig.overlap.length} archivo(s) cambiaron en ambos lados (${ig.overlap.slice(0, 5).join(', ')}): git los combina, pero hay que verificarlo.` : `Los cambios de ${ig.target} no tocan los archivos de la historia.`}`, details: ig.behind.slice(0, 8).map(b => ({ text: `${b.sha} ${b.subject}` })), files: ig.overlap, responsible: [] };
+      actions.push(act('integration_prepare', 'Preparar el candidato de integración (sin IA)', `Incorpora ${ig.target} (${ig.targetHead}) en ${ig.branch} y verifica typecheck, test y build en el sandbox. No llama a la IA ni toca ${ig.target}; integrar sigue siendo tu decisión.`, ['authorization'], { primary: true }), act('review_diff', 'Revisar el diff', 'Lo que aporta la historia.'), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama.'));
       return finish();
     }
     set('integrate', 'current', `Rama ${r.applied.branch} verificada`);

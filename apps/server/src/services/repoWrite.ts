@@ -322,8 +322,8 @@ export async function mergeBranch(repoPath: string, branch: string, into?: strin
     const files = opts.affectedFiles ?? [];
     const dirty = files.length ? await git(cwd, ['status', '--porcelain', '--', ...files]) : await git(cwd, ['status', '--porcelain']);
     if (dirty.trim()) throw Object.assign(new Error(`Hay cambios locales sin confirmar en archivos que esta historia modifica (${dirty.trim().split('\n').map(l => l.slice(3)).slice(0, 5).join(', ')}). Confírmalos o descártalos tú y vuelve a integrar.`), { statusCode: 409 });
-    try { await git(cwd, [...GIT_ID, 'merge', '--no-ff', '--no-edit', '-m', mergeMsg, branch]); }
-    catch (e: any) { await git(cwd, ['merge', '--abort']).catch(() => ''); throw Object.assign(new Error(`No se pudo integrar «${branch}» en «${target}» (conflictos). La rama queda intacta; resuélvelo en el espacio de la historia o con git. Detalle: ${e.message}`), { statusCode: 409 }); }
+    try { await execFileP('git', [...GIT_ID, 'merge', '--no-ff', '--no-edit', '-m', mergeMsg, branch], { cwd, maxBuffer: 10 * 1024 * 1024 }); }
+    catch (e: any) { await git(cwd, ['merge', '--abort']).catch(() => ''); throw mergeFailure(branch, target, e); }
     return { into: target, commit: await git(cwd, ['rev-parse', '--short', 'HEAD']), viaWorktree: false };
   }
   // El checkout principal está en otra rama: no lo tocamos. Merge en un worktree temporal de main.
@@ -331,14 +331,28 @@ export async function mergeBranch(repoPath: string, branch: string, into?: strin
   fs.mkdirSync(path.dirname(tmp), { recursive: true });
   await git(cwd, ['worktree', 'add', '-q', '--detach', tmp, target]);
   try {
-    await git(tmp, [...GIT_ID, 'merge', '--no-ff', '--no-edit', '-m', mergeMsg, branch]);
+    await execFileP('git', [...GIT_ID, 'merge', '--no-ff', '--no-edit', '-m', mergeMsg, branch], { cwd: tmp, maxBuffer: 10 * 1024 * 1024 });
     const commit = await git(tmp, ['rev-parse', 'HEAD']);
     await git(cwd, ['update-ref', `refs/heads/${target}`, commit]);
     return { into: target, commit: commit.slice(0, 7), viaWorktree: true };
   } catch (e: any) {
     await git(tmp, ['merge', '--abort']).catch(() => '');
-    throw Object.assign(new Error(`No se pudo integrar «${branch}» en «${target}» (conflictos). Detalle: ${e.message}`), { statusCode: 409 });
+    throw mergeFailure(branch, target, e);
   } finally { await git(cwd, ['worktree', 'remove', '--force', tmp]).catch(() => ''); }
+}
+
+/**
+ * Error de un merge con la salida REAL de git: conflicto (stdout «CONFLICT …», con los archivos) o cualquier otro motivo
+ * (archivos sin seguimiento que se sobrescribirían, cambios locales…), que ya no se presenta como «conflictos».
+ */
+function mergeFailure(branch: string, target: string, e: any): Error {
+  const out = `${e?.stdout ?? ''}\n${e?.stderr ?? ''}`.trim();
+  const files = Array.from(new Set(Array.from(out.matchAll(/Merge conflict in (\S+)/g)).map(x => x[1])));
+  const conflict = files.length > 0 || /CONFLICT \(/.test(out);
+  const why = out.split('\n').map(l => l.trim()).filter(l => /CONFLICT|error:|fatal:|would be overwritten|Please commit|Aborting/i.test(l)).slice(0, 12).join(' · ') || (e?.message ?? '').toString().slice(0, 400);
+  return Object.assign(new Error(conflict
+    ? `No se pudo integrar «${branch}» en «${target}» (conflictos en ${files.length || 'algunos'} archivo(s)${files.length ? `: ${files.join(', ')}` : ''}). La rama queda intacta. Detalle de git: ${why}`
+    : `No se pudo integrar «${branch}» en «${target}» (no es un conflicto de contenido). La rama queda intacta. Detalle de git: ${why}`), { statusCode: 409, conflict, conflictFiles: files });
 }
 
 /** Publica ramas en el remoto (git push -u). Usa las credenciales de git del equipo (gestor de credenciales / SSH). */

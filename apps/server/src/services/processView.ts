@@ -6,6 +6,8 @@ import { detectSandbox } from './sandbox.ts';
 import { lastUpdate } from './system.ts';
 import { isActiveJob } from './activeJobs.ts';
 import { worktreeDrift } from './worktreeDrift.ts';
+import { branchIntegration } from './storyIntegration.ts';
+import { projectsRepo } from '../db/workspace.ts';
 
 /**
  * Datos que necesita el recorrido guiado de un proceso de historia (sin IA, solo lectura): pasos con falla de la prueba,
@@ -30,5 +32,8 @@ export async function flowOptions(slug: string, p: Process, item?: BacklogItem |
   // Solo para historias detenidas con worktree vivo: ¿alguien confirmó o cambió algo fuera del equipo? (git, sin IA)
   const pl = r?.pipeline;
   const drift = r && pl && (pl.state === 'paused' || pl.state === 'stopped') && p.status !== 'running' && !r.merged && !r.rejected ? await worktreeDrift(r) : null;
-  return { failedStepDetails, sandbox, updateFailedLog, iteration: idx >= 0 ? { number: siblings.length - idx, total: siblings.length } : null, orphan, drift };
+  // Integración con la rama principal (git en memoria, sin IA): ¿avanzó main?, ¿se combina limpio o hay conflictos reales?
+  const repo = r?.applied && !r.merged && !r.rejected && p.status !== 'running' ? projectsRepo(slug).repository(p.projectId) : null;
+  const integration = repo && r?.applied ? await branchIntegration(repo.path, r.applied.branch).catch(() => null) : null;
+  return { failedStepDetails, sandbox, updateFailedLog, iteration: idx >= 0 ? { number: siblings.length - idx, total: siblings.length } : null, orphan, drift, integration };
 }
