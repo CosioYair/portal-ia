@@ -19,6 +19,7 @@ import { learningRoutes } from './routes/learning.ts';
 import { storyRoutes } from './routes/stories.ts';
 import { phaseRoutes, registerArchivedGuard } from './routes/phase.ts';
 import { claudeCodeRoutes } from './routes/claudeCode.ts';
+import { orgEvaluationRoutes } from './routes/orgEvaluation.ts';
 import { VERSION } from './services/system.ts';
 
 /** Script principal del paquete de la interfaz que se sirve (p. ej. «index-BYW4Vz5N.js»), o null sin paquete construido. Se relee cada 10 s. */
@@ -63,6 +64,7 @@ export async function buildApp() {
   await app.register(storyRoutes);
   await app.register(phaseRoutes);
   await app.register(claudeCodeRoutes);
+  await app.register(orgEvaluationRoutes);
 
   // Producción local: sirve apps/web/dist si existe (npm run build). SPA fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {
