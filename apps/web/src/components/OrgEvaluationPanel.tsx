@@ -30,6 +30,15 @@ const listOr = (l?: string[]) => (l && l.length ? l.join(', ') : 'ninguna');
 const OP: Record<OrgChange['op'], string> = { create: 'Creado', update: 'Ajustado', retire: 'Retirado', unretire: 'Reactivado' };
 const APP: Record<'applied' | 'reverted' | 'failed', { label: string; tone: '' | 'ok' | 'err' }> = { applied: { label: 'Aplicada', tone: 'ok' }, reverted: { label: 'Revertida', tone: '' }, failed: { label: 'Error al aplicar', tone: 'err' } };
 
+/** Mismo criterio que splitSubjects del servidor (orgProposalApply.ts): « + » o comas. */
+const splitSubjects = (s: string) => s.split(/\s*\+\s*|\s*,\s*/).map(x => x.trim()).filter(Boolean);
+/** Lo que se conserva en una fusión, igual que planProposal: keep; si falta, el primer sujeto (o spec.department en departamentos). */
+function keptOf(p: OrgProposal): string {
+  if (p.keep) return p.keep;
+  if (p.target === 'department' && p.spec?.department) return p.spec.department;
+  return splitSubjects(p.subject)[0] ?? p.subject;
+}
+
 /** Qué hará «Aceptar y aplicar» (texto de la confirmación). */
 function impact(p: OrgProposal): string {
   const s = `«${p.subject}»`;
@@ -37,7 +46,7 @@ function impact(p: OrgProposal): string {
   if (p.action === 'add') return p.target === 'agent' ? `se creará el agente «${p.spec?.name ?? p.subject}»` : `se crearán o etiquetarán los agentes del departamento ${s}`;
   if (p.action === 'adjust') return `se ajustarán la configuración y la jerarquía de ${s}`;
   if (p.action === 'retire') return `se retirará ${s} (se desactiva sin borrarlo y se puede revertir)`;
-  return `se conservará «${p.keep ?? '?'}» con la configuración propuesta y se retirará el resto de ${s}`;
+  return `se conservará «${keptOf(p)}» con la configuración propuesta y se retirará el resto de ${s}`;
 }
 
 function SpecView({ p }: { p: OrgProposal }) {
