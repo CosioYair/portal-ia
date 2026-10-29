@@ -279,8 +279,10 @@ test('prueba de humo: solo con autorización; UNA llamada mínima (haiku, 1 turn
   const r = await inject('POST', '/api/claude-code/smoke-test', { authorized: true });
   assert.equal(r.statusCode, 200, r.body);
   const j = r.json();
-  assert.equal(j.answer, 'OK'); assert.equal(j.authMethod, 'claude.ai'); assert.equal(j.apiKeySource, 'none'); assert.equal(j.apiBudgetChargedUsd, 0);
-  const runs = ccRuns(); assert.equal(runs.length, 1);
+  assert.equal(j.answer, 'OK'); assert.equal(j.expected, true); assert.equal(j.authMethod, 'claude.ai'); assert.equal(j.apiKeySource, 'none'); assert.equal(j.apiBudgetChargedUsd, 0);
+  assert.equal(j.model, 'claude-haiku-5-5'); assert.equal(j.exitCode, 0); assert.deepEqual(j.session.tools, [], 'sin herramientas: ni integradas, ni puente, ni salida estructurada');
+  assert.deepEqual(j.session.mcpServers, []); assert.equal(j.session.permissionMode, 'dontAsk');
+  const runs = ccRuns(); assert.equal(runs.length, 1); assert.equal(runs[0].prompt, 'Respond with exactly the word OK.');
   const a: string[] = runs[0].args;
   assert.equal(a[a.indexOf('--model') + 1], 'haiku'); assert.equal(a[a.indexOf('--max-turns') + 1], '1'); assert.ok(!a.includes('--mcp-config'));
   assert.equal(claudeCodeRunsRepo(S).get(j.runId)?.agentName, 'Prueba de humo del conector');

@@ -86,10 +86,10 @@ export async function claudeCodeRoutes(app: FastifyInstance) {
     const run = runs?.start({ mode: 'cli', projectId: project!.id, processId: null, stepId: null, agentId: 'prueba-de-humo', agentName: 'Prueba de humo del conector', model: 'haiku', billing: d.billing, authMethod: d.authMethod, subscriptionType: d.subscriptionType });
     const started = Date.now();
     try {
-      const r = await runCliTask({ cli, detection: d, model: 'haiku', system: 'Eres una prueba de conexión de Portal IA. No uses herramientas.', prompt: 'Responde exactamente con la palabra OK.', maxTurns: 1, timeoutMs: 120_000, signal: AbortSignal.timeout(130_000) });
+      const r = await runCliTask({ cli, detection: d, model: 'haiku', system: 'Eres una prueba de conexión de Portal IA. No uses herramientas.', prompt: 'Respond with exactly the word OK.', maxTurns: 1, timeoutMs: 120_000, signal: AbortSignal.timeout(130_000) });
       if (run) runs!.finish(run.id, 'done', { durationMs: r.durationMs, numTurns: r.numTurns, tokensIn: r.inputTokens, tokensOut: r.outputTokens, apiEquivalentUsd: r.apiEquivalentUsd, rateLimit: r.rateLimit });
       req.log.info({ authMethod: d.authMethod, apiKeySource: r.apiKeySource }, 'prueba de humo de Claude Code completada');
-      return { ok: true, answer: r.text.slice(0, 200), authMethod: d.authMethod, subscriptionType: d.subscriptionType, apiKeySource: r.apiKeySource, tokensIn: r.inputTokens, tokensOut: r.outputTokens, apiEquivalentUsd: r.apiEquivalentUsd, rateLimit: r.rateLimit, durationMs: r.durationMs, apiBudgetChargedUsd: 0, runId: run?.id ?? null };
+      return { ok: true, answer: r.text.slice(0, 200), expected: r.text.trim() === 'OK', model: r.session?.model ?? null, session: r.session, exitCode: r.exitCode, numTurns: r.numTurns, stopReason: r.stopReason, permissionDenials: r.permissionDenials, authMethod: d.authMethod, subscriptionType: d.subscriptionType, apiKeySource: r.apiKeySource, tokensIn: r.inputTokens, tokensOut: r.outputTokens, apiEquivalentUsd: r.apiEquivalentUsd, rateLimit: r.rateLimit, durationMs: r.durationMs, apiBudgetChargedUsd: 0, runId: run?.id ?? null };
     } catch (e: any) {
       if (run) runs!.finish(run.id, e?.error?.code === 'usage_limit' ? 'limit' : 'failed', { durationMs: Date.now() - started, error: e?.message ?? String(e) });
       return reply.code(502).send({ ok: false, error: e?.message ?? String(e), code: e?.error?.code ?? null });

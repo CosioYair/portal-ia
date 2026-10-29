@@ -63,6 +63,9 @@ export interface CliTaskResult {
   apiKeySource: string | null;
   rateLimit: ClaudeCodeRun['rateLimit'];
   permissionDenials: string[];
+  /** Lo que la sesión cargó según su «init» (comprobado antes del encargo) y cómo terminó el proceso. */
+  session: { model: string | null; tools: string[]; mcpServers: { name: string; status: string }[]; plugins: string[]; permissionMode: string | null } | null;
+  exitCode: number | null;
 }
 
 /**
@@ -132,7 +135,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
     return await new Promise<CliTaskResult>((resolve, reject) => {
       const child = spawn(o.cli.command, [...o.cli.prefixArgs, ...args], { cwd, env: managedEnv(), stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, shell: false, detached: process.platform !== 'win32' });
       let settled = false; let buf = ''; let stderr = ''; let turns = 0;
-      let apiKeySource: string | null = null; let rateLimit: CliTaskResult['rateLimit'] = null; let result: any = null; let failure: Error | null = null;
+      let apiKeySource: string | null = null; let session: CliTaskResult['session'] = null; let rateLimit: CliTaskResult['rateLimit'] = null; let result: any = null; let failure: Error | null = null;
       // BARRERA PREVIA. La CLI solo emite «init» al leer el primer mensaje, así que primero va un mensaje en blanco (la CLI
       // lo rechaza sin llamar al modelo: «Blank prompt … nothing was sent to the model») y, con «init» ya comprobado
       // (origen de la clave, herramientas, puente), el encargo real va en un segundo mensaje de la MISMA sesión.
@@ -147,6 +150,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
       const handle = (j: any) => {
         if (j.type === 'system' && j.subtype === 'init') {
           apiKeySource = typeof j.apiKeySource === 'string' ? j.apiKeySource : null;
+          session = { model: typeof j.model === 'string' ? j.model : null, tools: Array.isArray(j.tools) ? j.tools.map(String) : [], mcpServers: Array.isArray(j.mcp_servers) ? j.mcp_servers.map((s: any) => ({ name: String(s?.name), status: String(s?.status) })) : [], plugins: Array.isArray(j.plugins) ? j.plugins.map((p: any) => String(p?.name)) : [], permissionMode: typeof j.permissionMode === 'string' ? j.permissionMode : null };
           o.onEvent?.({ kind: 'init', model: j.model ?? null, apiKeySource, mcp: Array.isArray(j.mcp_servers) ? j.mcp_servers : [] });
           const problem = initProblem(j, { structured: !!o.schema, mcp: !!o.mcp });
           if (problem) stop(ccError('backend_unavailable', `${problem} Se detuvo antes de enviar el encargo: no se llamó al modelo.`));
@@ -193,7 +197,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
             if (/unknown option|error: option/i.test(why)) return reject(ccError('backend_unavailable', `La CLI instalada no aceptó las opciones del conector: ${why}`));
             return reject(ccError('provider_error', `Claude Code terminó sin resultado (código ${code ?? 'desconocido'})${why ? `: ${why}` : ''}.`));
           }
-          try { resolve(interpretResult(result, { apiKeySource, rateLimit, turns, started })); } catch (e) { reject(e); }
+          try { resolve({ ...interpretResult(result, { apiKeySource, rateLimit, turns, started }), session, exitCode: code }); } catch (e) { reject(e); }
         });
       });
       child.stdin!.on('error', () => { /* la CLI cerró la entrada antes de tiempo: lo dirá su resultado */ });
@@ -299,7 +303,7 @@ export function interpretResult(r: any, ctx: { apiKeySource: string | null; rate
     text, structured: structured ?? null, stopReason: stop, refusal: stop === 'refusal' ? (resultText || 'refusal') : null, inputTokens, outputTokens,
     numTurns: typeof r.num_turns === 'number' ? r.num_turns : ctx.turns || null, durationMs: typeof r.duration_ms === 'number' ? r.duration_ms : Date.now() - ctx.started,
     sessionId: typeof r.session_id === 'string' ? r.session_id : null, apiEquivalentUsd: typeof r.total_cost_usd === 'number' ? r.total_cost_usd : null,
-    apiKeySource: ctx.apiKeySource, rateLimit: ctx.rateLimit,
+    apiKeySource: ctx.apiKeySource, rateLimit: ctx.rateLimit, session: null, exitCode: null,
     permissionDenials: Array.isArray(r.permission_denials) ? r.permission_denials.map((p: any) => String(p?.tool_name ?? '?')) : []
   };
 }
