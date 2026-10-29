@@ -32,6 +32,11 @@ Fecha: 27 de octubre de 2026. Sobre la entrega v0.12.0 (abajo). Todo verificado 
   - **Datos:** versión de esquema 0.13, aditiva, con copia de `data/` al arrancar.
   - **Pruebas:** `claude-code-connector.test.ts` (10) y `claude-code-execution.test.ts` (15, Docker real), con una CLI simulada. Instancia aislada con Chromium: 16 de 16.
   - **Falta:** la prueba de humo con la suscripción real, que requiere autorización. **No activo hasta reconstruir y reiniciar el Portal.**
+- **HU-159, Asistente operativo y backends** — `docs/incidentes/HU-159.md`:
+  - **Pruebas:** las canceladas no son fallos. La causa (`before` de la suite) va primero y completa en la evidencia, y se repite `test` sin IA si solo hay canceladas.
+  - **Claude Code:** la puerta se comprueba antes de crear pasos. «Backends del equipo» es visible antes de empezar, y «Autorizar el proyecto o pasar a gestionado y continuar» retoma sin repetir lo hecho. Una consola desconectada no deja tareas esperando.
+  - **Asistente:** catálogo cerrado de operaciones con tarjeta de autorización (`publish_main`, el mismo servicio que el Panel, con auditoría). Su backend es explícito, y ninguna llamada de agente pasa a la API sin autorización.
+  - **Pruebas:** `assistant-operations.test.ts` (5), `test-cancellations.test.ts` (4) y casos nuevos en `claude-code-*` (F/G, D/E, H). `PORTAL_REQUIRE_DOCKER=1 npm test` 288/286 (2 omitidas por plataforma). Chromium 13/13 en una instancia aislada.
 - Pendiente de la validación del propietario en su instalación real: ver la lista de prueba final de la sesión.
 
 ---
