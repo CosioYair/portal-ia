@@ -100,6 +100,12 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         const p = await api.continueProcess(slug, proc.id, { addBudgetUsd: add, pipeline: { ...(a.pipeline ?? {}), ...(allowInstall ? { allowInstall: true } : {}) }, ...(a.answer ? { answer: answer.trim() } : {}) });
         onChange(p); flash(a.answer ? 'Tu respuesta llegó al equipo; retoma el trabajo' : a.id === 'repair_output' ? 'El Desarrollador está reparando su entrega (sin repetir el plan)' : 'El equipo retoma el trabajo donde lo dejó');
       }
+      else if (a.id === 'claude_code_fix' && a.backendFix) {
+        // Solo la autorización que falta (proyecto y/o pasar a «gestionado»), y después el «Continuar» de siempre: retoma lo pendiente sin repetir lo hecho.
+        await api.claudeCodeFix(slug, proc.id, a.backendFix);
+        const p = await api.continueProcess(slug, proc.id, {});
+        onChange(p); flash('Autorización aplicada: el equipo retoma la operación pendiente (sin repetir lo hecho ni usar la API)');
+      }
       else if (a.id === 'recover') { const p = await api.recoverProcess(slug, proc.id); onChange(p); flash('Resultado recuperado sin IA'); }
       else if (a.id === 'register_external' && a.external) { const p = await api.registerExternalCorrection(slug, proc.id, { commit: a.external.commit, note: answer.trim() }); onChange(p); flash('Corrección externa registrada: se verifica en el sandbox sin IA y se detiene antes de QA'); }
       else if (a.id === 'cancel') {

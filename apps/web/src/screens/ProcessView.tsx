@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import type { PipelineConfig, Process, ProcessStep } from '@portal-ia/domain';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
 import { PipelineOptions } from '../components/PipelineOptions.tsx';
-import { api } from '../lib/api.ts';
+import { api, type ProcessBackends } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
@@ -109,6 +109,7 @@ export function ProcessView() {
               <div className="help" style={{ paddingBottom: 26 }}>El proceso se detiene entre pasos si el gasto se acerca al límite.</div>
             </div>
             {proc.kind === 'story_execution' && <PipelineOptions value={pipeline} onChange={setPipeline} team={proc.steps.map(s => ({ agentName: s.agentName, role: s.title, model: s.model ?? '' }))} />}
+            {proc.kind === 'story_execution' && <TeamBackends slug={slug} processId={proc.id} />}
             <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo a los agentes indicados a trabajar en este proceso hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. Los resultados son propuestas que revisaré antes de aplicarse.</span></label>
             <button className="btn btn-primary" style={{ alignSelf: 'flex-start' }} onClick={authorize} disabled={!auth || authBusy || !(Number(budget) > 0)}>{authBusy ? <span className="spin spin-light" /> : Icon.arrow()}{authBusy ? 'Autorizando…' : 'Autorizar y comenzar'}</button>
           </div></section>}
@@ -179,4 +180,16 @@ export function ProcessList() {
       </main>
     </Shell>
   );
+}
+
+/** Backends del equipo ANTES de autorizar (o al retomar): con qué ejecutará cada agente y si puede hacerlo ya. */
+function TeamBackends({ slug, processId }: { slug: string; processId: string }) {
+  const [b, setB] = useState<ProcessBackends | null>(null);
+  useEffect(() => { api.processBackends(slug, processId).then(setB).catch(() => setB(null)); }, [slug, processId]);
+  if (!b || !b.team.some(t => t.backend !== 'api')) return null;
+  return <div className="card card-b" style={{ display: 'flex', flexDirection: 'column', gap: 6 }} data-team-backends>
+    <div className="h3" style={{ fontSize: 14 }}>Backends del equipo {b.ready ? <Chip xs tone="ok">listos</Chip> : <Chip xs tone="warn">falta algo</Chip>}</div>
+    {b.team.map(t => <div key={t.agentId} className="small" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><strong>{t.name}</strong><span className="muted">{t.roles.join(', ')}</span><Chip xs tone={t.ready ? (t.backend === 'api' ? '' : 'ok') : 'warn'}>{t.label}</Chip>{t.reason && <span style={{ color: '#7A4A00' }}>{t.reason}</span>}</div>)}
+    <div className="help">Sin consola conectada, «tu consola» no avanza. No se cambia de backend ni se usa la API sin tu autorización{b.fallback === 'api' ? ' (tienes autorizada la API como alternativa)' : ''}.</div>
+  </div>;
 }

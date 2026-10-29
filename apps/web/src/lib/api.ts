@@ -27,13 +27,18 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export interface AssistantInfo { agentId: string; name: string; model: string; provider: string; monthlyLimitUsd: number; spentThisMonthUsd: number; estimatedPerMessageUsd: number }
-export type AssistantActionType = 'create_company' | 'create_project' | 'add_backlog_item' | 'propose_execution' | 'propose_apply' | 'propose_delegation' | 'info';
+export interface AssistantInfo { agentId: string; name: string; model: string; provider: string; monthlyLimitUsd: number; spentThisMonthUsd: number; estimatedPerMessageUsd: number;
+  /** Backend del Asistente y su origen de facturación (se muestran antes de enviar). */
+  backend: ExecutionBackend; backendLabel: string; billing: 'api' | 'subscription'; available: boolean; unavailableReason: string | null }
+export type AssistantActionType = 'create_company' | 'create_project' | 'add_backlog_item' | 'propose_execution' | 'propose_apply' | 'propose_delegation' | 'propose_operation' | 'info';
 export interface AssistantAction {
-  type: AssistantActionType; status: 'done' | 'failed' | 'pending'; label: string; detail?: string; link?: string;
+  type: AssistantActionType; status: 'done' | 'failed' | 'pending' | 'running' | 'rejected'; label: string; detail?: string; link?: string;
+  operation?: { id: string; capability: string; params: Record<string, unknown>; preview: { ok: boolean; title: string; details: string[]; blockers: string[]; excluded: string[] }; result?: { summary: string; details: string[] } | null; decidedAt?: string | null };
   processId?: string; workspaceSlug?: string; projectId?: string; storyId?: string; estimatedUsd?: number; suggestedBudgetUsd?: number; changes?: number;
   live?: { status: string; phase: string; next: string; tone: 'info' | 'warn' | 'ok' | 'err'; settled: boolean };
 }
+export interface ProcessBackends { processId: string; projectId: string; projectName: string | null; connectorEnabled: boolean; subscriptionVerified: boolean; projectAuthorized: boolean; fallback: 'none' | 'api'; ready: boolean;
+  team: { agentId: string; name: string; roles: string[]; backend: ExecutionBackend; label: string; ready: boolean; reason: string | null; problem: string | null }[] }
 export interface AssistantAttachment { name: string; mediaType: string; bytes: number }
 export interface AssistantImage { mediaType: string; data: string; name?: string }
 export interface AssistantMessage { id: string; role: 'user' | 'assistant'; content: string; actions: AssistantAction[]; attachments: AssistantAttachment[]; tokensIn: number; tokensOut: number; costUsd: number; model: string | null; createdAt: string }
@@ -68,6 +73,9 @@ export const api = {
   claudeCodeSettings: (patch: Record<string, unknown>) => request<ClaudeCodeStatusView>('/api/claude-code/settings', { method: 'PUT', body: JSON.stringify(patch) }),
   claudeCodeSmokeTest: () => request<{ ok: boolean; answer: string; authMethod: string | null; subscriptionType: string | null; apiKeySource: string | null; tokensIn: number; tokensOut: number; apiEquivalentUsd: number | null; durationMs: number; apiBudgetChargedUsd: number }>('/api/claude-code/smoke-test', { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   agentClaudeCode: (slug: string, id: string) => request<{ backend: ExecutionBackend; status: ClaudeCodeStatusView; projects: { id: string; authorized: boolean }[]; limits: { maxConcurrent: number; maxDurationSec: number; maxTurns: number; repoRead: boolean; fallback: 'none' | 'api' }; usage: ClaudeCodeUsage; runs: ClaudeCodeRun[]; consoles: { id: string; name: string; connected: boolean; expired: boolean }[] }>(`/api/workspaces/${slug}/agents/${id}/claude-code`),
+  decideAssistantOperation: (messageId: string, operationId: string, decision: 'approve' | 'reject') => request<{ message: AssistantMessage }>(`/api/assistant/messages/${messageId}/operations/${operationId}/${decision}`, { method: 'POST', body: JSON.stringify(decision === 'approve' ? { authorized: true } : {}) }),
+  processBackends: (slug: string, id: string) => request<ProcessBackends>(`/api/workspaces/${slug}/processes/${id}/backends`),
+  claudeCodeFix: (slug: string, id: string, fix: { authorizeProject: boolean; switchToManaged: string[] }) => request<ProcessBackends>(`/api/workspaces/${slug}/processes/${id}/claude-code/fix`, { method: 'POST', body: JSON.stringify({ authorized: true, ...fix }) }),
   claudeCodeWorkspace: (slug: string) => request<ClaudeCodeWorkspaceView>(`/api/workspaces/${slug}/claude-code`),
   claudeCodeProjects: (slug: string, projectIds: string[]) => request<{ projects: string[] }>(`/api/workspaces/${slug}/claude-code/projects`, { method: 'PUT', body: JSON.stringify({ authorized: true, projectIds }) }),
   setAgentBackend: (slug: string, id: string, backend: ExecutionBackend) => request<Agent>(`/api/workspaces/${slug}/agents/${id}/backend`, { method: 'PUT', body: JSON.stringify(backend === 'api' ? { backend } : { backend, authorized: true }) }),

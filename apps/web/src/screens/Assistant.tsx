@@ -22,7 +22,9 @@ export function Assistant() {
             <h1 className="h1" style={{ fontSize: 24 }}>{info?.name ?? 'Asistente de Empresa'}</h1>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               {info && <Chip className="mono" xs>{info.model}</Chip>}
-              {info && <Chip xs>≈ {fmtUsd(info.estimatedPerMessageUsd)} por mensaje</Chip>}
+              {info && <Chip xs tone={info.available ? (info.billing === 'subscription' ? 'ok' : '') : 'warn'}>{info.backendLabel}{info.billing === 'subscription' ? ' · sin cargo a la API' : ''}</Chip>}
+              {info && info.billing === 'api' && <Chip xs>≈ {fmtUsd(info.estimatedPerMessageUsd)} por mensaje</Chip>}
+              {info && !info.available && info.unavailableReason && <Chip xs tone="warn">{info.unavailableReason}</Chip>}
               {info && <Chip xs tone={pct >= 90 ? 'err' : pct >= 70 ? 'warn' : ''}>mes: {fmtUsd(info.spentThisMonthUsd)} de {fmtUsd(info.monthlyLimitUsd)}</Chip>}
               {pending > 0 && <Chip xs tone="warn" dot="pulse">{pending} propuesta(s) por autorizar</Chip>}
             </div>

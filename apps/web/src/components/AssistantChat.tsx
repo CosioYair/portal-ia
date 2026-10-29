@@ -1,3 +1,4 @@
+import { OperationCard } from './OperationCard.tsx';
 import React, { useEffect, useRef, useState, type ClipboardEvent, type ChangeEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
@@ -178,7 +179,9 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
             {m.attachments?.length > 0 && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>{m.attachments.map((at, i) => <span key={i} className="chip chip-xs" style={{ background: 'rgba(255,255,255,.12)', color: '#fff', border: 0 }}>{at.mediaType.startsWith('image/') ? '🖼' : '📄'} {at.name} · {Math.max(1, Math.round(at.bytes / 1024))} KB</span>)}</div>}
           </div>
           {m.actions.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', maxWidth: 760 }}>
-            {m.actions.map((a, i) => a.status === 'pending' && (a.type === 'propose_execution' || a.type === 'propose_apply' || a.type === 'propose_delegation')
+            {m.actions.map((a, i) => a.type === 'propose_operation' && a.operation
+              ? <OperationCard key={`${m.id}-${i}`} msgId={m.id} action={a} onResolved={replaceMsg} />
+              : a.status === 'pending' && (a.type === 'propose_execution' || a.type === 'propose_apply' || a.type === 'propose_delegation')
               ? <ProposalCard key={`${m.id}-${i}`} msgId={m.id} action={a} onResolved={replaceMsg} />
               : <ActionRow key={`${m.id}-${i}`} a={a} />)}
           </div>}
@@ -201,7 +204,7 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
           <textarea className="input" value={text} onChange={e => setText(e.target.value)} onPaste={onPaste} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} placeholder={compact ? 'Pídele algo al asistente… (arrastra o pega archivos)' : 'Escribe tu petición, pega una captura o arrastra un archivo .md/.txt… (Enter envía · Shift+Enter salto de línea)'} aria-label="Mensaje para el asistente" style={{ minHeight: 48, height: 48, flex: 1 }} disabled={busy} />
           <button className="btn btn-primary" type="submit" disabled={busy || (!text.trim() && !images.length)}>{Icon.arrow()}{compact ? '' : 'Enviar'}</button>
         </div>
-        {compact && info && <div className="small muted" style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>≈ {fmtUsd(info.estimatedPerMessageUsd)} por mensaje · mes {fmtUsd(info.spentThisMonthUsd)} de {fmtUsd(info.monthlyLimitUsd)}</span><button type="button" className="lnk" onClick={clear}>limpiar</button></div>}
+        {compact && info && <div className="small muted" style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>{info.backendLabel} · {info.billing === 'subscription' ? 'sin cargo a la API' : `≈ ${fmtUsd(info.estimatedPerMessageUsd)} por mensaje · mes ${fmtUsd(info.spentThisMonthUsd)} de ${fmtUsd(info.monthlyLimitUsd)}`}{!info.available && info.unavailableReason ? ` · ⚠ ${info.unavailableReason}` : ''}</span><button type="button" className="lnk" onClick={clear}>limpiar</button></div>}
       </form>
     </section>
   );
