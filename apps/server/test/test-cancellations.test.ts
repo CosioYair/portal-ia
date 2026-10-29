@@ -68,6 +68,17 @@ test('evidencia recortada sin la causa: «solo canceladas» (no fallos), diagnó
   assert.ok(d.kinds.some(k => k.kind === 'test_runner')); assert.ok(!d.kinds.some(k => k.kind === 'implementation'));
 });
 
+test('evidencia REAL de HU-159: bloques de canceladas cortados tras «location:» (sin failureType ni error) no cuentan como fallos', () => {
+  // Así quedó guardado: el recorte antiguo dejaba «…» a mitad del bloque de algunas canceladas.
+  const cut = (n: number, name: string) => `    # Subtest: ${name}\n    not ok ${n} - ${name}\n      ---\n      duration_ms: 0\n      type: 'test'\n      location: '/work/apps/server/test/org-evaluation.test.ts:1:${14000 + n}'\n…`;
+  const REAL = `TAP version 13\n${cancelled(1, NAMES[0])}\n${cancelled(2, NAMES[1])}\n${cut(3, NAMES[2])}\n${cancelled(4, NAMES[3])}\n${cancelled(5, NAMES[4])}\n${cut(6, NAMES[5])}\n${cancelled(7, NAMES[6])}\n${cancelled(8, NAMES[7])}\n    1..8\nnot ok 198 - rutas y flujo con proveedor simulado (datos temporales)\n  ---\n  duration_ms: 167.37421\n  type: 'suite'\n  location: '/work/apps/server/test/org-evaluation.test.ts:1:11404'\n\n[…]\n\n${TOTALS}\n`;
+  const s = testRunSummary(run(REAL));
+  assert.deepEqual(s.causes, [], 'un bloque recortado no es la prueba de un fallo'); assert.equal(s.onlyCancellations, true); assert.equal(s.cancelled, 8);
+  assert.ok(failingTests(run(REAL)).every(x => x.kind === 'cancelled'));
+  // Otros productores de TAP (sin failureType): un «not ok» sin bloque sigue contando como fallo.
+  assert.equal(failingTests({ command: 'test', output: 'TAP version 13\nnot ok 1 - suma\n  ---\n  operator: equal\n  ...\n# fail 1' })[0]?.kind, 'assertion');
+});
+
 test('el recorte de la salida conserva el error de la suite (antes lo cortaba el tope) y resume las canceladas en una línea', () => {
   const blocks = failureBlocks(FULL);
   assert.match(blocks, /failureType: 'hookFailed'/); assert.match(blocks, /seedWorkspace/);

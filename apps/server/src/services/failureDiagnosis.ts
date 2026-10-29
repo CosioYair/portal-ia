@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import type { VerificationRun } from '@portal-ia/domain';
+import type { ExecutionResult, VerificationRun } from '@portal-ia/domain';
 import { clip } from './devOutput.ts';
 import { diagnosticsFor, filesIn } from './diagnostics.ts';
 import { readRepoFile } from './repoWrite.ts';
@@ -32,6 +32,9 @@ export interface FailingTest { name: string; message: string; file: string | nul
 export function failingTests(run: Pick<VerificationRun, 'command' | 'output'>, max = 8): FailingTest[] {
   if (run.command !== 'test') return diagnosticsFor(run).slice(0, max).map(d => ({ name: `${d.file ?? run.command}${d.line ? `:${d.line}` : ''}${d.code ? ` ${d.code}` : ''}`, message: d.text, file: d.file ?? null, line: d.line ?? null, kind: 'assertion' as const }));
   const lines = plain(run.output).split('\n'); const all: FailingTest[] = [];
+  // TAP de node --test: todo fallo propio trae `failureType` y su error. Un bloque sin ninguno de los dos es un bloque
+  // RECORTADO (HU-159: el recorte antiguo cortaba bloques de canceladas tras `location:`), no la prueba de un fallo.
+  const nodeTap = /^\s*failureType: '/m.test(run.output);
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(/^(\s*)not ok \d+ - (.+?)\s*(#.*)?$/); if (!m || TEST_FILE.test(m[2])) continue;
     const indent = m[1].length; let message = ''; let file: string | null = null; const frames: { file: string; line: number }[] = [];
@@ -55,6 +58,7 @@ export function failingTests(run: Pick<VerificationRun, 'command' | 'output'>, m
     }
     // Un contenedor (suite sin error propio, o prueba que falla solo porque fallan sus hijas) no es una causa: lo son sus hijas.
     if (failureType === 'subtestsFailed' || (isSuite && !failureType && !message)) continue;
+    if (nodeTap && !failureType && !message) continue;
     const kind: FailingKind = failureType === 'cancelledByParent' ? 'cancelled' : failureType === 'hookFailed' ? 'hook' : failureType === 'testTimeoutFailure' ? 'timeout' : 'assertion';
     const frame = frames.find(f => f.file === file) ?? frames[0];
     const name = kind === 'hook' ? `${m[2]} (preparación de la ${isSuite ? 'suite' : 'prueba'}: before/after)` : m[2];
@@ -66,6 +70,18 @@ export function failingTests(run: Pick<VerificationRun, 'command' | 'output'>, m
   const out = (causes.length ? causes : all).slice(0, max);
   if (!out.length) for (const d of diagnosticsFor(run).slice(0, max)) out.push({ name: d.text.split(' — ')[0], message: d.text.split(' — ').slice(1).join(' — '), file: d.file ?? null, line: null, kind: 'assertion' });
   return out;
+}
+
+/**
+ * Unidades de corrección PENDIENTES (sin ningún intento) planificadas a partir de un «test» que solo tenía pruebas
+ * canceladas: no corrigen nada real (HU-159: «Corrección 5» apuntaba a una prueba cancelada por el `before` de su suite).
+ * Al continuar se sustituyen, sin IA, por una nueva verificación que muestre la causa.
+ */
+export function staleCorrectionUnits(r: ExecutionResult | null | undefined): string[] {
+  const man = r?.manifest; if (!man || !r?.applied) return [];
+  const lastTest = r.verifications.filter(v => v.command === 'test').at(-1);
+  if (!lastTest || !testRunSummary(lastTest).onlyCancellations) return [];
+  return man.units.filter(u => u.kind === 'correction' && u.source === 'verification' && u.status === 'pending' && !u.attempts && (u.findings ?? []).every(f => /^test falla/.test(f.text))).map(u => u.id);
 }
 
 /** Resumen de una ejecución de «test»: cuántas pruebas fallan de verdad y cuántas solo se cancelaron. */

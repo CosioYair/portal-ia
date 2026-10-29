@@ -79,7 +79,7 @@ const EIGHT: Del[] = [['src/contract.mjs', 'code', 30], ['src/service.mjs', 'cod
 const planOf = (dels: Del[]) => JSON.stringify({ summary: 'Validador de contratos con servicio, CLI, pruebas y documentación', tasks: dels.map(d => `Entregar ${d[0]}`), filesToRead: ['src/index.mjs', 'package.json'], filesToChange: dels.map(d => d[0]), deliverables: dels.map(d => ({ path: d[0], purpose: `Entregable ${d[0]}`, kind: d[1], estimatedLines: d[2] })), acceptance: ['El validador comprueba datos, gasto y lecciones', 'Tiene CLI, pruebas y documentación'], risks: [] });
 const QA_OK = JSON.stringify({ verdict: 'approved', summary: 'Cumple el criterio con evidencia: todo entregado y probado.', findings: [], suggestedTests: [] });
 const qaReject = (findings: { text: string; file: string; expected?: string }[]) => JSON.stringify({ verdict: 'rejected', summary: 'Faltan requisitos del criterio.', findings: findings.map(f => ({ severity: 'alta', text: f.text, file: f.file, evidence: 'revisión del diff', requirement: 'criterio 1', expected: f.expected ?? 'corregirlo', verify: 'QA lo comprueba' })), suggestedTests: [] });
-const MARKERS = ['MARCA_SERVICIO', 'MARCA_CONTRATO', 'MARCA_CLI', 'MARCA_PRUEBA', 'MARCA_DOCS', 'MARCA_GUIA', 'MARCA_ARQUITECTO', 'MARCA_CONSEJO', '- crear src/contract.mjs', '- crear src/service.mjs', '- crear src/cli.mjs', '- crear test/service.test.mjs', 'Faltan src/service.mjs', 'Entregables del plan', 'Que compile no basta', 'test: OK', 'HALLAZGO_SERVICIO_1', 'HALLAZGO_SERVICIO_2', 'HALLAZGO_CLI', '[entregado] src/cli.mjs', 'Comprobación determinista previa', 'Criterio de', 'MARCA_HELPER', 'MARCA_DISPUTA', 'Estado de cada comprobación', 'Qué cambia en este intento'];
+const MARKERS = ['MARCA_SERVICIO', 'MARCA_CONTRATO', 'MARCA_CLI', 'MARCA_PRUEBA', 'MARCA_DOCS', 'MARCA_GUIA', 'MARCA_ARQUITECTO', 'MARCA_CONSEJO', '- crear src/contract.mjs', '- crear src/service.mjs', '- crear src/cli.mjs', '- crear test/service.test.mjs', 'Faltan src/service.mjs', 'Entregables del plan', 'Que compile no basta', 'test: OK', 'HALLAZGO_SERVICIO_1', 'HALLAZGO_SERVICIO_2', 'HALLAZGO_CLI', '[entregado] src/cli.mjs', 'Comprobación determinista previa', 'Criterio de', 'MARCA_HELPER', 'MARCA_DISPUTA', 'Estado de cada comprobación', 'Qué cambia en este intento', 'SQLite parameter 2'];
 type Rule = { match: string; text?: string; stopReason?: string; delayMs?: number; responses?: { text: string; stopReason?: string; thinkingTokens?: number }[]; thinkingTokens?: number; continueFromLines?: string };
 const R = { plan: 'plan técnico', consult: 'aporta recomendaciones concretas', repair: 'Tu entrega anterior para esta historia no se pudo convertir', fix: 'Corrige la implementación de esta historia', advice: 'necesita tu criterio para corregir esto', qa: 'Evalúa la implementación con la EVIDENCIA real', cont: 'Continúa el archivo', dev: 'Implementa la historia' };
 /** Las reglas específicas van antes (la primera que encaja responde): continuación, reparación, corrección, consulta, QA, unidades. */
@@ -857,6 +857,48 @@ test('revisión2 8/9 · una corrección que agota la salida falla ELLA (la ronda
     assert.match(q.result!.pipeline!.reason ?? '', /src\/contract\.mjs:2/);
     assert.equal(byRule('Corrige la implementación de esta historia').length, 1, 'una sola llamada');
     assert.equal(byRule(R.qa).length, 0);
+  } finally { sandboxFail = null; }
+});
+
+test('HU-159 · al continuar, una corrección planificada con pruebas solo canceladas se sustituye sin IA: «test» se repite, la causa (preparación de la suite) llega a la corrección y no se conceden correcciones nuevas', async () => {
+  const cancelled = (n: number) => `    not ok ${n} - caso ${n} con presupuesto no positivo\n      ---\n      duration_ms: 0\n      type: 'test'\n      location: '/work/test/org.test.mjs:1:${100 + n}'\n      failureType: 'cancelledByParent'\n      error: 'test did not finish before its parent and was cancelled'\n      ...`;
+  const HOOK = "not ok 1 - rutas con proveedor simulado\n  ---\n  type: 'suite'\n  location: '/work/test/org.test.mjs:1:50'\n  failureType: 'hookFailed'\n  error: 'Provided value cannot be bound to SQLite parameter 2.'\n  name: 'TypeError'\n  stack: |-\n    Object.create (/work/src/contract.mjs:2:10)\n    seedWorkspace (/work/test/org.test.mjs:192:19)\n  ...";
+  const totals = '# tests 2\n# pass 0\n# fail 0\n# cancelled 2';
+  const CLIPPED = `TAP version 13\n${cancelled(1)}\n${cancelled(2)}\n${totals}`; // lo que quedó guardado: sin la causa
+  const FULL = `TAP version 13\n${cancelled(1)}\n${cancelled(2)}\n    1..2\n${HOOK}\n1..1\n${totals}`;
+  const FIX = 'Corrige la implementación de esta historia';
+  setRules(planOf([['src/contract.mjs', 'code', 30]]), [
+    { match: FIX, text: `=== RESUMEN ===\nArreglo la preparación.\n${P('src/contract.mjs', "export const CHECKS = ['datos', 'gasto', 'lecciones'];", "export const CHECKS = ['datos', 'gasto', 'lecciones']; // HU159")}${OWNER}` },
+    { match: 'Esta es la unidad 1 de 1', text: resp(F('src/contract.mjs', C.contract)) }
+  ]);
+  const p = await runIt('HU-159 · corrección obsoleta');
+  assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
+  // Estado de HU-159: «test» guardado solo con canceladas, «Corrección 1» planificada con ellas (sin intentos), un paso
+  // huérfano sin llamada y una pausa de Claude Code.
+  const procs = processesRepo(S); const r = procs.get(p.id)!.result!; const man = r.manifest!; const u0 = man.units[0];
+  const orphan = procs.addStep(p.id, { agentId: u0.agentId, agentName: u0.agentName, title: 'Corrección 1', model: 'm', role: 'implementer' });
+  const at = new Date().toISOString();
+  const stale = { ...u0, id: 'r1-1', kind: 'correction' as const, title: 'org.test.mjs: test falla: caso 1 con presupuesto no positivo', purpose: 'x', files: ['src/contract.mjs'], status: 'pending' as const, attempts: 0, continuations: 0, repairs: 0, costUsd: 0, stepIds: [], reservedStepId: null, source: 'verification' as const, findings: [{ severity: 'alta' as const, text: 'test falla: caso 1 con presupuesto no positivo — test did not finish before its parent and was cancelled', file: 'test/org.test.mjs', evidence: null }], error: null, startedAt: null, finishedAt: null, round: man.rounds.length, applied: [], outputs: [] };
+  procs.setResult(p.id, { ...r, review: null, verifications: [...r.verifications, { command: 'test', exitCode: 1, output: CLIPPED, startedAt: at, finishedAt: at, durationMs: 1, isolation: 'docker' }], manifest: { ...man, units: [...man.units, stale], rounds: [...man.rounds, { at, source: 'verification', units: 1, applied: 0 }] }, pipeline: { ...r.pipeline!, state: 'paused', phase: 'finished', pauseKind: 'permission', reason: 'Claude Code no está disponible para este paso: El proyecto «X» no está autorizado para Claude Code. Lo hecho se conserva.', lastQaCommit: null } });
+  const maxBefore = procs.get(p.id)!.result!.pipeline!.config.maxCorrections;
+  let tests = 0;
+  sandboxFail = (_wt, command) => command !== 'test' ? null : ++tests === 1 ? { exitCode: 1, output: FULL } : null;
+  try {
+    const before = calls().length;
+    const res = await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/continue`, payload: { authorized: true } });
+    assert.equal(res.statusCode, 200, res.body);
+    const done = await waitDone(p.id); const pl = done.result!.pipeline!; const m2 = done.result!.manifest!;
+    assert.equal(pl.state, 'verified', pl.reason ?? '');
+    assert.equal(m2.units.find(u => u.id === 'r1-1')!.status, 'skipped', 'la corrección obsoleta no se ejecutó'); assert.match(m2.units.find(u => u.id === 'r1-1')!.error ?? '', /Sustituida sin IA/);
+    const st = done.steps.find(s => s.id === orphan.id)!; assert.equal(st.status, 'skipped'); assert.equal(st.costUsd, 0);
+    assert.equal(tests, 2, '«test» se repitió sin IA (causa a la vista) y otra vez tras la corrección');
+    const fix = m2.units.find(u => u.kind === 'correction' && u.id !== 'r1-1')!;
+    assert.match(fix.findings![0].text, /falla la preparación «rutas con proveedor simulado.*cannot be bound to SQLite parameter 2.*pila: .*seedWorkspace/);
+    assert.ok(!fix.findings!.some(f => /did not finish before its parent/.test(f.text)), 'no se corrigen pruebas canceladas');
+    assert.equal(calls().slice(before).filter(c => c.rule === FIX).length, 1); assert.ok(calls().slice(before).find(c => c.rule === FIX)!.markers.includes('SQLite parameter 2'), 'el error de la preparación llega a la corrección');
+    const order = ['sustituida(s) sin IA', 'Se repite «test» una vez, sin IA', 'Corrección dirigida'].map(t => pl.events.findIndex(e => e.message.includes(t)));
+    assert.ok(order.every(i => i >= 0) && order[0] < order[1] && order[1] < order[2], `orden: ${order}`);
+    assert.equal(pl.config.maxCorrections, maxBefore, 'continuar tras una pausa de Claude Code no concede correcciones nuevas');
   } finally { sandboxFail = null; }
 });
 

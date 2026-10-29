@@ -9,7 +9,7 @@ import { clip, type ParsedDevOutput } from './devOutput.ts';
 import { diagnosticsFor, filesIn } from './diagnostics.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { applyChanges, changesSinceBase, commitInWorktree, hashText, readRepoFile, safeRelPath } from './repoWrite.ts';
-import { diagnoseFailure, diagnosisPrompt } from './failureDiagnosis.ts';
+import { diagnoseFailure, diagnosisPrompt, failingTests, staleCorrectionUnits } from './failureDiagnosis.ts';
 import { verificationEvidence, zeroTests } from './qaGate.ts';
 import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
 import { agentHeadroom, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, retryForeignFailure, stepCall, updatePipeline, updateResult, verifyStage, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
@@ -599,7 +599,11 @@ type Finding = NonNullable<WorkUnit['findings']>[number];
 
 /** Hallazgos de una verificación que falla, por archivo (con la evidencia real del sandbox). */
 export function verificationFindings(v: VerificationRun): Finding[] {
-  const d = diagnosticsFor(v);
+  // «test»: las CAUSAS (aserción, preparación de la suite con su pila, plazo), nunca los nombres de las pruebas que su
+  // suite canceló (HU-159: la corrección apuntaba a una prueba cancelada y el `before` que fallaba quedaba fuera).
+  const causes = v.command === 'test' ? failingTests(v).filter(t => t.kind && t.kind !== 'cancelled') : [];
+  const what = { hook: 'falla la preparación', timeout: 'plazo agotado en', assertion: 'falla' } as Record<string, string>;
+  const d = causes.length ? causes.map(t => ({ file: t.file, line: t.line, code: null, text: `${what[t.kind!] ?? 'falla'} «${t.name}»: ${t.message}` })) : diagnosticsFor(v);
   const ev = verificationEvidence(v);
   const byFile = new Map<string, string[]>();
   for (const x of d) { const k = x.file ?? ''; byFile.set(k, [...(byFile.get(k) ?? []), `${x.line ? `línea ${x.line}: ` : ''}${x.code ? `${x.code} ` : ''}${x.text}`]); }
@@ -815,6 +819,19 @@ export function deliveryChecks(p: Process): DeliveryCheck[] {
  */
 export async function advanceUnits(ctx: StoryRunCtx, cfg: PipelineConfig): Promise<boolean> {
   const isPending = (u: WorkUnit) => u.status === 'pending' || u.status === 'running';
+  // Correcciones planificadas con pruebas solo canceladas (sin la causa a la vista): se sustituyen sin IA y sin gastar
+  // corrección por una nueva verificación de «test», que muestra la causa; con ella se planifica una corrección dirigida.
+  const stale = staleCorrectionUnits(resultOf(ctx));
+  if (stale.length) {
+    const titles = manifestOf(ctx).units.filter(u => stale.includes(u.id)).map(u => u.title);
+    saveManifest(ctx, m => { for (const u of m.units) if (stale.includes(u.id)) { u.status = 'skipped'; u.error = 'Sustituida sin IA: se planificó con pruebas canceladas por su suite, sin un fallo propio a la vista. Se repite «test» para ver la causa real.'; u.finishedAt = now(); } });
+    // Pasos «Corrección N» que se crearon y nunca llegaron a llamar a la IA (antes de que la puerta de Claude Code se
+    // comprobara primero): se cierran como omitidos, costo 0, para que no parezcan trabajo pendiente.
+    const live = new Set(manifestOf(ctx).units.filter(u => !stale.includes(u.id)).flatMap(u => [...u.stepIds, u.reservedStepId ?? '']));
+    const procs = processesRepo(ctx.slug);
+    for (const st of procs.get(ctx.processId)!.steps) if (st.status === 'pending' && !st.outputMd && !st.costUsd && /^Corrección/.test(st.title) && !live.has(st.id)) procs.stepFinish(st.id, 'skipped', { error: 'No llegó a llamar a la IA (se detuvo antes por Claude Code). Sustituido sin IA por una nueva verificación; costo 0.' });
+    emit(ctx, 'unit', `${stale.length} corrección(es) pendiente(s) sustituida(s) sin IA: se planificaron con pruebas canceladas (no son fallos propios). Antes de pagar una corrección se repite «test» para ver la causa real.`, { phase: 'verifying', detail: titles.join(' · ') });
+  }
   if (manifestOf(ctx).units.some(isPending)) {
     const rounds = new Set<number>();
     for (let guard = 0; guard < 200; guard++) {
