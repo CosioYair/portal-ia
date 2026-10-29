@@ -7,7 +7,8 @@ import { config, REPO_ROOT } from '../../config.ts';
 import { claudeCodeRunsRepo, processesRepo, projectsRepo } from '../../db/workspace.ts';
 import { repoRoot } from '../repoWrite.ts';
 import { registerJobTask, setProgressListener, submitTerminalTask } from './bridge.ts';
-import { ccError, runCliTask, type CliEvent } from './cli.ts';
+import { BRIDGE_SCRIPT, ccError, runCliTask, type CliEvent } from './cli.ts';
+export { BRIDGE_SCRIPT };
 import { cliCommandFor, findCli, verifiedDetection } from './detect.ts';
 import { getClaudeCodeSettings, projectAuthorized } from './settings.ts';
 
@@ -22,7 +23,6 @@ export const usesClaudeCode = (a: Agent) => agentBackend(a) !== 'api';
 
 /** Herramientas del puente que puede usar una ejecución gestionada (solo lectura y progreso). */
 export const JOB_TOOLS = ['portal_task_context', 'portal_list_files', 'portal_read_file', 'portal_knowledge', 'portal_report_progress'];
-export const BRIDGE_SCRIPT = path.join(REPO_ROOT, 'scripts', 'portal-mcp.mjs');
 let bridgeUrl = `http://${config.host}:${config.port}`;
 /** Dirección real en la que escucha el servidor (la fija index.ts al arrancar; las pruebas, la de su servidor). */
 export function setBridgeUrl(url: string) { bridgeUrl = url.replace(/\/+$/, ''); }
@@ -107,6 +107,7 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
   // CLI gestionada: la suscripción se comprueba ANTES de cada ejecución (no basta con la del día de la conexión).
   say('Comprobando la sesión de Claude Code (sin llamar al modelo)', 'preparing');
   const det = await verifiedDetection(s);
+  if (!det.capabilities.includes('restricted') || !det.capabilities.includes('blank-prompt-gate')) throw ccError('backend_unavailable', `Claude Code ${det.version ?? ''} no admite el modo restringido: actualízalo («claude update»).`);
   if (det.billing !== 'subscription') throw ccError('backend_unavailable', `Claude Code no está verificado con la suscripción (${backendLabel('claude-code', det.billing)}). ${det.problems.join(' ')}`.trim());
   const cli = (s.cliPath ? cliCommandFor(s.cliPath) : det.path ? cliCommandFor(det.path) : null) ?? findCli();
   if (!cli) throw ccError('backend_unavailable', 'No se encontró la CLI de Claude Code.');

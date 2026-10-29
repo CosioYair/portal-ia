@@ -3,7 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import type { ClaudeCodeBilling, ClaudeCodeDetection, ClaudeCodeSettings } from '@portal-ia/domain';
-import { credentialVarsIn, minimalEnv } from './env.ts';
+import { credentialVarsIn, managedEnv } from './env.ts';
+import { MIN_RESTRICTED, probeSession } from './cli.ts';
 import { saveDetection, savedDetection } from './settings.ts';
 
 /**
@@ -66,7 +67,7 @@ export interface CaptureResult { code: number | null; stdout: string; stderr: st
 export function runCapture(cli: CliCommand, args: string[], o: { cwd: string; timeoutMs: number; env?: Record<string, string> }): Promise<CaptureResult> {
   return new Promise(resolve => {
     let stdout = ''; let stderr = ''; let timedOut = false; let done = false;
-    const child = spawn(cli.command, [...cli.prefixArgs, ...args], { cwd: o.cwd, env: o.env ?? minimalEnv(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, shell: false });
+    const child = spawn(cli.command, [...cli.prefixArgs, ...args], { cwd: o.cwd, env: o.env ?? managedEnv(), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, shell: false });
     const finish = (r: CaptureResult) => { if (done) return; done = true; clearTimeout(t); resolve(r); };
     const t = setTimeout(() => { timedOut = true; try { child.kill(); } catch { /* ya terminó */ } }, o.timeoutMs);
     child.stdout.on('data', d => { if (stdout.length < 200_000) stdout += d; });
@@ -95,10 +96,10 @@ export function classifyAuth(j: { loggedIn?: unknown; authMethod?: unknown; apiP
   return { billing: 'unverified', problem: `Modo de autenticación desconocido («${method ?? 'sin dato'}»). Queda «No verificado» y no se ejecuta nada automáticamente.` };
 }
 
-export async function detectClaudeCode(settings: ClaudeCodeSettings): Promise<ClaudeCodeDetection> {
+export async function detectClaudeCode(settings: ClaudeCodeSettings, opts: { probe?: boolean } = { probe: true }): Promise<ClaudeCodeDetection> {
   const d: ClaudeCodeDetection = {
     checkedAt: new Date().toISOString(), installed: false, path: null, version: null, loggedIn: null, authMethod: null, subscriptionType: null,
-    apiProvider: null, billing: 'unverified', portalEnvCredentials: credentialVarsIn(process.env), problems: [], capabilities: []
+    apiProvider: null, billing: 'unverified', portalEnvCredentials: credentialVarsIn(process.env), problems: [], capabilities: [], probe: null
   };
   const cli = settings.cliPath ? cliCommandFor(settings.cliPath) : findCli();
   if (!cli) {
@@ -114,8 +115,12 @@ export async function detectClaudeCode(settings: ClaudeCodeSettings): Promise<Cl
     d.installed = !v.spawnError;
     if (v.spawnError || v.code !== 0 || !d.version) {
       d.problems.push(`La CLI no respondió a «--version»${v.timedOut ? ' a tiempo' : ''}${v.spawnError ? `: ${v.spawnError}` : v.code !== 0 ? ` (código ${v.code})` : ''}.`);
+    } else if (!versionAtLeast(d.version, MIN_RESTRICTED)) {
+      // Sin modo restringido, tus hooks, plugins y ajustes (incluido un apiKeySource o un `env`) entrarían en la ejecución.
+      d.problems.push(`Claude Code ${d.version} no tiene el modo restringido (--restricted, desde ${MIN_RESTRICTED}). Actualízalo con «claude update» y vuelve a comprobar.`);
     } else {
-      const a = await runCapture(cli, ['auth', 'status', '--json'], { cwd, timeoutMs: 20_000 });
+      // Con --restricted, como la ejecución: solo cuentan los ajustes gestionados (los de usuario no reintroducen la API).
+      const a = await runCapture(cli, ['--restricted', 'auth', 'status', '--json'], { cwd, timeoutMs: 20_000 });
       let j: any = null;
       try { const parsed = JSON.parse(a.stdout.trim()); if (parsed && typeof parsed === 'object') j = parsed; } catch { /* no es JSON */ }
       if (j) {
@@ -126,9 +131,17 @@ export async function detectClaudeCode(settings: ClaudeCodeSettings): Promise<Cl
       }
       const c = classifyAuth(j);
       d.billing = c.billing; if (c.problem) d.problems.push(c.problem);
+      d.capabilities.push('restricted', 'blank-prompt-gate');
       if (versionAtLeast(d.version, '2.1.259')) d.capabilities.push('permission-prompts');
       if (versionAtLeast(d.version, '2.1.181')) d.capabilities.push('rate-limit-events');
       d.capabilities.push('stream-json', 'json-schema', 'strict-mcp-config', 'tools-restriction');
+      if (d.billing === 'subscription') {
+        // La sonda (sin modelo) se repite al comprobar a mano o al activar; en cada ejecución se reutiliza la última
+        // correcta de la MISMA CLI y versión, y el «init» de la propia ejecución se vuelve a comprobar antes del encargo.
+        const prev = savedDetection();
+        d.probe = !opts.probe && prev?.probe?.ok && prev.path === d.path && prev.version === d.version ? prev.probe : await probeSession(cli, d);
+        if (!d.probe.ok) { d.billing = 'unverified'; d.problems.push(`Comprobación de la configuración (sin llamar al modelo): ${d.probe.problem}`); }
+      }
     }
   } finally { try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* temporal */ } }
   if (d.portalEnvCredentials.length) d.problems.push(`Hay credenciales en el entorno del Portal (${d.portalEnvCredentials.join(', ')}). No se reenvían a Claude Code; la detección de arriba ya las excluye.`);
@@ -140,7 +153,7 @@ let cached: { at: number; key: string; detection: ClaudeCodeDetection } | null =
 /** Detección reciente (por defecto, de hace menos de 60 s) o una nueva. Cada ejecución automática la exige. */
 export async function verifiedDetection(settings: ClaudeCodeSettings, maxAgeMs = 60_000): Promise<ClaudeCodeDetection> {
   if (cached && cached.key === (settings.cliPath ?? '') && Date.now() - cached.at < maxAgeMs) return cached.detection;
-  return detectClaudeCode(settings);
+  return detectClaudeCode(settings, { probe: false });
 }
 /** Para la interfaz: la última conocida (en memoria o guardada), sin ejecutar nada. */
 export function lastDetection(): ClaudeCodeDetection | null { return cached?.detection ?? savedDetection(); }

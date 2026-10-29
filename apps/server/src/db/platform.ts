@@ -112,19 +112,20 @@ export const settingsRepo = {
 platform.exec(`
 CREATE TABLE IF NOT EXISTS claude_code_workers (
   id TEXT PRIMARY KEY, workspace_slug TEXT NOT NULL, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, agent_ids_json TEXT NOT NULL,
-  created_at TEXT NOT NULL, revoked_at TEXT, last_seen_at TEXT, client_json TEXT
+  created_at TEXT NOT NULL, revoked_at TEXT, last_seen_at TEXT, client_json TEXT, expires_at TEXT
 );
 `);
+if (!(platform.prepare(`PRAGMA table_info(claude_code_workers)`).all() as any[]).some(c => c.name === 'expires_at')) platform.exec(`ALTER TABLE claude_code_workers ADD COLUMN expires_at TEXT`);
 
 export interface ClaudeCodeWorkerRow {
   id: string; workspace_slug: string; name: string; token_hash: string; agent_ids_json: string;
-  created_at: string; revoked_at: string | null; last_seen_at: string | null; client_json: string | null;
+  created_at: string; revoked_at: string | null; last_seen_at: string | null; client_json: string | null; expires_at: string | null;
 }
 
 export const claudeCodeWorkersRepo = {
-  create(w: { id: string; workspaceSlug: string; name: string; tokenHash: string; agentIds: string[] }) {
-    platform.prepare(`INSERT INTO claude_code_workers (id, workspace_slug, name, token_hash, agent_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(w.id, w.workspaceSlug, w.name, w.tokenHash, JSON.stringify(w.agentIds), now());
+  create(w: { id: string; workspaceSlug: string; name: string; tokenHash: string; agentIds: string[]; expiresAt: string }) {
+    platform.prepare(`INSERT INTO claude_code_workers (id, workspace_slug, name, token_hash, agent_ids_json, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(w.id, w.workspaceSlug, w.name, w.tokenHash, JSON.stringify(w.agentIds), now(), w.expiresAt);
   },
   byHash(hash: string): ClaudeCodeWorkerRow | undefined { return platform.prepare(`SELECT * FROM claude_code_workers WHERE token_hash = ?`).get(hash) as ClaudeCodeWorkerRow | undefined; },
   get(id: string): ClaudeCodeWorkerRow | undefined { return platform.prepare(`SELECT * FROM claude_code_workers WHERE id = ?`).get(id) as ClaudeCodeWorkerRow | undefined; },

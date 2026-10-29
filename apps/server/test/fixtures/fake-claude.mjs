@@ -2,7 +2,9 @@
 // CLI de Claude Code SIMULADA para las pruebas del conector (nunca llama a ningún modelo ni usa la red externa).
 // Lee su guion de `fake-claude.scenario.json` (junto a este archivo) y registra cada invocación en
 // `fake-claude.log.jsonl`: argumentos, prompt, nombres de las variables de entorno recibidas y lo que hizo.
-// Imita la salida documentada de `claude -p --output-format stream-json --verbose` y de `claude auth status`.
+// Imita la salida documentada de `claude -p --output-format stream-json --verbose` y de `claude auth status`, y lo
+// comprobado con la CLI real 2.1.311 sin llamar al modelo: --restricted delante de cualquier orden, «init» al leer el
+// primer mensaje, un mensaje en blanco que no llega al modelo y «StructuredOutput» cuando se pide --json-schema.
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -16,9 +18,10 @@ const args = process.argv.slice(2);
 const log = entry => fs.appendFileSync(logFile, `${JSON.stringify({ at: new Date().toISOString(), pid: process.pid, args, envKeys: Object.keys(process.env).sort(), ...entry })}\n`);
 const out = obj => process.stdout.write(`${JSON.stringify(obj)}\n`);
 const opt = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
+const a = args.filter(x => x !== '--restricted');
 
-if (args[0] === '--version') { log({ kind: 'version' }); console.log(`${sc.version ?? '2.1.311'} (Claude Code)`); process.exit(0); }
-if (args[0] === 'auth' && args[1] === 'status') {
+if (a[0] === '--version') { log({ kind: 'version' }); console.log(`${sc.version ?? '2.1.311'} (Claude Code)`); process.exit(0); }
+if (a[0] === 'auth' && a[1] === 'status') {
   log({ kind: 'auth' });
   const auth = sc.auth ?? 'subscription';
   if (auth === 'garbage') { console.log('esto no es JSON'); process.exit(0); }
@@ -35,26 +38,47 @@ if (args[0] === 'auth' && args[1] === 'status') {
   console.log(JSON.stringify({ ...base, ...(by[auth] ?? by.subscription) }));
   process.exit(auth === 'none' ? 1 : 0);
 }
-if (!args.includes('-p')) { log({ kind: 'unexpected' }); console.error('fake-claude: solo -p, --version y auth status'); process.exit(2); }
+if (!a.includes('-p')) { log({ kind: 'unexpected' }); console.error('fake-claude: solo -p, --version y auth status'); process.exit(2); }
 
-const chunks = [];
-process.stdin.on('data', d => chunks.push(d));
-process.stdin.on('end', async () => {
-  const prompt = Buffer.concat(chunks).toString('utf8');
-  const system = opt('--system-prompt-file') ? fs.readFileSync(opt('--system-prompt-file'), 'utf8') : '';
-  const behavior = sc.behavior ?? 'ok';
-  const mcpFile = opt('--mcp-config');
-  const tools = mcpFile ? (opt('--allowedTools') ?? '').split(',').filter(Boolean) : [];
-  const init = { type: 'system', subtype: 'init', session_id: 'sess-fake', uuid: 'u0', apiKeySource: sc.apiKeySource ?? 'none', claude_code_version: sc.version ?? '2.1.311', cwd: process.cwd(), tools: behavior === 'foreign_tools' ? ['Bash', 'Read', ...tools] : tools, mcp_servers: mcpFile ? [{ name: 'portal', status: 'connected' }] : [], model: opt('--model'), permissionMode: opt('--permission-mode') };
+const system = opt('--system-prompt-file') ? fs.readFileSync(opt('--system-prompt-file'), 'utf8') : '';
+const behavior = sc.behavior ?? 'ok';
+const mcpFile = opt('--mcp-config');
+const structured = args.includes('--json-schema');
+const sessionTools = () => [...(structured ? ['StructuredOutput'] : []), ...(mcpFile ? (opt('--allowedTools') ?? '').split(',').filter(Boolean) : []), ...(behavior === 'foreign_tools' ? ['Bash', 'Read'] : []), ...(sc.extraTools ?? [])];
+const init = () => ({
+  type: 'system', subtype: 'init', session_id: 'sess-fake', uuid: 'u0', apiKeySource: sc.apiKeySource === null ? undefined : (sc.apiKeySource ?? 'none'),
+  claude_code_version: sc.version ?? '2.1.311', cwd: process.cwd(), tools: sessionTools(), mcp_servers: mcpFile ? [{ name: 'portal', status: sc.mcpStatus ?? 'connected' }] : [],
+  model: opt('--model') === 'haiku' ? 'claude-haiku-5-5' : opt('--model'), permissionMode: opt('--permission-mode'), plugins: [{ name: 'cc-plugin-telemetry', path: 'builtin' }]
+});
+const blankResult = () => ({ type: 'result', subtype: 'success', is_error: false, result: 'Blank prompt — the message was only whitespace, so nothing was sent to the model.', num_turns: sc.gateModelCall ? 1 : 0, duration_ms: 1, total_cost_usd: 0, usage: { input_tokens: sc.gateModelCall ? 10 : 0, output_tokens: 0 }, session_id: 'sess-fake', permission_denials: [] });
+
+if (opt('--input-format') === 'stream-json') {
+  let buf = ''; let started = false; let busy = false; const queue = [];
+  const next = async () => {
+    if (busy || !queue.length) return; busy = true;
+    const msg = queue.shift(); const content = typeof msg?.message?.content === 'string' ? msg.message.content : '';
+    if (!started) {
+      started = true;
+      if (behavior === 'malformed') { log({ kind: 'run', prompt: content, system, cwd: process.cwd(), behavior }); process.stdout.write('{"type":"system"\nesto no es json\n'); process.exit(0); }
+      out(init());
+    }
+    if (!content.trim()) { log({ kind: 'blank' }); out({ type: 'system', subtype: 'informational' }); out(blankResult()); busy = false; return next(); }
+    await run(content); busy = false; next();
+  };
+  process.stdin.on('data', d => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { const l = buf.slice(0, i); buf = buf.slice(i + 1); try { queue.push(JSON.parse(l)); } catch { /* ignorar */ } } next(); });
+  process.stdin.on('end', () => { const wait = setInterval(() => { if (!busy && !queue.length) { clearInterval(wait); process.exit(0); } }, 20); });
+} else {
+  const chunks = [];
+  process.stdin.on('data', d => chunks.push(d));
+  process.stdin.on('end', async () => { out(init()); await run(Buffer.concat(chunks).toString('utf8')); process.exit(0); });
+}
+
+async function run(prompt) {
   const entry = { kind: 'run', prompt, system, cwd: process.cwd(), behavior };
-
-  if (behavior === 'malformed') { log(entry); process.stdout.write('{"type":"system"\nesto no es json\n'); process.exit(0); }
-  out(init);
-  if (behavior === 'hang' || behavior === 'foreign_tools' || (sc.apiKeySource && sc.apiKeySource !== 'none')) {
+  if (behavior === 'hang') {
     fs.writeFileSync(path.join(here, 'fake-claude.pid'), String(process.pid));
     log(entry);
-    setInterval(() => {}, 1000); // espera hasta que la maten (plazo o cancelación)
-    return;
+    await new Promise(() => setInterval(() => {}, 1000)); // espera hasta que la maten (plazo o cancelación)
   }
   if (behavior === 'limit') {
     log(entry);
@@ -67,11 +91,8 @@ process.stdin.on('end', async () => {
     out({ type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['algo falló dentro de la ejecución'], num_turns: 1, duration_ms: 10, total_cost_usd: 0, usage: {}, session_id: 'sess-fake', permission_denials: [] });
     process.exit(1);
   }
-
   // Lectura por el puente MCP del Portal (servidor real de scripts/portal-mcp.mjs, API real del Portal).
-  if (mcpFile && sc.mcpRead) {
-    entry.mcp = await useMcp(JSON.parse(fs.readFileSync(mcpFile, 'utf8')).mcpServers.portal, sc.mcpRead);
-  }
+  if (mcpFile && sc.mcpRead) entry.mcp = await useMcp(JSON.parse(fs.readFileSync(mcpFile, 'utf8')).mcpServers.portal, sc.mcpRead);
   const rule = (sc.rules ?? []).find(r => prompt.includes(r.match)) ?? null;
   entry.rule = rule?.match ?? null;
   log(entry);
@@ -83,8 +104,7 @@ process.stdin.on('end', async () => {
     stop_reason: rule?.stopReason ?? 'end_turn', num_turns: entry.mcp ? 2 : 1, duration_ms: 1234, total_cost_usd: 0.0421, session_id: 'sess-fake',
     usage: { input_tokens: 1200, cache_creation_input_tokens: 300, cache_read_input_tokens: 500, output_tokens: 400 }, permission_denials: []
   });
-  process.exit(0);
-});
+}
 
 /** Cliente MCP mínimo: initialize → tools/list → tools/call de cada lectura pedida por el guion. */
 function useMcp(server, reads) {

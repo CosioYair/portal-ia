@@ -88,12 +88,12 @@ const real = { ...sandboxDeps };
 function useRealSandbox() { sandboxDeps.detect = real.detect; sandboxDeps.run = real.run; }
 
 /** Proceso de historia creado y autorizado; el Desarrollador y QA del proceso pasan a `backend` (con autorización). */
-async function storyWith(title: string, backend: 'claude-code' | 'api' = 'claude-code', budget = 2) {
+async function storyWith(title: string, backend: 'claude-code' | 'api' = 'claude-code', budget = 2, cfg: Partial<typeof DEFAULT_PIPELINE> = {}) {
   const it = addManualItem(S, project.id, { title, criterion: 'a vale 2 (número)' });
   const p = createStoryProcess(S, project.id, it.id);
   const devId = p.steps.find(s => s.role === 'implementer')!.agentId; const qaId = p.steps.find(s => s.role === 'reviewer')!.agentId;
   for (const id of new Set([devId, qaId])) { const r = await inject('PUT', `${W}/agents/${id}/backend`, { backend, authorized: true }); assert.equal(r.statusCode, 200, r.body); }
-  processesRepo(S).setResult(p.id, { ...p.result!, pipeline: newPipeline(normalizePipeline({ ...DEFAULT_PIPELINE, allowInstall: true })) });
+  processesRepo(S).setResult(p.id, { ...p.result!, pipeline: newPipeline(normalizePipeline({ ...DEFAULT_PIPELINE, allowInstall: true, ...cfg })) });
   processesRepo(S).authorize(p.id, budget);
   return { p, devId, qaId, planner: p.steps.find(s => s.role === 'planner')! };
 }
@@ -122,6 +122,9 @@ test('13 · resultado estructurado: structured_output → JSON; opciones restrin
     assert.equal(r.inputTokens, 2000, 'entrada + caché'); assert.equal(r.outputTokens, 400); assert.equal(r.apiEquivalentUsd, 0.0421);
   } finally { delete process.env.ANTHROPIC_API_KEY; }
   const e = ccRuns()[0]; const a: string[] = e.args;
+  assert.equal(a[0], '--restricted', 'modo restringido: sin ajustes, hooks ni plugins del usuario y sin herramientas que ejecutan código');
+  assert.equal(a[a.indexOf('--input-format') + 1], 'stream-json', 'el encargo va en un segundo mensaje, tras la barrera');
+  for (const k of ['CLAUDE_CODE_RESTRICTED', 'CLAUDE_CODE_DISABLE_CLAUDE_MDS', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'ENABLE_CLAUDEAI_MCP_SERVERS', 'DISABLE_AUTOUPDATER']) assert.ok(e.envKeys.includes(k), k);
   assert.equal(a[a.indexOf('--tools') + 1], '', 'sin herramientas integradas');
   assert.equal(a[a.indexOf('--permission-mode') + 1], 'dontAsk'); assert.equal(a[a.indexOf('--permission-prompts') + 1], 'none');
   for (const f of ['--strict-mcp-config', '--no-session-persistence', '--disable-slash-commands', '--json-schema', '--system-prompt-file']) assert.ok(a.includes(f), f);
@@ -161,11 +164,34 @@ test('17 · límite de la suscripción: error «usage_limit» con la renovación
   await assert.rejects(task(), (e: any) => e.error.code === 'usage_limit' && /NO compra créditos/.test(e.message));
 });
 
-test('facturación por API en el arranque o herramientas no autorizadas → se detiene antes de seguir', async () => {
-  scenario({ apiKeySource: 'ANTHROPIC_API_KEY' });
-  await assert.rejects(task(), (e: any) => e.error.code === 'backend_unavailable' && /facturación por API/.test(e.message));
+test('barrera previa: el encargo solo se envía tras comprobar el «init» (origen de la clave, herramientas, puente) con un mensaje en blanco', async () => {
+  const blankThenRun = () => fs.readFileSync(ccLog, 'utf8').trim().split('\n').map(l => JSON.parse(l)).map((e: any) => e.kind);
+  scenario({ rules: [{ match: 'Implementa', text: 'hecho' }] });
+  assert.equal((await task()).text, 'hecho');
+  assert.deepEqual(blankThenRun(), ['blank', 'run'], 'primero el mensaje en blanco (sin modelo) y después el encargo');
+  // Cualquier origen de la clave que no sea la sesión de la suscripción («none»), conocido o no, detiene ANTES del encargo
+  for (const apiKeySource of ['ANTHROPIC_API_KEY', 'apiKeyHelper', 'oauth', null]) {
+    scenario({ apiKeySource });
+    await assert.rejects(task(), (e: any) => e.error.code === 'backend_unavailable' && /no se llamó al modelo/.test(e.message), String(apiKeySource));
+    assert.deepEqual(blankThenRun(), ['blank'], `${apiKeySource}: el encargo nunca se envió`);
+  }
   scenario({ behavior: 'foreign_tools' });
-  await assert.rejects(task(), (e: any) => e.error.code === 'backend_unavailable' && /herramientas no autorizadas/.test(e.message));
+  await assert.rejects(task(), (e: any) => /herramientas no autorizadas \(Bash, Read\)/.test(e.message));
+  assert.deepEqual(blankThenRun(), ['blank']);
+  // El puente configurado pero no conectado, o un mensaje en blanco que informara uso del modelo: también se detiene
+  scenario({ mcpStatus: 'failed' });
+  await assert.rejects(task({ mcp: { command: process.execPath, args: ['-e', ''], env: {}, tools: ['mcp__portal__portal_read_file'] } }), (e: any) => /puente del Portal no se conectó/.test(e.message));
+  scenario({ gateModelCall: true });
+  await assert.rejects(task(), (e: any) => /no se comportó como está documentado/.test(e.message));
+  assert.deepEqual(blankThenRun(), ['blank']);
+});
+
+test('regresión (CLI real 2.1.311): con --json-schema la sesión expone «StructuredOutput»; se admite SOLO si se pidió esquema', async () => {
+  // Antes, la comprobación de herramientas lo trataba como ajeno y habría detenido todas las revisiones de QA reales.
+  scenario({ rules: [{ match: 'veredicto', structured: { verdict: 'approved', summary: 'ok', findings: [], suggestedTests: [] } }] });
+  assert.match((await task({ prompt: 'Da tu veredicto', schema: { name: 'v', schema: { type: 'object' } } })).text, /approved/);
+  scenario({ extraTools: ['StructuredOutput'] });
+  await assert.rejects(task(), (e: any) => /herramientas no autorizadas \(StructuredOutput\)/.test(e.message), 'sin esquema pedido, no se admite');
 });
 
 // ---------------------------------------------------------------- Pipeline completo (8, 21, 22, 24, 25)
@@ -262,6 +288,51 @@ test('prueba de humo: solo con autorización; UNA llamada mínima (haiku, 1 turn
   assert.equal((await inject('POST', '/api/claude-code/smoke-test', { authorized: true })).statusCode, 409, 'con facturación por API no se ejecuta');
   assert.equal(ccRuns().length, 0);
   scenario({ auth: 'subscription' }); resetDetectionCache();
+});
+
+test('una respuesta mal formada de Claude Code nunca cuenta como implementación: nada se aplica ni se verifica', async () => {
+  useFakeSandbox(); apiScript(); scenario({ auth: 'subscription', rules: [{ match: R.qa, structured: QA_OK }], defaultText: 'Hecho, he revisado la historia.' });
+  const { p } = await storyWith('CC · respuesta mal formada', 'claude-code', 2, { maxOutputRepairs: 0 });
+  const done = await run(p.id);
+  const r = done.result!; const pl = r.pipeline!;
+  assert.notEqual(pl.state, 'verified'); assert.ok(!r.applied, 'sin cambios aplicados'); assert.equal(r.verifications.length, 0, 'sin verificación');
+  assert.ok(!ccRuns().some((x: any) => x.rule === R.qa), 'QA no se llama sobre una entrega inexistente');
+});
+
+test('conector desactivado o proyecto no autorizado: los agentes no pueden invocar Claude Code (pausa explicada, 0 ejecuciones)', async () => {
+  useFakeSandbox(); apiScript(); scenario({ auth: 'subscription' });
+  const a = await storyWith('CC · conector desactivado');
+  assert.equal((await inject('PUT', '/api/claude-code/settings', { enabled: false })).statusCode, 200);
+  try {
+    const done = await run(a.p.id);
+    assert.equal(done.result!.pipeline!.pauseKind, 'permission'); assert.match(done.result!.pipeline!.reason!, /desactivado/);
+    assert.equal(ccRuns().length, 0, 'Claude Code no se ejecutó');
+    assert.deepEqual(apiCalls().map(c => c.rule), [R.plan], 'y no se sustituyó por la API');
+  } finally { assert.equal((await inject('PUT', '/api/claude-code/settings', { enabled: true, authorized: true })).statusCode, 200); }
+  apiScript(); scenario({ auth: 'subscription' });
+  const b = await storyWith('CC · proyecto no autorizado');
+  assert.equal((await inject('PUT', `${W}/claude-code/projects`, { authorized: true, projectIds: [] })).statusCode, 200);
+  try {
+    const done = await run(b.p.id);
+    assert.match(done.result!.pipeline!.reason!, /proyecto no está autorizado/); assert.equal(ccRuns().length, 0);
+  } finally { assert.equal((await inject('PUT', `${W}/claude-code/projects`, { authorized: true, projectIds: [project.id] })).statusCode, 200); }
+});
+
+test('cancelar el proceso desde el Portal detiene la ejecución de Claude Code en curso (árbol de procesos incluido)', async () => {
+  useFakeSandbox(); apiScript(); scenario({ auth: 'subscription', behavior: 'hang' });
+  const pidFile = path.join(fakeDir, 'fake-claude.pid'); try { fs.unlinkSync(pidFile); } catch { /* vacío */ }
+  const it = addManualItem(S, project.id, { title: 'CC · cancelación', criterion: 'a vale 2' });
+  const p = createStoryProcess(S, project.id, it.id);
+  for (const s of p.steps.filter(x => x.role === 'implementer' || x.role === 'reviewer')) assert.equal((await inject('PUT', `${W}/agents/${s.agentId}/backend`, { backend: 'claude-code', authorized: true })).statusCode, 200);
+  const auth = await inject('POST', `${W}/processes/${p.id}/authorize`, { budgetUsd: 1, authorized: true, pipeline: { autoApply: true, autoVerify: true, commands: ['typecheck'] } });
+  assert.equal(auth.statusCode, 200, auth.body);
+  await waitFor(() => fs.existsSync(pidFile), 20_000);
+  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  assert.equal((await inject('POST', `${W}/processes/${p.id}/cancel`)).statusCode, 200);
+  await waitFor(() => processesRepo(S).get(p.id)!.status !== 'running', 20_000);
+  await waitFor(() => !alive(pid));
+  assert.equal(processesRepo(S).get(p.id)!.status, 'cancelled');
+  assert.equal(claudeCodeRunsRepo(S).recent(5).find(r => r.processId === p.id)?.status, 'cancelled');
 });
 
 // ---------------------------------------------------------------- Reinicio, duplicados y concurrencia (19, 20)

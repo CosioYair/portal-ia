@@ -25,7 +25,7 @@ scenario({});
 
 const { encryptSecret } = await import('../src/security/crypto.ts');
 const { classifyModel } = await import('@portal-ia/domain');
-const { providersRepo } = await import('../src/db/platform.ts');
+const { platform, providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
 const { agentsRepo, projectsRepo } = await import('../src/db/workspace.ts');
 const { buildApp } = await import('../src/app.ts');
@@ -282,4 +282,75 @@ test('12 · rutas protegidas: .env, data/, .git, node_modules, fuera de la carpe
   } catch (e: any) { if (e.code !== 'EPERM') throw e; }
   const files = bridge.listTaskFiles(task) as any;
   assert.ok(files.files.includes('src/a.ts')); assert.ok(!files.files.some((f: string) => /^\.env$|^data\//.test(f)));
+});
+
+// ---------------------------------------------------------------- Revisión de seguridad (antes de activar con la suscripción real)
+
+const fakeLog = () => fs.existsSync(path.join(fakeDir, 'fake-claude.log.jsonl')) ? fs.readFileSync(path.join(fakeDir, 'fake-claude.log.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l)) : [];
+const clearFakeLog = () => { try { fs.unlinkSync(path.join(fakeDir, 'fake-claude.log.jsonl')); } catch { /* vacío */ } };
+
+test('detección: «auth status» con --restricted y sonda SIN modelo de la configuración exacta; si la sonda falla, no hay suscripción verificada', async () => {
+  scenario({ auth: 'subscription' }); clearFakeLog();
+  const ok = (await inject('POST', '/api/claude-code/detect')).json();
+  assert.equal(ok.detection.billing, 'subscription'); assert.equal(ok.detection.probe.ok, true);
+  assert.equal(ok.detection.probe.apiKeySource, 'none'); assert.equal(ok.detection.probe.modelCalled, false); assert.equal(ok.detection.probe.model, 'claude-haiku-5-5');
+  assert.ok(ok.detection.probe.tools.includes('StructuredOutput') && ok.detection.probe.tools.includes('mcp__portal__portal_read_file'));
+  const log = fakeLog();
+  assert.equal(log.find((e: any) => e.kind === 'auth').args[0], '--restricted', 'el estado de la sesión se lee con el mismo modo que la ejecución');
+  assert.ok(log.some((e: any) => e.kind === 'blank') && !log.some((e: any) => e.kind === 'run'), 'la sonda nunca envía un encargo');
+  // Una herramienta inesperada en la configuración real → «No verificado» y el conector no está listo
+  scenario({ auth: 'subscription', extraTools: ['Bash'] });
+  const bad = (await inject('POST', '/api/claude-code/detect')).json();
+  assert.equal(bad.detection.billing, 'unverified'); assert.equal(bad.ready, false);
+  assert.match(bad.detection.problems.join(' '), /sin llamar al modelo.*Bash/);
+  // Una CLI sin modo restringido no se usa (sus ajustes, hooks y plugins personales entrarían en la ejecución)
+  scenario({ auth: 'subscription', version: '2.1.200' });
+  const old = (await inject('POST', '/api/claude-code/detect')).json();
+  assert.equal(old.detection.billing, 'unverified'); assert.match(old.detection.problems[0], /modo restringido/);
+  scenario({ auth: 'subscription' });
+  assert.equal((await inject('POST', '/api/claude-code/detect')).json().ready, true);
+});
+
+test('consolas: el token caduca (por defecto 30 días) y el puente se registra con alcance LOCAL en una carpeta dedicada', async () => {
+  const c = await inject('POST', `/api/workspaces/${S}/claude-code/workers`, { authorized: true, name: 'Caduca', agentIds: [qa.id], days: 1 });
+  assert.equal(c.statusCode, 201, c.body);
+  const { token, worker, setup } = c.json();
+  assert.deepEqual(setup.args.slice(0, 5), ['mcp', 'add', '--scope', 'local', 'portal-ia'], 'no queda disponible en todos tus proyectos');
+  assert.match(setup.cwd, /PortalIA-consola[\\/]portal-ia$/);
+  assert.ok(Date.parse(worker.expiresAt) - Date.now() < 86_400_000 + 5000 && !worker.expired);
+  const h = { authorization: `Bearer ${token}` };
+  assert.equal((await inject('GET', '/api/bridge/v1/tasks', undefined, h)).statusCode, 200);
+  platform.prepare('UPDATE claude_code_workers SET expires_at = ? WHERE id = ?').run(new Date(Date.now() - 1000).toISOString(), worker.id);
+  assert.equal((await inject('GET', '/api/bridge/v1/tasks', undefined, h)).statusCode, 401, 'caducado');
+  const v = (await inject('GET', `/api/workspaces/${S}/claude-code`)).json().workers.find((w: any) => w.id === worker.id);
+  assert.equal(v.expired, true); assert.equal(v.connected, false);
+  assert.equal((await inject('POST', `/api/workspaces/${S}/claude-code/workers`, { authorized: true, name: 'Eterna', agentIds: [qa.id], days: 3650 })).statusCode, 400, 'máximo 90 días');
+});
+
+test('peticiones malformadas u hostiles al puente: ni otra tarea, ni rutas codificadas, ni campos de más, ni token en la URL', async () => {
+  const job = bridge.registerJobTask({ slug: S, projectId: project.id, processId: null, stepId: null, agentId: qa.id, agentName: qa.config.name, role: 'reviewer', title: 'x', mode: 'cli', system: '', prompt: '', schema: null, readRoot: repo, runId: 'r-mal' });
+  const h = { authorization: `Bearer ${job.token}` };
+  try {
+    assert.equal((await inject('GET', '/api/bridge/v1/tasks/..%2F..%2Fotra/file?path=src/a.ts', undefined, h)).statusCode, 404);
+    for (const p of ['..%2F..%2F.env', '%2e%2e/%2e%2e/x', 'src%2F..%2F..%2Fx', '%5C%5Cservidor%5Ccompartido%5Cx', 'src%2Fa.ts%00.txt', 'C%3A%5CWindows%5Cwin.ini']) {
+      const r = await inject('GET', `/api/bridge/v1/tasks/current/file?path=${p}`, undefined, h);
+      assert.ok(r.statusCode >= 400 && r.statusCode < 500 && !/export const a/.test(r.body), `${p} → ${r.statusCode}`);
+    }
+    assert.equal((await inject('GET', '/api/bridge/v1/tasks/current/file?path=src/a.ts', undefined, h)).statusCode, 200, 'lo autorizado sí');
+    assert.equal((await inject('POST', '/api/bridge/v1/tasks/current/progress', { message: 'ok', taskId: 'otra', slug: 'empresa-aparte-cc' }, h)).statusCode, 400, 'el alcance no se amplía con campos del cuerpo');
+    assert.equal((await inject('GET', `/api/bridge/v1/tasks?token=${job.token}`)).statusCode, 401, 'el token solo vale en la cabecera');
+    assert.equal((await inject('GET', '/api/bridge/v1/tasks', undefined, { authorization: `Basic ${job.token}` })).statusCode, 401);
+    // El servidor MCP ante JSON-RPC mal formado: responde con error y sigue funcionando
+    const mcp = mcpClient(job.token, 'job');
+    const raw = await new Promise<any>(r => { mcp.child.stdout.once('data', d => r(JSON.parse(String(d).trim().split('\n')[0]))); mcp.child.stdin.write('esto no es JSON\n'); });
+    assert.equal(raw.error.code, -32700);
+    assert.equal((await mcp.rpc('tools/call', { name: 'portal_borrar_todo', arguments: {} })).error.code, -32602, 'herramienta inexistente');
+    const tools = (await mcp.rpc('tools/list')).result.tools.map((t: any) => t.name);
+    assert.ok(!tools.includes('portal_submit_result') && !tools.includes('portal_claim_task'), 'una ejecución gestionada no tiene herramientas de consola');
+    const read = await mcp.tool('portal_read_file', { path: { toString: 'x' } });
+    assert.equal(read.isError, true, 'argumentos de tipo incorrecto no leen nada');
+    assert.match((await mcp.tool('portal_read_file', { path: 'src/a.ts' })).text, /export const a = 1/);
+    assert.deepEqual((await mcp.rpc('ping')).result, {});
+    await mcp.close();
+  } finally { job.done(); }
 });

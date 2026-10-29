@@ -51,7 +51,8 @@ export function scopeFor(authorization: string | undefined): BridgeScope | null 
   const taskId = jobTokens.get(h);
   if (taskId) { const p = tasks.get(taskId); return p ? { kind: 'job', slug: p.task.slug, taskId } : null; }
   const w = claudeCodeWorkersRepo.byHash(h);
-  if (!w || w.revoked_at || !workspacesRepo.get(w.workspace_slug)) return null;
+  // Revocado, caducado o de un espacio que ya no existe: el token no vale.
+  if (!w || w.revoked_at || (w.expires_at && Date.parse(w.expires_at) <= Date.now()) || !workspacesRepo.get(w.workspace_slug)) return null;
   return { kind: 'worker', slug: w.workspace_slug, workerId: w.id, agentIds: JSON.parse(w.agent_ids_json) };
 }
 
@@ -76,10 +77,11 @@ export function taskFor(scope: BridgeScope, taskId: string | undefined): BridgeT
 
 // ---------------------------------------------------------------- Consolas (trabajadores)
 
-export function createWorker(slug: string, name: string, agentIds: string[]): { id: string; token: string } {
-  const id = crypto.randomUUID(); const token = newToken('pcc');
-  claudeCodeWorkersRepo.create({ id, workspaceSlug: slug, name, tokenHash: hash(token), agentIds });
-  return { id, token };
+/** Consola autorizada: token de un solo uso a la vista, guardado solo como hash y con caducidad (por defecto, 30 días). */
+export function createWorker(slug: string, name: string, agentIds: string[], days = 30): { id: string; token: string; expiresAt: string } {
+  const id = crypto.randomUUID(); const token = newToken('pcc'); const expiresAt = new Date(Date.now() + days * 86_400_000).toISOString();
+  claudeCodeWorkersRepo.create({ id, workspaceSlug: slug, name, tokenHash: hash(token), agentIds, expiresAt });
+  return { id, token, expiresAt };
 }
 export function touchWorker(workerId: string, client?: unknown) {
   const now = Date.now(); const prev = presence.get(workerId);
@@ -94,7 +96,8 @@ export function workerView(r: ClaudeCodeWorkerRow): ClaudeCodeWorkerView {
   const client = r.client_json ? JSON.parse(r.client_json) : null;
   return {
     id: r.id, workspaceSlug: r.workspace_slug, name: r.name, agentIds: JSON.parse(r.agent_ids_json), createdAt: r.created_at, revokedAt: r.revoked_at,
-    lastSeenAt: r.last_seen_at, connected: !r.revoked_at && workerConnected(r.id),
+    expiresAt: r.expires_at, expired: !!r.expires_at && Date.parse(r.expires_at) <= Date.now(),
+    lastSeenAt: r.last_seen_at, connected: !r.revoked_at && !(r.expires_at && Date.parse(r.expires_at) <= Date.now()) && workerConnected(r.id),
     clientEnvCredentials: Array.isArray(client?.envCredentials) ? client.envCredentials.map(String) : [], clientVersion: typeof client?.version === 'string' ? client.version : null
   };
 }

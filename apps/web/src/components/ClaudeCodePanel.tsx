@@ -66,6 +66,7 @@ export function ClaudeCodePanel() {
           <KV k="Autenticación">{d?.authMethod ? AUTH[d.authMethod] ?? d.authMethod : 'No verificada'}{d?.subscriptionType ? ` · plan ${d.subscriptionType}` : ''}</KV>
           <KV k="Origen de ejecución"><Chip xs tone={d?.billing === 'subscription' ? 'ok' : 'warn'}>{st.sourceLabel}</Chip></KV>
           <KV k="Comprobado">{when(d?.checkedAt ?? null)}</KV>
+          {d?.probe && <KV k="Configuración real (sin llamar al modelo)">{d.probe.ok ? `modo restringido · origen de la clave «${d.probe.apiKeySource}» · herramientas: ${d.probe.tools.map(t => t.replace(/^mcp__portal__/, '')).join(', ') || 'ninguna'} · plugins incluidos en Claude Code: ${d.probe.plugins.length}` : `no superada: ${d.probe.problem}`}</KV>}
           <KV k="En curso ahora">{st.running} ejecución(es)</KV>
         </div>
         {d?.problems.map((p, i) => <Notice key={i} kind="warn">{p}</Notice>)}
@@ -126,12 +127,12 @@ export function ClaudeCodePanel() {
           {view.workers.filter(w => !w.revokedAt).map(w => (
             <div key={w.id} className="krow" style={{ alignItems: 'center' }}>
               <Chip xs tone={w.connected ? 'ok' : ''} dot={w.connected ? 'ok' : ''}>{w.connected ? 'Conectada' : 'Desconectada'}</Chip>
-              <span className="small" style={{ flex: 1 }}>{w.name} · {w.agentIds.map(id => view.agents.find(a => a.id === id)?.name ?? id).join(', ')} · última señal {when(w.lastSeenAt)}
+              <span className="small" style={{ flex: 1 }}>{w.name} · {w.agentIds.map(id => view.agents.find(a => a.id === id)?.name ?? id).join(', ')} · última señal {when(w.lastSeenAt)} · {w.expired ? <span style={{ color: '#8A2B2B' }}>caducada</span> : `caduca ${when(w.expiresAt)}`}
                 {w.clientEnvCredentials.length > 0 && <span style={{ color: '#7A4A00' }}> · tu consola tiene {w.clientEnvCredentials.join(', ')}: podría facturar por API</span>}</span>
               <button className="lnk sm13" onClick={() => { if (confirm(`¿Revocar «${w.name}»? Su token deja de funcionar al instante.`)) void act('rev', () => api.revokeClaudeCodeWorker(slug, w.id), 'Consola revocada'); }}>Revocar</button>
             </div>
           ))}
-          {created && <Notice kind="ok"><strong>Consola creada.</strong> Copia y ejecuta esta orden en una terminal (el token solo se muestra ahora):<div className="mono small" style={{ wordBreak: 'break-all', marginTop: 6, userSelect: 'all' }}>{created.command}</div>
+          {created && <Notice kind="ok"><strong>Consola creada.</strong> Ejecuta estas órdenes en una terminal (el token solo se muestra ahora). El puente queda registrado SOLO en esa carpeta: abre Claude Code allí para atender tareas del Portal; tus otros proyectos no lo ven. Caduca en 30 días.<div className="mono small" style={{ wordBreak: 'break-all', whiteSpace: 'pre-wrap', marginTop: 6, userSelect: 'all' }}>{created.command}</div>
             <button className="btn btn-ghost btn-sm" style={{ marginTop: 6 }} onClick={() => { void navigator.clipboard?.writeText(created.command); flash('Orden copiada'); }}>Copiar orden</button></Notice>}
           {terminalAgents.length === 0
             ? <div className="small muted">Para crear una consola, asigna primero «tu consola» como backend de algún agente.</div>
@@ -140,7 +141,7 @@ export function ClaudeCodePanel() {
                 {terminalAgents.map(a => <label key={a.id} className="krow"><input className="cb" type="checkbox" checked={workerAgents.includes(a.id)} onChange={e => setWorkerAgents(e.target.checked ? [...workerAgents, a.id] : workerAgents.filter(x => x !== a.id))} /><span className="small">{a.name}</span></label>)}
                 <label className="krow"><input className="cb" type="checkbox" checked={workerConsent} onChange={e => setWorkerConsent(e.target.checked)} /><span className="small">Autorizo que esta consola reciba las tareas de esos agentes y lea, solo lectura, la carpeta de trabajo de cada tarea.</span></label>
                 <div><button className="btn btn-primary btn-sm" disabled={!workerConsent || !workerAgents.length || busy !== null}
-                  onClick={() => act('worker', async () => { const r = await api.createClaudeCodeWorker(slug, workerName, workerAgents); setCreated({ token: r.token, command: [r.setup.command, ...r.setup.args].map(q).join(' ') }); setWorkerConsent(false); }, 'Consola autorizada')}>Crear consola</button></div>
+                  onClick={() => act('worker', async () => { const r = await api.createClaudeCodeWorker(slug, workerName, workerAgents); setCreated({ token: r.token, command: [`mkdir ${q(r.setup.cwd)}`, `cd ${q(r.setup.cwd)}`, [r.setup.command, ...r.setup.args].map(q).join(' ')].join('\n') }); setWorkerConsent(false); }, 'Consola autorizada')}>Crear consola</button></div>
               </div>}
         </>}
 

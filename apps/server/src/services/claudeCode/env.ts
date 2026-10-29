@@ -30,6 +30,17 @@ export function minimalEnv(source: NodeJS.ProcessEnv = process.env, extra: Recor
   return { ...out, DISABLE_AUTOUPDATER: '1', ...extra };
 }
 
+/**
+ * Entorno de una ejecución gestionada (y de su detección): el mínimo de arriba más los controles documentados que dejan
+ * fuera la configuración personal del propietario. Modo restringido (igual que `--restricted`: solo ajustes gestionados
+ * y `--settings`, sin herramientas que ejecutan código), sin CLAUDE.md (de usuario, de proyecto ni de memoria
+ * automática), sin memoria automática y sin los conectores MCP de claude.ai.
+ */
+export const MANAGED_ENV: Record<string, string> = {
+  CLAUDE_CODE_RESTRICTED: '1', CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1', CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1', ENABLE_CLAUDEAI_MCP_SERVERS: 'false'
+};
+export const managedEnv = (source: NodeJS.ProcessEnv = process.env) => minimalEnv(source, MANAGED_ENV);
+
 /** Nombres de variables de credenciales presentes (no vacías) en un entorno. Nunca devuelve valores. */
 export function credentialVarsIn(source: NodeJS.ProcessEnv = process.env): string[] {
   const upper = new Map(Object.entries(source).map(([k, v]) => [k.toUpperCase(), v]));

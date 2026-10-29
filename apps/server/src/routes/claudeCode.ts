@@ -1,4 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import os from 'node:os';
+import path from 'node:path';
 import { z } from 'zod';
 import { backendLabel, type ClaudeCodeStatusView, type ClaudeCodeWorkspaceView } from '@portal-ia/domain';
 import { claudeCodeWorkersRepo, providersRepo, workspacesRepo } from '../db/platform.ts';
@@ -56,7 +58,8 @@ export async function claudeCodeRoutes(app: FastifyInstance) {
     const enabling = b.enabled === true && !cur.enabled; const allowingApi = b.fallback === 'api' && cur.fallback !== 'api';
     if ((enabling || allowingApi) && b.authorized !== true) return reply.code(403).send({ error: enabling ? 'Activar Claude Code requiere tu autorización explícita.' : 'Usar la API (facturable) como alternativa requiere tu autorización explícita.' });
     if (next.enabled) {
-      const d = await verifiedDetection(next, enabling || b.cliPath !== undefined ? 0 : 60_000);
+      // Activar o cambiar la CLI repite la comprobación completa, sonda sin modelo incluida.
+      const d = enabling || b.cliPath !== undefined ? await detectClaudeCode(next) : await verifiedDetection(next);
       if (d.billing !== 'subscription') return reply.code(409).send({ error: `No se puede activar: ${d.problems[0] ?? 'la suscripción no está verificada'}`, status: claudeCodeStatus() });
     }
     if (allowingApi && !providersRepo.connected().length) return reply.code(409).send({ error: 'No hay ningún proveedor de API conectado que pueda servir de alternativa.' });
@@ -75,6 +78,7 @@ export async function claudeCodeRoutes(app: FastifyInstance) {
     const s = getClaudeCodeSettings();
     const d = await verifiedDetection(s, 0);
     if (d.billing !== 'subscription') return reply.code(409).send({ error: `No se ejecuta: ${d.problems[0] ?? 'la suscripción no está verificada'}`, status: claudeCodeStatus() });
+    if (!d.capabilities.includes('restricted')) return reply.code(409).send({ error: `Claude Code ${d.version ?? ''} no admite el modo restringido: actualízalo.`, status: claudeCodeStatus() });
     const cli = cliCommandFor(s.cliPath ?? d.path ?? '');
     if (!cli) return reply.code(409).send({ error: 'No se encontró la CLI de Claude Code.' });
     const ws = workspacesRepo.list().find(w => w.kind === 'internal'); const project = ws ? projectsRepo(ws.slug).list()[0] : undefined;
@@ -150,18 +154,21 @@ export async function claudeCodeRoutes(app: FastifyInstance) {
   app.post('/api/workspaces/:slug/claude-code/workers', async (req, reply) => {
     const { slug } = req.params as { slug: string };
     if (!guard(slug, reply)) return;
-    const body = z.object({ authorized: z.literal(true), name: z.string().trim().min(2).max(80), agentIds: z.array(z.string().min(1).max(80)).min(1).max(50) }).strict().safeParse(req.body);
+    const body = z.object({ authorized: z.literal(true), name: z.string().trim().min(2).max(80), agentIds: z.array(z.string().min(1).max(80)).min(1).max(50), days: z.number().int().min(1).max(90).optional() }).strict().safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Indica un nombre, los agentes y confirma tu autorización.' });
     if (!getClaudeCodeSettings().enabled) return reply.code(409).send({ error: 'Activa primero el conector «Claude Code — Local».' });
     const agents = agentsRepo(slug);
     const bad = body.data.agentIds.find(a => !agents.get(a));
     if (bad) return reply.code(404).send({ error: `Agente no encontrado en este espacio: ${bad}` });
-    const w = createWorker(slug, body.data.name, [...new Set(body.data.agentIds)]);
+    const w = createWorker(slug, body.data.name, [...new Set(body.data.agentIds)], body.data.days ?? 30);
+    // Alcance LOCAL en una carpeta dedicada: el puente solo existe cuando abres Claude Code en esa carpeta, no en el
+    // resto de tus proyectos (con «user» estaría disponible en todos).
+    const cwd = path.join(os.homedir(), 'PortalIA-consola', slug);
     const url = getBridgeUrl();
     // El token se muestra UNA vez (se guarda solo su hash). La orden registra el puente en la consola del propietario.
     return reply.code(201).send({
       worker: workerView(claudeCodeWorkersRepo.get(w.id)!), token: w.token,
-      setup: { command: 'claude', args: ['mcp', 'add', '--scope', 'user', 'portal-ia', '-e', `PORTAL_URL=${url}`, '-e', `PORTAL_BRIDGE_TOKEN=${w.token}`, '--', process.execPath, BRIDGE_SCRIPT] }
+      setup: { cwd, command: 'claude', args: ['mcp', 'add', '--scope', 'local', 'portal-ia', '-e', `PORTAL_URL=${url}`, '-e', `PORTAL_BRIDGE_TOKEN=${w.token}`, '--', process.execPath, BRIDGE_SCRIPT] }
     });
   });
 

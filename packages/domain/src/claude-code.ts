@@ -32,6 +32,25 @@ export interface ClaudeCodeDetection {
   problems: string[];
   /** Funciones de la CLI comprobadas por su versión. */
   capabilities: string[];
+  /** Sonda SIN llamada al modelo con la configuración exacta de una ejecución gestionada (mensaje en blanco). */
+  probe?: ClaudeCodeProbe | null;
+}
+
+/** Lo que informó la CLI real al arrancar con la configuración gestionada, sin enviar nada al modelo. */
+export interface ClaudeCodeProbe {
+  checkedAt: string;
+  ok: boolean;
+  /** `apiKeySource` del mensaje init («none» = sesión de la suscripción, sin clave de API). */
+  apiKeySource: string | null;
+  /** Modelo al que resolvió el alias de la sonda (p. ej. haiku → claude-haiku-5-5). */
+  model: string | null;
+  tools: string[];
+  mcpServers: { name: string; status: string }[];
+  /** Plugins que la CLI cargó igualmente (con --restricted, solo los incluidos en Claude Code). */
+  plugins: string[];
+  /** true si la sesión informó turnos o tokens: no debería ocurrir con un mensaje en blanco. */
+  modelCalled: boolean;
+  problem: string | null;
 }
 
 export interface ClaudeCodeSettings {
@@ -65,6 +84,9 @@ export interface ClaudeCodeWorkerView {
   agentIds: string[];
   createdAt: string;
   revokedAt: string | null;
+  /** El token deja de valer en esta fecha (hay que crear otra consola). */
+  expiresAt: string | null;
+  expired: boolean;
   lastSeenAt: string | null;
   connected: boolean;
   /** Variables de credenciales que el puente vio en el entorno de la consola (solo nombres). */
