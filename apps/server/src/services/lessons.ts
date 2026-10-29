@@ -1,3 +1,4 @@
+import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -174,7 +175,8 @@ export async function proposeLesson(slug: string, lessonId: string, opts: { auth
   const repo = lessonsRepo(slug); const l = repo.get(lessonId); if (!l) throw Object.assign(new Error('Lección no encontrada'), { statusCode: 404 });
   const est = estimatePropose(slug, lessonId); const agent = agentsRepo(slug).get(est.agentId)!;
   const providerId = agent.config.provider as ProviderId; const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-  if (!cred || prow.status !== 'connected') throw Object.assign(new Error('El proveedor no está conectado.'), { statusCode: 409 });
+  const cc = agentCaller(slug, agent, l.projectId ?? null, 'Propuesta de lección');
+  if (!cc && (!cred || prow.status !== 'connected')) throw Object.assign(new Error('El proveedor no está conectado.'), { statusCode: 409 });
   const models: ModelInfo[] = JSON.parse(prow.models_json);
   const proc = l.evidence.processId ? processesRepo(slug).get(l.evidence.processId) : undefined;
   const stepOut = proc?.steps.find(s => s.id === l.evidence.stepId)?.outputMd?.slice(0, 6000) ?? '';
@@ -187,8 +189,8 @@ ${stepOut ? `Salida del paso (recortada):\n${stepOut}` : ''}
 Responde SOLO con JSON: {"rootCause": string (1-2 frases), "correctiveAction": string (1-2 frases, concreta), "lessonText": string (instrucción imperativa de 1-3 frases que se añadirá al prompt del agente en futuras historias; sin referencias a este caso concreto), "role": "planner"|"implementer"|"reviewer"|"consultant", "tags": string[1-4]}`;
   const startedAt = now();
   requirePolicy('ai_call', { slug, agentId: agent.id, projectId: l.projectId, authorized: true });
-  const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user, maxTokens: 800, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
-  const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
+  const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user, maxTokens: 800, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
+  const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
   processesRepo(slug).logExecution({ projectId: l.projectId ?? '', agentId: agent.id, kind: 'lesson_propose', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
   let j: any = {}; try { j = JSON.parse(res.text.match(/\{[\s\S]*\}/)?.[0] ?? '{}'); } catch { j = {}; }
   const role = ['planner', 'implementer', 'reviewer', 'consultant'].includes(j.role) ? j.role : l.role;

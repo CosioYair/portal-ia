@@ -1,3 +1,4 @@
+import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import type { Agent, AssessmentEstimate, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, Process, ProcessStep, ProviderId, ReviewVerdict, RuntimeCheck, StoryPlan, TeamOverride, TeamRole } from '@portal-ia/domain';
 import { composeTeam, orderedMembers, type StoryText } from './teamComposer.ts';
 import { injectLessons, recordDetections } from './lessons.ts';
@@ -408,7 +409,8 @@ export async function generateManualTest(slug: string, processId: string, log: (
   const item = proc.backlogItemId ? backlogRepo(slug).get(proc.backlogItemId) : undefined;
   const providerId = agent.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-  if (!cred || prow.status !== 'connected') throw Object.assign(new Error(`El proveedor ${providerId} no está conectado.`), { statusCode: 409 });
+  const cc = agentCaller(slug, agent, proc.projectId, 'Prueba manual');
+  if (!cc && (!cred || prow.status !== 'connected')) throw Object.assign(new Error(`El proveedor ${providerId} no está conectado.`), { statusCode: 409 });
   const models: ModelInfo[] = JSON.parse(prow.models_json);
   const r = proc.result!;
   const system = `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} del proyecto «${project.name}» en Portal IA. Escribes para el propietario, que no es técnico.`;
@@ -423,8 +425,8 @@ ${r.changes.slice(0, 8).map(c => `## ${c.path}\n${(c.diff ?? '').slice(0, 1500)}
 Responde SOLO con JSON: {"userFacing": string (3-8 líneas en lenguaje llano: qué cambia para quien usa el Portal y DÓNDE lo verá: menú, botón, pantalla o ruta exacta; si no hay nada visible, dilo), "steps": string[] (3-10 pasos numerados de prueba manual en el Portal, cada uno "acción. Esperado: resultado"; empieza por dónde entrar)}`;
   const startedAt = new Date().toISOString();
   requirePolicy('ai_call', { slug, agentId: agent.id, projectId: proc.projectId, authorized: true });
-  const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user, maxTokens: 2000, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
-  const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
+  const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user, maxTokens: 2000, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
+  const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
   procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
   procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'manual_test_gen', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
   const j = extractJson(res.text);

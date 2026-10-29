@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { assistantInfo, assistantRepo, chat, resolveProposal } from '../services/assistant.ts';
+import { assistantInfo, assistantRepo, chat, decideOperation, resolveProposal } from '../services/assistant.ts';
 import { createCompany, createProject } from '../services/companies.ts';
 import { workspacesRepo } from '../db/platform.ts';
 
@@ -30,6 +30,18 @@ export async function assistantRoutes(app: FastifyInstance) {
     if (!assistantRepo.get(id)) return reply.code(404).send({ error: 'Mensaje no encontrado' });
     resolveProposal(id, body.data.processId, body.data.status, body.data.detail);
     return { message: assistantRepo.listLive().find(m => m.id === id) ?? assistantRepo.get(id) };
+  });
+  // Operación del catálogo propuesta en el chat: autorizar (la ejecuta el servicio existente) o rechazar (sin efectos).
+  app.post('/api/assistant/messages/:id/operations/:opId/:decision', async (req, reply) => {
+    const { id, opId, decision } = req.params as { id: string; opId: string; decision: string };
+    if (decision !== 'approve' && decision !== 'reject') return reply.code(404).send({ error: 'Decisión no válida' });
+    if (decision === 'approve' && !z.object({ authorized: z.literal(true) }).strict().safeParse(req.body).success) return reply.code(403).send({ error: 'Ejecutar una operación del Portal requiere tu autorización explícita.' });
+    try {
+      const m = await decideOperation(id, opId, decision);
+      const op = m.actions.find(a => a.operation?.id === opId);
+      app.log.info({ operation: op?.operation?.capability, decision, status: op?.status }, 'operación del Asistente decidida');
+      return { message: assistantRepo.listLive().find(x => x.id === id) ?? m };
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   app.delete('/api/assistant/messages', async () => { assistantRepo.clear(); return { ok: true }; });
 

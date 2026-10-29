@@ -1,3 +1,4 @@
+import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import type { Agent, AssessmentEstimate, Process, ProviderId } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -106,7 +107,8 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
       const agent = agents.get(step.agentId)!;
       const providerId = agent.config.provider as ProviderId;
       const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-      if (!cred || prow.status !== 'connected') { procs.stepFinish(step.id, 'failed', { error: 'proveedor no conectado' }); finalStatus = 'failed'; finalError = `El proveedor ${providerId} no está conectado.`; continue; }
+      const cc = agentCaller(slug, agent, proc.projectId, 'Evaluación inicial');
+      if (!cc && (!cred || prow.status !== 'connected')) { procs.stepFinish(step.id, 'failed', { error: 'proveedor no conectado' }); finalStatus = 'failed'; finalError = `El proveedor ${providerId} no está conectado.`; continue; }
       const models: { id: string; supportsEffort: boolean }[] = JSON.parse(prow.models_json);
       const modelInfo = models.find(m => m.id === agent.config.model);
       // Comprobación de presupuesto ANTES de llamar: estimación conservadora del paso.
@@ -125,12 +127,12 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
       try {
         requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
       const timeoutMs = callTimeoutMs(STEP_PLAN[i].maxTokens, agent.config.effort);
-      const res = await withWatchdog(getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
+      const res = await withWatchdog(completeWith(cc, providerId, cred, prow, {
           model: agent.config.model, system: systemPrompt, user: userPrompt,
           maxTokens: STEP_PLAN[i].maxTokens, effort: agent.config.effort, supportsEffort: !!modelInfo?.supportsEffort,
           timeoutMs
         }, ctrl.signal), ctrl, timeoutMs);
-        const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
+        const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
         procs.stepFinish(step.id, 'done', { tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, outputMd: res.text });
         procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
         procs.logExecution({ projectId: project.id, agentId: agent.id, kind: 'assessment_step', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
@@ -142,7 +144,7 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
         let msg = err ? err.message : (e as Error).message;
         // Si la solicitud llegó al proveedor pero se cortó (plazo, cancelación, red) o falló en servidor, la entrada pudo
         // facturarse: su costo ESTIMADO se guarda como no confirmado, aparte del gasto confirmado (nunca un 0 engañoso).
-        const billed = maybeBilled(e);
+        const billed = !cc && maybeBilled(e);
         const estIn = billed ? estimateTokens(systemPrompt + userPrompt) : 0;
         const estCost = billed ? costUsd(providerId, agent.config.model, estIn, 0) : 0;
         if (billed) msg += ` Posible costo NO confirmado: ≈ ${estCost.toFixed(4)} USD (≈${estIn} tokens de entrada; sin confirmación del proveedor).`;

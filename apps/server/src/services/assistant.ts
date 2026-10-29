@@ -18,6 +18,10 @@ import { lessonsRepo } from './lessons.ts';
 import { systemStatus } from './system.ts';
 import { repoStatus } from './repoStatus.ts';
 import { phaseContext } from './operationalPhase.ts';
+import { CAPABILITIES, type CapabilityPreview, type CapabilityResult } from './capabilities.ts';
+import { agentBackend, agentCaller, claudeCodeGate } from './claudeCode/backend.ts';
+import { lastDetection } from './claudeCode/detect.ts';
+import { backendLabel } from '@portal-ia/domain';
 
 /**
  * Asistente global (lo encarna el «Asistente de Empresa» del espacio interno).
@@ -33,9 +37,11 @@ platform.exec(`CREATE TABLE IF NOT EXISTS assistant_messages (
 )`);
 { const cols = (platform.prepare(`PRAGMA table_info(assistant_messages)`).all() as any[]).map(c => c.name); if (!cols.includes('attachments_json')) platform.exec(`ALTER TABLE assistant_messages ADD COLUMN attachments_json TEXT`); }
 
-export type AssistantActionType = 'create_company' | 'create_project' | 'add_backlog_item' | 'propose_execution' | 'propose_apply' | 'propose_delegation' | 'info';
+export type AssistantActionType = 'create_company' | 'create_project' | 'add_backlog_item' | 'propose_execution' | 'propose_apply' | 'propose_delegation' | 'propose_operation' | 'info';
 export interface AssistantAction {
-  type: AssistantActionType; status: 'done' | 'failed' | 'pending'; label: string; detail?: string; link?: string;
+  type: AssistantActionType; status: 'done' | 'failed' | 'pending' | 'running' | 'rejected'; label: string; detail?: string; link?: string;
+  /** propose_operation: operación del catálogo (capabilities.ts), su vista previa calculada en el servidor y su resultado real. */
+  operation?: { id: string; capability: string; params: Record<string, unknown>; preview: CapabilityPreview; result?: CapabilityResult | null; decidedAt?: string | null };
   /** Estado real del proceso asociado, calculado al leer (no se persiste). */
   live?: { status: string; phase: string; next: string; tone: 'info' | 'warn' | 'ok' | 'err'; settled: boolean };
   /** propose_execution / propose_apply */
@@ -79,7 +85,13 @@ export function assistantInfo() {
   const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
   const spent = (workspaceDb(INTERNAL_WORKSPACE.slug).prepare(`SELECT COALESCE(SUM(cost_usd),0) AS c FROM execution_history WHERE agent_id = ? AND started_at >= ?`).get(a.id, monthStart.toISOString()) as any).c as number;
   const p = estimatePricing(a.config.provider, a.config.model);
-  return { agentId: a.id, name: a.config.name, model: a.config.model, provider: a.config.provider, monthlyLimitUsd: a.config.monthlyLimitUsd, spentThisMonthUsd: spent, estimatedPerMessageUsd: (7000 * p.inPerM + 900 * p.outPerM) / 1_000_000 };
+  // Backend del Asistente (como el de cualquier agente): se muestra ANTES de enviar, con su origen de facturación.
+  const backend = agentBackend(a); const gate = backend === 'api' ? null : claudeCodeGate(INTERNAL_WORKSPACE.slug, a, null);
+  const available = backend === 'api' || (backend === 'claude-code' && !!gate?.ok);
+  const unavailableReason = backend === 'claude-code-terminal' ? 'La consola de Claude Code atiende tareas de procesos, no respuestas inmediatas: elige «Claude Code (gestionado)» o la API para el Asistente.' : gate && !gate.ok ? gate.reason : null;
+  return { agentId: a.id, name: a.config.name, model: a.config.model, provider: a.config.provider, monthlyLimitUsd: a.config.monthlyLimitUsd, spentThisMonthUsd: spent,
+    backend, backendLabel: backendLabel(backend, lastDetection()?.billing, a.config.provider), billing: backend === 'api' ? 'api' as const : 'subscription' as const, available, unavailableReason,
+    estimatedPerMessageUsd: backend === 'api' ? (7000 * p.inPerM + 900 * p.outPerM) / 1_000_000 : 0 };
 }
 
 /** Mapa de pantallas del Portal, para poder decir DÓNDE está cada cosa. */
@@ -153,6 +165,9 @@ Acciones que requieren autorización del propietario (tú las PROPONES; el chat 
 - {"type":"execute_story","company":slug,"project":slug,"story":"HU-0xx"} → el equipo del proyecto (Coordinador, Desarrollador, QA) implementa la historia y entrega un diff.
 - {"type":"apply_changes","company":slug,"processId":string} → escribe en una rama git los cambios de un proceso terminado.
 - {"type":"delegate_task","company":slug,"project":slug|null,"agent":clave o nombre del agente responsable,"request":string} → ENCARGO: el agente responsable valida la petición, consulta a los agentes a su cargo si hace falta y entrega un resultado (documento en Conocimiento) con propuestas de cambio al backlog que el propietario aplica con un clic.
+Operaciones del Portal (las ejecuta el Portal, con el MISMO servicio que el botón correspondiente, SOLO cuando el propietario pulsa «Autorizar» en la tarjeta del chat; tú las propones):
+- {"type":"request_operation","capability":"publish_main","company":slug,"project":slug} → publicar la rama principal del repositorio autorizado del proyecto en su remoto (git push sin forzar; solo main, nunca otras ramas). El Portal calcula y muestra qué commits se publican y qué queda fuera.
+Si el propietario pide algo que está en esta lista, NO le mandes a otra pantalla ni digas que no puedes: propón la operación (la tarjeta muestra exactamente qué se hará y pide su autorización). Si pide algo que no está en ninguna lista, dilo y propón convertirlo en historia; nunca inventes operaciones ni órdenes de shell.
 Cómo elegir: NO todo es una historia de desarrollo. Si el propietario pide implementar/corregir/añadir una funcionalidad concreta en el código → add_backlog_item (+ execute_story si pide hacerlo ya). Si pide revisar, replantear, repriorizar, analizar, evaluar, proponer, organizar, redactar, planificar, auditar o decidir algo (p. ej. «revisa y replantea el backlog», «propón la organización de la nueva empresa», «evalúa si conviene X», «redacta la política de Y») → delegate_task al agente responsable del ámbito: asuntos de un proyecto (backlog, arquitectura, calidad, diseño) → su Coordinador del Proyecto (pj-coordinador); organización de la empresa, varias áreas o nuevos equipos → Gestor Organizacional (ws-gestor); creación o configuración de agentes → Agente de Onboarding (ws-onboarding); o el agente especializado que el propietario nombre. Escribe "request" completo y claro con lo que el propietario quiere. Cuando el propietario pida "ejecuta", "haz", "implementa" una historia que no existe, añádela y propón ejecutarla en la misma respuesta. El equipo SÍ puede modificar el código del propio Portal IA; así se construye el producto.`;
 
 export function parseResponse(text: string): { reply: string; actions: any[] } {
@@ -249,11 +264,12 @@ export function performActions(actionsReq: any[]): AssistantAction[] {
 export async function chat(userText: string, images: { mediaType: string; data: string; name?: string }[] = [], files: AssistantAttachment[] = []): Promise<{ user: AssistantMessage; assistant: AssistantMessage }> {
   const a = assistantAgent();
   const info = assistantInfo();
-  if (info.spentThisMonthUsd >= info.monthlyLimitUsd) throw Object.assign(new Error(`El Asistente alcanzó su límite mensual (${info.monthlyLimitUsd.toFixed(2)} USD). Puedes ampliarlo en su ficha de Equipo de IA.`), { statusCode: 409 });
+  if (info.billing === 'api' && info.spentThisMonthUsd >= info.monthlyLimitUsd) throw Object.assign(new Error(`El Asistente alcanzó su límite mensual (${info.monthlyLimitUsd.toFixed(2)} USD). Puedes ampliarlo en su ficha de Equipo de IA.`), { statusCode: 409 });
   const providerId = a.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-  if (!cred || prow.status !== 'connected') throw Object.assign(new Error('El proveedor del Asistente no está conectado.'), { statusCode: 409 });
-  const models: ModelInfo[] = JSON.parse(prow.models_json);
+  // Con la API, el proveedor debe estar conectado; con Claude Code NO se usa la API aunque esté conectada.
+  if (info.backend === 'api' && (!cred || prow.status !== 'connected')) throw Object.assign(new Error('El proveedor del Asistente no está conectado.'), { statusCode: 409 });
+  const models: ModelInfo[] = (() => { try { return JSON.parse(prow.models_json); } catch { return []; } })();
   const attachments: AssistantAttachment[] = [...images.map((im, i) => ({ name: im.name ?? `imagen-${i + 1}`, mediaType: im.mediaType, bytes: Math.round(im.data.length * 0.75) })), ...files];
   const user = assistantRepo.add({ role: 'user', content: userText, actions: [], attachments, tokensIn: 0, tokensOut: 0, costUsd: 0, model: null });
   const history = assistantRepo.list(16).filter(m => m.id !== user.id).slice(-12).map(m => `${m.role === 'user' ? 'Propietario' : 'Asistente'}: ${m.content.slice(0, 1200)}${m.actions.length ? ` [acciones: ${m.actions.map(x => `${x.type}:${x.status}`).join(', ')}]` : ''}`).join('\n');
@@ -271,13 +287,16 @@ ${await platformSnapshot()}`;
   const startedAt = new Date().toISOString();
   try {
     requirePolicy('ai_call', { slug: INTERNAL_WORKSPACE.slug, agentId: a.id, authorized: true }); // enviar el mensaje es la autorización (límite mensual ya comprobado)
-    const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
-      model: a.config.model, system, user: prompt, maxTokens: 3000, effort: a.config.effort, supportsEffort: !!models.find(m => m.id === a.config.model)?.supportsEffort, images
-    });
-    const cost = costUsd(providerId, a.config.model, res.inputTokens, res.outputTokens);
+    const req = { model: a.config.model, system, user: prompt, maxTokens: 3000, effort: a.config.effort, supportsEffort: !!models.find(m => m.id === a.config.model)?.supportsEffort, images };
+    // Backend del Asistente: con Claude Code, la suscripción (sin cargo a la API); si no está disponible, se dice y NO se usa la API.
+    const caller = agentCaller(INTERNAL_WORKSPACE.slug, a, null, 'Asistente');
+    const res = caller
+      ? await caller.complete({ ...req, images: undefined, user: images.length ? `${prompt}\n(Las imágenes adjuntas no llegan por Claude Code gestionado: pide al propietario que las describa si hacen falta.)` : prompt })
+      : await getAdapter(providerId)!.complete(decryptSecret(cred!.ciphertext), { workspaceId: prow.workspace_id }, req);
+    const cost = caller ? 0 : costUsd(providerId, a.config.model, res.inputTokens, res.outputTokens);
     processesRepo(INTERNAL_WORKSPACE.slug).logExecution({ projectId: '', agentId: a.id, kind: 'assistant_chat', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
     const { reply, actions: actionsReq } = parseResponse(res.text);
-    const actions = performActions(actionsReq);
+    const actions = [...performActions(actionsReq.filter(x => x?.type !== 'request_operation')), ...(await prepareOperations(actionsReq.filter(x => x?.type === 'request_operation')))];
     const assistant = assistantRepo.add({ role: 'assistant', content: reply, actions, attachments: [], tokensIn: res.inputTokens, tokensOut: res.outputTokens, costUsd: cost, model: a.config.model });
     return { user, assistant };
   } catch (e) {
@@ -292,4 +311,46 @@ ${await platformSnapshot()}`;
 export function resolveProposal(messageId: string, processId: string, status: 'done' | 'failed', detail?: string) {
   const m = assistantRepo.get(messageId); if (!m) return;
   assistantRepo.updateActions(messageId, m.actions.map(a => a.processId === processId && a.status === 'pending' ? { ...a, status, detail: detail ?? a.detail } : a));
+}
+
+/**
+ * Operaciones propuestas por el modelo → tarjetas pendientes con su vista previa calculada en el servidor. Nada se ejecuta
+ * aquí: solo decideOperation(…, 'approve') tras la autorización explícita del propietario.
+ */
+export async function prepareOperations(reqs: any[]): Promise<AssistantAction[]> {
+  const out: AssistantAction[] = [];
+  for (const r of reqs.slice(0, 3)) {
+    const cap = CAPABILITIES[String(r?.capability ?? '')];
+    if (!cap) { out.push({ type: 'info', status: 'failed', label: `Operación no disponible: «${String(r?.capability ?? '?')}»`, detail: 'No existe en el catálogo de operaciones del Portal; conviértela en historia si la necesitas.' }); continue; }
+    const { type: _t, capability: _c, ...raw } = r;
+    const parsed = cap.params.safeParse(raw);
+    if (!parsed.success) { out.push({ type: 'info', status: 'failed', label: `No se pudo preparar «${cap.label}»`, detail: 'Parámetros no válidos.' }); continue; }
+    try {
+      const preview = await cap.preview(parsed.data);
+      out.push({ type: 'propose_operation', status: preview.ok ? 'pending' : 'failed', label: preview.title, detail: preview.ok ? 'Revisa lo que se hará y autorízalo aquí.' : `No se puede ahora: ${preview.blockers.join(' ')}`,
+        workspaceSlug: preview.target.workspace, projectId: preview.target.projectId, operation: { id: crypto.randomUUID(), capability: cap.id, params: parsed.data as Record<string, unknown>, preview, result: null, decidedAt: null } });
+    } catch (e: any) { out.push({ type: 'info', status: 'failed', label: `No se pudo preparar «${cap.label}»`, detail: e.message }); }
+  }
+  return out;
+}
+
+/** Autorizar (ejecuta con el servicio existente) o rechazar (sin ningún efecto) una operación propuesta en el chat. */
+export async function decideOperation(messageId: string, operationId: string, decision: 'approve' | 'reject'): Promise<AssistantMessage> {
+  const m = assistantRepo.get(messageId);
+  const action = m?.actions.find(x => x.type === 'propose_operation' && x.operation?.id === operationId);
+  if (!m || !action?.operation) throw Object.assign(new Error('Operación no encontrada.'), { statusCode: 404 });
+  if (action.status !== 'pending') throw Object.assign(new Error(`Esta operación ya está «${action.status}»: no se repite.`), { statusCode: 409 });
+  const op = action.operation; const decidedAt = new Date().toISOString();
+  const save = (patch: Partial<AssistantAction>) => { const cur = assistantRepo.get(messageId)!; assistantRepo.updateActions(messageId, cur.actions.map(x => x.operation?.id === operationId ? { ...x, ...patch } : x)); };
+  if (decision === 'reject') { save({ status: 'rejected', detail: 'Rechazada por el propietario: no se ejecutó nada.', operation: { ...op, decidedAt } }); return assistantRepo.get(messageId)!; }
+  const cap = CAPABILITIES[op.capability];
+  if (!cap) throw Object.assign(new Error('La operación ya no existe en el catálogo.'), { statusCode: 409 });
+  save({ status: 'running', detail: 'Ejecutando con tu autorización…', operation: { ...op, decidedAt } });
+  try {
+    const result = await cap.execute(cap.params.parse(op.params));
+    save({ status: 'done', detail: result.summary, operation: { ...op, decidedAt, result } });
+  } catch (e: any) {
+    save({ status: 'failed', detail: `No se completó: ${e.message}`, operation: { ...op, decidedAt, result: { summary: 'Fallida', details: [String(e.message)] } } });
+  }
+  return assistantRepo.get(messageId)!;
 }

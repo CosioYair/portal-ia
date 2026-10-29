@@ -1,3 +1,4 @@
+import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import type { BacklogItem, ProviderId } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -126,17 +127,18 @@ export async function extractBacklogWithAI(slug: string, projectId: string, maxU
   const coord = agentsRepo(slug).list().find(a => a.key === 'pj-coordinador' && a.projectId === projectId) ?? agentsRepo(slug).list().find(a => a.key === 'pj-coordinador')!;
   const providerId = coord.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-  if (!cred || prow.status !== 'connected') throw Object.assign(new Error('El proveedor del Coordinador no está conectado.'), { statusCode: 409 });
+  const cc = agentCaller(slug, coord, projectId, 'Extracción del backlog');
+  if (!cc && (!cred || prow.status !== 'connected')) throw Object.assign(new Error('El proveedor del Coordinador no está conectado.'), { statusCode: 409 });
   const agents = agentsRepo(slug).list().map(a => `${a.key}: ${a.config.name}`).join(', ');
   const startedAt = new Date().toISOString();
   try {
     requirePolicy('ai_call', { slug, agentId: coord.id, projectId, authorized: true });
-    const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
+    const res = await completeWith(cc, providerId, cred, prow, {
       model: coord.config.model, maxTokens: 3000, effort: 'low', supportsEffort: false,
       system: `Eres «${coord.config.name}». Conviertes un documento de dirección en un backlog estructurado. Agentes disponibles (key: nombre): ${agents}. Responde SOLO con JSON válido.`,
       user: `Extrae TODAS las historias del siguiente documento. Responde SOLO con un array JSON de objetos {"id":"HU-0xx","titulo":string,"responsable":key de agente o null,"dependeDe":"HU-0xx"|null,"estimacion":"S"|"M"|"L"|null,"criterio":string}. Mantén los ids del documento; si no tiene, numera desde HU-005.\n\n${synthesis.body.slice(0, 40_000)}`
     });
-    const cost = costUsd(providerId, coord.config.model, res.inputTokens, res.outputTokens);
+    const cost = (cc ? 0 : costUsd(providerId, coord.config.model, res.inputTokens, res.outputTokens));
     processesRepo(slug).logExecution({ projectId, agentId: coord.id, kind: 'backlog_extract', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
     const items = parseBacklogFromMarkdown(res.text);
     const imported = insertStories(slug, projectId, items, synthesis.processId);

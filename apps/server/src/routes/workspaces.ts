@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
+import { publishProjectMain } from '../services/capabilities.ts';
 import { KNOWLEDGE, TOOLS, type AgentConfig, type AgentCreateInput } from '@portal-ia/domain';
 import { createAgent, deleteAgent, draftAgent, estimateDraft } from '../services/agentFactory.ts';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
@@ -140,9 +141,9 @@ export async function workspaceRoutes(app: FastifyInstance) {
     const body = z.object({ authorized: z.literal(true) }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita.' });
     try {
-      const st = await repoStatus(r.path);
-      if (!st.mainBranch) return reply.code(409).send({ error: 'El repositorio no tiene rama principal (main). Créala primero.' });
-      const res = await pushBranches(r.path, [st.mainBranch]); app.log.info({ path: r.path, remote: res.remote }, 'main publicada'); return res;
+      // Mismo servicio que la capacidad «publish_main» del Asistente (con auditoría de la política git_push).
+      const { slug, projectId } = req.params as any;
+      const res = await publishProjectMain(slug, projectId); app.log.info({ path: r.path, remote: res.remote }, 'main publicada'); return res;
     } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
 

@@ -1,3 +1,4 @@
+import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import crypto from 'node:crypto';
 import type { BacklogItem, ModelInfo, Process, ProviderId, StoryContext, StoryIterationState, StoryMessage, StoryTask, TeamMember } from '@portal-ia/domain';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
@@ -153,7 +154,8 @@ export async function askTeam(slug: string, itemId: string, text: string, opts: 
   const user = t.add({ backlogItemId: itemId, role: 'owner', agentId: null, agentName: null, content: text.trim().slice(0, 8000), processId: null, costUsd: 0, tokens: 0, proposals: null });
   const agent = agentsRepo(slug).get(est.agentId)!;
   const providerId = agent.config.provider as ProviderId; const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-  if (!cred || prow.status !== 'connected') throw Object.assign(new Error('El proveedor no está conectado.'), { statusCode: 409 });
+  const cc = agentCaller(slug, agent, ctx.project.id, 'Pregunta al equipo');
+  if (!cc && (!cred || prow.status !== 'connected')) throw Object.assign(new Error('El proveedor no está conectado.'), { statusCode: 409 });
   const models: ModelInfo[] = JSON.parse(prow.models_json);
   const history = ctx.messages.slice(-10).map(m => `${m.role === 'owner' ? 'Propietario' : m.agentName ?? 'Agente'}: ${m.content.slice(0, 1200)}`).join('\n');
   const system = `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} del proyecto «${ctx.project.name}» en Portal IA. Conversas con el propietario dentro del espacio de UNA historia. Responde en español, breve y concreto, en markdown. No ejecutas nada: si hace falta trabajo, propón tareas o una nueva iteración. Si propones cambiar el criterio de aceptación o crear tareas, termina con UN bloque:
@@ -166,8 +168,8 @@ export async function askTeam(slug: string, itemId: string, text: string, opts: 
   const startedAt = now();
   try {
     requirePolicy('ai_call', { slug, agentId: agent.id, projectId: ctx.item.projectId, authorized: true });
-    const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { model: agent.config.model, system, user: userPrompt, maxTokens: 1500, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
-    const cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
+    const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user: userPrompt, maxTokens: 1500, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
+    const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
     processesRepo(slug).logExecution({ projectId: ctx.item.projectId, agentId: agent.id, kind: 'story_chat', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
     const m = res.text.match(/```proposals\s*([\s\S]*?)```/i); let proposals: any = null;
     if (m) { try { proposals = JSON.parse(m[1]); } catch { proposals = null; } }
