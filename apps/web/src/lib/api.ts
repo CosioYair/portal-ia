@@ -1,6 +1,7 @@
 import type { PipelineConfig, PhaseTransition, PhaseTransitionPreview, ProjectArchive, StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
 import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
+import type { OrgDecision, OrgEvaluation, OrgProposal } from '@portal-ia/domain';
 import type { ClaudeCodeRun, ClaudeCodeStatusView, ClaudeCodeUsage, ClaudeCodeWorkerView, ClaudeCodeWorkspaceView, ExecutionBackend } from '@portal-ia/domain';
 import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
 
@@ -49,6 +50,17 @@ export interface AssistantImage { mediaType: string; data: string; name?: string
 export interface AssistantMessage { id: string; role: 'user' | 'assistant'; content: string; actions: AssistantAction[]; attachments: AssistantAttachment[]; tokensIn: number; tokensOut: number; costUsd: number; model: string | null; createdAt: string }
 export type ProjectFull = Project & { objectives: Objective[]; context: ContextItem[]; repository: Repository | null; knowledgeCount: number };
 export interface BootstrapStatus { providerConnected: boolean; initialized: boolean; workspace: Workspace | null; project: Project | null; agentCount: number }
+/** HU-159 · estimación previa de la evaluación organizativa (sin costo). */
+export interface OrgEvaluationEstimate {
+  scopeKind: 'workspace' | 'project'; projectId: string | null;
+  steps: { agentId: string; agentName: string; title: string; model: string; estimatedUsd: number }[];
+  contextChars: number; estimatedUsd: number; suggestedBudgetUsd: number; approximate: boolean;
+}
+/** Evaluación con el estado de su proceso (pasos y gasto). */
+export type OrgEvaluationView = OrgEvaluation & {
+  process: { id: string; status: Process['status']; budgetUsd: number; estimatedUsd: number; spentUsd: number; error?: string | null; steps?: { title: string; agentName: string; status: string }[] } | null;
+};
+export type OrgEvaluationFilter = { projectId?: string; scope?: 'workspace' | 'project' | 'all' };
 
 export const api = {
   health: () => request<{ ok: boolean; dataDir: string; repoRoot: string; version: string }>('/api/health'),
@@ -104,6 +116,20 @@ export const api = {
   registerExternalCorrection: (slug: string, id: string, body: { commit: string; note: string }) => request<Process>(`/api/workspaces/${slug}/processes/${id}/external-correction`, { method: 'POST', body: JSON.stringify({ authorized: true, ...body }) }),
   cancelProcess: (slug: string, id: string) => request<Process>(`/api/workspaces/${slug}/processes/${id}/cancel`, { method: 'POST' }),
   knowledge: (slug: string, projectId: string) => request<KnowledgeDoc[]>(`/api/workspaces/${slug}/projects/${projectId}/knowledge`),
+  // HU-159 · evaluación organizativa (solo «start» llama a la IA, con autorización explícita y presupuesto)
+  orgEvaluationEstimate: (slug: string, projectId: string | null) => request<OrgEvaluationEstimate>(`/api/workspaces/${slug}/org-evaluations/estimate${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
+  startOrgEvaluation: (slug: string, projectId: string | null, budgetUsd: number) => request<OrgEvaluationView>(`/api/workspaces/${slug}/org-evaluations`, { method: 'POST', body: JSON.stringify({ projectId, budgetUsd, authorized: true }) }),
+  orgEvaluations: (slug: string, filter: OrgEvaluationFilter = {}) => {
+    const q = new URLSearchParams();
+    if (filter.projectId) q.set('projectId', filter.projectId);
+    if (filter.scope) q.set('scope', filter.scope);
+    const qs = q.toString();
+    return request<OrgEvaluationView[]>(`/api/workspaces/${slug}/org-evaluations${qs ? `?${qs}` : ''}`);
+  },
+  orgEvaluation: (slug: string, id: string) => request<OrgEvaluationView>(`/api/workspaces/${slug}/org-evaluations/${encodeURIComponent(id)}`),
+  /** Solo registra la decisión del propietario: no crea, fusiona, retira ni modifica agentes ni departamentos. */
+  decideOrgProposal: (slug: string, id: string, proposalId: string, decision: Exclude<OrgDecision, 'pending'>) =>
+    request<{ evaluation: OrgEvaluation; proposal: OrgProposal }>(`/api/workspaces/${slug}/org-evaluations/${encodeURIComponent(id)}/proposals/${encodeURIComponent(proposalId)}`, { method: 'POST', body: JSON.stringify({ decision }) }),
   // HU-005 · backlog y ejecución de historias
   // Etapas operativas: archivo reversible del trabajo activo (el conocimiento se conserva)
   phase: (slug: string, projectId: string) => request<{ current: PhaseTransition | null; transitions: PhaseTransition[]; defaultName: string }>(`/api/workspaces/${slug}/projects/${projectId}/phase`),

@@ -6,11 +6,13 @@ import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Avatar, Chip, Icon, Notice } from '../components/ui.tsx';
+import { OrgEvaluationPanel } from '../components/OrgEvaluationPanel.tsx';
 
 export function Team() {
   const { status, providers, navigate } = useApp();
   const ws = status.workspace!;
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [evalOpen, setEvalOpen] = useState(false);
   useEffect(() => { api.agents(ws.slug).then(list => setAgents(list.filter(a => a.scope === 'workspace' || a.projectId === status.project?.id))); }, [ws.slug, status.project?.id]);
 
   const byKey = (k: string) => agents.find(a => a.key === k);
@@ -42,8 +44,9 @@ export function Team() {
             <h1 className="h1" style={{ fontSize: 26 }}>Organización del espacio y del proyecto</h1>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone="accent">{agents.filter(a => a.scope === 'workspace').length} agentes del espacio</Chip><Chip>{agents.filter(a => a.scope === 'project').length} agentes del proyecto</Chip><Chip dot={active ? 'ok' : ''}>{active} activos · {agents.length} configurados</Chip></div>
           </div>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}><Link className="btn btn-secondary" to="/equipo/nuevo">{Icon.arrow()}Nuevo agente especializado</Link><button className="btn btn-primary" disabled title="Requiere autorización de ejecución y presupuesto aprobado">Activar equipo</button></div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}><button className="btn btn-secondary" onClick={() => setEvalOpen(o => !o)} aria-expanded={evalOpen}>{Icon.org()}Evaluar organización</button><Link className="btn btn-secondary" to="/equipo/nuevo">{Icon.arrow()}Nuevo agente especializado</Link><button className="btn btn-primary" disabled title="Requiere autorización de ejecución y presupuesto aprobado">Activar equipo</button></div>
         </div>
+        {evalOpen && <OrgEvaluationPanel slug={ws.slug} defaultProjectId={status.project?.id ?? null} onClose={() => setEvalOpen(false)} />}
         <Notice kind="info">Todos los agentes están <strong>configurados pero inactivos</strong>. Ningún agente realiza llamadas a modelos ni consume créditos hasta que lo actives y autorices su ejecución. Selecciona un agente para revisar o editar su configuración.</Notice>
 
         <section className="card">

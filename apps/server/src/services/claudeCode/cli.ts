@@ -153,7 +153,9 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
           session = { model: typeof j.model === 'string' ? j.model : null, tools: Array.isArray(j.tools) ? j.tools.map(String) : [], mcpServers: Array.isArray(j.mcp_servers) ? j.mcp_servers.map((s: any) => ({ name: String(s?.name), status: String(s?.status) })) : [], plugins: Array.isArray(j.plugins) ? j.plugins.map((p: any) => String(p?.name)) : [], permissionMode: typeof j.permissionMode === 'string' ? j.permissionMode : null };
           o.onEvent?.({ kind: 'init', model: j.model ?? null, apiKeySource, mcp: Array.isArray(j.mcp_servers) ? j.mcp_servers : [] });
           const problem = initProblem(j, { structured: !!o.schema, mcp: !!o.mcp });
-          if (problem) stop(ccError('backend_unavailable', `${problem} Se detuvo antes de enviar el encargo: no se llamó al modelo.`));
+          // No se mata en el acto: se cierra la entrada y se espera al resultado del mensaje en blanco (que no llega al
+          // modelo). El encargo nunca se envía; al llegar ese resultado (o al vencer el plazo) se detiene el proceso.
+          if (problem) { if (!failure) failure = ccError('backend_unavailable', `${problem} Se detuvo antes de enviar el encargo: no se llamó al modelo.`); try { child.stdin?.end(); } catch { /* cerrada */ } }
           else gateOk = true;
         } else if (j.type === 'system' && j.subtype === 'api_retry') {
           o.onEvent?.({ kind: 'retry', attempt: Number(j.attempt) || 0, error: j.error ?? null, delayMs: typeof j.retry_delay_ms === 'number' ? j.retry_delay_ms : null });
@@ -170,6 +172,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
           o.onEvent?.({ kind: 'turn', turn: turns, tools });
         } else if (j.type === 'result' && phase === 'gate') {
           // Resultado del mensaje en blanco: debe confirmar que no se llamó al modelo; solo entonces se envía el encargo.
+          if (failure) { stop(failure); return; }
           const untouched = (Number(j.num_turns) || 0) === 0 && !(Number(j.usage?.input_tokens) || 0) && !(Number(j.usage?.output_tokens) || 0);
           if (!gateOk || !untouched) { stop(ccError('backend_unavailable', !gateOk ? 'Claude Code no informó de su configuración (init) antes de la primera respuesta. Se detuvo sin enviar el encargo.' : 'La comprobación previa de Claude Code no se comportó como está documentado (el mensaje en blanco no debía llegar al modelo). Se detuvo sin enviar el encargo.')); return; }
           phase = 'run';
