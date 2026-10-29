@@ -1,6 +1,6 @@
 import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import type { Agent, DelegationResult, ModelInfo, OrgDecision, OrgEvaluation, OrgEvaluationStatus, OrgProposal, Process, ProviderId } from '@portal-ia/domain';
-import { ORG_ACTION_LABEL, ORG_TARGET_LABEL, parseOrgProposals } from '@portal-ia/domain';
+import { ORG_ACTION_LABEL, ORG_TARGET_LABEL, departmentOf, isRetired, parseOrgProposals } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
@@ -9,12 +9,14 @@ import { requirePolicy } from './executionPolicy.ts';
 import { buildRepoContext } from './repoContext.ts';
 import { phaseContext } from './operationalPhase.ts';
 import { callTimeoutMs, maybeBilled, registerCall, unregisterCall, withWatchdog } from './providerCalls.ts';
+import { acceptProposal, orgCatalog } from './orgProposalApply.ts';
 
 /**
  * HU-159 · Evaluación organizativa. Con ámbito de proyecto participan el Coordinador del proyecto y el Gestor
  * Organizacional; con ámbito de empresa, el Gestor. Se reutiliza el proceso «delegated_task» (cancelación, vista de
- * procesos y presupuesto). El resultado va a Conocimiento y las propuestas solo se registran: decidir sobre ellas NO
- * crea, fusiona, retira ni modifica agentes ni departamentos.
+ * procesos y presupuesto). El resultado va a Conocimiento con propuestas que traen su configuración (spec). Aceptar una
+ * propuesta la aplica (orgProposalApply.ts, reversible con «Deshacer»); rechazarla solo registra la decisión.
+ * Los agentes retirados no participan como responsables de la evaluación.
  */
 const TOKENS = { coordinator: 4000, gestor: 12000 } as const;
 const CTX_MAX = 48_000;
@@ -24,7 +26,7 @@ const isTruncated = (stop: string | null | undefined) => stop === 'max_tokens' |
 const httpError = (statusCode: number, message: string, code?: string) => Object.assign(new Error(message), { statusCode, code });
 const cancelledError = () => Object.assign(new Error('cancelado'), { cancelled: true });
 
-function resolveScope(slug: string, projectId: string | null) {
+function resolveScope(slug: string, projectId: string | null, anchorProjectId?: string | null) {
   const ws = workspacesRepo.get(slug);
   if (!ws) throw httpError(404, 'Espacio no encontrado');
   const projects = projectsRepo(slug);
@@ -33,13 +35,19 @@ function resolveScope(slug: string, projectId: string | null) {
     if (!p) throw httpError(404, 'El proyecto no pertenece a esta empresa.');
     return { ws, project: p, anchor: p, label: `proyecto «${p.name}»` };
   }
+  // Evaluación de empresa: se ancla al proyecto activo que envía la interfaz (validado); si no llega, al primero.
+  if (anchorProjectId) {
+    const active = projects.get(anchorProjectId);
+    if (!active) throw httpError(422, 'El proyecto activo no pertenece a esta empresa.', 'invalid_anchor');
+    return { ws, project: null, anchor: active, label: `empresa «${ws.name}»` };
+  }
   const anchor = projects.list()[0];
   if (!anchor) throw httpError(409, 'La empresa no tiene proyectos: crea uno para guardar la evaluación en Conocimiento.', 'no_project');
   return { ws, project: null, anchor, label: `empresa «${ws.name}»` };
 }
 
 function findLeads(slug: string, projectId: string | null): { gestor: Agent; coordinator: Agent | null } {
-  const all = agentsRepo(slug).list();
+  const all = agentsRepo(slug).list().filter(a => !isRetired(a.template));
   const gestor = all.find(a => a.key === 'ws-gestor');
   if (!gestor) throw httpError(409, 'Falta el Gestor Organizacional (ws-gestor) en esta empresa.', 'missing_agent');
   if (!projectId) return { gestor, coordinator: null };
@@ -54,7 +62,7 @@ function agentLine(slug: string, a: Agent, projectNames: Map<string, string>): s
   const supervises = Array.isArray(tpl.supervises) ? tpl.supervises.join(', ') : '';
   const st = processesRepo(slug).agentStats(a.id);
   const scope = a.scope === 'workspace' ? 'empresa' : `proyecto «${projectNames.get(a.projectId ?? '') ?? a.projectId}»`;
-  return `- ${a.config.name} · clave ${a.key} · papel ${tpl.role} · ámbito ${scope}${tpl.tier ? ` · nivel ${tpl.tier}` : ''} · reporta a ${tpl.reportsTo || '—'} · supervisa ${supervises || '—'} · modelo ${a.config.provider}/${a.config.model}${a.config.effort ? ` (${a.config.effort})` : ''} · herramientas/permisos: ${caps || '—'} · actividad: ${st.steps} pasos (${st.failed} fallidos, ${st.costUsd.toFixed(2)} USD)${st.lastAt ? `, último ${st.lastAt.slice(0, 10)}` : ''}`;
+  return `- ${a.config.name}${isRetired(a.template) ? ' (retirado)' : ''} · clave ${a.key} · papel ${tpl.role}${departmentOf(a.template) ? ` · departamento ${departmentOf(a.template)}` : ''} · ámbito ${scope}${tpl.tier ? ` · nivel ${tpl.tier}` : ''} · reporta a ${tpl.reportsTo || '—'} · supervisa ${supervises || '—'} · modelo ${a.config.provider}/${a.config.model}${a.config.effort ? ` (${a.config.effort})` : ''} · herramientas/permisos: ${caps || '—'} · actividad: ${st.steps} pasos (${st.failed} fallidos, ${st.costUsd.toFixed(2)} USD)${st.lastAt ? `, último ${st.lastAt.slice(0, 10)}` : ''}`;
 }
 
 /** Contexto real y recortado: agentes (papel, permisos, modelo, jerarquía, actividad), línea base, backlog, actividad y repositorio. */
@@ -85,8 +93,8 @@ function price(a: Agent, inTok: number, outTok: number): number {
   return (inTok * p.inPerM + (outTok + think) * p.outPerM) / 1_000_000;
 }
 
-export function estimateOrgEvaluation(slug: string, projectId: string | null) {
-  const { project } = resolveScope(slug, projectId);
+export function estimateOrgEvaluation(slug: string, projectId: string | null, anchorProjectId?: string | null) {
+  const { project, anchor } = resolveScope(slug, projectId, anchorProjectId);
   const { gestor, coordinator } = findLeads(slug, project?.id ?? null);
   const ctx = buildOrgContext(slug, project?.id ?? null);
   const ctxTok = estimateTokens(ctx) + 900;
@@ -94,14 +102,14 @@ export function estimateOrgEvaluation(slug: string, projectId: string | null) {
   if (coordinator) steps.push({ agentId: coordinator.id, agentName: coordinator.config.name, title: STEP_COORD, model: coordinator.config.model, estimatedUsd: price(coordinator, ctxTok, TOKENS.coordinator) });
   steps.push({ agentId: gestor.id, agentName: gestor.config.name, title: STEP_GESTOR, model: gestor.config.model, estimatedUsd: price(gestor, ctxTok + (coordinator ? TOKENS.coordinator : 0), TOKENS.gestor) });
   const estimatedUsd = steps.reduce((acc, s) => acc + s.estimatedUsd, 0);
-  return { scopeKind: project ? 'project' as const : 'workspace' as const, projectId: project?.id ?? null, steps, contextChars: ctx.length, estimatedUsd, suggestedBudgetUsd: Math.max(0.5, Math.ceil(estimatedUsd * 2 * 2) / 2), approximate: true };
+  return { scopeKind: project ? 'project' as const : 'workspace' as const, projectId: project?.id ?? null, anchorProjectId: anchor.id, steps, contextChars: ctx.length, estimatedUsd, suggestedBudgetUsd: Math.max(0.5, Math.ceil(estimatedUsd * 2 * 2) / 2), approximate: true };
 }
 
 /** Crea el proceso ya autorizado con su presupuesto (la ruta exige autorización explícita) y la fila del historial. */
-export function createOrgEvaluation(slug: string, projectId: string | null, budgetUsd: number): { evaluation: OrgEvaluation; process: Process } {
+export function createOrgEvaluation(slug: string, projectId: string | null, budgetUsd: number, anchorProjectId?: string | null): { evaluation: OrgEvaluation; process: Process } {
   if (!(budgetUsd > 0)) throw httpError(403, 'Indica un presupuesto mayor que 0 USD.', 'authorization_required');
-  const est = estimateOrgEvaluation(slug, projectId);
-  const { project, anchor, label } = resolveScope(slug, projectId);
+  const est = estimateOrgEvaluation(slug, projectId, anchorProjectId);
+  const { project, anchor, label } = resolveScope(slug, projectId, anchorProjectId);
   const { gestor } = findLeads(slug, project?.id ?? null);
   const evals = orgEvaluationsRepo(slug);
   if (evals.list({ projectId: project?.id ?? null }).some(e => e.status === 'running')) throw httpError(409, 'Ya hay una evaluación en curso para este ámbito.', 'already_running');
@@ -129,15 +137,18 @@ ${ctx}
 
 Analiza en markdown breve (máx. ~600 palabras): qué trabajo real hay (repositorio, línea base, backlog, actividad), qué capacidades exige, qué agentes participan de verdad y cuáles apenas intervienen, cuellos de botella y huecos de capacidad. Cita evidencias concretas. No propongas aún cambios formales.`;
 
-const gestorPrompt = (ctx: string, label: string, coordNotes: string) => `El propietario pide evaluar si la organización (${label}) tiene los agentes y departamentos correctos según el contenido real.
+const gestorPrompt = (ctx: string, label: string, coordNotes: string, catalog: string) => `El propietario pide evaluar si la organización (${label}) tiene los agentes y departamentos correctos según el contenido real.
 ${coordNotes ? `\n# Análisis del Coordinador del proyecto\n${coordNotes}\n` : ''}
 # Estado real
 ${ctx}
 
+# Catálogo permitido para las configuraciones
+${catalog}
+
 Entrega en markdown (máx. ~900 palabras): empieza con «## Resumen» (3-5 frases) y después el diagnóstico (papeles, permisos, jerarquía, carga real, solapamientos y huecos).
 Al final, UN bloque \`\`\`org con un array JSON de propuestas (máx. 12) con este formato exacto:
-{"action":"add"|"merge"|"retire"|"adjust","target":"agent"|"department","subject":string,"rationale":string,"details":string}
-Reglas: "rationale" obligatorio y basado en evidencias reales del contexto; en merge, retire y adjust usa nombres o claves existentes ("subject" de merge: "A + B"); en "details" indica qué cambiaría (papel, permisos, modelo, a quién reporta). Si la organización es adecuada, devuelve []. Cierra el bloque con \`\`\`. Nada se aplicará sin la aprobación del propietario.`;
+{"action":"add"|"merge"|"retire"|"adjust","target":"agent"|"department","subject":string,"keep":string,"rationale":string,"details":string,"spec":{"name":string,"role":string,"specialization":string,"responsibilities":string[],"reportsTo":clave existente|"owner","tools":id[],"capabilities":id[],"model":id,"effort":"low"|"medium"|"high","department":string,"agents":spec[],"members":clave[]}}
+Reglas: "rationale" obligatorio y basado en evidencias reales del contexto; en merge, retire y adjust usa las claves existentes de agentes activos ("subject" de merge: "A + B"; "keep": el que se conserva). "spec" es la configuración concreta que el Portal aplicará si el propietario acepta: obligatorio en add y adjust (en adjust, solo los campos que cambian), opcional en merge (configuración del que se conserva) y omitido en retire. Para añadir un departamento usa "spec.agents" (agentes nuevos) o "spec.members" (claves existentes). Usa solo herramientas, capacidades y modelos del catálogo, con mínimo privilegio. No retires al Gestor Organizacional ni al último Coordinador de un proyecto; los agentes marcados «(retirado)» ya están desactivados. En "details" resume el cambio en lenguaje llano. Si la organización es adecuada, devuelve []. Cierra el bloque con \`\`\`. Nada se aplicará sin la aprobación del propietario.`;
 
 function summarize(body: string): string {
   const sec = /##\s*Resumen[^\n]*\n([\s\S]*?)(?=\n#|$)/i.exec(body)?.[1]?.trim();
@@ -145,7 +156,7 @@ function summarize(body: string): string {
   return para.slice(0, 600);
 }
 
-const proposalLine = (p: OrgProposal) => `- **${p.id} · ${ORG_ACTION_LABEL[p.action]} ${ORG_TARGET_LABEL[p.target]}: ${p.subject}** — ${p.rationale}${p.details ? `\n  ${p.details}` : ''}`;
+const proposalLine = (p: OrgProposal) => `- **${p.id} · ${ORG_ACTION_LABEL[p.action]} ${ORG_TARGET_LABEL[p.target]}: ${p.subject}** — ${p.rationale}${p.details ? `\n  ${p.details}` : ''}${p.spec ? `\n  Configuración propuesta: \`${JSON.stringify(p.spec).slice(0, 600)}\`` : ''}${p.specWarnings?.length ? `\n  Avisos: ${p.specWarnings.join(' ')}` : ''}`;
 
 export async function runOrgEvaluation(slug: string, processId: string, log: (o: any, m: string) => void, isCancelled: () => boolean) {
   const procs = processesRepo(slug); const agents = agentsRepo(slug); const knowledge = knowledgeRepo(slug); const evals = orgEvaluationsRepo(slug);
@@ -207,7 +218,7 @@ export async function runOrgEvaluation(slug: string, processId: string, log: (o:
     }
     if (isCancelled()) throw cancelledError();
     const gestor = agents.get(proc.steps[idx].agentId)!;
-    const prompt = gestorPrompt(ctx, label, coordNotes);
+    const prompt = gestorPrompt(ctx, label, coordNotes, orgCatalog(slug));
     let res = await call(idx, sys(gestor, slug), prompt, TOKENS.gestor);
     let text = res.text;
     for (let i = 0; i < 2 && isTruncated(res.stopReason); i++) {
@@ -223,7 +234,7 @@ export async function runOrgEvaluation(slug: string, processId: string, log: (o:
     const participants = [d.consulted[0]?.agentName, gestor.config.name].filter(Boolean).join(' y ');
     const doc = knowledge.add({
       projectId: proc.projectId, title: `Evaluación organizativa · ${scopeName} · ${date}`, authorAgentId: gestor.id, authorAgentName: gestor.config.name, processId,
-      body: `# Evaluación organizativa\n**Ámbito:** ${label}\n**Fecha:** ${date}\n**Participantes:** ${participants}\n\n${coordNotes ? `# Análisis del Coordinador\n${coordNotes}\n\n` : ''}# Evaluación del Gestor\n${body}\n\n# Propuestas (${parsed.proposals.length})\n${parsed.proposals.map(proposalLine).join('\n') || '(sin propuestas: la organización se considera adecuada)'}\n\n> Aceptar o rechazar una propuesta solo registra la decisión del propietario: no crea, fusiona, retira ni modifica agentes ni departamentos. Se aplica después desde Equipo.\n\n# Decisiones del propietario`
+      body: `# Evaluación organizativa\n**Ámbito:** ${label}\n**Fecha:** ${date}\n**Participantes:** ${participants}\n\n${coordNotes ? `# Análisis del Coordinador\n${coordNotes}\n\n` : ''}# Evaluación del Gestor\n${body}\n\n# Propuestas (${parsed.proposals.length})\n${parsed.proposals.map(proposalLine).join('\n') || '(sin propuestas: la organización se considera adecuada)'}\n\n> Al aceptar una propuesta, el Portal la aplica automáticamente con su configuración y deja disponible «Deshacer»; rechazarla solo registra la decisión. Nada se crea, ajusta ni retira sin la aprobación del propietario.\n\n# Decisiones del propietario`
     });
     d.knowledgeDocId = doc.id; procs.setDelegation(processId, d);
     evals.update(ev.id, { status: 'done', knowledgeDocId: doc.id, summary: summarize(parsed.body), proposals: parsed.proposals, error: null });
@@ -261,8 +272,12 @@ export function listOrgEvaluations(slug: string, filter: { projectId?: string | 
   return orgEvaluationsRepo(slug).list(filter).map(e => getOrgEvaluation(slug, e.id));
 }
 
-/** Registra la decisión del propietario sobre UNA propuesta y la anota en el documento. Sin efectos organizativos. */
+/**
+ * Decisión del propietario sobre UNA propuesta. Aceptar la aplica (validación previa, transacción, auditoría y
+ * deshacer) y solo entonces registra la decisión; si falla, la propuesta sigue pendiente. Rechazar solo registra.
+ */
 export function decideProposal(slug: string, evalId: string, proposalId: string, decision: Exclude<OrgDecision, 'pending'>) {
+  if (decision === 'accepted') return acceptProposal(slug, evalId, proposalId);
   const evals = orgEvaluationsRepo(slug);
   const cur = evals.get(evalId);
   if (!cur) throw httpError(404, 'Evaluación no encontrada');
@@ -270,7 +285,7 @@ export function decideProposal(slug: string, evalId: string, proposalId: string,
   const r = evals.setProposalDecision(evalId, proposalId, decision, 'owner');
   if (cur.knowledgeDocId) {
     const p = r.proposal;
-    const line = `\n- ${p.decidedAt?.slice(0, 16).replace('T', ' ')} · ${p.id} · ${decision === 'accepted' ? 'Aceptada' : 'Rechazada'}: ${ORG_ACTION_LABEL[p.action]} ${ORG_TARGET_LABEL[p.target]} «${p.subject}».${decision === 'accepted' ? ' Pendiente de aplicar desde Equipo.' : ''}`;
+    const line = `\n- ${p.decidedAt?.slice(0, 16).replace('T', ' ')} · ${p.id} · Rechazada: ${ORG_ACTION_LABEL[p.action]} ${ORG_TARGET_LABEL[p.target]} «${p.subject}». Sin cambios en la organización.`;
     workspaceDb(slug).prepare(`UPDATE knowledge SET body = body || ? WHERE id = ?`).run(line, cur.knowledgeDocId);
   }
   return r;
