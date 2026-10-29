@@ -102,6 +102,13 @@ test('c · añadir: crea el agente con mínimo privilegio, audita, anota y desha
   adapters.resetMockCalls();
   const a = await buildApp();
   const coordBefore = byKey('pj-coordinador').template;
+  const snapNoConfirm = snapshot();
+  for (const payload of [{ decision: 'accepted' }, { decision: 'accepted', confirm: false }]) {
+    const nc = await a.inject({ method: 'POST', url: url('p1'), payload });
+    assert.equal(nc.statusCode, 400, JSON.stringify(payload)); assert.equal(nc.json().code, 'confirmation_required');
+  }
+  assert.equal(snapshot(), snapNoConfirm, 'sin confirmación no se aplica nada');
+  assert.equal(orgEvaluationsRepo(SLUG).get(EV.id)!.proposals.find(p => p.id === 'p1')!.decision, 'pending');
   const r = await accept(a, 'p1');
   assert.equal(r.statusCode, 200, r.body);
   const app1 = r.json().proposal.application;
