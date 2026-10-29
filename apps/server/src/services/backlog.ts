@@ -2,7 +2,8 @@ import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import type { BacklogItem, ProviderId } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
-import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo } from '../db/workspace.ts';
+import { backlogRepo, knowledgeRepo, processesRepo } from '../db/workspace.ts';
+import { activeAgents } from './activeAgents.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { currentPhase, isBaselineDoc } from './operationalPhase.ts';
@@ -67,7 +68,7 @@ export function parseBacklogFromMarkdown(md: string): ParsedStory[] {
 
 function resolveOwner(slug: string, owner: string | null): string | null {
   if (!owner) return null;
-  const agents = agentsRepo(slug).list();
+  const agents = activeAgents(slug); // un retirado no es responsable de historias
   const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
   const o = norm(owner);
   const byKey = agents.find(a => a.key === owner); if (byKey) return byKey.key;
@@ -111,7 +112,7 @@ export function importBacklogFromKnowledge(slug: string, projectId: string): { i
 
 export function estimateExtraction(slug: string, projectId: string): { model: string; byAgent: string; estimatedUsd: number } | null {
   const synthesis = findSynthesis(slug, projectId); if (!synthesis) return null;
-  const coord = agentsRepo(slug).list().find(a => a.key === 'pj-coordinador' && a.projectId === projectId) ?? agentsRepo(slug).list().find(a => a.key === 'pj-coordinador');
+  const coord = activeAgents(slug).find(a => a.key === 'pj-coordinador' && a.projectId === projectId) ?? activeAgents(slug).find(a => a.key === 'pj-coordinador');
   if (!coord) return null;
   const p = estimatePricing(coord.config.provider, coord.config.model);
   return { model: coord.config.model, byAgent: coord.config.name, estimatedUsd: ((synthesis.body.length / 3.5 + 800) * p.inPerM + 2500 * p.outPerM) / 1_000_000 };
@@ -124,12 +125,12 @@ export async function extractBacklogWithAI(slug: string, projectId: string, maxU
   const est = estimateExtraction(slug, projectId);
   if (!est) throw Object.assign(new Error('Falta el Coordinador del Proyecto.'), { statusCode: 409 });
   if (est.estimatedUsd > maxUsd) throw Object.assign(new Error(`La extracción cuesta aprox. ${est.estimatedUsd.toFixed(3)} USD, por encima del tope (${maxUsd.toFixed(2)} USD).`), { statusCode: 409 });
-  const coord = agentsRepo(slug).list().find(a => a.key === 'pj-coordinador' && a.projectId === projectId) ?? agentsRepo(slug).list().find(a => a.key === 'pj-coordinador')!;
+  const coord = activeAgents(slug).find(a => a.key === 'pj-coordinador' && a.projectId === projectId) ?? activeAgents(slug).find(a => a.key === 'pj-coordinador')!;
   const providerId = coord.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
   const cc = agentCaller(slug, coord, projectId, 'Extracción del backlog');
   if (!cc && (!cred || prow.status !== 'connected')) throw Object.assign(new Error('El proveedor del Coordinador no está conectado.'), { statusCode: 409 });
-  const agents = agentsRepo(slug).list().map(a => `${a.key}: ${a.config.name}`).join(', ');
+  const agents = activeAgents(slug).map(a => `${a.key}: ${a.config.name}`).join(', ');
   const startedAt = new Date().toISOString();
   try {
     requirePolicy('ai_call', { slug, agentId: coord.id, projectId, authorized: true });
@@ -158,7 +159,7 @@ export function addManualItem(slug: string, projectId: string, input: { title: s
   let k = Math.max(0, ...Array.from(ids).map(id => parseInt(id.replace(/\D+/g, ''), 10)).filter(Number.isFinite)) + 1;
   let storyId = `HU-${String(k).padStart(3, '0')}`;
   while (ids.has(storyId)) storyId = `HU-${String(++k).padStart(3, '0')}`;
-  const hasCoord = agentsRepo(slug).list().some(a => a.key === 'pj-coordinador' && (a.projectId === projectId || a.projectId === null));
+  const hasCoord = activeAgents(slug).some(a => a.key === 'pj-coordinador' && (a.projectId === projectId || a.projectId === null));
   return repo.add({ projectId, storyId, title: input.title, ownerKey: input.ownerKey ?? (hasCoord ? 'pj-coordinador' : null), dependsOn: null, estimate: input.estimate ?? null, criterion: input.criterion ?? '', description: input.description ?? '', sourceProcessId: null });
 }
 

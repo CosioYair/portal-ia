@@ -6,6 +6,7 @@ import { practicesFor } from './agentTemplates.ts';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
+import { activeAgents } from './activeAgents.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { currentPhase, phaseContext } from './operationalPhase.ts';
@@ -389,7 +390,7 @@ export function retryStory(slug: string, processId: string, opts: StoryOptions =
 export function estimateManualTest(slug: string, processId: string): { agentId: string; agentName: string; model: string; estimatedUsd: number } {
   const proc = processesRepo(slug).get(processId);
   if (!proc || proc.kind !== 'story_execution' || !proc.result) throw Object.assign(new Error('Proceso de historia no encontrado'), { statusCode: 404 });
-  const agents = agentsRepo(slug).list().filter(a => a.projectId === proc.projectId || a.projectId === null);
+  const agents = activeAgents(slug).filter(a => a.projectId === proc.projectId || a.projectId === null);
   const agent = agents.find(a => a.key === 'pj-qa') ?? agents.find(a => a.key === 'pj-coordinador');
   if (!agent) throw Object.assign(new Error('No hay agente de QA ni Coordinador en el proyecto.'), { statusCode: 409 });
   const p = estimatePricing(agent.config.provider, agent.config.model);

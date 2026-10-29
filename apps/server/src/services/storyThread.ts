@@ -5,6 +5,7 @@ import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
+import { activeAgents } from './activeAgents.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { describeProcess } from './guidance.ts';
@@ -113,7 +114,7 @@ export function failedSteps(ctx: StoryContext): { index: number; text: string; r
 
 export function estimateAsk(slug: string, itemId: string, agentId?: string | null): { agentId: string; agentName: string; model: string; estimatedUsd: number } {
   const item = backlogRepo(slug).get(itemId); if (!item) throw Object.assign(new Error('Historia no encontrada'), { statusCode: 404 });
-  const agents = agentsRepo(slug).list();
+  const agents = activeAgents(slug); // un retirado no responde preguntas del equipo
   const agent = (agentId ? agents.find(a => a.id === agentId) : null) ?? agents.find(a => a.key === 'pj-coordinador' && a.projectId === item.projectId);
   if (!agent) throw Object.assign(new Error('No hay Coordinador en el proyecto.'), { statusCode: 409 });
   if (agent.projectId && agent.projectId !== item.projectId) throw Object.assign(new Error('Ese agente pertenece a otro proyecto.'), { statusCode: 403 });
@@ -188,7 +189,7 @@ export async function askTeam(slug: string, itemId: string, text: string, opts: 
 export function applyProposals(slug: string, itemId: string, messageId: string, what: { tasks?: boolean; criterion?: boolean }): StoryContext | Promise<StoryContext> {
   const t = threadRepo(slug); const msg = t.messages(itemId).find(m => m.id === messageId);
   if (!msg?.proposals) throw Object.assign(new Error('El mensaje no tiene propuestas.'), { statusCode: 404 });
-  const agents = agentsRepo(slug).list();
+  const agents = activeAgents(slug); // a un retirado no se le asignan tareas
   if (what.tasks) for (const task of msg.proposals.tasks) { const a = task.assignee ? agents.find(x => x.config.name === task.assignee) : null; t.addTask({ backlogItemId: itemId, title: task.title, assigneeAgentId: a?.id ?? null, assigneeName: a?.config.name ?? task.assignee ?? null, source: 'agent', processId: msg.processId }); }
   if (what.criterion && msg.proposals.criterion) backlogRepo(slug).update(itemId, { criterion: msg.proposals.criterion });
   workspaceDb(slug).prepare(`UPDATE story_threads SET proposals = ? WHERE id = ?`).run(JSON.stringify({ ...msg.proposals, applied: true }), messageId);
