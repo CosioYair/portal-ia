@@ -1,4 +1,4 @@
-import { BATCH_LIMITS, DEPENDENCY_BROKEN, DEPENDENCY_SATISFIED, INTERNAL_WORKSPACE, backendLabel, batchBudget, batchMoving, batchSourceOf, batchSummary, classifyStop, gauntletOverhead, normalizeGauntlet, normalizePipeline, planBatch, type Batch, type BatchAgentCheck, type BatchAuthorization, type BatchItem, type BatchItemState, type BatchPreview, type BatchPreviewStory, type CallRange, type Process, type ProviderId, type RuntimeCheck, type RuntimeCheckResult } from '@portal-ia/domain';
+import { BATCH_LIMITS, DEPENDENCY_BROKEN, DEPENDENCY_SATISFIED, INTERNAL_WORKSPACE, backendLabel, batchBudget, batchMoving, batchSourceOf, batchSummary, classifyStop, DEFAULT_GAUNTLET, gauntletOverhead, normalizeGauntlet, normalizePipeline, planBatch, type Batch, type BatchAgentCheck, type BatchAuthorization, type BatchItem, type BatchItemState, type BatchPreview, type BatchPreviewStory, type CallRange, type GauntletConfig, type Process, type ProviderId, type RuntimeCheck, type RuntimeCheckResult } from '@portal-ia/domain';
 import { batchesRepo } from '../db/batches.ts';
 import { callMetricsRepo } from '../db/callMetrics.ts';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
@@ -9,7 +9,7 @@ import { agentBackend, claudeCodeGate } from './claudeCode/backend.ts';
 import { lastDetection } from './claudeCode/detect.ts';
 import { getClaudeCodeSettings } from './claudeCode/settings.ts';
 import { requirePolicy } from './executionPolicy.ts';
-import { projectEvaluator, syncEvaluatorStep } from './gauntlet.ts';
+import { projectEvaluator, projectGauntlet, resolveGauntletFor, syncEvaluatorStep } from './gauntlet.ts';
 import { abortProcessCalls } from './providerCalls.ts';
 import { pushBranches } from './repoWrite.ts';
 import { defaultChecks, runRuntimeChecks } from './runtimeChecks.ts';
@@ -58,7 +58,7 @@ export interface BatchInput {
   apiFallback?: boolean;
   totalBudgetUsd: number; perStoryBudgetUsd: number;
   maxCorrections?: number; maxDurationMin?: number; maxSubscriptionCalls?: number;
-  gauntlet?: { mode: 'off' | 'standard' | 'deep'; maxRounds?: number };
+  gauntlet?: { mode: 'off' | 'standard' | 'deep' | 'auto'; maxRounds?: number };
   concurrency?: number;
   commands?: ('typecheck' | 'test' | 'build')[]; allowInstall?: boolean;
   git?: { merge?: boolean; activate?: boolean; publish?: boolean };
@@ -71,7 +71,7 @@ const clamp = (v: unknown, min: number, max: number, def: number) => { const n =
  * Normaliza la autorización: límites acotados (nunca «ilimitado»); la API, integrar, activar y publicar solo si se
  * piden (activar y publicar exigen integrar); ceder a la API solo si se pide y la API está autorizada en el lote.
  */
-export function normalizeAuth(projectId: string, input: BatchInput): BatchAuthorization {
+export function normalizeAuth(projectId: string, input: BatchInput, projectDefault: GauntletConfig = DEFAULT_GAUNTLET): BatchAuthorization {
   const order = ['typecheck', 'test', 'build'] as const;
   const itemIds = Array.from(new Set(input.itemIds));
   if (itemIds.length > BATCH_LIMITS.maxItems) throw fail(400, `Un lote admite hasta ${BATCH_LIMITS.maxItems} historias (elegiste ${itemIds.length}): divídelo en varios lotes.`, 'too_many');
@@ -86,7 +86,8 @@ export function normalizeAuth(projectId: string, input: BatchInput): BatchAuthor
     maxCorrections: Math.floor(clamp(input.maxCorrections, 0, BATCH_LIMITS.maxCorrections, 3)),
     maxDurationMin: Math.floor(clamp(input.maxDurationMin, 5, BATCH_LIMITS.maxDurationMin, 240)),
     maxSubscriptionCalls: Math.floor(clamp(input.maxSubscriptionCalls, 0, BATCH_LIMITS.maxSubscriptionCalls, 60)),
-    gauntlet: normalizeGauntlet(input.gauntlet ?? null),
+    // Sin indicarlo, el del proyecto (por defecto «automático»: se resuelve historia a historia al empezar cada una).
+    gauntlet: normalizeGauntlet(input.gauntlet ?? projectDefault),
     concurrency: Math.floor(clamp(input.concurrency, 1, BATCH_LIMITS.maxConcurrency, 1)),
     commands: order.filter(c => (input.commands ?? order).includes(c)),
     allowInstall: !!input.allowInstall,
@@ -168,8 +169,8 @@ function historyMinutes(slug: string, projectId: string): { median: number; p25:
  * evaluación del Gauntlet se pondera como una revisión de QA.
  */
 type Step = { agentId: string; role: string; usd: number };
-function stepRange(steps: Step[], auth: BatchAuthorization, evaluatorId: string | null, weight: (s: Step) => number): CallRange {
-  const g = gauntletOverhead(auth.gauntlet);
+function stepRange(steps: Step[], auth: BatchAuthorization, evaluatorId: string | null, weight: (s: Step) => number, gauntlet: GauntletConfig = auth.gauntlet): CallRange {
+  const g = gauntletOverhead(gauntlet);
   const dev = steps.find(s => s.role === 'implementer'); const qa = steps.find(s => s.role === 'reviewer');
   const ev = evaluatorId ? weight({ agentId: evaluatorId, role: 'evaluator', usd: qa?.usd ?? 0 }) : 0;
   const d = dev ? weight(dev) : 0; const r = qa ? weight(qa) : 0;
@@ -209,7 +210,7 @@ const LIMIT_TEXT: Record<Limit, string> = { subscription: 'tope de llamadas a la
 
 /** Vista previa SIN guardar nada ni llamar a la IA: plan, equipo y orígenes, llamadas, coste de API, límites, duración y avisos. */
 export function previewBatch(slug: string, projectId: string, input: BatchInput): BatchPreview {
-  const auth = normalizeAuth(projectId, input);
+  const auth = normalizeAuth(projectId, input, projectGauntlet(slug, projectId));
   const { selected, backlog } = selection(slug, projectId, auth.itemIds);
   const plan = planBatch(selected, backlog);
   const connector = getClaudeCodeSettings(); const fallback = batchFallback(auth, connector.fallback);
@@ -221,20 +222,24 @@ export function previewBatch(slug: string, projectId: string, input: BatchInput)
     let est: ReturnType<typeof estimateStory> | null = null; let error: string | null = null;
     try { est = estimateStory(slug, projectId, p.id, {}, ctxChars); } catch (e: any) { error = e.message; }
     const steps: Step[] = (est?.steps ?? []).map(st => ({ agentId: st.agentId, role: st.role as string, usd: st.estimatedUsd }));
-    const team = est ? checkTeam(slug, projectId, [...steps, ...(evaluator ? [{ agentId: evaluator.id, role: 'evaluator' }] : [])], auth) : [];
+    // «Automático» se resuelve por historia (sin IA), con la misma regla que al empezarla.
+    const g = resolveGauntletFor(slug, { id: '', projectId, backlogItemId: p.id, assignmentId: null }, auth.gauntlet);
+    const ev = g.mode !== 'off' ? evaluator : null;
+    const team = est ? checkTeam(slug, projectId, [...steps, ...(ev ? [{ agentId: ev.id, role: 'evaluator' }] : [])], auth) : [];
     const by = new Map(team.map(t => [t.agentId, t]));
     const subscription = (id: string) => by.get(id)?.source === 'claude_code' && !by.get(id)!.viaFallback;
     const problems = unique([...(p.blockedReason ? [p.blockedReason] : []), ...team.filter(t => !t.ready).map(t => t.problem!), ...(error ? [error] : [])]);
     const backends = Array.from(new Set(team.map(t => t.source)));
-    const cost = stepRange(steps, auth, evaluator?.id ?? null, s => subscription(s.agentId) ? 0 : s.usd);
+    const cost = stepRange(steps, auth, ev?.id ?? null, s => subscription(s.agentId) ? 0 : s.usd, g);
     // Peor caso de API: si Claude Code cede a la API autorizada en el lote.
-    if (!problems.length) worst = addRange(worst, stepRange(steps, auth, evaluator?.id ?? null, s => !subscription(s.agentId) || fallback ? s.usd : 0));
+    if (!problems.length) worst = addRange(worst, stepRange(steps, auth, ev?.id ?? null, s => !subscription(s.agentId) || fallback ? s.usd : 0, g));
     return {
       ...p, team, backends, disallowedBackends: backends.filter(b => !auth.backends.includes(b)), problems, executable: !problems.length, error,
+      gauntlet: { mode: g.mode === 'auto' ? 'off' : g.mode, maxRounds: g.maxRounds, reason: g.auto?.reason ?? null },
       // La suscripción no se cobra por llamada (consume tu cuota): el USD estimado es solo el de la API.
       estimatedUsd: est ? usd(cost.min) : null, estimatedUsdMax: est ? usd(cost.max) : null,
-      calls: stepRange(steps, auth, evaluator?.id ?? null, () => 1),
-      subscriptionCalls: stepRange(steps, auth, evaluator?.id ?? null, s => subscription(s.agentId) ? 1 : 0)
+      calls: stepRange(steps, auth, ev?.id ?? null, () => 1, g),
+      subscriptionCalls: stepRange(steps, auth, ev?.id ?? null, s => subscription(s.agentId) ? 1 : 0, g)
     };
   });
   const runnable = stories.filter(s => s.executable);
@@ -271,7 +276,8 @@ export function previewBatch(slug: string, projectId: string, input: BatchInput)
   if (apiUsd.min > auth.totalBudgetUsd) warnings.push(`La estimación de API (${apiUsd.min.toFixed(2)} USD) supera el presupuesto total (${auth.totalBudgetUsd} USD): el lote se pausará al agotarlo.`);
   if (automatic.some(s => (s.estimatedUsdMax ?? 0) > auth.perStoryBudgetUsd)) warnings.push('Alguna historia, con sus correcciones, podría gastar más API que el tope por historia: se pausará al alcanzarlo.');
   if (auth.apiFallback && !fallback) warnings.push('Pediste que Claude Code ceda a la API, pero el conector está configurado para pausar: no cederá (se cambia en Proveedores → Claude Code).');
-  if (auth.gauntlet.mode !== 'off' && !evaluator) warnings.push('Gauntlet activado sin Evaluador en el proyecto: se aplicarán la verificación y QA de siempre.');
+  if ((auth.gauntlet.mode === 'standard' || auth.gauntlet.mode === 'deep') && !evaluator) warnings.push('Gauntlet activado sin Evaluador en el proyecto: se aplicarán la verificación y QA de siempre.');
+  else if (auth.gauntlet.mode === 'auto' && !evaluator) warnings.push('Gauntlet automático: el proyecto no tiene Evaluador Gauntlet, así que cada historia tendrá la verificación y QA de siempre.');
   if (auth.git.activate && slug !== INTERNAL_WORKSPACE.slug) warnings.push('La activación (reconstruir y reiniciar) solo aplica al propio Portal: se ignora en este proyecto.');
   if (auth.concurrency > 1) warnings.push('Con historias en paralelo, la integración y la activación siguen siendo de una en una; las que tocan los mismos archivos pueden necesitar resolver conflictos.');
   return {
@@ -290,7 +296,7 @@ export function previewBatch(slug: string, projectId: string, input: BatchInput)
 
 /** Autorización explícita y persistida del lote: desde aquí y solo desde aquí el coordinador actúa por su cuenta. */
 export function createBatch(slug: string, projectId: string, input: BatchInput): Batch {
-  const auth = normalizeAuth(projectId, input);
+  const auth = normalizeAuth(projectId, input, projectGauntlet(slug, projectId));
   const { selected, backlog } = selection(slug, projectId, auth.itemIds);
   const repo = batchesRepo(slug);
   const open = repo.active().find(b => b.projectId === projectId);
@@ -559,10 +565,11 @@ function startItem(slug: string, id: string, itemId: string) {
   // listo para ejecutar (nunca se cambia a otro origen facturable). Si algo falla (el conector, el proyecto o un origen
   // cambiaron durante el lote), se pausa TODO el lote una vez, con el motivo y dónde corregirlo; «Reanudar» lo comprueba
   // otra vez. No se crea ningún proceso ni se llama a la IA.
-  let members: { agentId: string; role?: string | null }[];
+  let members: { agentId: string; role?: string | null }[]; let gauntlet: GauntletConfig = b.auth.gauntlet;
   try {
     members = reuse ? reuse.steps.filter(s => s.status === 'pending').map(s => ({ agentId: s.agentId, role: s.role })) : estimateStory(slug, b.projectId, itemId, {}).steps.map(s => ({ agentId: s.agentId, role: s.role }));
-    const evaluator = b.auth.gauntlet.mode !== 'off' ? projectEvaluator(slug, b.projectId) : null;
+    gauntlet = resolveGauntletFor(slug, { id: reuse?.id ?? '', projectId: b.projectId, backlogItemId: itemId, assignmentId: null }, b.auth.gauntlet);
+    const evaluator = gauntlet.mode !== 'off' ? projectEvaluator(slug, b.projectId) : null;
     if (evaluator) members.push({ agentId: evaluator.id, role: 'evaluator' });
   } catch (e: any) { return needsOwner(`No se pudo preparar la historia: ${e?.message ?? e}`); }
   const bad = checkTeam(slug, b.projectId, members, b.auth).filter(t => !t.ready);
@@ -576,7 +583,7 @@ function startItem(slug: string, id: string, itemId: string) {
   try { p = reuse ?? createStoryProcess(slug, b.projectId, itemId, {}); }
   catch (e: any) { return needsOwner(`No se pudo preparar la historia: ${e?.message ?? e}`); }
   // Claude Code solo cede a la API si el lote lo autoriza (y el conector lo permite): si no, se pausa como siempre.
-  const cfg = normalizePipeline({ autoApply: true, autoVerify: true, commands: b.auth.commands, allowInstall: b.auth.allowInstall, maxCorrections: b.auth.maxCorrections, gauntlet: b.auth.gauntlet, backends: b.auth.backends, ...(b.auth.apiFallback && b.auth.backends.includes('api') ? {} : { apiFallback: false }) });
+  const cfg = normalizePipeline({ autoApply: true, autoVerify: true, commands: b.auth.commands, allowInstall: b.auth.allowInstall, maxCorrections: b.auth.maxCorrections, gauntlet, backends: b.auth.backends, ...(b.auth.apiFallback && b.auth.backends.includes('api') ? {} : { apiFallback: false }) });
   procs.setResult(p.id, { ...procs.get(p.id)!.result!, pipeline: newPipeline(cfg) });
   syncEvaluatorStep(slug, p.id, cfg.gauntlet!);
   procs.authorize(p.id, b.auth.perStoryBudgetUsd);

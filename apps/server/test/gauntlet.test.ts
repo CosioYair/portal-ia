@@ -288,6 +288,23 @@ test('modo off y predeterminado del proyecto: off no añade llamadas; el modo de
   await app.inject({ method: 'PUT', url: `${W}/projects/${project.id}/gauntlet`, payload: { mode: 'off', authorized: true } });
 });
 
+test('lote con Gauntlet automático: se resuelve historia a historia (sin IA) y se explica; sin indicarlo, el del proyecto', async () => {
+  const small = addManualItem(S, project.id, { title: 'Cambiar el texto del pie', criterion: 'El pie dice Hola', estimate: 'S' });
+  const risky = addManualItem(S, project.id, { title: 'Migración de permisos y credenciales', criterion: 'Los permisos se migran sin borrar nada', estimate: 'L' });
+  const before = calls().length;
+  const prev = await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/batches/preview`, payload: { itemIds: [small.id, risky.id], totalBudgetUsd: 5, perStoryBudgetUsd: 2, gauntlet: { mode: 'auto' }, backends: ['api'] } });
+  assert.equal(prev.statusCode, 200, prev.body);
+  const plan = prev.json().plan as any[]; const of = (id: string) => plan.find(x => x.id === id);
+  assert.equal(of(small.id).gauntlet.mode, 'off', 'pequeña y sin riesgo: sin Gauntlet');
+  assert.equal(of(risky.id).gauntlet.mode, 'deep', 'grande y de riesgo: profundo'); assert.match(of(risky.id).gauntlet.reason, /riesgo/);
+  assert.ok(of(risky.id).calls.max > of(small.id).calls.max, 'el sobrecoste es el de cada historia, no el máximo para todas');
+  assert.equal(calls().length, before, 'la vista previa no llama a la IA');
+  assert.equal((await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/batches/preview`, payload: { itemIds: [small.id], totalBudgetUsd: 5, perStoryBudgetUsd: 2, gauntlet: { mode: 'auto', maxRounds: 7 }, backends: ['api'] } })).statusCode, 400, 'el tope de rondas es real');
+  // Sin indicarlo: el del proyecto (aquí «off», fijado por la prueba anterior).
+  const def = await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/batches/preview`, payload: { itemIds: [small.id], totalBudgetUsd: 5, perStoryBudgetUsd: 2, backends: ['api'] } });
+  assert.equal(def.json().auth.gauntlet.mode, 'off');
+});
+
 // ---------- R · Aprendizaje: las brechas del Evaluador entran en el ciclo de lecciones existente ----------
 test('R · una brecha con evidencia queda «detectada» y no se inyecta; validada por el propietario se reutiliza y se mide si cambia el comportamiento', async () => {
   const gaps = () => lessonsRepo(S).list(project.id).filter(l => l.detector === 'gauntlet_gap');

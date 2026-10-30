@@ -199,6 +199,8 @@ export function recommendGauntlet(input: { hasEvaluator: boolean; estimate: 'S' 
 /** Sobrecoste máximo del modo (llamadas del Evaluador y correcciones dirigidas), para mostrarlo ANTES de autorizar. */
 export function gauntletOverhead(cfg: GauntletConfig): { evaluations: { min: number; max: number }; corrections: { min: number; max: number } } {
   if (cfg.mode === 'off') return { evaluations: { min: 0, max: 0 }, corrections: { min: 0, max: 0 } };
+  // Sin resolver (p. ej. un lote antes de ver cada historia): de nada a «profundo» según la historia.
+  if (cfg.mode === 'auto') return { evaluations: { min: 0, max: GAUNTLET_LIMITS.deep + 1 }, corrections: { min: 0, max: GAUNTLET_LIMITS.deep } };
   return { evaluations: { min: 1, max: cfg.maxRounds + 1 }, corrections: { min: 0, max: cfg.maxRounds } };
 }
 
