@@ -38,7 +38,14 @@ export function classifyImpact(files: string[]): SystemStatus['action'] {
   return action;
 }
 
-/** Información del build servido (la escribe startUpdate tras construir; si falta, se usa la fecha de index.html). */
+/**
+ * Información del build servido, leída de <webDist>/build-info.json con el formato { commit, builtAt, version }.
+ * HU-163: el archivo lo genera cualquier `vite build` (`npm run build` o `npm run build --workspace apps/web`) mediante
+ * el plugin local de apps/web/vite.config.ts, que lo escribe en el outDir de ese build. En un build sin git, commit
+ * queda en null y el build no falla. startUpdate («Reconstruir y reiniciar») lo vuelve a escribir en dist.next con
+ * el mismo formato, así que el resultado es el mismo por los dos caminos.
+ * Si falta el archivo (builds anteriores a este cambio), se usa la fecha de modificación de index.html y buildCommit es null.
+ */
 export function buildInfo(): { buildCommit: string | null; buildAt: string | null } {
   try { const j = JSON.parse(fs.readFileSync(path.join(config.webDist, 'build-info.json'), 'utf8')); return { buildCommit: j.commit ?? null, buildAt: j.builtAt ?? null }; } catch { /* sin build-info */ }
   try { const st = fs.statSync(path.join(config.webDist, 'index.html')); return { buildCommit: null, buildAt: st.mtime.toISOString() }; } catch { return { buildCommit: null, buildAt: null }; }
