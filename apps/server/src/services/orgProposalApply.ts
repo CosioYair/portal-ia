@@ -1,4 +1,4 @@
-import type { Agent, AgentConfig, AgentCreateInput, Capability, ModelInfo, OrgAgentSnapshot, OrgApplication, OrgChange, OrgEvaluation, OrgProposal, OrgProposalSpec, ProviderId } from '@portal-ia/domain';
+import type { Agent, AgentConfig, AgentCreateInput, Capability, ModelInfo, OrgAgentSnapshot, OrgApplication, OrgChange, OrgChangeKind, OrgEvaluation, OrgProposal, OrgProposalSpec, ProviderId } from '@portal-ia/domain';
 import { CAPABILITIES, ORG_ACTION_LABEL, ORG_TARGET_LABEL, TOOLS, departmentOf, isRetired } from '@portal-ia/domain';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, workspaceDb } from '../db/workspace.ts';
@@ -324,9 +324,17 @@ function execute(slug: string, plan: Plan): OrgChange[] {
   });
 }
 
-function audit(slug: string, ev: OrgEvaluation, changes: OrgChange[], kind: 'org_change:apply' | 'org_change:undo', startedAt: string) {
+function audit(slug: string, ev: OrgEvaluation, changes: OrgChange[], kind: OrgChangeKind, startedAt: string) {
   const procs = processesRepo(slug);
   for (const c of changes) procs.logExecution({ projectId: ev.anchorProjectId, agentId: c.agentId, kind, status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });
+}
+
+/** Una sola fila de registro (coste 0) para una decisión sin cambios en agentes; se atribuye al Gestor Organizacional. */
+function auditDecision(slug: string, ev: OrgEvaluation, kind: OrgChangeKind) {
+  const all = agentsRepo(slug).list();
+  const gestor = all.find(a => a.key === 'ws-gestor') ?? all[0];
+  if (!gestor) return;
+  processesRepo(slug).logExecution({ projectId: ev.anchorProjectId, agentId: gestor.id, kind, status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: now() });
 }
 
 function appendDoc(slug: string, ev: OrgEvaluation, line: string) {
@@ -412,4 +420,71 @@ export function revertProposal(slug: string, evalId: string, proposalId: string)
     appendDoc(slug, ev, `\n- ${stamp(application.revertedAt)} · ${p.id} · Deshecha por el propietario: ${title(p)} → ${undone}.`);
     return { evaluation, proposal };
   });
+}
+
+/** Rechaza UNA propuesta pendiente (sin cambios en la organización). Exige confirmación explícita. */
+export function rejectProposal(slug: string, evalId: string, proposalId: string, confirmed = false): { evaluation: OrgEvaluation; proposal: OrgProposal } {
+  const { evals, ev, p } = loadProposal(slug, evalId, proposalId);
+  if (p.decision !== 'pending') throw httpError(409, `La propuesta ya está ${p.decision === 'accepted' ? 'aceptada' : 'rechazada'}.`, 'already_decided');
+  if (confirmed !== true) throw httpError(400, 'Rechazar una propuesta requiere confirmación explícita (confirm: true).', 'confirmation_required');
+  return withTx(slug, () => {
+    const r = evals.setProposalDecision(evalId, proposalId, 'rejected', 'owner');
+    auditDecision(slug, ev, 'org_change:reject');
+    appendDoc(slug, ev, `\n- ${stamp(r.proposal.decidedAt)} · ${p.id} · Rechazada: ${title(p)}. Sin cambios en la organización (puede reabrirse).`);
+    return r;
+  });
+}
+
+/** Reabre una propuesta rechazada: vuelve a 'pending' para poder aceptarla y aplicarla. Exige confirmación. */
+export function reopenProposal(slug: string, evalId: string, proposalId: string, confirmed = false): { evaluation: OrgEvaluation; proposal: OrgProposal } {
+  const { evals, ev, p } = loadProposal(slug, evalId, proposalId);
+  if (p.decision !== 'rejected') throw httpError(409, 'Solo se puede reabrir una propuesta rechazada.', 'not_rejected');
+  if (confirmed !== true) throw httpError(400, 'Reabrir una propuesta requiere confirmación explícita (confirm: true).', 'confirmation_required');
+  return withTx(slug, () => {
+    const { application: _drop, ...rest } = p;
+    const proposal: OrgProposal = { ...rest, decision: 'pending', decidedAt: null, decidedBy: null, reopenedAt: now() };
+    const fresh = evals.get(evalId)!;
+    const evaluation = evals.update(evalId, { proposals: fresh.proposals.map(x => (x.id === proposalId ? proposal : x)) });
+    auditDecision(slug, ev, 'org_change:reopen');
+    appendDoc(slug, ev, `\n- ${stamp(proposal.reopenedAt)} · ${p.id} · Reabierta por el propietario: vuelve a pendiente.`);
+    return { evaluation, proposal };
+  });
+}
+
+/**
+ * Vuelve a aplicar una propuesta aceptada y deshecha. Se valida contra la organización ACTUAL (422/409 → sigue
+ * revertida, sin cambios parciales) y se ejecuta en una transacción con fotos previas nuevas: se puede deshacer otra vez.
+ */
+export function reapplyProposal(slug: string, evalId: string, proposalId: string, confirmed = false): { evaluation: OrgEvaluation; proposal: OrgProposal } {
+  const { evals, ev, p } = loadProposal(slug, evalId, proposalId);
+  const app = p.application;
+  if (p.decision !== 'accepted' || !app || app.status !== 'reverted') throw httpError(409, 'Solo se puede volver a aplicar una propuesta aceptada y deshecha.', 'not_reverted');
+  if (confirmed !== true) throw httpError(400, 'Volver a aplicar cambia la organización: requiere confirmación explícita (confirm: true).', 'confirmation_required');
+  const startedAt = now();
+  try {
+    const plan = planProposal(slug, ev, p);
+    return withTx(slug, () => {
+      const changes = execute(slug, plan);
+      const warnings = [...new Set(plan.warnings)];
+      const at = now();
+      const application: OrgApplication = {
+        status: 'applied', appliedAt: at, revertedAt: null, error: null, changes,
+        reappliedAt: at, reapplyCount: (app.reapplyCount ?? 0) + 1, ...(warnings.length ? { warnings } : {})
+      };
+      const proposal: OrgProposal = { ...p, application };
+      const fresh = evals.get(evalId)!;
+      const evaluation = evals.update(evalId, { proposals: fresh.proposals.map(x => (x.id === proposalId ? proposal : x)) });
+      audit(slug, ev, changes, 'org_change:reapply', startedAt);
+      appendDoc(slug, ev, `\n- ${stamp(at)} · ${p.id} · Vuelta a aplicar (deshacer disponible): ${title(p)} → ${changeList(changes)}.${warnings.length ? ` Avisos: ${warnings.join(' ')}` : ''}`);
+      return { evaluation, proposal };
+    });
+  } catch (err: any) {
+    const e = err?.statusCode === 400 ? httpError(422, err.message, 'invalid_spec') : err;
+    // Sin cambios parciales: la propuesta sigue revertida; solo se anota el error.
+    try {
+      const fresh = evals.get(evalId);
+      if (fresh) evals.update(evalId, { proposals: fresh.proposals.map(x => (x.id === proposalId && x.application?.status === 'reverted' ? { ...x, application: { ...x.application, error: String(e?.message ?? e) } } : x)) });
+    } catch { /* sin anotación */ }
+    throw e;
+  }
 }
