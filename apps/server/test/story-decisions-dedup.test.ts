@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execSync } from 'node:child_process';
 import type { ExecutionResult, PendingDecision, Process } from '@portal-ia/domain';
 
 /** HU-161 · Una autorización vigente por historia: varias iteraciones de la misma historia, sin duplicados ni borrados. */
@@ -18,6 +19,7 @@ const { addManualItem } = await import('../src/services/backlog.ts');
 const { createAssessment } = await import('../src/services/assessment.ts');
 const { createCompany } = await import('../src/services/companies.ts');
 const { consolidateDecisions } = await import('../src/services/inbox.ts');
+const { iterateStory, supersedePreviousIterations, threadRepo } = await import('../src/services/storyThread.ts');
 const { buildApp } = await import('../src/app.ts');
 
 providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');
@@ -192,5 +194,59 @@ test('API: migración idempotente sin borrados, bandeja consolidada, 409 sobre s
   const other = createCompany('Empresa HU-161');
   assert.deepEqual(await inbox(other.slug), []);
   assert.equal((await app.inject({ method: 'GET', url: `/api/workspaces/${other.slug}/stories/${A.id}/decisions` })).statusCode, 404);
+  await app.close();
+});
+
+test('iterateStory: la iteración 1 integrada sin publicar queda superada por la nueva al crearla; /inbox muestra solo la iteración 2 y el hilo lo registra', async () => {
+  // createStoryProcess necesita un repositorio registrado (estimación del contexto); repositorio git temporal.
+  const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-hu161-repo-'));
+  fs.mkdirSync(path.join(repoDir, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(repoDir, 'src/a.ts'), 'export const a = 1;\n');
+  execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm Base', { cwd: repoDir });
+  projectsRepo(slug).setRepository(project.id, repoDir, 'main');
+  const app = await buildApp();
+  const inbox = async () => (await app.inject({ method: 'GET', url: `/api/workspaces/${slug}/inbox` })).json() as PendingDecision[];
+
+  const C = addManualItem(slug, project.id, { title: 'Iterar sin duplicar', criterion: 'una sola autorización vigente' });
+  const p1 = storyProcess(C.id, '2020-01-01T00:00:00.000Z');
+  const changes = [{ path: 'src/a.ts', action: 'modify' as const, content: 'export const a = 2;\n', diff: '+export const a = 2;', before: 1, after: 1 }];
+  processesRepo(slug).setResult(p1.id, result({
+    changes,
+    applied: { branch: 'portal-ia/hu-900', commit: 'abc1234', files: ['src/a.ts'], appliedAt: '2020-01-01T01:00:00.000Z', worktree: path.join(repoDir, 'wt') } as any,
+    merged: { into: 'main', commit: 'fff0001', mergedAt: '2020-01-01T02:00:00.000Z' } as any
+  }));
+  processesRepo(slug).finish(p1.id, 'done', null);
+  let list = await inbox();
+  assert.equal(forStory(list, C.id).length, 1);
+  assert.equal(forStory(list, C.id)[0].kind, 'publish', 'la iteración 1 espera la decisión de publicar');
+
+  // Nueva iteración: la anterior queda superada en la misma transacción, sin cambiar su estado ni rechazarla.
+  const { process: next, actions } = await iterateStory(slug, C.id, 'otra vuelta');
+  assert.notEqual(next.id, p1.id);
+  assert.equal(next.status, 'pending_authorization');
+  const old = processesRepo(slug).get(p1.id)!;
+  assert.equal(old.supersededBy, next.id);
+  assert.ok(old.supersededAt, 'fecha de superación registrada');
+  assert.equal(old.status, 'done');
+  assert.equal(old.result!.rejected, undefined, 'lo integrado no se rechaza');
+  assert.match(actions.join(' '), /marcada como superada/);
+
+  list = await inbox();
+  const c = forStory(list, C.id);
+  assert.equal(c.length, 1, 'una sola entrada pendiente para la historia');
+  assert.equal(c[0].processId, next.id);
+  assert.equal(c[0].kind, 'process_authorization');
+  assert.equal(c[0].iteration, 2);
+  assert.equal(c[0].supersededCount, 1);
+
+  const sys = threadRepo(slug).messages(C.id).filter(m => m.role === 'system');
+  assert.ok(sys.some(m => m.processId === next.id && /Iteración 2 creada/.test(m.content) && /marcada como superada/.test(m.content)), JSON.stringify(sys.map(m => m.content)));
+
+  // La superada no se publica desde la bandeja, y volver a superar no marca nada más.
+  const stale = await app.inject({ method: 'POST', url: `/api/workspaces/${slug}/inbox/publish/${p1.id}/decision`, payload: { verdict: 'approve' } });
+  assert.equal(stale.statusCode, 409, stale.body);
+  assert.match(stale.json().error, /superada por la iteración 2/);
+  assert.ok(!processesRepo(slug).get(p1.id)!.result!.published, 'no se publicó nada');
+  assert.deepEqual(supersedePreviousIterations(slug, C.id, next.id), []);
   await app.close();
 });
