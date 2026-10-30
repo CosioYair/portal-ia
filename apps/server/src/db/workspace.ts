@@ -16,6 +16,60 @@ const uuid = () => crypto.randomUUID();
 
 export function workspaceDbPath(slug: string) { return path.join(config.dataDir, 'workspaces', slug, `${slug}.sqlite`); }
 
+/**
+ * HU-161 · ¿La fila de un proceso espera todavía una decisión del propietario? Reproduce las reglas de
+ * services/inbox.ts (decisionsFromProcess) sin depender de los servicios: autorizar, aplicar el diff, integrar o publicar.
+ */
+function hasOpenDecisionRow(r: { status: string; result_json?: string | null }): boolean {
+  if (r.status === 'pending_authorization') return true;
+  if (r.status !== 'done' || !r.result_json) return false;
+  let res: ExecutionResult;
+  try { res = JSON.parse(r.result_json) as ExecutionResult; } catch { return false; }
+  if (res.applied) return !(res.merged && res.published);
+  return !res.rejected && Array.isArray(res.changes) && res.changes.some(c => !c.error);
+}
+
+export interface DecisionConsolidation { marked: { processId: string; supersededBy: string }[]; backup: string | null }
+
+/**
+ * HU-161 · Consolida las autorizaciones duplicadas por iteración: en cada historia, las iteraciones anteriores con
+ * una decisión pendiente quedan marcadas como superadas por la más reciente. No borra filas ni cambia estados.
+ * Es idempotente: solo toca filas que nunca se marcaron ni se restauraron (superseded_at IS NULL), así que una
+ * restauración del propietario se respeta. Antes de marcar nada se hace una copia de seguridad de la base (VACUUM INTO).
+ */
+function consolidateDb(db: DatabaseSync, slug: string, file: string): DecisionConsolidation {
+  const rows = db.prepare(`SELECT id, backlog_item_id, status, result_json, created_at, superseded_by, superseded_at FROM processes
+    WHERE kind = 'story_execution' AND backlog_item_id IS NOT NULL AND archived_at IS NULL ORDER BY created_at, id`).all() as any[];
+  const byStory = new Map<string, any[]>();
+  for (const r of rows) { const list = byStory.get(r.backlog_item_id) ?? []; list.push(r); byStory.set(r.backlog_item_id, list); }
+  const marks: { processId: string; supersededBy: string }[] = [];
+  for (const list of byStory.values()) {
+    if (list.length < 2) continue;
+    const latest = list[list.length - 1];
+    for (const r of list.slice(0, -1)) {
+      if (r.superseded_by == null && r.superseded_at == null && hasOpenDecisionRow(r)) marks.push({ processId: r.id, supersededBy: latest.id });
+    }
+  }
+  if (marks.length === 0) return { marked: [], backup: null };
+  const dir = path.join(path.dirname(file), 'backups');
+  fs.mkdirSync(dir, { recursive: true });
+  const backup = path.join(dir, `${slug}-hu161-${now().replace(/[:.]/g, '-')}.sqlite`);
+  db.exec(`VACUUM INTO '${backup.replace(/'/g, "''")}'`);
+  const ts = now();
+  const upd = db.prepare(`UPDATE processes SET superseded_by = ?, superseded_at = ? WHERE id = ? AND superseded_by IS NULL`);
+  db.exec('BEGIN');
+  try {
+    for (const m of marks) upd.run(m.supersededBy, ts, m.processId);
+    db.exec('COMMIT');
+  } catch (e) { db.exec('ROLLBACK'); throw e; }
+  return { marked: marks, backup };
+}
+
+/** Ejecuta la consolidación de HU-161 a demanda (también corre al abrir la base). Idempotente. */
+export function consolidateDuplicateDecisions(slug: string): DecisionConsolidation {
+  return consolidateDb(workspaceDb(slug), slug, workspaceDbPath(slug));
+}
+
 export function workspaceDb(slug: string): DatabaseSync {
   let db = open.get(slug);
   if (db) return db;
@@ -97,6 +151,9 @@ export function workspaceDb(slug: string): DatabaseSync {
   const pcols2 = (db.prepare(`PRAGMA table_info(processes)`).all() as any[]).map(c => c.name);
   if (!pcols2.includes('archived_at')) db.exec(`ALTER TABLE processes ADD COLUMN archived_at TEXT`);
   if (!pcols2.includes('archive_id')) db.exec(`ALTER TABLE processes ADD COLUMN archive_id TEXT`);
+  // HU-161: una autorización vigente por historia. Superar es reversible: no borra filas ni cambia el estado del proceso.
+  if (!pcols2.includes('superseded_by')) db.exec(`ALTER TABLE processes ADD COLUMN superseded_by TEXT`);
+  if (!pcols2.includes('superseded_at')) db.exec(`ALTER TABLE processes ADD COLUMN superseded_at TEXT`);
   // v0.13 · Conector Claude Code: origen de ejecución de cada paso y registro de ejecuciones con suscripción (sin USD).
   if (!scols.includes('backend')) db.exec(`ALTER TABLE process_steps ADD COLUMN backend TEXT`);
   db.exec(`
@@ -108,6 +165,8 @@ export function workspaceDb(slug: string): DatabaseSync {
   `);
   // Ejecuciones que quedaron «en curso» al apagarse el servidor: la CLI ya no existe (murió con él) → interrumpidas.
   db.prepare(`UPDATE claude_code_runs SET status = 'interrupted', finished_at = ?, error = COALESCE(error, 'El Portal se reinició durante la ejecución; lo hecho en el proceso se conserva.') WHERE status IN ('queued','running')`).run(now());
+  // HU-161: consolida (sin borrar) las autorizaciones duplicadas por iteración que ya existían. Nunca impide abrir la base.
+  try { consolidateDb(db, slug, file); } catch { /* se reintenta en la próxima apertura */ }
   open.set(slug, db);
   return db;
 }
@@ -229,7 +288,7 @@ export function processesRepo(slug: string) {
   const mapStep = (r: any): ProcessStep => ({ id: r.id, processId: r.process_id, position: r.position, agentId: r.agent_id, agentName: r.agent_name, title: r.title, status: r.status, model: r.model, inputTokens: r.tokens_in, outputTokens: r.tokens_out, costUsd: r.cost_usd, outputMd: r.output_md, error: r.error, startedAt: r.started_at, finishedAt: r.finished_at, role: r.role ?? null, reason: r.reason ?? null, lessonsUsed: r.lessons_used ? JSON.parse(r.lessons_used) : [], live: r.live_json ? JSON.parse(r.live_json) : null, unconfirmedUsd: r.unconfirmed_usd ?? 0, backend: r.backend ?? null });
   const mapProc = (r: any): Process => ({ id: r.id, projectId: r.project_id, kind: r.kind, title: r.title, status: r.status, budgetUsd: r.budget_usd, estimatedUsd: r.estimated_usd, spentUsd: r.spent_usd, inputTokens: r.tokens_in, outputTokens: r.tokens_out, createdAt: r.created_at, authorizedAt: r.authorized_at, startedAt: r.started_at, finishedAt: r.finished_at, error: r.error,
     result: r.result_json ? JSON.parse(r.result_json) : null, delegation: r.delegation_json ? JSON.parse(r.delegation_json) : null, backlogItemId: r.backlog_item_id ?? null, unconfirmedUsd: r.unconfirmed_usd ?? 0,
-    archivedAt: r.archived_at ?? null, archiveId: r.archive_id ?? null,
+    archivedAt: r.archived_at ?? null, archiveId: r.archive_id ?? null, supersededBy: r.superseded_by ?? null, supersededAt: r.superseded_at ?? null,
     steps: (db.prepare(`SELECT * FROM process_steps WHERE process_id = ? ORDER BY position`).all(r.id) as any[]).map(mapStep) });
   return {
     /** Procesos activos (los archivados al iniciar una etapa quedan fuera del flujo: ver listAll / listArchived). */
@@ -269,6 +328,33 @@ export function processesRepo(slug: string) {
     },
     setResult(id: string, result: ExecutionResult) { db.prepare(`UPDATE processes SET result_json = ? WHERE id = ?`).run(JSON.stringify(result), id); },
     setDelegation(id: string, d: DelegationResult) { db.prepare(`UPDATE processes SET delegation_json = ? WHERE id = ?`).run(JSON.stringify(d), id); },
+    /** HU-161 · Todos los procesos de una historia (activos y archivados), de la iteración más antigua a la más reciente. */
+    listByBacklogItem(itemId: string): Process[] { return (db.prepare(`SELECT * FROM processes WHERE backlog_item_id = ? ORDER BY created_at, id`).all(itemId) as any[]).map(mapProc); },
+    /** HU-161 · Marca la decisión de un proceso como superada por otra iteración. No cambia su estado ni borra nada. */
+    markSuperseded(id: string, byId: string): boolean {
+      const r = db.prepare(`UPDATE processes SET superseded_by = ?, superseded_at = ? WHERE id = ? AND id <> ?`).run(byId, now(), id, byId);
+      return Number(r.changes) > 0;
+    },
+    /**
+     * HU-161 · Restaura una autorización superada (reversible). Para que la historia siga teniendo una sola vigente,
+     * las demás iteraciones con decisión pendiente pasan a superadas por la restaurada. Todo en una transacción.
+     */
+    restoreSuperseded(id: string): { restored: string; superseded: string[] } | null {
+      const r = db.prepare(`SELECT id, backlog_item_id, superseded_by FROM processes WHERE id = ?`).get(id) as any;
+      if (!r || r.superseded_by == null) return null;
+      const ts = now(); const superseded: string[] = [];
+      db.exec('BEGIN');
+      try {
+        db.prepare(`UPDATE processes SET superseded_by = NULL, superseded_at = ? WHERE id = ?`).run(ts, id);
+        if (r.backlog_item_id) {
+          const others = db.prepare(`SELECT id, status, result_json FROM processes WHERE backlog_item_id = ? AND kind = 'story_execution' AND archived_at IS NULL AND superseded_by IS NULL AND id <> ?`).all(r.backlog_item_id, id) as any[];
+          const mark = db.prepare(`UPDATE processes SET superseded_by = ?, superseded_at = ? WHERE id = ?`);
+          for (const o of others) if (hasOpenDecisionRow(o)) { mark.run(id, ts, o.id); superseded.push(o.id); }
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      return { restored: id, superseded };
+    },
     finish(id: string, status: ProcessStatus, error: string | null = null) {
       db.prepare(`UPDATE processes SET status = ?, finished_at = ?, error = ? WHERE id = ?`).run(status, now(), error, id);
     },
