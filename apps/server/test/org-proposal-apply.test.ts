@@ -199,13 +199,20 @@ test('g · sujeto inexistente, keep inválido o agente protegido → 422, propue
   await a.close();
 });
 
-test('h · rechazar solo registra la decisión: ningún agente cambia ni hay auditoría', async () => {
+test('h · rechazar exige confirmación y solo registra la decisión: ningún agente cambia y una fila org_change:reject con coste 0', async () => {
   const a = await buildApp();
   const snap = snapshot(); const audits = auditRows().length;
-  const r = await a.inject({ method: 'POST', url: url('p7'), payload: { decision: 'rejected' } });
+  const nc = await a.inject({ method: 'POST', url: url('p7'), payload: { decision: 'rejected' } });
+  assert.equal(nc.statusCode, 400, nc.body); assert.equal(nc.json().code, 'confirmation_required');
+  assert.equal(orgEvaluationsRepo(SLUG).get(EV.id)!.proposals.find(p => p.id === 'p7')!.decision, 'pending', 'sin confirmación sigue pendiente');
+  assert.equal(auditRows().length, audits, 'sin confirmación no hay registro');
+  const r = await a.inject({ method: 'POST', url: url('p7'), payload: { decision: 'rejected', confirm: true } });
   assert.equal(r.statusCode, 200, r.body); assert.equal(r.json().proposal.decision, 'rejected');
   assert.equal(r.json().proposal.application, undefined);
-  assert.equal(snapshot(), snap); assert.equal(auditRows().length, audits);
+  assert.equal(snapshot(), snap, 'ningún agente cambió');
+  assert.equal(auditRows().length, audits + 1);
+  const rejects = auditRows('org_change:reject');
+  assert.equal(rejects.length, 1); assert.equal(rejects[0].cost_usd, 0);
   assert.ok(!agentsRepo(SLUG).list().some(x => x.config.name === 'Redactor Técnico'));
   assert.match(docBody(), /p7 · Rechazada/);
   await a.close();

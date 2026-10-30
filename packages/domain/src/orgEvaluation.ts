@@ -21,6 +21,9 @@ export const ORG_ACTIONS: readonly OrgAction[] = ['add', 'merge', 'retire', 'adj
 export const ORG_TARGETS: readonly OrgTarget[] = ['agent', 'department'];
 export const ORG_ACTION_LABEL: Record<OrgAction, string> = { add: 'Añadir', merge: 'Fusionar', retire: 'Retirar', adjust: 'Ajustar' };
 export const ORG_TARGET_LABEL: Record<OrgTarget, string> = { agent: 'agente', department: 'departamento' };
+/** Tipos de registro (execution_history.kind) de los cambios organizativos decididos por el propietario: coste 0, sin IA. */
+export const ORG_CHANGE_KINDS = ['org_change:apply', 'org_change:undo', 'org_change:reapply', 'org_change:reject', 'org_change:reopen'] as const;
+export type OrgChangeKind = typeof ORG_CHANGE_KINDS[number];
 
 export interface OrgProposal {
   id: string;
@@ -42,6 +45,8 @@ export interface OrgProposal {
   specWarnings?: string[];
   /** Resultado de aplicar la propuesta aceptada (con fotos previas para deshacer). */
   application?: OrgApplication;
+  /** Momento en que el propietario reabrió una propuesta rechazada (vuelve a 'pending'). */
+  reopenedAt?: string | null;
 }
 
 export type OrgEffort = 'low' | 'medium' | 'high';
@@ -85,6 +90,10 @@ export interface OrgApplication {
   error: string | null;
   changes: OrgChange[];
   warnings?: string[];
+  /** Última vez que se volvió a aplicar tras deshacerla. */
+  reappliedAt?: string | null;
+  /** Veces que se ha vuelto a aplicar. */
+  reapplyCount?: number;
 }
 
 /** Agente desactivado por una decisión organizativa (reversible: la fila se conserva). */

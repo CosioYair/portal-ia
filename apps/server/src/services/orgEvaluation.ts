@@ -9,7 +9,8 @@ import { requirePolicy } from './executionPolicy.ts';
 import { buildRepoContext } from './repoContext.ts';
 import { phaseContext } from './operationalPhase.ts';
 import { callTimeoutMs, maybeBilled, registerCall, unregisterCall, withWatchdog } from './providerCalls.ts';
-import { acceptProposal, orgCatalog } from './orgProposalApply.ts';
+import { acceptProposal, orgCatalog, rejectProposal } from './orgProposalApply.ts';
+export { reapplyProposal, reopenProposal } from './orgProposalApply.ts';
 
 /**
  * HU-159 · Evaluación organizativa. Con ámbito de proyecto participan el Coordinador del proyecto y el Gestor
@@ -274,19 +275,10 @@ export function listOrgEvaluations(slug: string, filter: { projectId?: string | 
 
 /**
  * Decisión del propietario sobre UNA propuesta. Aceptar la aplica (validación previa, transacción, auditoría y
- * deshacer) y solo entonces registra la decisión; si falla, la propuesta sigue pendiente. Rechazar solo registra.
+ * deshacer) y solo entonces registra la decisión; si falla, la propuesta sigue pendiente. Rechazar exige confirmación
+ * (400 confirmation_required sin ella), solo registra la decisión (org_change:reject) y se puede reabrir después.
  */
 export function decideProposal(slug: string, evalId: string, proposalId: string, decision: Exclude<OrgDecision, 'pending'>, confirmed = false) {
   if (decision === 'accepted') return acceptProposal(slug, evalId, proposalId, confirmed);
-  const evals = orgEvaluationsRepo(slug);
-  const cur = evals.get(evalId);
-  if (!cur) throw httpError(404, 'Evaluación no encontrada');
-  if (cur.status !== 'done') throw httpError(409, 'La evaluación aún no ha terminado.', 'not_finished');
-  const r = evals.setProposalDecision(evalId, proposalId, decision, 'owner');
-  if (cur.knowledgeDocId) {
-    const p = r.proposal;
-    const line = `\n- ${p.decidedAt?.slice(0, 16).replace('T', ' ')} · ${p.id} · Rechazada: ${ORG_ACTION_LABEL[p.action]} ${ORG_TARGET_LABEL[p.target]} «${p.subject}». Sin cambios en la organización.`;
-    workspaceDb(slug).prepare(`UPDATE knowledge SET body = body || ? WHERE id = ?`).run(line, cur.knowledgeDocId);
-  }
-  return r;
+  return rejectProposal(slug, evalId, proposalId, confirmed);
 }

@@ -9,7 +9,8 @@ import { Markdown } from './Markdown.tsx';
 /**
  * HU-159 · Evaluación organizativa. Selector de ámbito (empresa o proyecto), estimación sin costo, autorización explícita
  * con presupuesto, seguimiento del proceso, propuestas con decisión individual e historial. Aceptar (con confirmación
- * explícita y sin costo de IA) APLICA la propuesta con su configuración y permite «Deshacer»; rechazar solo registra.
+ * explícita y sin costo de IA) APLICA la propuesta con su configuración y permite «Deshacer» y «Volver a aplicar»;
+ * rechazar (con confirmación) solo registra la decisión y se puede «Reabrir».
  */
 const ACTION: Record<OrgAction, string> = { add: 'Añadir', merge: 'Fusionar', retire: 'Retirar', adjust: 'Ajustar' };
 const TARGET: Record<OrgTarget, string> = { agent: 'agente', department: 'departamento' };
@@ -91,7 +92,8 @@ export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: 
   const [current, setCurrent] = useState<OrgEvaluationView | null>(null);
   const [deciding, setDeciding] = useState<{ id: string; decision: Exclude<OrgDecision, 'pending'> } | null>(null);
   const [undoing, setUndoing] = useState<string | null>(null);
-  /** Confirmación en curso: id de la propuesta (aceptar) o «undo:id» (deshacer). */
+  const [acting, setActing] = useState<{ id: string; kind: 'reopen' | 'reapply' } | null>(null);
+  /** Confirmación en curso: id de la propuesta (aceptar), «reject:id», «undo:id», «reopen:id» o «reapply:id». */
   const [confirming, setConfirming] = useState<string | null>(null);
   const [propErr, setPropErr] = useState<Record<string, string>>({});
   const [history, setHistory] = useState<OrgEvaluationView[] | null>(null);
@@ -171,13 +173,25 @@ export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: 
     finally { setUndoing(null); }
   };
 
+  const act = async (p: OrgProposal, kind: 'reopen' | 'reapply') => {
+    if (!current) return;
+    setActing({ id: p.id, kind }); setConfirming(null); clearErr(p.id);
+    try {
+      mergeResult(kind === 'reopen' ? await api.reopenOrgProposal(slug, current.id, p.id) : await api.reapplyOrgProposal(slug, current.id, p.id));
+      flash(kind === 'reopen' ? 'Propuesta reabierta: vuelve a estar pendiente' : 'Propuesta aplicada de nuevo (puedes deshacerla)');
+      void loadHistory();
+    } catch (e) { setPropErr(x => ({ ...x, [p.id]: errMsg(e) })); flash(errMsg(e), 'err'); }
+    finally { setActing(null); }
+  };
+
   const decisionCell = (p: OrgProposal) => {
-    const busy = deciding?.id === p.id || undoing === p.id;
+    const busy = deciding?.id === p.id || undoing === p.id || acting?.id === p.id;
     const app = p.application;
     const err = propErr[p.id] ?? (p.decision === 'pending' && app?.status === 'failed' ? app.error : null);
     if (p.decision === 'pending') return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {p.reopenedAt && <Chip xs>Reabierta · {when(p.reopenedAt)}</Chip>}
       {deciding?.id === p.id
-        ? <div className="small muted"><span className="spin" aria-hidden="true" /> {deciding.decision === 'accepted' ? 'Aplicando…' : 'Registrando…'}</div>
+        ? <div className="small muted"><span className="spin" aria-hidden="true" /> {deciding.decision === 'accepted' ? 'Aplicando…' : 'Rechazando…'}</div>
         : confirming === p.id
           ? <>
             <div className="small"><strong>Aceptar y aplicar:</strong> {impact(p)}. No tiene costo de IA y podrás deshacerlo.</div>
@@ -186,15 +200,24 @@ export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: 
               <button className="btn btn-secondary" onClick={() => setConfirming(null)}>Volver</button>
             </div>
           </>
-          : <div style={{ display: 'flex', gap: 6 }}>
-            <button className="btn btn-primary" disabled={busy} onClick={() => setConfirming(p.id)}>Aceptar y aplicar</button>
-            <button className="btn btn-secondary" disabled={busy} onClick={() => decide(p, 'rejected')}>Rechazar</button>
-          </div>}
+          : confirming === `reject:${p.id}`
+            ? <>
+              <div className="small"><strong>Rechazar:</strong> no se cambia ningún agente. Podrás reabrirla después.</div>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="btn btn-primary" onClick={() => decide(p, 'rejected')}>Confirmar rechazo</button>
+                <button className="btn btn-secondary" onClick={() => setConfirming(null)}>Volver</button>
+              </div>
+            </>
+            : <div style={{ display: 'flex', gap: 6 }}>
+              <button className="btn btn-primary" disabled={busy} onClick={() => setConfirming(p.id)}>Aceptar y aplicar</button>
+              <button className="btn btn-secondary" disabled={busy} onClick={() => setConfirming(`reject:${p.id}`)}>Rechazar</button>
+            </div>}
       {err && <Notice kind="err">No se aplicó nada y la propuesta sigue pendiente: {err}</Notice>}
     </div>;
     return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
       <Chip xs tone={DECISION[p.decision].tone}>{DECISION[p.decision].label}{p.decidedAt ? ` · ${when(p.decidedAt)}` : ''}</Chip>
       {app && <Chip xs tone={APP[app.status].tone}>{APP[app.status].label}{app.status === 'reverted' && app.revertedAt ? ` · ${when(app.revertedAt)}` : ''}</Chip>}
+      {app?.reappliedAt && <Chip xs tone="ok">Aplicada de nuevo{(app.reapplyCount ?? 0) > 1 ? ` (${app.reapplyCount} veces)` : ''} · {when(app.reappliedAt)}</Chip>}
       {p.decision === 'accepted' && !app && <span className="small muted">Sin cambios aplicados: la propuesta no traía configuración.</span>}
       {app && app.changes.length > 0 && <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{app.changes.map(c => <li key={`${c.op}-${c.agentId}`}>
         {OP[c.op]}: {app.status === 'reverted' && c.op === 'create' ? `${c.agentName} (eliminado al deshacer)` : <Link className="lnk" to={`/equipo/${c.agentId}`}>{c.agentName}</Link>} <span className="mono muted">({c.agentKey})</span>
@@ -211,6 +234,29 @@ export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: 
             </div>
           </>
           : <div><button className="btn btn-secondary" disabled={busy} onClick={() => setConfirming(`undo:${p.id}`)}>Deshacer</button></div>)}
+      {p.decision === 'rejected' && (acting?.id === p.id && acting.kind === 'reopen'
+        ? <div className="small muted"><span className="spin" aria-hidden="true" /> Reabriendo…</div>
+        : confirming === `reopen:${p.id}`
+          ? <>
+            <div className="small"><strong>Reabrir:</strong> vuelve a pendiente para que puedas aceptarla y aplicarla. No cambia ningún agente.</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button className="btn btn-primary" onClick={() => act(p, 'reopen')}>Confirmar reabrir</button>
+              <button className="btn btn-secondary" onClick={() => setConfirming(null)}>Volver</button>
+            </div>
+          </>
+          : <div><button className="btn btn-secondary" disabled={busy} onClick={() => setConfirming(`reopen:${p.id}`)}>Reabrir</button></div>)}
+      {p.decision === 'accepted' && app?.status === 'reverted' && (acting?.id === p.id && acting.kind === 'reapply'
+        ? <div className="small muted"><span className="spin" aria-hidden="true" /> Aplicando de nuevo…</div>
+        : confirming === `reapply:${p.id}`
+          ? <>
+            <div className="small"><strong>Volver a aplicar:</strong> {impact(p)}. Se valida contra la organización actual: si algo ya no es válido, no se cambia nada. No tiene costo de IA y podrás deshacerlo otra vez.</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button className="btn btn-primary" onClick={() => act(p, 'reapply')}>Confirmar y aplicar de nuevo</button>
+              <button className="btn btn-secondary" onClick={() => setConfirming(null)}>Volver</button>
+            </div>
+          </>
+          : <div><button className="btn btn-secondary" disabled={busy} onClick={() => setConfirming(`reapply:${p.id}`)}>Volver a aplicar</button></div>)}
+      {app?.status === 'reverted' && app.error && !propErr[p.id] && <Notice kind="err">No se volvió a aplicar y la propuesta sigue revertida: {app.error}</Notice>}
       {propErr[p.id] && <Notice kind="err">{propErr[p.id]}</Notice>}
     </div>;
   };
@@ -278,7 +324,7 @@ export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: 
           {current.status === 'done' && <>
             {current.summary && <Markdown text={current.summary} />}
             {current.knowledgeDocId && <div><Link className="lnk" to={`/empresa/${slug}/proyecto/${current.anchorProjectId}/conocimiento`}>{Icon.book()} Ver el documento completo en Conocimiento{current.scopeKind === 'workspace' ? ` (proyecto «${projectName(current.anchorProjectId)}»)` : ''}</Link></div>}
-            <Notice kind="info">Al confirmar «Aceptar y aplicar», el Portal aplica la propuesta con su configuración, sin costo de IA, y puedes deshacerla. Rechazar solo registra la decisión. Nada se crea, ajusta ni retira sin tu aprobación.</Notice>
+            <Notice kind="info">Al confirmar «Aceptar y aplicar», el Portal aplica la propuesta con su configuración, sin costo de IA. Puedes deshacerla y, después, volver a aplicarla. Rechazar pide confirmación, solo registra la decisión y se puede reabrir más tarde. Nada se crea, ajusta ni retira sin tu aprobación.</Notice>
             {current.proposals.length === 0
               ? <div className="small muted">Sin propuestas: el Gestor considera adecuada la organización actual.</div>
               : <div style={{ overflowX: 'auto' }}><table className="tbl">
