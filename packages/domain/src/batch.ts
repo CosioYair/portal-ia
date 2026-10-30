@@ -140,13 +140,15 @@ export interface Batch {
   items: BatchItem[];
   events: BatchEvent[];
   activation: BatchActivation | null;
+  /** Dónde se corrige el motivo de la pausa (p. ej. Proveedores → Claude Code), si lo hay. */
+  reasonFix?: { label: string; href: string } | null;
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
   revokedAt: string | null;
 }
 
-export const BATCH_LIMITS = { maxItems: 200, maxConcurrency: 3, maxTotalUsd: 500, maxPerStoryUsd: 50, maxDurationMin: 24 * 60, maxCorrections: 6, maxSubscriptionCalls: 400, maxAutoResumes: 1 } as const;
+export const BATCH_LIMITS = { maxItems: 200, maxConcurrency: 3, maxTotalUsd: 500, maxPerStoryUsd: 50, maxDurationMin: 24 * 60, maxCorrections: 6, maxSubscriptionCalls: 2000, maxAutoResumes: 1 } as const;
 
 // ---------------------------------------------------------------- Planificación determinista
 
@@ -207,6 +209,8 @@ export function classifyStop(pauseKind: PipelinePauseKind | null | undefined, pr
   switch (pauseKind) {
     case 'subscription_limit': return { cls: 'subscription', batchWide: true };
     case 'environment': return { cls: 'environment', batchWide: true };
+    // Faltan dependencias en el sandbox y no se autorizó instalar con red: les pasaría lo mismo a todas.
+    case 'network': return { cls: 'environment', batchWide: true };
     case 'budget': return { cls: 'budget', batchWide: false };
     case 'provider_timeout': case 'provider_error': case 'interrupted': case 'max_turns': return { cls: 'environment', batchWide: false };
     case 'integration': case 'integration_conflict': return { cls: 'integration', batchWide: false };
@@ -234,6 +238,21 @@ export function batchBudget(auth: Pick<BatchAuthorization, 'totalBudgetUsd' | 'p
   return { spent: round(spent), reserved: round(reserved), remaining: round(remaining), canStart: remaining + 1e-9 >= auth.perStoryBudgetUsd };
 }
 const round = (n: number) => Math.round(n * 1e6) / 1e6;
+
+/**
+ * ¿Avanza algo sin ti? En marcha, en cola, integrándose, o esperando a una dependencia que sí avanza. Una historia que
+ * espera a otra pendiente de TU decisión (p. ej. integrar a mano) no cuenta: el lote espera tu decisión.
+ */
+export function batchMoving(items: Pick<BatchItem, 'storyId' | 'state' | 'dependsOn' | 'dependsInBatch'>[]): boolean {
+  const by = new Map(items.map(i => [i.storyId, i]));
+  const moving = (i: (typeof items)[number], seen: Set<string>): boolean => {
+    if (i.state === 'running' || i.state === 'queued' || i.state === 'integrating') return true;
+    if (i.state !== 'waiting_dependency' || !i.dependsInBatch || !i.dependsOn || seen.has(i.storyId)) return false;
+    seen.add(i.storyId); const d = by.get(i.dependsOn);
+    return !!d && moving(d, seen);
+  };
+  return items.some(i => moving(i, new Set()));
+}
 
 /** Resumen por estado para el monitor (cuántas completas, bloqueadas, pendientes de aceptación…). */
 export function batchSummary(items: Pick<BatchItem, 'state'>[]): Record<BatchItemState, number> {
@@ -287,6 +306,8 @@ export interface CallRange { min: number; max: number }
 export interface BatchPreviewStory extends PlannedItem {
   /** USD de la API (agentes en la API, o en Claude Code con la alternativa autorizada); la suscripción no se cobra por llamada. */
   estimatedUsd: number | null;
+  /** Con las correcciones autorizadas (mismo criterio que `calls.max`). */
+  estimatedUsdMax: number | null;
   calls: CallRange;
   subscriptionCalls: CallRange;
   team: BatchAgentCheck[];
@@ -314,14 +335,23 @@ export interface BatchPreview {
     blockedByPermission: number;
     calls: CallRange;
     subscriptionCalls: CallRange;
-    /** Si Claude Code cede a la API (alternativa autorizada), su coste sale de aquí. */
+    /** USD de API de las que empezarán: sin correcciones y con las autorizadas. */
+    apiUsd: { min: number; max: number };
+    /** Si Claude Code cede a la API (alternativa autorizada), con las correcciones autorizadas. */
     worstCaseUsd: number;
+    /**
+     * Cuántas de las que pueden empezar caben antes de que el tope de llamadas a la suscripción o el presupuesto pausen el
+     * lote (en el orden del plan): `max` si gastan lo mínimo, `min` si gastan lo máximo autorizado.
+     */
+    fits: { min: number; max: number; limitedBy: ('subscription' | 'budget')[] };
+    /** Dependen de otra del lote y, sin «Integrar en main», esperarán a que la integres tú. */
+    waitForManualIntegration: string[];
     /** Oleadas: las de una misma oleada no dependen entre sí (pueden ir a la vez si la concurrencia lo permite). */
     waves: string[][];
     /** Dependencias de las elegidas que NO están en el lote ni terminadas: no se añaden solas. */
     missingDependencies: { itemId: string | null; storyId: string; title: string | null; status: BacklogStatus | null; eligible: boolean; requiredBy: string[] }[];
     /** Duración orientativa a partir del historial real del proyecto (null si no hay datos suficientes). */
-    duration: { minutes: number; perStoryMinutes: number; samples: number } | null;
+    duration: { minutes: number; perStoryMinutes: number; p25: number; p75: number; samples: number } | null;
     /** Equipo del lote (agentes únicos) con su comprobación y cuántas historias usan cada uno. */
     agents: (BatchAgentCheck & { stories: number })[];
     connector: { enabled: boolean; subscriptionVerified: boolean; fallback: 'none' | 'api' };

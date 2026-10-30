@@ -31,7 +31,7 @@ const { encryptSecret } = await import('../src/security/crypto.ts');
 const { classifyModel } = await import('@portal-ia/domain');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
-const { agentsRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
+const { agentsRepo, backlogRepo, processesRepo, projectsRepo, workspaceDb } = await import('../src/db/workspace.ts');
 const { buildApp } = await import('../src/app.ts');
 const { addManualItem } = await import('../src/services/backlog.ts');
 const { sandboxDeps } = await import('../src/services/verification.ts');
@@ -95,11 +95,16 @@ const authorize = async (itemIds: string[], extra: Record<string, unknown> = {})
 const get = async (id: string) => (await inject('GET', `${W}/batches/${id}`)).json();
 async function waitFor<T>(fn: () => Promise<T>, ok: (v: T) => boolean, what: string, ms = 30_000): Promise<T> {
   const end = Date.now() + ms; let v = await fn();
-  while (!ok(v)) { if (Date.now() > end) throw new Error(`tiempo agotado esperando: ${what} · ${JSON.stringify(v).slice(0, 1500)}`); await new Promise(r => setTimeout(r, 50)); v = await fn(); }
+  while (!ok(v)) { if (Date.now() > end) throw new Error(`tiempo agotado esperando: ${what} · ${JSON.stringify((v as any)?.items?.map((i: any) => [i.storyId, i.state, i.reason]) ?? v).slice(0, 1500)}`); await new Promise(r => setTimeout(r, 50)); v = await fn(); }
   return v;
 }
 const settledItem = (b: any) => !['queued', 'waiting_dependency', 'running', 'integrating'].includes(b.items[0].state);
-const close = async (id: string) => { await inject('POST', `${W}/batches/${id}/cancel`); };
+/** Cancela el lote y espera a que sus procesos se detengan (entre pasos), para que no interfieran con la prueba siguiente. */
+const close = async (id: string) => {
+  const b = (await inject('POST', `${W}/batches/${id}/cancel`)).json();
+  const pids: string[] = (b.items ?? []).flatMap((i: any) => i.processIds);
+  await waitFor(async () => pids.filter(pid => processesRepo(S).get(pid)?.status === 'running'), r => !r.length, 'los procesos del lote se detienen');
+};
 
 test('regresión · Claude Code gestionado autorizado en el agente, el proyecto y el lote: la vista previa no lo marca «no autorizado» y la historia se ejecuta', async () => {
   await setBackends('claude-code'); ccRules(); apiScript();
@@ -115,7 +120,7 @@ test('regresión · Claude Code gestionado autorizado en el agente, el proyecto 
   await close(b.id);
 });
 
-test('proyecto sin autorizar para Claude Code: la vista previa lo bloquea con el motivo y dónde corregirlo; la ejecución real dice lo mismo y no llama a nada', async () => {
+test('proyecto sin autorizar para Claude Code: la vista previa lo bloquea con un motivo (sin repetirlo) y dónde corregirlo; autorizar el lote se rechaza con el mismo motivo y no crea nada', async () => {
   await setBackends('claude-code'); ccRules(); apiScript(); await authorizeProject(false);
   try {
     const a = story('Historia CC-SIN-PROYECTO');
@@ -123,16 +128,100 @@ test('proyecto sin autorizar para Claude Code: la vista previa lo bloquea con el
     const s = p.plan[0];
     assert.equal(s.executable, false); assert.equal(p.summary.blockedByPermission, 1); assert.equal(p.summary.executable, 0);
     assert.ok(s.team.length >= 3 && s.team.every((t: any) => t.source === 'claude_code' && t.allowed && !t.ready));
-    assert.match(s.problems[0], /no está autorizado para Claude Code/);
+    assert.equal(s.problems.length, 1, 'el mismo motivo de varios agentes se dice una vez');
+    assert.match(s.problems[0], /no está autorizado para Claude Code: autorízalo en Proveedores → Claude Code — Local/);
     assert.equal(s.team[0].fix.href, '/configuracion/proveedor#claude-code');
     assert.deepEqual(s.disallowedBackends, [], 'el origen sí está autorizado en el lote: falta el proyecto');
-    const b = await authorize([a.id]);
-    const x = await waitFor(() => get(b.id), y => y.items[0].state === 'needs_owner', 'no empieza');
-    assert.ok(x.items[0].reason.includes(s.problems[0]), `misma explicación que la vista previa: ${x.items[0].reason}`);
+    const before = processesRepo(S).list(project.id).length;
+    const r = await inject('POST', `${W}/projects/${project.id}/batches`, { authorized: true, ...body([a.id]) });
+    assert.equal(r.statusCode, 409); assert.equal(r.json().code, 'not_authorized');
+    assert.ok(r.json().error.includes(s.problems[0]), `misma explicación que la vista previa: ${r.json().error}`);
+    assert.equal(processesRepo(S).list(project.id).length, before, 'ningún proceso creado');
     assert.equal(ccRuns().length, 0); assert.equal(apiCalls().length, 0, 'ninguna llamada');
-    assert.equal(processesRepo(S).get(x.items[0].processId)!.status, 'cancelled', 'el proceso preparado queda cancelado con el motivo');
-    await close(b.id);
   } finally { await authorizeProject(true); }
+});
+
+test('permiso perdido DURANTE el lote: la siguiente historia no se prepara; el lote entero se pausa una vez con el motivo y su enlace, y «Reanudar» lo vuelve a comprobar', async () => {
+  await setBackends('claude-code'); ccRules(); apiScript();
+  const { batchDeps } = await import('../src/services/batchRunner.ts');
+  const real = batchDeps.runStory; let release!: () => void; const gate = new Promise<void>(r => { release = r; });
+  // La primera historia «trabaja» hasta que la soltamos y termina verificada (sin llamadas); mientras, el propietario
+  // retira la autorización del proyecto. La siguiente usa el pipeline real.
+  batchDeps.runStory = (async (_slug: string, pid: string) => {
+    batchDeps.runStory = real; await gate;
+    const pr = processesRepo(S).get(pid)!;
+    processesRepo(S).setResult(pid, { ...pr.result!, pipeline: { ...pr.result!.pipeline!, state: 'verified' } });
+    processesRepo(S).finish(pid, 'done');
+  }) as any;
+  try {
+    const a = story('Historia PERMISO-1'); const c = story('Historia PERMISO-2');
+    const b = await authorize([a.id, c.id]);
+    await waitFor(() => get(b.id), y => y.items[0].state === 'running', 'la primera empieza');
+    await authorizeProject(false);
+    const before = processesRepo(S).list(project.id).length;
+    release();
+    const x = await waitFor(() => get(b.id), y => y.status === 'paused', 'el lote se pausa');
+    assert.equal(x.items[1].state, 'queued', 'la segunda sigue en cola: nada se canceló'); assert.match(x.items[1].reason, /^No ha empezado: /);
+    assert.match(x.reason, /no está autorizado para Claude Code/); assert.equal(x.reasonFix.href, '/configuracion/proveedor#claude-code');
+    assert.equal((x.reason.match(/no está autorizado/g) ?? []).length, 1, 'el motivo, una vez');
+    assert.equal(processesRepo(S).list(project.id).length, before, 'no se creó el proceso de la segunda');
+    await authorizeProject(true);
+    assert.equal((await inject('POST', `${W}/batches/${b.id}/resume`, { authorized: true })).statusCode, 200);
+    const z = await waitFor(() => get(b.id), y => y.items.every((i: any) => !['queued', 'running', 'waiting_dependency', 'integrating'].includes(i.state)), 'ambas terminan');
+    assert.ok(z.items.every((i: any) => i.state === 'awaiting_integration'), z.items.map((i: any) => `${i.state}: ${i.reason}`).join(' | '));
+    assert.equal(z.reasonFix ?? null, null);
+    await close(b.id);
+  } finally { batchDeps.runStory = real; await authorizeProject(true); }
+});
+
+test('sin «Integrar en main», la dependiente del lote espera a que integres tú: la vista previa lo dice y el lote, al quedarse sin nada que hacer, «espera tu decisión»', async () => {
+  await setBackends('claude-code'); ccRules(); apiScript();
+  const a = story('Historia BASE-MANUAL');
+  const c = story('Historia DEPENDIENTE-MANUAL'); backlogRepo(S).update(c.id, { dependsOn: a.storyId });
+  const p = await preview([a.id, c.id]);
+  assert.deepEqual(p.summary.waitForManualIntegration, [c.storyId]);
+  assert.ok(p.warnings.some((w: string) => /esperarán a que integres tú su dependencia/.test(w)));
+  assert.deepEqual((await preview([a.id, c.id], { git: { merge: true } })).summary.waitForManualIntegration, [], 'con integrar, no espera');
+  const b = await authorize([a.id, c.id]);
+  const x = await waitFor(() => get(b.id), y => /esperan tu decisión/.test(y.reason ?? ''), 'espera tu decisión');
+  assert.equal(x.items.find((i: any) => i.storyId === a.storyId).state, 'awaiting_integration');
+  assert.equal(x.items.find((i: any) => i.storyId === c.storyId).state, 'waiting_dependency');
+  assert.match(x.reason, new RegExp(`${c.storyId} \\(espera a ${a.storyId}\\)`));
+  await close(b.id);
+});
+
+test('límites: la vista previa dice cuántas caben antes de que el tope de llamadas o el presupuesto pausen el lote; el tope admite lotes grandes', async () => {
+  await setBackends('claude-code'); ccRules(); apiScript();
+  const ids = Array.from({ length: 12 }, (_, i) => story(`Historia LIMITE ${i}`).id);
+  const p = await preview(ids, { maxSubscriptionCalls: 10 });
+  assert.equal(p.summary.executable, 12);
+  assert.ok(p.summary.fits.max < 12 && p.summary.fits.min <= p.summary.fits.max && p.summary.fits.limitedBy.includes('subscription'), JSON.stringify(p.summary.fits));
+  assert.ok(p.warnings.some((w: string) => /el lote se pausará tras ≈/.test(w)));
+  const big = await preview(ids, { maxSubscriptionCalls: p.summary.subscriptionCalls.max });
+  assert.equal(big.summary.fits.min, 12, 'con el tope en el máximo estimado caben todas'); assert.equal(big.auth.maxSubscriptionCalls, p.summary.subscriptionCalls.max);
+  assert.equal((await preview(ids, { maxSubscriptionCalls: 2000 })).auth.maxSubscriptionCalls, 2000);
+  // El coste de API también tiene su rango con las correcciones autorizadas.
+  await setBackends('api');
+  const api = await preview(ids.slice(0, 2), { backends: ['api'], maxCorrections: 3 });
+  assert.ok(api.summary.apiUsd.max > api.summary.apiUsd.min && api.plan[0].estimatedUsdMax > api.plan[0].estimatedUsd);
+});
+
+test('duración: solo cuenta historias que terminaron verificadas (de al menos 1 minuto); sin 5 así, no se estima', async () => {
+  await setBackends('claude-code');
+  const fake = (verified: boolean, min: number) => {
+    const p = processesRepo(S).create({ projectId: project.id, kind: 'story_execution', title: 'histórico', estimatedUsd: 0, backlogItemId: null, steps: [] } as any);
+    processesRepo(S).setResult(p.id, { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], pipeline: { state: verified ? 'verified' : 'paused' } } as any);
+    const end = new Date(); const start = new Date(end.getTime() - min * 60_000);
+    workspaceDb(S).prepare('UPDATE processes SET status = ?, started_at = ?, finished_at = ? WHERE id = ?').run('done', start.toISOString(), end.toISOString(), p.id);
+  };
+  for (let i = 0; i < 6; i++) fake(false, 0.2);
+  for (let i = 0; i < 4; i++) fake(true, 10 + i);
+  const a = story('Historia DURACION');
+  assert.equal((await preview([a.id])).summary.duration, null, 'las detenidas no cuentan: solo hay 4 verificadas');
+  fake(true, 0.5); assert.equal((await preview([a.id])).summary.duration, null, 'menos de 1 minuto no cuenta');
+  fake(true, 20);
+  const d = (await preview([a.id])).summary.duration;
+  assert.equal(d.samples, 5); assert.equal(d.perStoryMinutes, 12); assert.ok(d.p25 <= d.perStoryMinutes && d.perStoryMinutes <= d.p75);
 });
 
 test('agente solo API: exige la API autorizada en el lote (se explica qué agente y dónde cambiarlo)', async () => {
@@ -217,7 +306,7 @@ test('valores seguros: integrar, activar y publicar desactivados salvo que se ma
   const p = await preview([a.id]);
   assert.deepEqual(p.auth.git, { merge: false, activate: false, publish: false }); assert.equal(p.auth.apiFallback, false);
   assert.deepEqual((await preview([a.id], { git: { activate: true, publish: true } })).auth.git, { merge: false, activate: false, publish: false }, 'sin integrar no se activa ni se publica');
-  const b = await authorize([a.id], { git: { merge: true, publish: true }, title: 'Lote con publicación' });
+  const b = await authorize([a.id], { git: { merge: true, publish: true }, title: 'Lote con publicación', backends: ['api'] });
   assert.equal(b.auth.git.publish, true);
   await close(b.id);
   const next = await preview([story('Historia DEFECTOS-2').id]);
@@ -230,6 +319,22 @@ test('tamaño: hasta 200 historias por lote; más se rechaza con un motivo claro
   assert.equal(r.statusCode, 400);
 });
 
+test('escala: la vista previa de 200 historias es correcta y rápida, sin llamadas de IA (dependencias que faltan propuestas, no añadidas)', async () => {
+  await setBackends('claude-code'); ccRules(); apiScript();
+  const ids: string[] = []; const all: any[] = [];
+  for (let i = 0; i < 210; i++) { const s = story(`Historia ESCALA ${i}`); all.push(s); }
+  // Cada décima depende de la anterior, que NO se selecciona: dependencia que falta, nunca añadida sola.
+  for (let i = 0; i < 200; i++) ids.push(all[i].id);
+  for (let i = 10; i < 200; i += 10) backlogRepo(S).update(all[i].id, { dependsOn: all[200 + (i / 10) % 10].storyId });
+  const t = performance.now(); const p = await preview(ids); const ms = performance.now() - t;
+  assert.equal(p.plan.length, 200); assert.deepEqual(p.auth.itemIds, ids, 'el alcance es exactamente lo elegido');
+  assert.equal(p.summary.blockedByDependency, 19); assert.equal(p.summary.executable, 181);
+  assert.ok(p.summary.missingDependencies.length >= 1 && p.summary.missingDependencies.every((m: any) => m.eligible && !ids.includes(m.itemId)));
+  assert.ok(p.summary.subscriptionCalls.min >= 181 * 3, 'cada historia cuenta sus llamadas a la suscripción');
+  assert.ok(ms < 3000, `vista previa de 200 en ${ms.toFixed(0)} ms`);
+  assert.equal(ccRuns().length + apiCalls().length, 0, 'ninguna llamada de IA');
+});
+
 test('origen por defecto: sin orígenes indicados, solo la suscripción (la API facturable exige marcarla)', async () => {
   await setBackends('api');
   const p = await preview([story('Historia ORIGEN-DEFECTO').id]);
@@ -238,48 +343,42 @@ test('origen por defecto: sin orígenes indicados, solo la suscripción (la API 
   assert.match(p.plan[0].problems[0], /este lote no autoriza la API/);
 });
 
-test('volver tras una interrupción: reintentar una historia que no empezó, reanudar re-encola las que no trabajaron, el alcance no cambia; cancelar cierra lo que esperaba', async () => {
-  await setBackends('claude-code'); ccRules(); apiScript(); await authorizeProject(false);
+test('volver tras una interrupción: el límite de la suscripción en el primer paso pausa todo el lote; «Reintentar» (con autorización) y «Reanudar» lo vuelven a poner en cola sin cambiar el alcance; cancelar cierra lo que esperaba', async () => {
+  await setBackends('claude-code'); apiScript(); ccRules({ behavior: 'limit' });
   const a = story('Historia VUELTA-1'); const c = story('Historia VUELTA-2');
-  const b = await authorize([a.id, c.id], { git: { merge: false } });
-  const x = await waitFor(() => get(b.id), y => y.items.every((i: any) => i.state === 'needs_owner'), 'ninguna empieza');
-  assert.ok(x.items.every((i: any) => i.notStarted && /no está autorizado para Claude Code/.test(i.reason)));
-  await authorizeProject(true);
-  const url = (i: any) => `${W}/batches/${b.id}/items/${i.itemId}/retry`;
-  assert.equal((await inject('POST', url(x.items[0]), {})).statusCode, 400, 'reintentar exige autorización');
-  const r = await inject('POST', url(x.items[0]), { authorized: true });
-  assert.equal(r.statusCode, 200, r.body);
-  const y = await waitFor(() => get(b.id), z => z.items[0].state === 'awaiting_integration', 'la reintentada termina');
-  assert.equal(y.items[1].state, 'needs_owner', 'la otra sigue esperando: nada se re-encola solo');
-  // Reanudar (tras pausar) vuelve a poner en cola la que no llegó a empezar; el alcance autorizado no cambia.
-  assert.equal((await inject('POST', `${W}/batches/${b.id}/pause`, {})).statusCode, 200);
+  const b = await authorize([a.id, c.id]);
+  const p = await waitFor(() => get(b.id), w => w.status === 'paused', 'el lote se pausa');
+  assert.equal(p.items[0].failureClass, 'subscription'); assert.equal(p.items[0].state, 'needs_owner');
+  assert.equal(p.items[1].state, 'queued', 'la otra no empieza mientras el límite está agotado');
+  assert.ok(p.events.some((ev: any) => /se detuvo \(subscription\)/.test(ev.message)) && !p.events.some((ev: any) => /falló/.test(ev.message)), 'el registro dice lo mismo que el estado');
+  const url = `${W}/batches/${b.id}/items/${p.items[0].itemId}/retry`;
+  assert.equal((await inject('POST', url, {})).statusCode, 400, 'reintentar exige autorización');
+  const r = await inject('POST', url, { authorized: true });
+  assert.equal(r.statusCode, 200, r.body); assert.equal(r.json().items[0].state, 'queued'); assert.match(r.json().items[0].reason, /empezará al reanudar/);
+  ccRules(); // el límite se renovó
   assert.equal((await inject('POST', `${W}/batches/${b.id}/resume`, { authorized: true })).statusCode, 200);
-  const z = await waitFor(() => get(b.id), w => w.items[1].state === 'awaiting_integration', 'la segunda termina al reanudar');
+  const z = await waitFor(() => get(b.id), w => w.items.every((i: any) => i.state === 'awaiting_integration'), 'ambas terminan tras renovarse el límite');
   assert.deepEqual(z.auth.itemIds, b.auth.itemIds); assert.deepEqual(z.auth.git, b.auth.git); assert.deepEqual(z.auth.backends, b.auth.backends);
-  // Una con trabajo en pausa no se «reintenta» (se continúa desde su proceso): aquí ya terminó.
-  assert.equal((await inject('POST', url(z.items[0]), { authorized: true })).statusCode, 409);
+  assert.equal(apiCalls().length, 0, 'nunca se usó la API');
+  assert.equal((await inject('POST', url, { authorized: true })).statusCode, 409, 'una terminada no se reintenta');
   await close(b.id);
 
-  // Límite de la suscripción en el primer paso: pausa TODO el lote; al reanudar (límite renovado) vuelve a la cola.
+  // Sin «Reintentar»: «Reanudar» también vuelve a poner en cola la que se detuvo sin trabajo que conservar.
   ccRules({ behavior: 'limit' });
-  const d = story('Historia VUELTA-3'); const e = story('Historia VUELTA-4');
-  const b2 = await authorize([d.id, e.id]);
-  const p2 = await waitFor(() => get(b2.id), w => w.status === 'paused', 'el lote se pausa');
-  assert.equal(p2.items[0].failureClass, 'subscription'); assert.equal(p2.items[0].state, 'needs_owner');
-  assert.equal(p2.items[1].state, 'queued', 'la otra no empieza mientras el límite está agotado');
+  const d = story('Historia VUELTA-3');
+  const b2 = await authorize([d.id]);
+  await waitFor(() => get(b2.id), w => w.status === 'paused', 'se pausa');
   ccRules();
   assert.equal((await inject('POST', `${W}/batches/${b2.id}/resume`, { authorized: true })).statusCode, 200);
-  const q2 = await waitFor(() => get(b2.id), w => w.items.every((i: any) => i.state === 'awaiting_integration'), 'ambas terminan tras renovarse el límite');
-  assert.equal(apiCalls().length, 0, 'nunca se usó la API');
+  await waitFor(() => get(b2.id), w => w.items[0].state === 'awaiting_integration', 'termina al reanudar');
   await close(b2.id);
-  assert.ok(q2.items.every((i: any) => i.processIds.length >= 1));
 
-  // Cancelar cierra lo que esperaba tu decisión (con su motivo); lo terminado se conserva.
-  await authorizeProject(false);
-  const f = story('Historia VUELTA-5');
+  // Cancelar cierra lo que esperaba tu decisión (con su motivo).
+  ccRules({ behavior: 'limit' });
+  const f = story('Historia VUELTA-4');
   const b3 = await authorize([f.id]);
-  await waitFor(() => get(b3.id), w => w.items[0].state === 'needs_owner', 'espera');
+  await waitFor(() => get(b3.id), w => w.status === 'paused', 'se pausa');
   const cancelled = (await inject('POST', `${W}/batches/${b3.id}/cancel`, {})).json();
   assert.equal(cancelled.items[0].state, 'cancelled'); assert.match(cancelled.items[0].reason, /mientras esperaba tu decisión/);
-  await authorizeProject(true);
+  ccRules();
 });

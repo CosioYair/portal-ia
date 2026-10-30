@@ -196,7 +196,9 @@ test('I + J · dos historias en paralelo (worktrees separados) y la integración
   assert.ok(running.items.filter((i: any) => i.state === 'running').length === 2 || maxActive >= 2, 'llegaron a trabajar a la vez');
   const merges = done.events.filter((e: any) => /integrada en main/.test(e.message)).map((e: any) => Date.parse(e.at));
   assert.equal(merges.length, 2);
-  assert.ok(done.events.some((e: any) => e.itemId === done.items[1].itemId && /candidato preparado sin IA/.test(e.message)), 'la segunda incorporó main (con la primera) antes de integrarse');
+  // La que se integró en SEGUNDO lugar (cualquiera de las dos: depende de cuál terminó antes) incorporó main con la primera.
+  const second = done.events.filter((e: any) => /integrada en main/.test(e.message)).map((e: any) => e.itemId)[1];
+  assert.ok(done.events.some((e: any) => e.itemId === second && /candidato preparado sin IA/.test(e.message)), 'la segunda en integrarse incorporó main (con la primera) antes de integrarse');
 });
 
 test('K · reinicio durante la verificación (sin llamadas en curso): se retoma solo, una vez, sin repetir plan, implementación ni QA', async () => {
@@ -369,15 +371,15 @@ test('F · revocar: lo que estaba en marcha se detiene, lo pendiente se cancela 
   assert.ok(x.events.some((e: any) => e.kind === 'revoke' && /Cambio de prioridades/.test(e.message)));
 });
 
-test('Q · orígenes y aislamiento: un equipo con un origen no autorizado no empieza (no se cambia de origen); historias de otro proyecto o no pendientes se rechazan', async () => {
+test('Q · orígenes y aislamiento: un equipo con un origen no autorizado no se autoriza (no se cambia de origen); historias de otro proyecto o no pendientes se rechazan', async () => {
   const a = story('Historia QUEBEC');
   setScript([{ key: 'QUEBEC', file: 'src/quebec.ts', dev: create('src/quebec.ts', 'export const q = 1;') }]);
-  const b = await authorize({ itemIds: [a.id], title: 'Lote Q', backends: ['claude_code'] });
-  const x = await waitFor(() => get(b.id), y => y.items[0].state === 'needs_owner', 'no empieza');
-  assert.match(x.items[0].reason, /usa Anthropic API \(facturable\) y este lote no autoriza la API/);
+  const before = processesRepo(S).list(project.id).length;
+  const res = await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/batches`, payload: { authorized: true, itemIds: [a.id], title: 'Lote Q', totalBudgetUsd: 5, perStoryBudgetUsd: 1, backends: ['claude_code'] } });
+  assert.equal(res.statusCode, 409); assert.equal(res.json().code, 'not_authorized');
+  assert.match(res.json().error, /usa Anthropic API \(facturable\) y este lote no autoriza la API/);
   assert.equal(callsFor('QUEBEC').length, 0, 'ninguna llamada');
-  assert.equal(processesRepo(S).get(x.items[0].processId)!.status, 'cancelled', 'el proceso preparado queda cancelado con el motivo (auditable)');
-  await app.inject({ method: 'POST', url: `${W}/batches/${b.id}/cancel` });
+  assert.equal(processesRepo(S).list(project.id).length, before, 'ningún proceso preparado');
   const other = await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/batches`, payload: { authorized: true, itemIds: ['no-existe'], totalBudgetUsd: 1, perStoryBudgetUsd: 1 } });
   assert.equal(other.statusCode, 404);
   const closed = story('Historia QUEBEC-CERRADA'); backlogRepo(S).setStatus(closed.id, 'done');
