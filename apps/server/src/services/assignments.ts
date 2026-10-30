@@ -6,6 +6,8 @@ import { callMetricsRepo } from '../db/callMetrics.ts';
 import { createWorkProcess, estimateWork } from './storyExecution.ts';
 import { assignmentAsItem, onAssignmentStatus } from './workItems.ts';
 import { closingBlocker } from './closing.ts';
+import { discardBranch } from './repoWrite.ts';
+import { requirePolicy } from './executionPolicy.ts';
 import { subscriptionGate } from './claudeCode/usage.ts';
 import { projectGauntlet, resolveGauntletFor } from './gauntlet.ts';
 import { authorizeProcess } from './processAuthorization.ts';
@@ -153,10 +155,26 @@ export async function acceptAssignment(slug: string, id: string, note: string | 
 }
 
 /** Pedir cambios: queda la nota; la siguiente ejecución se prepara con ella (y se autoriza aparte). */
-export function requestAssignmentChanges(slug: string, id: string, note: string): Assignment {
+/**
+ * Pedir cambios (acto explícito del propietario, como iterar una historia): la versión entregada y NO integrada se
+ * descarta (se retira su worktree y su rama sin integrar; nunca el checkout principal) y queda la nota; la siguiente
+ * ejecución parte de main con la nota y el resultado anterior como contexto, y se autoriza aparte.
+ */
+export async function requestAssignmentChanges(slug: string, id: string, note: string): Promise<Assignment> {
   const a = syncAssignment(slug, id); if (!a) throw fail(404, 'Encargo no encontrado.', 'not_found');
   if (!['ready_for_review', 'needs_owner', 'failed'].includes(a.status)) throw fail(409, `No se piden cambios a un encargo ${ASSIGNMENT_STATUS_LABEL[a.status]}.`, 'invalid_state');
-  return assignmentsRepo(slug).update(id, x => { x.status = 'changes_requested'; x.iterationNote = note.trim().slice(0, 2000); x.events.push({ at: monotonicNow(), kind: 'changes', message: `Cambios pedidos: ${note.slice(0, 300)}` }); });
+  const p = a.processId ? processesRepo(slug).get(a.processId) : undefined;
+  let discarded = '';
+  if (p?.result?.applied?.worktree && !p.result.merged && !p.result.rejected) {
+    const repo = projectsRepo(slug).repository(a.projectId);
+    if (repo) {
+      requirePolicy('delete_worktree', { slug, processId: p.id, projectId: a.projectId, authorized: true });
+      const d = await discardBranch(repo.path, p.id, p.result.applied.branch);
+      discarded = ` Versión anterior descartada: worktree ${d.worktreeRemoved ? 'retirado' : 'ya no existía'}, rama ${p.result.applied.branch} ${d.branchDeleted ? 'borrada' : 'conservada (integrada o activa)'}.`;
+    }
+    processesRepo(slug).setResult(p.id, { ...p.result, rejected: { at: monotonicNow(), reason: 'descartada al pedir cambios: la siguiente ejecución parte de main con la nota del propietario' } });
+  }
+  return assignmentsRepo(slug).update(id, x => { x.status = 'changes_requested'; x.iterationNote = note.trim().slice(0, 2000); x.events.push({ at: monotonicNow(), kind: 'changes', processId: p?.id, message: `Cambios pedidos: ${note.slice(0, 300)}.${discarded}` }); });
 }
 
 /** Cancelar el encargo (no borra nada: el proceso y su worktree se conservan para consulta). */

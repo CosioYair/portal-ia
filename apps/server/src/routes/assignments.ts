@@ -63,7 +63,7 @@ export async function assignmentRoutes(app: FastifyInstance) {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ note: z.string().trim().min(3).max(2000) }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Explica qué hay que cambiar.' });
-    try { requestAssignmentChanges(slug, id, body.data.note); return assignmentView(slug, id); } catch (e) { return send(reply, e); }
+    try { await requestAssignmentChanges(slug, id, body.data.note); return assignmentView(slug, id); } catch (e) { return send(reply, e); }
   });
   app.post('/api/workspaces/:slug/assignments/:id/cancel', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;

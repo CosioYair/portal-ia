@@ -248,7 +248,7 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
           <input id={`en-${a.id}`} className="input" style={{ flex: 1, minWidth: 180, height: 30 }} value={note} onChange={e => setNote(e.target.value)} placeholder="Qué cambiar (para pedir cambios)" />
           <button type="button" className="btn btn-ghost btn-sm" disabled={busy || note.trim().length < 3} onClick={() => void act(() => api.requestAssignmentChanges(slug, a.id, note.trim()), 'Cambios pedidos: autoriza la siguiente iteración')}>Pedir cambios</button>
         </div>
-        <div className="small muted">Aceptar exige lo mismo que cerrar una historia (aplicado, verificado, probado). Integrar en main sigue siendo una decisión aparte.</div>
+        <div className="small muted">Aceptar exige lo mismo que cerrar una historia (aplicado, verificado, probado); integrar en main sigue siendo una decisión aparte. Pedir cambios descarta esta versión (su rama sin integrar) y prepara otra ejecución desde main con tu nota, que autorizas aparte.</div>
       </div>}
       {['draft', 'changes_requested', 'needs_owner', 'failed', 'ready_for_review'].includes(a.status) && <div><button type="button" className="lnk small" disabled={busy} onClick={() => void act(() => api.cancelAssignment(slug, a.id), `${a.code} cancelado`)}>cancelar el encargo</button></div>}
     </div>

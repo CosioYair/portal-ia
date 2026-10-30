@@ -116,10 +116,13 @@ test('pedir cambios: queda la nota y la siguiente ejecución (autorizada aparte)
   assert.match(p2.result!.iterationContext ?? '', /Nota del propietario: el valor debe ser 2/); assert.match(p2.result!.iterationContext ?? '', /Criterios de aceptación vigentes/);
   assert.ok(calls().some(c => c.markers?.includes('Nota del propietario')), 'la nota llega a los agentes');
   assert.ok(processesRepo(S).get(x.processId), 'la ejecución anterior se conserva');
-  // La iteración anterior queda superada: ya no se integra, aplica, publica ni continúa (como con las historias).
-  assert.equal(processesRepo(S).get(x.processId)!.supersededBy, y.processId);
+  // Pedir cambios descartó la versión anterior no integrada (como iterar una historia): rechazada, sin worktree ni rama,
+  // y ya no se integra; la nueva ejecución terminó (antes chocaba con la rama de la anterior).
+  const old = processesRepo(S).get(x.processId)!; assert.ok(old.result!.rejected); assert.ok(!fs.existsSync(old.result!.applied!.worktree!));
+  assert.equal(execSync(`git branch --list ${old.result!.applied!.branch}`, { cwd: repo }).toString().trim() === '' || processesRepo(S).get(y.processId)!.result?.applied?.branch === old.result!.applied!.branch, true);
+  assert.equal(y.status, 'ready_for_review', `${y.status}: ${y.reason ?? ''}`);
   const merge = await inject('POST', `${W}/processes/${x.processId}/merge`, { authorized: true });
-  assert.equal(merge.statusCode, 409, merge.body); assert.match(merge.json().error, /superada/);
+  assert.equal(merge.statusCode, 409, merge.body);
   // Rechazar el diff de la vigente: el encargo espera tu decisión (no se queda «listo» con «Aceptar»).
   if (y.status === 'ready_for_review') {
     assert.equal((await inject('POST', `${W}/processes/${y.processId}/reject`, {})).statusCode, 200);
