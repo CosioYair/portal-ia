@@ -38,7 +38,7 @@ import { workItemOf } from '../services/workItems.ts';
 import { closingBlocker } from '../services/closing.ts';
 
 /** Rutas con efecto (IA o git) que nunca deben actuar sobre una iteración superada de su historia (HU-161). */
-const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish|continue)$/;
+const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish|continue|accept-plan)$/;
 
 /**
  * Procesos autorizados (HU-004). Un proceso nace 'pending_authorization' con una estimación; solo empieza a consumir
@@ -116,6 +116,23 @@ export async function processRoutes(app: FastifyInstance) {
   // Continuar de forma autónoma (autorizado por el propietario): reanuda un pipeline pausado o detenido, lo inicia sobre un
   // proceso terminado con cambios sin aplicar, o repara la entrega de un proceso que falló por el formato del Desarrollador.
   // Lo ya hecho no se repite; el presupuesto adicional es un máximo, no un objetivo.
+  // La revisión independiente del plan se pausó con una brecha bloqueante: el propietario decide seguir con ESTE plan.
+  // No se repiten el plan ni la revisión (ya pagados); las brechas quedan documentadas en el informe.
+  app.post('/api/workspaces/:slug/processes/:id/accept-plan', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ authorized: z.literal(true), addBudgetUsd: z.number().min(0).max(100).optional() }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'Seguir con este plan exige tu autorización explícita.', code: 'authorization_required' });
+    const procs = processesRepo(slug); const proc = procs.get(id);
+    if (!proc || proc.kind !== 'story_execution' || !proc.result?.plan) return reply.code(404).send({ error: 'Proceso de historia no encontrado' });
+    if (proc.status === 'running' || proc.status === 'pending_authorization') return reply.code(409).send({ error: 'El proceso sigue activo o pendiente de autorizar.' });
+    const pr = proc.result.gauntlet?.planReview;
+    if (proc.result.pipeline?.pauseKind !== 'plan' || pr?.status !== 'paused') return reply.code(409).send({ error: 'Solo se acepta un plan que la revisión independiente dejó en pausa.', code: 'not_plan_review_pause' });
+    procs.setResult(id, { ...proc.result, gauntlet: { ...proc.result.gauntlet!, planReview: { ...pr, status: 'approved_with_gaps', ownerAccepted: true, reason: `Aceptado por el propietario con lo pendiente documentado: ${pr.reason ?? ''}` } } });
+    procs.resume(id, Math.max(proc.budgetUsd, proc.spentUsd) + (body.data.addBudgetUsd ?? 0));
+    const run = runStory(slug, id, (o: any, m: string) => app.log.info(o, m), () => isCancelled(id)).finally(() => clearCancel(id));
+    trackJob(id, run).catch(e => app.log.error({ err: e?.message, processId: id }, 'fallo inesperado al seguir con el plan aceptado'));
+    return procs.get(id);
+  });
   app.post('/api/workspaces/:slug/processes/:id/continue', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ authorized: z.literal(true), addBudgetUsd: z.number().min(0).max(100).optional(), addSubscriptionCalls: z.number().int().min(0).max(500).optional(), pipeline: PIPELINE_INPUT.optional(), answer: z.string().trim().min(2).max(8000).optional() }).safeParse(req.body ?? {});

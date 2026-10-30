@@ -111,7 +111,7 @@ export function completeWith(cc: ReturnType<typeof agentCaller>, providerId: Pro
  * no está disponible, se dice por qué y NO se usa la API en su lugar (la alternativa por API es solo de los pasos de
  * procesos autorizados y la decide el propietario en los ajustes del conector).
  */
-export function agentCaller(slug: string, agent: Agent, projectId: string | null, title: string): { backend: ExecutionBackend; label: string; subscription: boolean; complete: (req: CompletionRequest, signal?: AbortSignal) => Promise<CompletionResult> } | null {
+export function agentCaller(slug: string, agent: Agent, projectId: string | null, title: string, processId: string | null = null): { backend: ExecutionBackend; label: string; subscription: boolean; complete: (req: CompletionRequest, signal?: AbortSignal) => Promise<CompletionResult> } | null {
   const b = agentBackend(agent);
   if (b === 'api') return null;
   if (b === 'claude-code-terminal') throw Object.assign(new Error(`«${agent.config.name}» usa tu consola de Claude Code, que atiende tareas de procesos y no respuestas inmediatas. Cambia su backend a «Claude Code (gestionado)» o a la API para esto. No se ha usado la API.`), { statusCode: 409 });
@@ -119,7 +119,8 @@ export function agentCaller(slug: string, agent: Agent, projectId: string | null
   if (!g.ok) throw Object.assign(new Error(`${g.reason} No se ha usado la API en su lugar.`), { statusCode: 409 });
   return {
     backend: b, label: backendLabel(b, lastDetection()?.billing), subscription: true,
-    complete: (req, signal) => claudeCodeComplete({ slug, projectId: projectId ?? '', processId: null, stepId: null, agent, role: null, title }, req, signal ?? new AbortController().signal, () => undefined)
+    // Con el proceso: cada llamada cuenta para su tope de llamadas a la suscripción (y su ejecución queda ligada a él).
+    complete: (req, signal) => claudeCodeComplete({ slug, projectId: projectId ?? '', processId, stepId: null, agent, role: null, title }, req, signal ?? new AbortController().signal, () => undefined)
   };
 }
 

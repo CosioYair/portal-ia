@@ -20,7 +20,7 @@ process.env.PORTAL_MOCK_PROVIDER = '1';
 const scriptPath = path.join(process.env.PORTAL_DATA_DIR, 'mock-script.json'); const logPath = path.join(process.env.PORTAL_DATA_DIR, 'mock-log.jsonl');
 process.env.PORTAL_MOCK_SCRIPT = scriptPath; process.env.PORTAL_MOCK_LOG = logPath;
 const { encryptSecret } = await import('../src/security/crypto.ts');
-const { classifyModel, decideGauntlet, decidePlanReview, gauntletOverhead, gauntletSignature, normalizeGauntlet, planReviewWanted, progressBetween, recommendGauntlet, resolveGauntlet } = await import('@portal-ia/domain');
+const { classifyModel, decideGauntlet, decidePlanReview, gauntletOverhead, gauntletSignature, normalizeGauntlet, parsePlanReview, planReviewWanted, progressBetween, recommendGauntlet, resolveGauntlet } = await import('@portal-ia/domain');
 const { resetMockCalls } = await import('@portal-ia/ai-adapters');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
@@ -133,13 +133,13 @@ const PASS = JSON.stringify({ verdict: 'pass', criteria: [{ criterion: 'a vale 2
 const MARKERS = ['CAUSA-DIAG', 'GAP-PLAN-DOBLE', 'RAZONAMIENTO-CONSTRUCTOR', 'NO son evidencia', 'El contador muestra 2', 'FALTA-DOBLE', 'SIN-EVIDENCIA-XYZ', 'Rondas anteriores'];
 const DIAG = 'CAUSA-DIAG: el patch se aplicó sobre otra línea; ESTRATEGIA: añadir doble justo después de la definición de a.';
 const R = { review: 'REVISIÓN DEL PLAN', diag: 'DIAGNÓSTICO de una brecha', ev: 'Evalúa de forma INDEPENDIENTE', plan: 'plan técnico', fix: 'Corrige la implementación de esta historia', qa: 'Evalúa la implementación con la EVIDENCIA real', dev: 'Implementa la historia' };
-function setScript(evaluator: string[], fixes: string[] = [FIX1, FIX2], planReview: string[] = []) {
+function setScript(evaluator: string[], fixes: string[] = [FIX1, FIX2], planReview: string[] = [], plans: string[] = [PLAN]) {
   resetMockCalls(); try { fs.unlinkSync(logPath); } catch { /* vacío */ }
   fs.writeFileSync(scriptPath, JSON.stringify({ markers: MARKERS, rules: [
     ...(planReview.length ? [{ match: R.review, responses: planReview.map(text => ({ text })) }] : []),
     { match: R.diag, text: DIAG },
     { match: R.ev, responses: evaluator.map(text => ({ text })) },
-    { match: R.plan, text: PLAN },
+    { match: R.plan, responses: plans.map(text => ({ text })) },
     { match: R.fix, responses: fixes.map(text => ({ text })) },
     { match: R.qa, text: QA_OK },
     { match: R.dev, text: DEV }
@@ -281,11 +281,16 @@ test('Gauntlet en la planificación (sin IA): cuándo se revisa el plan y qué s
   assert.equal(decidePlanReview(deep, [r([gap('falta b')], 'revise'), r([gap('falta b')])]).decision, 'pause', 'sin progreso no se insiste');
   assert.equal(decidePlanReview(deep, [r([gap('falta b', 'major')], 'revise'), r([gap('falta b', 'major')])]).decision, 'proceed', 'sin progreso pero no bloqueante: sigue y queda documentado');
   assert.equal(decidePlanReview(std, [r([], 'proceed', 'cannot_review')]).decision, 'proceed');
+  // Un criterio sin cubrir (con evidencia) es una brecha bloqueante aunque el revisor diga «approve» sin listarla.
+  const cov = parsePlanReview(JSON.stringify({ verdict: 'approve', coverage: [{ criterion: 'existe doble', covered: 'no', evidence: 'ninguna tarea define doble' }], gaps: [] }));
+  assert.equal(cov.verdict, 'revise'); assert.equal(cov.gaps[0].severity, 'blocking'); assert.match(cov.gaps[0].text, /no cubre/);
 });
 
 test('revisión independiente del plan ANTES de implementar: brecha con evidencia → el planificador la corrige → aprobado; todo antes de pagar la implementación', async () => {
-  setScript([PASS], [FIX1], [REV_REVISE, REV_OK]);
+  const PLAN2 = PLAN.replace('"tasks":["Editar src/a.ts"]', '"tasks":["Editar src/a.ts","Exportar doble = a * 2"]');
+  setScript([PASS], [FIX1], [REV_REVISE, REV_OK], [PLAN, PLAN2]);
   const { p } = await authorize('Plan revisado', { gauntlet: { mode: 'deep' } });
+  assert.ok(p.result!.plan!.tasks.includes('Exportar doble = a * 2'), 'se implementa el plan REVISADO, no el primero');
   const pr = p.result!.gauntlet!.planReview!;
   assert.deepEqual(pr.rounds.map(x => x.decision), ['revise', 'proceed']); assert.equal(pr.status, 'approved');
   assert.equal(byRule(R.review).length, 2);
@@ -304,6 +309,18 @@ test('revisión del plan sin progreso y con un bloqueante: se pausa ANTES de imp
   assert.equal(pl.pauseKind, 'plan', pl.reason ?? ''); assert.match(pl.reason!, /no se ha pagado la implementación/);
   assert.equal(byRule(R.dev).length, 0, 'ninguna llamada de implementación'); assert.equal(byRule(R.review).length, 2);
   assert.equal(p.result!.gauntlet!.planReview!.status, 'paused');
+  // Decides tú: «Seguir con este plan» lo implementa tal cual, sin repetir el plan ni su revisión (ya pagados).
+  const flow = await flowOf(p.id);
+  const accept = flow.actions.find((a: any) => a.id === 'accept_plan'); assert.ok(accept, JSON.stringify(flow.actions.map((a: any) => a.id)));
+  const plans = byRule(R.plan).length; const reviews = byRule(R.review).length;
+  assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/accept-plan`, payload: {} })).statusCode, 400, 'exige autorización');
+  const res = await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/accept-plan`, payload: { authorized: true, addBudgetUsd: 0.5 } });
+  assert.equal(res.statusCode, 200, res.body);
+  const done = await waitDone(p.id);
+  assert.equal(done.result!.pipeline!.state, 'verified', done.result!.pipeline!.reason ?? '');
+  assert.equal(byRule(R.plan).length, plans, 'no se paga otro plan'); assert.equal(byRule(R.review).length, reviews, 'ni otra revisión');
+  assert.equal(byRule(R.dev).length, 1); assert.equal(done.result!.gauntlet!.planReview!.ownerAccepted, true);
+  assert.match(done.result!.gauntlet!.planReview!.reason!, /Aceptado por el propietario/);
 });
 
 test('E · continuar sin más evaluación tras la detención: sin IA, sin repetir QA ni la evaluación; las brechas quedan documentadas', async () => {

@@ -33,7 +33,7 @@ git('add', '-A'); git('add', '-f', '.npmrc', 'secrets/clave.txt'); git('commit',
 git('config', 'portal.marcador', M('GITCONFIG'));
 put('.env', `CLAVE=${M('ENV')}\n`); put('.env.local', `CLAVE=${M('ENVLOCAL')}\n`);
 put('.claude/settings.json', `{"m":"${M('CLAUDE')}"}\n`); put('.ssh/id_rsa', `${M('SSH')}\n`);
-put('data/x.txt', `${M('DATA')}\n`); put('node_modules/x/index.js', `// ${M('NODEMODULES')}\n`);
+put('data/x.txt', `${M('DATA')}\n`); put('.netrc', `${M('NETRC')}\n`); put('.git-credentials', `${M('GITCRED')}\n`); put('src/.git/config', `${M('NESTEDGIT')}\n`); put('node_modules/x/index.js', `// ${M('NODEMODULES')}\n`);
 put('.npmrc', `# ${M('NPMRC')}\n# ${M('NPMRC2')}\n`); put('secrets/clave.txt', `${M('SECRETS')}\n${M('SECRETS2')}\n`); // cambios sin confirmar
 fs.writeFileSync(path.join(outside, 'fuera.txt'), `${M('FUERA')}\n`);
 let junction = false; try { fs.symlinkSync(outside, path.join(repo, 'src', 'enlace'), 'junction'); junction = true; } catch (e: any) { if (e.code !== 'EPERM') throw e; }
@@ -51,9 +51,10 @@ const s = (name: string) => sn.get(name);
 const protectedFiles: { rel: string; marker: string; writeForbidden: boolean }[] = [
   { rel: '.env', marker: M('ENV'), writeForbidden: true }, { rel: '.env.local', marker: M('ENVLOCAL'), writeForbidden: true },
   { rel: '.git/config', marker: M('GITCONFIG'), writeForbidden: true }, { rel: 'data/x.txt', marker: M('DATA'), writeForbidden: true },
-  { rel: 'node_modules/x/index.js', marker: M('NODEMODULES'), writeForbidden: true }, { rel: '.npmrc', marker: M('NPMRC'), writeForbidden: false },
-  { rel: 'secrets/clave.txt', marker: M('SECRETS'), writeForbidden: false }, { rel: '.claude/settings.json', marker: M('CLAUDE'), writeForbidden: false },
-  { rel: '.ssh/id_rsa', marker: M('SSH'), writeForbidden: false }
+  { rel: 'node_modules/x/index.js', marker: M('NODEMODULES'), writeForbidden: true }, { rel: '.npmrc', marker: M('NPMRC'), writeForbidden: true },
+  { rel: 'secrets/clave.txt', marker: M('SECRETS'), writeForbidden: true }, { rel: '.claude/settings.json', marker: M('CLAUDE'), writeForbidden: true },
+  { rel: '.ssh/id_rsa', marker: M('SSH'), writeForbidden: true }, { rel: '.netrc', marker: M('NETRC'), writeForbidden: true },
+  { rel: '.git-credentials', marker: M('GITCRED'), writeForbidden: true }, { rel: 'src/.git/config', marker: M('NESTEDGIT'), writeForbidden: true }
 ];
 /** Todas las formas de nombrar un archivo protegido. */
 function aliases(rel: string): string[] {
@@ -123,4 +124,29 @@ test('por HTTP (como lo usa la CLI por MCP): rutas codificadas y alias tampoco d
     for (const q of ['MARCADOR-SINTETICO', M('ENV')]) { const r = await app.inject({ method: 'GET', url: `/api/bridge/v1/tasks/current/search?q=${encodeURIComponent(q)}`, headers: h }); assert.deepEqual(searchLeaks(r.body), [], q); }
     for (const range of ['working', 'branch']) { const r = await app.inject({ method: 'GET', url: `/api/bridge/v1/tasks/current/diff?range=${range}`, headers: h }); assert.deepEqual(leaks(r.body), [], range); }
   } finally { job.done(); }
+});
+
+test('escrituras: ningún enlace o unión saca una escritura o un borrado de la carpeta; los hooks del repositorio no se ejecutan', async () => {
+  const { writablePath, applyChanges, annotateChanges } = await import('../src/services/repoWrite.ts');
+  const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-sec-wt-')); const fuera = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-sec-victima-'));
+  fs.writeFileSync(path.join(fuera, 'victima.txt'), 'ORIGINAL');
+  let linked = false; try { fs.symlinkSync(fuera, path.join(wt, 'enlace'), 'junction'); linked = true; } catch (e: any) { if (e.code !== 'EPERM') throw e; }
+  if (linked) {
+    assert.throws(() => writablePath(wt, 'enlace/victima.txt'), /enlace/); assert.throws(() => writablePath(wt, 'enlace/nuevo.txt'), /enlace/);
+    assert.equal(fs.readFileSync(path.join(fuera, 'victima.txt'), 'utf8'), 'ORIGINAL');
+  }
+  assert.ok(writablePath(wt, 'src/nuevo.ts').endsWith(path.join('src', 'nuevo.ts')), 'lo normal sí');
+  // Un hook versionado (como los de husky) que un agente hubiera editado NO se ejecuta en los commits del Portal.
+  const r2 = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-sec-hooks-')); const marca = path.join(os.tmpdir(), `portal-ia-hook-${Date.now()}.txt`);
+  const g2 = (...a: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: r2, windowsHide: true }).toString();
+  g2('init', '-q', '-b', 'main'); fs.mkdirSync(path.join(r2, '.githooks'));
+  fs.writeFileSync(path.join(r2, '.githooks', 'pre-commit'), `#!/bin/sh\necho ejecutado > "${marca.replace(/\\/g, '/')}"\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(r2, 'README.md'), 'x\n'); g2('add', '-A'); g2('commit', '-qm', 'base'); g2('config', 'core.hooksPath', '.githooks');
+  const changes = annotateChanges(r2, [{ path: 'src/b.ts', action: 'create', content: 'export const b = 1;\n' }]);
+  await applyChanges(r2, 'portal-ia/hu-998', changes, 'HU-998', { processId: 'p-hooks' });
+  assert.ok(!fs.existsSync(marca), 'el hook no se ejecutó');
+  // Control: el mismo hook SÍ se ejecuta con un git normal (la prueba es real).
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_CONFIG_')));
+  fs.writeFileSync(path.join(r2, 'c.txt'), 'c'); execFileSync('git', ['add', '-A'], { cwd: r2, env }); execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'control'], { cwd: r2, env, windowsHide: true });
+  assert.ok(fs.existsSync(marca), 'control: con hooks activos, el hook se ejecuta'); fs.rmSync(marca, { force: true });
 });

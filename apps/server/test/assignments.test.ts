@@ -107,8 +107,14 @@ test('pedir cambios: queda la nota y la siguiente ejecución (autorizada aparte)
   const a = await define('Crear el archivo EN dos');
   assert.equal((await inject('POST', `${W}/assignments/${a.id}/authorize`, { authorized: true, budgetUsd: 2 })).statusCode, 200);
   const x = await waitFor(() => get(a.id), y => y.status === 'ready_for_review', 'listo');
-  const ch = await inject('POST', `${W}/assignments/${a.id}/changes`, { note: 'Nota del propietario: el valor debe ser 2' });
+  // Con la versión aplicada sin integrar, pedir cambios exige confirmar su descarte (como iterar una historia).
+  const noConfirm = await inject('POST', `${W}/assignments/${a.id}/changes`, { note: 'Nota del propietario: el valor debe ser 2' });
+  assert.equal(noConfirm.statusCode, 409); assert.equal(noConfirm.json().code, 'discard_confirmation_required');
+  const firstBranch = processesRepo(S).get(x.processId)!.result!.applied!.branch;
+  assert.notEqual(execSync(`git branch --list ${firstBranch}`, { cwd: repo }).toString().trim(), '', 'sin confirmar no se toca la rama');
+  const ch = await inject('POST', `${W}/assignments/${a.id}/changes`, { note: 'Nota del propietario: el valor debe ser 2', discardApplied: true });
   assert.equal(ch.statusCode, 200, ch.body); assert.equal(ch.json().status, 'changes_requested');
+  assert.equal(execSync(`git branch --list ${firstBranch}`, { cwd: repo }).toString().trim(), '', 'confirmado: la rama sin integrar se borró');
   script('src/en2.ts', 2);
   assert.equal((await inject('POST', `${W}/assignments/${a.id}/authorize`, { authorized: true, budgetUsd: 2 })).statusCode, 200);
   const y = await waitFor(() => get(a.id), z => z.processIds.length === 2 && !['running', 'pending_authorization'].includes(z.status), 'segunda ejecución');
@@ -119,7 +125,6 @@ test('pedir cambios: queda la nota y la siguiente ejecución (autorizada aparte)
   // Pedir cambios descartó la versión anterior no integrada (como iterar una historia): rechazada, sin worktree ni rama,
   // y ya no se integra; la nueva ejecución terminó (antes chocaba con la rama de la anterior).
   const old = processesRepo(S).get(x.processId)!; assert.ok(old.result!.rejected); assert.ok(!fs.existsSync(old.result!.applied!.worktree!));
-  assert.equal(execSync(`git branch --list ${old.result!.applied!.branch}`, { cwd: repo }).toString().trim() === '' || processesRepo(S).get(y.processId)!.result?.applied?.branch === old.result!.applied!.branch, true);
   assert.equal(y.status, 'ready_for_review', `${y.status}: ${y.reason ?? ''}`);
   const merge = await inject('POST', `${W}/processes/${x.processId}/merge`, { authorized: true });
   assert.equal(merge.statusCode, 409, merge.body);

@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { gauntletReviewed } from '@portal-ia/domain';
 import type { IntegrationCandidate, BranchIntegration, Process } from '@portal-ia/domain';
 import { backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
-import { changesSinceBase, mainBranch, repoRoot, safeRelPath } from './repoWrite.ts';
+import { changesSinceBase, mainBranch, repoRoot, safeRelPath, writablePath } from './repoWrite.ts';
 import { parseFileBlocks } from './devOutput.ts';
 import { FILE_FORMAT, sys } from './storyPrompts.ts';
 import { pausePipeline, PipelinePause, pipelineOf, providerPause, stepCall, storyRunContext, updatePipeline, updateResult } from './storyPipeline.ts';
@@ -104,13 +104,13 @@ export async function prepareCandidate(repoPath: string, worktree: string, branc
       const r = resolutions?.find(x => x.path === p);
       if (!r) throw fail(409, `Falta la resolución de ${p}: no se integra a medias.`, 'unresolved');
       if (MARKER.test(r.content)) throw fail(422, `La resolución de ${p} aún contiene marcadores de conflicto.`, 'markers_left');
-      const abs = path.join(worktree, safeRelPath(p));
+      const abs = writablePath(worktree, p);
       const crlf = fs.existsSync(abs) && /\r\n/.test(fs.readFileSync(abs, 'utf8').slice(0, 4000));
       fs.writeFileSync(abs, crlf ? r.content.replace(/\r?\n/g, '\r\n') : r.content, 'utf8');
       await must(worktree, ['add', '--', p]);
     }
     if (lines(await must(worktree, ['diff', '--name-only', '--diff-filter=U'])).length) throw fail(409, 'Quedan archivos sin resolver.', 'unresolved');
-    for (const p of unmerged) { const c = fs.readFileSync(path.join(worktree, safeRelPath(p)), 'utf8'); if (MARKER.test(c)) throw fail(422, `${p} aún contiene marcadores de conflicto.`, 'markers_left'); }
+    for (const p of unmerged) { const c = fs.readFileSync(writablePath(worktree, p), 'utf8'); if (MARKER.test(c)) throw fail(422, `${p} aún contiene marcadores de conflicto.`, 'markers_left'); }
     await must(worktree, [...GIT_ID, 'commit', '--no-edit', '-m', msg]);
   } catch (e) {
     await run(worktree, ['merge', '--abort']);

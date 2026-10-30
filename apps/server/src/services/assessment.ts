@@ -108,7 +108,7 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
       const agent = agents.get(step.agentId)!;
       const providerId = agent.config.provider as ProviderId;
       const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-      const cc = agentCaller(slug, agent, proc.projectId, 'Evaluación inicial');
+      const cc = agentCaller(slug, agent, proc.projectId, 'Evaluación inicial', proc.id);
       if (!cc && (!cred || prow.status !== 'connected')) { procs.stepFinish(step.id, 'failed', { error: 'proveedor no conectado' }); finalStatus = 'failed'; finalError = `El proveedor ${providerId} no está conectado.`; continue; }
       const models: { id: string; supportsEffort: boolean }[] = JSON.parse(prow.models_json);
       const modelInfo = models.find(m => m.id === agent.config.model);

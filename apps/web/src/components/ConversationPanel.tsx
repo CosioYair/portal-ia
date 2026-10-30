@@ -205,7 +205,7 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
   const [a, setA] = useState<AssignmentView | null>(initial ?? null);
   const [pre, setPre] = useState<AssignmentAuthPreview | null>(null);
   const [budget, setBudget] = useState(''); const [calls, setCalls] = useState(''); const [mode, setMode] = useState<'' | 'off' | 'standard' | 'deep'>(''); // '' = lo que resuelve el Portal (la vista previa)
-  const [ok, setOk] = useState(false); const [note, setNote] = useState(''); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState(false); const [note, setNote] = useState(''); const [discard, setDiscard] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
   const load = () => api.assignment(slug, assignmentId).then(setA).catch(e => setErr(e.message));
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, assignmentId]);
@@ -246,8 +246,9 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
           <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void act(() => api.acceptAssignment(slug, a.id, note.trim() || null), `${a.code} aceptado`)}>Aceptar</button>
           <label className="sr" htmlFor={`en-${a.id}`}>Qué cambiar</label>
           <input id={`en-${a.id}`} className="input" style={{ flex: 1, minWidth: 180, height: 30 }} value={note} onChange={e => setNote(e.target.value)} placeholder="Qué cambiar (para pedir cambios)" />
-          <button type="button" className="btn btn-ghost btn-sm" disabled={busy || note.trim().length < 3} onClick={() => void act(() => api.requestAssignmentChanges(slug, a.id, note.trim()), 'Cambios pedidos: autoriza la siguiente iteración')}>Pedir cambios</button>
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy || note.trim().length < 3 || !discard} onClick={() => void act(() => api.requestAssignmentChanges(slug, a.id, note.trim(), discard), 'Cambios pedidos: autoriza la siguiente iteración')}>Pedir cambios</button>
         </div>
+        <label className="ck small"><input className="cb" type="checkbox" checked={discard} onChange={e => setDiscard(e.target.checked)} /><span>Para pedir cambios, descarto esta versión (su worktree y su rama sin integrar).</span></label>
         <div className="small muted">Aceptar exige lo mismo que cerrar una historia (aplicado, verificado, probado); integrar en main sigue siendo una decisión aparte. Pedir cambios descarta esta versión (su rama sin integrar) y prepara otra ejecución desde main con tu nota, que autorizas aparte.</div>
       </div>}
       {['draft', 'changes_requested', 'needs_owner', 'failed', 'ready_for_review'].includes(a.status) && <div><button type="button" className="lnk small" disabled={busy} onClick={() => void act(() => api.cancelAssignment(slug, a.id), `${a.code} cancelado`)}>cancelar el encargo</button></div>}

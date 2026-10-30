@@ -107,6 +107,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       else if (a.id === 'reject') { const reason = prompt('¿Por qué rechazas esta iteración? (la historia vuelve a pendiente)', issue?.title ?? 'replanteada'); if (reason === null) return; onChange(await api.rejectProcess(slug, proc.id, reason.trim() || undefined)); }
       else if (a.id === 'close' && itemId) { await api.markStoryDone(slug, itemId); flash('Historia completada'); await reload(); }
       else if (a.id === 'close_resolved' && itemId) { const reason = prompt('Cerrar como resuelta: indica brevemente por qué (queda registrado).', 'Lo pedido ya funciona en el Portal'); if (reason === null) return; await api.markStoryDone(slug, itemId, { force: true, reason: reason.trim() || 'resuelta fuera del flujo' }); await reload(); }
+      else if (a.id === 'accept_plan') { onChange(await api.acceptPlan(slug, proc.id, Math.max(0, Number(addBudget) || 0))); flash('Se implementa el plan aceptado; lo pendiente queda documentado'); }
       else if (a.id === 'retry_process') { const p = await api.retryProcess(slug, proc.id); flash('Proceso nuevo creado: elige el presupuesto y autorízalo'); navigate(`/procesos/${p.id}`); }
       else if (a.id === 'pipeline_resume' || a.id === 'repair_output') {
         const add = a.requires.includes('ai_budget') ? Math.max(0, Number(addBudget) || 0) : 0;

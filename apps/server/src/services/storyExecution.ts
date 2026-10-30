@@ -197,7 +197,9 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   const direction = phase ? `${phaseContext(slug, project.id, 16000)}${synthesis ? `\n\n${synthesis}` : ''}` : synthesis;
   // Pipeline autorizado (si el propietario lo incluyó al autorizar): aplicar, verificar, QA con evidencia y correcciones acotadas.
   const config = proc.result?.pipeline?.config ?? null;
-  const result: ExecutionResult = { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: proc.result?.team ?? null, consultations: [], iterationContext: proc.result?.iterationContext ?? null, pipeline: config ? newPipeline(config) : null, failure: null };
+  // Plan aceptado por el propietario tras una pausa de la revisión: se reutiliza (ni otro plan ni otra revisión).
+  const accepted = proc.result?.gauntlet?.planReview?.ownerAccepted && proc.result.plan ? proc.result.plan : null;
+  const result: ExecutionResult = { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: proc.result?.team ?? null, consultations: [], iterationContext: proc.result?.iterationContext ?? null, pipeline: config ? newPipeline(config) : null, failure: null, ...(accepted ? { gauntlet: proc.result!.gauntlet } : {}) };
   const iterText = result.iterationContext ? `\n# Contexto de iteración (feedback del propietario y estado anterior; OBLIGATORIO tenerlo en cuenta)\n${result.iterationContext}\n` : '';
   const involved = Array.from(new Set(proc.steps.map(s => s.agentId)));
   const roleStep = (role: TeamRole) => { const st = stepByRole(proc, role); if (!st) throw new Error(`El proceso no tiene paso de ${role}.`); return st; };
@@ -210,7 +212,8 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   // Plazo y reintentos del proceso (si el propietario los fijó al autorizar) también para el plan y la implementación.
   const call = (stepId: string, system0: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[], operation?: string) => callAgentStep(slug, processId, stepId, system0, user, maxTokens, { history, injected, log, timeoutSec: config?.providerTimeoutSec ?? null, retries: config?.maxProviderRetries ?? null, operation });
   // Antes de la entrega el resultado vive en este objeto: al guardarlo se conservan los reintentos que la llamada anotó en la base.
-  const save = () => { const saved = procs.get(processId)?.result?.pipeline; if (result.pipeline && saved?.providerRetries) result.pipeline = { ...result.pipeline, providerRetries: saved.providerRetries }; procs.setResult(processId, result); };
+  // Lo que otras etapas guardan directamente (registro Gauntlet, revisión del plan, eventos) no se pisa con el objeto local.
+  const save = () => { const cur = procs.get(processId)?.result; const saved = cur?.pipeline; if (cur?.gauntlet) result.gauntlet = cur.gauntlet; if (result.pipeline && saved && (saved.events?.length ?? 0) > (result.pipeline.events?.length ?? 0)) result.pipeline = { ...result.pipeline, events: saved.events }; if (result.pipeline && saved?.providerRetries) result.pipeline = { ...result.pipeline, providerRetries: saved.providerRetries }; procs.setResult(processId, result); };
   const cancelled = () => { if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true }); };
   let runCtx: StoryRunCtx | null = null;
 
@@ -218,14 +221,14 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
     // 1 · Plan técnico
     cancelled();
     const planStep = roleStep('planner'); const coord = agents.get(planStep.agentId)!;
-    const planRes = await call(planStep.id, sys(coord, project, item),
+    const planRes = accepted ? { text: JSON.stringify(accepted), stopReason: 'end_turn' } as any : await call(planStep.id, sys(coord, project, item),
       `Elabora el plan técnico para implementar esta historia en el repositorio. Sé concreto: qué archivos hay que leer, qué archivos hay que crear o modificar y qué tareas en orden. Mantén el alcance mínimo que cumpla el criterio de aceptación.
 ${direction ? `\n# Dirección del proyecto (${phase ? 'etapa vigente y línea base' : 'síntesis previa'})\n${direction}\n` : ''}${iterText}
 ${treeText}
 
 El equipo implementará por partes (unidades que caben en una respuesta), así que indica también, por cada archivo a crear o modificar, su propósito, tipo y tamaño previsto en líneas.
 Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "deliverables": [{"path": string, "purpose": string (una frase), "kind": "code"|"test"|"docs"|"config", "estimatedLines": number}] (uno por cada ruta de filesToChange, en orden de dependencia), "acceptance": string[], "risks": string[]}`, 4000);
-    let plan: StoryPlan = planFrom(extractJson(planRes.text), planRes.text.slice(0, 500));
+    let plan: StoryPlan = accepted ?? planFrom(extractJson(planRes.text), planRes.text.slice(0, 500));
     // Entrega incremental: un plan sin entregables legibles (JSON cortado o mal formado) se pide UNA vez más, compacto y en
     // el mismo paso; nunca se convierte en una respuesta enorme del Desarrollador con la historia entera.
     if (config?.autoApply && !planHasFiles(plan)) {
@@ -246,7 +249,7 @@ Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": st
       if (problem) { handedOff = true; throw new PipelinePause('plan', problem); }
       // Gauntlet en la planificación: revisión independiente del plan ANTES de pagar consultas e implementación.
       try {
-        plan = await (await import('./gauntlet.ts')).planReviewStage(runCtx, config, plan, async gaps => {
+        if (!accepted) plan = await (await import('./gauntlet.ts')).planReviewStage(runCtx, config, plan, async gaps => {
           const res = await call(planStep.id, sys(coord, project, item), `Revisa tu plan técnico con las brechas que señaló el revisor independiente (cada una con su evidencia). Corrige SOLO lo necesario para cubrir todos los criterios de aceptación; no amplíes el alcance.
 # Brechas
 ${gaps.map((g, i) => `${i + 1}. [${g.severity}] ${g.text}${g.evidence ? ` · evidencia: ${g.evidence}` : ''}${g.fix ? ` · propuesta: ${g.fix}` : ''}`).join('\n')}
@@ -502,7 +505,7 @@ export async function generateManualTest(slug: string, processId: string, log: (
   const item = workItemOf(slug, proc) ?? undefined;
   const providerId = agent.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-  const cc = agentCaller(slug, agent, proc.projectId, 'Prueba manual');
+  const cc = agentCaller(slug, agent, proc.projectId, 'Prueba manual', proc.id);
   if (!cc && (!cred || prow.status !== 'connected')) throw Object.assign(new Error(`El proveedor ${providerId} no está conectado.`), { statusCode: 409 });
   const models: ModelInfo[] = JSON.parse(prow.models_json);
   const r = proc.result!;

@@ -115,7 +115,9 @@ export interface PlanReviewRound {
   decision: 'proceed' | 'revise' | 'pause';
   reason: string;
 }
-export interface PlanReviewState { rounds: PlanReviewRound[]; status: 'pending' | 'approved' | 'approved_with_gaps' | 'paused' | 'skipped'; reason: string | null }
+export interface PlanReviewState { rounds: PlanReviewRound[]; status: 'pending' | 'approved' | 'approved_with_gaps' | 'paused' | 'skipped'; reason: string | null;
+  /** El propietario aceptó el plan pausado con sus brechas: se implementa tal cual (sin repetir el plan ni la revisión). */
+  ownerAccepted?: boolean }
 
 /**
  * ¿Merece revisión independiente este plan? Adaptativo: en «profundo», siempre; en «estándar», solo si el plan es de
@@ -137,6 +139,8 @@ export function parsePlanReview(text: string): Pick<PlanReviewRound, 'verdict' |
     return { severity: PLAN_SEV[g?.severity] ?? 'minor', criterion: typeof g?.criterion === 'string' ? g.criterion.slice(0, 300) : null, text: String(g?.text ?? '').slice(0, 600), evidence, fix: typeof g?.fix === 'string' ? g.fix.slice(0, 600) : null, unsupported: !evidence };
   }).filter((g: PlanReviewGap) => g.text.trim());
   const coverage = (Array.isArray(j.coverage) ? j.coverage : []).slice(0, 30).map((c: any) => ({ criterion: String(c?.criterion ?? '').slice(0, 400), covered: ['yes', 'partial', 'no'].includes(c?.covered) ? c.covered : 'no', evidence: String(c?.evidence ?? '').slice(0, 600) }));
+  // Un criterio que el plan no cubre (con su evidencia) es una brecha bloqueante aunque el revisor no la haya listado.
+  for (const c of coverage) if (c.covered === 'no' && c.evidence.trim().length >= 6 && !gaps.some(g => !g.unsupported && g.criterion && g.criterion.toLowerCase() === c.criterion.toLowerCase())) gaps.push({ severity: 'blocking', criterion: c.criterion, text: `El plan no cubre el criterio: ${c.criterion}`, evidence: c.evidence, fix: null, unsupported: false });
   let verdict: PlanReviewRound['verdict'] = j.verdict;
   if (verdict === 'approve' && gaps.some(g => g.severity === 'blocking' && !g.unsupported)) verdict = 'revise';
   return { verdict, coverage, gaps };
@@ -276,7 +280,8 @@ export function gauntletOverhead(cfg: GauntletConfig): { evaluations: { min: num
   // Máximo honesto: evaluaciones del resultado + revisiones del plan (1 + sus revisiones) + un diagnóstico independiente;
   // correcciones dirigidas + revisiones del plan (se ponderan como una corrección: estimación por encima, nunca por debajo).
   const planRevisions = cfg.mode === 'deep' ? 2 : 1;
-  return { evaluations: { min: 1, max: cfg.maxRounds + 1 + planRevisions + 1 + 1 }, corrections: { min: 0, max: cfg.maxRounds + planRevisions } };
+  const diagnoses = Math.max(1, Math.floor(cfg.maxRounds / 2)); // uno por brecha repetida distinta
+  return { evaluations: { min: 1, max: cfg.maxRounds + 1 + planRevisions + 1 + diagnoses }, corrections: { min: 0, max: cfg.maxRounds + planRevisions } };
 }
 
 /**

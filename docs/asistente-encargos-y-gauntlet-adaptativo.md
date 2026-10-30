@@ -205,3 +205,57 @@ igual que con las historias.
   propuestas, cuestionamientos e historias depende del modelo y no se ha medido.
 - **Docker:** la versión final de la corrección de pruebas inestables no se ha ejecutado aún en el sandbox (ver
   Verificación).
+
+## Puerta de estabilización (31 de octubre de 2026)
+
+**Seguridad.** Una sola comprobación de lectura (`resolveReadable`) para el puente MCP y el contexto que el pipeline
+envía a los modelos, y una de escritura (`writablePath`) para aplicar, confirmar e integrar:
+- se rechazan: mayúsculas distintas, nombres cortos 8.3, flujos alternativos (`::$DATA`), punto o espacio final, `..`,
+  rutas absolutas y `\?\`;
+- la ruta REAL del sistema debe quedar dentro de la carpeta y no ser protegida;
+- en las escrituras, ningún tramo puede ser un enlace o una unión.
+
+Protegidos para leer y para escribir:
+- `.env*` (salvo `.example`/`.sample`/`.template`), `.git` (también anidado), `data/` y `node_modules/` en la raíz;
+- `.npmrc`, `.ssh`, `.aws`, `.claude`, `secrets/`, `.netrc`, `.git-credentials`, `.pypirc` y `.envrc`;
+- claves privadas.
+
+Además, ningún git que lance el Portal ejecuta hooks del repositorio (`GIT_CONFIG_*` → `core.hooksPath` vacío): un hook
+versionado editado por un agente no corre en el equipo. Prueba `security-paths.test.ts`:
+- usa marcadores sintéticos que el detector de secretos no reconoce, los nombres cortos REALES del volumen, una unión
+  real y un flujo alternativo real;
+- recorre cada alias por cada camino (read_file, search, diff, lista, contexto del pipeline, escritura, HTTP codificado);
+- incluye escrituras a través de una unión y un hook versionado, este con control positivo.
+
+Contra el código anterior falla, por ejemplo con «.env » (espacio final), que la validación de escritura aceptaba.
+
+**Tope de llamadas a la suscripción.** Se comprueba antes de CADA ejecución de la CLI contra el registro duradero
+`claude_code_runs`, en el mismo tramo síncrono que la registra, así que no hay carreras. Cuentan también las fallidas y las
+interrumpidas. Cubre reintentos, continuaciones, QA, Gauntlet, encargos de análisis, evaluaciones, pruebas manuales y la
+consola. Antes, los encargos de análisis llegaban sin proceso y su tope no se aplicaba. Se aplica el tope del proceso y el
+del lote. Al alcanzarlo no se llama, no se reintenta ni se cede a la API, y la parada ofrece ampliar el tope.
+
+**Gauntlet en la planificación y diagnóstico.** Se describen en la fase C; quedan completados con:
+- «Seguir con este plan (decides tú)» tras una pausa de la revisión, sin repetir el plan ni la revisión;
+- un criterio no cubierto (con evidencia) que cuenta como brecha bloqueante;
+- un registro que ya no se pierde al guardar.
+
+**Encargos.** Pedir cambios con una versión aplicada sin integrar exige confirmar su descarte (como iterar una historia).
+Se retiran el worktree y la rama sin integrar. Antes, la segunda ejecución fallaba porque la rama seguía en uso.
+
+**Revisión independiente (tercera).** 3 hallazgos mayores y 6 menores. Corregidos:
+- el tope no se aplicaba a los encargos de análisis;
+- las escrituras seguían enlaces fuera del worktree;
+- no había forma de seguir tras la pausa del plan;
+- el registro y los eventos de la revisión se perdían;
+- el descarte de rama no pedía confirmación;
+- la protección de escritura era estrecha y faltaban nombres de credenciales;
+- la cobertura «no» se ignoraba y la prueba de revisión del plan no distinguía el plan revisado;
+- la estimación suponía un solo diagnóstico.
+
+**Pendientes:**
+- si falla la llamada de diagnóstico, la evaluación de esa ronda se vuelve a pagar al continuar;
+- la cita de evidencia del revisor del plan no se comprueba contra el texto del plan;
+- el paso del planificador muestra solo el coste de su última llamada (el total del proceso es correcto).
+
+**Docker.** Ver «Verificación» en `IMPLEMENTATION_HANDOFF.md`.

@@ -160,12 +160,13 @@ export async function acceptAssignment(slug: string, id: string, note: string | 
  * descarta (se retira su worktree y su rama sin integrar; nunca el checkout principal) y queda la nota; la siguiente
  * ejecución parte de main con la nota y el resultado anterior como contexto, y se autoriza aparte.
  */
-export async function requestAssignmentChanges(slug: string, id: string, note: string): Promise<Assignment> {
+export async function requestAssignmentChanges(slug: string, id: string, note: string, opts: { discardApplied?: boolean } = {}): Promise<Assignment> {
   const a = syncAssignment(slug, id); if (!a) throw fail(404, 'Encargo no encontrado.', 'not_found');
   if (!['ready_for_review', 'needs_owner', 'failed'].includes(a.status)) throw fail(409, `No se piden cambios a un encargo ${ASSIGNMENT_STATUS_LABEL[a.status]}.`, 'invalid_state');
   const p = a.processId ? processesRepo(slug).get(a.processId) : undefined;
   let discarded = '';
   if (p?.result?.applied?.worktree && !p.result.merged && !p.result.rejected) {
+    if (!opts.discardApplied) throw fail(409, `La versión entregada está aplicada en ${p.result.applied.branch} sin integrar. Pedir cambios la descarta (worktree y rama): confírmalo explícitamente.`, 'discard_confirmation_required');
     const repo = projectsRepo(slug).repository(a.projectId);
     if (repo) {
       requirePolicy('delete_worktree', { slug, processId: p.id, projectId: a.projectId, authorized: true });

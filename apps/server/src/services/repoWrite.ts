@@ -1,3 +1,4 @@
+import '../gitSafety.ts';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -13,7 +14,10 @@ const execFileP = promisify(execFile);
  * (herramientas de riesgo `auth`). Las escrituras van a una rama de trabajo propia y se confirman en git para que
  * todo cambio sea revisable y reversible. Nunca se toca `.git`, `data/`, `node_modules/`, ni archivos con secretos.
  */
-const FORBIDDEN = [/^\.git(\/|$)/i, /^data(\/|$)/i, /^node_modules(\/|$)/i, /(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?$/i, /\.(key|pem|p12|pfx)$/i, /(^|\/)\.master\.key$/i];
+const FORBIDDEN = [/^\.git(\/|$)/i, /^data(\/|$)/i, /^node_modules(\/|$)/i, /(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?$/i, /\.(key|pem|p12|pfx)$/i, /(^|\/)\.master\.key$/i,
+  // Credenciales y configuración local: tampoco se ESCRIBEN (un agente podría redirigir el registro de paquetes o colar una clave).
+  /(^|\/)\.git(\/|$)/i, /(^|\/)\.npmrc$/i, /(^|\/)\.(ssh|aws|claude)(\/|$)/i, /(^|\/)secrets?(\/|$)/i, /(^|\/)\.credentials\.json$/i,
+  /(^|\/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i, /(^|\/)\.(netrc|git-credentials|pypirc|envrc)$/i, /(^|\/)\.env[-_](?!example$|sample$|template$)[^/]*$/i];
 
 /** Patrones de secretos que no deben entrar en un repositorio (aviso, no bloqueo: el propietario decide). */
 const SECRET_PATTERNS: [RegExp, string][] = [
@@ -115,6 +119,28 @@ export function readRepoFile(repoPath: string, rel: string, maxChars = 60_000): 
   try { const r = resolveReadable(repoRoot(repoPath), rel); if (!('abs' in r) || !fs.statSync(r.abs).isFile()) return null; const c = fs.readFileSync(r.abs, 'utf8'); return c.length > maxChars ? c.slice(0, maxChars) + '\n… (truncado)' : c; } catch { return null; }
 }
 
+/**
+ * Ruta de ESCRITURA (o borrado) dentro de `root`: segura (safeRelPath) y sin enlaces simbólicos ni uniones en ningún tramo
+ * existente, con el ancestro existente más profundo dentro de la carpeta según el sistema. Un enlace creado dentro del
+ * worktree (p. ej. por código del agente durante la verificación) nunca saca una escritura ni un borrado de la carpeta.
+ */
+export function writablePath(root: string, rel: string): string {
+  const norm = safeRelPath(rel);
+  const realRoot = fs.realpathSync.native(root);
+  const deny = (why: string) => Object.assign(new Error(`Ruta no permitida (${why}): ${rel}`), { statusCode: 400 });
+  let cur = realRoot;
+  for (const seg of norm.split('/')) {
+    cur = path.join(cur, seg);
+    let st: fs.Stats; try { st = fs.lstatSync(cur); } catch { break; } // lo que aún no existe se crea dentro
+    if (st.isSymbolicLink()) throw deny('enlace o unión');
+  }
+  const abs = path.join(realRoot, norm);
+  let anc = abs; while (!fs.existsSync(anc) && anc !== realRoot) anc = path.dirname(anc);
+  const inside = path.relative(realRoot, fs.realpathSync.native(anc));
+  if (inside.startsWith('..') || path.isAbsolute(inside)) throw deny('fuera de la carpeta');
+  return abs;
+}
+
 export interface RawChange { path: string; action: 'create' | 'modify' | 'delete' | 'patch'; content: string | null; edits?: { search: string; replace: string }[] }
 
 /**
@@ -214,7 +240,7 @@ export async function applyChanges(repoPath: string, branch: string, changes: Pr
   try {
     for (const c of changes) {
       if (c.error) continue; // cambios inválidos: se muestran en la revisión pero no se escriben
-      const abs = path.join(wt, safeRelPath(c.path));
+      const abs = writablePath(wt, c.path);
       if (c.action === 'delete') { if (fs.existsSync(abs)) fs.rmSync(abs); }
       else {
         fs.mkdirSync(path.dirname(abs), { recursive: true });
@@ -245,7 +271,7 @@ export async function commitInWorktree(wt: string, changes: ProposedChange[], me
   const files: string[] = [];
   for (const c of changes) {
     if (c.error) continue;
-    const abs = path.join(wt, safeRelPath(c.path));
+    const abs = writablePath(wt, c.path);
     if (c.action === 'delete') { if (fs.existsSync(abs)) fs.rmSync(abs); }
     else {
       fs.mkdirSync(path.dirname(abs), { recursive: true });

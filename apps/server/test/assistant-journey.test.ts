@@ -141,7 +141,7 @@ test('recorrido completo del Asistente con el sandbox Docker real (sin omitir Do
   assert.equal(stories(), s1, 'el encargo no crea historias'); assert.equal(git('rev-parse', 'main'), mainHead, 'nunca integra solo en main');
   assert.match(p1.result!.applied!.branch, /en-\d{3}/i);
   // 10 · Revisar y pedir cambios: la siguiente ejecución se autoriza aparte y recibe la nota.
-  assert.equal((await json('POST', `${E}/changes`, { note: 'Nota del propietario: usa una coma después de Hola' })).status, 200);
+  assert.equal((await json('POST', `${E}/changes`, { note: 'Nota del propietario: usa una coma después de Hola', discardApplied: true })).status, 200);
   assert.equal((await json('POST', `${E}/authorize`, { authorized: true, budgetUsd: 3, allowInstall: true, gauntlet: { mode: 'standard' } })).status, 200);
   a = await waitFor(async () => (await json('GET', E)).body, v => v.processIds.length === 2 && !['running', 'pending_authorization'].includes(v.status), 'segunda ejecución', 600_000);
   assert.equal(a.status, 'ready_for_review', `${a.status}: ${a.reason ?? ''}`);

@@ -367,7 +367,7 @@ export interface FlowIssue {
 export type FlowActionId =
   | 'authorize' | 'cancel' | 'review_diff' | 'apply' | 'reject' | 'install_and_retry' | 'verify' | 'retry_verification'
   | 'sandbox_help' | 'refresh_sandbox' | 'request_fix' | 'ask_team' | 'tasks_from_issue' | 'merge' | 'rebuild'
-  | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'retry_process' | 'recover' | 'new_iteration'
+  | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'accept_plan' | 'retry_process' | 'recover' | 'new_iteration'
   | 'pipeline_resume' | 'repair_output'
   /** Conector Claude Code: autorizar el proyecto o pasar a «gestionado» los agentes sin consola, y continuar (sin repetir lo hecho). */
   | 'claude_code_fix'

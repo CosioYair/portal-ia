@@ -175,7 +175,7 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
     const step = proc.steps[stepIdx]; const agent = agents.get(step.agentId)!;
     const providerId = agent.config.provider as ProviderId;
     const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-    const cc = agentCaller(slug, agent, projectId, 'Encargo');
+    const cc = agentCaller(slug, agent, projectId, 'Encargo', processId);
     if (!cc && (!cred || prow.status !== 'connected')) throw new Error(`El proveedor ${providerId} no está conectado.`);
     const models: ModelInfo[] = JSON.parse(prow.models_json);
     const cur = procs.get(processId)!; const p = estimatePricing(providerId, agent.config.model);

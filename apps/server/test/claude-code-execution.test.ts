@@ -334,12 +334,15 @@ test('tope comprobado en CADA ejecución: concurrentes sin carreras, reintentos 
   // Un reintento del mismo paso es otra ejecución: también se rechaza sin llamar.
   await assert.rejects(claudeCodeComplete(target, req(99), new AbortController().signal, () => {}), (e: any) => code(e) === 'call_cap');
   assert.equal(ccRuns().length, 2);
-  // Encargo de análisis (sin pipeline): su tope vive en el proceso y se cuenta igual.
+  // Encargo de análisis (sin pipeline): por el MISMO camino que usan los encargos, evaluaciones y pruebas manuales
+  // (agentCaller con el proceso); su tope vive en el proceso y se cuenta igual.
+  const { agentCaller } = await import('../src/services/claudeCode/backend.ts');
   const d = processesRepo(S).create({ projectId: project.id, kind: 'delegated_task', title: 'análisis con tope', estimatedUsd: 0, steps: [] });
   processesRepo(S).setCallCap(d.id, 1); processesRepo(S).authorize(d.id, 1);
-  const t2 = { ...target, processId: d.id, stepId: null };
-  await claudeCodeComplete(t2, req(10), new AbortController().signal, () => {});
-  await assert.rejects(claudeCodeComplete(t2, req(11), new AbortController().signal, () => {}), (e: any) => code(e) === 'call_cap' && /tope 1/.test(e.message ?? e.error?.message));
+  const cc = agentCaller(S, agent, project.id, 'Encargo', d.id)!;
+  await cc.complete(req(10));
+  await assert.rejects(cc.complete(req(11)), (e: any) => code(e) === 'call_cap' && /tope 1/.test(e.message ?? e.error?.message));
+  assert.equal(runsRepo(S).countForProcesses([d.id]), 1, 'la ejecución queda ligada al proceso del encargo');
   assert.equal(ccRuns().length, 3, 'solo la primera del análisis se ejecutó');
   processesRepo(S).finish(d.id, 'done'); processesRepo(S).finish(p.id, 'cancelled', 'fin de la prueba');
 });
