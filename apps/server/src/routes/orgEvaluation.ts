@@ -5,18 +5,20 @@ import { PolicyError } from '../services/executionPolicy.ts';
 import { clearCancel, isCancelled } from '../services/assessment.ts';
 import { trackJob } from '../services/activeJobs.ts';
 import { createOrgEvaluation, decideProposal, estimateOrgEvaluation, getOrgEvaluation, listOrgEvaluations, runOrgEvaluation } from '../services/orgEvaluation.ts';
-import { revertProposal } from '../services/orgProposalApply.ts';
+import { reapplyProposal, reopenProposal, revertProposal } from '../services/orgProposalApply.ts';
 
 /** HU-159 · Evaluación organizativa. Solo POST /org-evaluations llama a la IA, con autorización explícita y presupuesto. */
 const idSchema = z.string().min(1).max(100);
 const estimateQuery = z.object({ projectId: idSchema.optional(), anchorProjectId: idSchema.optional() });
 const listQuery = z.object({ projectId: idSchema.optional(), scope: z.enum(['workspace', 'project', 'all']).optional() });
 const startBody = z.object({ projectId: idSchema.nullable().optional(), anchorProjectId: idSchema.nullable().optional(), budgetUsd: z.number().finite().positive().max(1000), authorized: z.literal(true) });
-// Aceptar aplica cambios estructurales (sin costo de IA): exige confirmación explícita (confirm: true), igual que deshacer.
-// Rechazar solo registra la decisión y no la necesita.
-// La exigencia se comprueba en el servicio: solo cuando aceptar va a aplicar cambios (las propuestas sin spec solo registran).
+// Aceptar aplica cambios estructurales (sin costo de IA) y exige confirmación explícita (confirm: true), igual que deshacer.
+// Rechazar también la exige: sin ella, el servicio responde 400 confirmation_required y la propuesta sigue pendiente.
+// La exigencia se comprueba en el servicio (las propuestas sin spec solo registran la decisión al aceptarlas).
 const decisionBody = z.object({ decision: z.enum(['accepted', 'rejected']), confirm: z.boolean().optional() });
 const undoBody = z.object({ confirm: z.literal(true) });
+const confirmBody = z.object({ confirm: z.literal(true) });
+const proposalParams = z.object({ id: idSchema, proposalId: idSchema });
 
 export async function orgEvaluationRoutes(app: FastifyInstance) {
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
@@ -77,5 +79,25 @@ export async function orgEvaluationRoutes(app: FastifyInstance) {
     const body = undoBody.safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Deshacer requiere confirmación explícita (confirm: true).', code: 'confirmation_required' });
     try { return revertProposal(slug, params.data.id, params.data.proposalId); } catch (e: any) { return fail(reply, e); }
+  });
+
+  /** Reabre una propuesta rechazada (vuelve a pendiente). Sin IA; exige confirmación explícita. 409 si no está rechazada. */
+  app.post('/api/workspaces/:slug/org-evaluations/:id/proposals/:proposalId/reopen', async (req, reply) => {
+    const { slug, id, proposalId } = req.params as any; if (!guard(slug, reply)) return;
+    const params = proposalParams.safeParse({ id, proposalId });
+    if (!params.success) return reply.code(400).send({ error: 'Identificadores no válidos' });
+    const body = confirmBody.safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Reabrir requiere confirmación explícita (confirm: true).', code: 'confirmation_required' });
+    try { return reopenProposal(slug, params.data.id, params.data.proposalId, true); } catch (e: any) { return fail(reply, e); }
+  });
+
+  /** Vuelve a aplicar una propuesta deshecha, validada contra la organización actual. Sin IA; exige confirmación. 409 si no está revertida y 422 si el sujeto ya no es válido. */
+  app.post('/api/workspaces/:slug/org-evaluations/:id/proposals/:proposalId/reapply', async (req, reply) => {
+    const { slug, id, proposalId } = req.params as any; if (!guard(slug, reply)) return;
+    const params = proposalParams.safeParse({ id, proposalId });
+    if (!params.success) return reply.code(400).send({ error: 'Identificadores no válidos' });
+    const body = confirmBody.safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Volver a aplicar requiere confirmación explícita (confirm: true).', code: 'confirmation_required' });
+    try { return reapplyProposal(slug, params.data.id, params.data.proposalId, true); } catch (e: any) { return fail(reply, e); }
   });
 }

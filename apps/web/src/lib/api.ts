@@ -143,9 +143,15 @@ export const api = {
     return request<OrgEvaluationView[]>(`/api/workspaces/${slug}/org-evaluations${qs ? `?${qs}` : ''}`);
   },
   orgEvaluation: (slug: string, id: string) => request<OrgEvaluationView>(`/api/workspaces/${slug}/org-evaluations/${encodeURIComponent(id)}`),
-  /** Aceptar APLICA la propuesta (crea, ajusta o retira agentes, sin costo de IA, con «Deshacer»); rechazar solo registra la decisión. */
+  /** Aceptar APLICA la propuesta (crea, ajusta o retira agentes, sin costo de IA, con «Deshacer»). Rechazar solo registra la decisión y se puede reabrir. La interfaz confirma antes de llamar, así que siempre se envía confirm. */
   decideOrgProposal: (slug: string, id: string, proposalId: string, decision: Exclude<OrgDecision, 'pending'>) =>
-    request<OrgProposalResult>(`/api/workspaces/${slug}/org-evaluations/${encodeURIComponent(id)}/proposals/${encodeURIComponent(proposalId)}`, { method: 'POST', body: JSON.stringify(decision === 'accepted' ? { decision, confirm: true } : { decision }) }),
+    request<OrgProposalResult>(`/api/workspaces/${slug}/org-evaluations/${encodeURIComponent(id)}/proposals/${encodeURIComponent(proposalId)}`, { method: 'POST', body: JSON.stringify({ decision, confirm: true }) }),
+  /** Reabre una propuesta rechazada: vuelve a pendiente (409 not_rejected si no está rechazada). Sin IA. */
+  reopenOrgProposal: (slug: string, id: string, proposalId: string) =>
+    request<OrgProposalResult>(`/api/workspaces/${slug}/org-evaluations/${encodeURIComponent(id)}/proposals/${encodeURIComponent(proposalId)}/reopen`, { method: 'POST', body: JSON.stringify({ confirm: true }) }),
+  /** Vuelve a aplicar una propuesta deshecha, validada contra la organización actual (422 si el sujeto ya no es válido). Sin IA. */
+  reapplyOrgProposal: (slug: string, id: string, proposalId: string) =>
+    request<OrgProposalResult>(`/api/workspaces/${slug}/org-evaluations/${encodeURIComponent(id)}/proposals/${encodeURIComponent(proposalId)}/reapply`, { method: 'POST', body: JSON.stringify({ confirm: true }) }),
   /** Deshace una propuesta aplicada restaurando el estado previo (409 stale_undo si el agente cambió después). */
   undoOrgProposal: (slug: string, id: string, proposalId: string) =>
     request<OrgProposalResult>(`/api/workspaces/${slug}/org-evaluations/${encodeURIComponent(id)}/proposals/${encodeURIComponent(proposalId)}/undo`, { method: 'POST', body: JSON.stringify({ confirm: true }) }),
