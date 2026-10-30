@@ -25,7 +25,8 @@ const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-fakeccx-'));
 const FAKE = path.join(fakeDir, 'claude.mjs');
 fs.copyFileSync(path.join(here, 'fixtures', 'fake-claude.mjs'), FAKE);
 const ccLog = path.join(fakeDir, 'fake-claude.log.jsonl');
-const scenario = (s: Record<string, unknown>) => { fs.writeFileSync(path.join(fakeDir, 'fake-claude.scenario.json'), JSON.stringify(s)); try { fs.unlinkSync(ccLog); } catch { /* vacío */ } };
+// Volver a un escenario sin límite simula que la suscripción se renovó: el propietario lo confirma (el último informe deja de impedir empezar).
+const scenario = (s: Record<string, unknown>) => { fs.writeFileSync(path.join(fakeDir, 'fake-claude.scenario.json'), JSON.stringify(s)); try { fs.unlinkSync(ccLog); } catch { /* vacío */ } if (s.behavior !== 'limit') void import('../src/services/claudeCode/usage.ts').then(m => m.acknowledgeUsageReport()); };
 const ccRuns = () => fs.existsSync(ccLog) ? fs.readFileSync(ccLog, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)).filter((e: any) => e.kind === 'run') : [];
 scenario({});
 

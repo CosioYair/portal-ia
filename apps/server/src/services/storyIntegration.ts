@@ -10,6 +10,7 @@ import { parseFileBlocks } from './devOutput.ts';
 import { FILE_FORMAT, sys } from './storyPrompts.ts';
 import { pausePipeline, PipelinePause, pipelineOf, providerPause, stepCall, storyRunContext, updatePipeline, updateResult } from './storyPipeline.ts';
 import { monotonicNow } from '../clock.ts';
+import { setWorkStatus } from './workItems.ts';
 
 /**
  * Integración de una historia verificada con la rama principal cuando esta avanzó (HU-159).
@@ -186,7 +187,7 @@ export async function verifyCandidate(slug: string, processId: string, log: (o: 
     else pausePipeline(ctx, new PipelinePause('integration', `No se pudo verificar el candidato de integración: ${e?.message ?? e}. No se llamó a ningún agente y main no cambió.`));
   } finally {
     procs.finish(processId, status, null);
-    backlogRepo(slug).setStatus(ctx.item.id, 'review', processId);
+    setWorkStatus(slug, ctx.item, 'review', processId);
     log({ processId }, 'candidato de integración verificado (sin IA)');
   }
   return procs.get(processId)!;

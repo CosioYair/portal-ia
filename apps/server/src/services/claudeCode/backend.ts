@@ -13,6 +13,7 @@ import { BRIDGE_SCRIPT, ccError, runCliTask, type CliEvent, type CliFailedUsage 
 export { BRIDGE_SCRIPT };
 import { cliCommandFor, findCli, lastDetection, verifiedDetection } from './detect.ts';
 import { getClaudeCodeSettings, projectAuthorized } from './settings.ts';
+import { saveUsageReport, subscriptionGate } from './usage.ts';
 
 /**
  * Backend de ejecución «Claude Code» para los pasos de un proceso autorizado. El agente del Portal conserva su identidad,
@@ -188,6 +189,8 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
     } finally { liveListeners.delete(run.id); }
   }
 
+  // Límite confirmado (sin renovar) u «overage» sin reconocer en el último informe del CLI: no se hace la llamada.
+  const gate = subscriptionGate(); if (!gate.ok) throw ccError('usage_limit', gate.reason);
   // CLI gestionada: la suscripción se comprueba ANTES de cada ejecución (no basta con la del día de la conexión).
   say('Comprobando la sesión de Claude Code (sin llamar al modelo)', 'preparing');
   const det = await verifiedDetection(s);
@@ -209,7 +212,8 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
       if (e.kind === 'init') say(`Claude Code iniciado (${e.model ?? req.model}) · ${label}`, 'waiting');
       else if (e.kind === 'turn') { const m = `Claude Code: turno ${e.turn}${e.tools.length ? ` · ${e.tools.join(', ')}` : ''}`; say(m, 'receiving'); try { runs.progress(run.id, m); } catch { /* sin registro */ } }
       else if (e.kind === 'retry') say(`Claude Code reintenta la llamada (${e.error ?? 'error temporal'}, intento ${e.attempt})`, 'retrying');
-      else if (e.kind === 'rate_limit' && e.info.status === 'allowed_warning') say(`Aviso de Claude Code: cerca del límite de uso${e.info.utilization != null ? ` (${Math.round(e.info.utilization * 100)} %)` : ''}`);
+      // Cada informe de límites del CLI se guarda (también si la llamada falla después): es de la cuenta, no del espacio.
+      else if (e.kind === 'rate_limit') { try { saveUsageReport(e.info, label); } catch { /* sin base */ } if (e.info.status === 'allowed_warning') say(`Aviso de Claude Code: cerca del límite de uso${e.info.utilization != null ? ` (${Math.round(e.info.utilization * 100)} %)` : ''}`); }
     };
     try {
       say(`Enviando el encargo a Claude Code · ${label}`, 'sending');

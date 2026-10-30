@@ -6,8 +6,9 @@ import { Chip, Icon, Notice } from './ui.tsx';
 
 export const GAUNTLET_MODE: Record<GauntletMode, { label: string; help: string }> = {
   off: { label: 'Desactivado', help: 'Verificación del sandbox y QA de siempre.' },
-  standard: { label: 'Estándar', help: 'Una evaluación independiente y, si hace falta, una corrección dirigida.' },
-  deep: { label: 'Profundo', help: 'Varias rondas acotadas (máx. 3) para tareas de riesgo o con fallos previos.' }
+  standard: { label: 'Estándar', help: 'Evaluación independiente y correcciones dirigidas mientras haya progreso (2 autorizadas).' },
+  deep: { label: 'Profundo', help: 'Más rondas, solo con progreso medible (3 autorizadas; ampliable hasta 6) para tareas de riesgo o con fallos previos.' },
+  auto: { label: 'Automático', help: 'El Portal decide la intensidad sin IA (tamaño, riesgo, historial) y te dice por qué.' }
 };
 const STATUS: Record<GauntletState['status'], { label: string; tone: '' | 'ok' | 'warn' | 'err' }> = {
   pending: { label: 'en curso', tone: 'warn' }, passed: { label: 'todos los criterios con evidencia', tone: 'ok' },

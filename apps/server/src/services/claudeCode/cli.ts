@@ -167,7 +167,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
           if (['authentication_failed', 'oauth_org_not_allowed', 'account_on_hold', 'billing_error'].includes(j.error)) stop(ccError('backend_unavailable', `Claude Code no pudo autenticarse con la suscripción (${j.error}). Revisa la sesión con «claude auth status».`));
         } else if (j.type === 'rate_limit_event' && j.rate_limit_info) {
           const i = j.rate_limit_info;
-          rateLimit = { status: String(i.status ?? ''), resetsAt: typeof i.resetsAt === 'number' ? i.resetsAt : null, utilization: typeof i.utilization === 'number' ? i.utilization : null, errorCode: typeof i.errorCode === 'string' ? i.errorCode : null };
+          rateLimit = parseRateLimit(i);
           o.onEvent?.({ kind: 'rate_limit', info: rateLimit });
           // Límite alcanzado: se para sin esperar (ni comprar créditos ni cambiar de origen de facturación).
           if (i.status === 'rejected') stop(limitError(rateLimit));
@@ -282,6 +282,16 @@ export function initProblem(j: any, o: { structured: boolean; mcp: boolean }): s
     if (!portal || portal.status !== 'connected') return `El puente del Portal no se conectó a Claude Code (${portal?.status ?? 'ausente'}).`;
   }
   return null;
+}
+
+/** `rate_limit_info` del CLI oficial → informe del Portal (campos desconocidos se ignoran; nunca se inventan). */
+export function parseRateLimit(i: any): NonNullable<CliTaskResult['rateLimit']> {
+  const num = (v: unknown) => typeof v === 'number' && Number.isFinite(v) ? v : null;
+  const uw = i?.unifiedWindows && typeof i.unifiedWindows === 'object' ? i.unifiedWindows : null;
+  const windows = uw ? Object.entries(uw).filter(([, w]) => w && typeof w === 'object').map(([name, w]: [string, any]) => ({ name, utilization: num(w.utilization), resetsAt: num(w.resetsAt), status: typeof w.status === 'string' ? w.status : null })) : [];
+  const type = typeof i?.rateLimitType === 'string' ? i.rateLimitType : null;
+  const overage = type === 'overage' || i?.isUsingOverage === true;
+  return { status: String(i?.status ?? ''), resetsAt: num(i?.resetsAt), utilization: num(i?.utilization), errorCode: typeof i?.errorCode === 'string' ? i.errorCode : null, rateLimitType: type, windows, overage };
 }
 
 function limitError(rl: CliTaskResult['rateLimit'], detail?: string): ProviderRequestError {

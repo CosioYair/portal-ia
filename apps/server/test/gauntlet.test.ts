@@ -20,7 +20,7 @@ process.env.PORTAL_MOCK_PROVIDER = '1';
 const scriptPath = path.join(process.env.PORTAL_DATA_DIR, 'mock-script.json'); const logPath = path.join(process.env.PORTAL_DATA_DIR, 'mock-log.jsonl');
 process.env.PORTAL_MOCK_SCRIPT = scriptPath; process.env.PORTAL_MOCK_LOG = logPath;
 const { encryptSecret } = await import('../src/security/crypto.ts');
-const { classifyModel, decideGauntlet, gauntletOverhead, normalizeGauntlet, recommendGauntlet } = await import('@portal-ia/domain');
+const { classifyModel, decideGauntlet, gauntletOverhead, normalizeGauntlet, recommendGauntlet, resolveGauntlet } = await import('@portal-ia/domain');
 const { resetMockCalls } = await import('@portal-ia/ai-adapters');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
@@ -47,30 +47,48 @@ test('C · puerta de evidencia: un hallazgo sin evidencia se registra pero no mo
   assert.equal(decideGauntlet(normalizeGauntlet({ mode: 'deep' }), [{ ...onlyVague, decision: 'pass' }], 3).decision, 'pass', 'sin evidencia no hay corrección');
 });
 
-test('D · decisión acotada: límite de rondas, sin progreso, ganancia marginal y sin correcciones autorizadas', () => {
+test('D · continuación por progreso: sigue solo con progreso medible y margen autorizado; sin progreso o sin margen se detiene (y lo dice); nunca sin fin', () => {
   const f = (text: string, severity: 'blocking' | 'major' = 'blocking') => ({ severity, criterion: null, text, file: 'src/a.ts', evidence: 'src/a.ts:1 fragmento', expected: null });
-  const round = (findings: any[], decision: 'pass' | 'correct' | 'stop' = 'pass', anotherRoundWorthIt = true) => ({ verdict: 'gaps' as const, findings, anotherRoundWorthIt, decision });
+  const crit = (met: number, total = 3) => Array.from({ length: total }, (_, i) => ({ criterion: `c${i}`, status: i < met ? 'met' as const : 'unmet' as const, evidence: 'x' }));
+  const round = (findings: any[], decision: 'pass' | 'correct' | 'stop' = 'pass', anotherRoundWorthIt = true, met = 0) => ({ verdict: 'gaps' as const, findings, anotherRoundWorthIt, decision, criteria: crit(met) });
   const std = normalizeGauntlet({ mode: 'standard' });
-  assert.equal(std.maxRounds, 1); assert.equal(normalizeGauntlet({ mode: 'deep', maxRounds: 99 }).maxRounds, 3, 'deep nunca supera 3'); assert.equal(normalizeGauntlet({ mode: 'deep' }).maxRounds, 2);
-  assert.equal(normalizeGauntlet({ mode: 'x' as any }).mode, 'off');
-  const limit = decideGauntlet(std, [round([f('X')], 'correct'), round([f('Y')])], 5);
-  assert.equal(limit.decision, 'stop'); assert.equal(limit.status, 'stopped'); assert.match(limit.reason, /límite de 1/);
-  const same = decideGauntlet(normalizeGauntlet({ mode: 'deep', maxRounds: 3 }), [round([f('Falta doble en a')], 'correct'), round([f('Falta doble en a')])], 5);
-  assert.equal(same.decision, 'stop'); assert.match(same.reason, /misma brecha persiste/);
-  assert.equal(decideGauntlet(normalizeGauntlet({ mode: 'deep', maxRounds: 3 }), [round([f('Falta doble en a')], 'correct'), round([f('Falta doble en a')], 'stop')], 5, { ownerGranted: true }).decision, 'correct', 'el propietario puede conceder otra ronda');
+  assert.equal(std.maxRounds, 2, 'estándar: 2 correcciones autorizadas por defecto');
+  assert.equal(normalizeGauntlet({ mode: 'deep', maxRounds: 99 }).maxRounds, 6, 'tope duro por proceso'); assert.equal(normalizeGauntlet({ mode: 'deep' }).maxRounds, 3);
+  assert.equal(normalizeGauntlet({ mode: 'x' as any }).mode, 'off'); assert.deepEqual(normalizeGauntlet({ mode: 'auto' }), { mode: 'auto', maxRounds: 0 });
+  // Con progreso (más criterios cumplidos) y margen: sigue.
+  assert.equal(decideGauntlet(std, [round([f('X'), f('Y')], 'correct', true, 1), round([f('Y')], 'pass', true, 2)], 5).decision, 'correct');
+  // Sin progreso (mismas medidas y otra brecha) no repite la misma estrategia: se detiene y pide replantear.
+  const flat = decideGauntlet(std, [round([f('X')], 'correct', true, 1), round([f('Otra cosa distinta')], 'pass', true, 1)], 5);
+  assert.equal(flat.decision, 'stop'); assert.match(flat.reason, /Sin progreso.*Replantea/);
+  const same = decideGauntlet(normalizeGauntlet({ mode: 'deep' }), [round([f('Falta doble en a')], 'correct', true, 0), round([f('Falta doble en a')], 'pass', true, 2)], 5);
+  assert.equal(same.decision, 'stop', 'la misma brecha no cuenta como progreso aunque cambien otras medidas'); assert.match(same.reason, /la misma brecha/);
+  // Margen autorizado agotado CON progreso: se detiene diciendo que hubo progreso y que puedes conceder más.
+  const limit = decideGauntlet(std, [round([f('X'), f('Y'), f('Z')], 'correct', true, 0), round([f('Y'), f('Z')], 'correct', true, 1), round([f('Z')], 'pass', true, 2)], 5);
+  assert.equal(limit.decision, 'stop'); assert.equal(limit.status, 'stopped'); assert.match(limit.reason, /2 corrección\(es\) dirigida\(s\) autorizadas.*con progreso.*conceder más rondas \(hasta 6\)/);
+  assert.equal(decideGauntlet(normalizeGauntlet({ mode: 'deep' }), [round([f('Falta doble en a')], 'correct'), round([f('Falta doble en a')], 'stop')], 5, { ownerGranted: true }).decision, 'correct', 'el propietario puede conceder otra ronda');
   const marginal = decideGauntlet(std, [round([f('Nombre poco claro', 'major')], 'pass', false)], 5);
   assert.equal(marginal.decision, 'stop'); assert.equal(marginal.status, 'passed_with_findings');
   assert.equal(decideGauntlet(std, [round([f('X')])], 0).reason, 'No quedan correcciones autorizadas en este proceso.');
+  // Nunca sin fin: aunque cada ronda «mejore», el margen autorizado (y el tope duro de 6) lo corta.
+  const deep6 = normalizeGauntlet({ mode: 'deep', maxRounds: 6 }); const rounds: any[] = [];
+  let decisions = 0;
+  for (let i = 0; i < 20; i++) { rounds.push(round(Array.from({ length: 20 - i }, (_, k) => f(`B${k}`)), 'pass', true, Math.min(3, i))); const d = decideGauntlet(deep6, rounds, 99); rounds[rounds.length - 1].decision = d.decision; if (d.decision !== 'correct') break; decisions++; }
+  assert.equal(decisions, 6, 'como mucho 6 correcciones por proceso');
   assert.deepEqual(gauntletOverhead(normalizeGauntlet({ mode: 'off' })), { evaluations: { min: 0, max: 0 }, corrections: { min: 0, max: 0 } });
-  assert.deepEqual(gauntletOverhead(normalizeGauntlet({ mode: 'deep' })), { evaluations: { min: 1, max: 3 }, corrections: { min: 0, max: 2 } });
+  assert.deepEqual(gauntletOverhead(normalizeGauntlet({ mode: 'deep' })), { evaluations: { min: 1, max: 4 }, corrections: { min: 0, max: 3 } });
 });
 
-test('recomendación sin IA: tarea pequeña sin riesgo → off; riesgo o fallos repetidos → deep; sin Evaluador → off', () => {
+test('recomendación sin IA y modo automático: pequeña sin riesgo → off; tamaño desconocido nunca profundo; profundo solo con tamaño L y riesgo, varias áreas o fallos repetidos; sin Evaluador → off', () => {
   assert.equal(recommendGauntlet({ hasEvaluator: true, estimate: 'S', text: 'Cambiar el texto del botón', iterations: 1, qaRejections: 0 }).mode, 'off');
   assert.equal(recommendGauntlet({ hasEvaluator: true, estimate: 'M', text: 'Cambiar el texto del botón', iterations: 1, qaRejections: 0 }).mode, 'standard');
   const risky = recommendGauntlet({ hasEvaluator: true, estimate: 'L', text: 'Permisos y presupuesto de los agentes', iterations: 1, qaRejections: 0 });
   assert.equal(risky.mode, 'deep'); assert.ok(risky.signals.length >= 2);
+  assert.equal(recommendGauntlet({ hasEvaluator: true, estimate: null, text: 'Mostrar el agente responsable en la tarjeta', iterations: 1, qaRejections: 0 }).mode, 'standard', 'una palabra de riesgo y tamaño desconocido: estándar, no profundo');
+  assert.equal(recommendGauntlet({ hasEvaluator: true, estimate: 'M', text: 'Revisar permisos', iterations: 1, qaRejections: 0 }).mode, 'standard', 'un riesgo solo: estándar');
   assert.equal(recommendGauntlet({ hasEvaluator: false, estimate: 'L', text: 'seguridad', iterations: 5, qaRejections: 3 }).mode, 'off');
+  const auto = resolveGauntlet(normalizeGauntlet({ mode: 'auto' }), { hasEvaluator: true, estimate: 'S', text: 'Cambiar el texto del botón', iterations: 1, qaRejections: 0 });
+  assert.equal(auto.mode, 'off'); assert.match(auto.auto!.reason, /pequeña y de bajo riesgo/);
+  assert.deepEqual(resolveGauntlet(normalizeGauntlet({ mode: 'deep' }), { hasEvaluator: false, estimate: 'S', text: '', iterations: 1, qaRejections: 0 }).mode, 'deep', 'un modo explícito se respeta');
 });
 
 // ---------- Entorno de procesos ----------
@@ -138,7 +156,7 @@ test('sin Evaluador en el proyecto: Gauntlet no se aplica (lo dice) y el pipelin
 
 test('Q · el Evaluador Gauntlet solo existe con aprobación explícita: plantilla versionada, solo lectura, jefe el Coordinador', async () => {
   const info = (await app.inject({ method: 'GET', url: `${W}/projects/${project.id}/gauntlet` })).json();
-  assert.equal(info.evaluator, null); assert.equal(info.config.mode, 'off'); assert.equal(info.template.reportsTo, 'pj-coordinador');
+  assert.equal(info.evaluator, null); assert.equal(info.config.mode, 'auto', 'por defecto, automático (sin Evaluador resuelve a «off»)'); assert.equal(info.template.reportsTo, 'pj-coordinador');
   const denied = await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/gauntlet/evaluator`, payload: {} });
   assert.equal(denied.statusCode, 400); assert.equal(denied.json().code, 'authorization_required');
   assert.equal(projectEvaluator(S, project.id), null);
@@ -257,7 +275,7 @@ test('modo off y predeterminado del proyecto: off no añade llamadas; el modo de
   assert.ok(!p.steps.some(s => s.role === 'evaluator' && s.status === 'done'));
   assert.equal((await app.inject({ method: 'PUT', url: `${W}/projects/${project.id}/gauntlet`, payload: { mode: 'standard' } })).statusCode, 400, 'cambiar el modo exige autorización');
   const put = await app.inject({ method: 'PUT', url: `${W}/projects/${project.id}/gauntlet`, payload: { mode: 'standard', authorized: true } });
-  assert.equal(put.statusCode, 200, put.body); assert.deepEqual(put.json().config, { mode: 'standard', maxRounds: 1 });
+  assert.equal(put.statusCode, 200, put.body); assert.deepEqual(put.json().config, { mode: 'standard', maxRounds: 2 });
   setScript([PASS]);
   const { p: q } = await authorize('Predeterminado');
   assert.equal(q.result!.pipeline!.config.gauntlet!.mode, 'standard');
@@ -265,7 +283,7 @@ test('modo off y predeterminado del proyecto: off no añade llamadas; el modo de
   // Recomendación y sobrecoste ANTES de autorizar (sin IA).
   const adv = (await app.inject({ method: 'GET', url: `${W}/projects/${project.id}/backlog/${q.backlogItemId}/gauntlet` })).json();
   assert.equal(adv.projectDefault.mode, 'standard'); assert.ok(['off', 'standard', 'deep'].includes(adv.recommended.mode));
-  assert.deepEqual(adv.overhead.standard, { evaluations: { min: 1, max: 2 }, corrections: { min: 0, max: 1 } });
+  assert.deepEqual(adv.overhead.standard, { evaluations: { min: 1, max: 3 }, corrections: { min: 0, max: 2 } });
   assert.ok(adv.evaluator?.id);
   await app.inject({ method: 'PUT', url: `${W}/projects/${project.id}/gauntlet`, payload: { mode: 'off', authorized: true } });
 });

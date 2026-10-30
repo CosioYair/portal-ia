@@ -9,6 +9,25 @@
  */
 export type ExecutionBackend = 'api' | 'claude-code' | 'claude-code-terminal';
 
+/**
+ * Informe de límites tal como lo emite el CLI oficial en `stream-json` (`rate_limit_event`, versión 2.1.311). Solo
+ * llega cuando se hace una llamada: no es un saldo en vivo ni una previsión. `windows` viene de `unifiedWindows`, que el
+ * propio CLI marca como interno (puede cambiar o faltar).
+ */
+export interface ClaudeCodeRateLimit {
+  status: string;
+  resetsAt: number | null;
+  utilization: number | null;
+  errorCode: string | null;
+  /** five_hour | seven_day | seven_day_opus | seven_day_sonnet | seven_day_overage_included | overage */
+  rateLimitType?: string | null;
+  windows?: { name: string; utilization: number | null; resetsAt: number | null; status: string | null }[];
+  /** El informe indica uso adicional (overage): podría facturarse aparte según tu cuenta. */
+  overage?: boolean;
+}
+/** Último informe de límites recibido del CLI (de cualquier espacio: el límite es de la cuenta). */
+export interface ClaudeCodeUsageReport extends ClaudeCodeRateLimit { receivedAt: string; source: string }
+
 /** Origen de facturación que detecta el Portal (nunca se supone). */
 export type ClaudeCodeBilling = 'subscription' | 'api' | 'cloud' | 'none' | 'unverified';
 
@@ -120,7 +139,7 @@ export interface ClaudeCodeRun {
   apiEquivalentUsd: number | null;
   error: string | null;
   /** Último aviso de límites que informó Claude Code (estado, reinicio), tal cual. */
-  rateLimit: { status: string; resetsAt: number | null; utilization: number | null; errorCode: string | null } | null;
+  rateLimit: ClaudeCodeRateLimit | null;
   progress: string | null;
 }
 

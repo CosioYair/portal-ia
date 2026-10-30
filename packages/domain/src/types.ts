@@ -286,6 +286,8 @@ export interface Process {
   /** Resultado de un encargo delegado (kind = delegated_task). */
   delegation: DelegationResult | null;
   backlogItemId: string | null;
+  /** Encargo de desarrollo del propietario al que pertenece (en lugar de una historia del backlog). */
+  assignmentId?: string | null;
   /** Suma de costos posiblemente facturados y no confirmados (estimación; el gasto confirmado es spentUsd). */
   unconfirmedUsd?: number;
   /** Archivado al iniciar una etapa: histórico, sin acciones. null = activo. */
@@ -668,6 +670,12 @@ export interface PipelineConfig {
    * su llamada no se hace y el pipeline se pausa. Sin valor: cualquier origen del agente, como siempre.
    */
   backends?: ('api' | 'claude_code')[];
+  /**
+   * Tope de llamadas a la suscripción de Claude Code autorizadas para ESTE proceso (también las fallidas). Con la
+   * suscripción el presupuesto en USD no limita nada (cada llamada cuesta 0 USD de API): este es su límite de recursos.
+   * Al alcanzarlo, el pipeline se pausa y decides si concedes más. Sin valor: sin tope propio (como antes).
+   */
+  maxSubscriptionCalls?: number;
 }
 export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'verify' | 'environment' | 'qa' | 'correction' | 'pause' | 'done' | 'error'
   /** Entrega incremental: unidad de trabajo, continuación de una respuesta cortada y comprobación determinista previa a QA. */

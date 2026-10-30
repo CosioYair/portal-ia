@@ -4,6 +4,7 @@ import { backlogRepo, processesRepo } from '../db/workspace.ts';
 import { changesSinceBase, git, readRepoFile, safeRelPath } from './repoWrite.ts';
 import { pausePipeline, PipelinePause, pipelineOf, storyRunContext, updatePipeline, updateResult } from './storyPipeline.ts';
 import { monotonicNow } from '../clock.ts';
+import { setWorkStatus } from './workItems.ts';
 
 /**
  * Corrección externa (hecha fuera del equipo de agentes, p. ej. desde la consola) sobre una historia que ya tiene su
@@ -87,7 +88,7 @@ export async function verifyExternalCorrection(slug: string, processId: string, 
   } finally {
     procs.finish(processId, status, null);
     const fin = procs.get(processId)!;
-    backlogRepo(slug).setStatus(ctx.item.id, 'review', processId);
+    setWorkStatus(slug, ctx.item, 'review', processId);
     log({ processId, state: fin.result?.pipeline?.state, pause: fin.result?.pipeline?.pauseKind }, 'corrección externa verificada (sin IA)');
   }
   return procs.get(processId)!;

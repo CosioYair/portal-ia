@@ -1,4 +1,4 @@
-import { decideGauntlet, GAUNTLET_SCHEMA, GAUNTLET_TEMPLATE, gauntletOverhead, isRetired, normalizeGauntlet, recommendGauntlet, type Agent, type GauntletConfig, type GauntletFinding, type GauntletRound, type GauntletState, type IssueSeverity, type PipelineConfig, type Process } from '@portal-ia/domain';
+import { DEFAULT_GAUNTLET, decideGauntlet, resolveGauntlet, GAUNTLET_SCHEMA, GAUNTLET_TEMPLATE, gauntletOverhead, isRetired, normalizeGauntlet, recommendGauntlet, type Agent, type GauntletConfig, type GauntletFinding, type GauntletRound, type GauntletState, type IssueSeverity, type PipelineConfig, type Process } from '@portal-ia/domain';
 import { settingsRepo, providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { buildAgentConfig } from '../routes/bootstrap.ts';
@@ -8,6 +8,7 @@ import { testsEvidence, verificationEvidence } from './qaGate.ts';
 import { sys } from './storyPrompts.ts';
 import { emit, PipelinePause, pipelineOf, sinceApplied, stepCall, updateResult, type StoryRunCtx } from './storyPipeline.ts';
 import { monotonicNow } from '../clock.ts';
+import { workItemOf } from './workItems.ts';
 
 /**
  * Evaluación Gauntlet en el pipeline existente (ver packages/domain/src/gauntlet.ts para el método y la relación con
@@ -23,8 +24,9 @@ export const GAUNTLET_PROMPT_VERSION = 'gauntlet-eval@1';
 // ---------------------------------------------------------------- Modo por proyecto (predeterminado) y por tarea
 
 const KEY = (slug: string, projectId: string) => `gauntlet:${slug}:${projectId}`;
+/** Modo del proyecto; sin configurar, `auto` (v0.16): la intensidad la decide el Portal en cada tarea, con sus motivos. */
 export function projectGauntlet(slug: string, projectId: string): GauntletConfig {
-  try { return normalizeGauntlet(JSON.parse(settingsRepo.get(KEY(slug, projectId)) ?? 'null')); } catch { return normalizeGauntlet(null); }
+  try { const raw = settingsRepo.get(KEY(slug, projectId)); return raw ? normalizeGauntlet(JSON.parse(raw)) : { ...DEFAULT_GAUNTLET }; } catch { return { ...DEFAULT_GAUNTLET }; }
 }
 export function setProjectGauntlet(slug: string, projectId: string, g: Partial<GauntletConfig>): GauntletConfig {
   const n = normalizeGauntlet(g); settingsRepo.set(KEY(slug, projectId), JSON.stringify(n)); return n;
@@ -35,6 +37,17 @@ export function projectEvaluator(slug: string, projectId: string): Agent | null 
   return agentsRepo(slug).list().find(a => a.projectId === projectId && !isRetired(a.template) && (a.config.capabilities ?? []).includes('evaluar_gauntlet') && !!a.config.tools?.read_repo) ?? null;
 }
 
+/**
+ * Resuelve el modo `auto` para un proceso (historia o encargo) con la recomendación sin IA: tamaño, riesgo, iteraciones
+ * ANTERIORES (no cuenta la actual), rechazos previos de QA y si hay Evaluador. Otros modos se respetan.
+ */
+export function resolveGauntletFor(slug: string, proc: Pick<Process, 'id' | 'projectId' | 'backlogItemId' | 'assignmentId'>, cfg: GauntletConfig): GauntletConfig {
+  if (cfg.mode !== 'auto') return cfg;
+  const item = workItemOf(slug, proc);
+  const prev = processesRepo(slug).listAll(proc.projectId).filter(p => p.kind === 'story_execution' && p.id !== proc.id && ((proc.backlogItemId && p.backlogItemId === proc.backlogItemId) || (proc.assignmentId && p.assignmentId === proc.assignmentId)));
+  return resolveGauntlet(cfg, { hasEvaluator: !!projectEvaluator(slug, proc.projectId), estimate: item?.estimate ?? null, text: item ? `${item.title} ${item.criterion ?? ''} ${item.description ?? ''}` : '', iterations: prev.length + 1, qaRejections: prev.filter(p => p.result?.review?.verdict === 'rejected').length });
+}
+
 /** Recomendación (sin IA) y sobrecoste del modo para una historia, para mostrarlos ANTES de autorizar. */
 export function gauntletAdvice(slug: string, projectId: string, itemId: string) {
   const item = backlogRepo(slug).get(itemId);
@@ -42,7 +55,7 @@ export function gauntletAdvice(slug: string, projectId: string, itemId: string) 
   const procs = processesRepo(slug).listAll(projectId).filter(p => p.backlogItemId === itemId && p.kind === 'story_execution');
   const qaRejections = procs.filter(p => p.result?.review?.verdict === 'rejected').length;
   const evaluator = projectEvaluator(slug, projectId);
-  const rec = recommendGauntlet({ hasEvaluator: !!evaluator, estimate: item.estimate ?? null, text: `${item.title} ${item.criterion ?? ''} ${item.description ?? ''}`, iterations: procs.length, qaRejections });
+  const rec = recommendGauntlet({ hasEvaluator: !!evaluator, estimate: item.estimate ?? null, text: `${item.title} ${item.criterion ?? ''} ${item.description ?? ''}`, iterations: procs.length + 1, qaRejections });
   const def = projectGauntlet(slug, projectId);
   return { projectDefault: def, recommended: rec, evaluator: evaluator ? { id: evaluator.id, name: evaluator.config.name, model: evaluator.config.model } : null, overhead: { standard: gauntletOverhead(normalizeGauntlet({ mode: 'standard' })), deep: gauntletOverhead(normalizeGauntlet({ mode: 'deep' })) } };
 }

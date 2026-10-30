@@ -12,6 +12,7 @@ import {
 } from '../services/claudeCode/bridge.ts';
 import { runCliTask } from '../services/claudeCode/cli.ts';
 import { cliCommandFor, detectClaudeCode, lastDetection, verifiedDetection } from '../services/claudeCode/detect.ts';
+import { acknowledgeUsageReport, subscriptionGate } from '../services/claudeCode/usage.ts';
 import { getClaudeCodeSettings, saveClaudeCodeSettings } from '../services/claudeCode/settings.ts';
 
 /**
@@ -44,6 +45,15 @@ const BRIDGE_TOOLS_WORKER = ['portal_whoami', 'portal_list_tasks', 'portal_claim
 
 export async function claudeCodeRoutes(app: FastifyInstance) {
   app.get('/api/claude-code', async () => claudeCodeStatus());
+
+  // Último informe de límites del CLI oficial (de la cuenta) y si permite empezar trabajo nuevo. Sin llamar al modelo.
+  app.get('/api/claude-code/usage', async () => { const g = subscriptionGate(); return { report: g.report, ok: g.ok, reason: g.ok ? null : g.reason, warning: g.ok ? g.warning : null }; });
+  // El propietario reconoce el último informe (uso adicional, o un límite que ya se renovó): deja de impedir empezar.
+  app.post('/api/claude-code/usage/acknowledge', async (req, reply) => {
+    if (!z.object({ authorized: z.literal(true) }).safeParse(req.body ?? {}).success) return reply.code(403).send({ error: 'Reconocer el informe de límites requiere tu autorización explícita.' });
+    const r = acknowledgeUsageReport(); const g = subscriptionGate();
+    return { report: r, ok: g.ok, reason: g.ok ? null : g.reason, warning: g.ok ? g.warning : null };
+  });
 
   // Detección: `claude --version` y `claude auth status`. No envía nada al modelo ni consume uso.
   app.post('/api/claude-code/detect', async () => { await detectClaudeCode(getClaudeCodeSettings()); return claudeCodeStatus(); });

@@ -33,6 +33,9 @@ import { addManualItem, estimateExtraction, extractBacklogWithAI, importBacklogF
 import { backlogRepo } from '../db/workspace.ts';
 import { assertNotSuperseded, InboxError } from '../services/inbox.ts';
 import { monotonicNow } from '../clock.ts';
+import { authorizeProcess } from '../services/processAuthorization.ts';
+import { workItemOf } from '../services/workItems.ts';
+import { closingBlocker } from '../services/closing.ts';
 
 /** Rutas con efecto (IA o git) que nunca deben actuar sobre una iteración superada de su historia (HU-161). */
 const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish)$/;
@@ -42,7 +45,7 @@ const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish)$/;
  * IA cuando el usuario lo autoriza con un presupuesto (POST /authorize). Puede cancelarse; se detiene entre pasos.
  */
 /** Configuración del pipeline autorizado (se normaliza y acota en el servidor). */
-const PIPELINE_INPUT = z.object({ autoApply: z.boolean().optional(), autoVerify: z.boolean().optional(), commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(), allowInstall: z.boolean().optional(), maxOutputRepairs: z.number().int().min(0).max(10).optional(), maxCorrections: z.number().int().min(0).max(10).optional(), maxIdenticalFailures: z.number().int().min(1).max(10).optional(), maxDurationMin: z.number().int().min(1).max(600).optional(), maxConsultations: z.number().int().min(0).max(3).optional(), maxProviderRetries: z.number().int().min(0).max(3).optional(), providerTimeoutSec: z.number().int().min(5).max(900).nullable().optional(), maxContinuations: z.number().int().min(0).max(12).optional(), gauntlet: z.object({ mode: z.enum(['off', 'standard', 'deep']), maxRounds: z.number().int().min(0).max(3).optional() }).optional() });
+const PIPELINE_INPUT = z.object({ autoApply: z.boolean().optional(), autoVerify: z.boolean().optional(), commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(), allowInstall: z.boolean().optional(), maxOutputRepairs: z.number().int().min(0).max(10).optional(), maxCorrections: z.number().int().min(0).max(10).optional(), maxIdenticalFailures: z.number().int().min(1).max(10).optional(), maxDurationMin: z.number().int().min(1).max(600).optional(), maxConsultations: z.number().int().min(0).max(3).optional(), maxProviderRetries: z.number().int().min(0).max(3).optional(), providerTimeoutSec: z.number().int().min(5).max(900).nullable().optional(), maxContinuations: z.number().int().min(0).max(12).optional(), gauntlet: z.object({ mode: z.enum(['off', 'standard', 'deep', 'auto']), maxRounds: z.number().int().min(0).max(6).optional() }).optional(), maxSubscriptionCalls: z.number().int().min(1).max(2000).optional() });
 
 export async function processRoutes(app: FastifyInstance) {
   // Al servir un proceso se calcula (no se persiste) su estado de activación en el Portal en marcha y la orientación.
@@ -105,30 +108,9 @@ export async function processRoutes(app: FastifyInstance) {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ budgetUsd: z.number().min(0.1).max(500), authorized: z.literal(true), pipeline: PIPELINE_INPUT.optional() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere presupuesto (USD) y autorización explícita.' });
-    const procs = processesRepo(slug);
-    const proc = procs.get(id);
-    if (!proc) return reply.code(404).send({ error: 'Proceso no encontrado' });
-    if (proc.status !== 'pending_authorization') return reply.code(409).send({ error: 'El proceso ya fue autorizado o finalizado.' });
-    if (procs.running().length) return reply.code(409).send({ error: 'Ya hay un proceso en ejecución. Espera a que termine.' });
-    // Gauntlet: el modo de esta tarea (o el del proyecto) y el Evaluador en el equipo autorizado, ANTES de comprobar que el equipo puede ejecutar.
-    const gauntlet = proc.kind === 'story_execution' && body.data.pipeline ? normalizeGauntlet(body.data.pipeline.gauntlet ?? projectGauntlet(slug, proc.projectId)) : null;
-    // Sin Evaluador utilizable (no existe o sería el implementador), la etapa lo registra al llegar y sigue sin él.
-    if (gauntlet) syncEvaluatorStep(slug, id, gauntlet);
-    // Claude Code: un equipo que no puede ejecutar (proyecto sin autorizar, consola sin conectar…) no empieza: el
-    // proceso seguiría «autorizado» y fallaría en el primer paso. Se rechaza sin cambiar nada y se dice qué falta.
-    const readiness = proc.kind === 'story_execution' ? teamReadiness(slug, id) : null;
-    if (readiness && !readiness.ready && readiness.fallback !== 'api') return reply.code(409).send({ error: `No se inicia: ${readiness.team.find(t => !t.ready)!.reason}`, code: 'backend_not_ready', readiness });
-    // El pipeline (aplicar, verificar, QA con evidencia, correcciones acotadas) forma parte de ESTA autorización; sin él, cada paso se autoriza a mano como antes.
-    if (proc.kind === 'story_execution' && body.data.pipeline && proc.result) {
-      procs.setResult(id, { ...procs.get(id)!.result!, pipeline: newPipeline(normalizePipeline({ ...body.data.pipeline, gauntlet: gauntlet ?? undefined })) });
-    }
-    procs.authorize(id, body.data.budgetUsd);
-    app.log.info({ processId: id, kind: proc.kind, budget: body.data.budgetUsd }, 'proceso autorizado · inicia ejecución');
-    const logger = (o: any, m: string) => app.log.info(o, m);
-    const run = proc.kind === 'story_execution' ? runStory(slug, id, logger, () => isCancelled(id)).finally(() => clearCancel(id)) : proc.kind === 'delegated_task' ? runDelegation(slug, id, logger, () => isCancelled(id)).finally(() => clearCancel(id)) : runAssessment(slug, id, logger);
-    // Se registra ya (no en el siguiente tick): un proceso en marcha nunca debe parecer huérfano.
-    trackJob(id, run).catch(e => app.log.error(e, 'fallo inesperado en el proceso'));
-    return procs.get(id);
+    // Autorización única (historias, encargos, bandeja, chat): ver services/processAuthorization.ts.
+    try { return authorizeProcess(slug, id, { budgetUsd: body.data.budgetUsd, pipeline: body.data.pipeline ?? null }, (o, m) => app.log.info(o, m)); }
+    catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, ...(e.code ? { code: e.code } : {}), ...(e.payload ?? {}) }); }
   });
 
   // Continuar de forma autónoma (autorizado por el propietario): reanuda un pipeline pausado o detenido, lo inicia sobre un
@@ -136,7 +118,7 @@ export async function processRoutes(app: FastifyInstance) {
   // Lo ya hecho no se repite; el presupuesto adicional es un máximo, no un objetivo.
   app.post('/api/workspaces/:slug/processes/:id/continue', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ authorized: z.literal(true), addBudgetUsd: z.number().min(0).max(100).optional(), pipeline: PIPELINE_INPUT.optional(), answer: z.string().trim().min(2).max(8000).optional() }).safeParse(req.body ?? {});
+    const body = z.object({ authorized: z.literal(true), addBudgetUsd: z.number().min(0).max(100).optional(), addSubscriptionCalls: z.number().int().min(0).max(500).optional(), pipeline: PIPELINE_INPUT.optional(), answer: z.string().trim().min(2).max(8000).optional() }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Continuar exige tu autorización explícita.', code: 'authorization_required' });
     const procs = processesRepo(slug); const proc = procs.get(id);
     if (!proc || proc.kind !== 'story_execution' || !proc.result) return reply.code(404).send({ error: 'Proceso de historia no encontrado' });
@@ -157,7 +139,9 @@ export async function processRoutes(app: FastifyInstance) {
     // Si el equipo preguntó algo (información, permiso o decisión), continuar sin respuesta solo repetiría la pregunta y gastaría créditos.
     const request = prev?.ownerRequest ?? proc.result.failure?.request ?? null;
     if (request && !body.data.answer) return reply.code(400).send({ error: `El equipo necesita tu respuesta para seguir: «${request.question}»`, code: 'answer_required', request });
-    const cfg = normalizePipeline({ ...(prev?.config ?? {}), ...(body.data.pipeline ?? {}) });
+    const cfg0 = normalizePipeline({ ...(prev?.config ?? {}), ...(body.data.pipeline ?? {}) });
+    // Más llamadas a la suscripción solo con tu autorización explícita al continuar (se suman al tope que había).
+    const cfg = body.data.addSubscriptionCalls && cfg0.maxSubscriptionCalls ? { ...cfg0, maxSubscriptionCalls: Math.min(2000, cfg0.maxSubscriptionCalls + body.data.addSubscriptionCalls) } : cfg0;
     // Los límites nuevos se suman a lo ya consumido: continuar tras un tope concede ese margen otra vez, no más.
     // Una pausa de Claude Code (proyecto sin autorizar, consola, límite de la suscripción) no consumió ningún margen:
     // continuar tras ella conserva los límites que había, sin conceder correcciones nuevas.
@@ -374,8 +358,9 @@ export async function processRoutes(app: FastifyInstance) {
     if (!proc.result.changes.length) return reply.code(409).send({ error: 'No hay cambios que aplicar.' });
     const repo = projectsRepo(slug).repository(proc.projectId);
     if (!repo) return reply.code(409).send({ error: 'No hay repositorio registrado.' });
-    const item = proc.backlogItemId ? backlogRepo(slug).get(proc.backlogItemId) : undefined;
-    const branch = body.data.branch ?? `portal-ia/${(item?.storyId ?? 'cambio').toLowerCase()}`;
+    // La rama es la del elemento de trabajo (historia HU-n o encargo EN-n): nunca una rama común que mezclaría encargos.
+    const item = workItemOf(slug, proc) ?? undefined;
+    const branch = body.data.branch ?? `portal-ia/${(item?.storyId ?? `proceso-${proc.id.slice(0, 8)}`).toLowerCase()}`;
     try {
       requirePolicy('write_worktree', { slug, processId: id, agentId: stepByRole(proc, 'implementer')?.agentId ?? null, projectId: proc.projectId, authorized: true });
       // Última comprobación: ningún «modify» completo sobre un archivo que cambió después de leerse.
@@ -485,20 +470,8 @@ Proceso: ${proc.id}`, { processId: proc.id });
     const item = backlogRepo(slug).get(id); if (!item) return reply.code(404).send({ error: 'Historia no encontrada' });
     const procs = processesRepo(slug);
     const last = (item.lastProcessId ? procs.get(item.lastProcessId) : undefined) ?? procs.list(item.projectId).find(p => p.backlogItemId === item.id && p.kind === 'story_execution');
-    const r = last?.result;
-    if (!body.data?.force) {
-      if (!r?.applied) return reply.code(409).send({ error: 'La historia no tiene cambios aplicados. Ejecútala y aplica su diff, o ciérrala como «resuelta fuera del flujo».', code: 'not_applied' });
-      if (!r.merged) return reply.code(409).send({ error: `Los cambios están en la rama ${r.applied.branch} pero no integrados en la rama principal. Intégralos desde el proceso antes de cerrar la historia.`, code: 'not_merged' });
-      // Proyecto interno (el propio Portal): el merge no basta. Debe estar ACTIVADO (servidor reiniciado con el cambio y web
-      // reconstruida) y VERIFICADO en ejecución; publicar en GitHub no es requisito para cerrar.
-      if (slug === INTERNAL_WORKSPACE.slug && last) {
-        const served = await withGuidance(slug, last); const act = served.result?.activation;
-        if (act && !act.active) return reply.code(409).send({ error: `La historia está integrada pero no activa en el Portal en marcha: ${act.reason}`, code: 'not_activated' });
-        if (act && !runtimeVerified(served.result?.runtimeChecks)) return reply.code(409).send({ error: 'Falta la verificación en ejecución: pulsa «Comprobar en ejecución» en el proceso (el Portal se comprueba a sí mismo) y que todas las comprobaciones queden en verde.', code: 'not_runtime_verified' });
-      }
-      if (!r.manualTest) return reply.code(409).send({ error: 'Falta la prueba manual: en el Resumen del proceso, genera la lista de prueba con QA o escríbela, pruébala paso a paso y entonces cierra la historia.', code: 'no_test' });
-      if (r.manualTest && r.manualTest.checks.some(c => !c)) { const n = r.manualTest.checks.filter(Boolean).length; return reply.code(409).send({ error: `Falta probar la historia: ${n} de ${r.manualTest.steps.length} pasos marcados. Sigue la lista «Qué probar» en el proceso y marca cada paso; si no puedes probarla, ciérrala como «resuelta fuera del flujo» indicando por qué.`, code: 'not_tested' }); }
-    }
+    // Regla de cierre única (también la usa la aceptación de un encargo): integrado, activo y probado.
+    if (!body.data?.force) { const blocker = await closingBlocker(slug, last, 'historia'); if (blocker) return reply.code(409).send(blocker); }
     backlogRepo(slug).setStatus(id, 'done');
     app.log.info({ story: item.storyId, force: !!body.data?.force, reason: body.data?.reason }, 'historia cerrada');
     return backlogRepo(slug).get(id);
