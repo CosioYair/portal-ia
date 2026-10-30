@@ -154,6 +154,77 @@ Huecos del estándar señalados y añadidos al estándar:
 - que las muestras de duración sean válidas;
 - ordenar y filtrar por responsable (añadidos a la selección).
 
-## Rondas 5–6
+## Ronda 5 · Segunda revisión independiente y tercera corrección
 
-Ver la sección «Resultados» (se completa con la segunda revisión y las mediciones).
+El evaluador confirmó en el entorno aislado (no solo en las pruebas) que los 8 hallazgos de la ronda 4 están resueltos.
+
+Hallazgos nuevos y su corrección:
+
+| # | Gravedad | Hallazgo | Corrección |
+|---|---|---|---|
+| 1 | mayor | «Caben» no contaba la duración máxima del lote: con historias de ~1 min y 5 min de límite decía «7 de 7» | `fits` también con la duración: mediana del historial (optimista) y p75 (pesimista), con la concurrencia; aviso y botón «Subir la duración máxima» |
+| 2 | mayor | Un agente cambiado a la API a mitad de una historia hacía llamadas facturables en un lote que no autoriza la API | `pipeline.config.backends`: el origen del lote se comprueba en **cada** llamada (`originBlocked`); si no está autorizado, no se llama y el lote se pausa con el motivo (`permission` pausa todo el lote) |
+| 3 | menor | Con 6 correcciones, el peor caso de 200 historias superaba el tope máximo de 2000 llamadas | Tope máximo 5000 |
+| 4 | menor | «Caben» suponía una historia a la vez | La estimación modela la concurrencia (las de un grupo no ven las llamadas de las otras) y avisa de que el tope puede superarse un poco |
+
+Se acordó un máximo de tres rondas de revisión y corrección; esta fue la tercera. Lo pendiente está en
+«Limitaciones conocidas».
+
+## Ronda 6 · Rendimiento
+
+Todo medido en una instancia aislada con 500 historias sintéticas y proveedor simulado.
+
+| Medida | Antes | Después |
+|---|---|---|
+| Vista previa en el servidor, 200 historias (repositorio real del Portal) | 471 ms | 92 ms (el contexto del repositorio se mide una vez) |
+| Vista previa en el servidor, 100 historias | 245 ms | 52 ms |
+| DOM del asistente con 30 seleccionadas | 17.594 nodos (15.004 `<option>`: 500 por historia) | — |
+| DOM del asistente con 111 seleccionadas | — | 3.234 nodos (523 `<option>`: una lista común) |
+| Filas pintadas con 500 historias | 449 casillas en una caja de 260 px | 25 por página |
+| Filtrar entre 500 (navegador, incluye Playwright) | sin filtros | 12–25 ms |
+| Marcar 111 filtradas | 111 clics | 1 clic, 44–47 ms |
+| Peticiones por cambio | 1 por clic en «Vista previa» | 1 por ráfaga (espera de 350 ms) |
+| Llamadas de IA al seleccionar y previsualizar | 0 | 0 |
+
+## Verificación
+
+**Pruebas:**
+- `batch-authorization.test.ts`: 16 escenarios.
+- Suite completa en Windows: ver el resumen en `IMPLEMENTATION_HANDOFF.md`.
+
+**Recorrido en Chromium** (instancia aislada, 500 historias): 40/40 comprobaciones. Cubre:
+- volver a un lote interrumpido;
+- valores seguros;
+- 2, 12 (rango), 111 (filtro) y 500 historias, con el máximo;
+- filtros que conservan la selección, quitar, ordenar y el tope;
+- dependencias que faltan;
+- sin permiso, sin orígenes y solo API;
+- la frase de autorización;
+- un lote nuevo sin herencia;
+- teclado;
+- 390 px y 1280 px;
+- 0 llamadas de IA y ningún error de consola.
+
+## Limitaciones conocidas
+
+- **Sin validación con un modelo real ni con el Portal real:** todo es simulado, como se exigió.
+- **Las estimaciones son orientativas:**
+  - las llamadas son estructurales (pasos y correcciones autorizadas);
+  - el USD de una evaluación Gauntlet se aproxima con el de una revisión de QA;
+  - la duración necesita al menos 5 historias verificadas en el historial.
+- **El tope de llamadas a la suscripción se comprueba al empezar cada historia;** una historia en marcha termina sus
+  llamadas.
+- **Reanudar no continúa las historias con trabajo en pausa:** solo re-encola las que no tenían trabajo que conservar.
+  Las pausadas con trabajo se continúan desde su proceso.
+- **No hay un campo de prioridad aparte:** la prioridad es el orden del backlog.
+- **Cerrar el asistente pierde la selección.**
+- **Pruebas inestables en el sandbox (preexistente, también en `main`).** En el sandbox Docker (2 CPU), cada ejecución
+  completa de la suite del Portal falló una prueba distinta en 5 de 5 ejecuciones:
+  - R y T;
+  - I + J, dos veces;
+  - iterar;
+  - entrega incremental.
+
+  En Windows pasan todas. I + J se corrigió (dependía del orden de integración); T y R ahora explican su fallo. Las
+  demás quedan como riesgo: el Portal ejecuta esta suite para verificar cada historia de su propio proyecto, y un fallo
+  aleatorio puede provocar correcciones innecesarias.
