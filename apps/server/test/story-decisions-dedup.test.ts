@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
-import type { ExecutionResult, PendingDecision, Process } from '@portal-ia/domain';
+import type { ExecutionResult, PendingDecision, PendingDecisionsSummary, Process } from '@portal-ia/domain';
 
 /** HU-161 · Una autorización vigente por historia: varias iteraciones de la misma historia, sin duplicados ni borrados. */
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-hu161-'));
@@ -18,8 +18,9 @@ const { projectsRepo, processesRepo, workspaceDb, consolidateDuplicateDecisions 
 const { addManualItem } = await import('../src/services/backlog.ts');
 const { createAssessment } = await import('../src/services/assessment.ts');
 const { createCompany } = await import('../src/services/companies.ts');
-const { consolidateDecisions } = await import('../src/services/inbox.ts');
-const { iterateStory, supersedePreviousIterations, threadRepo } = await import('../src/services/storyThread.ts');
+const { consolidateDecisions, countStoriesWithMultipleCurrent, decisionsFromProcess, unmarkedDuplicates } = await import('../src/services/inbox.ts');
+const { iterateStory, storyContext, supersedePreviousIterations, threadRepo } = await import('../src/services/storyThread.ts');
+const { matches } = await import('../src/services/runtimeChecks.ts');
 const { buildApp } = await import('../src/app.ts');
 
 providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');
@@ -249,4 +250,105 @@ test('iterateStory: la iteración 1 integrada sin publicar queda superada por la
   assert.ok(!processesRepo(slug).get(p1.id)!.result!.published, 'no se publicó nada');
   assert.deepEqual(supersedePreviousIterations(slug, C.id, next.id), []);
   await app.close();
+});
+
+test('invariante puro: countStoriesWithMultipleCurrent FALLA (>0) con duplicados sin consolidar y es 0 con la lista consolidada; unmarkedDuplicates 1 → 0', () => {
+  const ps = [
+    proc({ id: 'u1', createdAt: '2026-01-01T00:00:00.000Z' }),
+    proc({ id: 'u2', createdAt: '2026-01-02T00:00:00.000Z' }),
+    proc({ id: 'u3', createdAt: '2026-01-03T00:00:00.000Z' }),
+    proc({ id: 'v1', backlogItemId: 'b2' }),
+    proc({ id: 'w1', kind: 'initial_assessment', backlogItemId: null }),
+    proc({ id: 'w2', kind: 'initial_assessment', backlogItemId: null })
+  ];
+  const raw = ps.flatMap(p => decisionsFromProcess('x', p));
+  assert.equal(forStory(raw, 'b1').length, 3);
+  assert.equal(countStoriesWithMultipleCurrent(raw), 1, 'con duplicados el invariante debe detectarlos');
+  assert.equal(countStoriesWithMultipleCurrent(consolidateDecisions('x', ps)), 0);
+  assert.equal(countStoriesWithMultipleCurrent([]), 0);
+  assert.equal(unmarkedDuplicates('x', ps), 1, 'falta migrar: la historia b1 tiene 3 pendientes sin marcar');
+  const marked = ps.map(p => (p.id === 'u1' || p.id === 'u2') ? { ...p, supersededBy: 'u3' } : p);
+  assert.equal(unmarkedDuplicates('x', marked), 0);
+  assert.equal(unmarkedDuplicates('x', ps.map(p => p.id === 'u3' ? { ...p, archivedAt: '2026-02-01T00:00:00.000Z' } : p)), 1, 'archivar una no basta si quedan dos');
+});
+
+const SUMMARY_KEYS = ['checkedAt', 'stories', 'storiesWithMultipleCurrent', 'supersededPending', 'total', 'unmarkedDuplicates'];
+
+test('GET /inbox/summary: 3 iteraciones pendientes antes y después de migrar, claves fijas, bandeja vacía en otro espacio y comprobaciones en ejecución que coinciden', async () => {
+  const app = await buildApp();
+  const get = async (url: string) => app.inject({ method: 'GET', url });
+  const summary = async (s = slug) => { const r = await get(`/api/workspaces/${s}/inbox/summary`); assert.equal(r.statusCode, 200, r.body); return { body: r.body, json: r.json() as PendingDecisionsSummary }; };
+  const base = (await summary()).json;
+  assert.equal(base.unmarkedDuplicates, 0, 'las pruebas anteriores dejaron la base consolidada');
+
+  const E = addManualItem(slug, project.id, { title: 'Resumen con tres iteraciones', criterion: 'una vigente' });
+  const ids = ['2026-03-01', '2026-03-02', '2026-03-03'].map(d => storyProcess(E.id, `${d}T00:00:00.000Z`).id);
+  const inboxList = (await get(`/api/workspaces/${slug}/inbox`)).json() as PendingDecision[];
+  assert.equal(forStory(inboxList, E.id).length, 1);
+  assert.equal(forStory(inboxList, E.id)[0].iteration, 3);
+  assert.equal(forStory(inboxList, E.id)[0].supersededCount, 2);
+
+  const preRes = await summary();
+  const pre = preRes.json;
+  assert.deepEqual(Object.keys(pre).sort(), SUMMARY_KEYS);
+  assert.equal(pre.storiesWithMultipleCurrent, 0, 'la bandeja ya consolida');
+  assert.equal(pre.unmarkedDuplicates, 1, 'sin migrar todavía');
+  assert.equal(pre.total, base.total + 1);
+  assert.equal(pre.stories, base.stories + 1);
+  assert.equal(pre.supersededPending, base.supersededPending);
+
+  const before = snapshot();
+  const mig = consolidateDuplicateDecisions(slug);
+  assert.deepEqual(mig.marked.map(m => m.processId).sort(), [ids[0], ids[1]].sort());
+  assert.deepEqual(snapshot(), before, 'sin borrar filas ni cambiar estados');
+  const post = await summary();
+  assert.deepEqual(Object.keys(post.json).sort(), SUMMARY_KEYS);
+  assert.equal(post.json.unmarkedDuplicates, 0);
+  assert.equal(post.json.storiesWithMultipleCurrent, 0);
+  assert.equal(post.json.total, pre.total);
+  assert.equal(post.json.supersededPending, base.supersededPending + 2);
+  assert.match(post.json.checkedAt, /^\d{4}-\d{2}-\d{2}T/);
+
+  // Comprobaciones en ejecución: mismas expresiones que se entregan al Portal, sobre el cuerpo real.
+  assert.ok(matches(post.body, '/"storiesWithMultipleCurrent":0[,}]/'));
+  assert.ok(matches(post.body, '/"unmarkedDuplicates":0[,}]/'));
+  assert.ok(matches(preRes.body, '/"storiesWithMultipleCurrent":0[,}]/'));
+  assert.ok(!matches(preRes.body, '/"unmarkedDuplicates":0[,}]/'), 'antes de migrar la comprobación debe fallar');
+  assert.ok(!matches(JSON.stringify({ ...post.json, storiesWithMultipleCurrent: 1 }), '/"storiesWithMultipleCurrent":0[,}]/'), 'con duplicados la comprobación debe fallar');
+  assert.ok(matches((await get(`/api/workspaces/${slug}/inbox`)).body, '/^\\[/'));
+
+  // Otro espacio sin nada pendiente: mismas claves, todo a 0; y empresa inexistente → 404.
+  const empty = createCompany('Empresa vacía HU-161');
+  const e = await summary(empty.slug);
+  assert.deepEqual(Object.keys(e.json).sort(), SUMMARY_KEYS);
+  assert.deepEqual([e.json.total, e.json.stories, e.json.storiesWithMultipleCurrent, e.json.unmarkedDuplicates, e.json.supersededPending], [0, 0, 0, 0, 0]);
+  assert.ok(matches((await get(`/api/workspaces/${empty.slug}/inbox`)).body, '/^\\[/'), 'una bandeja vacía también es un array');
+  assert.equal((await get('/api/workspaces/no-existe-hu161/inbox/summary')).statusCode, 404);
+  await app.close();
+});
+
+test('storyContext con 3 iteraciones: solo la vigente sin superseded, guía sin «Autorizar» en las superadas e iterationState no bloqueado por ellas', async () => {
+  const D = addManualItem(slug, project.id, { title: 'Contexto con iteraciones', criterion: 'una vigente' });
+  const [d1, d2, d3] = ['2026-04-01', '2026-04-02', '2026-04-03'].map(d => storyProcess(D.id, `${d}T00:00:00.000Z`));
+  consolidateDuplicateDecisions(slug);
+  let ctx = await storyContext(slug, D.id);
+  const byId = new Map(ctx.processes.map(p => [p.id, p] as const));
+  assert.equal(byId.get(d3.id)!.iteration, 3);
+  assert.equal(byId.get(d3.id)!.superseded, null);
+  for (const [p, n] of [[d1, 1], [d2, 2]] as const) {
+    const e = byId.get(p.id)!;
+    assert.equal(e.iteration, n);
+    assert.equal(e.status, 'pending_authorization', 'sigue pendiente (reversible)');
+    assert.equal(e.superseded?.byProcessId, d3.id);
+    assert.equal(e.superseded?.byIteration, 3);
+    assert.match(e.guidance!.phase, /Superada por la iteración 3/);
+    assert.ok(!/autoriz/i.test(`${e.guidance!.phase} ${e.guidance!.next}`), 'la guía de una superada no ofrece autorizar');
+    assert.equal(e.guidance!.flow, undefined);
+  }
+  assert.match(byId.get(d3.id)!.guidance!.phase, /Pendiente de autorización/);
+  assert.equal(ctx.iteration.state, 'in_progress', 'la vigente sigue pendiente');
+
+  processesRepo(slug).finish(d3.id, 'done', null);
+  ctx = await storyContext(slug, D.id);
+  assert.notEqual(ctx.iteration.state, 'in_progress', 'las superadas pendientes no bloquean la siguiente iteración');
 });

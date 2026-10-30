@@ -11,12 +11,18 @@ const implStep = (p: Process) => p.steps.find(s => s.role === 'implementer') ?? 
  * Una sola fuente de verdad sobre «qué pasa y qué toca hacer» con un proceso. La usan la vista del proceso, el backlog
  * y las tarjetas del Asistente, para que el estado que se muestra sea siempre el real.
  */
-export type GuidanceOptions = Omit<FlowOptions, 'failedSteps'> & { failedSteps?: number; failedStepDetails?: FlowOptions['failedSteps'] };
+export type GuidanceOptions = Omit<FlowOptions, 'failedSteps'> & { failedSteps?: number; failedStepDetails?: FlowOptions['failedSteps']; supersededByIteration?: number | null };
 
 /** Orientación + recorrido guiado (para historias). */
 export function describeProcess(p: Process, opts: GuidanceOptions = {}): ProcessGuidance {
   // Archivado con una etapa anterior: histórico, sin recorrido ni acciones que recomendar.
   if (p.archivedAt) return { phase: 'Archivado (etapa anterior)', next: 'Es histórico y no requiere ninguna acción. Si necesitas retomarlo, restaura su historia desde el archivo.', tone: 'info', settled: true };
+  // HU-161 · Iteración superada por otra más reciente: sin recorrido ni acciones de decisión (autorizar, aplicar,
+  // integrar, publicar). Solo se puede decidir sobre la vigente o restaurar esta desde el historial.
+  if (p.supersededBy) {
+    const by = opts.supersededByIteration ? `la iteración ${opts.supersededByIteration}` : 'una iteración más reciente';
+    return { phase: `Superada por ${by}`, next: `Superada por ${by}: decide sobre la vigente o restáurala desde el historial de la historia.`, tone: 'info', settled: true };
+  }
   const g = describePhase(p, { ...opts, failedSteps: opts.failedSteps ?? opts.failedStepDetails?.length ?? 0 });
   if (p.kind !== 'story_execution') return g;
   // El recorrido nunca debe tumbar la orientación: si algo no encaja, se sirve sin él.
