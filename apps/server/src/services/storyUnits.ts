@@ -259,11 +259,19 @@ ${(ctx.plan?.acceptance ?? []).map(a => `- ${a}`).join('\n') || `- ${ctx.item.cr
 ${ctx.plan ? ctx.plan.summary : '(sin plan)'}
 # Archivos implicados — contenido ACTUAL del worktree
 ${unitContext(ctx, man, unit, unit.files.filter(f => readRepoFile(bp, f, 1) !== null || !unit.files.some(g => g !== f)))}
+${(unit.maxTurns ?? 0) > 0 ? relatedContext(ctx, unit) : ''}
 
 FORMATO DE RESPUESTA:
 ${PATCH_ONLY_FORMAT}
 ${DROP_FORMAT}
 ${unit.source === 'qa' ? '(si un hallazgo de QA es incorrecto, no inventes cambios: responde solo con === RESUMEN === y === SIN CAMBIOS === seguido de la evidencia concreta —archivo:línea, fragmento o salida—; QA lo volverá a evaluar una vez)' : '(es un fallo objetivo del sandbox o de la comprobación previa: corrígelo; si la causa está en otro archivo, parchea ese archivo. Una prueba que ya existía y no está en el plan no se modifica para que pase. Si la comprobación exige algo que contradice el criterio de aceptación o el código real, no la debilites ni inventes: responde solo con === RESUMEN === y === SIN CAMBIOS === con la evidencia concreta y el propietario decide)'}`;
+}
+
+/** Intento acotado tras agotar los turnos: el contenido de los archivos relacionados, para no tener que explorarlos. */
+function relatedContext(ctx: StoryRunCtx, unit: WorkUnit): string {
+  const files = relatedFiles(ctx, unit); if (!files.length) return '';
+  const bp = basePathOf(ctx);
+  return `# Archivos relacionados (contenido ACTUAL, incluido para que no tengas que leerlos)\n${files.map(f => `## ${f}\n\`\`\`\n${clip(readRepoFile(bp, f, 60_000) ?? '', 14_000)}\n\`\`\``).join('\n\n')}\n`;
 }
 
 function unitRepairPrompt(ctx: StoryRunCtx, unit: WorkUnit, prompt: string, a: DevOutputAssessment, previous: string, ok: ProposedChange[], bad: ProposedChange[]): string {
@@ -471,11 +479,46 @@ function outputExhausted(ctx: StoryRunCtx, unitId: string, outputTokens: number,
  */
 async function runUnit(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: string): Promise<void> {
   try { await runUnitInner(ctx, cfg, unitId); }
-  catch (e) {
+  catch (e: any) {
     // Pausa, cancelación o fallo del proveedor: la unidad queda pendiente de retomar (con sus salidas ya pagadas registradas).
     try { if (unitOf(ctx, unitId).status === 'running') setUnit(ctx, unitId, { status: 'pending' }); } catch { /* sin manifiesto */ }
+    if (e?.failure?.providerCode === 'max_turns') throw maxTurnsPause(ctx, unitId, e);
     throw e;
   }
+}
+
+/**
+ * Claude Code agotó sus turnos en una unidad (CLAUDE_CODE_MAX_TURNS_EXHAUSTED). No es conexión ni implementación: se
+ * conserva todo (commits, unidades terminadas, salidas) y NO se repite el mismo encargo. Primera vez: el siguiente intento
+ * (con tu autorización) es ACOTADO, con el contenido de los archivos relacionados ya incluido para que no tenga que
+ * explorar. Segunda vez en la misma unidad: no se insiste; decides tú (sin bucle de reintentos).
+ */
+function maxTurnsPause(ctx: StoryRunCtx, unitId: string, e: any): PipelinePause {
+  const unit = unitOf(ctx, unitId); const n = (unit.maxTurns ?? 0) + 1;
+  const detail = String(e?.failure?.detail ?? e?.message ?? '');
+  setUnit(ctx, unitId, n >= 2 ? { maxTurns: n, status: 'failed', error: `Claude Code agotó sus turnos dos veces: ${detail}`, finishedAt: now() } : { maxTurns: n, error: `Claude Code agotó sus turnos: ${detail}` });
+  const man = manifestOf(ctx);
+  const left = man.units.filter(u => u.status === 'pending' || u.status === 'running' || u.id === unitId);
+  const done = man.units.filter(u => u.status === 'done').length;
+  emit(ctx, 'unit', `«${clip(unit.title, 120)}»: Claude Code agotó sus turnos sin terminar (${n === 1 ? 'primera vez' : 'segunda vez: no se insiste'}). Lo hecho se conserva.`, { detail: clip(detail, 400) });
+  const remaining = `Quedan: ${left.map(u => `«${clip(u.title, 90)}» (${u.files.join(', ')})`).join(' · ')}. Terminadas y conservadas: ${done} unidad(es).`;
+  // Uso del siguiente intento, dicho ANTES de autorizarlo: el encargo con los archivos implicados y relacionados.
+  const bp = basePathOf(ctx);
+  const chars = [...unit.files, ...relatedFiles(ctx, unit)].reduce((s, f) => s + Math.min(60_000, (readRepoFile(bp, f, 60_000) ?? '').length), 0);
+  const estTokens = Math.round((chars + 12_000) / 3.5 / 1000) * 1000;
+  const usage = `El intento acotado enviaría ≈ ${estTokens.toLocaleString('es-MX')} tokens de entrada${ctx.dev.config.backend && ctx.dev.config.backend !== 'api' ? ' con tu suscripción de Claude (0 USD de la API)' : ' a la API del proveedor (con el presupuesto del proceso)'}.`;
+  return new PipelinePause('max_turns', n >= 2
+    ? `«${unit.title}»: Claude Code agotó sus turnos por segunda vez (${detail}). No se insiste con la misma tarea. ${remaining} Decide: volver a verificar sin IA, corregirlo tú (corrección externa) o acotar la historia.`
+    : `«${unit.title}»: ${detail} ${remaining} Al continuar, el siguiente intento será acotado: incluye ya el contenido de los archivos relacionados para que no tenga que explorarlos, con los mismos límites autorizados. ${usage} Si vuelve a agotar los turnos, se detiene.`);
+}
+
+/** Archivos relacionados con una corrección que no están en su ámbito (los de los hallazgos y su evidencia), acotados. */
+function relatedFiles(ctx: StoryRunCtx, unit: WorkUnit): string[] {
+  const bp = basePathOf(ctx);
+  const named = (unit.findings ?? []).flatMap(f => [f.file ?? '', ...filesIn(`${f.text} ${f.evidence ?? ''}`)]).map(f => clean(f)).filter(Boolean);
+  const changed = (resultOf(ctx).changes ?? []).filter(c => !c.error).map(c => c.path);
+  const resolve = resolver(worktreeOf(ctx), [...changed, ...manifestOf(ctx).deliverables.map(d => d.path)]);
+  return Array.from(new Set(named.map(f => resolve(f)))).filter(f => !unit.files.includes(f) && readRepoFile(bp, f, 1) !== null).slice(0, 4);
 }
 async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: string): Promise<void> {
   let unit = unitOf(ctx, unitId);
@@ -485,6 +528,8 @@ async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
   setUnit(ctx, unitId, { status: 'running', startedAt: unit.startedAt ?? now() });
   if (!unit.outputs?.length) emit(ctx, 'unit', `${label[0].toUpperCase()}${label.slice(1)}: ${unit.title} — ${agent.config.name}.`, { phase: isCorrection ? 'correcting' : 'implementing', aiCall: true, detail: `${unit.files.join(', ')} · ≈ ${unit.estimatedUsd.toFixed(2)} USD estimados` });
   let strategy: string | null = unit.error ? `Intento anterior: ${unit.error}` : null;
+  // Tras agotar los turnos: intento ACOTADO. El contenido de lo relacionado va en el encargo y se pide no explorar.
+  if ((unit.maxTurns ?? 0) > 0) strategy = `El intento anterior agotó los turnos de Claude Code explorando el repositorio con herramientas sin llegar a entregar. Esta vez TODO lo necesario está en este encargo (archivos implicados y relacionados, con su contenido actual): NO uses herramientas de lectura salvo que falte algo imprescindible, y entrega la respuesta directamente. Corrige SOLO lo indicado.`;
   for (;;) {
     checkCancelled(ctx); checkDuration(ctx, cfg);
     unit = unitOf(ctx, unitId); const man = manifestOf(ctx);
@@ -602,7 +647,7 @@ export function verificationFindings(v: VerificationRun): Finding[] {
   // «test»: las CAUSAS (aserción, preparación de la suite con su pila, plazo), nunca los nombres de las pruebas que su
   // suite canceló (HU-159: la corrección apuntaba a una prueba cancelada y el `before` que fallaba quedaba fuera).
   const causes = v.command === 'test' ? failingTests(v).filter(t => t.kind && t.kind !== 'cancelled') : [];
-  const what = { hook: 'falla la preparación', timeout: 'plazo agotado en', assertion: 'falla' } as Record<string, string>;
+  const what = { hook: 'falla la preparación', timeout: 'plazo agotado en', assertion: 'falla', load: 'falla al cargar' } as Record<string, string>;
   const d = causes.length ? causes.map(t => ({ file: t.file, line: t.line, code: null, text: `${what[t.kind!] ?? 'falla'} «${t.name}»: ${t.message}` })) : diagnosticsFor(v);
   const ev = verificationEvidence(v);
   const byFile = new Map<string, string[]>();
@@ -814,27 +859,41 @@ export function deliveryChecks(p: Process): DeliveryCheck[] {
 // ---------------------------------------------------------------- Avance (lo llama el pipeline en cada vuelta)
 
 /**
+ * Sustituye SIN IA las correcciones pendientes cuya evidencia ya no vale (ver staleCorrectionUnits): quedan «omitidas» con
+ * el motivo, sin gastar corrección; la verificación siguiente dice lo que de verdad sigue fallando. Los pasos
+ * «Corrección N» creados que nunca llamaron a la IA se cierran como omitidos (costo 0). Devuelve cuántas sustituyó.
+ */
+function supersedeStale(ctx: StoryRunCtx): number {
+  const stale = staleCorrectionUnits(resultOf(ctx));
+  if (!stale.length) return 0;
+  const ids = stale.map(s => s.id);
+  const why = (s: (typeof stale)[number]) => s.reason === 'cancelled_only'
+    ? 'Sustituida sin IA: se planificó con pruebas canceladas por su suite, sin un fallo propio a la vista. Se repite «test» para ver la causa real.'
+    : `Sustituida sin IA: otra corrección de su ronda ya cambió ${s.files.join(', ')}; la evidencia con la que se planificó ya no vale. Se vuelve a verificar antes de pagar otra corrección.`;
+  const titles = manifestOf(ctx).units.filter(u => ids.includes(u.id)).map(u => u.title);
+  saveManifest(ctx, m => { for (const u of m.units) { const s = stale.find(x => x.id === u.id); if (s) { u.status = 'skipped'; u.error = why(s); u.finishedAt = now(); } } });
+  const live = new Set(manifestOf(ctx).units.filter(u => !ids.includes(u.id)).flatMap(u => [...u.stepIds, u.reservedStepId ?? '']));
+  const procs = processesRepo(ctx.slug);
+  for (const st of procs.get(ctx.processId)!.steps) if (st.status === 'pending' && !st.outputMd && !st.costUsd && /^Corrección/.test(st.title) && !live.has(st.id)) procs.stepFinish(st.id, 'skipped', { error: 'No llegó a llamar a la IA. Sustituido sin IA por una nueva verificación; costo 0.' });
+  const overlap = stale.filter(s => s.reason === 'overlap');
+  emit(ctx, 'unit', overlap.length
+    ? `${stale.length} corrección(es) pendiente(s) sustituida(s) sin IA: otra corrección de su ronda ya cambió sus archivos (${Array.from(new Set(overlap.flatMap(s => s.files))).join(', ')}). Se vuelve a verificar antes de pagar otra corrección.`
+    : `${stale.length} corrección(es) pendiente(s) sustituida(s) sin IA: se planificaron con pruebas canceladas (no son fallos propios). Antes de pagar una corrección se repite «test» para ver la causa real.`, { phase: 'verifying', detail: titles.join(' · ') });
+  return stale.length;
+}
+
+/**
  * Lo que la entrega incremental tiene pendiente antes de verificar: unidades (del plan o de una ronda de corrección) y la
  * comprobación determinista. Devuelve true si hizo algo (el pipeline vuelve a empezar la vuelta).
  */
 export async function advanceUnits(ctx: StoryRunCtx, cfg: PipelineConfig): Promise<boolean> {
   const isPending = (u: WorkUnit) => u.status === 'pending' || u.status === 'running';
-  // Correcciones planificadas con pruebas solo canceladas (sin la causa a la vista): se sustituyen sin IA y sin gastar
-  // corrección por una nueva verificación de «test», que muestra la causa; con ella se planifica una corrección dirigida.
-  const stale = staleCorrectionUnits(resultOf(ctx));
-  if (stale.length) {
-    const titles = manifestOf(ctx).units.filter(u => stale.includes(u.id)).map(u => u.title);
-    saveManifest(ctx, m => { for (const u of m.units) if (stale.includes(u.id)) { u.status = 'skipped'; u.error = 'Sustituida sin IA: se planificó con pruebas canceladas por su suite, sin un fallo propio a la vista. Se repite «test» para ver la causa real.'; u.finishedAt = now(); } });
-    // Pasos «Corrección N» que se crearon y nunca llegaron a llamar a la IA (antes de que la puerta de Claude Code se
-    // comprobara primero): se cierran como omitidos, costo 0, para que no parezcan trabajo pendiente.
-    const live = new Set(manifestOf(ctx).units.filter(u => !stale.includes(u.id)).flatMap(u => [...u.stepIds, u.reservedStepId ?? '']));
-    const procs = processesRepo(ctx.slug);
-    for (const st of procs.get(ctx.processId)!.steps) if (st.status === 'pending' && !st.outputMd && !st.costUsd && /^Corrección/.test(st.title) && !live.has(st.id)) procs.stepFinish(st.id, 'skipped', { error: 'No llegó a llamar a la IA (se detuvo antes por Claude Code). Sustituido sin IA por una nueva verificación; costo 0.' });
-    emit(ctx, 'unit', `${stale.length} corrección(es) pendiente(s) sustituida(s) sin IA: se planificaron con pruebas canceladas (no son fallos propios). Antes de pagar una corrección se repite «test» para ver la causa real.`, { phase: 'verifying', detail: titles.join(' · ') });
-  }
+  supersedeStale(ctx);
   if (manifestOf(ctx).units.some(isPending)) {
     const rounds = new Set<number>();
     for (let guard = 0; guard < 200; guard++) {
+      // Antes de cada unidad: si otra de su ronda ya cambió sus archivos, su evidencia ya no vale (se sustituye sin IA).
+      if (supersedeStale(ctx)) continue;
       const next = manifestOf(ctx).units.find(isPending); if (!next) break;
       checkCancelled(ctx); checkDuration(ctx, cfg);
       if (next.round !== undefined) rounds.add(next.round);

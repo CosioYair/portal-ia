@@ -84,13 +84,15 @@ export function createWorker(slug: string, name: string, agentIds: string[], day
   return { id, token, expiresAt };
 }
 export function touchWorker(workerId: string, client?: unknown) {
-  const now = Date.now(); const prev = presence.get(workerId);
+  // Reloj MONÓTONO para la presencia en memoria: un ajuste del reloj del sistema (habitual en la VM de WSL2/Docker) no
+  // debe dejar una consola «conectada» ni «desconectada» de más.
+  const now = performance.now(); const prev = presence.get(workerId);
   // Se persiste como mucho cada 15 s (la presencia real vive en memoria: tras reiniciar, nadie aparece conectado).
   if (!prev || now - prev.persistedAt > 15_000 || client !== undefined) { claudeCodeWorkersRepo.seen(workerId, client); presence.set(workerId, { at: now, persistedAt: now }); }
   else presence.set(workerId, { at: now, persistedAt: prev.persistedAt });
 }
 export function disconnectWorker(workerId: string) { presence.delete(workerId); }
-export const workerConnected = (workerId: string) => { const p = presence.get(workerId); return !!p && Date.now() - p.at < WORKER_TIMEOUT_MS; };
+export const workerConnected = (workerId: string) => { const p = presence.get(workerId); return !!p && performance.now() - p.at < WORKER_TIMEOUT_MS; };
 
 export function workerView(r: ClaudeCodeWorkerRow): ClaudeCodeWorkerView {
   const client = r.client_json ? JSON.parse(r.client_json) : null;

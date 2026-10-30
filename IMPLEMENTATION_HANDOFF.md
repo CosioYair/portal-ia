@@ -43,6 +43,12 @@ Fecha: 27 de octubre de 2026. Sobre la entrega v0.12.0 (abajo). Todo verificado 
   - **Datos:** sin correcciones nuevas; la corrección planificada con pruebas canceladas, y con bloques TAP recortados, se sustituye sin IA por una nueva verificación.
   - **Navegación:** Presupuestos accesible, enlace a «Claude Code — Local», aviso de interfaz desactualizada e historial sin repeticiones.
   - **Pruebas:** `settings-navigation-wiring.test.ts` (5) y casos nuevos en `claude-code-execution`, `incremental-delivery` y `test-cancellations`. `PORTAL_REQUIRE_DOCKER=1 npm test` 294/296 (2 omitidas por plataforma). Chromium 23/23 en una instancia aislada.
+- **HU-159, iteración 3: turnos agotados e integración** — `docs/incidentes/HU-159.md` §6:
+  - **Integración original:** fallaba por 2 conflictos reales en una rama nacida de una base vieja. Se informaron 11 y la historia se rehízo entera.
+  - **«Corrección 2.2»:** ya estaba resuelta por la 2.1; Claude Code agotó sus turnos cuatro veces, clasificado como conexión.
+  - **Fallo real:** `active-agents.test.ts` no cargaba.
+  - **Ahora:** `CLAUDE_CODE_MAX_TURNS_EXHAUSTED` con reintento acotado y sin bucle; correcciones obsoletas sustituidas sin IA; pruebas que no cargan diagnosticadas; candidato de integración con el main actual (sin IA) y conflictos resueltos solo en sus secciones; integrar exige el candidato si main avanzó.
+  - **Pruebas:** `integration-recovery.test.ts` (E–J) y casos A–D en `claude-code-execution`, `test-cancellations` e `incremental-delivery`. Chromium 17/17 en una instancia aislada.
 - Pendiente de la validación del propietario en su instalación real: ver la lista de prueba final de la sesión.
 
 ---

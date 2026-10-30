@@ -21,7 +21,8 @@ const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
  * canceladas sin ejecutarse; `cancelled` = cancelada por su suite padre (NO es un fallo propio: la causa está en el padre
  * o en el fin del proceso de pruebas); `timeout` = plazo de la prueba agotado; `assertion` = fallo propio de la prueba.
  */
-export type FailingKind = 'assertion' | 'hook' | 'cancelled' | 'timeout';
+/** load = el ARCHIVO de prueba falla al cargarse (error en su nivel superior) y ninguna de sus pruebas llega a ejecutarse. */
+export type FailingKind = 'assertion' | 'hook' | 'cancelled' | 'timeout' | 'load';
 export interface FailingTest { name: string; message: string; file: string | null; line: number | null; kind?: FailingKind }
 
 /**
@@ -36,7 +37,8 @@ export function failingTests(run: Pick<VerificationRun, 'command' | 'output'>, m
   // RECORTADO (HU-159: el recorte antiguo cortaba bloques de canceladas tras `location:`), no la prueba de un fallo.
   const nodeTap = /^\s*failureType: '/m.test(run.output);
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(/^(\s*)not ok \d+ - (.+?)\s*(#.*)?$/); if (!m || TEST_FILE.test(m[2])) continue;
+    const m = lines[i].match(/^(\s*)not ok \d+ - (.+?)\s*(#.*)?$/); if (!m) continue;
+    if (TEST_FILE.test(m[2])) { const load = loadFailure(lines, i, m[2]); if (load) all.push(load); continue; }
     const indent = m[1].length; let message = ''; let file: string | null = null; const frames: { file: string; line: number }[] = [];
     let failureType: string | null = null; let isSuite = false; const stack: string[] = [];
     for (let j = i + 1; j < lines.length; j++) {
@@ -72,16 +74,51 @@ export function failingTests(run: Pick<VerificationRun, 'command' | 'output'>, m
   return out;
 }
 
+/** Una corrección pendiente cuya evidencia ya no vale: se sustituye sin IA por una nueva verificación. */
+export interface StaleUnit { id: string; reason: 'cancelled_only' | 'overlap'; files: string[] }
+
 /**
- * Unidades de corrección PENDIENTES (sin ningún intento) planificadas a partir de un «test» que solo tenía pruebas
- * canceladas: no corrigen nada real (HU-159: «Corrección 5» apuntaba a una prueba cancelada por el `before` de su suite).
- * Al continuar se sustituyen, sin IA, por una nueva verificación que muestre la causa.
+ * Unidades de corrección PENDIENTES (sin ningún intento) de una verificación del sandbox cuya evidencia ya no vale:
+ * - cancelled_only: se planificaron con un «test» que solo tenía pruebas canceladas (HU-159, «Corrección 5»);
+ * - overlap: otra unidad de la MISMA ronda ya cambió sus archivos (HU-159, «Corrección 2.2»: la 2.1 ya había arreglado
+ *   esa prueba y Claude Code agotó sus turnos buscando un fallo que ya no existía, cuatro veces).
+ * Al continuar se sustituyen, sin IA ni gasto de corrección, por una nueva verificación que muestre lo que sigue fallando.
  */
-export function staleCorrectionUnits(r: ExecutionResult | null | undefined): string[] {
+export function staleCorrectionUnits(r: ExecutionResult | null | undefined): StaleUnit[] {
   const man = r?.manifest; if (!man || !r?.applied) return [];
+  const pending = man.units.filter(u => u.kind === 'correction' && u.source === 'verification' && u.status === 'pending' && !u.attempts);
+  if (!pending.length) return [];
+  const out: StaleUnit[] = [];
   const lastTest = r.verifications.filter(v => v.command === 'test').at(-1);
-  if (!lastTest || !testRunSummary(lastTest).onlyCancellations) return [];
-  return man.units.filter(u => u.kind === 'correction' && u.source === 'verification' && u.status === 'pending' && !u.attempts && (u.findings ?? []).every(f => /^test falla/.test(f.text))).map(u => u.id);
+  const cancelledOnly = !!lastTest && testRunSummary(lastTest).onlyCancellations;
+  for (const u of pending) {
+    if (cancelledOnly && (u.findings ?? []).every(f => /^test falla/.test(f.text))) { out.push({ id: u.id, reason: 'cancelled_only', files: [] }); continue; }
+    if (u.round === undefined) continue;
+    const mine = new Set([...u.files, ...(u.findings ?? []).flatMap(f => [f.file ?? '', ...filesIn(`${f.text} ${f.evidence ?? ''}`)])].filter(Boolean));
+    const touched = man.units.filter(o => o.id !== u.id && o.round === u.round && o.status === 'done').flatMap(o => o.applied ?? []).filter(f => mine.has(f));
+    if (touched.length) out.push({ id: u.id, reason: 'overlap', files: Array.from(new Set(touched)) });
+  }
+  return out;
+}
+
+/**
+ * Un archivo de prueba que falla AL CARGARSE (HU-159: active-agents.test.ts llamaba a runBootstrap sin proveedor y
+ * lanzaba en su nivel superior): node lo informa como «not ok N - test/x.test.ts» con failureType testCodeFailure y el
+ * error va antes, como comentarios TAP. Antes se ignoraba (la fila del archivo no es una prueba) y el fallo no tenía causa.
+ */
+function loadFailure(lines: string[], i: number, rel: string): FailingTest | null {
+  let failureType: string | null = null;
+  for (let j = i + 1; j < Math.min(lines.length, i + 12) && !/^\s*(not )?ok \d+ /.test(lines[j]); j++) { const ft = lines[j].match(/^\s*failureType: '(\w+)'/); if (ft) { failureType = ft[1]; break; } }
+  if (failureType !== 'testCodeFailure') return null;
+  const notes: string[] = [];
+  for (let j = i - 1; j >= 0 && j > i - 60 && /^\s*#/.test(lines[j]); j--) notes.unshift(lines[j].replace(/^\s*#\s?/, ''));
+  const body = notes.filter(l => l.trim() && !/^Subtest: /.test(l) && !/^Node\.js v\d/.test(l));
+  const err = body.find(l => /^\s*\w*Error\b|^\s*Error:/.test(l)) ?? body.find(l => /error/i.test(l)) ?? '';
+  const frames = body.map(l => l.match(/\(?(?:\/work\/)?((?:[\w@.-]+\/)+[\w@.-]+\.[cm]?[jt]sx?):(\d+):\d+\)?/)).filter((x): x is RegExpMatchArray => !!x && !/node_modules\//.test(x[1]));
+  const own = frames.find(f => f[1].endsWith(rel.replace(/^\.?\//, ''))) ?? null;
+  const file = own ? own[1] : rel;
+  const stack = frames.slice(0, 4).map(f => `${f[1]}:${f[2]}`).join(' ← ');
+  return { name: `${rel} (el archivo falla al cargarse: ninguna de sus pruebas llegó a ejecutarse)`, message: `${err.trim() || 'error en el nivel superior del archivo'}${stack ? ` · pila: ${stack}` : ''}`.slice(0, 900), file, line: own ? Number(own[2]) : null, kind: 'load' };
 }
 
 /** Resumen de una ejecución de «test»: cuántas pruebas fallan de verdad y cuántas solo se cancelaron. */

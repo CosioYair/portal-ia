@@ -108,7 +108,9 @@ test('recorrido: autorización, ejecución, presupuesto, conflicto, activación,
   assert.equal(unavailable.issue?.kind, 'sandbox_unavailable'); assert.equal(unavailable.actions[0].id, 'refresh_sandbox');
   const ok3 = [run('typecheck', 0, 4), run('test', 0, 5), run('build', 0, 6)];
   const conflict = buildStoryFlow(base({}, { applied, verifications: ok3, mergeError: { at: at(7), message: 'CONFLICT (content): Merge conflict in src/a.ts', files: ['src/a.ts'] } }), { isPortalRepo: true });
-  assert.equal(conflict.issue?.kind, 'merge_conflict'); assert.equal(stage(conflict, 'integrate').status, 'failed'); assert.equal(conflict.actions[0].id, 'request_fix');
+  // Conflictos reales al integrar: se resuelven SOLO esos archivos (HU-159); rehacer la historia es el último recurso.
+  assert.equal(conflict.issue?.kind, 'merge_conflict'); assert.equal(stage(conflict, 'integrate').status, 'failed'); assert.equal(conflict.actions[0].id, 'integration_resolve');
+  assert.deepEqual(conflict.issue?.files, ['src/a.ts']); assert.equal(conflict.actions.at(-1)?.id, 'request_fix'); assert.match(conflict.actions.at(-1)!.label, /último recurso/);
   const merged = { applied, verifications: ok3, merged: { into: 'main', commit: 'm1', mergedAt: at(8) } };
   const act = buildStoryFlow(base({}, { ...merged, activation: { active: false, reason: 'Falta reconstruir.', runningCommit: 'old', buildAt: null } }), { isPortalRepo: true, updateFailedLog: '✘ [ERROR] Expected ")" but found ";"\n    src/x.tsx:3:1:' });
   assert.equal(act.issue?.kind, 'activation_failed'); assert.equal(act.actions[0].id, 'rebuild');

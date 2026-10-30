@@ -98,6 +98,13 @@ async function run(prompt) {
   log(entry);
   out({ type: 'assistant', message: { content: [...(entry.mcp ? [{ type: 'tool_use', name: 'mcp__portal__portal_read_file', input: {} }] : []), { type: 'text', text: '…' }] }, session_id: 'sess-fake' });
   if (sc.slowMs) await new Promise(r => setTimeout(r, sc.slowMs));
+  // Turnos agotados (como la CLI real con --max-turns): explora con herramientas y termina sin respuesta, con su uso.
+  if (rule?.maxTurns) {
+    const limit = Number(opt('--max-turns')) || 8;
+    for (let t = 0; t < limit; t++) out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: t % 3 ? 'mcp__portal__portal_read_file' : 'mcp__portal__portal_list_files', input: {} }] }, session_id: 'sess-fake' });
+    out({ type: 'result', subtype: 'error_max_turns', is_error: true, num_turns: limit + 1, duration_ms: 4321, total_cost_usd: 0.31, session_id: 'sess-fake', usage: { input_tokens: 9000, cache_read_input_tokens: 21000, output_tokens: 700 }, permission_denials: [] });
+    return;
+  }
   const text = rule?.text ?? sc.defaultText ?? 'Respuesta simulada.';
   out({
     type: 'result', subtype: 'success', is_error: false, result: rule?.structured ? '' : text, ...(rule?.structured ? { structured_output: rule.structured } : {}),

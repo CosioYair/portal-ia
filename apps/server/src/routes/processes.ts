@@ -13,6 +13,7 @@ import { flowOptions } from '../services/processView.ts';
 import { DEPS_MISSING_EXIT } from '../services/sandbox.ts';
 import { recordContextEdit } from '../services/storyThread.ts';
 import { teamReadiness } from '../services/claudeCode/backend.ts';
+import { branchIntegration, prepareIntegration, processIntegration, resolveIntegrationConflicts, verifyCandidate } from '../services/storyIntegration.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { applyChanges, checkStaleChanges, discardBranch, mergeBranch, pushBranches, removeWorktree, worktreePathFor } from '../services/repoWrite.ts';
 import { requirePolicy, PolicyError } from '../services/executionPolicy.ts';
@@ -130,9 +131,10 @@ export async function processRoutes(app: FastifyInstance) {
     // Los límites nuevos se suman a lo ya consumido: continuar tras un tope concede ese margen otra vez, no más.
     // Una pausa de Claude Code (proyecto sin autorizar, consola, límite de la suscripción) no consumió ningún margen:
     // continuar tras ella conserva los límites que había, sin conceder correcciones nuevas.
-    const backendPause = !!prev && (prev.pauseKind === 'subscription_limit' || (prev.pauseKind === 'permission' && !request && /Claude Code/.test(prev.reason ?? '')));
+    const backendPause = !!prev && (prev.pauseKind === 'subscription_limit' || prev.pauseKind === 'max_turns' || (prev.pauseKind === 'provider_error' && /m[aá]ximo de turnos|agot[oó] los turnos/i.test(prev.reason ?? '')) || (prev.pauseKind === 'permission' && !request && /Claude Code/.test(prev.reason ?? '')));
     const pipeline = prev && backendPause
-      ? { ...prev, config: { ...prev.config, ...(body.data.pipeline ? { allowInstall: cfg.allowInstall } : {}) }, failures: [], ineffectiveRounds: 0, startedAt: new Date().toISOString() }
+      // «Volver a verificar sin IA» (maxCorrections: 0) cierra además el margen restante: si algo sigue fallando, se detiene sin pagar.
+      ? { ...prev, config: { ...prev.config, ...(body.data.pipeline ? { allowInstall: cfg.allowInstall } : {}), ...(body.data.pipeline?.maxCorrections === 0 ? { maxCorrections: prev.corrections } : {}) }, failures: [], ineffectiveRounds: 0, startedAt: new Date().toISOString() }
       : prev
       ? { ...prev, config: { ...cfg, maxCorrections: prev.corrections + cfg.maxCorrections, maxOutputRepairs: prev.outputRepairs + cfg.maxOutputRepairs, maxConsultations: (prev.consultations?.length ?? 0) + cfg.maxConsultations, maxContinuations: (prev.continuations ?? 0) + (cfg.maxContinuations ?? 6) }, failures: [], ineffectiveRounds: 0, startedAt: new Date().toISOString() }
       : newPipeline(cfg);
@@ -382,6 +384,15 @@ Proceso: ${proc.id}`, { processId: proc.id });
       if (missing.length) return reply.code(409).send({ error: `Antes de integrar faltan verificaciones en verde tras aplicar: ${missing.join(', ')}. ${internal && missing.some(m => m.includes('sandbox')) ? 'El proyecto interno exige test y build en un sandbox real (Docker/WSL2); sin sandbox no se integra.' : ''}`, code: 'verification_required', missing });
     }
     const repo = projectsRepo(slug).repository(proc.projectId); if (!repo) return reply.code(409).send({ error: 'No hay repositorio registrado.' });
+    // main avanzó desde que nació la rama: no se integra a ciegas. Conflictos reales → se dicen con sus archivos (sin
+    // intentar el merge); sin conflictos → primero el candidato (main incorporado en la rama y verificado en el sandbox).
+    const integ = await branchIntegration(repo.path, proc.result.applied.branch, body.data.into).catch(() => null);
+    if (integ?.state === 'conflicts') {
+      const files = integ.conflicts.map(c => c.path);
+      procs.setResult(id, { ...proc.result, mergeError: { at: new Date().toISOString(), message: `main avanzó ${integ.behindCount} commit(s) y hay conflictos reales en ${files.length} archivo(s): ${files.join(', ')}. Nada se modificó.`, files } });
+      return reply.code(409).send({ error: `Hay conflictos reales con ${integ.target} en ${files.join(', ')}: prepara el candidato de integración (se resuelven solo esos conflictos; no hace falta otra iteración).`, code: 'merge_conflict', integration: integ, process: await withGuidance(slug, procs.get(id)!) });
+    }
+    if (integ && integ.behindCount > 0) return reply.code(409).send({ error: `${integ.target} avanzó ${integ.behindCount} commit(s) desde que nació la rama: prepara el candidato de integración (incorpora ${integ.target} en la rama sin IA y se vuelve a verificar) antes de integrar.`, code: 'integration_candidate_required', integration: integ });
     try {
       requirePolicy('git_merge', { slug, processId: id, projectId: proc.projectId, authorized: true });
       const m = await mergeBranch(repo.path, proc.result.applied.branch, body.data.into, { affectedFiles: proc.result.changes.filter(c => !c.error).map(c => c.path), processId: id });
@@ -392,9 +403,10 @@ Proceso: ${proc.id}`, { processId: proc.id });
       return await withGuidance(slug, procs.get(id)!);
     } catch (e: any) {
       // Conflicto: se guarda para que el recorrido lo explique y ofrezca la corrección (el merge ya se deshizo).
-      if (e.statusCode === 409 && /conflict/i.test(e.message)) {
-        const files = Array.from(new Set(Array.from(String(e.message).matchAll(/Merge conflict in (\S+)/g)).map(x => x[1])));
-        procs.setResult(id, { ...proc.result, mergeError: { at: new Date().toISOString(), message: String(e.message).slice(0, 2000), files: files.length ? files : proc.result.changes.filter(c => !c.error).map(c => c.path) } });
+      if (e.statusCode === 409 && (e.conflict || /conflict/i.test(e.message))) {
+        // Solo los archivos que git dice en conflicto (antes, sin ellos, se listaban TODOS los de la historia).
+        const files: string[] = e.conflictFiles ?? Array.from(new Set(Array.from(String(e.message).matchAll(/Merge conflict in (\S+)/g)).map(x => x[1])));
+        procs.setResult(id, { ...proc.result, mergeError: { at: new Date().toISOString(), message: String(e.message).slice(0, 2000), files } });
         return reply.code(409).send({ error: e.message, code: 'merge_conflict', process: await withGuidance(slug, procs.get(id)!) });
       }
       return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : undefined });
@@ -497,6 +509,53 @@ Proceso: ${proc.id}`, { processId: proc.id });
   app.get('/api/workspaces/:slug/projects/:projectId/knowledge', async (req, reply) => {
     const { slug, projectId } = req.params as any; if (!guard(slug, reply)) return;
     return knowledgeRepo(slug).list(projectId);
+  });
+
+  // Integración con la rama principal (HU-159): estado (git, sin IA) y detalle de los conflictos reales si los hay.
+  app.get('/api/workspaces/:slug/processes/:id/integration', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    try { return await processIntegration(slug, id); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e.code }); }
+  });
+
+  // Candidato de integración (autorizado): main se incorpora en la rama de la historia en su worktree (merge, sin IA y sin
+  // tocar main) y se verifica en el sandbox; se detiene antes de QA e integrar. Con conflictos reales no cambia nada y los dice.
+  app.post('/api/workspaces/:slug/processes/:id/integration/prepare', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ authorized: z.literal(true) }).safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Preparar el candidato de integración exige tu autorización explícita.', code: 'authorization_required' });
+    const procs = processesRepo(slug); const proc0 = procs.get(id);
+    try {
+      if (proc0) requirePolicy('write_worktree', { slug, processId: id, agentId: null, projectId: proc0.projectId, authorized: true });
+      const res = await prepareIntegration(slug, id);
+      if (res.state === 'conflicts') return reply.code(409).send({ error: `Hay conflictos reales con ${res.status.target} en ${res.status.conflicts.map(c => c.path).join(', ')}. Nada cambió.`, code: 'integration_conflict', integration: res.status, process: await withGuidance(slug, procs.get(id)!) });
+      if (res.state === 'up_to_date') return reply.code(200).send({ ...(await withGuidance(slug, procs.get(id)!)), note: 'La rama ya contiene el main actual: no hace falta candidato.' });
+      const proc = procs.get(id)!;
+      procs.resume(id, Math.max(proc.budgetUsd, proc.spentUsd));
+      app.log.info({ processId: id, commit: proc.result?.applied?.commit }, 'candidato de integración preparado (sin IA)');
+      const run = verifyCandidate(slug, id, (o: any, m: string) => app.log.info(o, m), () => isCancelled(id)).finally(() => clearCancel(id));
+      trackJob(id, run).catch(e => app.log.error(e, 'fallo inesperado al verificar el candidato de integración'));
+      return await withGuidance(slug, procs.get(id)!);
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : e.code }); }
+  });
+
+  // Conflictos reales: el Desarrollador autorizado resuelve SOLO esas secciones (una llamada, autorizada) y el candidato se
+  // verifica en el sandbox. Nada se integra en main.
+  app.post('/api/workspaces/:slug/processes/:id/integration/resolve', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ authorized: z.literal(true), addBudgetUsd: z.number().min(0).max(100).optional() }).safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Resolver los conflictos con el equipo exige tu autorización explícita.', code: 'authorization_required' });
+    const procs = processesRepo(slug); const proc = procs.get(id);
+    if (!proc || proc.kind !== 'story_execution' || !proc.result?.applied?.worktree) return reply.code(404).send({ error: 'Proceso de historia no encontrado.' });
+    if (proc.status === 'running' || procs.running().length) return reply.code(409).send({ error: 'Hay un proceso en ejecución. Espera a que termine.' });
+    if (proc.result.merged || proc.result.rejected) return reply.code(409).send({ error: 'Esta historia ya está cerrada.' });
+    const readiness = teamReadiness(slug, id);
+    if (readiness && !readiness.ready && readiness.fallback !== 'api') return reply.code(409).send({ error: `No se inicia: ${readiness.team.find(t => !t.ready)!.reason}`, code: 'backend_not_ready', readiness });
+    try { requirePolicy('write_worktree', { slug, processId: id, agentId: null, projectId: proc.projectId, authorized: true }); } catch (e: any) { return reply.code(e.statusCode ?? 403).send({ error: e.message, code: e.code }); }
+    procs.resume(id, Math.max(proc.budgetUsd, proc.spentUsd) + (body.data.addBudgetUsd ?? 0));
+    app.log.info({ processId: id }, 'integración: resolver conflictos con el equipo (autorizado)');
+    const run = resolveIntegrationConflicts(slug, id, (o: any, m: string) => app.log.info(o, m), () => isCancelled(id)).finally(() => clearCancel(id));
+    trackJob(id, run).catch(e => app.log.error(e, 'fallo inesperado al resolver conflictos de integración'));
+    return await withGuidance(slug, procs.get(id)!);
   });
 
   // Corrección externa (consola) autorizada por el propietario: se registra con su commit y sus archivos reales, se verifica

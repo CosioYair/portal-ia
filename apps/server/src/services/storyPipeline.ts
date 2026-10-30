@@ -214,11 +214,15 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       opts.log({ ...who, attempt, ms: ms(), code: finalErr?.code ?? null, httpStatus: finalErr?.httpStatus ?? null, class: cls.kind, billed }, finalErr?.code === 'cancelled' ? 'llamada al proveedor: cancelada' : finalErr?.code === 'timeout' ? 'llamada al proveedor: plazo agotado' : 'llamada al proveedor: fallida');
       // Lo ya confirmado en este paso (llamadas anteriores de una continuación) se conserva: uso, costo y salida parcial.
       const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
-      procs.stepFinish(step.id, 'failed', { tokensIn: prev.inputTokens, tokensOut: prev.outputTokens, cost: prev.costUsd, outputMd: prev.outputMd, error: msg });
+      // Una ejecución de Claude Code sin respuesta útil (turnos agotados) consumió la suscripción: su uso se registra en el
+      // paso (0 USD de la API), no se presenta como «0 tokens».
+      const u = (e as any)?.usage as { inputTokens: number; outputTokens: number } | undefined;
+      procs.stepFinish(step.id, 'failed', { tokensIn: prev.inputTokens + (u?.inputTokens ?? 0), tokensOut: prev.outputTokens + (u?.outputTokens ?? 0), cost: prev.costUsd, outputMd: prev.outputMd, error: msg, backend: route === 'claude-code' ? backendLabel(agentBackend(agent), lastDetection()?.billing) : null });
+      if (u) procs.addUsage(processId, u.inputTokens, u.outputTokens, 0);
       if (billed) procs.addUnconfirmed(processId, step.id, estCost);
-      procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });
+      procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'failed', tokensIn: u?.inputTokens ?? 0, tokensOut: u?.outputTokens ?? 0, cost: 0, startedAt });
       const cancelled = finalErr?.code === 'cancelled';
-      throw Object.assign(new Error(msg), { cancelled, failure: { kind: cancelled ? 'cancelled' : finalErr ? 'provider' : 'internal', class: cls.kind, providerCode: cls.code, detail: msg } satisfies ProcessFailure });
+      throw Object.assign(new Error(msg), { cancelled, usage: u ?? null, failure: { kind: cancelled ? 'cancelled' : finalErr ? 'provider' : 'internal', class: cls.kind, providerCode: cls.code, detail: msg } satisfies ProcessFailure });
     } finally { unregisterCall(processId, ctrl); }
   }
 }
@@ -846,6 +850,7 @@ export function providerPause(e: any): PipelinePause | null {
   const f: ProcessFailure | undefined = e?.failure; if (!f?.class) return null;
   // Conector Claude Code: nunca se cambia solo a un origen facturable; se pausa con el motivo y lo hecho se conserva.
   if (f.providerCode === 'usage_limit') return new PipelinePause('subscription_limit', `${f.detail} Lo hecho se conserva y no se ha cambiado a otro proveedor facturable. «Continuar» cuando se renueve el límite, o asigna otro backend al agente.`);
+  if (f.providerCode === 'max_turns') return new PipelinePause('max_turns', `${f.detail} Lo hecho se conserva (commits, salidas y verificaciones). No se repite el mismo encargo: el siguiente intento es acotado o decides tú.`);
   if (f.providerCode === 'backend_unavailable') return new PipelinePause('permission', `Claude Code no está disponible para este paso: ${f.detail} Lo hecho se conserva y no se ha cambiado a otro proveedor facturable. Corrígelo y pulsa «Continuar».`);
   if (f.class === 'PROVIDER_TIMEOUT') return new PipelinePause('provider_timeout', `El proveedor no respondió a tiempo: ${f.detail} No se reintenta solo (la llamada pudo facturarse); lo hecho se conserva y «Continuar» repite solo esta llamada.`);
   if (f.class === 'PROVIDER_CONNECTION_ERROR') return new PipelinePause('provider_error', `No se pudo completar la llamada al proveedor tras los reintentos permitidos: ${f.detail} Lo hecho se conserva; «Continuar» la repite.`);
@@ -856,7 +861,7 @@ export function providerPause(e: any): PipelinePause | null {
 /** Cierra el pipeline en pausa/parada con el motivo (sin perder nada) y lo deja listo para «Continuar». */
 export function pausePipeline(ctx: StoryRunCtx, pause: PipelinePause) {
   const stopped = ['repeated_failure', 'limit', 'qa', 'no_changes', 'refusal', 'provider_refusal', 'unsupported', 'unknown', 'plan', 'disagreement'].includes(pause.kind);
-  const CLASS: Partial<Record<PipelinePauseKind, AgentFailureKind>> = { budget: 'BUDGET_EXHAUSTED', network: 'PERMISSION_REQUIRED', environment: 'ENVIRONMENT_FAILURE', limit: 'RECOVERABLE_IMPLEMENTATION_ERROR', repeated_failure: 'RECOVERABLE_IMPLEMENTATION_ERROR', missing_information: 'MISSING_INFORMATION', permission: 'PERMISSION_REQUIRED', unsupported: 'UNSUPPORTED_CAPABILITY', provider_refusal: 'PROVIDER_REFUSAL', provider_timeout: 'PROVIDER_TIMEOUT', provider_error: 'PROVIDER_CONNECTION_ERROR', interrupted: 'UNKNOWN_FAILURE', unknown: 'UNKNOWN_FAILURE', too_large: 'INCOMPLETE_OUTPUT', incomplete: 'RECOVERABLE_IMPLEMENTATION_ERROR' };
+  const CLASS: Partial<Record<PipelinePauseKind, AgentFailureKind>> = { budget: 'BUDGET_EXHAUSTED', network: 'PERMISSION_REQUIRED', environment: 'ENVIRONMENT_FAILURE', limit: 'RECOVERABLE_IMPLEMENTATION_ERROR', repeated_failure: 'RECOVERABLE_IMPLEMENTATION_ERROR', missing_information: 'MISSING_INFORMATION', permission: 'PERMISSION_REQUIRED', unsupported: 'UNSUPPORTED_CAPABILITY', provider_refusal: 'PROVIDER_REFUSAL', provider_timeout: 'PROVIDER_TIMEOUT', provider_error: 'PROVIDER_CONNECTION_ERROR', max_turns: 'CLAUDE_CODE_MAX_TURNS_EXHAUSTED', interrupted: 'UNKNOWN_FAILURE', unknown: 'UNKNOWN_FAILURE', too_large: 'INCOMPLETE_OUTPUT', incomplete: 'RECOVERABLE_IMPLEMENTATION_ERROR' };
   const cur = pipelineOf(ctx.slug, ctx.processId);
   updatePipeline(ctx.slug, ctx.processId, { state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, reason: pause.message, phase: 'finished', finishedAt: now(), failureClass: cur.failureClass && ['missing_information', 'permission', 'unsupported', 'provider_refusal'].includes(pause.kind) ? cur.failureClass : CLASS[pause.kind] ?? cur.failureClass ?? null }, { kind: 'pause', message: pause.message });
 }

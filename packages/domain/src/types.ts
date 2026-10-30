@@ -44,7 +44,9 @@ export type ProviderErrorCode = 'invalid_key' | 'forbidden' | 'rate_limited' | '
   /** Claude Code: la suscripción alcanzó su límite de uso (no se cambia solo a otro origen facturable). */
   | 'usage_limit'
   /** Claude Code: el backend no está disponible o no está autorizado (desactivado, sin sesión, conflicto de facturación, consola desconectada). */
-  | 'backend_unavailable';
+  | 'backend_unavailable'
+  /** Claude Code agotó los turnos autorizados (--max-turns) sin entregar la respuesta: capacidad de la ejecución, no conexión. */
+  | 'max_turns';
 
 export interface ProviderError {
   code: ProviderErrorCode;
@@ -312,7 +314,9 @@ export type FlowIssueKind =
   | 'merge_conflict' | 'activation_failed' | 'runtime_failed' | 'runtime_unavailable' | 'manual_failed' | 'budget_exceeded'
   | 'process_failed' | 'cancelled' | 'diff_rejected' | 'legacy'
   | 'output_contract' | 'provider_failed' | 'agent_refused' | 'pipeline_paused' | 'pipeline_stopped' | 'qa_blocked'
-  | 'agent_blocked' | 'provider_timeout' | 'process_interrupted' | 'call_overdue';
+  | 'agent_blocked' | 'provider_timeout' | 'process_interrupted' | 'call_overdue'
+  /** La rama principal avanzó desde que nació la rama de la historia (sin conflictos): falta el candidato de integración. */
+  | 'integration_behind';
 export type IssueSeverity = 'alta' | 'media' | 'baja';
 export interface FlowIssueDetail { text: string; file?: string | null; line?: number | null; code?: string | null; severity?: IssueSeverity | null }
 export interface FlowIssue {
@@ -346,7 +350,9 @@ export type FlowActionId =
   /** Registrar como corrección del propietario un commit hecho fuera del equipo (consola) y verificarlo sin IA. */
   | 'register_external'
   /** Ir a la pantalla del Portal donde se corrige (`href`); no cambia nada por sí sola. */
-  | 'open_settings';
+  | 'open_settings'
+  /** Integración: preparar el candidato (main incorporado en la rama, sin IA) · pedir al equipo que resuelva SOLO los conflictos. */
+  | 'integration_prepare' | 'integration_resolve';
 export interface FlowAction {
   id: FlowActionId;
   label: string;
@@ -590,7 +596,9 @@ export interface AgentBlocker {
 export type AgentFailureKind =
   | 'INVALID_OUTPUT' | 'INCOMPLETE_OUTPUT' | 'RECOVERABLE_IMPLEMENTATION_ERROR' | 'MISSING_INFORMATION' | 'PERMISSION_REQUIRED'
   | 'UNSUPPORTED_CAPABILITY' | 'PROVIDER_REFUSAL' | 'PROVIDER_TIMEOUT' | 'PROVIDER_CONNECTION_ERROR' | 'BUDGET_EXHAUSTED'
-  | 'ENVIRONMENT_FAILURE' | 'UNKNOWN_FAILURE';
+  | 'ENVIRONMENT_FAILURE' | 'UNKNOWN_FAILURE'
+  /** Claude Code agotó sus turnos sin terminar (no es un fallo de conexión ni de la implementación). */
+  | 'CLAUDE_CODE_MAX_TURNS_EXHAUSTED';
 /** Lo que el equipo pide al propietario cuando no puede resolverlo dentro de su autoridad. */
 export interface OwnerRequest {
   kind: 'information' | 'permission' | 'decision' | 'budget';
@@ -633,11 +641,17 @@ export interface PipelineConfig {
 export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'verify' | 'environment' | 'qa' | 'correction' | 'pause' | 'done' | 'error'
   /** Entrega incremental: unidad de trabajo, continuación de una respuesta cortada y comprobación determinista previa a QA. */
   | 'unit' | 'continuation' | 'gate'
+  /** Integración con la rama principal: candidato preparado, conflictos detectados o resueltos. */
+  | 'integration'
   /** Corrección hecha fuera del equipo de agentes (consola), registrada por el propietario: sin IA ni tokens. */
   | 'external';
 export interface PipelineEvent { at: string; kind: PipelineEventKind; message: string; detail?: string | null; aiCall?: boolean; costUsd?: number | null }
 export type PipelineState = 'running' | 'verified' | 'paused' | 'stopped';
 export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' | 'repeated_failure' | 'duration' | 'no_changes' | 'refusal' | 'qa' | 'cancelled'
+  /** Claude Code agotó sus turnos sin terminar una llamada: se conserva todo y el siguiente intento es acotado (o decides tú). */
+  | 'max_turns'
+  /** Candidato de integración preparado y verificado (o no) sin IA: decides QA e integrar · conflictos reales con la rama principal. */
+  | 'integration' | 'integration_conflict'
   | 'missing_information' | 'permission' | 'unsupported' | 'provider_refusal' | 'provider_timeout' | 'provider_error' | 'interrupted' | 'unknown'
   /** Entrega incremental: un entregable no cabe en la salida del modelo ni por secciones, o faltan entregables tras los intentos permitidos. */
   | 'too_large' | 'incomplete'
@@ -754,6 +768,8 @@ export interface WorkUnit {
   /** Entregables que esta unidad descartó de verdad (con motivo) y respuesta del equipo que discute un hallazgo (correcciones). */
   dropped?: string[];
   disputed?: string | null;
+  /** Veces que Claude Code agotó sus turnos en esta unidad: el siguiente intento es acotado; tras dos, no se insiste solo. */
+  maxTurns?: number;
   /** Salidas pagadas del intento en curso (paso + motivo de parada + prefijo de una continuación): al reanudar se releen sin volver a llamar. */
   outputs?: { stepId: string; stopReason: string | null; prefix?: string | null }[];
 }
@@ -867,8 +883,32 @@ export interface ExecutionResult {
    * propietario. No son actividad de los agentes: no tienen pasos, tokens ni coste, y no cuentan como correcciones.
    */
   externalCorrections?: ExternalCorrection[];
+  /** Integración con la rama principal: candidato preparado (main incorporado en la rama) o conflictos detectados. */
+  integration?: IntegrationCandidate | null;
 }
 export interface ExternalCorrection { at: string; commit: string; previousCommit: string; files: string[]; note: string; by: 'owner' }
+/** Integración de la rama de una historia con la rama principal (se calcula al leer, con git y sin IA). */
+export interface BranchIntegration {
+  target: string; branch: string; base: string; targetHead: string; branchHead: string;
+  /** Commits de la rama principal que la rama de la historia aún no tiene (como mucho 30, los más recientes primero). */
+  behind: { sha: string; subject: string }[]; behindCount: number; ahead: number;
+  /** Archivos que cambiaron en la rama principal y en la de la historia desde su base común, y los que cambiaron en ambas. */
+  targetFiles: string[]; branchFiles: string[]; overlap: string[];
+  /** up_to_date: la rama ya contiene la principal · clean: se combinan sin conflictos · conflicts: conflictos reales · unknown: no se pudo calcular. */
+  state: 'up_to_date' | 'clean' | 'conflicts' | 'unknown';
+  conflicts: { path: string; message: string }[];
+  detail?: string | null;
+}
+/** Candidato de integración preparado por el Portal: la rama de la historia con la rama principal ya incorporada (merge). */
+export interface IntegrationCandidate {
+  state: 'candidate' | 'conflicts';
+  at: string; target: string; targetHead: string; behindCount: number;
+  /** Commit del candidato (null si hay conflictos sin resolver) y el commit registrado antes. */
+  commit: string | null; previousCommit: string;
+  files: string[]; conflicts: string[];
+  /** Cómo se resolvieron los conflictos: git (no había), el agente autorizado o nadie todavía. */
+  resolvedBy: 'git' | 'agent' | null;
+}
 /** Estado del worktree de una historia respecto al último commit que registró el pipeline (se calcula al leer, sin IA). */
 export interface WorktreeDrift { state: 'same' | 'ahead' | 'dirty' | 'diverged'; head: string; recorded: string; files: string[] }
 

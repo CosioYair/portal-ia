@@ -904,6 +904,36 @@ test('HU-159 · al continuar, una corrección planificada con pruebas solo cance
   } finally { sandboxFail = null; }
 });
 
+test('HU-159 · «Corrección 2.2»: al continuar, una corrección pendiente cuyos archivos ya cambió otra de su ronda se sustituye SIN IA y se vuelve a verificar (no se repite la tarea que agotaba los turnos)', async () => {
+  setRules(planOf([['src/contract.mjs', 'code', 30]]), [{ match: 'Esta es la unidad 1 de 1', text: resp(F('src/contract.mjs', C.contract)) }]);
+  const p = await runIt('HU-159 · corrección 2.2 obsoleta');
+  assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
+  // Ronda 2: la 2.1 terminó y cambió src/contract.mjs; la 2.2 (mismo archivo) quedó pendiente tras agotar los turnos.
+  const procs = processesRepo(S); const r = procs.get(p.id)!.result!; const man = r.manifest!; const u0 = man.units[0];
+  // Como en HU-159: la evidencia (17:13) es ANTERIOR al commit de la 2.1 (17:15), que pasa a ser el aplicado.
+  const at = new Date(Date.now() - 60_000).toISOString(); const round = man.rounds.length;
+  const corr = (id: string, status: 'done' | 'pending', extra: any = {}) => ({ ...u0, id, kind: 'correction' as const, title: `${id}: contract.mjs`, purpose: 'x', files: ['src/contract.mjs'], status, attempts: status === 'done' ? 1 : 0, continuations: 0, repairs: 0, costUsd: 0, stepIds: [], reservedStepId: null, source: 'verification' as const, findings: [{ severity: 'alta' as const, text: 'test falla: línea 179: falla «f · fusionar»', file: 'src/contract.mjs', evidence: null }], error: null, startedAt: null, finishedAt: null, round, outputs: [], ...extra });
+  procs.setResult(p.id, { ...r, review: null, applied: { ...r.applied!, appliedAt: new Date().toISOString() }, verifications: [...r.verifications, { command: 'test', exitCode: 1, output: "TAP version 13\nnot ok 1 - f · fusionar\n  ---\n  failureType: 'testCodeFailure'\n  error: 'x'\n  ...", startedAt: at, finishedAt: at, durationMs: 1, isolation: 'docker' }],
+    manifest: { ...man, units: [...man.units, corr('r9-1', 'done', { applied: ['src/contract.mjs'] }), corr('r9-2', 'pending', { maxTurns: 1, error: 'Claude Code agotó sus turnos' })], rounds: [...man.rounds, { at, source: 'verification', units: 2, applied: 1 }] },
+    pipeline: { ...r.pipeline!, state: 'paused', phase: 'finished', pauseKind: 'max_turns', reason: 'Claude Code agotó los turnos autorizados (8) sin entregar la respuesta.', lastQaCommit: null } });
+  const rd = (await app.inject({ method: 'GET', url: `${W}/processes/${p.id}/backends` })).json();
+  assert.match(rd.nextOperation, /Volver a verificar sin IA \(la corrección pendiente quedó obsoleta: otra de su ronda ya cambió src\/contract\.mjs\)/);
+  const flow = (await flowOf(p.id)).guidance.flow;
+  assert.equal(flow.actions[0].label, 'Volver a verificar sin IA y corregir solo lo que falle');
+  let tests = 0; sandboxFail = (_wt, command) => { if (command === 'test') tests++; return null; };
+  try {
+    const before = calls().length;
+    assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/continue`, payload: { authorized: true } })).statusCode, 200);
+    const done = await waitDone(p.id); const pl = done.result!.pipeline!;
+    assert.equal(pl.state, 'verified', pl.reason ?? '');
+    const stale = done.result!.manifest!.units.find(u => u.id === 'r9-2')!;
+    assert.equal(stale.status, 'skipped'); assert.match(stale.error ?? '', /otra corrección de su ronda ya cambió src\/contract\.mjs/);
+    assert.equal(tests, 1, '«test» se vuelve a verificar (sin IA)');
+    assert.deepEqual(calls().slice(before).map(c => c.rule), [R.qa], 'la única llamada es la de QA: ninguna corrección se repite');
+    assert.ok(pl.events.some(e => /sustituida\(s\) sin IA: otra corrección de su ronda ya cambió sus archivos/.test(e.message)));
+  } finally { sandboxFail = null; }
+});
+
 // ---------- R · Docker real ----------
 let dockerReady = (await real.detect(true)).available === 'docker';
 for (let i = 0; i < 3 && !dockerReady; i++) { await new Promise(r => setTimeout(r, 2000)); dockerReady = (await real.detect(true)).available === 'docker'; }
