@@ -110,6 +110,8 @@ function selection(slug: string, projectId: string, itemIds: string[]) {
 const PROVIDERS_LINK = { label: 'Proveedores', href: '/configuracion/proveedor' };
 const CC_LINK = { label: 'Proveedores → Claude Code — Local', href: '/configuracion/proveedor#claude-code' };
 const unique = (xs: string[]) => Array.from(new Set(xs));
+/** Recorta un texto largo por una palabra entera (nunca a mitad de palabra). */
+const clip = (s: string, n: number) => s.length <= n ? s : `${s.slice(0, n).replace(/\s+\S*$/, '')}…`;
 /** ¿Puede Claude Code ceder a la API en las historias del lote? Lo pide el lote, con la API autorizada, y lo permite el conector. */
 const batchFallback = (auth: Pick<BatchAuthorization, 'backends' | 'apiFallback'>, connector: 'none' | 'api') => !!auth.apiFallback && auth.backends.includes('api') && connector === 'api';
 
@@ -187,15 +189,19 @@ type Limit = 'subscription' | 'budget' | 'duration';
  * eso el tope puede superarse un poco). `minutes`: duración por historia del historial (null si no hay datos).
  */
 function fitsUnderLimits(stories: BatchPreviewStory[], auth: BatchAuthorization, pick: 'min' | 'max', minutes: number | null): { n: number; limitedBy: Limit[] } {
-  const c = Math.max(1, auth.concurrency); let calls = 0; let spent = 0; let groupCalls = 0; let groupUsd = 0; let n = 0;
+  const c = Math.max(1, auth.concurrency); let calls = 0; let spent = 0; let groupCalls = 0; let groupUsd = 0; let n = 0; let inGroup = 0; let rounds = 0;
+  const close = () => { calls += groupCalls; spent += groupUsd; groupCalls = 0; groupUsd = 0; inGroup = 0; rounds++; };
+  const room = () => auth.totalBudgetUsd - spent - inGroup * auth.perStoryBudgetUsd + 1e-9 >= auth.perStoryBudgetUsd;
   for (const s of stories) {
-    const limitedBy: Limit[] = []; const inGroup = n % c;
+    // Si lo reservado para las que van a la vez no deja sitio, el coordinador espera a que terminen (no pausa el lote).
+    if (inGroup > 0 && !room()) close();
+    const limitedBy: Limit[] = [];
     if (auth.backends.includes('claude_code') && calls >= auth.maxSubscriptionCalls) limitedBy.push('subscription');
-    if (auth.totalBudgetUsd - spent - inGroup * auth.perStoryBudgetUsd + 1e-9 < auth.perStoryBudgetUsd) limitedBy.push('budget');
-    if (minutes !== null && Math.floor(n / c) * minutes > auth.maxDurationMin) limitedBy.push('duration');
+    if (!room()) limitedBy.push('budget');
+    if (minutes !== null && rounds * minutes > auth.maxDurationMin) limitedBy.push('duration');
     if (limitedBy.length) return { n, limitedBy };
-    n++; groupCalls += s.subscriptionCalls[pick]; groupUsd += (pick === 'min' ? s.estimatedUsd : s.estimatedUsdMax) ?? 0;
-    if (n % c === 0) { calls += groupCalls; spent += groupUsd; groupCalls = 0; groupUsd = 0; }
+    n++; inGroup++; groupCalls += s.subscriptionCalls[pick]; groupUsd += (pick === 'min' ? s.estimatedUsd : s.estimatedUsdMax) ?? 0;
+    if (inGroup === c) close();
   }
   return { n, limitedBy: [] };
 }
@@ -394,12 +400,14 @@ function onFinished(slug: string, id: string, it: BatchItem, p: Process) {
   const pl = p.result?.pipeline;
   if (p.status === 'done' && pl?.state === 'verified') return technicalDone(slug, id, it.itemId, p);
   if (p.status === 'cancelled' && batchesRepo(slug).get(id)!.status !== 'running') return setItem(slug, id, it.itemId, { state: 'cancelled', finishedAt: now(), reason: 'Cancelada con el lote.' }, 'cancelada.');
-  const c = classifyStop(pl?.pauseKind, p.status, p.result?.failure?.providerCode);
+  const code = p.result?.failure?.providerCode ?? pl?.providerCode ?? null;
+  const c = classifyStop(pl?.pauseKind, p.status, code);
   const reason = pl?.reason ?? p.error ?? 'El pipeline se detuvo.';
+  const why = c.cls === 'subscription' ? 'límite de la suscripción de Claude' : code === 'origin_not_allowed' ? 'un agente usa un origen que el lote no autoriza' : code === 'backend_unavailable' ? 'Claude Code no disponible' : 'entorno de verificación';
   // Un motivo de todo el lote (límite de la suscripción, Claude Code no disponible) no es un fallo de la historia: espera tu decisión.
-  setItem(slug, id, it.itemId, { state: p.status === 'failed' && !c.batchWide ? 'failed' : 'needs_owner', failureClass: c.cls, reason, finishedAt: now() }, `${p.status === 'failed' && !c.batchWide ? 'falló' : 'se detuvo'} (${c.cls}): ${reason.slice(0, 300)}${c.batchWide ? '' : ' Las historias independientes siguen.'}`);
+  setItem(slug, id, it.itemId, { state: p.status === 'failed' && !c.batchWide ? 'failed' : 'needs_owner', failureClass: c.cls, reason, finishedAt: now() }, `${p.status === 'failed' && !c.batchWide ? 'falló' : 'se detuvo'} (${c.cls}): ${clip(reason, 400)}${c.batchWide ? '' : ' Las historias independientes siguen.'}`);
   // El mismo motivo detendría a las demás (límite de la suscripción, sandbox caído): se pausa todo el lote.
-  if (c.batchWide) setStatus(slug, id, 'paused', `${it.storyId} se detuvo por un motivo que afecta a todo el lote (${c.cls === 'subscription' ? 'límite de la suscripción de Claude' : 'entorno de verificación'}): ${reason.slice(0, 300)} No se empieza nada más hasta que lo resuelvas y reanudes.`, 'pause');
+  if (c.batchWide) setStatus(slug, id, 'paused', `${it.storyId} se detuvo por un motivo que afecta a todo el lote (${why}): ${clip(reason, 400)} No se empieza nada más hasta que lo resuelvas y reanudes.`, 'pause', { label: `Proceso de ${it.storyId}`, href: `/procesos/${p.id}` });
 }
 
 function technicalDone(slug: string, id: string, itemId: string, p: Process) {

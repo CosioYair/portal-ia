@@ -198,12 +198,15 @@ export function planBatch(selected: PlanInput[], backlog: PlanInput[]): PlannedI
  * Cómo afecta al lote que el pipeline de una historia se detenga: `batchWide` pausa TODO el lote (el mismo motivo
  * detendría a las demás: límite de la suscripción, sandbox caído); si no, solo esa historia espera tu decisión y las
  * independientes siguen. `providerCode` es el del fallo del proceso (un fallo del proveedor antes de que el Desarrollador
- * entregue termina el proceso en lugar de pausarlo): el límite de la suscripción o Claude Code no disponible también
- * detendrían a las demás.
+ * entregue termina el proceso en lugar de pausarlo; después, va en la pausa): el límite de la suscripción, Claude Code
+ * no disponible o un origen no autorizado en el lote también detendrían a las demás. Una petición de permiso del propio
+ * agente para SU historia (`permission`) solo detiene esa historia.
  */
 export function classifyStop(pauseKind: PipelinePauseKind | null | undefined, processStatus: string, providerCode?: string | null): { cls: BatchFailureClass; batchWide: boolean } {
   if (providerCode === 'usage_limit') return { cls: 'subscription', batchWide: true };
   if (providerCode === 'backend_unavailable') return { cls: 'environment', batchWide: true };
+  // Un agente pasó a un origen que el lote no autoriza: les pasaría lo mismo a las demás que lo usan.
+  if (providerCode === 'origin_not_allowed') return { cls: 'owner_decision', batchWide: true };
   if (processStatus === 'failed') return { cls: 'failure', batchWide: false };
   if (processStatus === 'cancelled' || pauseKind === 'cancelled') return { cls: 'owner_decision', batchWide: false };
   switch (pauseKind) {
@@ -211,8 +214,6 @@ export function classifyStop(pauseKind: PipelinePauseKind | null | undefined, pr
     case 'environment': return { cls: 'environment', batchWide: true };
     // Faltan dependencias en el sandbox y no se autorizó instalar con red: les pasaría lo mismo a todas.
     case 'network': return { cls: 'environment', batchWide: true };
-    // Credencial rechazada, Claude Code no disponible u origen no autorizado en el lote: también afecta a todas.
-    case 'permission': return { cls: 'owner_decision', batchWide: true };
     case 'budget': return { cls: 'budget', batchWide: false };
     case 'provider_timeout': case 'provider_error': case 'interrupted': case 'max_turns': return { cls: 'environment', batchWide: false };
     case 'integration': case 'integration_conflict': return { cls: 'integration', batchWide: false };

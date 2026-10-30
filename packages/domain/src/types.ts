@@ -38,6 +38,8 @@ export interface ProviderView {
 }
 
 export type ProviderErrorCode = 'invalid_key' | 'forbidden' | 'rate_limited' | 'network' | 'provider_error' | 'no_credential' | 'workspace_required'
+  /** El agente usa un origen que el lote de su proceso no autoriza (no se hizo la llamada). */
+  | 'origin_not_allowed'
   /** El proveedor no respondió dentro del plazo de la llamada (se abortó). */
   | 'timeout'
   /** La llamada se abortó por decisión del propietario (cancelar). */
@@ -697,6 +699,8 @@ export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' |
 export type PipelinePhase = 'implementing' | 'recovering' | 'repairing' | 'applying' | 'verifying' | 'installing' | 'qa' | 'correcting' | 'finished';
 export interface PipelineStatus {
   config: PipelineConfig;
+  /** Código del proveedor que causó la pausa, si la causó una llamada (p. ej. origen no autorizado en el lote). */
+  providerCode?: string | null;
   state: PipelineState;
   phase: PipelinePhase;
   /** Motivo de la pausa o de la parada (para el propietario). */

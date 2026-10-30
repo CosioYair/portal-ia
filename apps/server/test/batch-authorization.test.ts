@@ -28,7 +28,7 @@ const scenario = (s: Record<string, unknown>) => { fs.writeFileSync(path.join(fa
 const ccRuns = () => fs.existsSync(ccLog) ? fs.readFileSync(ccLog, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)).filter((e: any) => e.kind === 'run') : [];
 
 const { encryptSecret } = await import('../src/security/crypto.ts');
-const { classifyModel } = await import('@portal-ia/domain');
+const { classifyModel, classifyStop } = await import('@portal-ia/domain');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
 const { agentsRepo, backlogRepo, processesRepo, projectsRepo, workspaceDb } = await import('../src/db/workspace.ts');
@@ -399,9 +399,25 @@ test('el origen autorizado se respeta en CADA llamada: un agente cambiado a la A
     await waitFor(() => get(b.id), y => y.items[0].state === 'running', 'empieza');
     assert.equal((await inject('PUT', `${W}/agents/${qa}/backend`, { backend: 'api', authorized: true })).statusCode, 200);
     const x = await waitFor(() => get(b.id), y => y.status === 'paused', 'el lote se pausa');
-    assert.equal(x.items[0].state, 'needs_owner'); assert.match(x.reason, /no autoriza ese origen: no se ha hecho la llamada/);
+    assert.equal(x.items[0].state, 'needs_owner'); assert.match(x.reason, /\(un agente usa un origen que el lote no autoriza\).*no autoriza ese origen: no se ha hecho la llamada/);
+    assert.equal(x.reasonFix.href, `/procesos/${x.items[0].processId}`, 'enlace al proceso, donde se continúa');
     assert.equal(apiCalls().length, 0, 'ninguna llamada facturable');
     assert.equal(x.budget.spent, 0);
     await close(b.id);
   } finally { assert.equal((await inject('PUT', `${W}/agents/${qa}/backend`, { backend: 'claude-code', authorized: true })).statusCode, 200); ccRules(); }
+});
+
+test('qué detiene a todo el lote: el origen no autorizado sí; una petición de permiso del propio agente para SU historia, no (las independientes siguen)', () => {
+  assert.deepEqual(classifyStop('permission', 'done'), { cls: 'owner_decision', batchWide: false });
+  assert.deepEqual(classifyStop('permission', 'done', 'origin_not_allowed'), { cls: 'owner_decision', batchWide: true });
+  assert.deepEqual(classifyStop('permission', 'done', 'backend_unavailable'), { cls: 'environment', batchWide: true });
+  assert.deepEqual(classifyStop(null, 'failed', 'origin_not_allowed'), { cls: 'owner_decision', batchWide: true });
+});
+
+test('presupuesto y concurrencia: si el presupuesto no cubre otra a la vez, el coordinador espera (no pausa): «caben» no avisa en falso', async () => {
+  await setBackends('claude-code');
+  const ids = Array.from({ length: 6 }, (_, i) => story(`Historia GRUPO ${i}`).id);
+  const p = await preview(ids, { totalBudgetUsd: 5, perStoryBudgetUsd: 2, concurrency: 3, maxSubscriptionCalls: 5000 });
+  assert.equal(p.summary.fits.min, 6); assert.equal(p.summary.fits.max, 6); assert.deepEqual(p.summary.fits.limitedBy, []);
+  assert.ok(!p.warnings.some((w: string) => /se pausará/.test(w)), p.warnings.join(' | '));
 });
