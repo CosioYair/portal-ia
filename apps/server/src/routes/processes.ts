@@ -29,6 +29,10 @@ import { defaultChecks, runRuntimeChecks, runtimeVerified } from '../services/ru
 import { recordDetections } from '../services/lessons.ts';
 import { addManualItem, estimateExtraction, extractBacklogWithAI, importBacklogFromKnowledge, resetStory } from '../services/backlog.ts';
 import { backlogRepo } from '../db/workspace.ts';
+import { assertNotSuperseded, InboxError } from '../services/inbox.ts';
+
+/** Rutas con efecto (IA o git) que nunca deben actuar sobre una iteración superada de su historia (HU-161). */
+const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish)$/;
 
 /**
  * Procesos autorizados (HU-004). Un proceso nace 'pending_authorization' con una estimación; solo empieza a consumir
@@ -53,6 +57,23 @@ export async function processRoutes(app: FastifyInstance) {
     return { ...q, guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, ...fo, backends: q.kind === 'story_execution' ? teamReadiness(slug, q.id) : null }) };
   };
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
+
+  // HU-161: la misma guardia que la bandeja, para cualquier vía (chat, vista del proceso, bandeja): una tarjeta antigua
+  // no puede autorizar, aplicar, integrar ni publicar una iteración superada. 409 sin efectos ni consumo de IA.
+  app.addHook('preHandler', async (req, reply) => {
+    if (req.method !== 'POST') return;
+    const url: string = (req as any).routeOptions?.url ?? (req as any).routerPath ?? '';
+    if (!SUPERSEDED_GUARDED.test(url)) return;
+    const { slug, id } = (req.params ?? {}) as { slug?: string; id?: string };
+    if (!slug || !id || !workspacesRepo.get(slug)) return;
+    const proc = processesRepo(slug).get(id);
+    if (!proc) return;
+    try { assertNotSuperseded(slug, proc); }
+    catch (e: any) {
+      if (e instanceof InboxError) { reply.code(e.status).send({ error: e.message, code: 'superseded' }); return reply; }
+      throw e;
+    }
+  });
 
   app.get('/api/workspaces/:slug/projects/:projectId/assessment/estimate', async (req, reply) => {
     const { slug, projectId } = req.params as any; if (!guard(slug, reply)) return;

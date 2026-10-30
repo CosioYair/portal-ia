@@ -145,6 +145,24 @@ test('API: migración idempotente sin borrados, bandeja consolidada, 409 sobre s
   assert.equal(processesRepo(slug).get(p1.id)!.status, 'pending_authorization');
   assert.equal(processesRepo(slug).get(p1.id)!.spentUsd, 0);
 
+  // Rutas directas (chat y vista del proceso): una iteración superada tampoco se autoriza, aplica, integra ni publica.
+  const direct = [
+    ['authorize', { budgetUsd: 1, authorized: true }],
+    ['apply', { authorized: true }],
+    ['merge', { authorized: true }],
+    ['publish', { authorized: true }]
+  ] as const;
+  for (const [action, payload] of direct) {
+    const r = await app.inject({ method: 'POST', url: `/api/workspaces/${slug}/processes/${p1.id}/${action}`, payload });
+    assert.equal(r.statusCode, 409, `${action}: ${r.body}`);
+    assert.match(r.json().error, /superada por la iteración 3/, action);
+    assert.equal(r.json().code, 'superseded', action);
+  }
+  assert.equal(processesRepo(slug).get(p1.id)!.status, 'pending_authorization');
+  assert.equal(processesRepo(slug).get(p1.id)!.spentUsd, 0);
+  assert.equal(processesRepo(slug).get(p1.id)!.authorizedAt, null);
+  assert.deepEqual(snapshot(), before, 'las rutas directas sobre una superada no cambian nada');
+
   // Historial: la vigente y las superadas (más recientes primero).
   const hist = (await app.inject({ method: 'GET', url: `/api/workspaces/${slug}/stories/${A.id}/decisions` })).json();
   assert.equal(hist.current.processId, p3.id);
