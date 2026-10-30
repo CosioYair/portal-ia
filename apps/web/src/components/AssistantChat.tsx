@@ -2,7 +2,9 @@ import { OperationCard } from './OperationCard.tsx';
 import React, { useEffect, useRef, useState, type ClipboardEvent, type ChangeEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
+import type { PendingDecision, Process, StoryDecisionHistory, SupersededDecision } from '@portal-ia/domain';
 import { api, type AssistantAction, type AssistantImage, type AssistantInfo, type AssistantMessage } from '../lib/api.ts';
+import { PendingDecisionCard } from './PendingDecisionCard.tsx';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
 import { Chip, Icon, KV, Notice } from './ui.tsx';
@@ -27,6 +29,22 @@ function fileToPending(f: File): Promise<Pending> {
     r.onload = () => { const url = String(r.result); resolve({ kind: 'image', mediaType: f.type, data: url.slice(url.indexOf(',') + 1), name: f.name || 'imagen', preview: url, bytes: f.size }); };
     r.readAsDataURL(f);
   });
+}
+
+/** HU-161 · propuesta del chat que espera autorización (candidata a consolidarse con la bandeja). */
+const isProposal = (a: AssistantAction) => a.status === 'pending' && (a.type === 'propose_execution' || a.type === 'propose_apply' || a.type === 'propose_delegation');
+
+/** HU-161 · propuesta de una iteración anterior: ya no es la vigente de su historia. */
+type SupersededInfo = { decision: SupersededDecision | null; byIteration: number | null; at: string | null; storyId: string | null };
+
+/** Tarjeta de una propuesta superada: sin aprobar ni ejecutar; solo informa y permite restaurarla (sin costo). */
+function SupersededProposalCard({ action, info, onRestore }: { action: AssistantAction; info: SupersededInfo; onRestore: (d: PendingDecision) => Promise<void> }) {
+  if (info.decision) return <PendingDecisionCard as="div" decision={info.decision} superseded={{ byIteration: info.byIteration, at: info.at }} onRestore={onRestore} />;
+  const label = `Superada por la iteración ${info.byIteration ?? 'más reciente'}`;
+  return <div className="notice notice-info" role="status">{Icon.info()}<div>
+    <strong>{action.label}</strong> · <strong>{label}.</strong> Ya no se puede autorizar desde aquí: decide sobre la autorización vigente en la bandeja.
+    {info.storyId && <> <Link className="lnk" to={`/historias/${info.storyId}#iteraciones`}>ver historial</Link></>}
+  </div></div>;
 }
 
 /** Tarjeta de propuesta: ejecutar historia / aplicar cambios. La autorización ocurre aquí, con costo visible. */
@@ -113,7 +131,51 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [msgs.length, busy]);
   const unsettled = msgs.some(m => m.actions.some(a => a.live && !a.live.settled));
   useEffect(() => { if (!unsettled) return; const t = setInterval(() => { api.assistant().then(r => { setMsgs(r.messages); setInfo(r.info); }).catch(() => null); }, 10_000); return () => clearInterval(t); }, [unsettled]);
-  const pendingCount = msgs.reduce((n, m) => n + m.actions.filter(a => a.status === 'pending').length, 0);
+  // HU-161 · consolidación con la bandeja: una sola autorización vigente por historia.
+  const [superseded, setSuperseded] = useState<Record<string, SupersededInfo>>({});
+  const [decTick, setDecTick] = useState(0);
+  const proposalKey = msgs.flatMap(m => m.actions).filter(a => isProposal(a) && a.processId && a.workspaceSlug).map(a => `${a.workspaceSlug}\t${a.processId}`).join('\n');
+  useEffect(() => {
+    if (!proposalKey) { setSuperseded({}); return; }
+    let cancelled = false;
+    void (async () => {
+      const bySlug = new Map<string, Set<string>>();
+      for (const line of proposalKey.split('\n')) {
+        const [slug, pid] = line.split('\t');
+        if (!slug || !pid) continue;
+        if (!bySlug.has(slug)) bySlug.set(slug, new Set());
+        bySlug.get(slug)!.add(pid);
+      }
+      const next: Record<string, SupersededInfo> = {};
+      for (const [slug, ids] of bySlug) {
+        let current: Set<string>;
+        try { current = new Set((await api.inbox(slug)).map(d => d.processId)); } catch { continue; }
+        const histories = new Map<string, StoryDecisionHistory | null>();
+        for (const pid of ids) {
+          if (current.has(pid)) continue;
+          let p: Process;
+          try { p = await api.process(slug, pid); } catch { continue; }
+          if (!p.supersededBy) continue;
+          const story = p.backlogItemId ?? null;
+          let h: StoryDecisionHistory | null = null;
+          if (story) {
+            if (!histories.has(story)) histories.set(story, await api.storyDecisions(slug, story).catch(() => null));
+            h = histories.get(story) ?? null;
+          }
+          const d = h?.superseded.find(s => s.processId === pid) ?? null;
+          next[pid] = { decision: d, byIteration: d?.supersededByIteration ?? h?.current?.iteration ?? null, at: d?.supersededAt ?? p.supersededAt ?? null, storyId: story };
+        }
+      }
+      if (!cancelled) setSuperseded(next);
+    })();
+    return () => { cancelled = true; };
+  }, [proposalKey, decTick]);
+  const restoreSuperseded = async (d: PendingDecision) => {
+    await api.restoreSuperseded(d.workspaceSlug, d.processId);
+    setDecTick(t => t + 1);
+    flash('Autorización restaurada como vigente · la anterior vigente pasa a superada');
+  };
+  const pendingCount = msgs.reduce((n, m) => n + m.actions.filter(a => a.status === 'pending' && !(a.processId && superseded[a.processId])).length, 0);
   useEffect(() => { onPending?.(pendingCount); }, [pendingCount, onPending]);
 
   const addFiles = async (files: FileList | File[]) => {
@@ -181,7 +243,9 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
           {m.actions.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', maxWidth: 760 }}>
             {m.actions.map((a, i) => a.type === 'propose_operation' && a.operation
               ? <OperationCard key={`${m.id}-${i}`} msgId={m.id} action={a} onResolved={replaceMsg} />
-              : a.status === 'pending' && (a.type === 'propose_execution' || a.type === 'propose_apply' || a.type === 'propose_delegation')
+              : isProposal(a) && a.processId && superseded[a.processId]
+              ? <SupersededProposalCard key={`${m.id}-${i}`} action={a} info={superseded[a.processId]} onRestore={restoreSuperseded} />
+              : isProposal(a)
               ? <ProposalCard key={`${m.id}-${i}`} msgId={m.id} action={a} onResolved={replaceMsg} />
               : <ActionRow key={`${m.id}-${i}`} a={a} />)}
           </div>}
