@@ -165,6 +165,16 @@ function supersededMessage(slug: string, p: Process): string | null {
   return `Esta autorización fue superada por la iteración ${n ?? 'más reciente'} de la historia: decide sobre la vigente o restáurala desde el historial.`;
 }
 
+/**
+ * Guardia compartida (bandeja, chat, vista del proceso): lanza 409 si el proceso es una iteración superada de su historia.
+ * Solo actúa si el proceso está marcado como superado o espera una decisión propia; no tiene efectos ni consume IA.
+ */
+export function assertNotSuperseded(slug: string, p: Process): void {
+  if (!p.supersededBy && decisionsFromProcess(slug, p).length === 0) return;
+  const msg = supersededMessage(slug, p);
+  if (msg) throw new InboxError(409, msg);
+}
+
 type Call = { status: number; body: Record<string, any> | null };
 
 async function call(app: FastifyInstance, method: 'GET' | 'POST', url: string, payload?: unknown): Promise<Call> {
