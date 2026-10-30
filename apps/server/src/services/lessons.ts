@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { findingKey } from '@portal-ia/domain';
 import type { Lesson, LessonEvidence, LessonStatus, ModelInfo, Process, ProviderId, TeamRole } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -130,6 +131,21 @@ export function detectInProcess(slug: string, proc: Process, repoPath: string | 
   const noTests = man?.gate?.notes.find(n => /sin pruebas/.test(n));
   if (noTests) out.push({ detector: 'missing_tests', title: 'Código nuevo sin pruebas nuevas', role: 'implementer', tags: ['pruebas', 'calidad', 'implementar'], evidence: ev(null, noTests), dedupeKey: key('missing_tests', null) });
   const heavy = proc.steps.filter(s => (s.role === 'implementer' || s.role === 'reviewer') && s.inputTokens > 40_000);
+  // Gauntlet: brechas CON evidencia que el Evaluador encontró en el trabajo del constructor. Un hallazgo no es una lección:
+  // queda «detectada» (nada se inyecta sin validar) con su evidencia, quién evaluó y si la corrección funcionó. Solo con el
+  // resultado decidido: una brecha cuya corrección sigue en curso se detecta en una parada posterior.
+  const g = r?.gauntlet; const short = (s: string, n: number) => s.length > n ? `${s.slice(0, n - 1)}…` : s;
+  const unfixed: Record<string, string> = { stopped: 'el ciclo se detuvo con la brecha pendiente', passed_with_findings: 'quedó documentada como no bloqueante', waived: 'el propietario siguió sin corregirla' };
+  for (const [i, round] of (g?.rounds ?? []).entries()) {
+    const next = g!.rounds[i + 1];
+    if (!next && g!.status === 'pending') continue;
+    for (const f of round.findings) {
+      if (f.unsupported || f.severity === 'minor') continue;
+      const k = findingKey(f);
+      const outcome = next ? (next.findings.some(n => findingKey(n) === k) ? `persistió tras la corrección (ronda ${next.round})` : `corregida en la ronda ${next.round}`) : `sin corregir: ${unfixed[g!.status] ?? 'no se re-evaluó'}`;
+      out.push({ detector: 'gauntlet_gap', title: `Brecha del Evaluador Gauntlet: ${short(f.text, 100)}`, role: 'implementer', tags: ['gauntlet', f.severity === 'blocking' ? 'bloqueante' : 'mayor', 'implementar'], evidence: ev(f.file, `Resultado: ${outcome}. Evaluó ${round.evaluatorName} (ronda ${round.round}, modo ${g!.mode}). ${f.criterion ? `Criterio: ${short(f.criterion, 120)}. ` : ''}Evidencia: ${short(f.evidence ?? '', 260)}.${f.expected ? ` Esperado: ${short(f.expected, 120)}.` : ''}`), dedupeKey: key(`gauntlet_gap:${k}`, null) });
+    }
+  }
   if (heavy.length) out.push({ detector: 'excessive_context', title: `Contexto excesivo en ${heavy.length} llamada(s) (hasta ${Math.max(...heavy.map(s => s.inputTokens))} tokens de entrada)`, role: null, tags: ['contexto', 'costo', 'tokens'], evidence: ev(null, heavy.map(s => `${s.title}: ${s.inputTokens} tokens de entrada, ${s.outputTokens} de salida, ${s.costUsd.toFixed(4)} USD`).join(' · '), heavy[0]), dedupeKey: key('excessive_context', null) });
   return out;
 }

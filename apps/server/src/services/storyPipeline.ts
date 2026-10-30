@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { backendLabel } from '@portal-ia/domain';
+import { backendLabel, promptSections } from '@portal-ia/domain';
 import type { Agent, AgentBlocker, AgentFailureKind, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError, reasoningHeadroom } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -13,6 +13,8 @@ import { failingTests, testRunSummary } from './failureDiagnosis.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall, withWatchdog } from './providerCalls.ts';
 import { injectLessons, recordDetections } from './lessons.ts';
+import { gauntletStage, toCorrection } from './gauntlet.ts';
+import { callMetricsRepo, promptHash } from '../db/callMetrics.ts';
 import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, testsEvidence, verificationEvidence } from './qaGate.ts';
 /** Veredicto de QA con salida estructurada nativa del proveedor (si la admite); el motor lo valida igualmente. */
 const QA_SCHEMA = { name: 'veredicto_qa', description: 'Veredicto de la puerta de calidad con hallazgos y evidencia.', schema: QA_VERDICT_SCHEMA as unknown as Record<string, unknown> };
@@ -75,6 +77,28 @@ export function budgetCheck(slug: string, processId: string, agent: Agent, syste
   return { ok: needed <= remaining, needed, remaining };
 }
 
+/** Sistema del paso con sus lecciones validadas y prácticas, inyectadas una sola vez por paso (lo reutilizan sus llamadas). */
+function stepSystem(slug: string, proc: Process, stepId: string, agent: Agent, system0: string, injected: Map<string, string>): string {
+  if (!injected.has(stepId)) {
+    const role = (proc.steps.find(s => s.id === stepId)!.role ?? 'implementer') as TeamRole;
+    injected.set(stepId, injectLessons(slug, stepId, system0, { projectId: proc.projectId, role, tags: [] }, practicesFor(slug, agent)).system);
+  }
+  return injected.get(stepId)!;
+}
+
+/**
+ * Lo máximo que una llamada del paso puede descontar del presupuesto antes de enviarla: con el sistema que recibirá de
+ * verdad (lecciones incluidas) y, si Claude Code puede ceder a la API (alternativa autorizada en el conector), al precio
+ * de la API. Sirve para decidir si varias llamadas caben a la vez.
+ */
+export function worstCaseCallUsd(slug: string, processId: string, stepId: string, system0: string, user: string, maxTokens: number, injected: Map<string, string>): number {
+  const proc = processesRepo(slug).get(processId)!; const agent = agentsRepo(slug).get(proc.steps.find(s => s.id === stepId)!.agentId)!;
+  const system = stepSystem(slug, proc, stepId, agent, system0, injected);
+  const providerId = agent.config.provider as ProviderId;
+  const apiFallback = getClaudeCodeSettings().fallback === 'api' && !!providersRepo.credential(providerId) && providersRepo.get(providerId)?.status === 'connected';
+  return estimateCallUsd(agent, system, user, maxTokens, usesClaudeCode(agent) && !apiFallback ? 'claude-code' : 'api');
+}
+
 export interface CallOptions {
   history?: { role: 'user' | 'assistant'; content: string }[];
   injected: Map<string, string>;
@@ -86,6 +110,8 @@ export interface CallOptions {
   retries?: number | null;
   /** Qué es esta llamada dentro del paso (p. ej. «Continuación 1: la respuesta anterior se cortó por longitud»). */
   operation?: string | null;
+  /** Orígenes del contexto entregado y su tamaño (telemetría: qué recibió de verdad el agente). */
+  context?: { source: string; chars: number }[];
 }
 
 /**
@@ -95,13 +121,10 @@ export interface CallOptions {
  * paso para la interfaz. Los errores de conexión se reintentan con espera exponencial; un plazo agotado no.
  */
 export async function callAgentStep(slug: string, processId: string, stepId: string, system0: string, user: string, maxTokens: number, opts: CallOptions): Promise<CallResult> {
+  const enteredAt = Date.now();
   const procs = processesRepo(slug); const proc = procs.get(processId)!;
   const step = proc.steps.find(s => s.id === stepId)!; const agent = agentsRepo(slug).get(step.agentId)!;
-  if (!opts.injected.has(stepId)) {
-    const role = (step.role ?? 'implementer') as TeamRole;
-    opts.injected.set(stepId, injectLessons(slug, step.id, system0, { projectId: proc.projectId, role, tags: [] }, practicesFor(slug, agent)).system);
-  }
-  const system = opts.injected.get(stepId)!;
+  const system = stepSystem(slug, proc, stepId, agent, system0, opts.injected);
   const providerId = agent.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
   const apiConnected = !!cred && prow.status === 'connected';
@@ -137,19 +160,27 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   let live: LiveCall = { state: 'preparing', provider: providerId, model: agent.config.model, startedAt: now0.toISOString(), lastEvent: 'Preparando la solicitud', lastEventAt: now0.toISOString(), deadlineAt: new Date(now0.getTime() + timeoutMs).toISOString(), timeoutMs, attempt: 1, maxAttempts, estimatedUsd: apiEstimate, inputTokensEstimated: inTok, inputUsd: costUsd(providerId, agent.config.model, inTok, 0), maxOutputTokens: maxTokens + headroom, operation: opts.operation ?? null, ...(route === 'claude-code' ? ccLive() : {}) };
   const setLive = (patch: Partial<LiveCall>) => { live = { ...live, ...patch }; try { procs.setStepLive(step.id, live); } catch { /* el estado en vivo nunca rompe la llamada */ } };
   procs.stepStart(step.id); setLive({});
+  // Telemetría: una fila por llamada (espera al modelo frente a preparación del Portal, tokens, turnos, herramientas).
+  const hash = promptHash(system, user); let firstSent: number | null = null;
+  const metric = (status: 'done' | 'failed', attempt: number, sentMs: number, d: { tokensIn: number; tokensOut: number; cacheReadTokens: number | null; turns: number | null; tools: Record<string, number> | null; backend: string | null }, errorClass: string | null) => callMetricsRepo(slug).record({
+    processId, stepId, agentId: agent.id, role: step.role ?? null, operation: opts.operation ?? step.title.slice(0, 120), backend: d.backend, model: agent.config.model, attempt, status,
+    startedAt: new Date(enteredAt).toISOString(), finishedAt: new Date().toISOString(), waitMs: Date.now() - sentMs, buildMs: Math.max(0, (firstSent ?? sentMs) - enteredAt),
+    systemChars: system.length, promptChars: user.length + (opts.history ?? []).reduce((a, h) => a + h.content.length, 0), context: opts.context ?? promptSections(user),
+    tokensIn: d.tokensIn, tokensOut: d.tokensOut, cacheReadTokens: d.cacheReadTokens, turns: d.turns, tools: d.tools, promptHash: hash, errorClass
+  });
   const startedAt = now0.toISOString();
   // Registro del ciclo de vida (sin prompts ni respuestas): qué, a quién, cuándo, cuánto tardó y cómo terminó.
   const who = { processId, step: step.title, operation: opts.operation ?? undefined, provider: providerId, model: agent.config.model };
   for (let attempt = 1; ; attempt++) {
     const ctrl = registerCall(processId);
-    const sentAt = new Date();
+    const sentAt = new Date(); firstSent ??= sentAt.getTime();
     const ms = () => Date.now() - sentAt.getTime();
     setLive({ state: 'sending', attempt, lastEvent: attempt > 1 ? `Reenviando la solicitud (intento ${attempt} de ${maxAttempts})` : 'Enviando la solicitud al proveedor', lastEventAt: sentAt.toISOString(), deadlineAt: new Date(sentAt.getTime() + timeoutMs).toISOString() });
     opts.log({ ...who, attempt, maxAttempts, timeoutMs, inputTokensEstimated: inTok, maxOutputTokens: maxTokens, route }, 'llamada al proveedor: enviando');
     try {
       requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
       const request = { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history: opts.history, responseSchema: opts.schema, timeoutMs };
-      let res: { text: string; inputTokens: number; outputTokens: number; stopReason: string | null; refusal?: string | null };
+      let res: { text: string; inputTokens: number; outputTokens: number; stopReason: string | null; refusal?: string | null; numTurns?: number | null; cacheReadTokens?: number; tools?: Record<string, number> };
       let cost: number; let backend: string | null = null;
       if (route === 'claude-code') {
         // Suscripción: 0 USD del presupuesto de API. El uso (tokens, turnos, duración, equivalente estimado) va al registro del conector.
@@ -175,6 +206,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
       opts.log({ ...who, attempt, ms: ms(), tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost: cost.toFixed(4), stop: res.stopReason, backend }, 'paso completado');
+      metric('done', attempt, sentAt.getTime(), { tokensIn: res.inputTokens, tokensOut: res.outputTokens, cacheReadTokens: route === 'claude-code' ? res.cacheReadTokens ?? null : null, turns: res.numTurns ?? null, tools: res.tools ?? null, backend: backend ?? backendLabel('api', null, providerId) }, null);
       return { text: res.text, stopReason: res.stopReason, inputTokens: res.inputTokens, outputTokens: res.outputTokens, costUsd: cost, refusal: res.refusal ?? null };
     } catch (e) {
       const err = e instanceof ProviderRequestError ? e.error : null;
@@ -219,6 +251,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       const u = (e as any)?.usage as { inputTokens: number; outputTokens: number } | undefined;
       procs.stepFinish(step.id, 'failed', { tokensIn: prev.inputTokens + (u?.inputTokens ?? 0), tokensOut: prev.outputTokens + (u?.outputTokens ?? 0), cost: prev.costUsd, outputMd: prev.outputMd, error: msg, backend: route === 'claude-code' ? backendLabel(agentBackend(agent), lastDetection()?.billing) : null });
       if (u) procs.addUsage(processId, u.inputTokens, u.outputTokens, 0);
+      metric('failed', attempt, sentAt.getTime(), { tokensIn: u?.inputTokens ?? 0, tokensOut: u?.outputTokens ?? 0, cacheReadTokens: null, turns: (u as any)?.numTurns ?? null, tools: (u as any)?.tools ?? null, backend: route === 'claude-code' ? backendLabel(agentBackend(agent), lastDetection()?.billing) : backendLabel('api', null, providerId) }, cls.kind);
       if (billed) procs.addUnconfirmed(processId, step.id, estCost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'failed', tokensIn: u?.inputTokens ?? 0, tokensOut: u?.outputTokens ?? 0, cost: 0, startedAt });
       const cancelled = finalErr?.code === 'cancelled';
@@ -812,13 +845,25 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
       updatePipeline(ctx.slug, ctx.processId, done, { kind: 'done', message: `Implementación completada. ${cfg.autoVerify ? `${cfg.commands.join(', ')} aprobados en el sandbox.` : 'Sin verificación automática.'} QA omitida por el propietario. Lista para tu revisión.` });
       return pipelineOf(ctx.slug, ctx.processId);
     }
-    const qaRan = p.lastQaCommit !== r.applied.commit || !r.review?.verdict;
+    // Tras una corrección del Evaluador Gauntlet, QA no vuelve a revisar lo mismo: el sandbox ya re-verificó el commit y
+    // lo re-evalúa (o ya lo evaluó) el Evaluador. No se pagan dos revisiones del mismo commit.
+    const gauntletReeval = r.review?.verdict === 'approved' && !!r.gauntlet && (!!r.gauntlet.pendingReeval || r.gauntlet.rounds.at(-1)?.commit === r.applied.commit);
+    const qaRan = !gauntletReeval && (p.lastQaCommit !== r.applied.commit || !r.review?.verdict);
     if (qaRan) await qaStage(ctx, cfg);
     const v = processesRepo(ctx.slug).get(ctx.processId)!.result!.review!;
     if (v.verdict === 'approved') {
       const names: Record<string, string> = { typecheck: 'Typecheck', test: 'pruebas', build: 'compilación' };
       const ran = cfg.autoVerify ? `${cfg.commands.map(c => names[c]).join(', ').replace(/, ([^,]*)$/, ' y $1')} aprobad${cfg.commands.length > 1 ? 'os' : 'o'}.` : '';
-      updatePipeline(ctx.slug, ctx.processId, { state: 'verified', phase: 'finished', reason: null, pauseKind: null, finishedAt: now() }, { kind: 'done', message: `Implementación completada. ${ran} QA validó los cambios. Lista para tu revisión.` });
+      // Evaluación Gauntlet (según el modo): crítico independiente sobre el commit aprobado; puede abrir una corrección dirigida.
+      const g = await gauntletStage(ctx, cfg);
+      if (g.outcome === 'correct') {
+        emit(ctx, 'gauntlet', `El Evaluador encontró ${g.toFix.length} brecha(s) con evidencia: corrección dirigida del Desarrollador (no del Evaluador) y nueva evaluación.`, { phase: 'correcting' });
+        if (units) { units.startRound(ctx, cfg, 'gauntlet', g.toFix.map(toCorrection)); continue; }
+        if (!await correct(ctx, cfg, `El Evaluador Gauntlet encontró brechas con evidencia:\n${g.toFix.map(f => `- [${f.severity}] ${f.text}${f.file ? ` (${f.file})` : ''}${f.evidence ? `\n  evidencia: ${f.evidence.split('\n').slice(0, 3).join(' ')}` : ''}${f.expected ? `\n  esperado: ${f.expected}` : ''}`).join('\n')}`, g.toFix.map(f => f.file).filter(Boolean) as string[])) ineffectiveCorrection(ctx);
+        continue;
+      }
+      const gNote = g.state && g.state.status !== 'skipped' ? ` Gauntlet (${g.state.mode}): ${g.state.status === 'passed' ? 'todos los criterios con evidencia' : 'aprobado con hallazgos menores documentados'} en ${g.state.rounds.length} ronda(s).` : '';
+      updatePipeline(ctx.slug, ctx.processId, { state: 'verified', phase: 'finished', reason: null, pauseKind: null, finishedAt: now() }, { kind: 'done', message: `Implementación completada. ${ran} QA validó los cambios.${gNote} Lista para tu revisión.` });
       return pipelineOf(ctx.slug, ctx.processId);
     }
     if (v.verdict === 'blocked_environment') throw new PipelinePause('environment', `QA no pudo validar por el entorno: ${v.overridden ?? v.summary}`);
@@ -860,7 +905,7 @@ export function providerPause(e: any): PipelinePause | null {
 
 /** Cierra el pipeline en pausa/parada con el motivo (sin perder nada) y lo deja listo para «Continuar». */
 export function pausePipeline(ctx: StoryRunCtx, pause: PipelinePause) {
-  const stopped = ['repeated_failure', 'limit', 'qa', 'no_changes', 'refusal', 'provider_refusal', 'unsupported', 'unknown', 'plan', 'disagreement'].includes(pause.kind);
+  const stopped = ['repeated_failure', 'limit', 'qa', 'no_changes', 'refusal', 'provider_refusal', 'unsupported', 'unknown', 'plan', 'disagreement', 'gauntlet'].includes(pause.kind);
   const CLASS: Partial<Record<PipelinePauseKind, AgentFailureKind>> = { budget: 'BUDGET_EXHAUSTED', network: 'PERMISSION_REQUIRED', environment: 'ENVIRONMENT_FAILURE', limit: 'RECOVERABLE_IMPLEMENTATION_ERROR', repeated_failure: 'RECOVERABLE_IMPLEMENTATION_ERROR', missing_information: 'MISSING_INFORMATION', permission: 'PERMISSION_REQUIRED', unsupported: 'UNSUPPORTED_CAPABILITY', provider_refusal: 'PROVIDER_REFUSAL', provider_timeout: 'PROVIDER_TIMEOUT', provider_error: 'PROVIDER_CONNECTION_ERROR', max_turns: 'CLAUDE_CODE_MAX_TURNS_EXHAUSTED', interrupted: 'UNKNOWN_FAILURE', unknown: 'UNKNOWN_FAILURE', too_large: 'INCOMPLETE_OUTPUT', incomplete: 'RECOVERABLE_IMPLEMENTATION_ERROR' };
   const cur = pipelineOf(ctx.slug, ctx.processId);
   updatePipeline(ctx.slug, ctx.processId, { state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, reason: pause.message, phase: 'finished', finishedAt: now(), failureClass: cur.failureClass && ['missing_information', 'permission', 'unsupported', 'provider_refusal'].includes(pause.kind) ? cur.failureClass : CLASS[pause.kind] ?? cur.failureClass ?? null }, { kind: 'pause', message: pause.message });

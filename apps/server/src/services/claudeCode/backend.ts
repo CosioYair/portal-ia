@@ -151,7 +151,7 @@ export function readRootFor(slug: string, processId: string | null, projectId: s
 }
 
 export interface ExecutionTarget { slug: string; projectId: string; processId: string | null; stepId: string | null; agent: Agent; role: string | null; title: string }
-export interface ClaudeCodeCompletion extends CompletionResult { backendLabel: string; billing: ClaudeCodeBilling; apiEquivalentUsd: number | null; runId: string }
+export interface ClaudeCodeCompletion extends CompletionResult { backendLabel: string; billing: ClaudeCodeBilling; apiEquivalentUsd: number | null; runId: string; numTurns?: number | null; cacheReadTokens?: number; tools?: Record<string, number> }
 
 const READ_HINT = `
 
@@ -219,7 +219,7 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
       });
       runs.finish(run.id, 'done', { durationMs: r.durationMs, numTurns: r.numTurns, tokensIn: r.inputTokens, tokensOut: r.outputTokens, apiEquivalentUsd: r.apiEquivalentUsd, rateLimit: r.rateLimit });
       say('Respuesta de Claude Code recibida; procesándola', 'processing');
-      return { text: r.text, inputTokens: r.inputTokens, outputTokens: r.outputTokens, stopReason: r.stopReason, refusal: r.refusal, backendLabel: label, billing: det.billing, apiEquivalentUsd: r.apiEquivalentUsd, runId: run.id };
+      return { text: r.text, inputTokens: r.inputTokens, outputTokens: r.outputTokens, stopReason: r.stopReason, refusal: r.refusal, backendLabel: label, billing: det.billing, apiEquivalentUsd: r.apiEquivalentUsd, runId: run.id, numTurns: r.numTurns, cacheReadTokens: r.cacheReadTokens, tools: r.tools };
     } catch (e: any) {
       const code = e?.error?.code;
       // Turnos agotados (u otra ejecución sin respuesta útil): el uso que consumió la suscripción también se registra.

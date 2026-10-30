@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { gauntletReviewed } from '@portal-ia/domain';
 import type { Agent, CheckState, CompletenessGate, Deliverable, DeliverableKind, DeliveryCheck, DeliveryProgress, DevOutputAssessment, IssueSeverity, PipelineConfig, Process, ProposedChange, QaFinding, StoryManifest, StoryPlan, VerificationRun, WorkUnit } from '@portal-ia/domain';
 import { estimatePricing } from '@portal-ia/ai-adapters';
 import { processesRepo } from '../db/workspace.ts';
@@ -264,7 +265,7 @@ ${(unit.maxTurns ?? 0) > 0 ? relatedContext(ctx, unit) : ''}
 FORMATO DE RESPUESTA:
 ${PATCH_ONLY_FORMAT}
 ${DROP_FORMAT}
-${unit.source === 'qa' ? '(si un hallazgo de QA es incorrecto, no inventes cambios: responde solo con === RESUMEN === y === SIN CAMBIOS === seguido de la evidencia concreta —archivo:línea, fragmento o salida—; QA lo volverá a evaluar una vez)' : '(es un fallo objetivo del sandbox o de la comprobación previa: corrígelo; si la causa está en otro archivo, parchea ese archivo. Una prueba que ya existía y no está en el plan no se modifica para que pase. Si la comprobación exige algo que contradice el criterio de aceptación o el código real, no la debilites ni inventes: responde solo con === RESUMEN === y === SIN CAMBIOS === con la evidencia concreta y el propietario decide)'}`;
+${unit.source === 'qa' || unit.source === 'gauntlet' ? `(si un hallazgo ${unit.source === 'qa' ? 'de QA' : 'del Evaluador'} es incorrecto, no inventes cambios: responde solo con === RESUMEN === y === SIN CAMBIOS === seguido de la evidencia concreta —archivo:línea, fragmento o salida—; ${unit.source === 'qa' ? 'QA' : 'el Evaluador'} lo volverá a evaluar una vez)` : '(es un fallo objetivo del sandbox o de la comprobación previa: corrígelo; si la causa está en otro archivo, parchea ese archivo. Una prueba que ya existía y no está en el plan no se modifica para que pase. Si la comprobación exige algo que contradice el criterio de aceptación o el código real, no la debilites ni inventes: responde solo con === RESUMEN === y === SIN CAMBIOS === con la evidencia concreta y el propietario decide)'}`;
 }
 
 /** Intento acotado tras agotar los turnos: el contenido de los archivos relacionados, para no tener que explorarlos. */
@@ -568,8 +569,8 @@ async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
     setUnit(ctx, unitId, { outputs: [] });
     const missing = isCorrection ? [] : unit.files.filter(f => manifestOf(ctx).deliverables.find(d => d.path === f)?.status === 'pending');
     // Corrección que discute el hallazgo con evidencia (SIN CAMBIOS): resultado válido que QA vuelve a evaluar.
-    const answer = isCorrection && unit.source === 'qa' && !applied.length && !dropped.length && s.outcome === 'no_changes' && s.meta.noChanges ? s.meta.noChanges.slice(0, 1500) : null;
-    if (isCorrection && unit.source !== 'qa' && s.outcome === 'no_changes' && s.meta.noChanges) {
+    const answer = isCorrection && (unit.source === 'qa' || unit.source === 'gauntlet') && !applied.length && !dropped.length && s.outcome === 'no_changes' && s.meta.noChanges ? s.meta.noChanges.slice(0, 1500) : null;
+    if (isCorrection && unit.source !== 'qa' && unit.source !== 'gauntlet' && s.outcome === 'no_changes' && s.meta.noChanges) {
       // Un fallo objetivo no se discute con QA; pero si el Desarrollador sostiene CON EVIDENCIA que la comprobación exige algo
       // que contradice el criterio o el código real, repetir la llamada no lo arregla: decide el propietario (sin debilitar la prueba).
       if (EVIDENCE.test(s.meta.noChanges)) {
@@ -660,7 +661,7 @@ export function verificationFindings(v: VerificationRun): Finding[] {
  * Agrupa hallazgos en unidades dirigidas: por archivo (como mucho 3 hallazgos y 6 unidades por ronda). Un entregable del
  * plan que no está en el worktree se ENTREGA (unidad de construcción), no se «parchea».
  */
-export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' | 'verification' | 'completeness', findings: (Finding | QaFinding)[]) {
+export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' | 'verification' | 'completeness' | 'gauntlet', findings: (Finding | QaFinding)[]) {
   const man = manifestOf(ctx); const wt = worktreeOf(ctx);
   // Un intercambio por hallazgo: si QA mantiene lo que el equipo ya discutió con evidencia, decide el propietario (sin bucle pagado).
   const persisting = source === 'qa' ? findings.filter(f => (man.disputes ?? []).some(d => sameFinding(d, { file: f.file ?? null, text: f.text }))) : [];
@@ -693,7 +694,7 @@ export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' |
       : newUnit(ctx, ctx.dev, id, { kind: 'correction', title: `${base(g.file)}: ${g.findings[0].text}`.slice(0, 120), purpose: g.findings.map(f => f.text).join(' · '), files: [g.file], dependsOn: [], estimatedOutputTokens: 1500, source, findings: g.findings, round });
   });
   saveManifest(ctx, m => { m.rounds.push({ at: now(), source, units: units.length, applied: 0 }); m.units.push(...units); for (const u of units) if (u.kind === 'build') { const d = m.deliverables.find(x => x.path === u.files[0]); if (d) { d.status = 'pending'; d.unitId = u.id; } } });
-  emit(ctx, 'unit', `Corrección dirigida (${source === 'qa' ? 'hallazgos de QA' : source === 'verification' ? 'verificación del sandbox' : 'comprobación previa a QA'}): ${units.length} unidad(es), solo los archivos afectados. Lo que ya funciona no se regenera.`, { phase: 'correcting', detail: units.map(u => `${u.files[0]}: ${u.findings?.length ?? 0} hallazgo(s)`).join(' · ') });
+  emit(ctx, 'unit', `Corrección dirigida (${source === 'qa' ? 'hallazgos de QA' : source === 'verification' ? 'verificación del sandbox' : source === 'gauntlet' ? 'brechas del Evaluador Gauntlet' : 'comprobación previa a QA'}): ${units.length} unidad(es), solo los archivos afectados. Lo que ya funciona no se regenera.`, { phase: 'correcting', detail: units.map(u => `${u.files[0]}: ${u.findings?.length ?? 0} hallazgo(s)`).join(' · ') });
 }
 
 /**
@@ -962,7 +963,7 @@ export function deliveryProgress(p: Process): DeliveryProgress | null {
   const comp = ['typecheck', 'build'].map(last).filter(Boolean) as VerificationRun[];
   const compiles = !comp.length ? null : comp.every(v => v.exitCode === 0) ? true : comp.some(v => v.exitCode !== 0 && v.exitCode !== null && v.exitCode !== 86 && v.isolation !== 'unavailable') ? false : null;
   const complete = planned.every(d => d.status === 'delivered' || d.status === 'dropped') && (!man.gate || man.gate.commit !== r.applied?.commit || man.gate.ok);
-  const qaApproved = r.review?.verdict === 'approved' && !!r.applied && pl?.lastQaCommit === r.applied.commit;
+  const qaApproved = r.review?.verdict === 'approved' && !!r.applied && (pl?.lastQaCommit === r.applied.commit || gauntletReviewed(r.gauntlet, r.applied.commit));
   const running = p.status === 'running' ? man.units.find(u => u.status === 'running') ?? man.units.find(u => u.status === 'pending') : undefined;
   const corrUnits = man.units.filter(u => u.source && u.source !== 'plan');
   const pendingUsd = man.units.filter(u => u.status === 'pending' || u.status === 'running').reduce((s, u) => s + u.estimatedUsd, 0);

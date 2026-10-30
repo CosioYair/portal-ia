@@ -1,5 +1,5 @@
 import type { Agent, AgentTemplateVersion, Capability, TeamRole } from '@portal-ia/domain';
-import { AGENT_TEMPLATES } from '@portal-ia/domain';
+import { AGENT_TEMPLATES, PROPOSED_TEMPLATES } from '@portal-ia/domain';
 import { agentsRepo, workspaceDb } from '../db/workspace.ts';
 import { lessonsRepo } from './lessons.ts';
 
@@ -11,8 +11,8 @@ import { lessonsRepo } from './lessons.ts';
  * como `practice:<key>@<v>:<lessonId>`.
  */
 const now = () => new Date().toISOString();
-const ROLE_TEMPLATE: Record<TeamRole, string> = { planner: 'pj-coordinador', implementer: 'pj-dev', reviewer: 'pj-qa', consultant: 'pj-arquitecto' };
-const CAP_TEMPLATE: Partial<Record<Capability, string>> = { planificar: 'pj-coordinador', implementar: 'pj-dev', revisar_calidad: 'pj-qa', generar_pruebas: 'pj-qa', consultar_arquitectura: 'pj-arquitecto', consultar_ux: 'pj-ux', revisar_seguridad: 'pj-arquitecto', consultar: 'pj-arquitecto', documentar: 'pj-arquitecto' };
+const ROLE_TEMPLATE: Record<TeamRole, string> = { planner: 'pj-coordinador', implementer: 'pj-dev', reviewer: 'pj-qa', consultant: 'pj-arquitecto', evaluator: 'pj-gauntlet' };
+const CAP_TEMPLATE: Partial<Record<Capability, string>> = { planificar: 'pj-coordinador', implementar: 'pj-dev', revisar_calidad: 'pj-qa', generar_pruebas: 'pj-qa', consultar_arquitectura: 'pj-arquitecto', consultar_ux: 'pj-ux', revisar_seguridad: 'pj-arquitecto', consultar: 'pj-arquitecto', documentar: 'pj-arquitecto', evaluar_gauntlet: 'pj-gauntlet' };
 
 function ensure(slug: string) {
   const db = workspaceDb(slug);
@@ -22,7 +22,8 @@ function ensure(slug: string) {
   ); CREATE TABLE IF NOT EXISTS agent_template_history (id INTEGER PRIMARY KEY AUTOINCREMENT, agent_id TEXT NOT NULL, from_version TEXT, to_version TEXT NOT NULL, at TEXT NOT NULL, by TEXT NOT NULL);`);
   // Semilla: v1 de cada plantilla aprobada (idempotente).
   const ins = db.prepare(`INSERT OR IGNORE INTO agent_templates (key, version, name, role, responsibilities, practices, diff_md, source, lesson_id, created_at, created_by) VALUES (?, 1, ?, ?, ?, '[]', '', 'seed', NULL, ?, 'portal')`);
-  for (const t of AGENT_TEMPLATES) ins.run(t.key, t.name, t.role, JSON.stringify(t.responsibilities), now());
+  // Las plantillas PROPUESTAS (p. ej. Evaluador Gauntlet) entran en el catálogo versionado, pero no crean agentes.
+  for (const t of [...AGENT_TEMPLATES, ...PROPOSED_TEMPLATES]) ins.run(t.key, t.name, t.role, JSON.stringify(t.responsibilities), now());
   return db;
 }
 const map = (r: any): AgentTemplateVersion => ({ key: r.key, version: r.version, id: `${r.key}@${r.version}`, name: r.name, role: r.role, responsibilities: JSON.parse(r.responsibilities), practices: JSON.parse(r.practices), diffMd: r.diff_md, source: r.source, lessonId: r.lesson_id, createdAt: r.created_at, createdBy: r.created_by });
@@ -55,7 +56,7 @@ export function parseVersion(v: string | null | undefined): { key: string; versi
 
 /** Plantilla que sigue un agente: la suya (plantilla aprobada) o, si es personalizado, la del papel de su primera capacidad. */
 export function templateKeyFor(agent: Agent): string | null {
-  if (AGENT_TEMPLATES.some(t => t.key === agent.key)) return agent.key;
+  if ([...AGENT_TEMPLATES, ...PROPOSED_TEMPLATES].some(t => t.key === agent.key)) return agent.key;
   for (const c of agent.config.capabilities ?? []) { const k = CAP_TEMPLATE[c]; if (k) return k; }
   return null;
 }

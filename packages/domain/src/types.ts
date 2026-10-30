@@ -1,6 +1,7 @@
 // Tipos de dominio compartidos entre backend y frontend.
 // Todo texto visible al usuario vive en el frontend; aquí solo identificadores y estructuras.
 import type { ExecutionBackend } from './claude-code.ts';
+import type { GauntletConfig, GauntletState } from './gauntlet.ts';
 
 export type ProviderId = 'anthropic' | 'openai';
 
@@ -88,8 +89,8 @@ export interface AgentTemplate {
 }
 
 /** Capacidades reconocidas por el compositor de equipos (M3). */
-export type Capability = 'planificar' | 'implementar' | 'revisar_calidad' | 'generar_pruebas' | 'consultar_arquitectura' | 'consultar_ux' | 'revisar_seguridad' | 'consultar' | 'documentar';
-export const CAPABILITIES: { id: Capability; label: string; role: 'planner' | 'implementer' | 'reviewer' | 'consultant' }[] = [
+export type Capability = 'planificar' | 'implementar' | 'revisar_calidad' | 'generar_pruebas' | 'consultar_arquitectura' | 'consultar_ux' | 'revisar_seguridad' | 'consultar' | 'documentar' | 'evaluar_gauntlet';
+export const CAPABILITIES: { id: Capability; label: string; role: 'planner' | 'implementer' | 'reviewer' | 'consultant' | 'evaluator' }[] = [
   { id: 'planificar', label: 'Planificar historias (plan técnico)', role: 'planner' },
   { id: 'implementar', label: 'Implementar cambios en el código', role: 'implementer' },
   { id: 'revisar_calidad', label: 'Revisar calidad del diff (QA)', role: 'reviewer' },
@@ -98,7 +99,8 @@ export const CAPABILITIES: { id: Capability; label: string; role: 'planner' | 'i
   { id: 'consultar_ux', label: 'Consultar sobre UX/UI', role: 'consultant' },
   { id: 'revisar_seguridad', label: 'Revisar seguridad', role: 'consultant' },
   { id: 'consultar', label: 'Consultar en su especialidad', role: 'consultant' },
-  { id: 'documentar', label: 'Documentar', role: 'consultant' }
+  { id: 'documentar', label: 'Documentar', role: 'consultant' },
+  { id: 'evaluar_gauntlet', label: 'Evaluar entregables de forma independiente (Gauntlet)', role: 'evaluator' }
 ];
 /** Capacidades por defecto de las plantillas del equipo inicial (para agentes creados antes de M3). */
 export function defaultCapabilitiesFor(key: string): Capability[] {
@@ -416,7 +418,8 @@ export interface KnowledgeDoc {
   createdAt: string;
 }
 
-export type TeamRole = 'planner' | 'consultant' | 'implementer' | 'reviewer';
+/** evaluator: Evaluador Gauntlet (crítico independiente; nunca implementa lo que evalúa). */
+export type TeamRole = 'planner' | 'consultant' | 'implementer' | 'reviewer' | 'evaluator';
 export interface TeamMember { agentId: string; agentName: string; agentKey: string; role: TeamRole; capability: Capability | null; model: string; reason: string; override?: boolean }
 export interface TeamOverride { add?: string[]; remove?: string[]; by: 'owner'; at: string }
 export interface TeamComposition { members: TeamMember[]; excluded: { agentId: string; agentName: string; reason: string }[]; override: TeamOverride | null; aiCalls: 0 }
@@ -651,12 +654,16 @@ export interface PipelineConfig {
   providerTimeoutSec: number | null;
   /** Continuaciones de respuestas cortadas por longitud (en todo el proceso; cada archivo, como máximo 2). No consumen correcciones. */
   maxContinuations?: number;
+  /** Evaluación Gauntlet (constructor ≠ crítico): modo y rondas máximas de corrección dirigida. Sin él, «off». */
+  gauntlet?: GauntletConfig;
 }
 export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'verify' | 'environment' | 'qa' | 'correction' | 'pause' | 'done' | 'error'
   /** Entrega incremental: unidad de trabajo, continuación de una respuesta cortada y comprobación determinista previa a QA. */
   | 'unit' | 'continuation' | 'gate'
   /** Integración con la rama principal: candidato preparado, conflictos detectados o resueltos. */
   | 'integration'
+  /** Evaluación Gauntlet: ronda del Evaluador independiente y su decisión. */
+  | 'gauntlet'
   /** Corrección hecha fuera del equipo de agentes (consola), registrada por el propietario: sin IA ni tokens. */
   | 'external';
 export interface PipelineEvent { at: string; kind: PipelineEventKind; message: string; detail?: string | null; aiCall?: boolean; costUsd?: number | null }
@@ -666,6 +673,8 @@ export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' |
   | 'max_turns'
   /** Candidato de integración preparado y verificado (o no) sin IA: decides QA e integrar · conflictos reales con la rama principal. */
   | 'integration' | 'integration_conflict'
+  /** El Evaluador Gauntlet dejó brechas bloqueantes al llegar a su límite (o sin progreso): decide el propietario. */
+  | 'gauntlet'
   | 'missing_information' | 'permission' | 'unsupported' | 'provider_refusal' | 'provider_timeout' | 'provider_error' | 'interrupted' | 'unknown'
   /** Entrega incremental: un entregable no cabe en la salida del modelo ni por secciones, o faltan entregables tras los intentos permitidos. */
   | 'too_large' | 'incomplete'
@@ -764,7 +773,7 @@ export interface WorkUnit {
   costUsd: number;
   stepIds: string[];
   /** Origen (unidades de corrección): QA, verificación o comprobación de completitud, con los hallazgos que corrige. */
-  source?: 'plan' | 'qa' | 'verification' | 'completeness';
+  source?: 'plan' | 'qa' | 'verification' | 'completeness' | 'gauntlet';
   findings?: { severity: IssueSeverity; text: string; file: string | null; evidence: string | null; expected?: string | null }[];
   /** Último problema (para no repetir lo mismo y para el propietario). */
   error: string | null;
@@ -811,7 +820,7 @@ export interface StoryManifest {
   /** Salida de texto máxima por unidad (tokens) con la que se dividió el trabajo. */
   unitOutputBudget: number;
   /** Rondas de corrección: de dónde vienen, cuántas unidades y cuántas aplicaron cambios. */
-  rounds: { at: string; source: 'qa' | 'verification' | 'completeness'; units: number; applied: number }[];
+  rounds: { at: string; source: 'qa' | 'verification' | 'completeness' | 'gauntlet'; units: number; applied: number }[];
   gate: CompletenessGate | null;
   /** Comprobación posterior a la verificación: ¿cada prueba nueva se ejecutó de verdad en el sandbox? */
   testRun?: { commit: string | null; at: string; results: { path: string; state: CheckState; detail: string }[] } | null;
@@ -899,6 +908,10 @@ export interface ExecutionResult {
   externalCorrections?: ExternalCorrection[];
   /** Integración con la rama principal: candidato preparado (main incorporado en la rama) o conflictos detectados. */
   integration?: IntegrationCandidate | null;
+  /** Evaluación Gauntlet: rondas del Evaluador independiente, hallazgos con evidencia y decisión de cada ronda. */
+  gauntlet?: GauntletState | null;
+  /** Aceptación del propietario (distinta de QA): cuándo, en qué lote y con qué nota. */
+  acceptance?: { at: string; by: 'owner'; batchId: string | null; note: string | null } | null;
 }
 export interface ExternalCorrection { at: string; commit: string; previousCommit: string; files: string[]; note: string; by: 'owner' }
 /** Integración de la rama de una historia con la rama principal (se calcula al leer, con git y sin IA). */

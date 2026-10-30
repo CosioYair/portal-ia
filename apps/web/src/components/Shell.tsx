@@ -76,6 +76,7 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/panel">{Icon.grid()}<span>Panel</span></NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/equipo">{Icon.users()}<span>Equipo de IA</span></NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/backlog">{Icon.inbox()}<span>Backlog</span></NavLink>
+          <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/lotes">{Icon.activity()}<span>Ejecución continua</span></NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/actividad">{Icon.activity()}<span>Actividad</span>{usage && usage.running > 0 && <span className="dot dot-warn dot-pulse" style={{ marginLeft: 'auto' }} />}</NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/conocimiento">{Icon.book()}<span>Conocimiento</span></NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/presupuestos">{Icon.wallet()}<span>Presupuestos</span></NavLink>

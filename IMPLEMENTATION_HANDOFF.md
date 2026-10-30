@@ -1,3 +1,52 @@
+# Portal IA · Gauntlet, ejecución continua del backlog, comunicación y aprendizaje
+
+Fecha: 30 de octubre de 2026. Diseño, flujo y limitaciones: `docs/gauntlet-y-ejecucion-continua.md`. Todo con
+proveedor y CLI simulados (0 USD), datos temporales y Docker real, **sin abrir `data/`, sin llamadas reales, sin
+integrar ni publicar**.
+
+**Commits sobre `main`** (sin publicar):
+
+| Commit | Contenido | Esquema |
+|---|---|---|
+| `318e61a` | Telemetría de cada llamada (p50/p95, modelo frente a Portal) | 0.14 |
+| `5e32c33` | Evaluador Gauntlet y etapa en el pipeline | — |
+| `6b40667` | Ejecución continua del backlog | 0.15 |
+| `34b9073` | Interfaz en español | — |
+| `76b61b8` | Consultas en paralelo con presupuesto garantizado y contexto por secciones | — |
+| `fe901b5` | Brechas del Evaluador en el ciclo de lecciones | — |
+
+**Verificación** (clon limpio, `npm run typecheck`, `PORTAL_REQUIRE_DOCKER=1 npm test`, `npm run build`): exit 0 /
+392 pruebas, 390 superadas, 0 fallidas, 2 omitidas por plataforma / exit 0. Recorrido en Chromium de las pantallas
+nuevas en una instancia aislada: 18 de 18.
+
+- **Pruebas por escenario:**
+  - A–E, Q y R en `gauntlet.test.ts`;
+  - F–Q en `batch-execution.test.ts`;
+  - S y T en `performance.test.ts`.
+- **Antes / después** (simulado; no prueba un modelo real): historia con 2 consultas de 4,9 s a 3,3 s, mismas 15
+  llamadas y mismo resultado.
+- **Activación:** no activo en el Portal en marcha. Hay que reconstruir y reiniciar con tu autorización; al arrancar,
+  el esquema 0.15 copia `data/` antes de migrar.
+
+**Prueba real controlada propuesta** (requiere tu autorización; consume la suscripción):
+1. Reconstruir y reiniciar el Portal.
+2. En Equipo, aprobar el Evaluador Gauntlet en un proyecto de bajo riesgo, con un modelo de nivel medio y el backend
+   Claude Code.
+3. Elegir 2–3 historias pequeñas (texto, interfaz o documentación), una de ellas dependiente de otra.
+4. Crear un lote con estos límites:
+   - concurrencia 1, Gauntlet `standard`, 2 correcciones;
+   - tope de 30 llamadas a la suscripción;
+   - 0 USD de API, sin alternativa por API;
+   - integrar, activar y publicar **desactivados**.
+5. Revisar cada historia en la pantalla de aceptación y comparar la telemetría (`/metrics/calls`) con la línea base.
+6. Criterios de éxito:
+   - 0 USD de API;
+   - ninguna llamada repetida;
+   - paradas correctas;
+   - hallazgos del Evaluador con evidencia real y útiles a tu juicio.
+
+---
+
 # Portal IA v0.12.1 · Integración en Windows (Fases 0–2)
 
 Fecha: 27 de octubre de 2026. Sobre la entrega v0.12.0 (abajo). Todo verificado en Windows 11 con Docker Desktop (motor WSL2), con datos temporales y proveedor simulado; **sin abrir `data/`, sin gastar créditos reales, sin publicar**.

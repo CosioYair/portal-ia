@@ -2,6 +2,7 @@ import type { RestoreSupersededResult, StoryDecisionHistory } from '@portal-ia/d
 import type { PipelineConfig, PhaseTransition, PhaseTransitionPreview, ProjectArchive, StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
 import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
+import type { BatchPreview, BatchView, GauntletAdvice, GauntletConfig, GauntletProjectInfo } from '@portal-ia/domain';
 import type { OrgApplication, OrgBriefAttachment, OrgChange, OrgDecision, OrgEvaluation, OrgEvaluationBrief, OrgProposal, OrgProposalSpec } from '@portal-ia/domain';
 import type { ClaudeCodeRun, ClaudeCodeStatusView, ClaudeCodeUsage, ClaudeCodeWorkerView, ClaudeCodeWorkspaceView, ExecutionBackend } from '@portal-ia/domain';
 import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
@@ -178,7 +179,7 @@ export const api = {
   resolveAssistantProposal: (messageId: string, processId: string, status: 'done' | 'failed', detail?: string) => request<{ message: AssistantMessage }>(`/api/assistant/messages/${messageId}/resolve`, { method: 'POST', body: JSON.stringify({ processId, status, detail }) }),
   clearAssistant: () => request<{ ok: boolean }>('/api/assistant/messages', { method: 'DELETE' }),
   addBacklogItem: (slug: string, projectId: string, input: { title: string; description?: string; criterion?: string; ownerKey?: string | null; estimate?: 'S' | 'M' | 'L' | null }) => request<BacklogItem>(`/api/workspaces/${slug}/projects/${projectId}/backlog`, { method: 'POST', body: JSON.stringify(input) }),
-  patchBacklogItem: (slug: string, id: string, patch: Partial<Pick<BacklogItem, 'title' | 'criterion' | 'description' | 'ownerKey' | 'estimate'>> & { status?: BacklogStatus }) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+  patchBacklogItem: (slug: string, id: string, patch: Partial<Pick<BacklogItem, 'title' | 'criterion' | 'description' | 'ownerKey' | 'estimate' | 'dependsOn'>> & { status?: BacklogStatus }) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteBacklogItem: (slug: string, id: string) => request<{ ok: boolean }>(`/api/workspaces/${slug}/backlog/${id}`, { method: 'DELETE' }),
   storyEstimate: (slug: string, projectId: string, id: string, skipQa = false, team?: { add?: string[]; remove?: string[] }) => { const q = new URLSearchParams(); if (skipQa) q.set('skipQa', '1'); if (team?.add?.length) q.set('add', team.add.join(',')); if (team?.remove?.length) q.set('remove', team.remove.join(',')); const qs = q.toString(); return request<AssessmentEstimate>(`/api/workspaces/${slug}/projects/${projectId}/backlog/${id}/estimate${qs ? `?${qs}` : ''}`); },
   executeStory: (slug: string, projectId: string, id: string, skipQa = false, team?: { add?: string[]; remove?: string[] }) => request<Process>(`/api/workspaces/${slug}/projects/${projectId}/backlog/${id}/execute`, { method: 'POST', body: JSON.stringify({ skipQa, team }) }),
@@ -256,5 +257,29 @@ export const api = {
   // HU-161 · una autorización vigente por historia: historial (vigente + superadas) y restauración reversible sin costo.
   storyDecisions: (slug: string, storyId: string) => request<StoryDecisionHistory>(`/api/workspaces/${slug}/stories/${encodeURIComponent(storyId)}/decisions`),
   restoreSuperseded: (slug: string, processId: string) =>
-    request<RestoreSupersededResult>(`/api/workspaces/${slug}/inbox/superseded/${encodeURIComponent(processId)}/restore`, { method: 'POST', body: JSON.stringify({ authorized: true }) })
+    request<RestoreSupersededResult>(`/api/workspaces/${slug}/inbox/superseded/${encodeURIComponent(processId)}/restore`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
+  // Evaluación Gauntlet: modo del proyecto, recomendación por historia y el Evaluador (aprobación organizativa).
+  projectGauntlet: (slug: string, projectId: string) => request<GauntletProjectInfo>(`/api/workspaces/${slug}/projects/${projectId}/gauntlet`),
+  setProjectGauntlet: (slug: string, projectId: string, g: GauntletConfig) => request<{ config: GauntletConfig }>(`/api/workspaces/${slug}/projects/${projectId}/gauntlet`, { method: 'PUT', body: JSON.stringify({ ...g, authorized: true }) }),
+  gauntletAdvice: (slug: string, projectId: string, itemId: string) => request<GauntletAdvice>(`/api/workspaces/${slug}/projects/${projectId}/backlog/${itemId}/gauntlet`),
+  createEvaluator: (slug: string, projectId: string, opts: { model?: string; effort?: 'low' | 'medium' | 'high' } = {}) => request<Agent>(`/api/workspaces/${slug}/projects/${projectId}/gauntlet/evaluator`, { method: 'POST', body: JSON.stringify({ authorized: true, ...opts }) }),
+  // Ejecución continua del backlog (lotes autorizados).
+  batches: (slug: string, projectId: string) => request<BatchView[]>(`/api/workspaces/${slug}/projects/${projectId}/batches`),
+  batch: (slug: string, id: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}`),
+  previewBatch: (slug: string, projectId: string, body: BatchRequest) => request<BatchPreview>(`/api/workspaces/${slug}/projects/${projectId}/batches/preview`, { method: 'POST', body: JSON.stringify(body) }),
+  createBatch: (slug: string, projectId: string, body: BatchRequest) => request<BatchView>(`/api/workspaces/${slug}/projects/${projectId}/batches`, { method: 'POST', body: JSON.stringify({ ...body, authorized: true }) }),
+  batchControl: (slug: string, id: string, action: 'pause' | 'resume' | 'cancel' | 'revoke', body: Record<string, unknown> = {}) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/${action}`, { method: 'POST', body: JSON.stringify(action === 'resume' ? { ...body, authorized: true } : body) }),
+  acceptBatchItems: (slug: string, id: string, itemIds: string[], note?: string, checks?: Record<string, boolean[]>) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/accept`, { method: 'POST', body: JSON.stringify({ itemIds, note: note?.trim() || undefined, checks }) }),
+  rejectBatchItem: (slug: string, id: string, itemId: string, note: string, failedSteps: string[]) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/reject`, { method: 'POST', body: JSON.stringify({ note, failedSteps }) }),
+  reopenBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/reopen`, { method: 'POST', body: '{}' }),
+  iterateBatchItem: (slug: string, id: string, itemId: string, note: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/iterate`, { method: 'POST', body: JSON.stringify({ authorized: true, note }) }),
+  cancelBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/cancel`, { method: 'POST', body: '{}' })
 };
+
+/** Alcance que el propietario autoriza para un lote (lo normaliza y acota el servidor). */
+export interface BatchRequest {
+  title?: string; itemIds: string[]; backends?: ('api' | 'claude_code')[];
+  totalBudgetUsd: number; perStoryBudgetUsd: number; maxCorrections?: number; maxDurationMin?: number; maxSubscriptionCalls?: number;
+  gauntlet?: GauntletConfig; concurrency?: number; commands?: ('typecheck' | 'test' | 'build')[]; allowInstall?: boolean;
+  git?: { merge?: boolean; activate?: boolean; publish?: boolean }; autoResume?: boolean;
+}

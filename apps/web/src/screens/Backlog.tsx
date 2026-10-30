@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import type { Agent, AssessmentEstimate, BacklogItem, PendingDecision, PendingDecisionKind, PhaseTransition, PipelineConfig, Process } from '@portal-ia/domain';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
 import { PipelineOptions } from '../components/PipelineOptions.tsx';
+import { GauntletOptions } from '../components/Gauntlet.tsx';
 import { api, type ProjectFull } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { BACKLOG_STATUS, fmtUsd } from '../lib/labels.ts';
@@ -209,6 +210,7 @@ export function Backlog() {
                   </div>
                   <label className="ck"><input className="cb" type="checkbox" checked={!skipQa} onChange={e => setSkipQa(!e.target.checked)} /><span>Incluir la <strong>revisión de QA</strong> (recomendado). Sin ella la historia termina antes y cuesta menos; el diff lo revisas tú.</span></label>
                   <PipelineOptions value={pipeline} onChange={setPipeline} repo={project?.repository?.path ?? null} team={(est?.steps ?? []).map(s => { const ag = agents.find(a => a.id === s.agentId); return { agentName: s.agentName, role: s.title, model: s.model, effort: ag?.config.effort ?? null, tools: Object.entries(ag?.config.tools ?? {}).filter(([, v]) => v).map(([k]) => k) }; })} />
+                  <GauntletOptions slug={ws.slug} projectId={projectId} itemId={sel.id} value={pipeline.gauntlet} onChange={g => setPipeline(p => ({ ...p, gauntlet: g }))} />
                   <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo que los agentes del proyecto trabajen en la historia <strong>{sel.storyId}</strong> con lectura del repositorio, hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. Los cambios resultantes serán <strong>propuestas</strong> que revisaré antes de aplicarse en una rama git.</span></label>
                 </div>
                 <div className="modal-f">

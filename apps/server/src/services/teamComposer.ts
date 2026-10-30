@@ -38,7 +38,7 @@ export function matchScore(story: StoryText, agent: Agent, team: Agent[]): { sco
 const has = (a: Agent, c: Capability) => (a.config.capabilities ?? []).includes(c);
 const tool = (a: Agent, t: string) => !!a.config.tools?.[t];
 
-export function composeTeam(agents: Agent[], projectId: string, story: StoryText, opts: { skipQa?: boolean; override?: TeamOverride | null } = {}): TeamComposition {
+export function composeTeam(agents: Agent[], projectId: string, story: StoryText, opts: { skipQa?: boolean; override?: TeamOverride | null; gauntlet?: boolean } = {}): TeamComposition {
   // Ámbito: agentes del proyecto; los de espacio solo entran por anulación manual.
   // Los agentes retirados (template.retiredAt) no participan nunca; se listan como excluidos con el motivo.
   const pool = agents.filter(a => a.projectId === projectId && !isRetired(a.template));
@@ -58,6 +58,8 @@ export function composeTeam(agents: Agent[], projectId: string, story: StoryText
   pick('planner', 'planificar', null, 'pj-coordinador', 'Planifica');
   pick('implementer', 'implementar', 'write_repo', 'pj-dev', 'Implementa');
   if (!opts.skipQa) pick('reviewer', 'revisar_calidad', 'read_repo', 'pj-qa', 'Revisa');
+  // Evaluador Gauntlet: solo si se pide; nunca el implementador ni el revisor (ya usados): el constructor no se juzga.
+  if (opts.gauntlet) pick('evaluator', 'evaluar_gauntlet', 'read_repo', 'pj-gauntlet', 'Evalúa de forma independiente (Gauntlet)');
   // Consultores por coincidencia de vocabulario (máx. 2), nunca el implementador/planificador ya elegidos.
   const consultCaps: Capability[] = ['consultar_arquitectura', 'consultar_ux', 'revisar_seguridad', 'consultar', 'documentar', 'generar_pruebas'];
   // Si el propietario omitió la revisión QA, el revisor no vuelve a entrar como consultor (ni su costo).
@@ -96,6 +98,6 @@ export function composeTeam(agents: Agent[], projectId: string, story: StoryText
 
 /** Orden de ejecución de los pasos: plan → consultas → implementación → revisión. */
 export function orderedMembers(t: TeamComposition): TeamMember[] {
-  const order: TeamRole[] = ['planner', 'consultant', 'implementer', 'reviewer'];
+  const order: TeamRole[] = ['planner', 'consultant', 'implementer', 'reviewer', 'evaluator'];
   return [...t.members].sort((a, b) => order.indexOf(a.role) - order.indexOf(b.role));
 }
