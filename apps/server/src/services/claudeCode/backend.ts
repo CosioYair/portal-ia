@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { callCapCheck } from './callCap.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getAdapter, type CompletionRequest, type CompletionResult } from '@portal-ia/ai-adapters';
@@ -175,6 +176,7 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
 
   if (backend === 'claude-code-terminal') {
     const label = backendLabel(backend);
+    const cap = callCapCheck(t.slug, t.processId); if (!cap.ok) throw ccError('call_cap', cap.detail);
     const run = runs.start({ mode: 'terminal', projectId: t.projectId, processId: t.processId, stepId: t.stepId, agentId: t.agent.id, agentName: t.agent.config.name, model: req.model, billing: 'unverified', authMethod: null, subscriptionType: null });
     const started = Date.now();
     try {
@@ -205,6 +207,8 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
   runningKeys.add(key);
   try {
     await acquireSlot(s.maxConcurrent, signal, n => say(`En cola: ${n} ejecución(es) de Claude Code en curso (máximo ${s.maxConcurrent})`, 'preparing'));
+    // Tope de llamadas: comprobado y registrado en el mismo tramo síncrono (sin «await» entre medias): sin carreras.
+    const cap = callCapCheck(t.slug, t.processId); if (!cap.ok) { releaseSlot(); throw ccError('call_cap', cap.detail); }
     const run = runs.start({ mode: 'cli', projectId: t.projectId, processId: t.processId, stepId: t.stepId, agentId: t.agent.id, agentName: t.agent.config.name, model: req.model, billing: det.billing, authMethod: det.authMethod, subscriptionType: det.subscriptionType });
     const job = s.repoRead && readRoot ? registerJobTask({ ...base, mode: 'cli', system: '', prompt: '', schema: null, readRoot, runId: run.id }) : null;
     liveListeners.set(run.id, m => say(m));

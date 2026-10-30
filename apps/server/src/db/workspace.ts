@@ -134,6 +134,8 @@ export function workspaceDb(slug: string): DatabaseSync {
   if (!pcols.includes('backlog_item_id')) db.exec(`ALTER TABLE processes ADD COLUMN backlog_item_id TEXT`);
   // v0.16 · Encargos de desarrollo del propietario (sin historia): el proceso lleva su encargo.
   if (!pcols.includes('assignment_id')) db.exec(`ALTER TABLE processes ADD COLUMN assignment_id TEXT`);
+  // Tope de llamadas a la suscripción autorizado para procesos sin pipeline (encargos de análisis, evaluaciones).
+  if (!pcols.includes('max_subscription_calls')) db.exec(`ALTER TABLE processes ADD COLUMN max_subscription_calls INTEGER`);
   // M3/M4: papel y motivo de cada paso; lecciones inyectadas.
   const scols = (db.prepare(`PRAGMA table_info(process_steps)`).all() as any[]).map(c => c.name);
   if (!scols.includes('role')) db.exec(`ALTER TABLE process_steps ADD COLUMN role TEXT`);
@@ -298,7 +300,7 @@ export function processesRepo(slug: string) {
   const db = workspaceDb(slug);
   const mapStep = (r: any): ProcessStep => ({ id: r.id, processId: r.process_id, position: r.position, agentId: r.agent_id, agentName: r.agent_name, title: r.title, status: r.status, model: r.model, inputTokens: r.tokens_in, outputTokens: r.tokens_out, costUsd: r.cost_usd, outputMd: r.output_md, error: r.error, startedAt: r.started_at, finishedAt: r.finished_at, role: r.role ?? null, reason: r.reason ?? null, lessonsUsed: r.lessons_used ? JSON.parse(r.lessons_used) : [], live: r.live_json ? JSON.parse(r.live_json) : null, unconfirmedUsd: r.unconfirmed_usd ?? 0, backend: r.backend ?? null });
   const mapProc = (r: any): Process => ({ id: r.id, projectId: r.project_id, kind: r.kind, title: r.title, status: r.status, budgetUsd: r.budget_usd, estimatedUsd: r.estimated_usd, spentUsd: r.spent_usd, inputTokens: r.tokens_in, outputTokens: r.tokens_out, createdAt: r.created_at, authorizedAt: r.authorized_at, startedAt: r.started_at, finishedAt: r.finished_at, error: r.error,
-    result: r.result_json ? JSON.parse(r.result_json) : null, delegation: r.delegation_json ? JSON.parse(r.delegation_json) : null, backlogItemId: r.backlog_item_id ?? null, assignmentId: r.assignment_id ?? null, unconfirmedUsd: r.unconfirmed_usd ?? 0,
+    result: r.result_json ? JSON.parse(r.result_json) : null, delegation: r.delegation_json ? JSON.parse(r.delegation_json) : null, backlogItemId: r.backlog_item_id ?? null, assignmentId: r.assignment_id ?? null, maxSubscriptionCalls: r.max_subscription_calls ?? null, unconfirmedUsd: r.unconfirmed_usd ?? 0,
     archivedAt: r.archived_at ?? null, archiveId: r.archive_id ?? null, supersededBy: r.superseded_by ?? null, supersededAt: r.superseded_at ?? null,
     steps: (db.prepare(`SELECT * FROM process_steps WHERE process_id = ? ORDER BY position`).all(r.id) as any[]).map(mapStep) });
   return {
@@ -351,6 +353,7 @@ export function processesRepo(slug: string) {
      * HU-161 · Restaura una autorización superada (reversible). Para que la historia siga teniendo una sola vigente,
      * las demás iteraciones con decisión pendiente pasan a superadas por la restaurada. Todo en una transacción.
      */
+    setCallCap(id: string, n: number | null) { db.prepare(`UPDATE processes SET max_subscription_calls = ? WHERE id = ?`).run(n, id); },
     /** Deshace las marcas puestas por un proceso que nunca empezó (se canceló al no poder autorizarse). */
     unsupersedeBy(byId: string): number { return Number(db.prepare(`UPDATE processes SET superseded_by = NULL, superseded_at = NULL WHERE superseded_by = ?`).run(byId).changes); },
     restoreSuperseded(id: string): { restored: string; superseded: string[] } | null {
@@ -452,6 +455,8 @@ export function claudeCodeRunsRepo(slug: string) {
         .run(status, now(), d.durationMs ?? null, d.numTurns ?? null, d.tokensIn ?? null, d.tokensOut ?? null, d.apiEquivalentUsd ?? null, d.error ?? null, d.rateLimit ? JSON.stringify(d.rateLimit) : null, id);
     },
     get(id: string): ClaudeCodeRun | undefined { const r = db.prepare(`SELECT * FROM claude_code_runs WHERE id = ?`).get(id); return r ? map(r) : undefined; },
+    /** Ejecuciones de la CLI registradas (TODAS: en curso, terminadas, fallidas, interrumpidas) de estos procesos. */
+    countForProcesses(ids: string[]): number { if (!ids.length) return 0; return Number((db.prepare(`SELECT COUNT(*) AS n FROM claude_code_runs WHERE process_id IN (${ids.map(() => '?').join(',')})`).get(...ids) as any).n); },
     recent(limit = 20): ClaudeCodeRun[] { return (db.prepare(`SELECT * FROM claude_code_runs ORDER BY started_at DESC LIMIT ?`).all(limit) as any[]).map(map); },
     byStep(stepId: string): ClaudeCodeRun[] { return (db.prepare(`SELECT * FROM claude_code_runs WHERE step_id = ? ORDER BY started_at`).all(stepId) as any[]).map(map); },
     byAgent(agentId: string, limit = 10): ClaudeCodeRun[] { return (db.prepare(`SELECT * FROM claude_code_runs WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?`).all(agentId, limit) as any[]).map(map); },

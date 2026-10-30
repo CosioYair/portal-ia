@@ -2,7 +2,7 @@ import { BATCH_LIMITS, DEPENDENCY_BROKEN, DEPENDENCY_SATISFIED, INTERNAL_WORKSPA
 import { batchesRepo } from '../db/batches.ts';
 import { callMetricsRepo } from '../db/callMetrics.ts';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
-import { agentsRepo, backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
+import { agentsRepo, backlogRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { isActiveJob, trackJob } from './activeJobs.ts';
 import { cancelProcess, clearCancel, isCancelled } from './assessment.ts';
 import { agentBackend, claudeCodeGate } from './claudeCode/backend.ts';
@@ -525,8 +525,8 @@ export function budgetOf(slug: string, b: Batch) {
 }
 /** Llamadas a la suscripción de Claude Code hechas por las historias del lote (telemetría de llamadas). */
 export function subscriptionCalls(slug: string, b: Batch): number {
-  const ids = b.items.flatMap(i => i.processIds); if (!ids.length) return 0;
-  return callMetricsRepo(slug).list({ processIds: ids }).filter(m => /Claude Code/i.test(m.backend ?? '')).length;
+  // Mismo registro que la comprobación de cada llamada: ejecuciones reales de la CLI (también fallidas o interrumpidas).
+  return claudeCodeRunsRepo(slug).countForProcesses(b.items.flatMap(i => i.processIds));
 }
 
 function startNext(slug: string, id: string) {

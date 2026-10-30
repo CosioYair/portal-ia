@@ -86,7 +86,7 @@ export function allowedSessionTool(name: string, structured: boolean): boolean {
 }
 
 /** Error del conector con el código del Portal (los reintentos automáticos solo existen para errores de red de la API). */
-export const ccError = (code: 'usage_limit' | 'backend_unavailable' | 'timeout' | 'cancelled' | 'provider_error' | 'invalid_key' | 'max_turns', message: string) => new ProviderRequestError({ code, message });
+export const ccError = (code: 'usage_limit' | 'call_cap' | 'backend_unavailable' | 'timeout' | 'cancelled' | 'provider_error' | 'invalid_key' | 'max_turns', message: string) => new ProviderRequestError({ code, message });
 /** Uso de una ejecución que terminó sin respuesta útil (p. ej. turnos agotados): se registra igual (consumió la suscripción). */
 export interface CliFailedUsage { inputTokens: number; outputTokens: number; numTurns: number | null; apiEquivalentUsd: number | null; durationMs: number; tools: Record<string, number>; maxTurns: number | null }
 

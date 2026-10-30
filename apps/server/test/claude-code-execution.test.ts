@@ -318,6 +318,32 @@ test('tope de llamadas a la suscripción de un proceso: al alcanzarlo se pausa s
   for (let i = 0; i < 400 && processesRepo(S).get(p.id)!.status === 'running'; i++) await new Promise(res => setTimeout(res, 50));
 });
 
+test('tope comprobado en CADA ejecución: concurrentes sin carreras, reintentos del mismo paso y encargos de análisis', async () => {
+  useFakeSandbox(); apiScript(); scenario({ auth: 'subscription', slowMs: 150 });
+  const { claudeCodeComplete } = await import('../src/services/claudeCode/backend.ts');
+  const { agentsRepo: agents, claudeCodeRunsRepo: runsRepo } = await import('../src/db/workspace.ts');
+  const { p, devId } = await storyWith('CC · tope en cada llamada', 'claude-code', 2, { maxSubscriptionCalls: 2 });
+  const agent = agents(S).get(devId)!;
+  const req = (i: number) => ({ model: agent.config.model, system: 'sistema', user: `llamada ${i}`, maxTokens: 200 }) as any;
+  const target = { slug: S, projectId: project.id, processId: p.id, stepId: p.steps.find(st => st.role === 'implementer')!.id, agent, role: 'implementer', title: 'tope' };
+  const code = (e: any) => e?.error?.code ?? e?.code;
+  // Cinco llamadas A LA VEZ para el mismo proceso con tope 2: exactamente 2 ejecuciones de la CLI.
+  const results = await Promise.allSettled([0, 1, 2, 3, 4].map(i => claudeCodeComplete(target, req(i), new AbortController().signal, () => {})));
+  assert.equal(results.filter(r => r.status === 'rejected' && code(r.reason) === 'call_cap').length, 3, JSON.stringify(results.map(r => r.status === 'rejected' ? code(r.reason) : 'ok')));
+  assert.equal(runsRepo(S).countForProcesses([p.id]), 2); assert.equal(ccRuns().length, 2, 'la CLI se ejecutó exactamente 2 veces');
+  // Un reintento del mismo paso es otra ejecución: también se rechaza sin llamar.
+  await assert.rejects(claudeCodeComplete(target, req(99), new AbortController().signal, () => {}), (e: any) => code(e) === 'call_cap');
+  assert.equal(ccRuns().length, 2);
+  // Encargo de análisis (sin pipeline): su tope vive en el proceso y se cuenta igual.
+  const d = processesRepo(S).create({ projectId: project.id, kind: 'delegated_task', title: 'análisis con tope', estimatedUsd: 0, steps: [] });
+  processesRepo(S).setCallCap(d.id, 1); processesRepo(S).authorize(d.id, 1);
+  const t2 = { ...target, processId: d.id, stepId: null };
+  await claudeCodeComplete(t2, req(10), new AbortController().signal, () => {});
+  await assert.rejects(claudeCodeComplete(t2, req(11), new AbortController().signal, () => {}), (e: any) => code(e) === 'call_cap' && /tope 1/.test(e.message ?? e.error?.message));
+  assert.equal(ccRuns().length, 3, 'solo la primera del análisis se ejecutó');
+  processesRepo(S).finish(d.id, 'done'); processesRepo(S).finish(p.id, 'cancelled', 'fin de la prueba');
+});
+
 test('alternativa por API SOLO si el propietario la autorizó: se usa con su presupuesto y queda señalada', async () => {
   useFakeSandbox(); apiScript(); scenario({ auth: 'subscription', behavior: 'limit' });
   assert.equal((await inject('PUT', '/api/claude-code/settings', { fallback: 'api', authorized: true })).statusCode, 200);

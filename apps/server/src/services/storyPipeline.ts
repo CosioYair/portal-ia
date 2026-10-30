@@ -162,12 +162,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
     const b = budgetCheck(slug, processId, agent, system, user, maxTokens, 'api');
     if (!b.ok) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${proc.spentUsd.toFixed(2)} de ${proc.budgetUsd.toFixed(2)} USD${proc.unconfirmedUsd ? ` + ${proc.unconfirmedUsd.toFixed(2)} sin confirmar` : ''}; esta llamada necesita ≈ ${b.needed.toFixed(2)} USD).`), { budget: true, needed: b.needed, remaining: b.remaining, failure: { kind: 'budget', class: 'BUDGET_EXHAUSTED', detail: 'Presupuesto insuficiente para la siguiente llamada.' } satisfies ProcessFailure });
   };
-  // Tope de llamadas a la suscripción de ESTE proceso (las fallidas también cuentan): al alcanzarlo, se pausa sin llamar.
-  const capCalls = proc.result?.pipeline?.config.maxSubscriptionCalls;
-  if (route === 'claude-code' && capCalls) {
-    const used = callMetricsRepo(slug).list({ processIds: [processId] }).filter(m => /Claude Code/i.test(m.backend ?? '')).length;
-    if (used >= capCalls) { const detail = `Se usaron las ${used} llamada(s) a la suscripción autorizadas para este proceso (tope ${capCalls}). No se ha llamado; lo hecho se conserva. Concede más llamadas al continuar si quieres seguir.`; throw Object.assign(new Error(detail), { budget: true, failure: { kind: 'budget', class: 'BUDGET_EXHAUSTED', detail } satisfies ProcessFailure }); }
-  }
+  // El tope de llamadas a la suscripción se comprueba antes de CADA ejecución de la CLI (claudeCode/callCap.ts).
   if (route === 'api') requireApi();
   const models: ModelInfo[] = (() => { try { return JSON.parse(prow.models_json); } catch { return []; } })();
   // El plazo cuenta la salida que la llamada puede facturar de verdad: texto pedido + margen del razonamiento oculto.
@@ -235,6 +230,13 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       return { text: res.text, stopReason: res.stopReason, inputTokens: res.inputTokens, outputTokens: res.outputTokens, costUsd: cost, refusal: res.refusal ?? null };
     } catch (e) {
       const err = e instanceof ProviderRequestError ? e.error : null;
+      // Tope de llamadas a la suscripción: NO se llamó. Se detiene como un presupuesto agotado (nunca cede a la API ni reintenta).
+      if (err?.code === 'call_cap') {
+        unregisterCall(processId, ctrl);
+        const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
+        procs.stepFinish(step.id, 'failed', { tokensIn: prev.inputTokens, tokensOut: prev.outputTokens, cost: prev.costUsd, outputMd: prev.outputMd, error: err.message });
+        throw Object.assign(new Error(err.message), { budget: true, failure: { kind: 'budget', class: 'BUDGET_EXHAUSTED', detail: err.message } satisfies ProcessFailure });
+      }
       // Claude Code no disponible o límite de la suscripción: la API solo si el propietario la autorizó como alternativa.
       if (route === 'claude-code' && (err?.code === 'usage_limit' || err?.code === 'backend_unavailable') && apiFallbackAllowed()) {
         unregisterCall(processId, ctrl);

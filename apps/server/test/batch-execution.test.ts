@@ -24,7 +24,7 @@ const { classifyModel, planBatch, batchBudget, classifyStop } = await import('@p
 const { resetMockCalls } = await import('@portal-ia/ai-adapters');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
-const { agentsRepo, backlogRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
+const { agentsRepo, backlogRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
 const { callMetricsRepo } = await import('../src/db/callMetrics.ts');
 const { buildApp } = await import('../src/app.ts');
 const { addManualItem } = await import('../src/services/backlog.ts');
@@ -271,8 +271,10 @@ test('M · límite de la suscripción: pausa TODO el lote (no empieza la indepen
     assert.equal(paused.items[0].state, 'needs_owner'); assert.equal(paused.items[0].failureClass, 'subscription');
     assert.equal(paused.items[1].state, 'queued', 'la independiente NO empieza: el mismo límite la detendría');
     assert.match(paused.reason, /límite de la suscripción de Claude/);
-    // Tope de llamadas a la suscripción del lote (telemetría): con el tope alcanzado no empieza nada más.
-    callMetricsRepo(S).record({ processId: paused.items[0].processId, stepId: null, agentId: null, role: 'implementer', operation: 'x', backend: 'Claude Code — Suscripción', model: 'm', attempt: 1, status: 'done', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(), waitMs: 0, buildMs: 0, systemChars: 0, promptChars: 0, context: [], tokensIn: 0, tokensOut: 0, cacheReadTokens: null, turns: 1, tools: null, promptHash: 'h', errorClass: null } as any);
+    // Tope de llamadas a la suscripción del lote: cuenta las ejecuciones REALES de la CLI (el mismo registro que se comprueba
+    // antes de cada llamada). Una ejecución registrada de la primera historia alcanza el tope de 1.
+    const run = claudeCodeRunsRepo(S).start({ mode: 'cli', projectId: project.id, processId: paused.items[0].processId, stepId: null, agentId: 'a', agentName: 'A', model: 'm', billing: 'subscription', authMethod: null, subscriptionType: null } as any);
+    claudeCodeRunsRepo(S).finish(run.id, 'done', {});
     const r = await app.inject({ method: 'POST', url: `${W}/batches/${b.id}/resume`, payload: { authorized: true } });
     assert.equal(r.statusCode, 200);
     const capped = await waitFor(() => get(b.id), x => x.status === 'paused', 'pausa por el tope de llamadas');

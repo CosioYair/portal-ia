@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import type { ClaudeCodeWorkerView } from '@portal-ia/domain';
 import { claudeCodeWorkersRepo, workspacesRepo, type ClaudeCodeWorkerRow } from '../../db/platform.ts';
 import { agentsRepo, knowledgeRepo, projectsRepo } from '../../db/workspace.ts';
-import { safeRelPath, scanSecrets } from '../repoWrite.ts';
+import { readProtectedReason, resolveReadable, scanSecrets } from '../repoWrite.ts';
 import { ccError } from './cli.ts';
 import { getClaudeCodeSettings, projectAuthorized } from './settings.ts';
 
@@ -206,34 +206,15 @@ export function reportBlocker(scope: BridgeScope, id: string, reason: string): {
 
 // ---------------------------------------------------------------- Lectura acotada (contexto, archivos, conocimiento)
 
-/** Rutas que nunca se leen por el puente, además de las prohibidas para escribir (.git, data/, node_modules/, .env, claves). */
-// Sin distinguir mayúsculas: en Windows «.GIT/config» o «DATA/x» son las mismas rutas protegidas.
-const PROTECTED_READ = [/(^|\/)node_modules(\/|$)/i, /(^|\/)\.git(\/|$)/i, /(^|\/)\.claude(\/|$)/i, /(^|\/)\.ssh(\/|$)/i, /(^|\/)\.aws(\/|$)/i, /(^|\/)\.npmrc$/i,
-  /(^|\/)\.credentials\.json$/i, /(^|\/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i, /(^|\/)secrets?(\/|$)/i, /\.(keystore|jks|kdbx)$/i];
-export function protectedReason(rel: string): string | null {
-  let norm: string;
-  try { norm = safeRelPath(rel); } catch (e: any) { return e.message; }
-  if (PROTECTED_READ.some(r => r.test(norm))) return `Ruta protegida: ${rel}`;
-  return null;
-}
+/** Rutas que nunca se leen por el puente: las mismas que en todo el Portal (ver `resolveReadable`). */
+export function protectedReason(rel: string): string | null { return readProtectedReason(rel); }
 
 const MAX_FILE = 200_000;
-/** Lee un archivo de la carpeta de trabajo con TODAS las comprobaciones (ruta protegida, enlaces, binario, secretos). */
+/** Lee un archivo de la carpeta de trabajo con TODAS las comprobaciones (ruta protegida, ruta real, binario, secretos). */
 function readInside(readRoot: string, rel: string): { path: string; content: string; truncated: boolean } | Denied {
-  const why = protectedReason(rel); if (why) return deny(403, why);
-  const norm = safeRelPath(rel);
-  let root: string; let full: string;
-  try { root = fs.realpathSync(readRoot); full = fs.realpathSync(path.join(root, norm)); } catch { return deny(404, `No existe: ${rel}`); }
-  // Un enlace simbólico no puede sacar la lectura de la carpeta de trabajo.
-  if (full !== root && !full.startsWith(root + path.sep)) return deny(403, `Ruta fuera de la carpeta de trabajo: ${rel}`);
-  // La ruta REAL según el sistema (expande nombres cortos y mayúsculas) tampoco puede ser protegida.
-  try {
-    const rootN = fs.realpathSync.native(root); const fullN = fs.realpathSync.native(full);
-    const realRel = path.relative(rootN, fullN).replace(/\\/g, '/');
-    if (realRel.startsWith('..') || path.isAbsolute(realRel)) return deny(403, `Ruta fuera de la carpeta de trabajo: ${rel}`);
-    if (realRel && PROTECTED_READ.some(r => r.test(realRel))) return deny(403, `Ruta protegida: ${rel}`);
-    if (realRel && /(^|\/)(\.git|data|node_modules)(\/|$)|(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?$|\.(key|pem|p12|pfx)$/i.test(realRel)) return deny(403, `Ruta protegida: ${rel}`);
-  } catch { return deny(404, `No existe: ${rel}`); }
+  const r = resolveReadable(readRoot, rel);
+  if (!('abs' in r)) return deny(r.status, r.error);
+  const norm = r.norm; const full = r.abs;
   const st = fs.statSync(full); if (!st.isFile()) return deny(400, `No es un archivo: ${rel}`);
   const fd = fs.openSync(full, 'r'); const buf = Buffer.alloc(Math.min(st.size, MAX_FILE)); fs.readSync(fd, buf, 0, buf.length, 0); fs.closeSync(fd);
   if (buf.subarray(0, 8000).includes(0)) return deny(415, `Archivo binario: ${rel}`);

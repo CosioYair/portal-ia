@@ -40,6 +40,8 @@ export interface ProviderView {
 export type ProviderErrorCode = 'invalid_key' | 'forbidden' | 'rate_limited' | 'network' | 'provider_error' | 'no_credential' | 'workspace_required'
   /** El agente usa un origen que el lote de su proceso no autoriza (no se hizo la llamada). */
   | 'origin_not_allowed'
+  /** Se alcanzó el tope de llamadas a la suscripción autorizado (del proceso o del lote): no se hizo la llamada. */
+  | 'call_cap'
   /** El proveedor no respondió dentro del plazo de la llamada (se abortó). */
   | 'timeout'
   /** La llamada se abortó por decisión del propietario (cancelar). */
@@ -288,6 +290,8 @@ export interface Process {
   backlogItemId: string | null;
   /** Encargo de desarrollo del propietario al que pertenece (en lugar de una historia del backlog). */
   assignmentId?: string | null;
+  /** Tope de llamadas a la suscripción de Claude autorizado (procesos sin pipeline; los de historia lo llevan en su pipeline). */
+  maxSubscriptionCalls?: number | null;
   /** Suma de costos posiblemente facturados y no confirmados (estimación; el gasto confirmado es spentUsd). */
   unconfirmedUsd?: number;
   /** Archivado al iniciar una etapa: histórico, sin acciones. null = activo. */

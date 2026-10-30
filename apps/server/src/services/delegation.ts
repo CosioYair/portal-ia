@@ -203,7 +203,7 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
       if (billed) msg += ` Posible costo NO confirmado por el proveedor: ≈ ${estCost.toFixed(4)} USD (estimación de la entrada enviada; sin confirmación del proveedor).`;
       procs.stepFinish(step.id, 'failed', { error: msg }); if (billed) procs.addUnconfirmed(processId, step.id, estCost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'delegated_step', status: 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });
-      throw Object.assign(new Error(msg), { cancelled: err?.code === 'cancelled' });
+      throw Object.assign(new Error(msg), { cancelled: err?.code === 'cancelled', budget: err?.code === 'call_cap' });
     } finally { unregisterCall(processId, ctrl); }
   };
 

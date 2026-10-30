@@ -43,6 +43,8 @@ export function authorizeProcess(slug: string, id: string, input: AuthorizeInput
     const maxSubscriptionCalls = input.pipeline.maxSubscriptionCalls ?? (subscription ? DEFAULT_SUBSCRIPTION_CALLS : undefined);
     procs.setResult(id, { ...procs.get(id)!.result!, pipeline: newPipeline(normalizePipeline({ ...input.pipeline, maxSubscriptionCalls, gauntlet: gauntlet ?? undefined })) });
   }
+  // Encargos de análisis y evaluaciones: tope por proceso (cada paso puede necesitar continuaciones), contado en cada llamada.
+  if (!story && proc.maxSubscriptionCalls == null) procs.setCallCap(id, Math.max(6, proc.steps.length * 3));
   procs.authorize(id, input.budgetUsd);
   log({ processId: id, kind: proc.kind, budget: input.budgetUsd, gauntlet: gauntlet?.mode ?? null, auto: gauntlet?.auto?.reason ?? null }, 'proceso autorizado · inicia ejecución');
   const run = story ? runStory(slug, id, log, () => isCancelled(id)).finally(() => clearCancel(id))

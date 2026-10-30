@@ -236,7 +236,7 @@ export async function runOrgEvaluation(slug: string, processId: string, log: (o:
       if (billed) msg += ` Posible costo NO confirmado por el proveedor: ≈ ${estCost.toFixed(4)} USD (estimación de la entrada enviada).`;
       procs.stepFinish(step.id, 'failed', { error: msg }); if (billed) procs.addUnconfirmed(processId, step.id, estCost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'org_evaluation_step', status: 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });
-      throw Object.assign(new Error(msg), { cancelled: err?.code === 'cancelled' });
+      throw Object.assign(new Error(msg), { cancelled: err?.code === 'cancelled', budget: err?.code === 'call_cap' });
     } finally { unregisterCall(processId, ctrl); }
   };
 
