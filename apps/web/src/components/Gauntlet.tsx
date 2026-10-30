@@ -62,6 +62,16 @@ export function GauntletReport({ state, implementer }: { state: GauntletState; i
       <div className="card-h"><div className="h3">Evaluación Gauntlet</div><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}><Chip xs>{GAUNTLET_MODE[state.mode].label}</Chip><Chip xs tone={st.tone}>{st.label}</Chip></div></div>
       <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div className="small muted">Implementa: <strong>{implementer ?? '—'}</strong> · Evalúa: <strong>{state.rounds[0]?.evaluatorName ?? '—'}</strong> (independiente, con contexto nuevo: objetivo, criterios, evidencia y el diff; sin la explicación del equipo).{state.reason ? ` ${state.reason}` : ''}</div>
+        {state.planReview && state.planReview.rounds.length > 0 && <details data-testid="gauntlet-plan-review" open={state.planReview.status === 'paused'}>
+          <summary style={{ cursor: 'pointer' }}><strong>Revisión del plan</strong> (antes de implementar) · {state.planReview.rounds.length} ronda(s) · {state.planReview.status === 'approved' ? 'aprobado' : state.planReview.status === 'paused' ? 'en pausa: decides tú' : state.planReview.status === 'approved_with_gaps' ? 'aprobado con pendientes' : state.planReview.status}</summary>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
+            {state.planReview.rounds.map(pr => <div key={pr.round} className="small">
+              <strong>Ronda {pr.round}</strong> ({pr.reviewerName}): {pr.coverage.filter(c => c.covered === 'yes').length}/{pr.coverage.length} criterios cubiertos por el plan
+              {pr.gaps.map((g, i) => <div key={i} style={{ borderLeft: `3px solid ${g.unsupported ? '#C9C6BE' : g.severity === 'blocking' ? '#C0392B' : g.severity === 'major' ? '#D68910' : '#7F8C8D'}`, paddingLeft: 8, opacity: g.unsupported ? 0.7 : 1 }}><strong>[{SEV[g.severity]}]</strong> {g.text}{g.evidence ? <span className="mono muted"> · evidencia: {g.evidence}</span> : <span className="muted"> · sin evidencia: no motiva revisión</span>}</div>)}
+              <div className="muted">Decisión del Portal (sin IA): {pr.reason}</div>
+            </div>)}
+          </div>
+        </details>}
         {state.rounds.map(r => <details key={r.round} open={r.round === state.rounds.length}>
           <summary style={{ cursor: 'pointer' }}><strong>Ronda {r.round}</strong> · commit <span className="mono">{r.commit ?? '?'}</span> · {r.criteria.filter(c => c.status === 'met').length}/{r.criteria.length} criterios cumplidos · {r.findings.filter(f => !f.unsupported).length} hallazgo(s) con evidencia · <em>{r.decision === 'correct' ? 'corrección dirigida' : r.decision === 'pass' ? 'pasa' : 'se detiene'}</em></summary>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
@@ -73,6 +83,7 @@ export function GauntletReport({ state, implementer }: { state: GauntletState; i
               {f.expected && <div className="muted">esperado: {f.expected}</div>}
             </div>)}
             {r.limitations.length > 0 && <div className="small muted">Limitaciones: {r.limitations.join(' · ')}</div>}
+            {r.diagnosis && <div className="notice notice-info" style={{ padding: '6px 10px' }}><div className="small"><strong>Diagnóstico independiente</strong> de {r.diagnosis.agentName} (la misma brecha se repitió; ni construyó ni evaluó): <span style={{ whiteSpace: 'pre-wrap' }}>{r.diagnosis.text}</span></div></div>}
             <div className="small muted">Decisión del Portal (sin IA): {r.reason}</div>
           </div>
         </details>)}

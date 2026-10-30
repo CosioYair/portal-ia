@@ -241,8 +241,27 @@ Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": st
       const team0 = involved.map(id => agents.get(id)).filter(Boolean) as Agent[];
       const implStep0 = roleStep('implementer'); const qaStep0 = stepByRole(proc, 'reviewer');
       runCtx = { slug, processId, item, project, repoPath: repo.path, plan, consultText: '', iterText, dev: agents.get(implStep0.agentId)!, qa: qaStep0 ? agents.get(qaStep0.agentId)! : null, team: team0, log, isCancelled, injected };
-      const problem = (await import('./storyUnits.ts')).planProblem(plan);
+      const { planProblem } = await import('./storyUnits.ts');
+      const problem = planProblem(plan);
       if (problem) { handedOff = true; throw new PipelinePause('plan', problem); }
+      // Gauntlet en la planificación: revisión independiente del plan ANTES de pagar consultas e implementación.
+      try {
+        plan = await (await import('./gauntlet.ts')).planReviewStage(runCtx, config, plan, async gaps => {
+          const res = await call(planStep.id, sys(coord, project, item), `Revisa tu plan técnico con las brechas que señaló el revisor independiente (cada una con su evidencia). Corrige SOLO lo necesario para cubrir todos los criterios de aceptación; no amplíes el alcance.
+# Brechas
+${gaps.map((g, i) => `${i + 1}. [${g.severity}] ${g.text}${g.evidence ? ` · evidencia: ${g.evidence}` : ''}${g.fix ? ` · propuesta: ${g.fix}` : ''}`).join('\n')}
+# Tu plan actual
+${JSON.stringify(plan, null, 2)}
+Responde SOLO con el JSON del plan completo, en el mismo formato.`, MAX_TOKENS.planner);
+          const next = planFrom(extractJson(res.text), plan.summary);
+          if (!next.acceptance.length) next.acceptance = plan.acceptance;
+          return planHasFiles(next) ? next : plan;
+        });
+      } catch (e) { if (e instanceof PipelinePause) handedOff = true; throw e; }
+      // La revisión guardó su registro en el resultado: se conserva al guardar el plan (el objeto local no lo tenía).
+      result.gauntlet = procs.get(processId)!.result?.gauntlet ?? result.gauntlet; result.plan = plan; save(); runCtx.plan = plan;
+      const problem2 = planProblem(plan);
+      if (problem2) { handedOff = true; throw new PipelinePause('plan', problem2); }
       runCtx = null;
     }
 

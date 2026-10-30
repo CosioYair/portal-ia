@@ -20,7 +20,7 @@ process.env.PORTAL_MOCK_PROVIDER = '1';
 const scriptPath = path.join(process.env.PORTAL_DATA_DIR, 'mock-script.json'); const logPath = path.join(process.env.PORTAL_DATA_DIR, 'mock-log.jsonl');
 process.env.PORTAL_MOCK_SCRIPT = scriptPath; process.env.PORTAL_MOCK_LOG = logPath;
 const { encryptSecret } = await import('../src/security/crypto.ts');
-const { classifyModel, decideGauntlet, gauntletOverhead, normalizeGauntlet, progressBetween, recommendGauntlet, resolveGauntlet } = await import('@portal-ia/domain');
+const { classifyModel, decideGauntlet, decidePlanReview, gauntletOverhead, gauntletSignature, normalizeGauntlet, planReviewWanted, progressBetween, recommendGauntlet, resolveGauntlet } = await import('@portal-ia/domain');
 const { resetMockCalls } = await import('@portal-ia/ai-adapters');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
@@ -61,7 +61,9 @@ test('D · continuación por progreso: sigue solo con progreso medible y margen 
   const flat = decideGauntlet(std, [round([f('X')], 'correct', true, 1), round([f('Otra cosa distinta')], 'pass', true, 1)], 5);
   assert.equal(flat.decision, 'stop'); assert.match(flat.reason, /Sin progreso.*Replantea/);
   const same = decideGauntlet(normalizeGauntlet({ mode: 'deep' }), [round([f('Falta doble en a')], 'correct', true, 0), round([f('Falta doble en a')], 'pass', true, 2)], 5);
-  assert.equal(same.decision, 'stop', 'la misma brecha no cuenta como progreso aunque cambien otras medidas'); assert.match(same.reason, /la misma brecha/);
+  assert.equal(same.decision, 'diagnose', 'la misma brecha sin progreso: primero un diagnóstico independiente, no la misma estrategia');
+  const sameAgain = decideGauntlet(normalizeGauntlet({ mode: 'deep' }), [round([f('Falta doble en a')], 'correct', true, 0), round([f('Falta doble en a')], 'pass', true, 2)], 5, { diagnosed: [gauntletSignature([f('Falta doble en a')])] });
+  assert.equal(sameAgain.decision, 'stop', 'ya diagnosticada y sigue igual: se detiene'); assert.match(sameAgain.reason, /la misma brecha/);
   // Margen autorizado agotado CON progreso: se detiene diciendo que hubo progreso y que puedes conceder más.
   const limit = decideGauntlet(std, [round([f('X'), f('Y'), f('Z')], 'correct', true, 0), round([f('Y'), f('Z')], 'correct', true, 1), round([f('Z')], 'pass', true, 2)], 5);
   assert.equal(limit.decision, 'stop'); assert.equal(limit.status, 'stopped'); assert.match(limit.reason, /2 corrección\(es\) dirigida\(s\) autorizadas.*con progreso.*conceder más rondas \(hasta 6\)/);
@@ -75,7 +77,8 @@ test('D · continuación por progreso: sigue solo con progreso medible y margen 
   for (let i = 0; i < 20; i++) { rounds.push(round(Array.from({ length: 20 - i }, (_, k) => f(`B${k}`)), 'pass', true, Math.min(3, i))); const d = decideGauntlet(deep6, rounds, 99); rounds[rounds.length - 1].decision = d.decision; if (d.decision !== 'correct') break; decisions++; }
   assert.equal(decisions, 6, 'como mucho 6 correcciones por proceso');
   assert.deepEqual(gauntletOverhead(normalizeGauntlet({ mode: 'off' })), { evaluations: { min: 0, max: 0 }, corrections: { min: 0, max: 0 } });
-  assert.deepEqual(gauntletOverhead(normalizeGauntlet({ mode: 'deep' })), { evaluations: { min: 1, max: 4 }, corrections: { min: 0, max: 3 } });
+  // Máximo: 3 rondas + 1 evaluación, 1 + 2 revisiones del plan, 1 diagnóstico; correcciones: 3 + 2 revisiones del plan.
+  assert.deepEqual(gauntletOverhead(normalizeGauntlet({ mode: 'deep' })), { evaluations: { min: 1, max: 8 }, corrections: { min: 0, max: 5 } });
 });
 
 test('progreso sin retrocesos: mejorar una medida empeorando la otra no es progreso (no puede alternar hasta el tope)', () => {
@@ -127,11 +130,14 @@ const FIX2 = '=== RESUMEN ===\nAjuste.\n=== ARCHIVO: src/a.ts | patch ===\n<<<< 
 const QA_OK = JSON.stringify({ verdict: 'approved', summary: 'Cumple; typecheck, test y build en verde.', findings: [], suggestedTests: [] });
 const GAPS = JSON.stringify({ verdict: 'gaps', criteria: [{ criterion: 'a vale 2', status: 'met', evidence: 'src/a.ts:1 export const a = 2;' }, { criterion: 'existe doble = a * 2', status: 'unmet', evidence: 'el diff no define doble' }], findings: [{ severity: 'blocking', criterion: 'existe doble = a * 2', text: 'FALTA-DOBLE: no se exporta doble = a * 2', file: 'src/a.ts', evidence: 'src/a.ts:1 solo contiene «export const a = 2;»', expected: 'export const doble = a * 2;' }, { severity: 'major', criterion: null, text: 'SIN-EVIDENCIA-XYZ el estilo no me convence', file: null, evidence: null, expected: null }], largestGap: 'No se exporta doble', anotherRoundWorthIt: true, limitations: [] });
 const PASS = JSON.stringify({ verdict: 'pass', criteria: [{ criterion: 'a vale 2', status: 'met', evidence: 'src/a.ts:1' }, { criterion: 'existe doble = a * 2', status: 'met', evidence: 'src/a.ts:2 export const doble = a * 2;' }], findings: [], largestGap: null, anotherRoundWorthIt: false, limitations: [] });
-const MARKERS = ['RAZONAMIENTO-CONSTRUCTOR', 'NO son evidencia', 'El contador muestra 2', 'FALTA-DOBLE', 'SIN-EVIDENCIA-XYZ', 'Rondas anteriores'];
-const R = { ev: 'Evalúa de forma INDEPENDIENTE', plan: 'plan técnico', fix: 'Corrige la implementación de esta historia', qa: 'Evalúa la implementación con la EVIDENCIA real', dev: 'Implementa la historia' };
-function setScript(evaluator: string[], fixes: string[] = [FIX1, FIX2]) {
+const MARKERS = ['CAUSA-DIAG', 'GAP-PLAN-DOBLE', 'RAZONAMIENTO-CONSTRUCTOR', 'NO son evidencia', 'El contador muestra 2', 'FALTA-DOBLE', 'SIN-EVIDENCIA-XYZ', 'Rondas anteriores'];
+const DIAG = 'CAUSA-DIAG: el patch se aplicó sobre otra línea; ESTRATEGIA: añadir doble justo después de la definición de a.';
+const R = { review: 'REVISIÓN DEL PLAN', diag: 'DIAGNÓSTICO de una brecha', ev: 'Evalúa de forma INDEPENDIENTE', plan: 'plan técnico', fix: 'Corrige la implementación de esta historia', qa: 'Evalúa la implementación con la EVIDENCIA real', dev: 'Implementa la historia' };
+function setScript(evaluator: string[], fixes: string[] = [FIX1, FIX2], planReview: string[] = []) {
   resetMockCalls(); try { fs.unlinkSync(logPath); } catch { /* vacío */ }
   fs.writeFileSync(scriptPath, JSON.stringify({ markers: MARKERS, rules: [
+    ...(planReview.length ? [{ match: R.review, responses: planReview.map(text => ({ text })) }] : []),
+    { match: R.diag, text: DIAG },
     { match: R.ev, responses: evaluator.map(text => ({ text })) },
     { match: R.plan, text: PLAN },
     { match: R.fix, responses: fixes.map(text => ({ text })) },
@@ -220,31 +226,84 @@ test('A + C + E · ciclo completo: crítico distinto con contexto nuevo, correcc
   assert.ok(!p.result!.merged);
 });
 
-test('D + E · acotado: la misma brecha tras corregirla detiene el ciclo; conceder otra ronda no re-evalúa el mismo commit', async () => {
-  setScript([GAPS, GAPS, PASS]);
+const FIX3 = '=== RESUMEN ===\nAjuste final.\n=== ARCHIVO: src/a.ts | patch ===\n<<<< BUSCAR\nexport const doble: number = a * 2;\n==== REEMPLAZAR\nexport const doble: number = a * 2; // revisado\n>>>> FIN\n=== FIN ARCHIVO ===';
+test('D + E · la misma brecha: diagnóstico independiente, corrección con su causa y, si sigue igual, se detiene; conceder otra ronda no re-evalúa el mismo commit', async () => {
+  setScript([GAPS, GAPS, GAPS, PASS], [FIX1, FIX2, FIX3]);
   const { p } = await authorize('D acotado', { gauntlet: { mode: 'standard' } });
   let pl = p.result!.pipeline!;
   assert.equal(pl.state, 'stopped'); assert.equal(pl.pauseKind, 'gauntlet');
   assert.match(pl.reason!, /brechas bloqueantes/); assert.match(pl.reason!, /Lo hecho se conserva/);
-  assert.equal(p.result!.gauntlet!.status, 'stopped');
-  assert.equal(byRule(R.ev).length, 2); assert.equal(byRule(R.fix).length, 1); assert.equal(byRule(R.qa).length, 1);
+  const g0 = p.result!.gauntlet!;
+  assert.equal(g0.status, 'stopped'); assert.deepEqual(g0.rounds.map(r => r.decision), ['correct', 'correct', 'stop']);
+  assert.equal(byRule(R.ev).length, 3); assert.equal(byRule(R.fix).length, 2); assert.equal(byRule(R.qa).length, 1);
+  assert.equal(byRule(R.diag).length, 1, 'un diagnóstico por brecha repetida, no uno por ronda');
+  const diag = g0.rounds[1].diagnosis!; assert.ok(diag && diag.agentName); assert.match(diag.text, /CAUSA-DIAG/);
+  const devAgent = p.steps.find(st => st.role === 'implementer')!.agentId; const evAgent = p.steps.find(st => st.role === 'evaluator')!.agentId;
+  assert.ok(diag.agentId !== devAgent && diag.agentId !== evAgent, 'diagnostica alguien que ni construyó ni evaluó');
+  assert.ok(!byRule(R.fix)[0].markers.includes('CAUSA-DIAG') && byRule(R.fix)[1].markers.includes('CAUSA-DIAG'), 'la segunda corrección lleva el diagnóstico');
+  assert.match(g0.rounds[2].reason, /la misma brecha/);
   const flow = await flowOf(p.id);
   assert.equal(flow.issue.title, 'El Evaluador Gauntlet dejó brechas bloqueantes: decides tú');
   assert.ok(flow.issue.details.some((d: any) => /FALTA-DOBLE/.test(d.text) && /evidencia/.test(d.text)));
   assert.ok(!flow.issue.details.some((d: any) => /SIN-EVIDENCIA/.test(d.text)));
   const grant = flow.actions.find((a: any) => a.id === 'pipeline_resume' && /otra corrección dirigida/.test(a.label));
-  assert.deepEqual(grant.pipeline, { maxCorrections: 1, gauntlet: { mode: 'deep', maxRounds: 2 } });
+  assert.deepEqual(grant.pipeline, { maxCorrections: 1, gauntlet: { mode: 'deep', maxRounds: 3 } });
   assert.ok(flow.actions.some((a: any) => a.id === 'pipeline_resume' && /sin más evaluación/.test(a.label)));
   const res = await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/continue`, payload: { authorized: true, addBudgetUsd: 0.5, pipeline: grant.pipeline } });
   assert.equal(res.statusCode, 200, res.body);
   const done = await waitDone(p.id); pl = done.result!.pipeline!;
   assert.equal(pl.state, 'verified', pl.reason ?? '');
-  assert.equal(byRule(R.ev).length, 3, 'el commit detenido NO se evalúa otra vez: solo el nuevo');
-  assert.equal(byRule(R.fix).length, 2); assert.equal(byRule(R.qa).length, 1, 'QA no repite');
+  assert.equal(byRule(R.ev).length, 4, 'el commit detenido NO se evalúa otra vez: solo el nuevo');
+  assert.equal(byRule(R.fix).length, 3); assert.equal(byRule(R.qa).length, 1, 'QA no repite'); assert.equal(byRule(R.diag).length, 1);
   const g = done.result!.gauntlet!;
-  assert.deepEqual(g.rounds.map(r => r.decision), ['correct', 'correct', 'pass']);
-  assert.match(g.rounds[1].reason, /El propietario concedió otra corrección/);
+  assert.deepEqual(g.rounds.map(r => r.decision), ['correct', 'correct', 'correct', 'pass']);
+  assert.match(g.rounds[2].reason, /El propietario concedió otra corrección/);
   assert.ok(g.rounds.length <= 1 + 3, 'nunca más de 3 correcciones del Evaluador');
+});
+
+const REV_GAP = { severity: 'blocking', criterion: 'existe doble = a * 2', text: 'GAP-PLAN-DOBLE: el plan no define doble', evidence: 'tasks: ["Editar src/a.ts"] no menciona doble', fix: 'añadir la tarea de exportar doble' };
+const REV_REVISE = JSON.stringify({ verdict: 'revise', coverage: [{ criterion: 'a vale 2', covered: 'yes', evidence: 'tasks[0]' }, { criterion: 'existe doble = a * 2', covered: 'no', evidence: 'ninguna tarea define doble' }], gaps: [REV_GAP] });
+const REV_OK = JSON.stringify({ verdict: 'approve', coverage: [{ criterion: 'a vale 2', covered: 'yes', evidence: 'tasks[0]' }, { criterion: 'existe doble = a * 2', covered: 'yes', evidence: 'tasks[1]' }], gaps: [] });
+
+test('Gauntlet en la planificación (sin IA): cuándo se revisa el plan y qué se decide', () => {
+  const plan = (files: number, acc: number) => ({ filesToChange: Array.from({ length: files }, (_, i) => `f${i}`), acceptance: Array.from({ length: acc }, (_, i) => `c${i}`) });
+  assert.equal(planReviewWanted(normalizeGauntlet({ mode: 'off' }), plan(5, 5)), false);
+  assert.equal(planReviewWanted(normalizeGauntlet({ mode: 'standard' }), plan(1, 2)), false, 'una tarea pequeña no paga una revisión del plan');
+  assert.equal(planReviewWanted(normalizeGauntlet({ mode: 'standard' }), plan(3, 1)), true);
+  assert.equal(planReviewWanted(normalizeGauntlet({ mode: 'deep' }), plan(1, 1)), true);
+  const gap = (text: string, severity = 'blocking', evidence: string | null = 'cita del plan: tasks[0]') => ({ severity: severity as any, criterion: null, text, evidence, fix: null, unsupported: !evidence });
+  const std = normalizeGauntlet({ mode: 'standard' }); const deep = normalizeGauntlet({ mode: 'deep' });
+  const r = (gaps: any[], decision: 'revise' | 'proceed' = 'proceed', verdict: any = 'revise') => ({ verdict, gaps, decision });
+  assert.equal(decidePlanReview(std, [r([gap('falta b')])]).decision, 'revise');
+  assert.equal(decidePlanReview(std, [r([gap('vago', 'major', null)])]).decision, 'proceed', 'sin evidencia no hay revisión');
+  assert.equal(decidePlanReview(std, [r([gap('falta b'), gap('falta c')], 'revise'), r([gap('falta c')])]).decision, 'pause', 'estándar: una revisión; un bloqueante pendiente → decides tú antes de pagar la implementación');
+  assert.equal(decidePlanReview(deep, [r([gap('falta b'), gap('falta c')], 'revise'), r([gap('falta c')])]).decision, 'revise', 'profundo: con progreso, otra revisión');
+  assert.equal(decidePlanReview(deep, [r([gap('falta b')], 'revise'), r([gap('falta b')])]).decision, 'pause', 'sin progreso no se insiste');
+  assert.equal(decidePlanReview(deep, [r([gap('falta b', 'major')], 'revise'), r([gap('falta b', 'major')])]).decision, 'proceed', 'sin progreso pero no bloqueante: sigue y queda documentado');
+  assert.equal(decidePlanReview(std, [r([], 'proceed', 'cannot_review')]).decision, 'proceed');
+});
+
+test('revisión independiente del plan ANTES de implementar: brecha con evidencia → el planificador la corrige → aprobado; todo antes de pagar la implementación', async () => {
+  setScript([PASS], [FIX1], [REV_REVISE, REV_OK]);
+  const { p } = await authorize('Plan revisado', { gauntlet: { mode: 'deep' } });
+  const pr = p.result!.gauntlet!.planReview!;
+  assert.deepEqual(pr.rounds.map(x => x.decision), ['revise', 'proceed']); assert.equal(pr.status, 'approved');
+  assert.equal(byRule(R.review).length, 2);
+  const planCalls = byRule(R.plan); assert.ok(planCalls.length >= 2 && planCalls.some(c => c.markers.includes('GAP-PLAN-DOBLE')), 'el planificador recibe la brecha con su evidencia');
+  const all = calls(); const lastReview = all.map(c => c.rule).lastIndexOf(R.review); const firstDev = all.findIndex(c => c.rule === R.dev);
+  assert.ok(lastReview >= 0 && firstDev > lastReview, 'la revisión del plan ocurre antes de pagar la implementación');
+  assert.ok(byRule(R.review).every(c => !c.markers.includes('RAZONAMIENTO-CONSTRUCTOR')));
+  assert.equal(p.steps.filter(st => /Revisión del plan/.test(st.title)).length, 2, 'cada revisión es un paso con su coste');
+  assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
+});
+
+test('revisión del plan sin progreso y con un bloqueante: se pausa ANTES de implementar (decides tú; no se paga la implementación)', async () => {
+  setScript([PASS], [FIX1], [REV_REVISE, REV_REVISE]);
+  const { p } = await authorize('Plan sin progreso', { gauntlet: { mode: 'deep' } });
+  const pl = p.result!.pipeline!;
+  assert.equal(pl.pauseKind, 'plan', pl.reason ?? ''); assert.match(pl.reason!, /no se ha pagado la implementación/);
+  assert.equal(byRule(R.dev).length, 0, 'ninguna llamada de implementación'); assert.equal(byRule(R.review).length, 2);
+  assert.equal(p.result!.gauntlet!.planReview!.status, 'paused');
 });
 
 test('E · continuar sin más evaluación tras la detención: sin IA, sin repetir QA ni la evaluación; las brechas quedan documentadas', async () => {
@@ -258,7 +317,8 @@ test('E · continuar sin más evaluación tras la detención: sin IA, sin repeti
   assert.equal(done.result!.pipeline!.state, 'verified', done.result!.pipeline!.reason ?? '');
   assert.equal(calls().length, before, 'ninguna llamada a la IA');
   assert.equal(done.result!.gauntlet!.status, 'waived'); assert.match(done.result!.gauntlet!.reason!, /Pendiente documentado/);
-  assert.equal(done.result!.gauntlet!.rounds.length, 2, 'el informe del Evaluador se conserva');
+  // Tres rondas: corrección, la misma brecha → diagnóstico y corrección guiada, y la detención; el informe se conserva entero.
+  assert.equal(done.result!.gauntlet!.rounds.length, 3, 'el informe del Evaluador se conserva');
 });
 
 test('B · sin autoaprobación: si el paso del Evaluador apunta al implementador, no se evalúa', async () => {
@@ -291,7 +351,7 @@ test('modo off y predeterminado del proyecto: off no añade llamadas; el modo de
   // Recomendación y sobrecoste ANTES de autorizar (sin IA).
   const adv = (await app.inject({ method: 'GET', url: `${W}/projects/${project.id}/backlog/${q.backlogItemId}/gauntlet` })).json();
   assert.equal(adv.projectDefault.mode, 'standard'); assert.ok(['off', 'standard', 'deep'].includes(adv.recommended.mode));
-  assert.deepEqual(adv.overhead.standard, { evaluations: { min: 1, max: 3 }, corrections: { min: 0, max: 2 } });
+  assert.deepEqual(adv.overhead.standard, { evaluations: { min: 1, max: 6 }, corrections: { min: 0, max: 3 } });
   assert.ok(adv.evaluator?.id);
   await app.inject({ method: 'PUT', url: `${W}/projects/${project.id}/gauntlet`, payload: { mode: 'off', authorized: true } });
 });
