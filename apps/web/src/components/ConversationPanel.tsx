@@ -21,6 +21,7 @@ export class CardBoundary extends Component<{ children: ReactNode }, { error: st
   render() { return this.state.error ? <Notice kind="err">Esta tarjeta no se pudo mostrar ({this.state.error}). Recarga la página; el resto sigue disponible.</Notice> : this.props.children; }
 }
 
+const GMODE: Record<string, string> = { off: 'sin Gauntlet', standard: 'estándar', deep: 'profundo', auto: 'automático' };
 const DECISION_TONE: Record<ConversationDecision['status'], '' | 'ok' | 'warn' | 'err'> = { open: 'warn', approved: 'ok', rejected: 'err', deferred: '' };
 const DECISION_LABEL: Record<ConversationDecision['status'], string> = { open: 'abierta', approved: 'aprobada', rejected: 'rechazada', deferred: 'aplazada' };
 const ARTIFACT_LABEL = { proposal: 'Propuesta', team_review: 'Revisión del equipo', stories: 'Borradores de historias' } as const;
@@ -203,7 +204,7 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
   const { flash } = useApp();
   const [a, setA] = useState<AssignmentView | null>(initial ?? null);
   const [pre, setPre] = useState<AssignmentAuthPreview | null>(null);
-  const [budget, setBudget] = useState(''); const [calls, setCalls] = useState(''); const [mode, setMode] = useState<'auto' | 'off' | 'standard' | 'deep'>('auto');
+  const [budget, setBudget] = useState(''); const [calls, setCalls] = useState(''); const [mode, setMode] = useState<'' | 'off' | 'standard' | 'deep'>(''); // '' = lo que resuelve el Portal (la vista previa)
   const [ok, setOk] = useState(false); const [note, setNote] = useState(''); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
   const load = () => api.assignment(slug, assignmentId).then(setA).catch(e => setErr(e.message));
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -231,14 +232,14 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
         {pre.missing && <Notice kind="warn">Falta antes de autorizar: {pre.missing}</Notice>}
         {!pre.subscription.ok && <Notice kind="warn">{pre.subscription.reason}</Notice>}
         {pre.subscription.ok && pre.subscription.warning && <Notice kind="info">{pre.subscription.warning}</Notice>}
-        <div className="small muted">{pre.steps} paso(s): {pre.agents.map(x => x.name).join(', ')} · estimado de API ≈ {fmtUsd(pre.estimatedUsd)} (con Claude Code, consume tu suscripción en lugar de API) · Gauntlet recomendado: <strong>{pre.gauntlet.mode}</strong>{pre.gauntlet.auto?.reason ? ` — ${pre.gauntlet.auto.reason}` : ''}</div>
+        <div className="small muted">{pre.steps} paso(s): {pre.agents.map(x => x.name).join(', ')} · estimado de API ≈ {fmtUsd(pre.estimatedUsd)} (con Claude Code, consume tu suscripción en lugar de API) · Gauntlet que se aplicará: <strong>{GMODE[mode || pre.gauntlet.mode] ?? (mode || pre.gauntlet.mode)}</strong>{!mode && pre.gauntlet.auto?.reason ? ` — ${pre.gauntlet.auto.reason}` : ''}</div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(150px, 100%), 1fr))', gap: 8, alignItems: 'end' }}>
           <div><label className="label" htmlFor={`eb-${a.id}`}>Presupuesto API (USD)</label><input id={`eb-${a.id}`} className="input mono" type="number" min={0.1} step={0.5} value={budget} onChange={e => setBudget(e.target.value)} /></div>
           <div><label className="label" htmlFor={`ec-${a.id}`}>Tope de llamadas a la suscripción</label><input id={`ec-${a.id}`} className="input mono" type="number" min={1} max={2000} step={1} value={calls} onChange={e => setCalls(e.target.value)} /></div>
-          <div><label className="label" htmlFor={`eg-${a.id}`}>Gauntlet</label><select id={`eg-${a.id}`} className="input" value={mode} onChange={e => setMode(e.target.value as typeof mode)}><option value="auto">Automático</option><option value="off">Sin Gauntlet</option><option value="standard">Estándar</option><option value="deep">Profundo</option></select></div>
+          <div><label className="label" htmlFor={`eg-${a.id}`}>Gauntlet</label><select id={`eg-${a.id}`} className="input" value={mode} onChange={e => setMode(e.target.value as typeof mode)}><option value="">Automático ({GMODE[pre.gauntlet.mode] ?? pre.gauntlet.mode})</option><option value="off">Sin Gauntlet</option><option value="standard">Estándar</option><option value="deep">Profundo</option></select></div>
         </div>
-        <label className="ck"><input className="cb" type="checkbox" checked={ok} onChange={e => setOk(e.target.checked)} /><span>Autorizo ejecutar <strong>{a.code}</strong> en un worktree aislado (rama propia, verificación en el sandbox, QA{mode !== 'off' ? ' y Gauntlet' : ''}) hasta <strong>{fmtUsd(Number(budget) || 0)}</strong> de API y <strong>{Number(calls) || 0}</strong> llamadas a la suscripción. Nunca integra en main ni publica.</span></label>
-        <div><button type="button" className="btn btn-primary btn-sm" disabled={!ok || busy || !!pre.missing || !pre.subscription.ok || !(Number(budget) > 0) || !(Number(calls) >= 1)} onClick={() => void act(() => api.authorizeAssignment(slug, a.id, { budgetUsd: Number(budget), maxSubscriptionCalls: Math.floor(Number(calls)), gauntlet: { mode } }), `${a.code} en marcha`)}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}Autorizar y ejecutar</button></div>
+        <label className="ck"><input className="cb" type="checkbox" checked={ok} onChange={e => setOk(e.target.checked)} /><span>Autorizo ejecutar <strong>{a.code}</strong> en un worktree aislado (rama propia, verificación en el sandbox, QA{(mode || pre.gauntlet.mode) !== 'off' ? ' y Gauntlet' : ''}) hasta <strong>{fmtUsd(Number(budget) || 0)}</strong> de API y <strong>{Number(calls) || 0}</strong> llamadas a la suscripción. Nunca integra en main ni publica.</span></label>
+        <div><button type="button" className="btn btn-primary btn-sm" disabled={!ok || busy || !!pre.missing || !pre.subscription.ok || !(Number(budget) > 0) || !(Number(calls) >= 1)} onClick={() => void act(() => api.authorizeAssignment(slug, a.id, { budgetUsd: Number(budget), maxSubscriptionCalls: Math.floor(Number(calls)), ...(mode ? { gauntlet: { mode } } : {}) }), `${a.code} en marcha`)}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}Autorizar y ejecutar</button></div>
       </div>}
       {a.status === 'ready_for_review' && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -285,7 +286,8 @@ export function UsageBanner() {
     {g.report && <div className="small muted" style={{ marginTop: 2 }}>Dato del último informe del CLI ({new Date(g.report.receivedAt).toLocaleString()}), no una estimación. El Portal no conoce tu cuota restante.</div>}
     {!g.ok && <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
       <label className="ck"><input className="cb" type="checkbox" checked={ok} onChange={e => setOk(e.target.checked)} /><span className="small">He revisado mi cuenta (límite renovado o uso adicional aceptado).</span></label>
-      <button type="button" className="btn btn-ghost btn-sm" disabled={!ok || busy} onClick={() => void ack()}>Reconocer y reanudar</button>
+      <button type="button" className="btn btn-ghost btn-sm" disabled={!ok || busy} onClick={() => void ack()}>Reconocer</button>
+      <span className="small muted">Permite empezar trabajo nuevo. Lo que quedó en pausa se reanuda desde su proceso o su lote.</span>
     </div>}
   </div></div></div>;
 }

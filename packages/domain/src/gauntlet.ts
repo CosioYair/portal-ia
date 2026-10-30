@@ -161,7 +161,8 @@ export function progressBetween(prev: Pick<GauntletRound, 'findings'> & Partial<
   const severe = (r: Pick<GauntletRound, 'findings'>) => r.findings.filter(f => !f.unsupported && f.severity !== 'minor').length;
   const same = gauntletSignature(prev.findings) === gauntletSignature(last.findings);
   const m0 = met(prev); const m1 = met(last); const s0 = severe(prev); const s1 = severe(last);
-  const improved = !same && (m1 > m0 || s1 < s0);
+  // Progreso estricto y sin retrocesos: mejora una medida y la otra no empeora (así no puede alternar entre las dos).
+  const improved = !same && m1 >= m0 && s1 <= s0 && (m1 > m0 || s1 < s0);
   return { improved, detail: `criterios cumplidos ${m0} → ${m1}, brechas graves ${s0} → ${s1}${same ? ', la misma brecha' : ''}` };
 }
 

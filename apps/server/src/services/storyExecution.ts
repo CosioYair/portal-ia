@@ -158,7 +158,7 @@ export function createWorkProcess(slug: string, projectId: string, item: WorkIte
     const proc = procs.create({ projectId, kind: 'story_execution', title: `${item.storyId} · ${item.title}`, estimatedUsd: est.estimatedUsd, backlogItemId: isStory ? itemId : null, assignmentId: isStory ? null : (link.assignmentId ?? itemId), steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model, role: s.role, reason: s.reason })) });
     // El equipo (con motivos y anulaciones) queda registrado desde el principio; runStory lo conserva.
     procs.setResult(proc.id, { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: est.team ?? null, iterationContext: opts.iterationContext ?? null });
-    if (isStory) supersedePreviousIterations(slug, itemId, proc.id);
+    supersedePreviousIterations(slug, itemId, proc.id, isStory ? 'story' : 'assignment');
     db.exec('RELEASE create_story_process');
     return procs.get(proc.id)!;
   } catch (e) {
@@ -172,9 +172,9 @@ export function createWorkProcess(slug: string, projectId: string, item: WorkIte
  * todavía esperan una decisión del propietario quedan marcadas como superadas por `currentId`. No cambia su estado
  * ni borra nada; se puede deshacer con «Restaurar» desde el historial. Devuelve los procesos marcados.
  */
-export function supersedePreviousIterations(slug: string, itemId: string, currentId: string): string[] {
+export function supersedePreviousIterations(slug: string, itemId: string, currentId: string, kind: 'story' | 'assignment' = 'story'): string[] {
   const repo = processesRepo(slug); const out: string[] = [];
-  for (const p of repo.listByBacklogItem(itemId)) {
+  for (const p of kind === 'story' ? repo.listByBacklogItem(itemId) : repo.listByAssignment(itemId)) {
     if (p.id === currentId || p.kind !== 'story_execution' || p.archivedAt || p.supersededBy) continue;
     if (decisionsFromProcess(slug, p).length === 0) continue;
     if (repo.markSuperseded(p.id, currentId)) out.push(p.id);

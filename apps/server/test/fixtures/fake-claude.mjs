@@ -84,6 +84,14 @@ async function run(prompt) {
     log(entry);
     await new Promise(() => setInterval(() => {}, 1000)); // espera hasta que la maten (plazo o cancelación)
   }
+  if (behavior === 'overage') {
+    // Uso adicional en plena llamada: si el Portal no la para, terminaría «bien» (y la prueba lo detectaría).
+    log(entry);
+    out({ type: 'rate_limit_event', rate_limit_info: { status: 'allowed', rateLimitType: 'overage', isUsingOverage: true, resetsAt: 1893456000 }, uuid: 'u1', session_id: 'sess-fake' });
+    await new Promise(r => setTimeout(r, 300));
+    out({ type: 'result', subtype: 'success', is_error: false, result: 'hecho', num_turns: 1, duration_ms: 50, total_cost_usd: 0, usage: { input_tokens: 10, output_tokens: 5 }, session_id: 'sess-fake', permission_denials: [] });
+    process.exit(0);
+  }
   if (behavior === 'limit') {
     log(entry);
     out({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1893456000, errorCode: sc.creditsRequired ? 'credits_required' : undefined }, uuid: 'u1', session_id: 'sess-fake' });

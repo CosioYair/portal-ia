@@ -13,12 +13,12 @@ const execFileP = promisify(execFile);
  * (herramientas de riesgo `auth`). Las escrituras van a una rama de trabajo propia y se confirman en git para que
  * todo cambio sea revisable y reversible. Nunca se toca `.git`, `data/`, `node_modules/`, ni archivos con secretos.
  */
-const FORBIDDEN = [/^\.git(\/|$)/, /^data(\/|$)/, /^node_modules(\/|$)/, /(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?$/i, /\.(key|pem|p12|pfx)$/i, /(^|\/)\.master\.key$/];
+const FORBIDDEN = [/^\.git(\/|$)/i, /^data(\/|$)/i, /^node_modules(\/|$)/i, /(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?$/i, /\.(key|pem|p12|pfx)$/i, /(^|\/)\.master\.key$/i];
 
 /** Patrones de secretos que no deben entrar en un repositorio (aviso, no bloqueo: el propietario decide). */
 const SECRET_PATTERNS: [RegExp, string][] = [
   [/sk-ant-[A-Za-z0-9_-]{20,}/, 'clave de API de Anthropic'], [/\bsk-[A-Za-z0-9]{32,}\b/, 'clave de API (sk-…)'], [/\bAKIA[0-9A-Z]{16}\b/, 'clave de acceso AWS'],
-  [/\bgh[pousr]_[A-Za-z0-9]{30,}\b/, 'token de GitHub'], [/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/, 'clave privada'], [/\b(password|passwd|contraseña|secret|api[_-]?key)\s*[:=]\s*['"][^'"\s]{8,}['"]/i, 'credencial literal']
+  [/\bgh[pousr]_[A-Za-z0-9]{30,}\b/, 'token de GitHub'], [/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/, 'clave privada'], [/_authToken\s*=\s*\S{8,}/i, 'token de registro npm'], [/\b(password|passwd|contraseña|secret|api[_-]?key)\s*[:=]\s*['"][^'"\s]{8,}['"]/i, 'credencial literal']
 ];
 export function scanSecrets(text: string): string | null {
   for (const [re, label] of SECRET_PATTERNS) if (re.test(text)) return `Posible ${label} en el contenido: revísalo antes de aplicar o publicar.`;

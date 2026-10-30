@@ -27,7 +27,7 @@ const { classifyModel } = await import('@portal-ia/domain');
 const { resetMockCalls } = await import('@portal-ia/ai-adapters');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
-const { backlogRepo, knowledgeRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
+const { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
 const { buildApp } = await import('../src/app.ts');
 const { sandboxDeps } = await import('../src/services/verification.ts');
 const { recoverInterruptedProcesses } = await import('../src/services/interruptions.ts');
@@ -116,13 +116,21 @@ test('pedir cambios: queda la nota y la siguiente ejecución (autorizada aparte)
   assert.match(p2.result!.iterationContext ?? '', /Nota del propietario: el valor debe ser 2/); assert.match(p2.result!.iterationContext ?? '', /Criterios de aceptación vigentes/);
   assert.ok(calls().some(c => c.markers?.includes('Nota del propietario')), 'la nota llega a los agentes');
   assert.ok(processesRepo(S).get(x.processId), 'la ejecución anterior se conserva');
+  // La iteración anterior queda superada: ya no se integra, aplica, publica ni continúa (como con las historias).
+  assert.equal(processesRepo(S).get(x.processId)!.supersededBy, y.processId);
+  const merge = await inject('POST', `${W}/processes/${x.processId}/merge`, { authorized: true });
+  assert.equal(merge.statusCode, 409, merge.body); assert.match(merge.json().error, /superada/);
+  // Rechazar el diff de la vigente: el encargo espera tu decisión (no se queda «listo» con «Aceptar»).
+  if (y.status === 'ready_for_review') {
+    assert.equal((await inject('POST', `${W}/processes/${y.processId}/reject`, {})).statusCode, 200);
+    const z = await get(a.id); assert.equal(z.status, 'needs_owner'); assert.match(z.reason ?? '', /Rechazaste el diff/);
+  }
 });
 
 test('una autorización que no puede empezar no deja procesos pendientes: el recién creado se cancela con el motivo y el encargo espera tu decisión', async () => {
   script('src/en3.ts');
   const a = await define('Crear el archivo EN tres');
-  // El último informe del CLI dice «límite alcanzado» y aún no se renueva; con un equipo en la API no aplica, así que se
-  // prueba con otro motivo determinista: ya hay un proceso en ejecución.
+  // Ya hay un proceso en ejecución: se comprueba ANTES de crear nada.
   const blocker = processesRepo(S).create({ projectId: project.id, kind: 'story_execution', title: 'otro en marcha', estimatedUsd: 0, steps: [] });
   processesRepo(S).authorize(blocker.id, 1);
   try {
@@ -132,10 +140,22 @@ test('una autorización que no puede empezar no deja procesos pendientes: el rec
     assert.equal(x.status, 'draft', 'sin proceso creado: comprobado antes de crear nada');
     assert.equal(processesRepo(S).list(project.id).filter(p => p.assignmentId === a.id).length, 0);
   } finally { processesRepo(S).finish(blocker.id, 'cancelled', 'fin de la prueba'); }
+  // El equipo no puede ejecutar: el Desarrollador quedó en Claude Code y el conector se desactivó después (la API ya no
+  // deja asignarlo así, por eso se simula en la base). Falla DESPUÉS de crear el proceso, que se cancela con el motivo:
+  // no queda nada pendiente que otra pantalla pudiera ejecutar con otros límites.
+  const dev = agentsRepo(S).list().find(ag => ag.projectId === project.id && /desarroll/i.test(ag.config.name))!;
+  agentsRepo(S).updateConfig(dev.id, { ...dev.config, backend: 'claude-code' });
+  try {
+    const r = await inject('POST', `${W}/assignments/${a.id}/authorize`, { authorized: true, budgetUsd: 2 });
+    assert.equal(r.statusCode, 409, r.body); assert.equal(r.json().code, 'backend_not_ready');
+    const procsOfA = processesRepo(S).list(project.id).filter(p => p.assignmentId === a.id);
+    assert.equal(procsOfA.length, 1); assert.equal(procsOfA[0].status, 'cancelled', 'el proceso recién creado se cancela'); assert.match(procsOfA[0].error ?? '', /No se inició/);
+    const x = await get(a.id); assert.equal(x.status, 'needs_owner'); assert.match(x.reason ?? '', /No se inicia/);
+  } finally { agentsRepo(S).updateConfig(dev.id, { ...dev.config, backend: 'api' }); }
 });
 
-test('el límite de la suscripción en el último informe del CLI impide empezar un equipo en Claude Code (sin llamar); reconocerlo lo permite', async () => {
-  const { setGauntletless } = { setGauntletless: true }; void setGauntletless;
+// Que un equipo en Claude Code no empiece ni llame a la CLI con el límite vigente se prueba en claude-code-execution.test.ts.
+test('el último informe de límites del CLI se muestra tal cual (sin cuotas inventadas) y reconocerlo exige tu autorización', async () => {
   saveUsageReport({ status: 'rejected', resetsAt: Math.floor(Date.now() / 1000) + 3600, utilization: 1, errorCode: null, rateLimitType: 'five_hour', windows: [], overage: false }, 'prueba');
   const gate = (await inject('GET', '/api/claude-code/usage')).json();
   assert.equal(gate.ok, false); assert.match(gate.reason, /alcanzó su límite.*se renueva hacia/);
@@ -143,7 +163,12 @@ test('el límite de la suscripción en el último informe del CLI impide empezar
   assert.equal((await inject('POST', '/api/claude-code/usage/acknowledge', {})).statusCode, 403, 'reconocer exige autorización');
   const ack = (await inject('POST', '/api/claude-code/usage/acknowledge', { authorized: true })).json();
   assert.equal(ack.ok, true);
+  // Uso adicional: bloquea aunque después llegue un informe normal; solo tu reconocimiento lo levanta.
+  saveUsageReport({ status: 'allowed', resetsAt: null, utilization: 0.5, errorCode: null, rateLimitType: 'overage', windows: [], overage: true }, 'prueba');
+  saveUsageReport({ status: 'allowed', resetsAt: null, utilization: 0.1, errorCode: null, rateLimitType: 'five_hour', windows: [], overage: false }, 'prueba');
+  const g2 = (await inject('GET', '/api/claude-code/usage')).json(); assert.equal(g2.ok, false); assert.match(g2.reason, /overage/);
   acknowledgeUsageReport();
+  assert.equal((await inject('GET', '/api/claude-code/usage')).json().ok, true);
 });
 
 test('un reinicio a mitad no deja el encargo «en marcha»: su estado sale del proceso recuperado', async () => {

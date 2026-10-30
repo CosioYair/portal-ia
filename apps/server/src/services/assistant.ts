@@ -275,8 +275,16 @@ export function performActions(actionsReq: any[], scope: ActionScope = NO_SCOPE)
       if (LOCAL_OPS.includes(act.type)) {
         const { type, ...params } = act;
         const what = type === 'add_backlog_item' ? `Crear la historia «${String(params.title ?? '').slice(0, 80)}»` : type === 'update_backlog_item' ? `Editar ${params.story}` : type === 'reset_story' ? `Devolver ${params.story} a pendiente (descarta su diff pendiente)` : type === 'create_company' ? `Crear la empresa «${params.name}»` : `Crear el proyecto «${params.name}»`;
-        if (type === 'update_backlog_item' || type === 'reset_story') { const ws = resolveCompany(params.company); const pr = resolveProject(ws.slug, params.project); resolveStory(ws.slug, pr.id, params.story); }
-        out.push({ type: 'propose_local', status: 'pending', label: what, detail: 'Confírmalo para hacerlo: el Asistente solo lo propone.', local: { op: type, params } });
+        let detail = 'Confírmalo para hacerlo: el Asistente solo lo propone.';
+        if (type === 'update_backlog_item' || type === 'reset_story') {
+          const ws = resolveCompany(params.company); const pr = resolveProject(ws.slug, params.project); const st = resolveStory(ws.slug, pr.id, params.story) as any;
+          if (type === 'update_backlog_item') {
+            const changes = [params.title ? `título → «${String(params.title).slice(0, 120)}»` : '', params.criterion ? `criterio → «${String(params.criterion).slice(0, 200)}»` : '', params.description ? 'descripción nueva' : '', params.estimate ? `tamaño → ${params.estimate}` : '', params.dependsOn !== undefined ? `depende de → ${params.dependsOn ?? 'nada'}` : ''].filter(Boolean);
+            const resets = (params.title || params.criterion) && st && (st.status === 'review' || st.status === 'blocked');
+            detail = `${changes.length ? `Cambios: ${changes.join(' · ')}.` : 'Sin cambios concretos.'}${resets ? ` Atención: ${st.storyId} está ${st.status === 'review' ? 'en revisión' : 'bloqueada'}; cambiar el título o el criterio la devuelve a pendiente y descarta su diff pendiente.` : ''} Confírmalo para hacerlo.`;
+          }
+        }
+        out.push({ type: 'propose_local', status: 'pending', label: what, detail, local: { op: type, params } });
       } else if (act.type === 'open_decision') {
         if (!scope.conversationId) throw new Error('Las decisiones viven en una conversación.');
         const [d] = proposeDecisions(scope.conversationId, null, [act]);

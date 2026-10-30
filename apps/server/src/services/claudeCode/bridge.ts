@@ -207,7 +207,8 @@ export function reportBlocker(scope: BridgeScope, id: string, reason: string): {
 // ---------------------------------------------------------------- Lectura acotada (contexto, archivos, conocimiento)
 
 /** Rutas que nunca se leen por el puente, además de las prohibidas para escribir (.git, data/, node_modules/, .env, claves). */
-const PROTECTED_READ = [/(^|\/)node_modules(\/|$)/, /(^|\/)\.git(\/|$)/, /(^|\/)\.claude(\/|$)/, /(^|\/)\.ssh(\/|$)/, /(^|\/)\.aws(\/|$)/, /(^|\/)\.npmrc$/i,
+// Sin distinguir mayúsculas: en Windows «.GIT/config» o «DATA/x» son las mismas rutas protegidas.
+const PROTECTED_READ = [/(^|\/)node_modules(\/|$)/i, /(^|\/)\.git(\/|$)/i, /(^|\/)\.claude(\/|$)/i, /(^|\/)\.ssh(\/|$)/i, /(^|\/)\.aws(\/|$)/i, /(^|\/)\.npmrc$/i,
   /(^|\/)\.credentials\.json$/i, /(^|\/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i, /(^|\/)secrets?(\/|$)/i, /\.(keystore|jks|kdbx)$/i];
 export function protectedReason(rel: string): string | null {
   let norm: string;
@@ -252,8 +253,9 @@ function walk(root: string, max = 5000): string[] {
   return out;
 }
 
-/** git sin efectos: sin fsmonitor ni diff/textconv externos, sin bloquear el índice y sin paginador. Nunca un shell. */
-const GIT_SAFE = ['-c', 'core.fsmonitor=false', '-c', 'core.quotepath=off', '-c', 'diff.external=', '--no-pager'];
+/** git sin efectos: sin fsmonitor ni diff/textconv externos, sin bloquear el índice ni paginador, y rutas LITERALES (un nombre
+ * de archivo como «[.]npmrc» nunca es un patrón que alcance otro). Nunca un shell. */
+const GIT_SAFE = ['-c', 'core.fsmonitor=false', '-c', 'core.quotepath=off', '-c', 'diff.external=', '--no-pager', '--literal-pathspecs'];
 const git = (cwd: string, args: string[], maxBuffer = 32 * 1024 * 1024) =>
   execFileSync('git', [...GIT_SAFE, ...args], { cwd, maxBuffer, windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' } }).toString('utf8');
 

@@ -19,10 +19,22 @@ export function getConversation(id: string): AssistantConversation {
   const c = conversationsRepo.get(id); if (!c) throw fail(404, 'Conversación no encontrada.', 'not_found'); return c;
 }
 
-export function createConversation(title: string, workspaceSlug: string | null, projectId: string | null): AssistantConversation {
+function checkScope(workspaceSlug: string | null, projectId: string | null) {
   if (workspaceSlug && !workspacesRepo.get(workspaceSlug)) throw fail(404, 'Empresa no encontrada.', 'not_found');
+  if (projectId && !workspaceSlug) throw fail(400, 'Un proyecto necesita su empresa.', 'invalid_scope');
   if (workspaceSlug && projectId && !projectsRepo(workspaceSlug).get(projectId)) throw fail(404, 'Proyecto no encontrado.', 'not_found');
+}
+export function createConversation(title: string, workspaceSlug: string | null, projectId: string | null): AssistantConversation {
+  checkScope(workspaceSlug, projectId);
   return conversationsRepo.create(title.trim() || 'Nueva conversación', workspaceSlug, projectId);
+}
+/** Cambiar título, alcance o estado: el alcance se valida igual que al crear (el modelo nunca lo elige). */
+export function updateConversation(id: string, patch: { title?: string; workspaceSlug?: string | null; projectId?: string | null; status?: 'active' | 'archived' }): AssistantConversation {
+  const c = getConversation(id);
+  const ws = patch.workspaceSlug !== undefined ? patch.workspaceSlug : c.workspaceSlug;
+  const pj = patch.projectId !== undefined ? patch.projectId : patch.workspaceSlug !== undefined ? null : c.projectId;
+  checkScope(ws, pj);
+  return conversationsRepo.update(id, { ...patch, workspaceSlug: ws, projectId: pj });
 }
 
 /** Mensaje del sistema en la conversación (decisiones, artefactos): queda en el historial, sin llamar a la IA. */
@@ -171,7 +183,7 @@ export function recomputeStage(conversationId: string): ConversationStage {
   const c = getConversation(conversationId);
   const arts = artifactsRepo.list(conversationId).map(syncArtifact);
   const ds = decisionsRepo.list(conversationId);
-  const hasAssignment = !!c.workspaceSlug && assignmentsRepo(c.workspaceSlug).list().some(x => x.conversationId === conversationId);
+  const hasAssignment = !!c.workspaceSlug && assignmentsRepo(c.workspaceSlug).list().some(x => x.conversationId === conversationId && x.status !== 'cancelled');
   const stage: ConversationStage = hasAssignment ? 'execution'
     : arts.some(a => a.kind === 'stories' && a.status === 'applied') ? 'backlog'
     : arts.some(a => a.kind === 'proposal' && a.status === 'approved') ? 'approved'

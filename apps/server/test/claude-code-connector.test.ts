@@ -404,6 +404,15 @@ test('portal_search y portal_diff: solo lectura, literal, con las mismas protecc
   assert.match(b.diff, /-export const a = 1;/); assert.match(b.diff, /\+export const a = 2;/);
   assert.equal(b.base, run('rev-parse', 'main').trim(), 'desde el punto de partida de la rama');
   assert.equal(run('status', '--porcelain').split('\n').filter(Boolean).length, 4, 'leer no cambia nada en el repositorio');
+  // Un nombre con caracteres de patrón no alcanza otro archivo: «[.]npmrc» nunca trae el «.npmrc» protegido.
+  fs.writeFileSync(path.join(g, '.npmrc'), '//registry.npmjs.org/:_authToken=npm_secreto_de_prueba_123\n'); fs.writeFileSync(path.join(g, '[.]npmrc'), 'inofensivo\n');
+  run('--literal-pathspecs', 'add', '--', '.npmrc', '[.]npmrc'); run('commit', '-qm', 'npmrc');
+  fs.writeFileSync(path.join(g, '.npmrc'), '//registry.npmjs.org/:_authToken=npm_otro_secreto_456\n'); fs.writeFileSync(path.join(g, '[.]npmrc'), 'cambiado\n');
+  const lit = bridge.taskDiff(t, 'working') as any;
+  assert.ok(!/authToken|secreto/.test(lit.diff), 'ni el token ni el archivo protegido');
+  assert.match(lit.diff, /\+cambiado/); assert.ok(lit.omitted.some((o: any) => o.path === '.npmrc'));
+  // Windows no distingue mayúsculas: «.GIT/config» o «DATA/x.txt» son las mismas rutas protegidas.
+  for (const p of ['.GIT/config', 'DATA/x.txt', 'Node_Modules/x/index.js']) assert.ok(bridge.isDenied(bridge.readTaskFile(plain, p)), `${p} debía denegarse`);
 
   // De punta a punta por MCP con un token de ejecución.
   const job = bridge.registerJobTask({ slug: S, projectId: project.id, processId: null, stepId: null, agentId: qa.id, agentName: qa.config.name, role: 'reviewer', title: 'diff', mode: 'cli', system: '', prompt: '', schema: null, readRoot: g, runId: 'r-diff' });
@@ -414,7 +423,7 @@ test('portal_search y portal_diff: solo lectura, literal, con las mismas protecc
     const sr = await mcp.tool('portal_search', { query: 'export const n' });
     assert.equal(sr.isError, false); assert.equal(sr.json.matches[0].path, 'src/nuevo.ts');
     const dr = await mcp.tool('portal_diff', { range: 'branch' });
-    assert.equal(dr.isError, false); assert.deepEqual(dr.json.files, [{ path: 'src/a.ts', status: 'M' }]);
+    assert.equal(dr.isError, false); assert.ok(dr.json.files.some((f: any) => f.path === 'src/a.ts' && f.status === 'M')); assert.ok(!dr.json.files.some((f: any) => f.path === '.npmrc'), 'lo protegido no se lista');
     assert.equal((await mcp.tool('portal_search', { query: { toString: 'x' } })).isError, true, 'argumentos de tipo incorrecto no buscan nada');
     await mcp.close();
     assert.equal((await inject('GET', '/api/bridge/v1/tasks/current/diff?range=todo', undefined, { authorization: `Bearer ${job.token}` })).statusCode, 400);

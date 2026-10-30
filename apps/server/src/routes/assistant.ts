@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { assistantInfo, assistantRepo, chat, decideLocal, decideOperation, resolveProposal } from '../services/assistant.ts';
 import { conversationsRepo } from '../db/conversations.ts';
-import { conversationDetail, createConversation, createStoriesFrom, decide, decideProposal, getConversation, startArtifact } from '../services/conversations.ts';
+import { conversationDetail, createConversation, createStoriesFrom, decide, decideProposal, startArtifact, updateConversation } from '../services/conversations.ts';
 import { createCompany, createProject } from '../services/companies.ts';
 import { workspacesRepo } from '../db/platform.ts';
 
@@ -24,7 +24,7 @@ export async function assistantRoutes(app: FastifyInstance) {
     const { id } = req.params as any;
     const body = z.object({ title: z.string().trim().min(1).max(120).optional(), workspaceSlug: z.string().max(80).nullable().optional(), projectId: z.string().max(80).nullable().optional(), status: z.enum(['active', 'archived']).optional() }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Datos no válidos' });
-    try { getConversation(id); return conversationsRepo.update(id, body.data as any); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    try { return updateConversation(id, body.data); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e.code }); }
   });
   app.get('/api/assistant/conversations/:id', async (req, reply) => {
     const { id } = req.params as any;

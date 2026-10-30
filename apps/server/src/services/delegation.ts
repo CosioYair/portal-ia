@@ -65,7 +65,8 @@ export function extractBacklogOps(text: string): { ops: BacklogOp[]; body: strin
 export function ensureOpsParsed(slug: string, proc: Process): Process {
   const d = proc.delegation;
   if (!d || d.backlogOps.length || !d.deliverable || !/```(backlog|json)/i.test(d.deliverable)) return proc;
-  const { ops, body, truncated } = extractBacklogOps(d.deliverable);
+  if (d.purpose === 'proposal' || d.purpose === 'team_review') return proc;
+  const ex = extractBacklogOps(d.deliverable); const { body, truncated } = ex; const ops = d.purpose === 'stories' ? ex.ops.filter(o => o.op === 'add') : ex.ops;
   if (!ops.length) return proc;
   d.backlogOps = ops; d.deliverable = body + (truncated ? '\n\n> ⚠ La respuesta se cortó por longitud: se recuperaron las propuestas completas; puede faltar alguna.' : '');
   processesRepo(slug).setDelegation(proc.id, d);
@@ -320,6 +321,9 @@ export function applyBacklogOps(slug: string, processId: string): DelegationResu
   const procs = processesRepo(slug); const proc = procs.get(processId);
   if (!proc?.delegation) throw Object.assign(new Error('Encargo no encontrado'), { statusCode: 404 });
   const d = proc.delegation; if (d.opsApplied) throw Object.assign(new Error('Las propuestas ya se aplicaron.'), { statusCode: 409 });
+  // Por propósito: una propuesta o una revisión no cambian el backlog; unas historias solo AÑADEN.
+  if (d.purpose === 'proposal' || d.purpose === 'team_review') throw Object.assign(new Error('Una propuesta o una revisión del equipo no cambian el backlog.'), { statusCode: 409 });
+  if (d.purpose === 'stories') d.backlogOps = d.backlogOps.filter(o => o.op === 'add');
   const repo = backlogRepo(slug); const list = () => repo.list(proc.projectId);
   // Por id exacto; el número solo vale si la referencia ES un id de historia («12», «HU-12»): EN-3 nunca es HU-003 y un
   // título con cifras («Tema v2») nunca se confunde con HU-002.

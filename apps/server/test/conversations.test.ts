@@ -135,6 +135,8 @@ test('idea → decisiones una a una → propuesta cuestionada → revisión del 
   const synth = calls().find(c => c.rule === 'Es la PROPUESTA');
   assert.ok(synth.markers.includes('Decisiones aprobadas por el propietario') && synth.markers.includes('Decisiones aplazadas'), 'la propuesta recibe lo aprobado y lo aplazado');
   assert.deepEqual(pa.backlogOps, [], 'una propuesta no propone cambios al backlog');
+  const { applyBacklogOps } = await import('../src/services/delegation.ts');
+  assert.throws(() => applyBacklogOps(S, pa.process.id), /no cambian el backlog/, 'ni aplicándola a mano');
   assert.ok(!pa.consulted.some((c: any) => c.agentName === pa.challenge.agentName), 'quien cuestiona no participó en la redacción');
 
   // 4 · Revisión del equipo (con consulta al arquitecto).
@@ -185,6 +187,15 @@ test('conversaciones: «Limpiar» archiva sin borrar; leer no escribe; alcance v
   assert.equal(JSON.stringify((await inject('GET', '/api/assistant')).body.conversations), before, 'leer no crea ni cambia conversaciones');
   assert.equal((await inject('POST', '/api/assistant/conversations', { workspaceSlug: 'no-existe' })).status, 404);
   const noScope = await inject('POST', '/api/assistant/conversations', { title: 'Sin alcance' });
+  // El alcance se valida también al cambiarlo; ningún identificador sale de la carpeta de datos.
+  for (const ws of ['../../rev-escape', 'no-existe']) assert.equal((await inject('PATCH', `/api/assistant/conversations/${noScope.body.id}`, { workspaceSlug: ws })).status, 404, ws);
+  assert.equal((await inject('PATCH', `/api/assistant/conversations/${noScope.body.id}`, { projectId: project.id })).status, 400, 'un proyecto sin su empresa');
+  assert.ok(!fs.existsSync(path.join(path.dirname(process.env.PORTAL_DATA_DIR!), 'rev-escape.sqlite')) && !fs.existsSync(path.join(process.env.PORTAL_DATA_DIR!, 'rev-escape.sqlite')));
+  const { workspaceDbPath } = await import('../src/db/workspace.ts');
+  assert.throws(() => workspaceDbPath('../x'), /no válido/);
+  const scoped = await inject('PATCH', `/api/assistant/conversations/${noScope.body.id}`, { workspaceSlug: S, projectId: project.id });
+  assert.equal(scoped.status, 200); assert.equal(scoped.body.projectId, project.id);
+  assert.equal((await inject('PATCH', `/api/assistant/conversations/${noScope.body.id}`, { workspaceSlug: null })).body.projectId, null, 'quitar la empresa quita el proyecto');
   assert.equal((await inject('POST', `/api/assistant/conversations/${noScope.body.id}/artifacts`, { kind: 'proposal' })).body.code, 'no_scope');
   const total = (await inject('GET', `/api/assistant/conversations/${list0.body.conversations[0].id}`)).body.messages.length;
   await inject('DELETE', '/api/assistant/messages');

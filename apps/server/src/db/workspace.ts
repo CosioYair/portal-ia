@@ -15,7 +15,11 @@ const open = new Map<string, DatabaseSync>();
 const now = monotonicNow;
 const uuid = () => crypto.randomUUID();
 
-export function workspaceDbPath(slug: string) { return path.join(config.dataDir, 'workspaces', slug, `${slug}.sqlite`); }
+/** Un identificador de espacio es siempre [a-z0-9-]: cualquier otra cosa (p. ej. «../x») nunca abre ni crea una base. */
+export function workspaceDbPath(slug: string) {
+  if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(slug)) throw Object.assign(new Error('Identificador de empresa no válido.'), { statusCode: 400 });
+  return path.join(config.dataDir, 'workspaces', slug, `${slug}.sqlite`);
+}
 
 /**
  * HU-161 · ¿La fila de un proceso espera todavía una decisión del propietario? Reproduce las reglas de
@@ -286,6 +290,10 @@ export function knowledgeRepo(slug: string) {
   };
 }
 
+const finishListeners: ((slug: string, processId: string) => void)[] = [];
+/** Avisa cuando un proceso termina (p. ej. para poner al día el encargo al que pertenece). */
+export function onProcessFinish(fn: (slug: string, processId: string) => void) { finishListeners.push(fn); }
+
 export function processesRepo(slug: string) {
   const db = workspaceDb(slug);
   const mapStep = (r: any): ProcessStep => ({ id: r.id, processId: r.process_id, position: r.position, agentId: r.agent_id, agentName: r.agent_name, title: r.title, status: r.status, model: r.model, inputTokens: r.tokens_in, outputTokens: r.tokens_out, costUsd: r.cost_usd, outputMd: r.output_md, error: r.error, startedAt: r.started_at, finishedAt: r.finished_at, role: r.role ?? null, reason: r.reason ?? null, lessonsUsed: r.lessons_used ? JSON.parse(r.lessons_used) : [], live: r.live_json ? JSON.parse(r.live_json) : null, unconfirmedUsd: r.unconfirmed_usd ?? 0, backend: r.backend ?? null });
@@ -361,6 +369,7 @@ export function processesRepo(slug: string) {
     },
     finish(id: string, status: ProcessStatus, error: string | null = null) {
       db.prepare(`UPDATE processes SET status = ?, finished_at = ?, error = ? WHERE id = ?`).run(status, now(), error, id);
+      for (const fn of finishListeners) { try { fn(slug, id); } catch { /* un oyente no impide terminar */ } }
     },
     /** Estado real de la llamada en curso de un paso (null al terminar). */
     setStepLive(stepId: string, live: unknown | null) { db.prepare(`UPDATE process_steps SET live_json = ? WHERE id = ?`).run(live ? JSON.stringify(live) : null, stepId); },

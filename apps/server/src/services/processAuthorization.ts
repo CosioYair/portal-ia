@@ -18,6 +18,7 @@ import { newPipeline } from './storyPipeline.ts';
  */
 export interface AuthorizeInput { budgetUsd: number; pipeline?: Partial<Omit<PipelineConfig, 'gauntlet'>> & { gauntlet?: { mode: 'off' | 'standard' | 'deep' | 'auto'; maxRounds?: number } } | null }
 type Fail = Error & { statusCode: number; code?: string; payload?: Record<string, unknown> };
+export const DEFAULT_SUBSCRIPTION_CALLS = 60;
 const fail = (statusCode: number, message: string, code?: string, payload?: Record<string, unknown>): Fail => Object.assign(new Error(message), { statusCode, code, payload });
 
 export function authorizeProcess(slug: string, id: string, input: AuthorizeInput, log: (o: any, m: string) => void): Process {
@@ -37,7 +38,10 @@ export function authorizeProcess(slug: string, id: string, input: AuthorizeInput
     if (!gate.ok) throw fail(409, `No se inicia: ${gate.reason}`, 'subscription_limit', { report: gate.report });
   }
   if (story && input.pipeline && proc.result) {
-    procs.setResult(id, { ...procs.get(id)!.result!, pipeline: newPipeline(normalizePipeline({ ...input.pipeline, gauntlet: gauntlet ?? undefined })) });
+    // Con la suscripción el USD no limita nada: sin tope indicado, el de un lote (60 llamadas), ampliable al continuar.
+    const subscription = !!readiness?.team.some(t => t.backend !== 'api');
+    const maxSubscriptionCalls = input.pipeline.maxSubscriptionCalls ?? (subscription ? DEFAULT_SUBSCRIPTION_CALLS : undefined);
+    procs.setResult(id, { ...procs.get(id)!.result!, pipeline: newPipeline(normalizePipeline({ ...input.pipeline, maxSubscriptionCalls, gauntlet: gauntlet ?? undefined })) });
   }
   procs.authorize(id, input.budgetUsd);
   log({ processId: id, kind: proc.kind, budget: input.budgetUsd, gauntlet: gauntlet?.mode ?? null, auto: gauntlet?.auto?.reason ?? null }, 'proceso autorizado · inicia ejecución');

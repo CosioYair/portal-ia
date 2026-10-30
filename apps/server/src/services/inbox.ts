@@ -186,7 +186,7 @@ export function unmarkedDuplicates(slug: string, processes: Process[]): number {
 function supersededMessage(slug: string, p: Process): string | null {
   const key = storyKey(p);
   if (!key) return null;
-  const all = processesRepo(slug).listByBacklogItem(key);
+  const all = p.assignmentId ? processesRepo(slug).listByAssignment(p.assignmentId) : processesRepo(slug).listByBacklogItem(key);
   const self = all.find(x => x.id === p.id) ?? p;
   const { stories, iters } = storyGroups(slug, all.filter(x => !x.archivedAt), all);
   const g = stories.get(key);

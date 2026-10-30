@@ -173,6 +173,8 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
           o.onEvent?.({ kind: 'rate_limit', info: rateLimit });
           // Límite alcanzado: se para sin esperar (ni comprar créditos ni cambiar de origen de facturación).
           if (i.status === 'rejected') stop(limitError(rateLimit));
+          // Uso adicional («overage»): podría facturarse aparte. Se para en el acto; seguir exige tu reconocimiento.
+          else if (rateLimit.overage) stop(ccError('usage_limit', 'Claude Code informa uso adicional («overage»), que podría facturarse aparte según tu cuenta. Se ha parado sin continuar; reconócelo en el Asistente o en Proveedores si quieres seguir.'));
         } else if (j.type === 'assistant') {
           turns++;
           const tools = (j.message?.content ?? []).filter((c: any) => c?.type === 'tool_use').map((c: any) => String(c.name ?? '').replace(/^mcp__portal__/, ''));

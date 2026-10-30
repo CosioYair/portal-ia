@@ -13,7 +13,7 @@ import { flowOptions } from '../services/processView.ts';
 import { DEPS_MISSING_EXIT } from '../services/sandbox.ts';
 import { recordContextEdit } from '../services/storyThread.ts';
 import { teamReadiness } from '../services/claudeCode/backend.ts';
-import { projectGauntlet, syncEvaluatorStep } from '../services/gauntlet.ts';
+import { projectGauntlet, resolveGauntletFor, syncEvaluatorStep } from '../services/gauntlet.ts';
 import { prepareIntegration, processIntegration, resolveIntegrationConflicts, verifyCandidate } from '../services/storyIntegration.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { applyChanges, checkStaleChanges, discardBranch, pushBranches, worktreePathFor } from '../services/repoWrite.ts';
@@ -38,7 +38,7 @@ import { workItemOf } from '../services/workItems.ts';
 import { closingBlocker } from '../services/closing.ts';
 
 /** Rutas con efecto (IA o git) que nunca deben actuar sobre una iteración superada de su historia (HU-161). */
-const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish)$/;
+const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish|continue)$/;
 
 /**
  * Procesos autorizados (HU-004). Un proceso nace 'pending_authorization' con una estimación; solo empieza a consumir
@@ -139,7 +139,9 @@ export async function processRoutes(app: FastifyInstance) {
     // Si el equipo preguntó algo (información, permiso o decisión), continuar sin respuesta solo repetiría la pregunta y gastaría créditos.
     const request = prev?.ownerRequest ?? proc.result.failure?.request ?? null;
     if (request && !body.data.answer) return reply.code(400).send({ error: `El equipo necesita tu respuesta para seguir: «${request.question}»`, code: 'answer_required', request });
-    const cfg0 = normalizePipeline({ ...(prev?.config ?? {}), ...(body.data.pipeline ?? {}) });
+    // Gauntlet «automático» al continuar: se resuelve aquí, con la misma regla que al autorizar (nunca llega «auto» a la ejecución).
+    const gIn = body.data.pipeline?.gauntlet ? resolveGauntletFor(slug, proc, normalizeGauntlet(body.data.pipeline.gauntlet)) : null;
+    const cfg0 = normalizePipeline({ ...(prev?.config ?? {}), ...(body.data.pipeline ?? {}), ...(gIn ? { gauntlet: gIn } : {}) });
     // Más llamadas a la suscripción solo con tu autorización explícita al continuar (se suman al tope que había).
     const cfg = body.data.addSubscriptionCalls && cfg0.maxSubscriptionCalls ? { ...cfg0, maxSubscriptionCalls: Math.min(2000, cfg0.maxSubscriptionCalls + body.data.addSubscriptionCalls) } : cfg0;
     // Los límites nuevos se suman a lo ya consumido: continuar tras un tope concede ese margen otra vez, no más.
@@ -155,7 +157,7 @@ export async function processRoutes(app: FastifyInstance) {
     // La respuesta del propietario se entrega al agente que la pidió (una vez) al reanudar.
     if (request && body.data.answer) { pipeline.ownerAnswers = [...(pipeline.ownerAnswers ?? []), { at: new Date().toISOString(), question: request.question, answer: body.data.answer, delivered: false }]; pipeline.ownerRequest = null; }
     // Gauntlet cambiado al continuar (más rondas o sin más evaluación): el Evaluador entra o sale del equipo autorizado.
-    if (body.data.pipeline?.gauntlet) syncEvaluatorStep(slug, id, normalizeGauntlet(body.data.pipeline.gauntlet));
+    if (gIn) syncEvaluatorStep(slug, id, gIn);
     procs.setResult(id, { ...procs.get(id)!.result!, pipeline });
     procs.resume(id, Math.max(proc.budgetUsd, proc.spentUsd) + (body.data.addBudgetUsd ?? 0));
     app.log.info({ processId: id, addBudget: body.data.addBudgetUsd ?? 0, allowInstall: cfg.allowInstall }, 'pipeline de la historia: continuar (autorizado)');

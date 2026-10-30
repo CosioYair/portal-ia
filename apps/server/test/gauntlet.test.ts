@@ -20,7 +20,7 @@ process.env.PORTAL_MOCK_PROVIDER = '1';
 const scriptPath = path.join(process.env.PORTAL_DATA_DIR, 'mock-script.json'); const logPath = path.join(process.env.PORTAL_DATA_DIR, 'mock-log.jsonl');
 process.env.PORTAL_MOCK_SCRIPT = scriptPath; process.env.PORTAL_MOCK_LOG = logPath;
 const { encryptSecret } = await import('../src/security/crypto.ts');
-const { classifyModel, decideGauntlet, gauntletOverhead, normalizeGauntlet, recommendGauntlet, resolveGauntlet } = await import('@portal-ia/domain');
+const { classifyModel, decideGauntlet, gauntletOverhead, normalizeGauntlet, progressBetween, recommendGauntlet, resolveGauntlet } = await import('@portal-ia/domain');
 const { resetMockCalls } = await import('@portal-ia/ai-adapters');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
@@ -76,6 +76,14 @@ test('D · continuación por progreso: sigue solo con progreso medible y margen 
   assert.equal(decisions, 6, 'como mucho 6 correcciones por proceso');
   assert.deepEqual(gauntletOverhead(normalizeGauntlet({ mode: 'off' })), { evaluations: { min: 0, max: 0 }, corrections: { min: 0, max: 0 } });
   assert.deepEqual(gauntletOverhead(normalizeGauntlet({ mode: 'deep' })), { evaluations: { min: 1, max: 4 }, corrections: { min: 0, max: 3 } });
+});
+
+test('progreso sin retrocesos: mejorar una medida empeorando la otra no es progreso (no puede alternar hasta el tope)', () => {
+  const round = (met: number, severe: string[]) => ({ criteria: ['a', 'b', 'c'].map((c, i) => ({ criterion: c, status: (i < met ? 'met' : 'unmet') as any, evidence: 'e' })), findings: severe.map(t => ({ severity: 'major' as const, criterion: null, text: t, file: null, evidence: 'e', expected: null })) });
+  assert.equal(progressBetween(round(1, ['x', 'y']), round(2, ['x', 'y2'])).improved, true, 'más criterios y las mismas graves');
+  assert.equal(progressBetween(round(1, ['x', 'y']), round(1, ['x'])).improved, true, 'menos graves');
+  assert.equal(progressBetween(round(2, ['x', 'y']), round(1, ['z'])).improved, false, 'menos graves pero menos criterios cumplidos');
+  assert.equal(progressBetween(round(1, ['x']), round(2, ['y', 'z'])).improved, false, 'más criterios pero más graves');
 });
 
 test('recomendación sin IA y modo automático: pequeña sin riesgo → off; tamaño desconocido nunca profundo; profundo solo con tamaño L y riesgo, varias áreas o fallos repetidos; sin Evaluador → off', () => {

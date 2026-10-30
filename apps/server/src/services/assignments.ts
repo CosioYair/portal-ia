@@ -1,13 +1,13 @@
-import { ASSIGNMENT_STATUS_LABEL, DEFAULT_PIPELINE, assignmentReady, resolveGauntlet, verificationsForApplied, type Assignment, type AssignmentOutcome, type AssignmentStatus, type Process } from '@portal-ia/domain';
+import { ASSIGNMENT_STATUS_LABEL, DEFAULT_PIPELINE, assignmentReady, verificationsForApplied, type Assignment, type AssignmentOutcome, type AssignmentStatus, type Process } from '@portal-ia/domain';
 import { monotonicNow } from '../clock.ts';
 import { assignmentsRepo } from '../db/assignments.ts';
-import { knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
+import { knowledgeRepo, onProcessFinish, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { callMetricsRepo } from '../db/callMetrics.ts';
 import { createWorkProcess, estimateWork } from './storyExecution.ts';
 import { assignmentAsItem, onAssignmentStatus } from './workItems.ts';
 import { closingBlocker } from './closing.ts';
 import { subscriptionGate } from './claudeCode/usage.ts';
-import { projectEvaluator, projectGauntlet } from './gauntlet.ts';
+import { projectGauntlet, resolveGauntletFor } from './gauntlet.ts';
 import { authorizeProcess } from './processAuthorization.ts';
 
 /**
@@ -22,6 +22,8 @@ const fail = (statusCode: number, message: string, code: string) => Object.assig
 
 // El motor avisa del estado del elemento: el encargo lo deriva de su proceso.
 onAssignmentStatus((slug, id) => { syncAssignment(slug, id); });
+// Al terminar su proceso (por cualquier vía: ejecución, recuperación o cancelación) el encargo se pone al día en el acto.
+onProcessFinish((slug, processId) => { const p = processesRepo(slug).get(processId); if (p?.assignmentId) syncAssignment(slug, p.assignmentId); });
 
 export interface AssignmentInput { request: string; title: string; objective: string; criteria: string[]; outOfScope?: string[]; size?: 'S' | 'M' | 'L' | null; conversationId?: string | null; messageId?: string | null }
 
@@ -89,6 +91,7 @@ export function syncAssignment(slug: string, id: string): Assignment | null {
   let status: AssignmentStatus; let reason: string | null = null;
   if (p.status === 'pending_authorization') status = 'pending_authorization';
   else if (p.status === 'running') status = 'running';
+  else if (p.result?.rejected) { status = 'needs_owner'; reason = 'Rechazaste el diff de esta ejecución: pide cambios para otra iteración o cancela el encargo.'; }
   else if (p.status === 'done' && (pl ? pl.state === 'verified' : !!p.result?.applied)) status = 'ready_for_review';
   else if (p.status === 'failed') { status = 'failed'; reason = p.error ?? 'El proceso falló.'; }
   else { status = 'needs_owner'; reason = pl?.reason ?? p.error ?? (p.status === 'cancelled' ? 'Ejecución cancelada.' : 'El pipeline se detuvo.'); }
@@ -187,7 +190,8 @@ export function assignmentAuthorizationPreview(slug: string, id: string) {
   const missing = assignmentReady(a);
   const est = estimateWork(slug, a.projectId, assignmentAsItem(a));
   const prev = a.processIds.map(pid => processesRepo(slug).get(pid)).filter(Boolean) as Process[];
-  const g = resolveGauntlet(projectGauntlet(slug, a.projectId), { hasEvaluator: !!projectEvaluator(slug, a.projectId), estimate: a.size, text: `${a.title} ${a.objective} ${a.criteria.join(' ')}`, iterations: prev.length + 1, qaRejections: prev.filter(p => p.result?.review?.verdict === 'rejected').length });
+  // La misma resolución que al autorizar (mismo texto del elemento de trabajo y mismo historial): lo que ves es lo que corre.
+  const g = resolveGauntletFor(slug, { id: '', projectId: a.projectId, backlogItemId: null, assignmentId: a.id }, projectGauntlet(slug, a.projectId));
   const agents = est.steps.map(s => ({ name: s.agentName, role: s.role, model: s.model }));
   return { missing, estimatedUsd: est.estimatedUsd, suggestedBudgetUsd: est.suggestedBudgetUsd, steps: est.steps.length, agents, gauntlet: g, suggestedSubscriptionCalls: suggestedCalls(est.steps.length, DEFAULT_PIPELINE.maxCorrections), subscription: subscriptionGate() };
 }
