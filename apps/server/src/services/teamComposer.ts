@@ -1,4 +1,8 @@
 import type { Agent, Capability, TeamComposition, TeamMember, TeamOverride, TeamRole } from '@portal-ia/domain';
+import { isRetired } from '@portal-ia/domain';
+
+/** HU-159 · motivo con el que se excluye a un agente desactivado por una decisión organizativa (reversible). */
+export const RETIRED_REASON = 'retirado por decisión organizativa';
 
 /**
  * Compositor de equipos (M3). Determinista, sin llamadas a la IA: decide quién planifica, quién implementa, quién revisa
@@ -36,8 +40,10 @@ const tool = (a: Agent, t: string) => !!a.config.tools?.[t];
 
 export function composeTeam(agents: Agent[], projectId: string, story: StoryText, opts: { skipQa?: boolean; override?: TeamOverride | null } = {}): TeamComposition {
   // Ámbito: agentes del proyecto; los de espacio solo entran por anulación manual.
-  const pool = agents.filter(a => a.projectId === projectId);
+  // Los agentes retirados (template.retiredAt) no participan nunca; se listan como excluidos con el motivo.
+  const pool = agents.filter(a => a.projectId === projectId && !isRetired(a.template));
   const members: TeamMember[] = []; const excluded: TeamComposition['excluded'] = [];
+  for (const a of agents) if (a.projectId === projectId && isRetired(a.template)) excluded.push({ agentId: a.id, agentName: a.config.name, reason: RETIRED_REASON });
   const used = new Set<string>();
   const pick = (role: TeamRole, cap: Capability, requiredTool: string | null, preferKey: string, label: string): TeamMember | null => {
     const cands = pool.filter(a => has(a, cap) && !used.has(a.id));
@@ -76,6 +82,10 @@ export function composeTeam(agents: Agent[], projectId: string, story: StoryText
       if (members.some(m => m.agentId === id)) continue;
       const a = agents.find(x => x.id === id); if (!a) continue;
       if (a.projectId && a.projectId !== projectId) continue; // fuera de ámbito: nunca
+      if (isRetired(a.template)) { // retirado: tampoco por anulación manual
+        if (!excluded.some(e => e.agentId === a.id)) excluded.push({ agentId: a.id, agentName: a.config.name, reason: RETIRED_REASON });
+        continue;
+      }
       const ex = excluded.findIndex(e => e.agentId === id); if (ex >= 0) excluded.splice(ex, 1);
       const cap = consultCaps.find(c => has(a, c)) ?? null;
       members.push({ agentId: a.id, agentName: a.config.name, agentKey: a.key, role: 'consultant', capability: cap, model: a.config.model, reason: 'añadido por el propietario', override: true });

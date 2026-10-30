@@ -3,6 +3,7 @@ import type { Agent, AssessmentEstimate, BacklogItem, BacklogOp, DelegationResul
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
+import { activeAgents } from './activeAgents.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { buildRepoContext } from './repoContext.ts';
@@ -64,7 +65,7 @@ export function ensureOpsParsed(slug: string, proc: Process): Process {
 }
 
 export function pickLeadAgent(slug: string, projectId: string | null, ref: any): Agent {
-  const all = agentsRepo(slug).list();
+  const all = activeAgents(slug); // los retirados no reciben encargos
   const r = String(ref ?? '').trim().toLowerCase();
   const inScope = all.filter(a => a.scope === 'workspace' || !projectId || a.projectId === projectId);
   if (r) {
@@ -79,11 +80,11 @@ export function pickLeadAgent(slug: string, projectId: string | null, ref: any):
 
 /** Agentes bajo el mando del responsable (relación reportsTo real, incluidos agentes personalizados). */
 export function teamOf(slug: string, lead: Agent): Agent[] {
-  return agentsRepo(slug).list().filter(a => a.id !== lead.id && a.template.reportsTo === lead.key && a.key !== 'ws-asistente' && (lead.scope === 'workspace' || a.scope === 'workspace' || a.projectId === lead.projectId));
+  return activeAgents(slug).filter(a => a.id !== lead.id && a.template.reportsTo === lead.key && a.key !== 'ws-asistente' && (lead.scope === 'workspace' || a.scope === 'workspace' || a.projectId === lead.projectId));
 }
 
 function contextFor(slug: string, projectId: string | null): string {
-  const ws = workspacesRepo.get(slug)!; const projects = projectsRepo(slug); const agents = agentsRepo(slug).list();
+  const ws = workspacesRepo.get(slug)!; const projects = projectsRepo(slug); const agents = activeAgents(slug);
   const lines: string[] = [`# Empresa «${ws.name}»`];
   lines.push(`Agentes de espacio: ${agents.filter(a => a.scope === 'workspace').map(a => `${a.config.name} (${a.template.role}, clave ${a.key})`).join('; ')}`);
   const list = projectId ? projects.list().filter(p => p.id === projectId) : projects.list();

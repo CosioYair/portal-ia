@@ -6,7 +6,8 @@ import type { ModelInfo, ProviderId } from '@portal-ia/domain';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { platform, providersRepo, workspacesRepo } from '../db/platform.ts';
-import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
+import { backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
+import { activeAgents } from './activeAgents.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { addManualItem, resetStory } from './backlog.ts';
@@ -75,8 +76,8 @@ export const assistantRepo = {
 };
 
 function assistantAgent() {
-  const a = agentsRepo(INTERNAL_WORKSPACE.slug).list().find(x => x.key === 'ws-asistente');
-  if (!a) throw Object.assign(new Error('El Asistente de Empresa no existe todavía (inicializa el espacio interno).'), { statusCode: 409 });
+  const a = activeAgents(INTERNAL_WORKSPACE.slug).find(x => x.key === 'ws-asistente');
+  if (!a) throw Object.assign(new Error('El Asistente de Empresa no existe todavía o está retirado (inicializa el espacio interno o reactívalo desde Equipo de IA).'), { statusCode: 409 });
   return a;
 }
 
@@ -121,7 +122,7 @@ async function platformSnapshot(): Promise<string> {
   } catch { /* sin git */ }
   for (const ws of workspacesRepo.list()) {
     lines.push(`\n# Empresa «${ws.name}» (slug: ${ws.slug}${ws.kind === 'internal' ? ', espacio interno: aquí vive el propio Portal IA' : ''})`);
-    const projects = projectsRepo(ws.slug); const agents = agentsRepo(ws.slug).list();
+    const projects = projectsRepo(ws.slug); const agents = activeAgents(ws.slug);
     lines.push(`Agentes de espacio: ${agents.filter(a => a.scope === 'workspace').map(a => `${a.config.name} (${a.key})`).join(', ') || 'ninguno'}`);
     for (const p of projects.list()) {
       const bl = backlogRepo(ws.slug).list(p.id); const procs = processesRepo(ws.slug).list(p.id); const allProcs = processesRepo(ws.slug).listAll(p.id); const repo = projects.repository(p.id);

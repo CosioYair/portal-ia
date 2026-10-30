@@ -3,6 +3,7 @@ import type { Agent, AssessmentEstimate, Process, ProviderId } from '@portal-ia/
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
+import { activeAgents } from './activeAgents.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { buildRepoContext, renderRepoContext } from './repoContext.ts';
@@ -51,7 +52,7 @@ function userFor(stepIndex: number, repoCtx: string, previous: { title: string; 
 }
 
 function resolveAgents(slug: string, projectId: string) {
-  const agents = agentsRepo(slug).list().filter(a => a.projectId === projectId || a.scope === 'workspace');
+  const agents = activeAgents(slug).filter(a => a.projectId === projectId || a.scope === 'workspace');
   const byKey = (k: string) => agents.find(a => a.key === k);
   return STEP_PLAN.map(s => { const a = byKey(s.agentKey); if (!a) throw Object.assign(new Error(`Falta el agente ${s.agentKey}`), { statusCode: 409 }); return { ...s, agent: a }; });
 }

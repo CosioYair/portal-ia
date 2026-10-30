@@ -1,9 +1,15 @@
 /**
  * Evaluación organizativa (HU-159). El Gestor Organizacional (con el Coordinador si el ámbito es un proyecto) analiza
- * la organización real y propone añadir, fusionar, retirar o ajustar agentes o departamentos. Las propuestas solo se
- * registran: aceptarlas o rechazarlas no crea ni elimina nada; el propietario lo aplica después desde Equipo.
+ * la organización real y propone añadir, fusionar, retirar o ajustar agentes o departamentos. Cada propuesta trae su
+ * configuración concreta (spec); nada se aplica sin la aprobación del propietario: al aceptarla, el servidor la aplica
+ * (con foto previa para deshacer) y rechazarla solo registra la decisión. Retirar = desactivar de forma reversible
+ * (template.retiredAt). Un departamento es la etiqueta template.department de sus agentes.
  * Este módulo es puro (sin IO).
  */
+import type { Agent, AgentConfig } from './types.ts';
+import { TOOLS } from './templates.ts';
+// Ciclo seguro: CAPABILITIES solo se usa dentro de funciones, nunca al evaluar el módulo.
+import { CAPABILITIES } from './index.ts';
 export type OrgEvaluationScope = { kind: 'workspace' } | { kind: 'project'; projectId: string };
 export type OrgScopeKind = OrgEvaluationScope['kind'];
 export type OrgAction = 'add' | 'merge' | 'retire' | 'adjust';
@@ -28,6 +34,70 @@ export interface OrgProposal {
   decision: OrgDecision;
   decidedAt: string | null;
   decidedBy: string | null;
+  /** Configuración concreta propuesta por el Gestor (ausente en las propuestas antiguas). */
+  spec?: OrgProposalSpec;
+  /** En «merge»: agente o departamento que se conserva. */
+  keep?: string;
+  /** Avisos de normalización (p. ej. herramientas fuera del catálogo descartadas). */
+  specWarnings?: string[];
+  /** Resultado de aplicar la propuesta aceptada (con fotos previas para deshacer). */
+  application?: OrgApplication;
+}
+
+export type OrgEffort = 'low' | 'medium' | 'high';
+
+export interface OrgProposalSpec {
+  name?: string;
+  role?: string;
+  specialization?: string;
+  responsibilities?: string[];
+  /** Clave (o nombre) del agente al que reporta, u «owner». */
+  reportsTo?: string;
+  /** Ids del catálogo TOOLS (los desconocidos ya se descartaron). */
+  tools?: string[];
+  /** Ids del catálogo CAPABILITIES (los desconocidos ya se descartaron). */
+  capabilities?: string[];
+  model?: string;
+  effort?: OrgEffort;
+  /** Etiqueta de departamento. */
+  department?: string;
+  /** Solo al añadir un departamento: agentes nuevos que lo forman. */
+  agents?: OrgProposalSpec[];
+  /** Solo al añadir un departamento: agentes existentes (clave o nombre) que pasan a él. */
+  members?: string[];
+}
+
+export type OrgChangeOp = 'create' | 'update' | 'retire' | 'unretire';
+export interface OrgAgentSnapshot { config: AgentConfig; template: Agent['template']; configEdited?: boolean }
+export interface OrgChange {
+  op: OrgChangeOp;
+  agentId: string;
+  agentKey: string;
+  agentName: string;
+  /** null si el agente lo creó la propia aplicación. */
+  before: OrgAgentSnapshot | null;
+  after: OrgAgentSnapshot | null;
+}
+export interface OrgApplication {
+  status: 'applied' | 'reverted' | 'failed';
+  appliedAt: string | null;
+  revertedAt: string | null;
+  error: string | null;
+  changes: OrgChange[];
+  warnings?: string[];
+}
+
+/** Agente desactivado por una decisión organizativa (reversible: la fila se conserva). */
+export function isRetired(template: unknown): boolean {
+  if (!template || typeof template !== 'object') return false;
+  const v = (template as { retiredAt?: unknown }).retiredAt;
+  return typeof v === 'string' && v.length > 0;
+}
+
+/** Etiqueta de departamento de un agente (template.department) o null. */
+export function departmentOf(template: unknown): string | null {
+  const d = template && typeof template === 'object' ? (template as { department?: unknown }).department : null;
+  return typeof d === 'string' && d.trim() ? d.trim() : null;
 }
 
 export interface OrgEvaluation {
@@ -52,6 +122,49 @@ export const isOrgEvaluationFinished = (s: OrgEvaluationStatus) => s === 'done' 
 
 const str = (v: unknown, max: number) => (typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : '').slice(0, max);
 
+const EFFORTS: readonly OrgEffort[] = ['low', 'medium', 'high'];
+const textList = (v: unknown, maxItems: number, maxLen: number): string[] =>
+  (Array.isArray(v) ? v : typeof v === 'string' ? v.split(/\n|;/) : []).map(x => str(x, maxLen)).filter(Boolean).slice(0, maxItems);
+const idList = (v: unknown): string[] => {
+  const ids = Array.isArray(v) ? v.map(x => str(x, 60))
+    : v && typeof v === 'object' ? Object.entries(v as Record<string, unknown>).filter(([, on]) => !!on).map(([k]) => k.trim())
+      : typeof v === 'string' ? v.split(',').map(s => s.trim()) : [];
+  return [...new Set(ids.filter(Boolean))];
+};
+
+/**
+ * Normaliza la configuración propuesta: solo campos conocidos, textos recortados; herramientas y capacidades filtradas
+ * contra TOOLS y CAPABILITIES (los ids desconocidos se descartan con aviso). spec ausente o vacío → undefined.
+ */
+export function normalizeOrgSpec(raw: unknown, nested = false): { spec: OrgProposalSpec | undefined; warnings: string[] } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { spec: undefined, warnings: [] };
+  const r = raw as Record<string, unknown>; const warnings: string[] = []; const spec: OrgProposalSpec = {};
+  const name = str(r.name, 80); if (name) spec.name = name;
+  const role = str(r.role, 120); if (role) spec.role = role;
+  const specialization = str(r.specialization, 600); if (specialization) spec.specialization = specialization;
+  if (r.responsibilities != null) { const l = textList(r.responsibilities, 8, 300); if (l.length) spec.responsibilities = l; }
+  const reportsTo = str(r.reportsTo ?? r.reports_to, 120); if (reportsTo) spec.reportsTo = reportsTo;
+  if (r.tools != null) {
+    const ids = idList(r.tools); const ok = ids.filter(id => TOOLS.some(t => t.id === id)); spec.tools = ok;
+    const bad = ids.filter(id => !ok.includes(id)); if (bad.length) warnings.push(`Herramientas fuera del catálogo descartadas: ${bad.join(', ')}.`);
+  }
+  if (r.capabilities != null) {
+    const ids = idList(r.capabilities); const ok = ids.filter(id => CAPABILITIES.some(c => c.id === id)); spec.capabilities = ok;
+    const bad = ids.filter(id => !ok.includes(id)); if (bad.length) warnings.push(`Capacidades fuera del catálogo descartadas: ${bad.join(', ')}.`);
+  }
+  const model = str(r.model, 80); if (model) spec.model = model;
+  const effort = str(r.effort, 10).toLowerCase() as OrgEffort; if (EFFORTS.includes(effort)) spec.effort = effort;
+  const department = str(r.department ?? r.departamento, 80); if (department) spec.department = department;
+  if (!nested && Array.isArray(r.agents)) {
+    const subs = r.agents.slice(0, 8).map(a => normalizeOrgSpec(a, true));
+    const agents = subs.map(x => x.spec).filter((x): x is OrgProposalSpec => !!x && !!x.name);
+    if (agents.length) spec.agents = agents;
+    for (const x of subs) warnings.push(...x.warnings);
+  }
+  if (!nested && r.members != null) { const m = textList(r.members, 20, 120); if (m.length) spec.members = m; }
+  return { spec: Object.keys(spec).length ? spec : undefined, warnings };
+}
+
 /** Normaliza una entrada del bloque; null si no es válida o no tiene justificación. */
 export function normalizeOrgProposal(raw: unknown, id: string): OrgProposal | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
@@ -64,7 +177,12 @@ export function normalizeOrgProposal(raw: unknown, id: string): OrgProposal | nu
   const rationale = str(r.rationale ?? r.reason ?? r.justification, 2000);
   if (!subject || rationale.length < 3) return null;
   const details = typeof r.details === 'string' ? r.details.trim().slice(0, 4000) : r.details != null ? JSON.stringify(r.details).slice(0, 4000) : '';
-  return { id, action, target, subject, rationale, details, decision: 'pending', decidedAt: null, decidedBy: null };
+  const { spec, warnings } = normalizeOrgSpec(r.spec ?? r.config);
+  const keep = str(r.keep, 120);
+  return {
+    id, action, target, subject, rationale, details, decision: 'pending', decidedAt: null, decidedBy: null,
+    ...(spec ? { spec } : {}), ...(keep ? { keep } : {}), ...(warnings.length ? { specWarnings: warnings } : {})
+  };
 }
 
 /** Objetos JSON completos de un array cortado (equilibrio de llaves fuera de cadenas). */

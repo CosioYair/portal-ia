@@ -39,7 +39,11 @@ export function createAgent(slug: string, input: AgentCreateInput): Agent {
   });
   // Mantener la relación inversa: el supervisor pasa a "supervisar" al nuevo agente.
   if (input.reportsTo !== 'owner') {
-    const boss = all.find(a => a.key === input.reportsTo)!;
+    // Jefe del mismo ámbito: el del proyecto del nuevo agente, luego el de empresa (evita el pj-coordinador de otro proyecto).
+    const pid = input.scope === 'project' ? (input.projectId ?? null) : null;
+    const boss = all.find(a => a.key === input.reportsTo && pid !== null && a.projectId === pid)
+      ?? all.find(a => a.key === input.reportsTo && a.scope === 'workspace')
+      ?? all.find(a => a.key === input.reportsTo)!;
     if (!boss.template.supervises.includes(key)) agents.updateTemplateMeta(boss.id, { ...boss.template, supervises: [...boss.template.supervises, key] });
   }
   // M5: hereda las prácticas vigentes del papel de su primera capacidad.
