@@ -46,6 +46,8 @@ const proposals = [
   { action: 'adjust', target: 'agent', subject: 'pj-arquitecto', rationale: 'Esfuerzo excesivo para el volumen actual.', spec: { effort: 'low' } }
 ];
 const FENCE = '```';
+/** Paso «Contexto y dirección» obligatorio: estas pruebas evalúan sin indicaciones. */
+const NO_BRIEF = { brief: { skipped: true } };
 const GESTOR_TEXT = `## Resumen\nOrganización con huecos de seguridad (RESUMEN-APPLY).\n\n${FENCE}org\n${JSON.stringify(proposals)}\n${FENCE}\n`;
 fs.writeFileSync(scriptPath, JSON.stringify({ rules: [
   { match: 'Entrega en markdown', text: GESTOR_TEXT },
@@ -68,7 +70,7 @@ async function waitFinished(app: any, id: string): Promise<any> {
 }
 
 const app = await buildApp();
-const started = await app.inject({ method: 'POST', url: `/api/workspaces/${SLUG}/org-evaluations`, payload: { projectId: project.id, budgetUsd: 5, authorized: true } });
+const started = await app.inject({ method: 'POST', url: `/api/workspaces/${SLUG}/org-evaluations`, payload: { projectId: project.id, budgetUsd: 5, authorized: true, ...NO_BRIEF } });
 assert.equal(started.statusCode, 202, started.body);
 const EV = await waitFinished(app, started.json().id);
 await app.close();
@@ -234,10 +236,10 @@ test('j · evaluación de empresa anclada al anchorProjectId enviado; ancla ajen
   const anchor = createProject(SLUG, 'Proyecto Ancla');
   const a = await buildApp();
   const procs = countProcesses();
-  const bad = await a.inject({ method: 'POST', url: `/api/workspaces/${SLUG}/org-evaluations`, payload: { projectId: null, anchorProjectId: 'no-existe', budgetUsd: 5, authorized: true } });
+  const bad = await a.inject({ method: 'POST', url: `/api/workspaces/${SLUG}/org-evaluations`, payload: { projectId: null, anchorProjectId: 'no-existe', budgetUsd: 5, authorized: true, ...NO_BRIEF } });
   assert.equal(bad.statusCode, 422, bad.body); assert.equal(bad.json().code, 'invalid_anchor');
   assert.equal(countProcesses(), procs);
-  const r = await a.inject({ method: 'POST', url: `/api/workspaces/${SLUG}/org-evaluations`, payload: { projectId: null, anchorProjectId: anchor.id, budgetUsd: 5, authorized: true } });
+  const r = await a.inject({ method: 'POST', url: `/api/workspaces/${SLUG}/org-evaluations`, payload: { projectId: null, anchorProjectId: anchor.id, budgetUsd: 5, authorized: true, ...NO_BRIEF } });
   assert.equal(r.statusCode, 202, r.body);
   const ev = await waitFinished(a, r.json().id);
   assert.equal(ev.status, 'done', ev.error ?? ''); assert.equal(ev.scopeKind, 'workspace'); assert.equal(ev.projectId, null);

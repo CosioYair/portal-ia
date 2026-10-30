@@ -1,7 +1,7 @@
 import type { PipelineConfig, PhaseTransition, PhaseTransitionPreview, ProjectArchive, StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
 import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
-import type { OrgApplication, OrgChange, OrgDecision, OrgEvaluation, OrgProposal, OrgProposalSpec } from '@portal-ia/domain';
+import type { OrgApplication, OrgBriefAttachment, OrgChange, OrgDecision, OrgEvaluation, OrgEvaluationBrief, OrgProposal, OrgProposalSpec } from '@portal-ia/domain';
 import type { ClaudeCodeRun, ClaudeCodeStatusView, ClaudeCodeUsage, ClaudeCodeWorkerView, ClaudeCodeWorkspaceView, ExecutionBackend } from '@portal-ia/domain';
 import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
 
@@ -57,6 +57,8 @@ export interface OrgEvaluationEstimate {
   anchorProjectId?: string | null;
   steps: { agentId: string; agentName: string; title: string; model: string; estimatedUsd: number }[];
   contextChars: number; estimatedUsd: number; suggestedBudgetUsd: number; approximate: boolean;
+  /** Proyectos del ámbito sin repositorio vinculado (la interfaz lo avisa en «Contexto y dirección»). */
+  missingRepository?: string[];
 }
 /** Evaluación con el estado de su proceso (pasos y gasto). */
 export type OrgEvaluationView = OrgEvaluation & {
@@ -65,7 +67,7 @@ export type OrgEvaluationView = OrgEvaluation & {
 export type OrgEvaluationFilter = { projectId?: string; scope?: 'workspace' | 'project' | 'all' };
 /** HU-159 · propuesta con su configuración (spec) y el resultado de aplicarla (cambios con fotos previas). */
 export type OrgProposalView = OrgProposal & { spec?: OrgProposalSpec; application?: OrgApplication };
-export type { OrgApplication, OrgChange, OrgProposalSpec };
+export type { OrgApplication, OrgBriefAttachment, OrgChange, OrgEvaluationBrief, OrgProposalSpec };
 /** Respuesta de decidir o deshacer una propuesta. */
 export interface OrgProposalResult { evaluation: OrgEvaluation; proposal: OrgProposalView }
 
@@ -126,15 +128,17 @@ export const api = {
   cancelProcess: (slug: string, id: string) => request<Process>(`/api/workspaces/${slug}/processes/${id}/cancel`, { method: 'POST' }),
   knowledge: (slug: string, projectId: string) => request<KnowledgeDoc[]>(`/api/workspaces/${slug}/projects/${projectId}/knowledge`),
   // HU-159 · evaluación organizativa (solo «start» llama a la IA, con autorización explícita y presupuesto)
-  orgEvaluationEstimate: (slug: string, projectId: string | null, anchorProjectId?: string | null) => {
+  /** `briefChars`: tamaño del contexto aportado en «Contexto y dirección», para que el presupuesto lo incluya. */
+  orgEvaluationEstimate: (slug: string, projectId: string | null, anchorProjectId?: string | null, briefChars = 0) => {
     const q = new URLSearchParams();
     if (projectId) q.set('projectId', projectId);
     if (!projectId && anchorProjectId) q.set('anchorProjectId', anchorProjectId);
+    if (briefChars > 0) q.set('briefChars', String(Math.floor(briefChars)));
     const qs = q.toString();
     return request<OrgEvaluationEstimate>(`/api/workspaces/${slug}/org-evaluations/estimate${qs ? `?${qs}` : ''}`);
   },
-  /** En una evaluación de empresa, `anchorProjectId` (proyecto activo) indica dónde se guardan el proceso y el documento. */
-  startOrgEvaluation: (slug: string, projectId: string | null, budgetUsd: number, anchorProjectId?: string | null) => request<OrgEvaluationView>(`/api/workspaces/${slug}/org-evaluations`, { method: 'POST', body: JSON.stringify({ projectId, budgetUsd, authorized: true, ...(!projectId && anchorProjectId ? { anchorProjectId } : {}) }) }),
+  /** En una evaluación de empresa, `anchorProjectId` (proyecto activo) indica dónde se guardan el proceso y el documento. `brief` (paso «Contexto y dirección») es obligatorio: sin él el servidor responde 400 brief_required. */
+  startOrgEvaluation: (slug: string, projectId: string | null, budgetUsd: number, anchorProjectId: string | null | undefined, brief: OrgEvaluationBrief) => request<OrgEvaluationView>(`/api/workspaces/${slug}/org-evaluations`, { method: 'POST', body: JSON.stringify({ projectId, budgetUsd, authorized: true, brief, ...(!projectId && anchorProjectId ? { anchorProjectId } : {}) }) }),
   orgEvaluations: (slug: string, filter: OrgEvaluationFilter = {}) => {
     const q = new URLSearchParams();
     if (filter.projectId) q.set('projectId', filter.projectId);

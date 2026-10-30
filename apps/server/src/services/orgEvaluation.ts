@@ -1,6 +1,6 @@
 import { agentCaller, completeWith } from './claudeCode/backend.ts';
-import type { Agent, DelegationResult, ModelInfo, OrgDecision, OrgEvaluation, OrgEvaluationStatus, OrgProposal, Process, ProviderId } from '@portal-ia/domain';
-import { ORG_ACTION_LABEL, ORG_TARGET_LABEL, departmentOf, isRetired, parseOrgProposals } from '@portal-ia/domain';
+import type { Agent, DelegationResult, ModelInfo, OrgDecision, OrgEvaluation, OrgEvaluationBrief, OrgEvaluationStatus, OrgProposal, Process, ProviderId } from '@portal-ia/domain';
+import { ORG_ACTION_LABEL, ORG_BRIEF_REQUIRED_MESSAGE, ORG_TARGET_LABEL, briefIsEmpty, briefLimitError, briefToMarkdown, departmentOf, isRetired, normalizeOrgBrief, parseOrgProposals } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
@@ -66,8 +66,32 @@ function agentLine(slug: string, a: Agent, projectNames: Map<string, string>): s
   return `- ${a.config.name}${isRetired(a.template) ? ' (retirado)' : ''} · clave ${a.key} · papel ${tpl.role}${departmentOf(a.template) ? ` · departamento ${departmentOf(a.template)}` : ''} · ámbito ${scope}${tpl.tier ? ` · nivel ${tpl.tier}` : ''} · reporta a ${tpl.reportsTo || '—'} · supervisa ${supervises || '—'} · modelo ${a.config.provider}/${a.config.model}${a.config.effort ? ` (${a.config.effort})` : ''} · herramientas/permisos: ${caps || '—'} · actividad: ${st.steps} pasos (${st.failed} fallidos, ${st.costUsd.toFixed(2)} USD)${st.lastAt ? `, último ${st.lastAt.slice(0, 10)}` : ''}`;
 }
 
-/** Contexto real y recortado: agentes (papel, permisos, modelo, jerarquía, actividad), línea base, backlog, actividad y repositorio. */
-export function buildOrgContext(slug: string, projectId: string | null): string {
+/**
+ * Valida el paso «Contexto y dirección». Si falta → 400 brief_required; si supera los límites → 400 brief_too_large;
+ * si viene vacío sin «Evaluar sin indicaciones» → 400 brief_required. No crea nada.
+ */
+export function validateOrgBrief(raw: unknown): OrgEvaluationBrief {
+  const b = normalizeOrgBrief(raw);
+  if (!b) throw httpError(400, ORG_BRIEF_REQUIRED_MESSAGE, 'brief_required');
+  const limit = briefLimitError(b);
+  if (limit) throw httpError(400, limit, 'brief_too_large');
+  if (!b.skipped && briefIsEmpty(b)) throw httpError(400, ORG_BRIEF_REQUIRED_MESSAGE, 'brief_required');
+  return b;
+}
+
+/** Nombres de los proyectos del ámbito sin repositorio vinculado (empresa o proyecto nuevos). */
+export function projectsWithoutRepo(slug: string, projectId: string | null): string[] {
+  const projects = projectsRepo(slug);
+  return projects.list().filter(p => !projectId || p.id === projectId).filter(p => !projects.repository(p.id)).map(p => p.name);
+}
+
+const briefSection = (brief: OrgEvaluationBrief | null) => `## Contexto y dirección del propietario\n${briefToMarkdown(brief)}`;
+
+/**
+ * Contexto real y recortado: agentes (papel, permisos, modelo, jerarquía, actividad), línea base, backlog, actividad y repositorio.
+ * Con brief (incluido null en las filas antiguas), antepone la sección «Contexto y dirección del propietario», que no se recorta con el resto.
+ */
+export function buildOrgContext(slug: string, projectId: string | null, brief?: OrgEvaluationBrief | null): string {
   const ws = workspacesRepo.get(slug)!; const projects = projectsRepo(slug); const procs = processesRepo(slug);
   const all = projects.list(); const names = new Map(all.map(p => [p.id, p.name]));
   const list = projectId ? all.filter(p => p.id === projectId) : all;
@@ -84,8 +108,10 @@ export function buildOrgContext(slug: string, projectId: string | null): string 
     lines.push(`### Actividad reciente\n${recent.map(r => `- ${r.createdAt.slice(0, 10)} · ${r.kind} · ${r.status} · ${r.title} · ${r.spentUsd.toFixed(2)} USD · pasos: ${r.steps.map(s => s.agentName).join(', ')}`).join('\n') || '(sin procesos)'}`);
     const repo = projects.repository(p.id);
     if (repo) { try { const ctx = buildRepoContext(repo.path, 20_000); lines.push(`### Repositorio ${repo.path} (rama ${repo.branch ?? '?'})\n\`\`\`\n${ctx.tree.slice(0, projectId ? 6000 : 1500)}\n\`\`\``); } catch { /* sin árbol */ } }
+    else lines.push(`### Repositorio\n(sin repositorio vinculado: evalúa con la descripción, la línea base, el backlog, la actividad y el contexto del propietario)`);
   }
-  return lines.join('\n').slice(0, CTX_MAX);
+  const state = lines.join('\n').slice(0, CTX_MAX);
+  return brief === undefined ? state : `${briefSection(brief)}\n\n${state}`;
 }
 
 function price(a: Agent, inTok: number, outTok: number): number {
@@ -94,32 +120,38 @@ function price(a: Agent, inTok: number, outTok: number): number {
   return (inTok * p.inPerM + (outTok + think) * p.outPerM) / 1_000_000;
 }
 
-export function estimateOrgEvaluation(slug: string, projectId: string | null, anchorProjectId?: string | null) {
+/** Estimación sin costo. opts.brief suma el contexto real; si no llega, opts.briefChars ajusta la estimación (interfaz). */
+export function estimateOrgEvaluation(slug: string, projectId: string | null, anchorProjectId?: string | null, opts: { brief?: OrgEvaluationBrief | null; briefChars?: number } = {}) {
   const { project, anchor } = resolveScope(slug, projectId, anchorProjectId);
   const { gestor, coordinator } = findLeads(slug, project?.id ?? null);
-  const ctx = buildOrgContext(slug, project?.id ?? null);
-  const ctxTok = estimateTokens(ctx) + 900;
+  const ctx = buildOrgContext(slug, project?.id ?? null, opts.brief ?? undefined);
+  const extraChars = !opts.brief && opts.briefChars && opts.briefChars > 0 ? Math.min(Math.floor(opts.briefChars), 60_000) : 0;
+  const ctxTok = estimateTokens(ctx) + (extraChars ? estimateTokens('x'.repeat(extraChars)) : 0) + 900;
   const steps: { agentId: string; agentName: string; title: string; model: string; estimatedUsd: number }[] = [];
   if (coordinator) steps.push({ agentId: coordinator.id, agentName: coordinator.config.name, title: STEP_COORD, model: coordinator.config.model, estimatedUsd: price(coordinator, ctxTok, TOKENS.coordinator) });
   steps.push({ agentId: gestor.id, agentName: gestor.config.name, title: STEP_GESTOR, model: gestor.config.model, estimatedUsd: price(gestor, ctxTok + (coordinator ? TOKENS.coordinator : 0), TOKENS.gestor) });
   const estimatedUsd = steps.reduce((acc, s) => acc + s.estimatedUsd, 0);
-  return { scopeKind: project ? 'project' as const : 'workspace' as const, projectId: project?.id ?? null, anchorProjectId: anchor.id, steps, contextChars: ctx.length, estimatedUsd, suggestedBudgetUsd: Math.max(0.5, Math.ceil(estimatedUsd * 2 * 2) / 2), approximate: true };
+  return { scopeKind: project ? 'project' as const : 'workspace' as const, projectId: project?.id ?? null, anchorProjectId: anchor.id, steps, contextChars: ctx.length + extraChars, estimatedUsd, suggestedBudgetUsd: Math.max(0.5, Math.ceil(estimatedUsd * 2 * 2) / 2), approximate: true, missingRepository: projectsWithoutRepo(slug, project?.id ?? null) };
 }
 
-/** Crea el proceso ya autorizado con su presupuesto (la ruta exige autorización explícita) y la fila del historial. */
-export function createOrgEvaluation(slug: string, projectId: string | null, budgetUsd: number, anchorProjectId?: string | null): { evaluation: OrgEvaluation; process: Process } {
+/**
+ * Crea el proceso ya autorizado con su presupuesto (la ruta exige autorización explícita) y la fila del historial con el
+ * brief. Primero comprueba el presupuesto (403) y después el brief (400); ninguno de los dos errores crea nada.
+ */
+export function createOrgEvaluation(slug: string, projectId: string | null, budgetUsd: number, anchorProjectId?: string | null, brief?: unknown): { evaluation: OrgEvaluation; process: Process } {
   if (!(budgetUsd > 0)) throw httpError(403, 'Indica un presupuesto mayor que 0 USD.', 'authorization_required');
-  const est = estimateOrgEvaluation(slug, projectId, anchorProjectId);
+  const b = validateOrgBrief(brief);
+  const est = estimateOrgEvaluation(slug, projectId, anchorProjectId, { brief: b });
   const { project, anchor, label } = resolveScope(slug, projectId, anchorProjectId);
   const { gestor } = findLeads(slug, project?.id ?? null);
   const evals = orgEvaluationsRepo(slug);
   if (evals.list({ projectId: project?.id ?? null }).some(e => e.status === 'running')) throw httpError(409, 'Ya hay una evaluación en curso para este ámbito.', 'already_running');
   const procs = processesRepo(slug);
   const proc = procs.create({ projectId: anchor.id, kind: 'delegated_task', title: `Evaluación organizativa · ${label}`, estimatedUsd: est.estimatedUsd, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model })) });
-  const d: DelegationResult = { request: `Evaluar si la organización (${label}) tiene los agentes y departamentos adecuados según el contenido real.`, leadAgentId: gestor.id, leadAgentName: gestor.config.name, triage: null, consulted: [], deliverable: null, knowledgeDocId: null, backlogOps: [], opsApplied: null };
+  const d: DelegationResult = { request: `Evaluar si la organización (${label}) tiene los agentes y departamentos adecuados según el contenido real.${b.direction ? ` Dirección del propietario: ${b.direction.slice(0, 300)}` : b.skipped && briefIsEmpty(b) ? ' Sin indicaciones del propietario.' : ''}`, leadAgentId: gestor.id, leadAgentName: gestor.config.name, triage: null, consulted: [], deliverable: null, knowledgeDocId: null, backlogOps: [], opsApplied: null };
   procs.setDelegation(proc.id, d);
   procs.authorize(proc.id, budgetUsd);
-  const evaluation = evals.create({ scopeKind: project ? 'project' : 'workspace', projectId: project?.id ?? null, anchorProjectId: anchor.id, processId: proc.id, status: 'running' });
+  const evaluation = evals.create({ scopeKind: project ? 'project' : 'workspace', projectId: project?.id ?? null, anchorProjectId: anchor.id, processId: proc.id, status: 'running', brief: b });
   return { evaluation, process: procs.get(proc.id)! };
 }
 
@@ -136,6 +168,7 @@ const coordPrompt = (ctx: string) => `El propietario pide evaluar si la organiza
 # Estado real
 ${ctx}
 
+Ten en cuenta la sección «Contexto y dirección del propietario»: orienta el análisis hacia lo que pide y usa su contexto inicial y sus adjuntos como evidencia (si no hay repositorio vinculado, dilo).
 Analiza en markdown breve (máx. ~600 palabras): qué trabajo real hay (repositorio, línea base, backlog, actividad), qué capacidades exige, qué agentes participan de verdad y cuáles apenas intervienen, cuellos de botella y huecos de capacidad. Cita evidencias concretas. No propongas aún cambios formales.`;
 
 const gestorPrompt = (ctx: string, label: string, coordNotes: string, catalog: string) => `El propietario pide evaluar si la organización (${label}) tiene los agentes y departamentos correctos según el contenido real.
@@ -146,6 +179,7 @@ ${ctx}
 # Catálogo permitido para las configuraciones
 ${catalog}
 
+Respeta la sección «Contexto y dirección del propietario»: orienta el diagnóstico y las propuestas hacia la dirección indicada y explica cómo la tienes en cuenta.
 Entrega en markdown (máx. ~900 palabras): empieza con «## Resumen» (3-5 frases) y después el diagnóstico (papeles, permisos, jerarquía, carga real, solapamientos y huecos).
 Al final, UN bloque \`\`\`org con un array JSON de propuestas (máx. 12) con este formato exacto:
 {"action":"add"|"merge"|"retire"|"adjust","target":"agent"|"department","subject":string,"keep":string,"rationale":string,"details":string,"spec":{"name":string,"role":string,"specialization":string,"responsibilities":string[],"reportsTo":clave existente|"owner","tools":id[],"capabilities":id[],"model":id,"effort":"low"|"medium"|"high","department":string,"agents":spec[],"members":clave[]}}
@@ -207,7 +241,7 @@ export async function runOrgEvaluation(slug: string, processId: string, log: (o:
   };
 
   try {
-    const ctx = buildOrgContext(slug, projectId);
+    const ctx = buildOrgContext(slug, projectId, ev.brief ?? null);
     let coordNotes = ''; let idx = 0;
     if (ev.scopeKind === 'project' && proc.steps.length > 1) {
       if (isCancelled()) throw cancelledError();
@@ -233,9 +267,11 @@ export async function runOrgEvaluation(slug: string, processId: string, log: (o:
     d.deliverable = body;
     const date = new Date().toISOString().slice(0, 10);
     const participants = [d.consulted[0]?.agentName, gestor.config.name].filter(Boolean).join(' y ');
+    const noRepo = projectsWithoutRepo(slug, projectId);
+    const repoNote = noRepo.length ? `\n> ⚠ Sin repositorio vinculado: ${noRepo.map(n => `«${n}»`).join(', ')}. La evaluación se basa en la descripción, la línea base, el backlog, la actividad y el contexto del propietario.\n` : '';
     const doc = knowledge.add({
       projectId: proc.projectId, title: `Evaluación organizativa · ${scopeName} · ${date}`, authorAgentId: gestor.id, authorAgentName: gestor.config.name, processId,
-      body: `# Evaluación organizativa\n**Ámbito:** ${label}\n**Fecha:** ${date}\n**Participantes:** ${participants}\n\n${coordNotes ? `# Análisis del Coordinador\n${coordNotes}\n\n` : ''}# Evaluación del Gestor\n${body}\n\n# Propuestas (${parsed.proposals.length})\n${parsed.proposals.map(proposalLine).join('\n') || '(sin propuestas: la organización se considera adecuada)'}\n\n> Al aceptar una propuesta, el Portal la aplica automáticamente con su configuración y deja disponible «Deshacer»; rechazarla solo registra la decisión. Nada se crea, ajusta ni retira sin la aprobación del propietario.\n\n# Decisiones del propietario`
+      body: `# Evaluación organizativa\n**Ámbito:** ${label}\n**Fecha:** ${date}\n**Participantes:** ${participants}\n${repoNote}\n# Contexto y dirección\n${briefToMarkdown(ev.brief ?? null)}\n\n${coordNotes ? `# Análisis del Coordinador\n${coordNotes}\n\n` : ''}# Evaluación del Gestor\n${body}\n\n# Propuestas (${parsed.proposals.length})\n${parsed.proposals.map(proposalLine).join('\n') || '(sin propuestas: la organización se considera adecuada)'}\n\n> Al aceptar una propuesta, el Portal la aplica automáticamente con su configuración y deja disponible «Deshacer»; rechazarla solo registra la decisión. Nada se crea, ajusta ni retira sin la aprobación del propietario.\n\n# Decisiones del propietario`
     });
     d.knowledgeDocId = doc.id; procs.setDelegation(processId, d);
     evals.update(ev.id, { status: 'done', knowledgeDocId: doc.id, summary: summarize(parsed.body), proposals: parsed.proposals, error: null });

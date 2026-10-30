@@ -56,6 +56,8 @@ async function waitFinished(app: any, slug: string, id: string): Promise<any> {
   throw new Error('La evaluación no terminó a tiempo');
 }
 let projectEvalId = '';
+/** Paso «Contexto y dirección» obligatorio: estas pruebas evalúan sin indicaciones. */
+const NO_BRIEF = { brief: { skipped: true } };
 
 test('a · parseOrgProposals: bloque válido, recortado y ausente; descarta entradas sin justificación', () => {
   const ok = parseOrgProposals(GESTOR_TEXT);
@@ -100,7 +102,7 @@ test('c · sin autorización explícita o sin presupuesto → 403 y no se crea n
 test('d · flujo completo de proyecto: Coordinador → Gestor, proceso done, documento en Conocimiento, propuestas pendientes e historial', async () => {
   resetMockCalls(); fs.writeFileSync(logPath, '');
   const app = await buildApp();
-  const r = await app.inject({ method: 'POST', url: '/api/workspaces/portal-ia/org-evaluations', payload: { projectId: internal.id, budgetUsd: 5, authorized: true } });
+  const r = await app.inject({ method: 'POST', url: '/api/workspaces/portal-ia/org-evaluations', payload: { projectId: internal.id, budgetUsd: 5, authorized: true, ...NO_BRIEF } });
   assert.equal(r.statusCode, 202, r.body);
   const ev = await waitFinished(app, 'portal-ia', r.json().id);
   assert.equal(ev.status, 'done', ev.error ?? '');
@@ -145,13 +147,13 @@ test('f · genérico: otra empresa con su propio proyecto evalúa la empresa y e
   const beta = createCompany('Empresa Beta Org');
   const shop = createProject(beta.slug, 'Tienda online', 'Comercio electrónico', ['Vender en línea']);
   const app = await buildApp();
-  const r1 = await app.inject({ method: 'POST', url: `/api/workspaces/${beta.slug}/org-evaluations`, payload: { projectId: null, budgetUsd: 5, authorized: true } });
+  const r1 = await app.inject({ method: 'POST', url: `/api/workspaces/${beta.slug}/org-evaluations`, payload: { projectId: null, budgetUsd: 5, authorized: true, ...NO_BRIEF } });
   assert.equal(r1.statusCode, 202, r1.body);
   const wsEv = await waitFinished(app, beta.slug, r1.json().id);
   assert.equal(wsEv.status, 'done', wsEv.error ?? ''); assert.equal(wsEv.scopeKind, 'workspace'); assert.equal(wsEv.projectId, null);
   assert.equal(wsEv.anchorProjectId, shop.id); assert.equal(wsEv.process.steps.length, 1);
   assert.equal(knowledgeRepo(beta.slug).get(wsEv.knowledgeDocId)!.projectId, shop.id);
-  const r2 = await app.inject({ method: 'POST', url: `/api/workspaces/${beta.slug}/org-evaluations`, payload: { projectId: shop.id, budgetUsd: 5, authorized: true } });
+  const r2 = await app.inject({ method: 'POST', url: `/api/workspaces/${beta.slug}/org-evaluations`, payload: { projectId: shop.id, budgetUsd: 5, authorized: true, ...NO_BRIEF } });
   const pjEv = await waitFinished(app, beta.slug, r2.json().id);
   assert.equal(pjEv.status, 'done', pjEv.error ?? ''); assert.equal(pjEv.process.steps.length, 2);
   const onlyWs = (await app.inject({ method: 'GET', url: `/api/workspaces/${beta.slug}/org-evaluations?scope=workspace` })).json();
