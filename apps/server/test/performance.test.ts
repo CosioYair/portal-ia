@@ -85,7 +85,10 @@ test('T · consultas independientes en paralelo: mismas llamadas, mismo resultad
   assert.equal(p.result!.pipeline!.state, 'verified', p.result!.pipeline!.reason ?? '');
   const cs = p.steps.filter(s => s.role === 'consultant');
   assert.equal(cs.length, 2); assert.ok(cs.every(s => s.status === 'done'));
-  assert.ok(overlap(p), 'las dos consultas trabajaron a la vez');
+  // Primero la decisión (determinista, con sus números si falla); después, que de verdad trabajaron a la vez.
+  const decision = logs.filter(l => l.o?.processId === p.id && /^consultas /.test(l.m)).at(-1);
+  assert.equal(decision?.o.parallel, true, `decisión: ${decision?.m} · ${JSON.stringify(decision?.o)}`);
+  assert.ok(overlap(p), `las dos consultas trabajaron a la vez · ${JSON.stringify(cs.map(s => [s.startedAt, s.finishedAt]))}`);
   assert.deepEqual(p.result!.consultations!.map(c => c.agentId), cs.map(s => s.agentId), 'las aportaciones llegan al implementador en el orden de los pasos');
   const log = fs.readFileSync(logPath, 'utf8').trim().split('\n');
   assert.equal(log.length, 5, 'plan + 2 consultas + implementación + QA: ninguna llamada extra');
