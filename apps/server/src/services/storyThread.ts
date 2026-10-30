@@ -11,6 +11,7 @@ import { requirePolicy } from './executionPolicy.ts';
 import { describeProcess } from './guidance.ts';
 import { listFeedback } from './manual-test-feedback.ts';
 import { createStoryProcess, stepByRole, supersedePreviousIterations } from './storyExecution.ts';
+import { iterationNumbers } from './inbox.ts';
 import { lessonsRepo } from './lessons.ts';
 import { discardBranch } from './repoWrite.ts';
 import { flowOptions } from './processView.ts';
@@ -72,11 +73,16 @@ export async function storyContext(slug: string, itemId: string): Promise<StoryC
   const procs = storyProcesses(slug, item);
   const repo = projectsRepo(slug).repository(item.projectId);
   const runtime = isPortal && !!repo && path.resolve(repo.path) === path.resolve(REPO_ROOT);
-  const enriched = await Promise.all(procs.map(async p => {
+  // HU-161 · Cada proceso lleva su número de iteración y si su autorización está superada (por qué iteración y cuándo).
+  // La interfaz decide con estos campos si muestra «Autorizar», no con el texto de la guía.
+  const iters = iterationNumbers(procs);
+  const supersededOf = (p: Process) => p.supersededBy ? { byProcessId: p.supersededBy, byIteration: iters.get(p.supersededBy) ?? null, at: p.supersededAt ?? null } : null;
+  const enriched = await Promise.all(procs.map(async (p, i) => {
     let q = p;
     if (runtime && p.result?.merged) { const activation = await activationOf(p.result.merged.commit, p.result.merged.mergedAt).catch(() => null); q = { ...p, result: { ...p.result, activation } }; }
     const fo = await flowOptions(slug, q, item);
-    return { ...q, guidance: describeProcess(q, { isPortalRepo: isPortal, storyStatus: q.id === item.lastProcessId || !item.lastProcessId || q.id === procs[0]?.id ? item.status : null, ...fo }) };
+    const superseded = supersededOf(p);
+    return { ...q, iteration: iters.get(p.id) ?? procs.length - i, superseded, guidance: describeProcess(q, { isPortalRepo: isPortal, storyStatus: q.id === item.lastProcessId || !item.lastProcessId || q.id === procs[0]?.id ? item.status : null, ...fo, supersededByIteration: superseded?.byIteration ?? null }) };
   }));
   // La iteración «actual» es la más reciente (también si está pendiente de autorización), no la última que llegó a ejecutarse.
   const last = enriched[0] ?? null;
@@ -97,8 +103,11 @@ export function iterationState(item: BacklogItem, procs: Process[], failedSteps:
   const base = { needsReopen, needsDiscardConfirmation: false, failedSteps };
   const reopen = needsReopen ? `Primero se reabre la historia (está ${item.status === 'done' ? 'completada' : 'descartada'}; queda registrado en su historial). ` : '';
   const pendingNote = 'La nueva iteración queda pendiente de tu autorización: no gasta nada hasta que la autorices con un presupuesto.';
-  if (procs.some(p => p.status === 'running' || p.status === 'pending_authorization')) return { ...base, state: 'in_progress', branch: null, summary: 'Ya hay una iteración en ejecución o pendiente de autorización: autorízala o cancélala en «Iteraciones» antes de crear otra.' };
-  const prev = procs[0]; const r = prev?.result;
+  // HU-161 · Las iteraciones superadas siguen en pending_authorization (es reversible), pero no cuentan: si contaran,
+  // bloquearían para siempre la siguiente iteración.
+  const active = procs.filter(p => !p.supersededBy);
+  if (active.some(p => p.status === 'running' || p.status === 'pending_authorization')) return { ...base, state: 'in_progress', branch: null, summary: 'Ya hay una iteración en ejecución o pendiente de autorización: autorízala o cancélala en «Iteraciones» antes de crear otra.' };
+  const prev = active[0]; const r = prev?.result;
   if (!r || r.rejected && !r.merged) return { ...base, state: 'none', branch: null, summary: `${reopen}${pendingNote}` };
   if (r.merged) return { ...base, state: 'merged', branch: r.merged.into, summary: `${reopen}La iteración anterior ya está integrada en ${r.merged.into} (commit ${r.merged.commit}): la nueva parte de ese código y lo corrige o completa. ${pendingNote}` };
   if (r.applied && !r.applied.worktree) return { ...base, state: 'legacy', branch: r.applied.branch, summary: `${reopen}La iteración anterior se aplicó antes de v0.12 (sin worktree): se marca como descartada y su rama ${r.applied.branch} se conserva en git. ${pendingNote}` };
