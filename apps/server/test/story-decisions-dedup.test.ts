@@ -45,8 +45,8 @@ test('pura: 3 iteraciones pendientes de una historia → 1 entrada con iteració
     proc({ id: 'a2', createdAt: '2026-01-02T00:00:00.000Z' }),
     proc({ id: 'a3', createdAt: '2026-01-03T00:00:00.000Z' }),
     proc({ id: 'b1x', backlogItemId: 'b2', createdAt: '2026-01-02T12:00:00.000Z' }),
-    proc({ id: 'e1', kind: 'assessment', backlogItemId: null }),
-    proc({ id: 'e2', kind: 'assessment', backlogItemId: null, createdAt: '2026-01-04T00:00:00.000Z' })
+    proc({ id: 'e1', kind: 'initial_assessment', backlogItemId: null }),
+    proc({ id: 'e2', kind: 'initial_assessment', backlogItemId: null, createdAt: '2026-01-04T00:00:00.000Z' })
   ];
   const out = consolidateDecisions('x', ps);
   const a = forStory(out, 'b1');
