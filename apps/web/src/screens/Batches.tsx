@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { BacklogItem, BatchItemState, BatchItemView, BatchPreview, BatchView, GauntletConfig } from '@portal-ia/domain';
 import { BATCH_LIMITS, INTERNAL_WORKSPACE, normalizeGauntlet } from '@portal-ia/domain';
@@ -7,6 +7,7 @@ import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
 import { GAUNTLET_MODE } from '../components/Gauntlet.tsx';
+import { BatchStoryPicker, STATUS_LABEL } from '../components/BatchStoryPicker.tsx';
 import { Chip, Icon, Notice } from '../components/ui.tsx';
 
 const STATUS: Record<BatchView['status'], { label: string; tone: '' | 'ok' | 'warn' | 'err' | 'accent' }> = {
@@ -56,82 +57,192 @@ export function Batches() {
   );
 }
 
-/** Asistente: historias y orden, límites, Gauntlet, operaciones git; vista previa sin IA; autorización explícita. */
+const ROLE: Record<string, string> = { planner: 'plan', consultant: 'consulta', implementer: 'implementa', reviewer: 'QA', evaluator: 'Gauntlet' };
+const range = (r: { min: number; max: number }) => r.min === r.max ? `${r.min}` : `${r.min}–${r.max}`;
+const minutes = (m: number) => m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`;
+
+/**
+ * Asistente del lote: historias (búsqueda, filtros y selección masiva para cientos), equipo y orígenes por agente,
+ * límites, Gauntlet y operaciones git; a la derecha, un resumen persistente con la vista previa sin IA (se actualiza
+ * sola tras cada cambio) y la autorización explícita. Nada se hereda de lotes anteriores.
+ */
 function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
   const { status, flash, navigate } = useApp();
   const ws = status.workspace!; const projectId = status.project!.id;
   const internal = ws.slug === INTERNAL_WORKSPACE.slug;
-  const [items, setItems] = useState<BacklogItem[]>([]); const [all, setAll] = useState<BacklogItem[]>([]); const [sel, setSel] = useState<string[]>([]);
-  const [req, setReq] = useState<Omit<BatchRequest, 'itemIds'>>({ totalBudgetUsd: 5, perStoryBudgetUsd: 1.5, maxCorrections: 3, maxDurationMin: 240, maxSubscriptionCalls: 60, concurrency: 1, gauntlet: normalizeGauntlet(null), backends: ['api', 'claude_code'], commands: ['typecheck', 'test', 'build'], allowInstall: false, git: { merge: false, activate: false, publish: false } });
-  const [preview, setPreview] = useState<BatchPreview | null>(null); const [ok, setOk] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
-  const loadItems = () => api.backlog(ws.slug, projectId).then(list => { setAll(list.filter(i => !i.archivedAt)); setItems(list.filter(i => !i.archivedAt && (i.status === 'pending' || i.status === 'blocked'))); }).catch(e => setErr(e.message));
+  const [all, setAll] = useState<BacklogItem[] | null>(null);
+  const [sel, setSel] = useState<string[]>([]); const [custom, setCustom] = useState(false);
+  // Valores seguros en CADA lote nuevo: la API (facturable), integrar, activar, publicar y ceder a la API, desmarcados.
+  const [req, setReq] = useState<Omit<BatchRequest, 'itemIds'>>({ totalBudgetUsd: 5, perStoryBudgetUsd: 1.5, maxCorrections: 3, maxDurationMin: 240, maxSubscriptionCalls: 60, concurrency: 1, gauntlet: normalizeGauntlet(null), backends: ['claude_code'], apiFallback: false, commands: ['typecheck', 'test', 'build'], allowInstall: false, git: { merge: false, activate: false, publish: false } });
+  const [preview, setPreview] = useState<BatchPreview | null>(null); const [fresh, setFresh] = useState(false);
+  const [ok, setOk] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
+  const [editDep, setEditDep] = useState<{ id: string; value: string } | null>(null);
+  const loadItems = () => api.backlog(ws.slug, projectId).then(list => setAll(list.filter(i => !i.archivedAt))).catch(e => setErr(e.message));
   useEffect(() => { void loadItems(); }, [ws.slug, projectId]);
+  const items = all ?? [];
+  const pos = useMemo(() => new Map(items.map((i, n) => [i.id, n])), [items]);
+  const byId = useMemo(() => new Map(items.map(i => [i.id, i])), [items]);
+  const byPos = (a: string, b: string) => (pos.get(a) ?? 0) - (pos.get(b) ?? 0);
+  // Orden: el del backlog (su prioridad) salvo que lo cambies a mano; el plan pone siempre las dependencias antes.
+  const add = (ids: string[]) => setSel(s => { const next = [...s, ...ids.filter(id => !s.includes(id))]; return custom ? next : next.sort(byPos); });
+  const remove = (ids: string[]) => { const r = new Set(ids); setSel(s => s.filter(id => !r.has(id))); };
+  const move = (id: string, d: -1 | 1) => { setCustom(true); setSel(s => { const i = s.indexOf(id); const j = i + d; if (j < 0 || j >= s.length) return s; const c = [...s]; [c[i], c[j]] = [c[j], c[i]]; return c; }); };
+  const toTop = (id: string) => { setCustom(true); setSel(s => [id, ...s.filter(x => x !== id)]); };
+  const resetOrder = () => { setCustom(false); setSel(s => [...s].sort(byPos)); };
   // «Depende de» se guarda en la historia (el plan del lote lo respeta siempre, también en lotes futuros).
-  const setDep = async (id: string, dependsOn: string | null) => { try { await api.patchBacklogItem(ws.slug, id, { dependsOn }); await loadItems(); setPreview(null); } catch (e: any) { setErr(e.message); } };
-  useEffect(() => { setPreview(null); setOk(false); }, [sel, req]);
+  const saveDep = async (id: string, dependsOn: string | null) => { try { await api.patchBacklogItem(ws.slug, id, { dependsOn }); setEditDep(null); await loadItems(); setSel(s => [...s]); } catch (e: any) { setErr(e.message); } };
   const set = (patch: Partial<typeof req>) => setReq(r => ({ ...r, ...patch }));
-  const toggle = (id: string) => setSel(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
-  const move = (id: string, d: -1 | 1) => setSel(s => { const i = s.indexOf(id); const j = i + d; if (j < 0 || j >= s.length) return s; const c = [...s]; [c[i], c[j]] = [c[j], c[i]]; return c; });
+  // Vista previa automática y sin IA: una petición tras cada ráfaga de cambios; cualquier cambio desmarca la autorización.
+  const seq = useRef(0);
+  useEffect(() => {
+    setOk(false); setFresh(false);
+    if (!sel.length || !req.backends?.length) { setPreview(null); return; }
+    const n = ++seq.current;
+    const t = setTimeout(() => {
+      api.previewBatch(ws.slug, projectId, { ...req, itemIds: sel })
+        .then(p => { if (n === seq.current) { setPreview(p); setFresh(true); setErr(null); } })
+        .catch(e => { if (n === seq.current) { setPreview(null); setErr(e.message); } });
+    }, 350);
+    return () => clearTimeout(t);
+  }, [sel, req, ws.slug, projectId]);
+  const authorize = async () => { setBusy(true); setErr(null); try { const b = await api.createBatch(ws.slug, projectId, { ...req, itemIds: sel }); flash(`Lote autorizado: ${b.items.length} historia(s)`); onCreated(); navigate(`/lotes/${b.id}`); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
   const num = (k: 'totalBudgetUsd' | 'perStoryBudgetUsd' | 'maxCorrections' | 'maxDurationMin' | 'maxSubscriptionCalls' | 'concurrency', label: string, min: number, max: number, step = 1) =>
     <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>{label}<input className="input mono" type="number" min={min} max={max} step={step} value={req[k] as number} onChange={e => set({ [k]: Math.max(min, Math.min(max, Number(e.target.value) || min)) } as any)} style={{ height: 32 }} /></label>;
-  const body = (): BatchRequest => ({ ...req, itemIds: sel });
-  const doPreview = async () => { setBusy(true); setErr(null); try { setPreview(await api.previewBatch(ws.slug, projectId, body())); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
-  const authorize = async () => { setBusy(true); setErr(null); try { const b = await api.createBatch(ws.slug, projectId, body()); flash(`Lote autorizado: ${b.items.length} historia(s)`); onCreated(); navigate(`/lotes/${b.id}`); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
-  const byId = useMemo(() => new Map(items.map(i => [i.id, i])), [items]);
   const g = req.git ?? {};
+  const sum = fresh ? preview?.summary ?? null : null;
+  const agents = preview?.summary.agents ?? [];
+  const usedBy = (src: 'api' | 'claude_code') => agents.filter(a => a.source === src).map(a => a.name);
+  const fallbackOn = !!req.apiFallback && req.backends!.includes('api') && preview?.summary.connector.fallback === 'api';
+  const notReady = (preview?.plan ?? []).filter(p => !p.blockedReason && !p.executable).map(p => p.id);
+  const blockReason = !sel.length ? null : !req.backends?.length ? 'Marca al menos un origen de ejecución (sección 2).' : !fresh ? 'Actualizando la vista previa…' : !sum ? 'Sin vista previa.' : sum.blockedByPermission ? `Hay ${sum.blockedByPermission} historia(s) cuyo equipo no puede ejecutar con lo autorizado: corrígelo (sección 2) o quítalas.` : !sum.executable ? 'Ninguna historia puede empezar.' : !ok ? 'Marca la casilla de autorización.' : null;
+  const autonomous = sum ? [`Ejecutar ${sum.executable} historia(s) con su equipo: plan, implementación en un worktree aislado, verificación en el sandbox y QA`, req.gauntlet!.mode !== 'off' ? `Evaluación Gauntlet ${GAUNTLET_MODE[req.gauntlet!.mode].label.toLowerCase()}` : null, `Hasta ${req.maxCorrections} corrección(es) por historia`, g.merge ? 'Integrar en main cada historia terminada (de una en una, con las mismas verificaciones)' : null, internal && g.activate ? 'Reconstruir y reiniciar el Portal tras integrar (sin nada en marcha)' : null, g.publish ? 'Publicar en GitHub tras integrar' : null, fallbackOn ? 'Ceder a la API (facturable) si Claude Code no está disponible' : null].filter(Boolean) as string[] : [];
+  const yours = [!g.merge ? 'Integrar en main' : null, internal && !g.activate ? 'Reconstruir y reiniciar el Portal' : null, !g.publish ? 'Publicar en GitHub' : null, 'Aceptar (o no) cada historia: es distinto de QA', 'Ampliar presupuesto, tope de llamadas o duración', 'Lo que se detenga: conflictos, fallos o límites'].filter(Boolean) as string[];
   return (
     <section className="card" data-testid="batch-wizard">
       <div className="card-h"><div className="h3">Nuevo lote</div><button className="xbtn" onClick={onClose} aria-label="Cerrar">{Icon.x(16)}</button></div>
-      <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        {err && <Notice kind="err">{err}</Notice>}
-        <div><div className="eyebrow" style={{ marginBottom: 6 }}>1 · Historias y orden</div>
-          {!items.length ? <div className="small muted">No hay historias pendientes en el backlog.</div> :
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 260, overflowY: 'auto' }}>
-              {items.map(i => <label key={i.id} className="ck" style={{ gap: 8 }}><input className="cb" type="checkbox" checked={sel.includes(i.id)} onChange={() => toggle(i.id)} /><span><span className="mono small">{i.storyId}</span> {i.title}{i.dependsOn ? <span className="small muted"> · depende de {i.dependsOn}</span> : null}{i.estimate ? <span className="small muted"> · {i.estimate}</span> : null}</span></label>)}
-            </div>}
-          {sel.length > 0 && <ol className="small" style={{ margin: '8px 0 0', paddingLeft: 20 }}>{sel.map(id => <li key={id}><span className="mono">{byId.get(id)?.storyId}</span> {byId.get(id)?.title} <select className="input" style={{ height: 26, width: 'auto', display: 'inline-block', fontSize: 12 }} aria-label={`Depende de (${byId.get(id)?.storyId})`} value={byId.get(id)?.dependsOn ?? ''} onChange={e => void setDep(id, e.target.value || null)}><option value="">sin dependencia</option>{all.filter(o => o.id !== id).map(o => <option key={o.id} value={o.storyId}>depende de {o.storyId}</option>)}</select> <button className="btn btn-ghost btn-sm" onClick={() => move(id, -1)} aria-label="Subir">↑</button><button className="btn btn-ghost btn-sm" onClick={() => move(id, 1)} aria-label="Bajar">↓</button></li>)}</ol>}
-          <div className="small muted">El plan respeta «depende de» aunque el orden diga otra cosa; a igualdad, usa este orden.</div>
-        </div>
-        <div><div className="eyebrow" style={{ marginBottom: 6 }}>2 · Límites (nunca ilimitados)</div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(170px, 100%), 1fr))', gap: 12 }}>
-            {num('totalBudgetUsd', 'Presupuesto total (USD)', 0.1, BATCH_LIMITS.maxTotalUsd, 0.5)}
-            {num('perStoryBudgetUsd', 'Tope por historia (USD)', 0.1, BATCH_LIMITS.maxPerStoryUsd, 0.5)}
-            {num('maxCorrections', 'Correcciones por historia', 0, BATCH_LIMITS.maxCorrections)}
-            {num('maxDurationMin', 'Duración máx. del lote (min)', 5, BATCH_LIMITS.maxDurationMin, 5)}
-            {num('concurrency', 'Historias a la vez', 1, BATCH_LIMITS.maxConcurrency)}
-            {num('maxSubscriptionCalls', 'Llamadas a la suscripción (tope)', 0, BATCH_LIMITS.maxSubscriptionCalls)}
+      <div className="card-b">
+        <div className="bw-layout">
+          <div className="bw-main">
+            <div className="bw-section">
+              <div className="eyebrow">1 · Historias</div>
+              {!all ? <span className="spin" /> : !items.some(i => i.status === 'pending' || i.status === 'blocked') ? <div className="small muted">No hay historias pendientes en el backlog.</div> :
+                <BatchStoryPicker items={items} selected={sel} onAdd={add} onRemove={remove} onClear={() => setSel([])} />}
+              {sel.length > 0 && <details open={sel.length <= 12} data-testid="batch-order">
+                <summary className="small" style={{ cursor: 'pointer' }}><strong>Orden de la selección ({sel.length})</strong> · {custom ? 'orden manual' : 'orden del backlog (su prioridad)'}; el plan pone siempre las dependencias antes</summary>
+                <div className="small muted" style={{ display: 'flex', gap: 8, margin: '6px 0', alignItems: 'center', flexWrap: 'wrap' }}>{custom && <button type="button" className="btn btn-ghost btn-sm" onClick={resetOrder}>Volver al orden del backlog</button>}<span>Cambiar «depende de» se guarda en la historia del backlog (también para lotes futuros), aunque no autorices este lote.</span></div>
+                <datalist id="bw-story-ids">{items.map(i => <option key={i.id} value={i.storyId}>{i.title}</option>)}</datalist>
+                <ol className="bw-selected">
+                  {sel.map((id, n) => { const it = byId.get(id); if (!it) return null; return (
+                    <li key={id}>
+                      <span className="mono small muted" style={{ width: 28, textAlign: 'right' }}>{n + 1}</span>
+                      <span className="bw-sel-title"><span className="mono small">{it.storyId}</span> {it.title}</span>
+                      {editDep?.id === id
+                        ? <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}><input className="input mono" list="bw-story-ids" style={{ height: 26, width: 96, fontSize: 12 }} aria-label={`Depende de (${it.storyId})`} value={editDep.value} onChange={e => setEditDep({ id, value: e.target.value.trim().toUpperCase() })} />
+                          <button type="button" className="btn btn-ghost btn-sm" onClick={() => void saveDep(id, editDep.value || null)}>Guardar</button><button type="button" className="btn btn-ghost btn-sm" onClick={() => setEditDep(null)}>Cancelar</button></span>
+                        : <button type="button" className="lnk small" onClick={() => setEditDep({ id, value: it.dependsOn ?? '' })} aria-label={`Cambiar «depende de» de ${it.storyId}`}>{it.dependsOn ? `depende de ${it.dependsOn}` : 'sin dependencia'}</button>}
+                      <button type="button" className="bw-icon-btn" onClick={() => toTop(id)} disabled={n === 0} aria-label={`Mover ${it.storyId} al principio`} title="Al principio">⤒</button>
+                      <button type="button" className="bw-icon-btn" onClick={() => move(id, -1)} disabled={n === 0} aria-label={`Subir ${it.storyId}`}>↑</button>
+                      <button type="button" className="bw-icon-btn" onClick={() => move(id, 1)} disabled={n === sel.length - 1} aria-label={`Bajar ${it.storyId}`}>↓</button>
+                      <button type="button" className="bw-icon-btn" onClick={() => remove([id])} aria-label={`Quitar ${it.storyId} de la selección`}>×</button>
+                    </li>); })}
+                </ol>
+              </details>}
+            </div>
+
+            <div className="bw-section" data-testid="batch-sources">
+              <div className="eyebrow">2 · Equipo y orígenes de ejecución</div>
+              <div className="small muted">El origen es de cada agente (se cambia en <Link className="lnk" to="/equipo">Equipo de IA</Link>). Aquí autorizas qué orígenes puede usar este lote; nunca cambia de origen por su cuenta.</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {(['claude_code', 'api'] as const).map(b => <label key={b} className="ck"><input className="cb" type="checkbox" checked={req.backends!.includes(b)} onChange={e => set({ backends: e.target.checked ? [...req.backends!, b] : req.backends!.filter(x => x !== b), ...(b === 'api' && !e.target.checked ? { apiFallback: false } : {}) })} />
+                  <span><strong>{b === 'api' ? 'API del proveedor (facturable, en USD)' : 'Claude Code (tu suscripción)'}</strong>{preview ? <span className="muted"> · {usedBy(b).length ? `lo usan: ${usedBy(b).join(', ')}` : 'ningún agente del lote lo usa'}</span> : null}</span></label>)}
+                {preview?.summary.connector.fallback === 'api'
+                  ? <label className="ck"><input className="cb" type="checkbox" checked={!!req.apiFallback} disabled={!req.backends!.includes('api')} onChange={e => set({ apiFallback: e.target.checked })} /><span>Si Claude Code no está disponible, <strong>ceder a la API (facturable)</strong> en este lote. Desmarcado: el lote se pausa y decides tú.</span></label>
+                  : <div className="small muted">Si Claude Code no está disponible, el lote se pausa (el conector no permite ceder a la API).</div>}
+              </div>
+              {agents.length > 0 && <div className="bw-table-wrap"><table className="tbl bw-agents" data-testid="batch-agents"><caption className="bw-sr">Agentes del lote y su origen</caption>
+                <thead><tr><th scope="col">Agente</th><th scope="col">Hace</th><th scope="col">Origen</th><th scope="col">¿Puede ejecutar?</th></tr></thead>
+                <tbody>{agents.map(a => <tr key={a.agentId}>
+                  <td className="small"><strong>{a.name}</strong><div className="muted">{a.stories} historia(s)</div></td>
+                  <td className="small">{a.roles.map(r => ROLE[r] ?? r).join(', ')}</td>
+                  <td className="small">{a.label}</td>
+                  <td className="small">{a.ready ? (a.viaFallback ? <><Chip xs tone="warn">por la API</Chip> {a.problem}</> : <Chip xs tone="ok">sí</Chip>) : <><Chip xs tone="err">no</Chip> {a.problem}{a.fix ? <> <Link className="lnk" to={a.fix.href}>{a.fix.label}</Link></> : null}</>}</td>
+                </tr>)}</tbody></table></div>}
+            </div>
+
+            <div className="bw-section">
+              <div className="eyebrow">3 · Límites (nunca ilimitados)</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(160px, 100%), 1fr))', gap: 12 }}>
+                {num('totalBudgetUsd', 'Presupuesto de API total (USD)', 0.1, BATCH_LIMITS.maxTotalUsd, 0.5)}
+                {num('perStoryBudgetUsd', 'Tope de API por historia (USD)', 0.1, BATCH_LIMITS.maxPerStoryUsd, 0.5)}
+                {num('maxSubscriptionCalls', 'Llamadas a la suscripción (tope)', 0, BATCH_LIMITS.maxSubscriptionCalls)}
+                {num('maxCorrections', 'Correcciones por historia', 0, BATCH_LIMITS.maxCorrections)}
+                {num('maxDurationMin', 'Duración máx. del lote (min)', 5, BATCH_LIMITS.maxDurationMin, 5)}
+                {num('concurrency', 'Historias a la vez', 1, BATCH_LIMITS.maxConcurrency)}
+              </div>
+              <div className="small" style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                <span className="muted">Verificación:</span>
+                {(['typecheck', 'test', 'build'] as const).map(c => <label key={c} className="ck" style={{ gap: 4 }}><input className="cb" type="checkbox" checked={req.commands!.includes(c)} onChange={e => set({ commands: e.target.checked ? (['typecheck', 'test', 'build'] as const).filter(x => x === c || req.commands!.includes(x)) : req.commands!.filter(x => x !== c) })} /><span>{c}</span></label>)}
+                <label className="ck" style={{ gap: 4 }}><input className="cb" type="checkbox" checked={!!req.allowInstall} onChange={e => set({ allowInstall: e.target.checked })} /><span>instalar dependencias con red temporal si faltan</span></label>
+              </div>
+            </div>
+
+            <div className="bw-section">
+              <div className="eyebrow">4 · Evaluación Gauntlet</div>
+              <div role="radiogroup" aria-label="Modo Gauntlet del lote" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {(['off', 'standard', 'deep'] as const).map(m => <label key={m} className="ck" style={{ gap: 6 }}><input type="radio" name="batch-gauntlet" checked={req.gauntlet!.mode === m} onChange={() => set({ gauntlet: normalizeGauntlet({ mode: m }) as GauntletConfig })} /><span><strong>{GAUNTLET_MODE[m].label}</strong> <span className="small muted">{GAUNTLET_MODE[m].help}</span></span></label>)}
+              </div>
+            </div>
+
+            <div className="bw-section">
+              <div className="eyebrow">5 · Operaciones git (solo con tu marca, en cada lote)</div>
+              <label className="ck"><input className="cb" type="checkbox" checked={!!g.merge} onChange={e => set({ git: e.target.checked ? { ...g, merge: true } : { merge: false, activate: false, publish: false } })} /><span><strong>Integrar en main</strong> cada historia terminada técnicamente, de una en una y con las mismas verificaciones que la integración manual. Sin esto, integrar sigue siendo tuyo (y las dependientes esperan).</span></label>
+              {internal && <label className="ck"><input className="cb" type="checkbox" checked={!!g.activate} disabled={!g.merge} onChange={e => set({ git: { ...g, activate: e.target.checked } })} /><span><strong>Reconstruir y reiniciar el Portal</strong> cuando no haya nada en marcha, y comprobarlo en ejecución al volver.{!g.merge ? ' (exige integrar)' : ''}</span></label>}
+              <label className="ck"><input className="cb" type="checkbox" checked={!!g.publish} disabled={!g.merge} onChange={e => set({ git: { ...g, publish: e.target.checked } })} /><span><strong>Publicar en GitHub</strong> tras integrar: es una operación externa y visible.{!g.merge ? ' (exige integrar)' : ''}</span></label>
+            </div>
+
+            {preview && fresh && <details data-testid="batch-preview">
+              <summary className="small" style={{ cursor: 'pointer' }}><strong>Plan detallado ({preview.plan.length} historia(s))</strong> · orden, oleadas, llamadas y motivo de cada una</summary>
+              <div className="bw-table-wrap" style={{ marginTop: 8 }}><table className="tbl"><thead><tr><th>#</th><th>Historia</th><th>Oleada</th><th>Llamadas</th><th>API</th><th>Estado</th></tr></thead><tbody>
+                {preview.plan.map(p => <tr key={p.id}><td className="mono">{p.order + 1}</td><td className="small"><span className="mono">{p.storyId}</span> {p.title}{p.dependsOn ? <span className="muted"> · tras {p.dependsOn}{p.dependsInBatch ? '' : ' (fuera del lote)'}</span> : null}</td><td className="mono">{p.wave + 1}</td><td className="mono small">{range(p.calls)}</td><td className="mono small">{p.estimatedUsd == null ? '—' : fmtUsd(p.estimatedUsd)}</td>
+                  <td className="small">{p.executable ? 'se ejecutará' : <><Chip xs tone="err">{p.blockedReason ? 'bloqueada' : 'no empezará'}</Chip> {p.problems.join(' ')}</>}</td></tr>)}
+              </tbody></table></div>
+            </details>}
           </div>
-          <div className="small" style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 8 }}>
-            <span className="muted">Orígenes permitidos:</span>
-            {(['api', 'claude_code'] as const).map(b => <label key={b} className="ck" style={{ gap: 4 }}><input className="cb" type="checkbox" checked={req.backends!.includes(b)} onChange={e => set({ backends: e.target.checked ? [...req.backends!, b] : req.backends!.filter(x => x !== b) })} /><span>{b === 'api' ? 'API (facturable)' : 'Claude Code (suscripción)'}</span></label>)}
-            <span className="muted">· nunca se cambia de origen por su cuenta.</span>
-          </div>
-          <div className="small" style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginTop: 6 }}>
-            <span className="muted">Verificación:</span>
-            {(['typecheck', 'test', 'build'] as const).map(c => <label key={c} className="ck" style={{ gap: 4 }}><input className="cb" type="checkbox" checked={req.commands!.includes(c)} onChange={e => set({ commands: e.target.checked ? (['typecheck', 'test', 'build'] as const).filter(x => x === c || req.commands!.includes(x)) : req.commands!.filter(x => x !== c) })} /><span>{c}</span></label>)}
-            <label className="ck" style={{ gap: 4 }}><input className="cb" type="checkbox" checked={!!req.allowInstall} onChange={e => set({ allowInstall: e.target.checked })} /><span>instalar dependencias con red temporal si faltan</span></label>
-          </div>
+
+          <aside className="bw-aside" aria-label="Resumen del lote" id="bw-summary">
+            <section className="card"><div className="card-b bw-sum" data-testid="batch-summary">
+              <div className="h3">Resumen del lote</div>
+              {!sel.length ? <div className="small muted">Elige historias: aquí verás qué empezará, con qué equipo, cuántas llamadas y qué gasto, y lo que seguirá siendo decisión tuya.</div> : !req.backends?.length ? <Notice kind="warn">Ningún origen autorizado: marca Claude Code, la API o ambos en la sección 2.</Notice> : !sum ? <div className="small muted"><span className="spin" /> Actualizando la vista previa (sin IA)…</div> : <>
+                <div className="bw-kpis">
+                  <div className="bw-kpi"><span className="small muted">Seleccionadas</span><b>{sum.selected}</b></div>
+                  <div className="bw-kpi"><span className="small muted">Empezarán</span><b>{sum.executable}</b></div>
+                  <div className="bw-kpi" data-tone={sum.blockedByDependency ? 'warn' : undefined}><span className="small muted">Bloqueadas por dependencias</span><b>{sum.blockedByDependency}</b></div>
+                  <div className="bw-kpi" data-tone={sum.blockedByPermission ? 'err' : undefined}><span className="small muted">Sin permiso para empezar</span><b>{sum.blockedByPermission}</b></div>
+                </div>
+                {sum.blockedByPermission > 0 && <button type="button" className="btn btn-secondary btn-sm" onClick={() => remove(notReady)}>Quitar las {notReady.length} que no pueden empezar</button>}
+                <ul className="bw-list">
+                  <li><strong>Llamadas a modelos:</strong> {range(sum.calls)} (mín. sin correcciones; máx. con las autorizadas; reparaciones y reintentos pueden sumar más).</li>
+                  <li><strong>Suscripción de Claude Code:</strong> {range(sum.subscriptionCalls)} llamada(s) de un tope de {req.maxSubscriptionCalls}. No se cobra por llamada, pero <strong>consume la cuota de tu plan</strong>; el tope se comprueba antes de empezar cada historia.</li>
+                  <li><strong>API (facturable):</strong> ≈ {fmtUsd(preview!.estimateUsd)} de {fmtUsd(req.totalBudgetUsd)} (tope {fmtUsd(req.perStoryBudgetUsd)} por historia).{sum.worstCaseUsd > preview!.estimateUsd ? <> Si Claude Code cede a la API: hasta ≈ {fmtUsd(sum.worstCaseUsd)}.</> : null} Estimación orientativa, no un precio.</li>
+                  <li><strong>Duración:</strong> {sum.duration ? <>≈ {minutes(sum.duration.minutes)} ({req.concurrency} a la vez; mediana de {sum.duration.samples} historias anteriores: {minutes(sum.duration.perStoryMinutes)} cada una). Orientativa.</> : 'sin historial suficiente en este proyecto para estimarla.'}</li>
+                </ul>
+                {sum.missingDependencies.length > 0 && <div className="small" data-testid="batch-missing-deps"><strong>Dependencias que faltan</strong> (no se añaden solas):
+                  <ul className="bw-list">{sum.missingDependencies.map(m => <li key={m.storyId}><span className="mono">{m.storyId}</span> {m.title ?? ''} <span className="muted">({m.status ? STATUS_LABEL[m.status] : 'no encontrada'}; la necesita{m.requiredBy.length > 1 ? 'n' : ''} {m.requiredBy.join(', ')})</span>{m.eligible && m.itemId ? <> <button type="button" className="lnk" onClick={() => add([m.itemId!])}>Añadir {m.storyId}</button></> : null}</li>)}</ul>
+                  {sum.missingDependencies.filter(m => m.eligible && m.itemId).length > 1 && <button type="button" className="btn btn-ghost btn-sm" onClick={() => add(sum.missingDependencies.filter(m => m.eligible && m.itemId).map(m => m.itemId!))}>Añadir las {sum.missingDependencies.filter(m => m.eligible && m.itemId).length} elegibles</button>}</div>}
+                {sum.waves.length > 0 && <div className="small"><strong>Orden:</strong> {(req.concurrency ?? 1) > 1 ? `hasta ${req.concurrency} a la vez dentro de cada oleada` : 'de una en una'}; cada oleada espera a la anterior.
+                  <ul className="bw-list">{sum.waves.slice(0, 4).map((w, n) => <li key={n}>Oleada {n + 1}: {w.slice(0, 8).join(', ')}{w.length > 8 ? ` y ${w.length - 8} más` : ''}</li>)}{sum.waves.length > 4 ? <li>… y {sum.waves.length - 4} oleada(s) más (plan detallado)</li> : null}</ul></div>}
+                <div className="bw-ops small"><strong>Hará sin preguntarte:</strong><ul className="bw-list">{autonomous.map(x => <li key={x}>{x}</li>)}</ul>
+                  <strong>Seguirá siendo decisión tuya:</strong><ul className="bw-list">{yours.map(x => <li key={x}>{x}</li>)}</ul></div>
+                {preview!.warnings.map((w, i) => <Notice key={i} kind="warn">{w}</Notice>)}
+                <label className="ck"><input className="cb" type="checkbox" checked={ok} disabled={!sum.executable || sum.blockedByPermission > 0} onChange={e => setOk(e.target.checked)} /><span>Autorizo este lote: <strong>{sum.executable}</strong> de {sum.selected} historia(s) empezarán, con {req.backends!.map(b => b === 'api' ? 'la API (facturable)' : 'Claude Code (suscripción)').join(' y ')}; hasta <strong>{fmtUsd(req.totalBudgetUsd)}</strong> de API y <strong>{req.maxSubscriptionCalls}</strong> llamadas a la suscripción; integrar <strong>{g.merge ? 'sí' : 'no'}</strong>{internal ? <>, reiniciar <strong>{g.activate ? 'sí' : 'no'}</strong></> : null}, publicar <strong>{g.publish ? 'sí' : 'no'}</strong>. Puedo pausarlo, cancelarlo o revocarlo en cualquier momento.</span></label>
+              </>}
+              {err && <Notice kind="err">{err}</Notice>}
+              <button className="btn btn-primary" onClick={authorize} disabled={!!blockReason || busy}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}Autorizar lote</button>
+              {blockReason && sel.length > 0 && <div className="small muted" data-testid="authorize-reason">{blockReason}</div>}
+            </div></section>
+          </aside>
         </div>
-        <div><div className="eyebrow" style={{ marginBottom: 6 }}>3 · Evaluación Gauntlet</div>
-          <div role="radiogroup" aria-label="Modo Gauntlet del lote" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {(['off', 'standard', 'deep'] as const).map(m => <label key={m} className="ck" style={{ gap: 6 }}><input type="radio" name="batch-gauntlet" checked={req.gauntlet!.mode === m} onChange={() => set({ gauntlet: normalizeGauntlet({ mode: m }) as GauntletConfig })} /><span><strong>{GAUNTLET_MODE[m].label}</strong> <span className="small muted">{GAUNTLET_MODE[m].help}</span></span></label>)}
-          </div>
-        </div>
-        <div><div className="eyebrow" style={{ marginBottom: 6 }}>4 · Operaciones git pre-autorizadas</div>
-          <label className="ck"><input className="cb" type="checkbox" checked={!!g.merge} onChange={e => set({ git: { ...g, merge: e.target.checked } })} /><span><strong>Integrar en main</strong> cada historia terminada técnicamente, de una en una y con las mismas verificaciones que la integración manual. Sin esto, integrar sigue siendo tuyo (y las dependientes esperan).</span></label>
-          {internal && <label className="ck"><input className="cb" type="checkbox" checked={!!g.activate} disabled={!g.merge} onChange={e => set({ git: { ...g, activate: e.target.checked } })} /><span><strong>Activar en el Portal</strong> (reconstruir y reiniciar) cuando no haya nada en marcha, y comprobarlo en ejecución al volver.</span></label>}
-          <label className="ck"><input className="cb" type="checkbox" checked={!!g.publish} disabled={!g.merge} onChange={e => set({ git: { ...g, publish: e.target.checked } })} /><span><strong>Publicar en GitHub</strong> tras integrar (desactivado por defecto; es una operación externa).</span></label>
-        </div>
-        <div style={{ display: 'flex', gap: 10 }}><button className="btn btn-secondary" onClick={doPreview} disabled={!sel.length || busy}>{busy && !preview ? <span className="spin" /> : null}Vista previa del plan (sin IA)</button></div>
-        {preview && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }} data-testid="batch-preview">
-          {preview.warnings.map((w, i) => <Notice key={i} kind="warn">{w}</Notice>)}
-          <table className="tbl"><thead><tr><th>#</th><th>Historia</th><th>Oleada</th><th>Depende de</th><th>Estimación</th><th>Orígenes</th><th>Estado</th></tr></thead><tbody>
-            {preview.plan.map(p => <tr key={p.id}><td className="mono">{p.order + 1}</td><td><span className="mono small">{p.storyId}</span> {p.title}</td><td className="mono">{p.wave + 1}</td><td className="small">{p.dependsOn ?? '—'}{p.dependsInBatch ? ' (en el lote)' : ''}</td><td className="mono">{p.estimatedUsd == null ? '—' : `≈ ${fmtUsd(p.estimatedUsd)}`}</td><td className="small">{p.backends.join(', ')}{p.disallowedBackends.length ? <Chip xs tone="err">no autorizado</Chip> : null}</td><td className="small">{p.blockedReason ? <Chip xs tone="err">bloqueada</Chip> : 'se ejecutará'}{p.blockedReason ? ` ${p.blockedReason}` : ''}{p.error ? ` · ${p.error}` : ''}</td></tr>)}
-          </tbody></table>
-          <div className="small">Estimación total ≈ <strong className="mono">{fmtUsd(preview.estimateUsd)}</strong> · Gauntlet por historia: {preview.gauntletOverheadPerStory.evaluations.max ? `${preview.gauntletOverheadPerStory.evaluations.min}–${preview.gauntletOverheadPerStory.evaluations.max} evaluación(es) y hasta ${preview.gauntletOverheadPerStory.corrections.max} corrección(es) más` : 'sin sobrecoste'}.</div>
-          <label className="ck"><input className="cb" type="checkbox" checked={ok} onChange={e => setOk(e.target.checked)} /><span>Autorizo este lote: {sel.length} historia(s), hasta <strong>{fmtUsd(req.totalBudgetUsd)}</strong> en total ({fmtUsd(req.perStoryBudgetUsd)} por historia), {req.maxCorrections} corrección(es), Gauntlet {GAUNTLET_MODE[req.gauntlet!.mode].label.toLowerCase()}, {req.concurrency} a la vez, {req.maxDurationMin} min; integrar {g.merge ? 'sí' : 'no'}{internal ? `, activar ${g.activate ? 'sí' : 'no'}` : ''}, publicar {g.publish ? 'sí' : 'no'}. Puedo pausarlo, cancelarlo o revocarlo en cualquier momento.</span></label>
-          <div><button className="btn btn-primary" onClick={authorize} disabled={!ok || busy || preview.plan.every(p => !!p.blockedReason)}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}Autorizar lote</button></div>
-        </div>}
+        {sel.length > 0 && <div className="bw-mobilebar" aria-hidden="true"><span className="small"><strong>{sel.length}</strong> seleccionada(s){sum ? <> · <strong>{sum.executable}</strong> empezarán{sum.blockedByDependency + sum.blockedByPermission ? <> · {sum.blockedByDependency + sum.blockedByPermission} no</> : null}</> : null}</span><a className="btn btn-primary btn-sm" href="#bw-summary" tabIndex={-1}>Ver resumen y autorizar</a></div>}
       </div>
     </section>
   );
@@ -143,13 +254,15 @@ export function BatchDetail() {
   const ws = status.workspace!; const { batchId } = useParams();
   const [b, setB] = useState<BatchView | null>(null); const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false); const [addBudget, setAddBudget] = useState('0'); const [addCalls, setAddCalls] = useState('0'); const [resumeOk, setResumeOk] = useState(false);
-  const [revoking, setRevoking] = useState(false); const [revokeReason, setRevokeReason] = useState('');
+  const [revoking, setRevoking] = useState(false); const [revokeReason, setRevokeReason] = useState(''); const [cancelling, setCancelling] = useState(false);
   const [picked, setPicked] = useState<string[]>([]); const [checks, setChecks] = useState<Record<string, boolean[]>>({}); const [note, setNote] = useState('');
   const load = () => api.batch(ws.slug, batchId!).then(x => { setB(x); setErr(null); }).catch(e => setErr(e.message));
   useEffect(() => { void load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, [ws.slug, batchId]);
   const act = async (fn: () => Promise<BatchView>, ok: string) => { setBusy(true); try { setB(await fn()); flash(ok); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   if (!b) return <Shell crumb="Ejecución continua"><main className="page">{err ? <Notice kind="err">{err}</Notice> : <span className="spin" />}</main></Shell>;
-  const st = STATUS[b.status]; const closed = b.status === 'cancelled' || b.status === 'revoked';
+  // «En marcha» solo si algo avanza: si todo espera tu decisión, se dice.
+  const idle = b.status === 'running' && !b.items.some(i => ['running', 'queued', 'integrating', 'waiting_dependency'].includes(i.state));
+  const st = idle ? { label: 'espera tu decisión', tone: 'warn' as const } : STATUS[b.status]; const closed = b.status === 'cancelled' || b.status === 'revoked';
   const pct = (n: number) => `${Math.min(100, Math.round((n / Math.max(0.0001, b.auth.totalBudgetUsd)) * 100))}%`;
   return (
     <Shell crumb={`Ejecución continua / ${b.title}`}>
@@ -159,10 +272,15 @@ export function BatchDetail() {
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}><Chip tone={st.tone}>{st.label}</Chip><Chip xs>Gauntlet {GAUNTLET_MODE[b.auth.gauntlet.mode].label.toLowerCase()}</Chip><Chip xs>{b.auth.concurrency} a la vez</Chip><Chip xs>integrar {b.auth.git.merge ? 'sí' : 'no'}</Chip>{b.auth.git.activate && <Chip xs>activar sí</Chip>}<Chip xs>publicar {b.auth.git.publish ? 'sí' : 'no'}</Chip></div></div>
           {!closed && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {b.status === 'running' && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => act(() => api.batchControl(ws.slug, b.id, 'pause'), 'Lote en pausa')}>Pausar</button>}
-            <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => act(() => api.batchControl(ws.slug, b.id, 'cancel'), 'Lote cancelado')}>Cancelar lote</button>
-            <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setRevoking(r => !r)} aria-expanded={revoking}>Revocar autorización…</button>
+            <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setCancelling(c => !c); setRevoking(false); }} aria-expanded={cancelling}>Cancelar lote…</button>
+            <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setRevoking(r => !r); setCancelling(false); }} aria-expanded={revoking}>Revocar autorización…</button>
           </div>}
         </div>
+        {cancelling && !closed && <section className="card card-b" style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span className="small" style={{ flex: '1 1 260px' }}>Cancelar detiene lo que está en marcha entre pasos y cierra lo pendiente y lo que espera tu decisión. Lo terminado se conserva y puedes aceptarlo; lo hecho en cada proceso, también.</span>
+          <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => { setCancelling(false); void act(() => api.batchControl(ws.slug, b.id, 'cancel'), 'Lote cancelado'); }}>Confirmar cancelación</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => setCancelling(false)}>No cancelar</button>
+        </section>}
         {revoking && !closed && <section className="card card-b" style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           <span className="small">Revocar detiene lo que está en marcha, cancela lo pendiente y nada terminado se integra, activa ni publica solo.</span>
           <input className="input" placeholder="Motivo (opcional)" value={revokeReason} onChange={e => setRevokeReason(e.target.value)} style={{ flex: '1 1 220px', height: 32 }} />
@@ -204,10 +322,12 @@ export function BatchDetail() {
 
 function ItemCard({ slug, b, it, picked, onPick, checks, onChecks, onChange, busy }: { slug: string; b: BatchView; it: BatchItemView; picked: boolean; onPick: (v: boolean) => void; checks?: boolean[]; onChecks: (c: boolean[]) => void; onChange: (b: BatchView) => void; busy: boolean }) {
   const { flash } = useApp();
-  const [mode, setMode] = useState<'reject' | 'iterate' | null>(null); const [text, setText] = useState(''); const [auth, setAuth] = useState(false);
+  const [mode, setMode] = useState<'reject' | 'iterate' | 'retry' | null>(null); const [text, setText] = useState(''); const [auth, setAuth] = useState(false);
   const p = it.process; const steps = p?.manualTest?.steps ?? []; const c = checks ?? steps.map(() => false);
   const run = async (fn: () => Promise<BatchView>, ok: string) => { try { onChange(await fn()); flash(ok); setMode(null); setText(''); setAuth(false); } catch (e: any) { flash(e.message, 'err'); } };
   const canIterate = ['rejected', 'needs_owner', 'failed', 'awaiting_acceptance', 'awaiting_integration'].includes(it.state) && b.status !== 'cancelled' && b.status !== 'revoked';
+  // Sin trabajo que conservar (no llegó a empezar o su proceso falló): se puede reintentar con los límites del lote.
+  const canRetry = (it.state === 'needs_owner' || it.state === 'failed') && (!p || p.status === 'cancelled' || p.status === 'failed') && b.status !== 'cancelled' && b.status !== 'revoked';
   return (
     <div style={{ border: '1px solid #E4E2DC', borderRadius: 10, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }} data-testid={`batch-item-${it.storyId}`}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -232,10 +352,15 @@ function ItemCard({ slug, b, it, picked, onPick, checks, onChecks, onChange, bus
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         {(it.state === 'awaiting_acceptance' || it.state === 'accepted') && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setMode('reject'); setText(''); }}>No aceptar…</button>}
         {it.state === 'accepted' && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(() => api.reopenBatchItem(slug, b.id, it.itemId), `${it.storyId} reabierta`)}>Reabrir</button>}
+        {canRetry && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => { setMode('retry'); setAuth(false); }}>Reintentar…</button>}
         {canIterate && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setMode('iterate')}>Iterar solo esta…</button>}
         {['queued', 'waiting_dependency', 'running', 'needs_owner', 'blocked'].includes(it.state) && b.status !== 'cancelled' && b.status !== 'revoked' && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(() => api.cancelBatchItem(slug, b.id, it.itemId), `${it.storyId} cancelada`)}>Cancelar esta</button>}
       </div>
-      {mode && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {mode === 'retry' && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <label className="ck small"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo reintentarla con los límites de este lote: vuelve a la cola y se comprueban otra vez su equipo y sus orígenes{b.status === 'running' ? '' : ' (empezará al reanudar el lote)'}. No tenía trabajo que conservar.</span></label>
+        <div style={{ display: 'flex', gap: 8 }}><button className="btn btn-primary btn-sm" disabled={!auth} onClick={() => run(() => api.retryBatchItem(slug, b.id, it.itemId), `${it.storyId}: de nuevo en la cola`)}>Reintentar</button><button className="btn btn-ghost btn-sm" onClick={() => setMode(null)}>Cancelar</button></div>
+      </div>}
+      {mode && mode !== 'retry' && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <textarea className="input" placeholder={mode === 'reject' ? 'Qué no cumple (se registra en la historia)' : 'Qué debe cambiar en la nueva iteración'} value={text} onChange={e => setText(e.target.value)} />
         {mode === 'reject' && steps.some((_, i) => !c[i]) && <div className="small muted">Se crearán tareas con los pasos sin marcar: {steps.filter((_, i) => !c[i]).map((s, i) => <span key={i}>«{s}» </span>)}</div>}
         {mode === 'iterate' && <label className="ck small"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo una iteración de esta historia dentro de los límites del lote (las demás no se repiten).</span></label>}

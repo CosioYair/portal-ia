@@ -273,12 +273,13 @@ export const api = {
   rejectBatchItem: (slug: string, id: string, itemId: string, note: string, failedSteps: string[]) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/reject`, { method: 'POST', body: JSON.stringify({ note, failedSteps }) }),
   reopenBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/reopen`, { method: 'POST', body: '{}' }),
   iterateBatchItem: (slug: string, id: string, itemId: string, note: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/iterate`, { method: 'POST', body: JSON.stringify({ authorized: true, note }) }),
+  retryBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/retry`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   cancelBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/cancel`, { method: 'POST', body: '{}' })
 };
 
 /** Alcance que el propietario autoriza para un lote (lo normaliza y acota el servidor). */
 export interface BatchRequest {
-  title?: string; itemIds: string[]; backends?: ('api' | 'claude_code')[];
+  title?: string; itemIds: string[]; backends?: ('api' | 'claude_code')[]; apiFallback?: boolean;
   totalBudgetUsd: number; perStoryBudgetUsd: number; maxCorrections?: number; maxDurationMin?: number; maxSubscriptionCalls?: number;
   gauntlet?: GauntletConfig; concurrency?: number; commands?: ('typecheck' | 'test' | 'build')[]; allowInstall?: boolean;
   git?: { merge?: boolean; activate?: boolean; publish?: boolean }; autoResume?: boolean;

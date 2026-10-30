@@ -1,0 +1,58 @@
+/* Ejecución continua: asistente del lote (selección de historias, equipo y orígenes, resumen persistente). */
+.bw-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+.bw-layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+.bw-main { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.bw-aside { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; max-height: calc(100vh - 32px); overflow-y: auto; }
+.bw-section { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.bw-picker { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.bw-filters { display: grid; grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr)); gap: 10px; align-items: end; }
+.bw-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.bw-field .input { height: 36px; }
+.bw-only { grid-column: 1 / -1; }
+.bw-bulk { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; justify-content: space-between; }
+.bw-bulk-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.bw-table-wrap { border: 1px solid #E5E3DC; border-radius: 8px; overflow-x: auto; }
+.bw-tbl { table-layout: fixed; }
+.bw-tbl td, .bw-tbl th { padding: 8px 10px; }
+.bw-tbl tr.bw-on td { background: #F1F8F7; }
+.bw-tbl tr.bw-off td { color: #8A8D93; }
+.bw-c-cb { width: 36px; }
+.bw-c-size { width: 64px; }
+.bw-c-dep { width: 150px; }
+.bw-c-st { width: 104px; }
+.bw-c-title { overflow-wrap: anywhere; }
+.bw-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bw-meta-sm { display: none; }
+.bw-pages { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; justify-content: flex-end; }
+.bw-selected { margin: 0; padding: 0; list-style: none; max-height: 260px; overflow-y: auto; border: 1px solid #EEECE6; border-radius: 8px; }
+.bw-selected li { display: flex; gap: 8px; align-items: center; padding: 4px 8px; border-bottom: 1px solid #F2F0EA; font-size: 13px; min-width: 0; }
+.bw-selected li:last-child { border-bottom: 0; }
+.bw-selected .bw-sel-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bw-icon-btn { appearance: none; border: 0; background: transparent; width: 26px; height: 26px; border-radius: 6px; cursor: pointer; color: #4F5259; flex: none; }
+.bw-icon-btn:hover { background: #ECEAE4; }
+.bw-icon-btn:focus-visible { outline: 2px solid #0F6E6A; outline-offset: 1px; }
+.bw-icon-btn:disabled { opacity: .35; cursor: not-allowed; }
+.bw-sum { display: flex; flex-direction: column; gap: 10px; }
+.bw-kpis { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.bw-kpi { padding: 8px 10px; border-radius: 8px; background: #FAF9F6; border: 1px solid #EEECE6; min-width: 0; }
+.bw-kpi b { display: block; font-size: 18px; font-weight: 600; font-family: 'IBM Plex Mono', ui-monospace, monospace; }
+.bw-kpi[data-tone="warn"] { background: #FFFBF0; border-color: #F0DCB0; }
+.bw-kpi[data-tone="err"] { background: #FDF2F1; border-color: #F2C7C3; }
+.bw-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; line-height: 1.45; }
+.bw-agents td { vertical-align: top; }
+.bw-ops { display: flex; flex-direction: column; gap: 6px; }
+.bw-mobilebar { display: none; }
+@media (max-width: 1100px) {
+  .bw-layout { grid-template-columns: minmax(0, 1fr); }
+  .bw-aside { position: static; max-height: none; overflow: visible; }
+  /* En pantallas estrechas el resumen queda al final: una barra fija dice cuántas empezarán y lleva a él. */
+  .bw-mobilebar { display: flex; position: sticky; bottom: 0; z-index: 5; gap: 10px; align-items: center; justify-content: space-between; margin: 12px -18px -18px; padding: 10px 18px; background: #fff; border-top: 1px solid #E5E3DC; box-shadow: 0 -4px 12px rgba(0,0,0,.05); }
+}
+@media (max-width: 720px) {
+  .bw-filters { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .bw-search { grid-column: 1 / -1; }
+  .bw-c-size, .bw-c-dep, .bw-c-st { display: none; }
+  .bw-meta-sm { display: block; }
+  .bw-desc { white-space: normal; }
+  .bw-kpis { grid-template-columns: minmax(0, 1fr); }
+}
