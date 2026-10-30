@@ -4,6 +4,7 @@ a{color:#0F6E6A}a:hover{color:#0B5652}
 .app *{box-sizing:border-box}
 .mono{font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .screen{animation:fadeIn .28s ease both}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
 @keyframes fadeUp{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(227,155,28,.55)}60%{box-shadow:0 0 0 7px rgba(227,155,28,0)}}
@@ -30,7 +31,7 @@ h1,h2,h3,p,ul,ol{margin:0}
 .input{height:40px;border:1px solid #CFCCC3;border-radius:8px;padding:0 12px;font:inherit;font-size:14px;color:#1A1B1E;background:#fff;width:100%}
 .input:focus{outline:2px solid #0F6E6A;outline-offset:-1px;border-color:#0F6E6A}
 .input:disabled{background:#F7F6F2;color:#686B72;cursor:not-allowed}
-.input::placeholder{color:#9A9DA4}
+.input::placeholder{color:var(--color-placeholder,#686B72)}
 textarea.input{height:auto;min-height:88px;padding:10px 12px;resize:vertical;line-height:1.45}
 select.input{padding-right:32px}
 .label{font-size:13px;font-weight:500;color:#1A1B1E;display:block;margin-bottom:6px}
@@ -68,6 +69,7 @@ button.chip:hover{border-color:#B8B5AC}
 .notice-warn{background:#FBF0DC;border:1px solid #F0DCB0;color:#633D00}
 .spin{width:16px;height:16px;border:2px solid #E5E3DC;border-top-color:#E39B1C;border-radius:50%;animation:spin .8s linear infinite;display:inline-block;flex:none}
 .spin-light{border-color:rgba(255,255,255,.3);border-top-color:#fff}
+.spin-status{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:#686B72}
 .wordmark{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px;letter-spacing:-.01em}
 .mark{width:22px;height:22px;border-radius:6px;background:#1A1B1E;position:relative;flex:none;display:inline-block}
 .mark::after{content:"";position:absolute;right:4px;bottom:4px;width:8px;height:8px;border-radius:2px;background:#0F6E6A}
@@ -190,7 +192,6 @@ button.chip:hover{border-color:#B8B5AC}
 .pathfield .input{flex:1;cursor:default;color:#1A1B1E}
 .pathfield .input:read-only{background:#FAF9F6}
 .backdrop{position:fixed;inset:0;background:rgba(26,27,30,.38);display:flex;align-items:center;justify-content:center;padding:24px;z-index:20;animation:fadeIn .15s ease both}
-@keyframes fadeIn{from{opacity:0}to{opacity:1}}
 .modal{background:#fff;border:1px solid #E5E3DC;border-radius:12px;width:min(680px,100%);max-height:min(720px,100%);display:flex;flex-direction:column;box-shadow:0 24px 64px rgba(26,27,30,.22);animation:fadeUp .2s ease both}
 .modal-h{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:16px 18px;border-bottom:1px solid #EEECE6}
 .modal-f{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 18px;border-top:1px solid #EEECE6;background:#FAF9F6;border-radius:0 0 12px 12px;flex-wrap:wrap}
@@ -233,3 +234,10 @@ button.chip:hover{border-color:#B8B5AC}
 .inbox-fab{position:fixed;left:16px;bottom:16px;z-index:31;display:inline-flex;align-items:center;gap:8px;height:44px;padding:0 16px 0 12px;border-radius:999px;border:1px solid #CFCCC3;background:#fff;color:#1A1B1E;font:inherit;font-size:13.5px;font-weight:600;box-shadow:0 12px 32px rgba(26,27,30,.16);cursor:pointer}
 .inbox-fab:hover{background:#F7F6F2}
 .inbox-fab:focus-visible{outline:2px solid #0F6E6A;outline-offset:2px}
+
+/* HU-162 · Movimiento reducido: anula animaciones y transiciones en todos los elementos, también en las hojas
+   que se cargan después (story-flow, manual-test-feedback, BudgetMeter). Se usa .01ms y no animation:none para
+   conservar el estado final (fill-mode both) y que nada quede oculto o en otra posición. */
+@media (prefers-reduced-motion: reduce){
+*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;animation-delay:0s!important;transition-duration:.01ms!important;transition-delay:0s!important;scroll-behavior:auto!important}
+}
