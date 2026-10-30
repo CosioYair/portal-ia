@@ -7,7 +7,7 @@ import { claudeCodeWorkersRepo, providersRepo, workspacesRepo } from '../db/plat
 import { agentsRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { agentBackend, BRIDGE_SCRIPT, getBridgeUrl, runningClaudeCode, teamReadiness } from '../services/claudeCode/backend.ts';
 import {
-  claimTask, createWorker, disconnectWorker, isDenied, listTaskFiles, listTasks, readTaskFile, reportBlocker, reportProgress, scopeFor,
+  claimTask, createWorker, disconnectWorker, isDenied, listTaskFiles, listTasks, readTaskFile, reportBlocker, reportProgress, scopeFor, searchTaskFiles, taskDiff,
   submitResult, taskContext, taskFor, taskKnowledge, touchWorker, workerView, type BridgeScope, type BridgeTask
 } from '../services/claudeCode/bridge.ts';
 import { runCliTask } from '../services/claudeCode/cli.ts';
@@ -40,7 +40,7 @@ const settingsBody = z.object({
   fallback: z.enum(['none', 'api']).optional()
 }).strict();
 
-const BRIDGE_TOOLS_JOB = ['portal_task_context', 'portal_list_files', 'portal_read_file', 'portal_knowledge', 'portal_report_progress'];
+const BRIDGE_TOOLS_JOB = ['portal_task_context', 'portal_list_files', 'portal_read_file', 'portal_search', 'portal_diff', 'portal_knowledge', 'portal_report_progress'];
 const BRIDGE_TOOLS_WORKER = ['portal_whoami', 'portal_list_tasks', 'portal_claim_task', ...BRIDGE_TOOLS_JOB, 'portal_submit_result', 'portal_report_blocker'];
 
 export async function claudeCodeRoutes(app: FastifyInstance) {
@@ -320,6 +320,23 @@ export async function claudeCodeRoutes(app: FastifyInstance) {
     const p = String((req.query as any)?.path ?? '');
     if (!p) return reply.code(400).send({ error: 'Falta la ruta.' });
     return send(reply, readTaskFile(t, p));
+  });
+  // Búsqueda literal y cambios de la carpeta de trabajo: solo lectura, mismas reglas que leer un archivo.
+  app.get('/api/bridge/v1/tasks/:id/search', async (req, reply) => {
+    const s = scoped(req, reply); if (!s) return;
+    const t = taskFor(s, taskId(req)); if (isDenied(t)) return send(reply, t);
+    if (s.kind === 'worker' && t.claimedBy !== s.workerId) return reply.code(409).send({ error: 'Toma la tarea antes de buscar en su carpeta de trabajo.' });
+    const q = z.object({ q: z.string().max(200), dir: z.string().max(300).optional(), case: z.enum(['0', '1']).optional() }).safeParse(req.query ?? {});
+    if (!q.success) return reply.code(400).send({ error: 'Búsqueda no válida.' });
+    return send(reply, searchTaskFiles(t, q.data.q, { dir: q.data.dir ?? '', caseSensitive: q.data.case === '1' }));
+  });
+  app.get('/api/bridge/v1/tasks/:id/diff', async (req, reply) => {
+    const s = scoped(req, reply); if (!s) return;
+    const t = taskFor(s, taskId(req)); if (isDenied(t)) return send(reply, t);
+    if (s.kind === 'worker' && t.claimedBy !== s.workerId) return reply.code(409).send({ error: 'Toma la tarea antes de ver sus cambios.' });
+    const q = z.object({ range: z.enum(['working', 'branch']).optional() }).safeParse(req.query ?? {});
+    if (!q.success) return reply.code(400).send({ error: 'Rango no válido (working o branch).' });
+    return send(reply, taskDiff(t, q.data.range ?? 'working'));
   });
   app.get('/api/bridge/v1/tasks/:id/knowledge', async (req, reply) => {
     const s = scoped(req, reply); if (!s) return;

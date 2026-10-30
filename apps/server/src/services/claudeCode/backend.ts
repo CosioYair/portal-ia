@@ -25,7 +25,7 @@ export const agentBackend = (a: Agent): ExecutionBackend => a.config.backend ?? 
 export const usesClaudeCode = (a: Agent) => agentBackend(a) !== 'api';
 
 /** Herramientas del puente que puede usar una ejecución gestionada (solo lectura y progreso). */
-export const JOB_TOOLS = ['portal_task_context', 'portal_list_files', 'portal_read_file', 'portal_knowledge', 'portal_report_progress'];
+export const JOB_TOOLS = ['portal_task_context', 'portal_list_files', 'portal_read_file', 'portal_search', 'portal_diff', 'portal_knowledge', 'portal_report_progress'];
 let bridgeUrl = `http://${config.host}:${config.port}`;
 /** Dirección real en la que escucha el servidor (la fija index.ts al arrancar; las pruebas, la de su servidor). */
 export function setBridgeUrl(url: string) { bridgeUrl = url.replace(/\/+$/, ''); }
@@ -158,8 +158,9 @@ export interface ClaudeCodeCompletion extends CompletionResult { backendLabel: s
 const READ_HINT = `
 
 # Herramientas del Portal (solo lectura)
-Si el contexto de arriba no basta, puedes consultar la carpeta de trabajo del proceso con portal_list_files y portal_read_file,
-el conocimiento aprobado del proyecto con portal_knowledge e informar de tu avance con portal_report_progress.
+Si el contexto de arriba no basta, puedes consultar la carpeta de trabajo del proceso con portal_list_files, portal_read_file,
+portal_search (texto literal) y portal_diff (cambios sin confirmar o de la rama), el conocimiento aprobado del proyecto con
+portal_knowledge e informar de tu avance con portal_report_progress.
 No puedes escribir archivos ni ejecutar órdenes: entrega los cambios en el formato pedido; el Portal los valida y los aplica.`;
 
 /** Una llamada del agente a través de Claude Code (CLI gestionada o consola del propietario). */
