@@ -98,9 +98,13 @@ export const GAUNTLET_SCHEMA = {
 } as const;
 
 const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+/** Huella de un hallazgo (archivo + inicio del texto normalizado): la misma brecha entre rondas y procesos. */
+export function findingKey(f: Pick<GauntletFinding, 'file' | 'text'>): string {
+  return `${f.file ?? '*'}:${norm(f.text).split(' ').slice(0, 8).join(' ')}`;
+}
 /** Huella de lo que hay que corregir (archivo + texto normalizado de bloqueantes/mayores). */
 export function gauntletSignature(findings: GauntletFinding[]): string {
-  return findings.filter(f => !f.unsupported && f.severity !== 'minor').map(f => `${f.file ?? '*'}:${norm(f.text).split(' ').slice(0, 8).join(' ')}`).sort().join('|');
+  return findings.filter(f => !f.unsupported && f.severity !== 'minor').map(findingKey).sort().join('|');
 }
 
 /**
