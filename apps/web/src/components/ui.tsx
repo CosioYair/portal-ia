@@ -65,3 +65,15 @@ export function KV({ k, children }: { k: string; children: ReactNode }) {
 export function Avatar({ initials, ws, lg }: { initials: string; ws: boolean; lg?: boolean }) {
   return <span className={`av mono ${ws ? 'av-ws' : ''} ${lg ? 'av-lg' : ''}`}>{initials}</span>;
 }
+
+/**
+ * HU-162 · Indicador de carga accesible.
+ * Se anuncia con role="status" y muestra el texto visible «Cargando…», así que la carga
+ * se entiende también cuando el movimiento reducido detiene el giro.
+ */
+export function Spinner({ label = 'Cargando…', light }: { label?: string; light?: boolean }) {
+  return <span className="spin-status" role="status" aria-live="polite">
+    <span className={`spin ${light ? 'spin-light' : ''}`} aria-hidden="true" />
+    <span>{label}</span>
+  </span>;
+}

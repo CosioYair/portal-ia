@@ -1,0 +1,76 @@
+/* HU-162 · Tokens de diseño (fase 0).
+   Solo declaraciones: copian los valores que ya usa styles.css, así que la interfaz se ve igual.
+   Las hojas aún no las consumen; la fase siguiente sustituirá los valores literales por estas variables.
+   Los nombres usan el prefijo --color-/--font-/--radius-/--shadow-/--dur- para no chocar con los
+   respaldos de BudgetMeter.css (--line, --surface, --ink…). */
+:root {
+  /* Superficies y fondo */
+  --color-bg: #F4F3EF;
+  --color-surface: #fff;
+  --color-surface-alt: #FAF9F6;
+  --color-surface-hover: #F7F6F2;
+  --color-surface-pressed: #ECEAE4;
+  --color-surface-nav-hover: #F0EEE8;
+
+  /* Texto */
+  --color-text: #1A1B1E;
+  --color-text-med: #4F5259;
+  --color-text-muted: #686B72;
+  --color-placeholder: #686B72;
+
+  /* Bordes y separadores */
+  --color-border: #E5E3DC;
+  --color-border-strong: #CFCCC3;
+  --color-border-hover: #B8B5AC;
+  --color-border-hover-strong: #9D9A91;
+  --color-divider: #EEECE6;
+
+  /* Acento y acción primaria */
+  --color-accent: #0F6E6A;
+  --color-accent-hover: #0B5652;
+  --color-accent-soft: #E3F1EF;
+  --color-accent-border: #C6E2DE;
+  --color-primary-hover: #2C2E33;
+  --color-activity: #E39B1C;
+
+  /* Estados: ok / warn / err (punto, fondo, borde, texto) */
+  --color-ok: #22A55B;
+  --color-ok-bg: #E4F3EA;
+  --color-ok-border: #C2E3CF;
+  --color-ok-text: #166534;
+  --color-warn: #E39B1C;
+  --color-warn-bg: #FBF0DC;
+  --color-warn-border: #F0DCB0;
+  --color-warn-text: #7A4A00;
+  --color-err: #D93025;
+  --color-err-bg: #FBE7E5;
+  --color-err-border: #F2C7C3;
+  --color-err-text: #9A1F18;
+
+  /* Tipografías */
+  --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Radios */
+  --radius-sm: 7px;
+  --radius: 8px;
+  --radius-card: 10px;
+  --radius-modal: 12px;
+  --radius-dock: 14px;
+  --radius-pill: 999px;
+
+  /* Sombras */
+  --shadow-onode: 0 6px 16px rgba(26,27,30,.08);
+  --shadow-toast: 0 8px 24px rgba(0,0,0,.18);
+  --shadow-modal: 0 24px 64px rgba(26,27,30,.22);
+  --shadow-dock: 0 24px 64px rgba(26,27,30,.24);
+  --shadow-fab: 0 12px 32px rgba(26,27,30,.28);
+
+  /* Duraciones */
+  --dur-fast: .15s;
+  --dur-enter: .2s;
+  --dur-screen: .28s;
+
+  /* Foco */
+  --focus-ring: 2px solid #0F6E6A;
+}

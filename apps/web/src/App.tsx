@@ -19,7 +19,7 @@ import { Archive } from './screens/Archive.tsx';
 import { Assistant } from './screens/Assistant.tsx';
 import { Budgets } from './screens/Budgets.tsx';
 import { CompanyHome } from './screens/CompanyHome.tsx';
-import { Icon } from './components/ui.tsx';
+import { Icon, Spinner } from './components/ui.tsx';
 import { InboxLauncher, InboxScreen } from './screens/InboxScreen.tsx';
 
 const SEL_KEY = 'portal-ia.seleccion';
@@ -33,7 +33,7 @@ function SelectRoute({ select }: { select: (ws: string, pid?: string | null) => 
   const navigate = useNavigate();
   useEffect(() => { select(slug!, pid ?? null).then(() => navigate('/' + (rest || 'panel'), { replace: true })); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, pid]);
-  return <div className="app" style={{ display: 'grid', placeItems: 'center' }}><span className="spin" aria-label="Cargando" /></div>;
+  return <div className="app" style={{ display: 'grid', placeItems: 'center' }}><Spinner /></div>;
 }
 
 export default function App() {
@@ -91,7 +91,7 @@ export default function App() {
       </div>
     </div>;
   }
-  if (!status) return <div className="app" style={{ display: 'grid', placeItems: 'center' }}><span className="spin" aria-label="Cargando" /></div>;
+  if (!status) return <div className="app" style={{ display: 'grid', placeItems: 'center' }}><Spinner /></div>;
 
   const connected = providers.find(p => p.status === 'connected') ?? null;
   const ready = status.initialized && !!status.workspace;
