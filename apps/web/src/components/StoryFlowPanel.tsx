@@ -110,7 +110,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       else if (a.id === 'retry_process') { const p = await api.retryProcess(slug, proc.id); flash('Proceso nuevo creado: elige el presupuesto y autorízalo'); navigate(`/procesos/${p.id}`); }
       else if (a.id === 'pipeline_resume' || a.id === 'repair_output') {
         const add = a.requires.includes('ai_budget') ? Math.max(0, Number(addBudget) || 0) : 0;
-        const p = await api.continueProcess(slug, proc.id, { addBudgetUsd: add, pipeline: { ...(a.pipeline ?? {}), ...(allowInstall ? { allowInstall: true } : {}) }, ...(a.answer ? { answer: answer.trim() } : {}) });
+        const p = await api.continueProcess(slug, proc.id, { addBudgetUsd: add, ...(a.addSubscriptionCalls ? { addSubscriptionCalls: a.addSubscriptionCalls } : {}), pipeline: { ...(a.pipeline ?? {}), ...(allowInstall ? { allowInstall: true } : {}) }, ...(a.answer ? { answer: answer.trim() } : {}) });
         onChange(p); flash(a.answer ? 'Tu respuesta llegó al equipo; retoma el trabajo' : a.id === 'repair_output' ? 'El Desarrollador está reparando su entrega (sin repetir el plan)' : 'El equipo retoma el trabajo donde lo dejó');
       }
       else if (a.id === 'claude_code_fix' && a.backendFix) {

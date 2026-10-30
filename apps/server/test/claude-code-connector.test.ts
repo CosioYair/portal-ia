@@ -413,6 +413,13 @@ test('portal_search y portal_diff: solo lectura, literal, con las mismas protecc
   assert.match(lit.diff, /\+cambiado/); assert.ok(lit.omitted.some((o: any) => o.path === '.npmrc'));
   // Windows no distingue mayúsculas: «.GIT/config» o «DATA/x.txt» son las mismas rutas protegidas.
   for (const p of ['.GIT/config', 'DATA/x.txt', 'Node_Modules/x/index.js']) assert.ok(bridge.isDenied(bridge.readTaskFile(plain, p)), `${p} debía denegarse`);
+  // Nombres cortos de Windows (8.3): «ENV~1» es otro nombre de .env; nunca valen para leer ni para escribir.
+  for (const p of ['ENV~1', 'GIT~1/config', 'NODE_M~1/x/index.js', 'src/CONFIG~1.TS']) assert.ok(bridge.isDenied(bridge.readTaskFile(plain, p)), `${p} debía denegarse`);
+  const { safeRelPath, scanSecrets } = await import('../src/services/repoWrite.ts');
+  assert.throws(() => safeRelPath('GIT~1/hooks/pre-commit'), /nombre corto/);
+  // Un marcador de variable no es un secreto; un token literal sí.
+  assert.equal(scanSecrets('//registry.npmjs.org/:_authToken=${NPM_TOKEN}'), null);
+  assert.match(scanSecrets('//registry.npmjs.org/:_authToken=npm_abcdef123456') ?? '', /token de registro npm/);
 
   // De punta a punta por MCP con un token de ejecución.
   const job = bridge.registerJobTask({ slug: S, projectId: project.id, processId: null, stepId: null, agentId: qa.id, agentName: qa.config.name, role: 'reviewer', title: 'diff', mode: 'cli', system: '', prompt: '', schema: null, readRoot: g, runId: 'r-diff' });

@@ -226,6 +226,14 @@ function readInside(readRoot: string, rel: string): { path: string; content: str
   try { root = fs.realpathSync(readRoot); full = fs.realpathSync(path.join(root, norm)); } catch { return deny(404, `No existe: ${rel}`); }
   // Un enlace simbólico no puede sacar la lectura de la carpeta de trabajo.
   if (full !== root && !full.startsWith(root + path.sep)) return deny(403, `Ruta fuera de la carpeta de trabajo: ${rel}`);
+  // La ruta REAL según el sistema (expande nombres cortos y mayúsculas) tampoco puede ser protegida.
+  try {
+    const rootN = fs.realpathSync.native(root); const fullN = fs.realpathSync.native(full);
+    const realRel = path.relative(rootN, fullN).replace(/\\/g, '/');
+    if (realRel.startsWith('..') || path.isAbsolute(realRel)) return deny(403, `Ruta fuera de la carpeta de trabajo: ${rel}`);
+    if (realRel && PROTECTED_READ.some(r => r.test(realRel))) return deny(403, `Ruta protegida: ${rel}`);
+    if (realRel && /(^|\/)(\.git|data|node_modules)(\/|$)|(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?$|\.(key|pem|p12|pfx)$/i.test(realRel)) return deny(403, `Ruta protegida: ${rel}`);
+  } catch { return deny(404, `No existe: ${rel}`); }
   const st = fs.statSync(full); if (!st.isFile()) return deny(400, `No es un archivo: ${rel}`);
   const fd = fs.openSync(full, 'r'); const buf = Buffer.alloc(Math.min(st.size, MAX_FILE)); fs.readSync(fd, buf, 0, buf.length, 0); fs.closeSync(fd);
   if (buf.subarray(0, 8000).includes(0)) return deny(415, `Archivo binario: ${rel}`);

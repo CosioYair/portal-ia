@@ -43,6 +43,8 @@ export interface CliTaskOptions {
   /** Servidor MCP del Portal para esta ejecución (token de UN solo uso, ligado a la tarea) y herramientas permitidas. */
   mcp?: { command: string; args: string[]; env: Record<string, string>; tools: string[] } | null;
   onEvent?: (e: CliEvent) => void;
+  /** ¿Se acepta el uso adicional («overage») que informe la llamada? Sin esto, se para en el acto. */
+  overageAccepted?: () => boolean;
 }
 export type CliEvent =
   | { kind: 'init'; model: string | null; apiKeySource: string | null; mcp: { name: string; status: string }[] }
@@ -174,7 +176,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
           // Límite alcanzado: se para sin esperar (ni comprar créditos ni cambiar de origen de facturación).
           if (i.status === 'rejected') stop(limitError(rateLimit));
           // Uso adicional («overage»): podría facturarse aparte. Se para en el acto; seguir exige tu reconocimiento.
-          else if (rateLimit.overage) stop(ccError('usage_limit', 'Claude Code informa uso adicional («overage»), que podría facturarse aparte según tu cuenta. Se ha parado sin continuar; reconócelo en el Asistente o en Proveedores si quieres seguir.'));
+          else if (rateLimit.overage && !o.overageAccepted?.()) stop(ccError('usage_limit', 'Claude Code informa uso adicional («overage»), que podría facturarse aparte según tu cuenta. Se ha parado sin continuar; reconócelo en el Asistente o en Proveedores si quieres seguir.'));
         } else if (j.type === 'assistant') {
           turns++;
           const tools = (j.message?.content ?? []).filter((c: any) => c?.type === 'tool_use').map((c: any) => String(c.name ?? '').replace(/^mcp__portal__/, ''));

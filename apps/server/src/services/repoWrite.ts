@@ -18,7 +18,7 @@ const FORBIDDEN = [/^\.git(\/|$)/i, /^data(\/|$)/i, /^node_modules(\/|$)/i, /(^|
 /** Patrones de secretos que no deben entrar en un repositorio (aviso, no bloqueo: el propietario decide). */
 const SECRET_PATTERNS: [RegExp, string][] = [
   [/sk-ant-[A-Za-z0-9_-]{20,}/, 'clave de API de Anthropic'], [/\bsk-[A-Za-z0-9]{32,}\b/, 'clave de API (sk-…)'], [/\bAKIA[0-9A-Z]{16}\b/, 'clave de acceso AWS'],
-  [/\bgh[pousr]_[A-Za-z0-9]{30,}\b/, 'token de GitHub'], [/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/, 'clave privada'], [/_authToken\s*=\s*\S{8,}/i, 'token de registro npm'], [/\b(password|passwd|contraseña|secret|api[_-]?key)\s*[:=]\s*['"][^'"\s]{8,}['"]/i, 'credencial literal']
+  [/\bgh[pousr]_[A-Za-z0-9]{30,}\b/, 'token de GitHub'], [/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/, 'clave privada'], [/_authToken\s*=\s*(?!["']?\$\{)[^\s"'$]{8,}/i, 'token de registro npm'], [/\b(password|passwd|contraseña|secret|api[_-]?key)\s*[:=]\s*['"][^'"\s]{8,}['"]/i, 'credencial literal']
 ];
 export function scanSecrets(text: string): string | null {
   for (const [re, label] of SECRET_PATTERNS) if (re.test(text)) return `Posible ${label} en el contenido: revísalo antes de aplicar o publicar.`;
@@ -50,6 +50,8 @@ export function applyPatch(original: string, edits: { search: string; replace: s
 export function safeRelPath(p: string): string {
   const norm = p.replace(/\\/g, '/').replace(/^\.\//, '');
   if (!norm || norm.startsWith('/') || /^[A-Za-z]:/.test(norm) || norm.split('/').some(seg => seg === '..' || seg === '')) throw Object.assign(new Error(`Ruta no permitida: ${p}`), { statusCode: 400 });
+  // Nombre corto de Windows (8.3: «ENV~1», «GIT~1»): es otro nombre de un archivo existente y burlaría las rutas protegidas.
+  if (norm.split('/').some(seg => /~\d/.test(seg))) throw Object.assign(new Error(`Ruta no permitida (nombre corto de Windows): ${p}`), { statusCode: 400 });
   if (FORBIDDEN.some(r => r.test(norm))) throw Object.assign(new Error(`Ruta protegida: ${p}`), { statusCode: 400 });
   return norm;
 }

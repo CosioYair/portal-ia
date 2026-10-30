@@ -13,7 +13,7 @@ import { BRIDGE_SCRIPT, ccError, runCliTask, type CliEvent, type CliFailedUsage 
 export { BRIDGE_SCRIPT };
 import { cliCommandFor, findCli, lastDetection, verifiedDetection } from './detect.ts';
 import { getClaudeCodeSettings, projectAuthorized } from './settings.ts';
-import { saveUsageReport, subscriptionGate } from './usage.ts';
+import { overageAccepted, saveUsageReport, subscriptionGate } from './usage.ts';
 
 /**
  * Backend de ejecución «Claude Code» para los pasos de un proceso autorizado. El agente del Portal conserva su identidad,
@@ -220,7 +220,7 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
       say(`Enviando el encargo a Claude Code · ${label}`, 'sending');
       const r = await runCliTask({
         cli, detection: det, model: req.model, system: job ? req.system + READ_HINT : req.system, prompt: req.user, history: req.history, images: req.images,
-        schema: req.responseSchema ?? null, maxTurns: s.maxTurns, timeoutMs, signal, onEvent,
+        schema: req.responseSchema ?? null, maxTurns: s.maxTurns, timeoutMs, signal, onEvent, overageAccepted,
         mcp: job ? { command: process.execPath, args: [BRIDGE_SCRIPT], env: { PORTAL_URL: bridgeUrl, PORTAL_BRIDGE_TOKEN: job.token, PORTAL_BRIDGE_MODE: 'job' }, tools: JOB_TOOLS.map(n => `mcp__portal__${n}`) } : null
       });
       runs.finish(run.id, 'done', { durationMs: r.durationMs, numTurns: r.numTurns, tokensIn: r.inputTokens, tokensOut: r.outputTokens, apiEquivalentUsd: r.apiEquivalentUsd, rateLimit: r.rateLimit });

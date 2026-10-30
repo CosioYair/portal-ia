@@ -309,6 +309,13 @@ test('tope de llamadas a la suscripción de un proceso: al alcanzarlo se pausa s
   assert.ok(['paused', 'stopped'].includes(done.result!.pipeline!.state), done.result!.pipeline!.state);
   assert.match(done.result!.pipeline!.reason!, /tope 1/); assert.match(done.result!.pipeline!.reason!, /Concede más llamadas al continuar/);
   assert.equal(ccRuns().length, 1, 'una sola llamada a la CLI: la siguiente no se hizo');
+  // La pausa ofrece ampliar el tope (llamadas, no USD) y continuar lo amplía.
+  const flow = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow;
+  const more = flow.actions.find((a: any) => a.addSubscriptionCalls);
+  assert.ok(more, JSON.stringify(flow.actions.map((a: any) => a.label))); assert.equal(more.addSubscriptionCalls, 1); assert.ok(!more.requires.includes('ai_budget'), 'no pide USD');
+  const c = await inject('POST', `${W}/processes/${p.id}/continue`, { authorized: true, addSubscriptionCalls: 2 });
+  assert.equal(c.statusCode, 200, c.body); assert.equal(c.json().result.pipeline.config.maxSubscriptionCalls, 3);
+  for (let i = 0; i < 400 && processesRepo(S).get(p.id)!.status === 'running'; i++) await new Promise(res => setTimeout(res, 50));
 });
 
 test('alternativa por API SOLO si el propietario la autorizó: se usa con su presupuesto y queda señalada', async () => {

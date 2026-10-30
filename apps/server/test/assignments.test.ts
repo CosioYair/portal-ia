@@ -169,6 +169,15 @@ test('el último informe de límites del CLI se muestra tal cual (sin cuotas inv
   const g2 = (await inject('GET', '/api/claude-code/usage')).json(); assert.equal(g2.ok, false); assert.match(g2.reason, /overage/);
   acknowledgeUsageReport();
   assert.equal((await inject('GET', '/api/claude-code/usage')).json().ok, true);
+  // Reconocido, el uso adicional de ESE episodio se acepta (las llamadas siguen); cuando deja de informarse, el episodio
+  // termina y uno nuevo vuelve a exigir tu reconocimiento.
+  const { overageAccepted } = await import('../src/services/claudeCode/usage.ts');
+  saveUsageReport({ status: 'allowed', resetsAt: null, utilization: 0.6, errorCode: null, rateLimitType: 'overage', windows: [], overage: true }, 'prueba');
+  assert.equal(overageAccepted(), true); assert.equal((await inject('GET', '/api/claude-code/usage')).json().ok, true);
+  saveUsageReport({ status: 'allowed', resetsAt: null, utilization: 0.1, errorCode: null, rateLimitType: 'five_hour', windows: [], overage: false }, 'prueba');
+  saveUsageReport({ status: 'allowed', resetsAt: null, utilization: 0.2, errorCode: null, rateLimitType: 'overage', windows: [], overage: true }, 'prueba');
+  assert.equal(overageAccepted(), false); assert.equal((await inject('GET', '/api/claude-code/usage')).json().ok, false, 'un episodio nuevo exige reconocerlo otra vez');
+  acknowledgeUsageReport();
 });
 
 test('un reinicio a mitad no deja el encargo «en marcha»: su estado sale del proceso recuperado', async () => {

@@ -279,7 +279,7 @@ export function performActions(actionsReq: any[], scope: ActionScope = NO_SCOPE)
         if (type === 'update_backlog_item' || type === 'reset_story') {
           const ws = resolveCompany(params.company); const pr = resolveProject(ws.slug, params.project); const st = resolveStory(ws.slug, pr.id, params.story) as any;
           if (type === 'update_backlog_item') {
-            const changes = [params.title ? `título → «${String(params.title).slice(0, 120)}»` : '', params.criterion ? `criterio → «${String(params.criterion).slice(0, 200)}»` : '', params.description ? 'descripción nueva' : '', params.estimate ? `tamaño → ${params.estimate}` : '', params.dependsOn !== undefined ? `depende de → ${params.dependsOn ?? 'nada'}` : ''].filter(Boolean);
+            const changes = [params.title ? `título → «${String(params.title).slice(0, 120)}»` : '', params.criterion ? `criterio → «${String(params.criterion).slice(0, 200)}»` : '', params.description !== undefined ? (params.description ? 'descripción nueva' : 'descripción vacía') : '', params.estimate ? `tamaño → ${params.estimate}` : '', params.dependsOn !== undefined ? `depende de → ${params.dependsOn ?? 'nada'}` : ''].filter(Boolean);
             const resets = (params.title || params.criterion) && st && (st.status === 'review' || st.status === 'blocked');
             detail = `${changes.length ? `Cambios: ${changes.join(' · ')}.` : 'Sin cambios concretos.'}${resets ? ` Atención: ${st.storyId} está ${st.status === 'review' ? 'en revisión' : 'bloqueada'}; cambiar el título o el criterio la devuelve a pendiente y descarta su diff pendiente.` : ''} Confírmalo para hacerlo.`;
           }

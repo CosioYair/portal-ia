@@ -351,15 +351,18 @@ export function processesRepo(slug: string) {
      * HU-161 · Restaura una autorización superada (reversible). Para que la historia siga teniendo una sola vigente,
      * las demás iteraciones con decisión pendiente pasan a superadas por la restaurada. Todo en una transacción.
      */
+    /** Deshace las marcas puestas por un proceso que nunca empezó (se canceló al no poder autorizarse). */
+    unsupersedeBy(byId: string): number { return Number(db.prepare(`UPDATE processes SET superseded_by = NULL, superseded_at = NULL WHERE superseded_by = ?`).run(byId).changes); },
     restoreSuperseded(id: string): { restored: string; superseded: string[] } | null {
-      const r = db.prepare(`SELECT id, backlog_item_id, superseded_by FROM processes WHERE id = ?`).get(id) as any;
+      const r = db.prepare(`SELECT id, backlog_item_id, assignment_id, superseded_by FROM processes WHERE id = ?`).get(id) as any;
       if (!r || r.superseded_by == null) return null;
       const ts = now(); const superseded: string[] = [];
       db.exec('BEGIN');
       try {
         db.prepare(`UPDATE processes SET superseded_by = NULL, superseded_at = ? WHERE id = ?`).run(ts, id);
-        if (r.backlog_item_id) {
-          const others = db.prepare(`SELECT id, status, result_json FROM processes WHERE backlog_item_id = ? AND kind = 'story_execution' AND archived_at IS NULL AND superseded_by IS NULL AND id <> ?`).all(r.backlog_item_id, id) as any[];
+        if (r.backlog_item_id || r.assignment_id) {
+          const col = r.backlog_item_id ? 'backlog_item_id' : 'assignment_id';
+          const others = db.prepare(`SELECT id, status, result_json FROM processes WHERE ${col} = ? AND kind = 'story_execution' AND archived_at IS NULL AND superseded_by IS NULL AND id <> ?`).all(r.backlog_item_id ?? r.assignment_id, id) as any[];
           const mark = db.prepare(`UPDATE processes SET superseded_by = ?, superseded_at = ? WHERE id = ?`);
           for (const o of others) if (hasOpenDecisionRow(o)) { mark.run(id, ts, o.id); superseded.push(o.id); }
         }

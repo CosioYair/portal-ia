@@ -152,6 +152,14 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
     issue = { kind: 'budget_exceeded', level: 'blocker', cause: 'decision', title: 'Se agotó el presupuesto autorizado', explanation: `El equipo gastó ${usd(p.spentUsd)} de ${usd(p.budgetUsd)} USD y se detuvo antes de terminar, como pediste. Para seguir hay que autorizar un presupuesto nuevo (o recuperar lo que ya entregó, sin IA).`, details: p.steps.filter(s => s.status !== 'done').map(s => ({ text: `${s.agentName}: ${s.title} — sin terminar` })), files: [], responsible: [] };
     if (implOut && !r?.applied) actions.push(act('recover', 'Recuperar lo entregado (sin IA)', 'Vuelve a leer lo que el Desarrollador ya entregó y deja el diff listo para revisar, sin gastar nada.'));
     actions.push(act('retry_process', 'Volver a ejecutar con un presupuesto nuevo', 'Crea un proceso nuevo pendiente de autorización: eliges el presupuesto antes de que empiece.', ['authorization', 'ai_budget']));
+    // Tope de llamadas a la suscripción (no USD): se amplía y se continúa donde lo dejó, sin repetir lo hecho.
+    const cap = [p.error, r?.pipeline?.reason].find(t => /llamada\(s\) a la suscripción autorizadas/.test(t ?? ''));
+    if (cap) {
+      const n = r?.pipeline?.config.maxSubscriptionCalls ?? 60;
+      set('execute', 'failed', `Detenido por el tope de llamadas a la suscripción (${n})`);
+      issue = { ...issue!, title: 'Se alcanzó el tope de llamadas a la suscripción', explanation: `${cap} No es presupuesto en USD: con Claude Code se cuenta en llamadas a tu suscripción.` };
+      actions.unshift(act('pipeline_resume', `Conceder ${n} llamadas más a la suscripción y continuar`, `Retoma donde lo dejó con ${n} llamadas más a tu suscripción; lo hecho no se repite.`, ['authorization'], { pipeline: {}, addSubscriptionCalls: n, primary: true }));
+    }
   } else if (p.status === 'failed' || p.status === 'cancelled') {
     // Con la clasificación del fallo no se adivina por el texto: solo es «parche que no encaja» si hubo cambios con forma
     // válida que no encajan; una entrega sin formato reconocible es un fallo del contrato de salida.
@@ -270,6 +278,7 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
       }
     }
     else if (pl.pauseKind === 'unknown') actions.push(ASK, act('retry_process', 'Volver a ejecutar la historia', 'Crea un proceso nuevo pendiente de autorización.', ['authorization', 'ai_budget']));
+    else if (pl.pauseKind === 'budget' && /llamada\(s\) a la suscripción autorizadas/.test(pl.reason ?? '')) { const n = pl.config.maxSubscriptionCalls ?? 60; actions.push(resume(`Conceder ${n} llamadas más a la suscripción y continuar`, `El equipo retoma donde lo dejó con ${n} llamadas más a tu suscripción (no es USD de API). Lo hecho no se repite.`, ['authorization'], { addSubscriptionCalls: n })); }
     else if (pl.pauseKind === 'budget') actions.push(resume('Continuar con más presupuesto', 'El equipo retoma donde lo dejó (no repite lo hecho). Fijas el presupuesto adicional máximo; solo se gasta lo necesario.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.5 }));
     else if (pl.pauseKind === 'network') actions.push(resume('Permitir instalar dependencias y continuar', 'Instala las dependencias en el sandbox con red temporal (solo durante la instalación) y sigue verificando. No llama a la IA.', ['authorization', 'network'], { pipeline: { allowInstall: true } }));
     else if (pl.pauseKind === 'environment') actions.push(act('refresh_sandbox', 'Comprobar el sandbox de nuevo', 'Vuelve a detectar Docker sin ejecutar nada.'), resume('Continuar cuando el entorno esté listo', 'Retoma la verificación; no llama a la IA salvo que haga falta corregir código.', ['authorization']));

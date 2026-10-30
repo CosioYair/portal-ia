@@ -388,6 +388,8 @@ export interface FlowAction {
   /** La acción exige responder antes a esta pregunta del equipo (información, permiso o decisión). */
   answer?: { question: string; why: string; options: string[] } | null;
   suggestedBudgetUsd?: number;
+  /** pipeline_resume tras el tope de llamadas a la suscripción: cuántas se conceden de más al continuar. */
+  addSubscriptionCalls?: number;
   /** register_external: commit del worktree que se registraría, el último registrado y los archivos que cambian. */
   external?: { commit: string; recorded: string; files: string[] } | null;
   /** claude_code_fix: lo que se autoriza antes de continuar (el proyecto del proceso y/o agentes que pasan a «gestionado»). */

@@ -164,8 +164,9 @@ export function cancelAssignment(slug: string, id: string): Assignment {
   const a = assignmentsRepo(slug).get(id); if (!a) throw fail(404, 'Encargo no encontrado.', 'not_found');
   const p = a.processId ? processesRepo(slug).get(a.processId) : undefined;
   if (p?.status === 'running') throw fail(409, 'El encargo está en marcha: cancela su proceso primero (se detiene entre pasos).', 'running');
+  const out = assignmentsRepo(slug).update(id, x => { x.status = 'cancelled'; x.events.push({ at: monotonicNow(), kind: 'cancelled', message: 'Cancelado por el propietario.' }); });
   if (p?.status === 'pending_authorization') processesRepo(slug).finish(p.id, 'cancelled', 'Encargo cancelado por el propietario.');
-  return assignmentsRepo(slug).update(id, x => { x.status = 'cancelled'; x.events.push({ at: monotonicNow(), kind: 'cancelled', message: 'Cancelado por el propietario.' }); });
+  return out;
 }
 
 /** Vista con el estado real del proceso (sin IA). */
@@ -210,8 +211,9 @@ export function authorizeAssignment(slug: string, id: string, input: { budgetUsd
     const a = assignmentsRepo(slug).update(id, x => { x.status = 'running'; x.events.push({ at: monotonicNow(), kind: 'authorized', processId: p.id, message: `Autorizado por el propietario (hasta ${input.budgetUsd} USD de API${p.result?.pipeline?.config.maxSubscriptionCalls ? ` y ${p.result.pipeline.config.maxSubscriptionCalls} llamadas a la suscripción` : ''}; Gauntlet ${p.result?.pipeline?.config.gauntlet?.mode ?? 'off'}${p.result?.pipeline?.config.gauntlet?.auto ? ` (automático: ${p.result.pipeline.config.gauntlet.auto.reason})` : ''}).` }); });
     return { assignment: a, process: p };
   } catch (e: any) {
+    processesRepo(slug).unsupersedeBy(process.id); // la iteración anterior vuelve a ser la vigente
     processesRepo(slug).finish(process.id, 'cancelled', `No se inició: ${e.message}`);
-    assignmentsRepo(slug).update(id, x => { x.status = 'needs_owner'; x.reason = e.message; x.events.push({ at: monotonicNow(), kind: 'status', processId: process.id, message: `No se inició: ${String(e.message).slice(0, 300)}` }); });
+    if (assignmentsRepo(slug).get(id)?.status !== 'needs_owner') assignmentsRepo(slug).update(id, x => { x.status = 'needs_owner'; x.reason = e.message; x.events.push({ at: monotonicNow(), kind: 'status', processId: process.id, message: `No se inició: ${String(e.message).slice(0, 300)}` }); });
     throw e;
   }
 }
