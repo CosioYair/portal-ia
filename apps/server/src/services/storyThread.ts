@@ -10,8 +10,7 @@ import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { describeProcess } from './guidance.ts';
 import { listFeedback } from './manual-test-feedback.ts';
-import { createStoryProcess, stepByRole } from './storyExecution.ts';
-import { decisionsFromProcess } from './inbox.ts';
+import { createStoryProcess, stepByRole, supersedePreviousIterations } from './storyExecution.ts';
 import { lessonsRepo } from './lessons.ts';
 import { discardBranch } from './repoWrite.ts';
 import { flowOptions } from './processView.ts';
@@ -226,20 +225,8 @@ function inTransaction<T>(slug: string, fn: () => T): T {
   }
 }
 
-/**
- * HU-161 · Una autorización vigente por historia: las iteraciones anteriores (no archivadas ni ya superadas) que
- * todavía esperan una decisión del propietario quedan marcadas como superadas por `currentId`. No cambia su estado
- * ni borra nada; se puede deshacer con «Restaurar» desde el historial. Devuelve los procesos marcados.
- */
-export function supersedePreviousIterations(slug: string, itemId: string, currentId: string): string[] {
-  const repo = processesRepo(slug); const out: string[] = [];
-  for (const p of repo.listByBacklogItem(itemId)) {
-    if (p.id === currentId || p.kind !== 'story_execution' || p.archivedAt || p.supersededBy) continue;
-    if (decisionsFromProcess(slug, p).length === 0) continue;
-    if (repo.markSuperseded(p.id, currentId)) out.push(p.id);
-  }
-  return out;
-}
+// HU-161 · supersedePreviousIterations vive en storyExecution.ts (lo invoca createStoryProcess en todas las vías).
+export { supersedePreviousIterations };
 
 /** Tareas a partir del problema actual del recorrido (observaciones de QA, errores de verificación, comprobaciones en rojo…). Sin IA; no duplica. */
 export async function tasksFromIssue(slug: string, itemId: string): Promise<StoryTask[]> {
@@ -310,8 +297,9 @@ export async function iterateStory(slug: string, itemId: string, note: string | 
   // HU-161 · Crear la iteración y superar la autorización pendiente de las anteriores en la MISMA transacción:
   // nunca quedan dos entradas pendientes para la historia (ni siquiera si algo falla a mitad).
   const proc = inTransaction(slug, () => {
+    // createStoryProcess ya marca como superadas las iteraciones anteriores pendientes (misma transacción).
     const created = createStoryProcess(slug, item.projectId, item.id, { iterationContext: context });
-    const superseded = supersedePreviousIterations(slug, item.id, created.id);
+    const superseded = procs.listByBacklogItem(item.id).filter(p => p.supersededBy === created.id).map(p => p.id);
     if (superseded.length) actions.push(`${superseded.length} autorización${superseded.length === 1 ? '' : 'es'} pendiente${superseded.length === 1 ? '' : 's'} de iteraciones anteriores marcada${superseded.length === 1 ? '' : 's'} como superada${superseded.length === 1 ? '' : 's'} (reversible desde el historial)`);
     threadRepo(slug).add({ backlogItemId: itemId, role: 'system', agentId: null, agentName: null, content: `Iteración ${ctx.iterations + 1} creada (proceso ${created.id}); pendiente de autorización.${fails.length ? ` Incluye ${fails.length} paso(s) de la prueba con falla u observación.` : ''}${actions.length ? ` Antes: ${actions.join('; ')}.` : ''}${note ? ` Nota: ${note}` : ''}`, processId: created.id, costUsd: 0, tokens: 0, proposals: null });
     return created;
