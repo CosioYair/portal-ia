@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
-import type { DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, Process } from '@portal-ia/domain';
-import { projectsRepo } from '../db/workspace.ts';
+import type { DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, Process, RestoreSupersededResult, StoryDecisionHistory, SupersededDecision } from '@portal-ia/domain';
+import { backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 
 /** Error con código HTTP para que la ruta lo traduzca tal cual. */
 export class InboxError extends Error {
@@ -35,7 +35,8 @@ function requestedBy(p: Process): string {
 /** Función pura: qué decisiones del propietario espera un proceso (como máximo una a la vez). */
 export function decisionsFromProcess(slug: string, p: Process): PendingDecision[] {
   const make = (kind: PendingDecisionKind, createdAt: string, extra: Pick<PendingDecision, 'estimatedCost' | 'impact' | 'approveEffect' | 'denyEffect'>): PendingDecision => ({
-    id: `${kind}:${p.id}`, kind, title: p.title, workspaceSlug: slug, projectId: p.projectId, processId: p.id, requestedBy: requestedBy(p), createdAt, ...extra
+    id: `${kind}:${p.id}`, kind, title: p.title, workspaceSlug: slug, projectId: p.projectId, processId: p.id, requestedBy: requestedBy(p), createdAt,
+    storyId: p.backlogItemId ?? null, iteration: null, supersededCount: 0, ...extra
   });
 
   if (p.status === 'pending_authorization') {
@@ -96,6 +97,84 @@ export function decisionsFromProcess(slug: string, p: Process): PendingDecision[
   return [];
 }
 
+// ---- HU-161 · Una autorización vigente por historia ----
+const storyKey = (p: Process): string | null => (p.kind === 'story_execution' && p.backlogItemId ? p.backlogItemId : null);
+const byAge = (a: Process, b: Process) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
+
+/** Número de iteración (1..N por fecha de creación) de cada proceso de historia. */
+export function iterationNumbers(processes: Process[]): Map<string, number> {
+  const byStory = new Map<string, Process[]>();
+  for (const p of processes) {
+    const key = storyKey(p);
+    if (!key) continue;
+    const list = byStory.get(key) ?? []; list.push(p); byStory.set(key, list);
+  }
+  const out = new Map<string, number>();
+  for (const list of byStory.values()) [...list].sort(byAge).forEach((p, i) => out.set(p.id, i + 1));
+  return out;
+}
+
+type Entry = { p: Process; d: PendingDecision };
+
+/** Agrupa las decisiones por historia: la vigente es la iteración más reciente no marcada como superada. */
+function storyGroups(slug: string, processes: Process[], all: Process[]) {
+  const iters = iterationNumbers(all);
+  const loose: PendingDecision[] = [];
+  const groups = new Map<string, Entry[]>();
+  for (const p of processes) {
+    const key = storyKey(p);
+    for (const d of decisionsFromProcess(slug, p)) {
+      if (!key) { loose.push(d); continue; }
+      const list = groups.get(key) ?? [];
+      list.push({ p, d: { ...d, iteration: iters.get(p.id) ?? null } });
+      groups.set(key, list);
+    }
+  }
+  const stories = new Map<string, { current: Entry | null; superseded: Entry[] }>();
+  for (const [key, list] of groups) {
+    list.sort((a, b) => byAge(a.p, b.p));
+    // Por precaución, aunque una iteración anterior no esté marcada, solo la más reciente sin marcar es la vigente.
+    const current = list.filter(e => !e.p.supersededBy).at(-1) ?? null;
+    stories.set(key, { current, superseded: list.filter(e => e !== current) });
+  }
+  return { loose, stories, iters };
+}
+
+/**
+ * Función pura: como máximo una decisión pendiente por historia (la iteración vigente, con su número y el recuento
+ * de superadas). Los procesos sin historia (evaluaciones, encargos) no se agrupan. `all` sirve para numerar iteraciones.
+ */
+export function consolidateDecisions(slug: string, processes: Process[], all: Process[] = processes): PendingDecision[] {
+  const { loose, stories } = storyGroups(slug, processes, all);
+  const out = [...loose];
+  for (const g of stories.values()) if (g.current) out.push({ ...g.current.d, supersededCount: g.superseded.length });
+  return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+/** Si la decisión de un proceso de historia está superada, el motivo para el 409; null si es la vigente. */
+function supersededMessage(slug: string, p: Process): string | null {
+  const key = storyKey(p);
+  if (!key) return null;
+  const all = processesRepo(slug).listByBacklogItem(key);
+  const self = all.find(x => x.id === p.id) ?? p;
+  const { stories, iters } = storyGroups(slug, all.filter(x => !x.archivedAt), all);
+  const g = stories.get(key);
+  if (!self.supersededBy && (self.archivedAt || !g?.current || g.current.p.id === p.id)) return null;
+  const byId = self.supersededBy ?? g?.current?.p.id ?? null;
+  const n = byId ? iters.get(byId) : undefined;
+  return `Esta autorización fue superada por la iteración ${n ?? 'más reciente'} de la historia: decide sobre la vigente o restáurala desde el historial.`;
+}
+
+/**
+ * Guardia compartida (bandeja, chat, vista del proceso): lanza 409 si el proceso es una iteración superada de su historia.
+ * Solo actúa si el proceso está marcado como superado o espera una decisión propia; no tiene efectos ni consume IA.
+ */
+export function assertNotSuperseded(slug: string, p: Process): void {
+  if (!p.supersededBy && decisionsFromProcess(slug, p).length === 0) return;
+  const msg = supersededMessage(slug, p);
+  if (msg) throw new InboxError(409, msg);
+}
+
 type Call = { status: number; body: Record<string, any> | null };
 
 async function call(app: FastifyInstance, method: 'GET' | 'POST', url: string, payload?: unknown): Promise<Call> {
@@ -115,18 +194,25 @@ async function fetchProcess(app: FastifyInstance, slug: string, id: string): Pro
 /** Lista todo lo pendiente del espacio indicado, de más antiguo a más reciente (las más antiguas primero), cada una con su costo e impacto. Solo lee: no cambia nada. */
 export async function listPendingDecisions(app: FastifyInstance, slug: string): Promise<PendingDecision[]> {
   const out: PendingDecision[] = [];
+  const repo = processesRepo(slug);
   for (const project of projectsRepo(slug).list()) {
     const res = await call(app, 'GET', `/api/workspaces/${slug}/projects/${project.id}/processes`);
     if (res.status !== 200 || !Array.isArray(res.body)) {
       const code = res.status === 200 || res.status >= 500 ? 502 : res.status;
       throw new InboxError(code, res.body && !Array.isArray(res.body) ? String(res.body.error ?? 'No se pudo leer los procesos') : 'No se pudo leer los procesos');
     }
+    // Todas las iteraciones (también archivadas) para numerar; el marcado de superada se toma siempre de la base.
+    const all = repo.listAll(project.id);
+    const stored = new Map(all.map(x => [x.id, x] as const));
+    const listedFull: Process[] = [];
     for (const listed of res.body as unknown as Process[]) {
       let p = listed;
       // Si el listado viene sin el resultado estructurado, se lee el proceso completo.
       if (p.status === 'done' && p.result === undefined && p.delegation === undefined) p = (await fetchProcess(app, slug, p.id)) ?? p;
-      out.push(...decisionsFromProcess(slug, p));
+      const s = stored.get(p.id);
+      listedFull.push({ ...p, supersededBy: s?.supersededBy ?? null, supersededAt: s?.supersededAt ?? null });
     }
+    out.push(...consolidateDecisions(slug, listedFull, all));
   }
   return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
@@ -141,6 +227,8 @@ export async function decide(app: FastifyInstance, slug: string, kind: PendingDe
   if (!p) throw new InboxError(404, 'El proceso no existe.');
   const current = decisionsFromProcess(slug, p).find(d => d.kind === kind);
   if (!current) throw new InboxError(409, 'Esta decisión ya no está pendiente: el proceso cambió de estado.');
+  const superseded = supersededMessage(slug, p);
+  if (superseded) throw new InboxError(409, superseded);
   if (verdict === 'deny' && current.denyEffect === null) throw new InboxError(400, 'Esta decisión no se puede denegar desde aquí: el proceso original tampoco tiene esa acción.');
 
   const base = `/api/workspaces/${slug}/processes/${processId}`;
@@ -170,4 +258,32 @@ export async function decide(app: FastifyInstance, slug: string, kind: PendingDe
     throw new InboxError(res.status >= 500 ? 502 : res.status, String(res.body?.error ?? 'No se pudo registrar la decisión.'));
   }
   return { ok: true, kind, processId, verdict, processStatus: typeof res.body?.status === 'string' ? res.body.status : null };
+}
+
+/** Historial de autorizaciones de una historia: la vigente y las superadas (las más recientes primero). Solo lee. */
+export function listStoryDecisionHistory(slug: string, storyId: string): StoryDecisionHistory {
+  const item = backlogRepo(slug).get(storyId);
+  if (!item) throw new InboxError(404, 'La historia no existe.');
+  const all = processesRepo(slug).listByBacklogItem(storyId);
+  const { stories, iters } = storyGroups(slug, all.filter(p => !p.archivedAt), all);
+  const g = stories.get(storyId);
+  const current = g?.current ? { ...g.current.d, supersededCount: g.superseded.length } : null;
+  const superseded: SupersededDecision[] = (g?.superseded ?? []).map(({ p, d }) => {
+    const by = p.supersededBy ?? g?.current?.p.id ?? null;
+    return { ...d, supersededBy: by, supersededByIteration: by ? iters.get(by) ?? null : null, supersededAt: p.supersededAt ?? null };
+  }).reverse();
+  return { storyId, storyCode: item.storyId, current, superseded };
+}
+
+/** Restaura una autorización superada (reversible, sin costo de IA); la que era vigente pasa a superada. */
+export function restoreSupersededDecision(slug: string, processId: string): RestoreSupersededResult {
+  const repo = processesRepo(slug);
+  const p = repo.get(processId);
+  if (!p) throw new InboxError(404, 'El proceso no existe.');
+  if (!p.supersededBy) throw new InboxError(409, 'Esta autorización no está superada: ya es la vigente.');
+  if (p.archivedAt) throw new InboxError(409, 'El proceso está archivado: no se puede restaurar su autorización.');
+  if (decisionsFromProcess(slug, p).length === 0) throw new InboxError(409, 'Esta autorización ya no tiene ninguna decisión pendiente: no hay nada que restaurar.');
+  const r = repo.restoreSuperseded(processId);
+  if (!r) throw new InboxError(409, 'Esta autorización no está superada: ya es la vigente.');
+  return { ok: true, processId, superseded: r.superseded };
 }

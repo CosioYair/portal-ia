@@ -10,7 +10,7 @@ import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { describeProcess } from './guidance.ts';
 import { listFeedback } from './manual-test-feedback.ts';
-import { createStoryProcess, stepByRole } from './storyExecution.ts';
+import { createStoryProcess, stepByRole, supersedePreviousIterations } from './storyExecution.ts';
 import { lessonsRepo } from './lessons.ts';
 import { discardBranch } from './repoWrite.ts';
 import { flowOptions } from './processView.ts';
@@ -211,6 +211,23 @@ export async function tasksFromFeedback(slug: string, itemId: string): Promise<S
 
 const conflict = (message: string, code: string, extra: Record<string, unknown> = {}) => Object.assign(new Error(message), { statusCode: 409, code, ...extra });
 
+/** Ejecuta `fn` dentro de una transacción de la base del espacio (todo o nada). */
+function inTransaction<T>(slug: string, fn: () => T): T {
+  const db = workspaceDb(slug);
+  db.exec('BEGIN');
+  try {
+    const r = fn();
+    db.exec('COMMIT');
+    return r;
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* la transacción ya no estaba abierta */ }
+    throw e;
+  }
+}
+
+// HU-161 · supersedePreviousIterations vive en storyExecution.ts (lo invoca createStoryProcess en todas las vías).
+export { supersedePreviousIterations };
+
 /** Tareas a partir del problema actual del recorrido (observaciones de QA, errores de verificación, comprobaciones en rojo…). Sin IA; no duplica. */
 export async function tasksFromIssue(slug: string, itemId: string): Promise<StoryTask[]> {
   const ctx = await storyContext(slug, itemId); const issue = ctx.lastProcess?.guidance?.flow?.issue;
@@ -277,8 +294,16 @@ export async function iterateStory(slug: string, itemId: string, note: string | 
   ].filter(Boolean).join('\n\n');
   const cur = backlog.get(item.id)!;
   if (cur.status === 'review' || cur.status === 'blocked') backlog.setStatus(item.id, 'pending', prev?.id ?? null);
-  const proc = createStoryProcess(slug, item.projectId, item.id, { iterationContext: context });
-  threadRepo(slug).add({ backlogItemId: itemId, role: 'system', agentId: null, agentName: null, content: `Iteración ${ctx.iterations + 1} creada (proceso ${proc.id}); pendiente de autorización.${fails.length ? ` Incluye ${fails.length} paso(s) de la prueba con falla u observación.` : ''}${actions.length ? ` Antes: ${actions.join('; ')}.` : ''}${note ? ` Nota: ${note}` : ''}`, processId: proc.id, costUsd: 0, tokens: 0, proposals: null });
+  // HU-161 · Crear la iteración y superar la autorización pendiente de las anteriores en la MISMA transacción:
+  // nunca quedan dos entradas pendientes para la historia (ni siquiera si algo falla a mitad).
+  const proc = inTransaction(slug, () => {
+    // createStoryProcess ya marca como superadas las iteraciones anteriores pendientes (misma transacción).
+    const created = createStoryProcess(slug, item.projectId, item.id, { iterationContext: context });
+    const superseded = procs.listByBacklogItem(item.id).filter(p => p.supersededBy === created.id).map(p => p.id);
+    if (superseded.length) actions.push(`${superseded.length} autorización${superseded.length === 1 ? '' : 'es'} pendiente${superseded.length === 1 ? '' : 's'} de iteraciones anteriores marcada${superseded.length === 1 ? '' : 's'} como superada${superseded.length === 1 ? '' : 's'} (reversible desde el historial)`);
+    threadRepo(slug).add({ backlogItemId: itemId, role: 'system', agentId: null, agentName: null, content: `Iteración ${ctx.iterations + 1} creada (proceso ${created.id}); pendiente de autorización.${fails.length ? ` Incluye ${fails.length} paso(s) de la prueba con falla u observación.` : ''}${actions.length ? ` Antes: ${actions.join('; ')}.` : ''}${note ? ` Nota: ${note}` : ''}`, processId: created.id, costUsd: 0, tokens: 0, proposals: null });
+    return created;
+  });
   return { process: proc, context, actions };
 }
 

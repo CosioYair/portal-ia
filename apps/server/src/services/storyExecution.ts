@@ -5,7 +5,8 @@ import { injectLessons, recordDetections } from './lessons.ts';
 import { practicesFor } from './agentTemplates.ts';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
-import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
+import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
+import { decisionsFromProcess } from './inbox.ts';
 import { activeAgents } from './activeAgents.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
@@ -120,10 +121,37 @@ export function createStoryProcess(slug: string, projectId: string, itemId: stri
   const pending = procs.list(projectId).find(p => p.backlogItemId === itemId && (p.status === 'pending_authorization' || p.status === 'running'));
   if (pending) return pending;
   const est = estimateStory(slug, projectId, itemId, opts);
-  const proc = procs.create({ projectId, kind: 'story_execution', title: `${item.storyId} · ${item.title}`, estimatedUsd: est.estimatedUsd, backlogItemId: itemId, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model, role: s.role, reason: s.reason })) });
-  // El equipo (con motivos y anulaciones) queda registrado desde el principio; runStory lo conserva.
-  procs.setResult(proc.id, { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: est.team ?? null, iterationContext: opts.iterationContext ?? null });
-  return procs.get(proc.id)!;
+  // HU-161 · Crear el proceso y superar las autorizaciones pendientes de las iteraciones anteriores en la MISMA
+  // transacción, venga de donde venga (Backlog, asistente, pipeline, reintento o nueva iteración). Se usa un
+  // SAVEPOINT para que también funcione anidado dentro de la transacción de iterateStory.
+  const db = workspaceDb(slug);
+  db.exec('SAVEPOINT create_story_process');
+  try {
+    const proc = procs.create({ projectId, kind: 'story_execution', title: `${item.storyId} · ${item.title}`, estimatedUsd: est.estimatedUsd, backlogItemId: itemId, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model, role: s.role, reason: s.reason })) });
+    // El equipo (con motivos y anulaciones) queda registrado desde el principio; runStory lo conserva.
+    procs.setResult(proc.id, { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: est.team ?? null, iterationContext: opts.iterationContext ?? null });
+    supersedePreviousIterations(slug, itemId, proc.id);
+    db.exec('RELEASE create_story_process');
+    return procs.get(proc.id)!;
+  } catch (e) {
+    try { db.exec('ROLLBACK TO create_story_process'); db.exec('RELEASE create_story_process'); } catch { /* el savepoint ya no existía */ }
+    throw e;
+  }
+}
+
+/**
+ * HU-161 · Una autorización vigente por historia: las iteraciones anteriores (no archivadas ni ya superadas) que
+ * todavía esperan una decisión del propietario quedan marcadas como superadas por `currentId`. No cambia su estado
+ * ni borra nada; se puede deshacer con «Restaurar» desde el historial. Devuelve los procesos marcados.
+ */
+export function supersedePreviousIterations(slug: string, itemId: string, currentId: string): string[] {
+  const repo = processesRepo(slug); const out: string[] = [];
+  for (const p of repo.listByBacklogItem(itemId)) {
+    if (p.id === currentId || p.kind !== 'story_execution' || p.archivedAt || p.supersededBy) continue;
+    if (decisionsFromProcess(slug, p).length === 0) continue;
+    if (repo.markSuperseded(p.id, currentId)) out.push(p.id);
+  }
+  return out;
 }
 
 export async function runStory(slug: string, processId: string, log: (o: any, m: string) => void, isCancelled: () => boolean) {

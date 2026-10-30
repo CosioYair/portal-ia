@@ -287,6 +287,13 @@ export interface Process {
   /** Archivado al iniciar una etapa: histórico, sin acciones. null = activo. */
   archivedAt?: string | null;
   archiveId?: string | null;
+  /**
+   * HU-161 · Iteración de la historia que sustituye a esta en las autorizaciones pendientes (id del proceso).
+   * null = vigente. Se puede revertir («Restaurar») y no borra ni cambia el estado del proceso.
+   */
+  supersededBy?: string | null;
+  /** Último cambio del marcado de superada (al marcarla o al restaurarla). null = nunca se marcó. */
+  supersededAt?: string | null;
   /** Descripción de «qué pasa y qué hacer» calculada por el servidor al servir el proceso (no se persiste). */
   guidance?: ProcessGuidance;
 }
@@ -1141,8 +1148,40 @@ export interface PendingDecision {
   impact: string;
   /** Qué ocurre al aprobar. */
   approveEffect: string;
+  /** Historia del backlog: id interno (BacklogItem.id), no el código «HU-xxx». null si el proceso no pertenece a una historia. */
+  storyId: string | null;
+  /** Número de iteración de la historia (1..N por fecha de creación); null fuera de historias. */
+  iteration: number | null;
+  /** Autorizaciones de iteraciones anteriores de la misma historia que esta deja superadas (solo visibles en el historial). */
+  supersededCount: number;
   /** Qué ocurre al denegar; null si el proceso original no tiene una acción de denegar (la decisión solo se puede aprobar o dejar pendiente). */
   denyEffect: string | null;
+}
+
+/** HU-161 · Decisión de una iteración anterior: no se puede aprobar, queda en el historial de la historia y se puede restaurar. */
+export interface SupersededDecision extends PendingDecision {
+  /** Proceso (iteración) que la sustituye; null si ahora mismo no hay ninguna vigente. */
+  supersededBy: string | null;
+  /** Número de iteración que la sustituye («Superada por la iteración N»). */
+  supersededByIteration: number | null;
+  supersededAt: string | null;
+}
+
+/** Historial de autorizaciones de una historia: la vigente (como mucho una) y las superadas, de la más reciente a la más antigua. */
+export interface StoryDecisionHistory {
+  /** Id interno de la historia (BacklogItem.id). */
+  storyId: string;
+  /** Código visible de la historia («HU-161»). */
+  storyCode: string;
+  current: PendingDecision | null;
+  superseded: SupersededDecision[];
+}
+
+/** Resultado de restaurar una autorización superada: las que eran vigentes pasan a superadas (como mucho una vigente por historia). */
+export interface RestoreSupersededResult {
+  ok: true;
+  processId: string;
+  superseded: string[];
 }
 
 export interface InboxDecisionResult {

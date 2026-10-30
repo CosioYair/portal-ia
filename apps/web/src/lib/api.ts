@@ -1,3 +1,4 @@
+import type { RestoreSupersededResult, StoryDecisionHistory } from '@portal-ia/domain';
 import type { PipelineConfig, PhaseTransition, PhaseTransitionPreview, ProjectArchive, StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
 import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
@@ -251,5 +252,9 @@ export const api = {
   // HU-009 / HU-137 · bandeja de autorizaciones
   inbox: (slug: string) => request<PendingDecision[]>(`/api/workspaces/${slug}/inbox`),
   decideInbox: (slug: string, kind: PendingDecisionKind, processId: string, verdict: DecisionVerdict, reason?: string) =>
-    request<InboxDecisionResult>(`/api/workspaces/${slug}/inbox/${kind}/${processId}/decision`, { method: 'POST', body: JSON.stringify({ verdict, reason: reason?.trim() ? reason.trim() : undefined }) })
+    request<InboxDecisionResult>(`/api/workspaces/${slug}/inbox/${kind}/${processId}/decision`, { method: 'POST', body: JSON.stringify({ verdict, reason: reason?.trim() ? reason.trim() : undefined }) }),
+  // HU-161 · una autorización vigente por historia: historial (vigente + superadas) y restauración reversible sin costo.
+  storyDecisions: (slug: string, storyId: string) => request<StoryDecisionHistory>(`/api/workspaces/${slug}/stories/${encodeURIComponent(storyId)}/decisions`),
+  restoreSuperseded: (slug: string, processId: string) =>
+    request<RestoreSupersededResult>(`/api/workspaces/${slug}/inbox/superseded/${encodeURIComponent(processId)}/restore`, { method: 'POST', body: JSON.stringify({ authorized: true }) })
 };

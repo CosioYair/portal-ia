@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
-import type { PipelineConfig, Process, StoryContext } from '@portal-ia/domain';
+import type { PendingDecision, PipelineConfig, Process, StoryContext, StoryDecisionHistory } from '@portal-ia/domain';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
 import { PipelineOptions } from '../components/PipelineOptions.tsx';
 import { api } from '../lib/api.ts';
@@ -12,6 +12,7 @@ import { Markdown } from '../components/Markdown.tsx';
 import { StoryResult } from '../components/StoryResult.tsx';
 import { IterationComposer } from '../components/IterationComposer.tsx';
 import { StoryFlowPanel } from '../components/StoryFlowPanel.tsx';
+import { KIND_LABEL, PendingDecisionCard } from '../components/PendingDecisionCard.tsx';
 
 const ROLE: Record<string, string> = { planner: 'planifica', implementer: 'implementa', reviewer: 'revisa', consultant: 'consulta' };
 type Tab = 'estado' | 'chat' | 'tareas' | 'iteraciones';
@@ -34,7 +35,11 @@ export function StoryWorkspace() {
   const [tab, setTab] = useState<Tab>(() => tabFromHash(hash) ?? 'estado');
   // Un fallo al leer no borra la pantalla si ya hay datos (la cabecera avisa de la conexión) y el sondeo sigue intentando.
   const loaded = useRef(false);
-  const load = async () => { try { const c = await api.story(slug, storyId!); loaded.current = true; setCtx(c); setErr(null); return c; } catch (e: any) { if (!loaded.current) setErr(e.message); return null; } };
+  // HU-161 · autorización vigente e historial de superadas: la misma lista consolidada que la bandeja (sin deducirla aquí).
+  const [decisions, setDecisions] = useState<StoryDecisionHistory | null>(null);
+  const [decErr, setDecErr] = useState<string | null>(null);
+  const loadDecisions = () => api.storyDecisions(slug, storyId!).then(h => { setDecisions(h); setDecErr(null); }).catch((e: any) => setDecErr(e.message));
+  const load = async () => { try { const c = await api.story(slug, storyId!); loaded.current = true; setCtx(c); setErr(null); void loadDecisions(); return c; } catch (e: any) { if (!loaded.current) setErr(e.message); return null; } };
   // El sondeo se reanuda cuando el último proceso vuelve a estar activo (p. ej. al continuar desde la cabecera).
   const active = ctx?.lastProcess?.status === 'running' || ctx?.lastProcess?.status === 'pending_authorization';
   useEffect(() => { let alive = true; let timer: ReturnType<typeof setTimeout> | undefined; const tick = async () => { const c = await load(); if (!alive) return; if (c === null ? active : c.lastProcess && (c.lastProcess.status === 'running' || c.lastProcess.status === 'pending_authorization')) timer = setTimeout(tick, c === null ? 5000 : 3000); }; void tick(); return () => { alive = false; clearTimeout(timer); }; // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -79,7 +84,17 @@ export function StoryWorkspace() {
   };
   const [budget, setBudget] = useState(''); const [authIter, setAuthIter] = useState(false);
   const [pipeline, setPipeline] = useState<PipelineConfig>(DEFAULT_PIPELINE);
-  const pending = ctx?.processes.find(p => p.status === 'pending_authorization') ?? null;
+  const dec = decisions?.storyId === storyId ? decisions : null;
+  const currentDecision = dec?.current ?? null;
+  // Solo la iteración vigente se autoriza; mientras carga el historial, nunca una marcada como superada.
+  const pending = (dec
+    ? (currentDecision?.kind === 'process_authorization' ? ctx?.processes.find(p => p.id === currentDecision.processId) : undefined)
+    : ctx?.processes.find(p => p.status === 'pending_authorization' && !p.supersededBy)) ?? null;
+  const restore = async (d: PendingDecision) => {
+    await api.restoreSuperseded(slug, d.processId);
+    flash(`Autorización de la iteración ${d.iteration ?? '—'} restaurada: vuelve a ser la vigente`);
+    await load();
+  };
   useEffect(() => { if (pending && !budget) setBudget(Math.max(0.5, Math.ceil(pending.estimatedUsd * 2 * 2) / 2).toFixed(2)); }, [pending, budget]);
   const authorize = async () => { if (!pending) return; setIterBusy(true); try { await api.authorizeProcess(slug, pending.id, Number(budget), pipeline); flash(`Iteración autorizada con ${fmtUsd(Number(budget))}`); setAuthIter(false); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setIterBusy(false); } };
 
@@ -103,6 +118,18 @@ export function StoryWorkspace() {
             {!last && it.status === 'pending' && !it.archivedAt && <button className="btn btn-primary btn-sm" onClick={() => navigate('/backlog#ejecutar')}>{Icon.arrow()}Ejecutar desde Backlog</button>}
           </div>
         </header>
+        {currentDecision && !it.archivedAt && <Notice kind="warn"><div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', flex: 1 }}>
+          <strong>Pendiente de tu decisión</strong>
+          <Chip tone="accent" xs>Iteración {currentDecision.iteration ?? '—'}</Chip>
+          <span>{KIND_LABEL[currentDecision.kind]} · {currentDecision.impact}</span>
+          {currentDecision.supersededCount > 0 && <button className="lnk small" onClick={() => openTab('iteraciones')}>{currentDecision.supersededCount === 1 ? '1 autorización anterior superada' : `${currentDecision.supersededCount} autorizaciones anteriores superadas`} · ver historial</button>}
+          <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+            {currentDecision.kind === 'process_authorization'
+              ? <button className="btn btn-primary btn-sm" onClick={() => openTab('iteraciones')}>Autorizar iteración</button>
+              : <Link className="btn btn-secondary btn-sm" to={`/procesos/${currentDecision.processId}`}>Decidir en el proceso</Link>}
+            <Link className="btn btn-ghost btn-sm" to="/autorizaciones">Autorizaciones</Link>
+          </span>
+        </div></Notice>}
         {it.archivedAt && <Notice kind="info"><strong>Historia archivada</strong> con la etapa anterior ({new Date(it.archivedAt).toLocaleDateString('es-MX')}). Es histórica: puedes consultarla, pero no admite acciones. Para retomarla, restáurala desde el <Link className="lnk" to="/archivo">archivo histórico</Link>.</Notice>}
         <fieldset disabled={!!it.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
         {last?.guidance?.flow ? <StoryFlowPanel proc={last} story={{ id: it.id, storyId: it.storyId, title: it.title }} variant="story" onChange={onProcChange}
@@ -161,7 +188,7 @@ export function StoryWorkspace() {
             {tab === 'iteraciones' && <section className="card">
               <div className="card-h"><div><div className="h3">Iteraciones</div><div className="small muted">Cada iteración es un proceso del equipo con el contexto de la anterior: feedback de la prueba, tareas abiertas, conversación y tu nota.</div></div></div>
               <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                {ctx.processes.map((p, i) => <div key={p.id} className="rrow" style={{ alignItems: 'flex-start' }}><span className="mono small muted">#{ctx.processes.length - i}</span><span style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2 }}><span style={{ fontWeight: 500 }}>{p.guidance?.phase ?? p.status}</span><span className="small muted">{new Date(p.createdAt).toLocaleString()} · {p.steps.length} pasos · gastado {fmtUsd(p.spentUsd)} de {fmtUsd(p.budgetUsd)}{p.result?.iterationContext ? ' · con contexto de iteración' : ''}</span></span><Link className="btn btn-ghost btn-sm" to={`/procesos/${p.id}`}>Abrir</Link></div>)}
+                {ctx.processes.map((p, i) => <div key={p.id} className="rrow" style={{ alignItems: 'flex-start' }}><span className="mono small muted">#{ctx.processes.length - i}</span><span style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2 }}><span style={{ fontWeight: 500 }}>{p.guidance?.phase ?? p.status}{p.supersededBy && <> <Chip xs>autorización superada</Chip></>}</span><span className="small muted">{new Date(p.createdAt).toLocaleString()} · {p.steps.length} pasos · gastado {fmtUsd(p.spentUsd)} de {fmtUsd(p.budgetUsd)}{p.result?.iterationContext ? ' · con contexto de iteración' : ''}</span></span><Link className="btn btn-ghost btn-sm" to={`/procesos/${p.id}`}>Abrir</Link></div>)}
                 {pending ? <Notice kind="warn"><div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <div><strong>Iteración pendiente de autorización</strong> · estimación ≈ {fmtUsd(pending.estimatedUsd)} · {pending.steps.length} pasos ({pending.steps.map(s => s.agentName).join(', ')})</div>
                   {pending.result?.iterationContext && <details><summary className="small muted" style={{ cursor: 'pointer' }}>Contexto que recibirá el equipo</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap', fontSize: 12, background: '#FAF9F6', padding: 8, borderRadius: 8 }}>{pending.result.iterationContext}</pre></details>}
@@ -171,6 +198,15 @@ export function StoryWorkspace() {
                   <IterationComposer key={`${ctx.iterations}:${note}`} slug={slug} itemId={it.id} iteration={ctx.iteration} nextNumber={ctx.iterations + 1} initialNote={note}
                     onCreated={async () => { setNote(''); flash('Iteración creada: autorízala con un presupuesto'); await load(); }} />
                 </div>}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid #EEECE6', paddingTop: 10 }}>
+                  <div className="eyebrow">Historial de autorizaciones superadas</div>
+                  {decErr && <Notice kind="err"><strong>No se pudo cargar el historial de autorizaciones.</strong> {decErr}</Notice>}
+                  {!dec && !decErr && <span className="small muted" style={{ display: 'flex', gap: 8, alignItems: 'center' }}><span className="spin" aria-hidden="true" /> Cargando historial…</span>}
+                  {dec && dec.superseded.length === 0 && <span className="small muted">Ninguna. Cada historia tiene como máximo una autorización vigente; al crear una iteración nueva, la pendiente anterior aparece aquí como superada.</span>}
+                  {dec && dec.superseded.length > 0 && <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {dec.superseded.map(d => <PendingDecisionCard key={d.id} decision={d} superseded={{ byIteration: d.supersededByIteration, at: d.supersededAt }} onRestore={restore} />)}
+                  </ul>}
+                </div>
               </div>
             </section>}
             </fieldset>

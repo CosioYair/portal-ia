@@ -2,11 +2,14 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { PENDING_DECISION_KINDS } from '@portal-ia/domain';
 import { workspacesRepo } from '../db/platform.ts';
-import { decide, InboxError, listPendingDecisions } from '../services/inbox.ts';
+import { decide, InboxError, listPendingDecisions, listStoryDecisionHistory, restoreSupersededDecision } from '../services/inbox.ts';
 
 const slugParams = z.object({ slug: z.string().min(1) });
 const decisionParams = z.object({ slug: z.string().min(1), kind: z.enum(PENDING_DECISION_KINDS), processId: z.string().min(1) });
 const decisionBody = z.object({ verdict: z.enum(['approve', 'deny']), reason: z.string().max(2000).optional() });
+const storyParams = z.object({ slug: z.string().min(1), id: z.string().min(1) });
+const restoreParams = z.object({ slug: z.string().min(1), processId: z.string().min(1) });
+const restoreBody = z.object({ authorized: z.literal(true) });
 
 function fail(reply: FastifyReply, e: unknown) {
   if (e instanceof InboxError) return reply.code(e.status).send({ error: e.message });
@@ -32,5 +35,23 @@ export async function inboxRoutes(app: FastifyInstance) {
     try {
       return await decide(app, params.data.slug, params.data.kind, params.data.processId, body.data.verdict, body.data.reason);
     } catch (e) { return fail(reply, e); }
+  });
+
+  // HU-161 · Historial de autorizaciones de una historia: la vigente y las superadas (solo lectura).
+  app.get('/api/workspaces/:slug/stories/:id/decisions', async (req, reply) => {
+    const params = storyParams.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: 'Historia no válida' });
+    if (!workspacesRepo.get(params.data.slug)) return reply.code(404).send({ error: 'Empresa no encontrada' });
+    try { return listStoryDecisionHistory(params.data.slug, params.data.id); } catch (e) { return fail(reply, e); }
+  });
+
+  // HU-161 · Restaurar una autorización superada (reversible, sin costo de IA); requiere confirmación explícita.
+  app.post('/api/workspaces/:slug/inbox/superseded/:processId/restore', async (req, reply) => {
+    const params = restoreParams.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: 'Proceso no válido' });
+    const body = restoreBody.safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Restaurar una autorización requiere confirmación explícita (authorized: true).' });
+    if (!workspacesRepo.get(params.data.slug)) return reply.code(404).send({ error: 'Empresa no encontrada' });
+    try { return restoreSupersededDecision(params.data.slug, params.data.processId); } catch (e) { return fail(reply, e); }
   });
 }
