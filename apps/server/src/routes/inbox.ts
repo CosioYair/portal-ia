@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { PENDING_DECISION_KINDS } from '@portal-ia/domain';
 import { workspacesRepo } from '../db/platform.ts';
-import { decide, InboxError, listPendingDecisions, listStoryDecisionHistory, restoreSupersededDecision } from '../services/inbox.ts';
+import { decide, InboxError, listPendingDecisions, listStoryDecisionHistory, restoreSupersededDecision, summarizePendingDecisions } from '../services/inbox.ts';
 
 const slugParams = z.object({ slug: z.string().min(1) });
 const decisionParams = z.object({ slug: z.string().min(1), kind: z.enum(PENDING_DECISION_KINDS), processId: z.string().min(1) });
@@ -23,6 +23,15 @@ export async function inboxRoutes(app: FastifyInstance) {
     if (!params.success) return reply.code(400).send({ error: 'Empresa no válida' });
     if (!workspacesRepo.get(params.data.slug)) return reply.code(404).send({ error: 'Empresa no encontrada' });
     try { return await listPendingDecisions(app, params.data.slug); } catch (e) { return fail(reply, e); }
+  });
+
+  // HU-161 · Resumen de la bandeja con el invariante «una autorización vigente por historia» (solo lectura, sin IA).
+  // Siempre devuelve total, stories, storiesWithMultipleCurrent, unmarkedDuplicates, supersededPending y checkedAt.
+  app.get('/api/workspaces/:slug/inbox/summary', async (req, reply) => {
+    const params = slugParams.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: 'Empresa no válida' });
+    if (!workspacesRepo.get(params.data.slug)) return reply.code(404).send({ error: 'Empresa no encontrada' });
+    try { return await summarizePendingDecisions(app, params.data.slug); } catch (e) { return fail(reply, e); }
   });
 
   // Aprobar o denegar una decisión: delega en las mismas rutas del proceso.

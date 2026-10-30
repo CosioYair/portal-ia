@@ -294,6 +294,13 @@ export interface Process {
   supersededBy?: string | null;
   /** Último cambio del marcado de superada (al marcarla o al restaurarla). null = nunca se marcó. */
   supersededAt?: string | null;
+  /** HU-161 · Número de iteración de la historia (1..N por fecha de creación). Se calcula al servir el contexto de la historia y no se persiste. */
+  iteration?: number;
+  /**
+   * HU-161 · Iteración que sustituye a esta (se calcula al servir el contexto de la historia y no se persiste).
+   * null o ausente = vigente. Si está presente, el cliente no ofrece «Autorizar» y la muestra solo en el historial.
+   */
+  superseded?: { byProcessId: string; byIteration: number | null; at: string | null } | null;
   /** Descripción de «qué pasa y qué hacer» calculada por el servidor al servir el proceso (no se persiste). */
   guidance?: ProcessGuidance;
 }
@@ -1175,6 +1182,22 @@ export interface StoryDecisionHistory {
   storyCode: string;
   current: PendingDecision | null;
   superseded: SupersededDecision[];
+}
+
+/** HU-161 · Resumen de la bandeja con el invariante «una autorización vigente por historia». Siempre trae las seis claves. */
+export interface PendingDecisionsSummary {
+  /** Entradas de la bandeja (la misma lista que devuelve GET /inbox). */
+  total: number;
+  /** Historias distintas con alguna entrada en la bandeja. */
+  stories: number;
+  /** Historias que aparecen más de una vez en la bandeja final. Debe ser 0. */
+  storiesWithMultipleCurrent: number;
+  /** Historias con más de una decisión pendiente sin marcar como superada en la base (falta migrar). Debe ser 0 tras la migración. */
+  unmarkedDuplicates: number;
+  /** Procesos marcados como superados que siguen esperando una decisión (solo visibles en el historial). */
+  supersededPending: number;
+  /** Momento del cálculo (ISO). */
+  checkedAt: string;
 }
 
 /** Resultado de restaurar una autorización superada: las que eran vigentes pasan a superadas (como mucho una vigente por historia). */

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
-import type { DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, Process, RestoreSupersededResult, StoryDecisionHistory, SupersededDecision } from '@portal-ia/domain';
+import type { DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, PendingDecisionsSummary, Process, RestoreSupersededResult, StoryDecisionHistory, SupersededDecision } from '@portal-ia/domain';
 import { backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 
 /** Error con código HTTP para que la ruta lo traduzca tal cual. */
@@ -151,6 +151,36 @@ export function consolidateDecisions(slug: string, processes: Process[], all: Pr
   return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+/**
+ * Función pura (invariante de HU-161): número de historias (storyId no nulo) que aparecen más de una vez en la lista
+ * recibida. Sobre la salida final de la bandeja debe ser 0. Con una lista sin consolidar que tenga duplicados, es mayor que 0.
+ */
+export function countStoriesWithMultipleCurrent(decisions: PendingDecision[]): number {
+  const seen = new Map<string, number>();
+  for (const d of decisions) if (d.storyId) seen.set(d.storyId, (seen.get(d.storyId) ?? 0) + 1);
+  let n = 0;
+  for (const c of seen.values()) if (c > 1) n++;
+  return n;
+}
+
+/**
+ * Función pura: historias con más de una decisión pendiente entre procesos vigentes, es decir, sin supersededBy y sin
+ * archivar. Si es mayor que 0, falta consolidar (migrar) las duplicadas en la base.
+ */
+export function unmarkedDuplicates(slug: string, processes: Process[]): number {
+  const perStory = new Map<string, number>();
+  for (const p of processes) {
+    if (p.supersededBy || p.archivedAt) continue;
+    const key = storyKey(p);
+    if (!key) continue;
+    const n = decisionsFromProcess(slug, p).length;
+    if (n > 0) perStory.set(key, (perStory.get(key) ?? 0) + n);
+  }
+  let out = 0;
+  for (const c of perStory.values()) if (c > 1) out++;
+  return out;
+}
+
 /** Si la decisión de un proceso de historia está superada, el motivo para el 409; null si es la vigente. */
 function supersededMessage(slug: string, p: Process): string | null {
   const key = storyKey(p);
@@ -215,6 +245,32 @@ export async function listPendingDecisions(app: FastifyInstance, slug: string): 
     out.push(...consolidateDecisions(slug, listedFull, all));
   }
   return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+/**
+ * Resumen de la bandeja (solo lectura). El invariante storiesWithMultipleCurrent se calcula sobre la MISMA salida de
+ * listPendingDecisions que ve el propietario. unmarkedDuplicates y supersededPending se calculan sobre la base sin
+ * consolidar (repo.listAll por proyecto). Siempre devuelve las seis claves, aunque no haya nada pendiente.
+ */
+export async function summarizePendingDecisions(app: FastifyInstance, slug: string): Promise<PendingDecisionsSummary> {
+  const decisions = await listPendingDecisions(app, slug);
+  const stories = new Set(decisions.map(d => d.storyId).filter((s): s is string => !!s));
+  const repo = processesRepo(slug);
+  let unmarked = 0;
+  let supersededPending = 0;
+  for (const project of projectsRepo(slug).list()) {
+    const all = repo.listAll(project.id);
+    unmarked += unmarkedDuplicates(slug, all);
+    supersededPending += all.filter(p => p.supersededBy && !p.archivedAt && decisionsFromProcess(slug, p).length > 0).length;
+  }
+  return {
+    total: decisions.length,
+    stories: stories.size,
+    storiesWithMultipleCurrent: countStoriesWithMultipleCurrent(decisions),
+    unmarkedDuplicates: unmarked,
+    supersededPending,
+    checkedAt: new Date().toISOString()
+  };
 }
 
 /**
