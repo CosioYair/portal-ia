@@ -14,10 +14,19 @@ const execFileP = promisify(execFile);
  * (herramientas de riesgo `auth`). Las escrituras van a una rama de trabajo propia y se confirman en git para que
  * todo cambio sea revisable y reversible. Nunca se toca `.git`, `data/`, `node_modules/`, ni archivos con secretos.
  */
-const FORBIDDEN = [/^\.git(\/|$)/i, /^data(\/|$)/i, /^node_modules(\/|$)/i, /(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?$/i, /\.(key|pem|p12|pfx)$/i, /(^|\/)\.master\.key$/i,
-  // Credenciales y configuración local: tampoco se ESCRIBEN (un agente podría redirigir el registro de paquetes o colar una clave).
-  /(^|\/)\.git(\/|$)/i, /(^|\/)\.npmrc$/i, /(^|\/)\.(ssh|aws|claude)(\/|$)/i, /(^|\/)secrets?(\/|$)/i, /(^|\/)\.credentials\.json$/i,
-  /(^|\/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i, /(^|\/)\.(netrc|git-credentials|pypirc|envrc)$/i, /(^|\/)\.env[-_](?!example$|sample$|template$)[^/]*$/i];
+const FORBIDDEN = [/^\.git(\/|$)/i, /^data(\/|$)/i, /^node_modules(\/|$)/i, /(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?$/i, /\.(key|pem|p12|pfx)$/i, /(^|\/)\.master\.key$/i];
+/**
+ * Credenciales y configuración local: nunca se leen ni las ESCRIBE un agente (podría redirigir el registro de paquetes o
+ * colar una clave). Las acciones del propio propietario (su corrección externa, resolver un conflicto) no se bloquean aquí.
+ */
+const AGENT_WRITE_FORBIDDEN = [/(^|\/)\.git(\/|$)/i, /(^|\/)\.npmrc$/i, /(^|\/)\.(ssh|aws|claude)(\/|$)/i, /(^|\/)secrets?(\/|$)/i, /(^|\/)\.credentials\.json$/i,
+  /(^|\/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i, /(^|\/)\.(netrc|git-credentials|pypirc|envrc)$/i, /(^|\/)\.env[-_](?!example$|sample$|template$|dist$)[^/]*$/i];
+/** Ruta que un AGENTE puede proponer cambiar: segura y fuera de credenciales y configuración local. */
+export function agentRelPath(p: string): string {
+  const norm = safeRelPath(p);
+  if (AGENT_WRITE_FORBIDDEN.some(r => r.test(norm))) throw Object.assign(new Error(`Ruta protegida (credenciales o configuración local): ${p}`), { statusCode: 400 });
+  return norm;
+}
 
 /** Patrones de secretos que no deben entrar en un repositorio (aviso, no bloqueo: el propietario decide). */
 const SECRET_PATTERNS: [RegExp, string][] = [
@@ -91,7 +100,7 @@ export function repoRoot(repoPath: string): string { return path.resolve(expandH
  * Lo que NUNCA se lee ni se envía a un modelo (puente MCP, contexto del pipeline, búsqueda, diferencias): lo prohibido para
  * escribir y, además, credenciales y configuración local. Sin distinguir mayúsculas (Windows).
  */
-const READ_PROTECTED = [...FORBIDDEN, /(^|\/)node_modules(\/|$)/i, /(^|\/)\.git(\/|$)/i, /(^|\/)\.claude(\/|$)/i, /(^|\/)\.ssh(\/|$)/i, /(^|\/)\.aws(\/|$)/i,
+const READ_PROTECTED = [...FORBIDDEN, ...AGENT_WRITE_FORBIDDEN, /(^|\/)node_modules(\/|$)/i, /(^|\/)\.git(\/|$)/i, /(^|\/)\.claude(\/|$)/i, /(^|\/)\.ssh(\/|$)/i, /(^|\/)\.aws(\/|$)/i,
   /(^|\/)\.npmrc$/i, /(^|\/)\.credentials\.json$/i, /(^|\/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i, /(^|\/)secrets?(\/|$)/i, /\.(keystore|jks|kdbx)$/i];
 export function readProtectedReason(rel: string): string | null {
   let norm: string;
@@ -124,8 +133,9 @@ export function readRepoFile(repoPath: string, rel: string, maxChars = 60_000): 
  * existente, con el ancestro existente más profundo dentro de la carpeta según el sistema. Un enlace creado dentro del
  * worktree (p. ej. por código del agente durante la verificación) nunca saca una escritura ni un borrado de la carpeta.
  */
-export function writablePath(root: string, rel: string): string {
-  const norm = safeRelPath(rel);
+export function writablePath(root: string, rel: string, opts: { agent?: boolean } = {}): string {
+  // Por defecto, una escritura del agente (lo más estricto); `agent: false` solo para acciones del propietario.
+  const norm = opts.agent === false ? safeRelPath(rel) : agentRelPath(rel);
   const realRoot = fs.realpathSync.native(root);
   const deny = (why: string) => Object.assign(new Error(`Ruta no permitida (${why}): ${rel}`), { statusCode: 400 });
   let cur = realRoot;
@@ -181,7 +191,7 @@ export function annotateChanges(repoPath: string, changes: RawChange[]): Propose
   return changes.map(c => {
     const relDisplay = c.path.replace(/\\/g, '/');
     let rel: string;
-    try { rel = safeRelPath(c.path); } catch (e: any) { return { path: relDisplay, action: c.action === 'delete' ? 'delete' : 'modify', content: null, diff: '', before: 0, after: 0, error: e.message } as ProposedChange; }
+    try { rel = agentRelPath(c.path); } catch (e: any) { return { path: relDisplay, action: c.action === 'delete' ? 'delete' : 'modify', content: null, diff: '', before: 0, after: 0, error: e.message } as ProposedChange; }
     const existingRaw = readRepoFile(repoPath, rel, 400_000);
     const existing = existingRaw === null ? null : existingRaw.replace(/\r\n/g, '\n'); // comparar siempre en LF (Windows suele guardar CRLF)
     const before = existing ?? '';

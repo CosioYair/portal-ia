@@ -259,3 +259,22 @@ Se retiran el worktree y la rama sin integrar. Antes, la segunda ejecución fall
 - el paso del planificador muestra solo el coste de su última llamada (el total del proceso es correcto).
 
 **Docker.** Ver «Verificación» en `IMPLEMENTATION_HANDOFF.md`.
+
+**Cuarta revisión (verificación de `79d4521`).**
+
+Confirmó: escrituras sin enlaces, sin hooks, confirmación del descarte y el registro que ya no se pierde.
+
+Defectos nuevos, corregidos con prueba:
+- «Seguir con este plan» podía revivir una iteración RECHAZADA (con una llamada de implementación pagada) y no
+  comprobaba si había otro proceso en marcha ni si el equipo podía ejecutar. Ahora rechaza lo integrado o rechazado,
+  aplica las mismas comprobaciones que «continuar», conserva la actividad anterior y devuelve la guía.
+- Las evaluaciones organizativas no tenían tope de llamadas: se les asigna al crearlas.
+- La lista de credenciales bloqueaba también acciones del propietario (su corrección externa, resolver un conflicto).
+  Ahora solo bloquea las escrituras de los agentes; la lista base (.git, data/, node_modules/, .env, claves) sigue
+  aplicándose a todo.
+- La prueba manual (una llamada que pide el propietario) quedaba bloqueada si la ejecución había agotado su tope: no
+  cuenta para ese tope.
+- Otros: `.env-dist` es una plantilla como `.env.dist`; la casilla de descarte se reinicia; las carpetas temporales sin
+  hooks se retiran al salir.
+
+Sin corregir: los enlaces duros no se detectan. Bajo Docker no dan salida al agente fuera del worktree.

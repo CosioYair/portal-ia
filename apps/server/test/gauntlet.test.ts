@@ -313,6 +313,9 @@ test('revisión del plan sin progreso y con un bloqueante: se pausa ANTES de imp
   const flow = await flowOf(p.id);
   const accept = flow.actions.find((a: any) => a.id === 'accept_plan'); assert.ok(accept, JSON.stringify(flow.actions.map((a: any) => a.id)));
   const plans = byRule(R.plan).length; const reviews = byRule(R.review).length;
+  // Con otro proceso en marcha, no: como al continuar.
+  const blocker = processesRepo(S).create({ projectId: project.id, kind: 'story_execution', title: 'otro en marcha', estimatedUsd: 0, steps: [] }); processesRepo(S).authorize(blocker.id, 1);
+  assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/accept-plan`, payload: { authorized: true } })).statusCode, 409); processesRepo(S).finish(blocker.id, 'cancelled', 'fin');
   assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/accept-plan`, payload: {} })).statusCode, 400, 'exige autorización');
   const res = await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/accept-plan`, payload: { authorized: true, addBudgetUsd: 0.5 } });
   assert.equal(res.statusCode, 200, res.body);
@@ -321,6 +324,16 @@ test('revisión del plan sin progreso y con un bloqueante: se pausa ANTES de imp
   assert.equal(byRule(R.plan).length, plans, 'no se paga otro plan'); assert.equal(byRule(R.review).length, reviews, 'ni otra revisión');
   assert.equal(byRule(R.dev).length, 1); assert.equal(done.result!.gauntlet!.planReview!.ownerAccepted, true);
   assert.match(done.result!.gauntlet!.planReview!.reason!, /Aceptado por el propietario/);
+  assert.ok(done.result!.pipeline!.events.some(e => /Revisión del plan/.test(e.message)), 'la actividad anterior (la revisión y la pausa) se conserva');
+  assert.ok(res.json().guidance, 'la respuesta trae la guía, como «continuar»');
+  // Una iteración RECHAZADA nunca revive aceptando su plan.
+  setScript([PASS], [FIX1], [REV_REVISE, REV_REVISE]);
+  const { p: q } = await authorize('Plan rechazado', { gauntlet: { mode: 'deep' } });
+  assert.equal(q.result!.pipeline!.pauseKind, 'plan');
+  assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${q.id}/reject`, payload: {} })).statusCode, 200);
+  const devBefore = byRule(R.dev).length;
+  assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${q.id}/accept-plan`, payload: { authorized: true } })).statusCode, 409);
+  assert.equal(byRule(R.dev).length, devBefore, 'sin llamada de implementación');
 });
 
 test('E · continuar sin más evaluación tras la detención: sin IA, sin repetir QA ni la evaluación; las brechas quedan documentadas', async () => {

@@ -126,12 +126,17 @@ export async function processRoutes(app: FastifyInstance) {
     if (!proc || proc.kind !== 'story_execution' || !proc.result?.plan) return reply.code(404).send({ error: 'Proceso de historia no encontrado' });
     if (proc.status === 'running' || proc.status === 'pending_authorization') return reply.code(409).send({ error: 'El proceso sigue activo o pendiente de autorizar.' });
     const pr = proc.result.gauntlet?.planReview;
+    if (proc.result.merged || proc.result.rejected) return reply.code(409).send({ error: proc.result.merged ? 'Ya está integrado en la rama principal.' : 'Esta iteración se rechazó; crea una nueva iteración.' });
     if (proc.result.pipeline?.pauseKind !== 'plan' || pr?.status !== 'paused') return reply.code(409).send({ error: 'Solo se acepta un plan que la revisión independiente dejó en pausa.', code: 'not_plan_review_pause' });
+    if (procs.running().length) return reply.code(409).send({ error: 'Ya hay un proceso en ejecución. Espera a que termine.' });
+    // Las mismas comprobaciones que «continuar»: un equipo que no puede ejecutar no empieza (sin cambiar nada).
+    const readiness = teamReadiness(slug, id);
+    if (readiness && !readiness.ready && readiness.fallback !== 'api') return reply.code(409).send({ error: `No se continúa: ${readiness.team.find(t => !t.ready)!.reason}`, code: 'backend_not_ready', readiness });
     procs.setResult(id, { ...proc.result, gauntlet: { ...proc.result.gauntlet!, planReview: { ...pr, status: 'approved_with_gaps', ownerAccepted: true, reason: `Aceptado por el propietario con lo pendiente documentado: ${pr.reason ?? ''}` } } });
     procs.resume(id, Math.max(proc.budgetUsd, proc.spentUsd) + (body.data.addBudgetUsd ?? 0));
     const run = runStory(slug, id, (o: any, m: string) => app.log.info(o, m), () => isCancelled(id)).finally(() => clearCancel(id));
     trackJob(id, run).catch(e => app.log.error({ err: e?.message, processId: id }, 'fallo inesperado al seguir con el plan aceptado'));
-    return procs.get(id);
+    return await withGuidance(slug, procs.get(id)!);
   });
   app.post('/api/workspaces/:slug/processes/:id/continue', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;

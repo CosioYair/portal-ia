@@ -9,6 +9,7 @@ import path from 'node:path';
  * propia de este proceso. La verificación del código ocurre en Docker, no en hooks. PORTAL_GIT_HOOKS=1 lo desactiva.
  */
 export const NO_HOOKS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-sin-hooks-'));
+process.on('exit', () => { try { fs.rmdirSync(NO_HOOKS_DIR); } catch { /* ya no existe o no está vacía */ } });
 if (process.env.PORTAL_GIT_HOOKS !== '1' && !process.env.PORTAL_GIT_NO_HOOKS_SET) {
   const n = Number(process.env.GIT_CONFIG_COUNT ?? 0) || 0;
   process.env[`GIT_CONFIG_KEY_${n}`] = 'core.hooksPath';

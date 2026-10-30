@@ -199,7 +199,7 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   const config = proc.result?.pipeline?.config ?? null;
   // Plan aceptado por el propietario tras una pausa de la revisión: se reutiliza (ni otro plan ni otra revisión).
   const accepted = proc.result?.gauntlet?.planReview?.ownerAccepted && proc.result.plan ? proc.result.plan : null;
-  const result: ExecutionResult = { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: proc.result?.team ?? null, consultations: [], iterationContext: proc.result?.iterationContext ?? null, pipeline: config ? newPipeline(config) : null, failure: null, ...(accepted ? { gauntlet: proc.result!.gauntlet } : {}) };
+  const result: ExecutionResult = { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: proc.result?.team ?? null, consultations: [], iterationContext: proc.result?.iterationContext ?? null, pipeline: config ? (accepted && proc.result?.pipeline ? { ...newPipeline(config), events: proc.result.pipeline.events } : newPipeline(config)) : null, failure: null, ...(accepted ? { gauntlet: proc.result!.gauntlet } : {}) };
   const iterText = result.iterationContext ? `\n# Contexto de iteración (feedback del propietario y estado anterior; OBLIGATORIO tenerlo en cuenta)\n${result.iterationContext}\n` : '';
   const involved = Array.from(new Set(proc.steps.map(s => s.agentId)));
   const roleStep = (role: TeamRole) => { const st = stepByRole(proc, role); if (!st) throw new Error(`El proceso no tiene paso de ${role}.`); return st; };
@@ -505,7 +505,7 @@ export async function generateManualTest(slug: string, processId: string, log: (
   const item = workItemOf(slug, proc) ?? undefined;
   const providerId = agent.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-  const cc = agentCaller(slug, agent, proc.projectId, 'Prueba manual', proc.id);
+  const cc = agentCaller(slug, agent, proc.projectId, 'Prueba manual');
   if (!cc && (!cred || prow.status !== 'connected')) throw Object.assign(new Error(`El proveedor ${providerId} no está conectado.`), { statusCode: 409 });
   const models: ModelInfo[] = JSON.parse(prow.models_json);
   const r = proc.result!;

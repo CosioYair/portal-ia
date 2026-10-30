@@ -150,6 +150,7 @@ export function createOrgEvaluation(slug: string, projectId: string | null, budg
   const proc = procs.create({ projectId: anchor.id, kind: 'delegated_task', title: `Evaluación organizativa · ${label}`, estimatedUsd: est.estimatedUsd, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model })) });
   const d: DelegationResult = { request: `Evaluar si la organización (${label}) tiene los agentes y departamentos adecuados según el contenido real.${b.direction ? ` Dirección del propietario: ${b.direction.slice(0, 300)}` : b.skipped && briefIsEmpty(b) ? ' Sin indicaciones del propietario.' : ''}`, leadAgentId: gestor.id, leadAgentName: gestor.config.name, triage: null, consulted: [], deliverable: null, knowledgeDocId: null, backlogOps: [], opsApplied: null };
   procs.setDelegation(proc.id, d);
+  procs.setCallCap(proc.id, Math.max(6, proc.steps.length * 3)); // tope de llamadas a la suscripción, como cualquier encargo
   procs.authorize(proc.id, budgetUsd);
   const evaluation = evals.create({ scopeKind: project ? 'project' : 'workspace', projectId: project?.id ?? null, anchorProjectId: anchor.id, processId: proc.id, status: 'running', brief: b });
   return { evaluation, process: procs.get(proc.id)! };

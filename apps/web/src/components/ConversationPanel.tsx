@@ -214,7 +214,7 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
   useEffect(() => { if (a?.status !== 'running') return; const t = setInterval(() => void load(), 8000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [a?.status]);
   if (!a) return err ? <Notice kind="err">{err}</Notice> : null;
-  const act = async (fn: () => Promise<unknown>, msg: string) => { setBusy(true); setErr(null); try { await fn(); flash(msg); setOk(false); setNote(''); setPre(null); await load(); onChanged?.(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
+  const act = async (fn: () => Promise<unknown>, msg: string) => { setBusy(true); setErr(null); try { await fn(); flash(msg); setOk(false); setNote(''); setDiscard(false); setPre(null); await load(); onChanged?.(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
   const link = a.process ? `/empresa/${slug}/procesos/${a.process.id}` : null;
   return <div className="card" style={{ borderColor: authorizable ? '#F0C66B' : undefined }} data-testid={`assignment-${a.code}`}>
     <div className="card-h" style={{ alignItems: 'flex-start', gap: 8 }}>

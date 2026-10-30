@@ -16,7 +16,7 @@ import { execFileSync } from 'node:child_process';
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-sec-'));
 process.env.LOG_LEVEL = 'warn';
 const bridge = await import('../src/services/claudeCode/bridge.ts');
-const { readRepoFile, safeRelPath } = await import('../src/services/repoWrite.ts');
+const { readRepoFile, safeRelPath, writablePath: wp } = await import('../src/services/repoWrite.ts');
 const { buildApp } = await import('../src/app.ts');
 const app = await buildApp();
 after(async () => { await app.close(); });
@@ -78,6 +78,9 @@ test('control positivo: un archivo normal SÍ se lee por cada camino (la prueba 
   assert.equal((bridge.searchTaskFiles(task, 'CONTROL-POSITIVO') as any).matches[0].path, 'src/a.ts');
   assert.ok((bridge.listTaskFiles(task) as any).files.includes('src/a.ts'));
   assert.equal(safeRelPath('src/nuevo.ts'), 'src/nuevo.ts');
+  // Las acciones del propietario (su corrección externa, resolver un conflicto) no quedan bloqueadas por la lista de credenciales.
+  assert.equal(safeRelPath('.npmrc'), '.npmrc'); assert.ok(wp(repo, 'secrets/nuevo.txt', { agent: false }));
+  assert.equal(safeRelPath('.env.dist'), '.env.dist'); assert.ok(wp(repo, '.env-dist'), 'una plantilla .env-dist tampoco es un secreto');
   console.log(`nombres cortos reales: ${[...sn.entries()].map(([l, x]) => `${l}→${x}`).join(', ') || 'ninguno (volumen sin 8.3)'} · unión: ${junction} · flujo alternativo: ${ads}`);
 });
 
@@ -89,7 +92,7 @@ test('ningún archivo protegido se lee con NINGUNA forma de nombrarlo, por ning�
       const r = bridge.readTaskFile(task, a);
       assert.ok(bridge.isDenied(r), `portal_read_file «${a}» debía denegarse`); assert.deepEqual(leaks(r), [], `portal_read_file «${a}»`);
       assert.equal(readRepoFile(repo, a), null, `contexto del pipeline «${a}»`);
-      if (f.writeForbidden) assert.throws(() => safeRelPath(a), Error, `escritura «${a}»`);
+      if (f.writeForbidden) assert.throws(() => wp(repo, a), Error, `escritura de un agente «${a}»`);
     }
   }
   for (const a of ['src/enlace/fuera.txt', 'src/a.ts:oculto', 'src/a.ts::$DATA', '../fuera.txt', path.join(outside, 'fuera.txt')]) {
