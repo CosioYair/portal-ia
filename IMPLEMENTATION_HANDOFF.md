@@ -1,5 +1,8 @@
 # Portal IA · Asistente como interfaz de ejecución, encargos de desarrollo y Gauntlet automático
 
+> **Retomar tras reiniciar Windows:** empieza por `docs/handoffs/RESTART_CHECKPOINT_2026-10-30.md` (estado exacto de
+> git, verificación real, bloqueo de Docker y plan de continuación). No repitas el trabajo ya confirmado en la rama.
+
 Fecha: 30–31 de octubre de 2026. Diseño, estándar de calidad, revisión independiente, medidas y límites:
 `docs/asistente-encargos-y-gauntlet-adaptativo.md`. Todo con proveedor y CLI de Claude Code simulados, datos e
 instancias temporales, **sin abrir `data/`, sin llamadas reales, sin reiniciar el Portal en marcha, sin integrar ni
