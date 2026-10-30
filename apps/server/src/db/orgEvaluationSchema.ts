@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 import type { OrgDecision, OrgEvaluation, OrgEvaluationBrief, OrgEvaluationStatus, OrgProposal, OrgScopeKind } from '@portal-ia/domain';
 import { workspaceDb } from './workspace.ts';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * Historial de evaluaciones organizativas (HU-159). Migración aditiva e idempotente: se crea al primer uso en la base
@@ -32,7 +33,7 @@ export function ensureOrgEvaluationSchema(db: DatabaseSync): void {
   if (!cols.some(c => c.name === 'brief_json')) db.exec(`ALTER TABLE org_evaluations ADD COLUMN brief_json TEXT NULL`);
 }
 
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 const httpError = (statusCode: number, message: string, code?: string) => Object.assign(new Error(message), { statusCode, code });
 
 export function orgEvaluationsRepo(slug: string) {

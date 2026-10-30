@@ -1,4 +1,4 @@
-import type { Process, ProcessGuidance } from '@portal-ia/domain';
+import { verificationsForApplied, type Process, type ProcessGuidance } from '@portal-ia/domain';
 import { runtimeVerified } from './runtimeChecks.ts';
 import { DEPS_MISSING_EXIT } from './sandbox.ts';
 import { buildStoryFlow, type FlowOptions } from './storyFlow.ts';
@@ -75,8 +75,7 @@ function describePhase(p: Process, opts: GuidanceOptions): ProcessGuidance {
   // con el flujo actual. Salidas: cerrar la historia si ya está resuelta, o descartar la iteración y preparar una nueva.
   if (!r.merged && isLegacyApplied(p)) return { phase: `Iteración anterior a v0.12 · aplicada sin aislamiento en ${r.applied.branch}`, next: 'Esta iteración se aplicó con el método anterior (directamente en tu carpeta, sin worktree), así que no puede verificarse en sandbox ni integrarse. Si lo que pedía la historia ya funciona en tu Portal, pulsa «Cerrar como resuelta»; si no, pulsa «Descartar esta iteración y preparar otra» (la rama se conserva) y autoriza la nueva iteración.', tone: 'warn', settled: false };
   if (!r.merged) {
-    const after = new Date(r.applied.appliedAt).getTime() - 1000;
-    const since = (r.verifications ?? []).filter(v => new Date(v.startedAt).getTime() >= after);
+    const since = verificationsForApplied(r, 1000);
     const lastOf = (c: string) => since.filter(v => v.command === c).at(-1);
     // Docker: sin dependencias Linux instaladas para este package-lock el sandbox no ejecuta nada (no es un fallo del código).
     // Si después se instaló bien, esa ejecución solo queda pendiente de repetir.

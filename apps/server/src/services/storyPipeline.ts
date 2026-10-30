@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { backendLabel, batchSourceOf, promptSections } from '@portal-ia/domain';
+import { backendLabel, batchSourceOf, promptSections, verificationsForApplied } from '@portal-ia/domain';
 import type { Agent, AgentBlocker, AgentFailureKind, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError, reasoningHeadroom } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -26,6 +26,7 @@ import { driftMessage, worktreeDrift } from './worktreeDrift.ts';
 import { agentBackend, claudeCodeComplete, claudeCodeGate, usesClaudeCode } from './claudeCode/backend.ts';
 import { lastDetection } from './claudeCode/detect.ts';
 import { getClaudeCodeSettings } from './claudeCode/settings.ts';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * Pipeline autónomo autorizado de una historia (sin supervisión del propietario entre pasos rutinarios).
@@ -43,7 +44,7 @@ import { getClaudeCodeSettings } from './claudeCode/settings.ts';
  * Antes de cada llamada a la IA se comprueba que el presupuesto restante alcanza; si no, se pausa SIN llamar.
  * Todo queda registrado: cada intento es un paso con su modelo, tokens y costo, y un evento legible.
  */
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 export const isTruncatedStop = (stop: string | null | undefined) => stop === 'max_tokens' || stop === 'length';
 
 export class PipelinePause extends Error { constructor(public kind: PipelinePauseKind, message: string, public providerCode: string | null = null) { super(message); } }
@@ -662,9 +663,7 @@ async function applyInWorktree(ctx: StoryRunCtx) {
  * ejecución anterior NO vale para el commit nuevo.
  */
 export function sinceApplied(r: ExecutionResult): VerificationRun[] {
-  if (!r.applied) return [];
-  const after = new Date(r.applied.appliedAt).getTime();
-  return (r.verifications ?? []).filter(v => new Date(v.startedAt).getTime() >= after);
+  return verificationsForApplied(r);
 }
 
 /** Verifica los comandos autorizados; resuelve el entorno sin IA. Devuelve la primera ejecución que falla por el código, o null. */

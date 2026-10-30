@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { gauntletReviewed } from '@portal-ia/domain';
+import { gauntletReviewed, verificationsForApplied } from '@portal-ia/domain';
 import type { Agent, CheckState, CompletenessGate, Deliverable, DeliverableKind, DeliveryCheck, DeliveryProgress, DevOutputAssessment, IssueSeverity, PipelineConfig, Process, ProposedChange, QaFinding, StoryManifest, StoryPlan, VerificationRun, WorkUnit } from '@portal-ia/domain';
 import { estimatePricing } from '@portal-ia/ai-adapters';
 import { processesRepo } from '../db/workspace.ts';
@@ -14,6 +14,7 @@ import { diagnoseFailure, diagnosisPrompt, failingTests, staleCorrectionUnits } 
 import { verificationEvidence, zeroTests } from './qaGate.ts';
 import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
 import { agentHeadroom, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, retryForeignFailure, stepCall, updatePipeline, updateResult, verifyStage, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * Entrega INCREMENTAL de una historia (pipeline autorizado con aplicación automática).
@@ -32,7 +33,7 @@ import { agentHeadroom, attemptsSummary, checkCancelled, checkDuration, emit, is
  * mira lo que el motor ya sabe (entregables que faltan, JSON roto, contenido omitido, pruebas que el script no ejecuta).
  */
 
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 const TOKENS_PER_LINE = 12;
 /** Texto previsto por unidad (tokens): deja sitio al razonamiento oculto y al formato dentro de una sola respuesta. */
 export const UNIT_TEXT_BUDGET = 6000;
@@ -841,7 +842,7 @@ export function afterVerification(ctx: StoryRunCtx, cfg: PipelineConfig): boolea
 export function deliveryChecks(p: Process): DeliveryCheck[] {
   const r = p.result; if (!r) return [];
   const cmds = r.pipeline?.config.commands ?? [];
-  const since = r.applied ? (r.verifications ?? []).filter(v => new Date(v.startedAt).getTime() >= new Date(r.applied!.appliedAt).getTime()) : [];
+  const since = verificationsForApplied(r);
   const out: DeliveryCheck[] = (['typecheck', 'test', 'build'] as const).map(cmd => {
     if (!cmds.includes(cmd)) return { name: cmd, state: 'not_applicable' as CheckState, detail: 'no se pidió en esta autorización' };
     const v = since.filter(x => x.command === cmd).at(-1);
@@ -958,7 +959,7 @@ export function deliveryProgress(p: Process): DeliveryProgress | null {
   const pl = r.pipeline;
   const planned = man.deliverables.filter(d => d.planned);
   const delivered = planned.filter(d => d.status === 'delivered').length;
-  const since = r.applied ? (r.verifications ?? []).filter(v => new Date(v.startedAt).getTime() >= new Date(r.applied!.appliedAt).getTime()) : [];
+  const since = verificationsForApplied(r);
   const last = (c: string) => since.filter(v => v.command === c).at(-1);
   const comp = ['typecheck', 'build'].map(last).filter(Boolean) as VerificationRun[];
   const compiles = !comp.length ? null : comp.every(v => v.exitCode === 0) ? true : comp.some(v => v.exitCode !== 0 && v.exitCode !== null && v.exitCode !== 86 && v.isolation !== 'unavailable') ? false : null;

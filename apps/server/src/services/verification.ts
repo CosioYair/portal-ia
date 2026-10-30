@@ -39,7 +39,8 @@ export async function runVerification(slug: string, id: string, command: VerifyC
   requirePolicy(op, { slug, processId: id, agentId: null, projectId: proc.projectId, authorized: true });
   // Instalar dependencias exige red: solo con autorización explícita.
   if (command === 'install' && !allowNetwork) throw fail(409, 'Instalar dependencias necesita red dentro del sandbox. Revisa el diff de package.json y confirma «Permitir red solo para install».', 'network_confirmation_required');
-  const run = await sandboxDeps.run(wt, path.resolve(repo.path), command, { allowNetwork });
+  // Se registra QUÉ commit se verificó: la frescura de la evidencia se decide por el commit, no por la hora.
+  const run = { ...await sandboxDeps.run(wt, path.resolve(repo.path), command, { allowNetwork }), commit: proc.result.applied.commit ?? null };
   const cur = procs.get(id)!;
   procs.setResult(id, { ...cur.result!, verifications: [...cur.result!.verifications, run] });
   procs.logExecution({ projectId: proc.projectId, agentId: qa?.agentId ?? '', kind: `verify:${command}:${run.isolation}`, status: run.exitCode === 0 ? 'done' : 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: run.startedAt });

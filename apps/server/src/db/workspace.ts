@@ -5,13 +5,14 @@ import crypto from 'node:crypto';
 import { config } from '../config.ts';
 import { defaultCapabilitiesFor } from '@portal-ia/domain';
 import type { ClaudeCodeRun, ClaudeCodeRunStatus, ClaudeCodeUsage, DelegationResult, Agent, AgentConfig, AgentStatus, AgentTemplate, BacklogItem, BacklogStatus, ContextItem, ExecutionResult, KnowledgeDoc, Objective, Process, ProcessStatus, ProcessStep, Project, Repository, Scope, StepStatus, UsageToday } from '@portal-ia/domain';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * Una base SQLite por espacio de trabajo: data/workspaces/<slug>/<slug>.sqlite
  * Aislamiento total entre el espacio interno y las futuras empresas.
  */
 const open = new Map<string, DatabaseSync>();
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 const uuid = () => crypto.randomUUID();
 
 export function workspaceDbPath(slug: string) { return path.join(config.dataDir, 'workspaces', slug, `${slug}.sqlite`); }

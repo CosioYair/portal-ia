@@ -7,6 +7,7 @@ import { clip } from './devOutput.ts';
 import { testsEvidence, verificationEvidence } from './qaGate.ts';
 import { sys } from './storyPrompts.ts';
 import { emit, PipelinePause, pipelineOf, sinceApplied, stepCall, updateResult, type StoryRunCtx } from './storyPipeline.ts';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * Evaluación Gauntlet en el pipeline existente (ver packages/domain/src/gauntlet.ts para el método y la relación con
@@ -15,7 +16,7 @@ import { emit, PipelinePause, pipelineOf, sinceApplied, stepCall, updateResult, 
  */
 
 const fail = (statusCode: number, message: string, code: string) => Object.assign(new Error(message), { statusCode, code });
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 /** Versión del encargo del Evaluador (plantilla de prompt versionada: cambia si cambia su contrato). */
 export const GAUNTLET_PROMPT_VERSION = 'gauntlet-eval@1';
 

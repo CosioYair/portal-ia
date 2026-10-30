@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { IssueSeverity, Process } from '@portal-ia/domain';
-import { qaSeverity } from '@portal-ia/domain';
+import { qaSeverity, verificationsForApplied } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, KV, Notice } from './ui.tsx';
@@ -21,8 +21,8 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
   const [authGit, setAuthGit] = useState(false);
   const [gitErr, setGitErr] = useState<string | null>(null);
   const isPortalRepo = slug === 'portal-ia';
-  const appliedAt = r.applied ? new Date(r.applied.appliedAt).getTime() : 0;
-  const okV = (c: string) => r.verifications.some(v => v.command === c && v.exitCode === 0 && new Date(v.startedAt).getTime() >= appliedAt - 1000);
+  const fresh = verificationsForApplied(r, 1000);
+  const okV = (c: string) => fresh.some(v => v.command === c && v.exitCode === 0);
   const canMerge = isPortalRepo ? okV('typecheck') && okV('test') && okV('build') : okV('typecheck');
   // 86 (Docker sin dependencias) es un bloqueo del entorno, no un fallo del código: no cuenta como «falló».
   const lastFailed = ['typecheck', 'build', 'test'].map(c => r.verifications.filter(v => v.command === c).at(-1)).filter(v => v && v.exitCode !== 0 && v.exitCode !== 86).map(v => v!.command).join(', ');

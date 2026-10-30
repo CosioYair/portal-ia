@@ -9,6 +9,7 @@ import { changesSinceBase, mainBranch, repoRoot, safeRelPath } from './repoWrite
 import { parseFileBlocks } from './devOutput.ts';
 import { FILE_FORMAT, sys } from './storyPrompts.ts';
 import { pausePipeline, PipelinePause, pipelineOf, providerPause, stepCall, storyRunContext, updatePipeline, updateResult } from './storyPipeline.ts';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * Integración de una historia verificada con la rama principal cuando esta avanzó (HU-159).
@@ -27,7 +28,7 @@ const execFileP = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=Portal IA', '-c', 'user.email=portal-ia@local'];
 const MARKER = /^(<{7}|={7}|>{7})( |$)/m;
 const fail = (statusCode: number, message: string, code: string, extra: Record<string, unknown> = {}) => Object.assign(new Error(message), { statusCode, code, ...extra });
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 
 /** git sin lanzar: código de salida, stdout y stderr (merge-tree sale con 1 si hay conflictos y la salida importa). */
 async function run(cwd: string, args: string[]): Promise<{ code: number; out: string; err: string }> {

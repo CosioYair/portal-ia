@@ -1,5 +1,5 @@
 import type { FlowAction, FlowActionId, FlowIssue, FlowIssueDetail, FlowStage, FlowStageKey, FlowStageStatus, Isolation, IssueSeverity, Process, StoryFlow, VerificationRun, WorktreeDrift, BranchIntegration } from '@portal-ia/domain';
-import { GAUNTLET_LIMITS, gauntletReviewed } from '@portal-ia/domain';
+import { GAUNTLET_LIMITS, gauntletReviewed, verificationsForApplied } from '@portal-ia/domain';
 import { filesIn, parseBuildErrors, parseFailingTests, parseTypeScriptErrors, qaSeverity, tailOf } from './diagnostics.ts';
 import { deliveryProgress } from './storyUnits.ts';
 import { runtimeVerified } from './runtimeChecks.ts';
@@ -51,9 +51,8 @@ const fix = (label = 'Pedir al equipo que lo corrija') => act('request_fix', lab
 
 /** Verificaciones relevantes desde que se aplicó (las anteriores son de otra versión del código). */
 function sinceApplied(p: Process): VerificationRun[] {
-  const r = p.result!; if (!r.applied) return [];
-  const after = new Date(r.applied.appliedAt).getTime() - (r.pipeline ? 0 : 1000); // el pipeline puede corregir en menos de 1 s
-  return (r.verifications ?? []).filter(v => new Date(v.startedAt).getTime() >= after);
+  const r = p.result!;
+  return verificationsForApplied(r, r.pipeline ? 0 : 1000); // sin commit registrado: el pipeline puede corregir en menos de 1 s
 }
 
 export function verificationIssue(v: VerificationRun, responsible: string[]): FlowIssue {

@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { config } from '../config.ts';
 import type { ModelInfo, ProviderError, ProviderId, Workspace } from '@portal-ia/domain';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * Base de datos de plataforma (una por instalación): proveedores, credenciales cifradas,
@@ -37,7 +38,7 @@ CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 const providerCols = (platform.prepare(`PRAGMA table_info(providers)`).all() as any[]).map(c => c.name);
 if (!providerCols.includes('workspace_id')) platform.exec(`ALTER TABLE providers ADD COLUMN workspace_id TEXT`);
 
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 
 export interface ProviderRow {
   id: ProviderId; status: string; verified_at: string | null; last_error: string | null;

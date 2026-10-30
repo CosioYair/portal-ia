@@ -32,6 +32,7 @@ import { recordDetections } from '../services/lessons.ts';
 import { addManualItem, estimateExtraction, extractBacklogWithAI, importBacklogFromKnowledge, resetStory } from '../services/backlog.ts';
 import { backlogRepo } from '../db/workspace.ts';
 import { assertNotSuperseded, InboxError } from '../services/inbox.ts';
+import { monotonicNow } from '../clock.ts';
 
 /** Rutas con efecto (IA o git) que nunca deben actuar sobre una iteración superada de su historia (HU-161). */
 const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish)$/;
@@ -386,7 +387,7 @@ export async function processRoutes(app: FastifyInstance) {
 
 Cambios propuestos por el equipo de agentes de Portal IA y aprobados por el propietario.
 Proceso: ${proc.id}`, { processId: proc.id });
-      const result = { ...proc.result, applied: { ...applied, appliedAt: new Date().toISOString() } };
+      const result = { ...proc.result, applied: { ...applied, appliedAt: monotonicNow() } };
       procs.setResult(id, result);
       procs.logExecution({ projectId: proc.projectId, agentId: stepByRole(proc, 'implementer')?.agentId ?? '', kind: 'repo_write', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() });
       app.log.info({ processId: id, branch: applied.branch, commit: applied.commit, files: applied.files.length, worktree: applied.worktree }, 'cambios aplicados en worktree aislado');

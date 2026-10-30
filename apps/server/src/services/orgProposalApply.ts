@@ -4,6 +4,7 @@ import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, workspaceDb } from '../db/workspace.ts';
 import { orgEvaluationsRepo } from '../db/orgEvaluationSchema.ts';
 import { createAgent, deleteAgent } from './agentFactory.ts';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * HU-159 · Aplicación de propuestas organizativas aceptadas por el propietario (sin IA, sin costo).
@@ -15,7 +16,7 @@ import { createAgent, deleteAgent } from './agentFactory.ts';
  * Retirar = template.retiredAt (reversible, la fila se conserva). Departamento = etiqueta template.department.
  */
 const httpError = (statusCode: number, message: string, code?: string) => Object.assign(new Error(message), { statusCode, code });
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 const stamp = (iso: string | null | undefined) => (iso ?? now()).slice(0, 16).replace('T', ' ');
 const norm = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[«»"'`]/g, '').replace(/\s+/g, ' ').trim();
 const withExtra = (t: Agent['template'], extra: Record<string, unknown>) => ({ ...t, ...extra }) as Agent['template'];

@@ -876,7 +876,17 @@ export interface ProcessFailure { kind: 'output_contract' | 'provider' | 'budget
   /** Lo que se pide al propietario para seguir (procesos sin pipeline). */
   request?: OwnerRequest | null }
 export type Isolation = 'docker' | 'wsl' | 'linux-ns' | 'host-min' | 'unavailable';
-export interface VerificationRun { command: string; exitCode: number | null; output: string; startedAt: string; finishedAt: string; durationMs: number; /** Dónde se ejecutó: sandbox real (docker/wsl), verificación mínima en el equipo (solo tsc) o no disponible. */ isolation?: Isolation; }
+export interface VerificationRun { command: string; exitCode: number | null; output: string; startedAt: string; finishedAt: string; durationMs: number; /** Dónde se ejecutó: sandbox real (docker/wsl), verificación mínima en el equipo (solo tsc) o no disponible. */ isolation?: Isolation;  /** Commit del worktree verificado: identifica a qué versión del código corresponde (no la hora). */ commit?: string | null; }
+/**
+ * Verificaciones que corresponden a la versión aplicada ahora. Con el commit registrado (desde v0.16), por identidad
+ * del commit: la hora no sirve (el reloj puede retroceder, p. ej. en la VM de Docker, y una verificación válida pasaría
+ * por antigua). Las antiguas, sin commit, por la hora como antes (`toleranceMs` antes del aplicado).
+ */
+export function verificationsForApplied(r: Pick<ExecutionResult, 'applied' | 'verifications'>, toleranceMs = 0): VerificationRun[] {
+  if (!r.applied) return [];
+  const after = new Date(r.applied.appliedAt).getTime() - toleranceMs;
+  return (r.verifications ?? []).filter(v => v.commit && r.applied!.commit ? v.commit === r.applied!.commit : new Date(v.startedAt).getTime() >= after);
+}
 export interface ExecutionResult {
   plan: StoryPlan | null;
   implementationSummary: string | null;

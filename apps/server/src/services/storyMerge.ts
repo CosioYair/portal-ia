@@ -1,4 +1,4 @@
-import { INTERNAL_WORKSPACE, type BranchIntegration, type Process } from '@portal-ia/domain';
+import { INTERNAL_WORKSPACE, verificationsForApplied, type BranchIntegration, type Process } from '@portal-ia/domain';
 import { processesRepo, projectsRepo } from '../db/workspace.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { mergeBranch, removeWorktree } from './repoWrite.ts';
@@ -18,12 +18,13 @@ export async function mergeStory(slug: string, id: string, opts: { into?: string
   if (proc.result.merged) throw fail(409, `Ya integrada en ${proc.result.merged.into}.`);
   if (!proc.result.applied.worktree) throw fail(409, 'Esta iteración se aplicó antes de v0.12 (sin worktree aislado) y no se integra con el flujo actual. Ciérrala como resuelta o descártala y prepara una nueva iteración.', 'legacy_applied');
   // Orden de cierre: no se integra sin que typecheck haya pasado en esta rama (salvo que el propietario lo fuerce a sabiendas).
-  const after = new Date(proc.result.applied.appliedAt).getTime();
-  const okTypecheck = proc.result.verifications.some(v => v.command === 'typecheck' && v.exitCode === 0 && new Date(v.startedAt).getTime() >= after - 1000);
+  // Evidencia de ESTA versión del código (por el commit verificado; la hora solo en registros antiguos sin commit).
+  const fresh = verificationsForApplied(proc.result, 1000);
+  const okTypecheck = fresh.some(v => v.command === 'typecheck' && v.exitCode === 0);
   const failedLast = ['typecheck', 'build', 'test'].map(c => proc.result!.verifications.filter(v => v.command === c).at(-1)).filter(v => v && v.exitCode !== 0);
   // Proyecto interno (el propio Portal): además de typecheck, test y build en sandbox real; en otros proyectos basta typecheck.
   const internal = slug === INTERNAL_WORKSPACE.slug;
-  const okAfter = (cmd: string, sandboxOnly = false) => proc.result!.verifications.some(v => v.command === cmd && v.exitCode === 0 && new Date(v.startedAt).getTime() >= after - 1000 && (!sandboxOnly || v.isolation === 'docker' || v.isolation === 'wsl' || v.isolation === 'linux-ns'));
+  const okAfter = (cmd: string, sandboxOnly = false) => fresh.some(v => v.command === cmd && v.exitCode === 0 && (!sandboxOnly || v.isolation === 'docker' || v.isolation === 'wsl' || v.isolation === 'linux-ns'));
   const missing = internal ? [!okTypecheck ? 'typecheck' : '', !okAfter('test', true) ? 'test (sandbox)' : '', !okAfter('build', true) ? 'build (sandbox)' : ''].filter(Boolean) : [!okTypecheck ? 'typecheck' : ''].filter(Boolean);
   if (!opts.skipVerification || internal) {
     // El proyecto interno (el propio Portal) nunca se integra saltándose la verificación: es un control de seguridad.
