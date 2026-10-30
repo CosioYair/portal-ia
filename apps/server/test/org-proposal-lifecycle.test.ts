@@ -54,6 +54,8 @@ const proposals = [
   { action: 'adjust', target: 'agent', subject: 'pj-qa', rationale: 'Carga baja de verificación.', spec: { effort: 'low' } }
 ];
 const FENCE = '```';
+/** Paso «Contexto y dirección» obligatorio: estas pruebas evalúan sin indicaciones. */
+const NO_BRIEF = { brief: { skipped: true } };
 const GESTOR_TEXT = `## Resumen\nOrganización de B revisada (RESUMEN-CICLO).\n\n${FENCE}org\n${JSON.stringify(proposals)}\n${FENCE}\n`;
 fs.writeFileSync(scriptPath, JSON.stringify({ rules: [
   { match: 'Entrega en markdown', text: GESTOR_TEXT },
@@ -75,7 +77,7 @@ async function waitFinished(app: any, id: string): Promise<any> {
 }
 
 const app0 = await buildApp();
-const started = await app0.inject({ method: 'POST', url: `/api/workspaces/${SLUG}/org-evaluations`, payload: { projectId: projectB.id, budgetUsd: 5, authorized: true } });
+const started = await app0.inject({ method: 'POST', url: `/api/workspaces/${SLUG}/org-evaluations`, payload: { projectId: projectB.id, budgetUsd: 5, authorized: true, ...NO_BRIEF } });
 assert.equal(started.statusCode, 202, started.body);
 const EV = await waitFinished(app0, started.json().id);
 await app0.close();
