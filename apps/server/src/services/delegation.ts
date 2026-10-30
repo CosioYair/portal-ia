@@ -18,6 +18,13 @@ import { callTimeoutMs, maybeBilled, registerCall, unregisterCall, withWatchdog 
  * propietario aplica con un clic. No todo se resuelve con historias de desarrollo: esto es el resto del trabajo.
  */
 const MAX_CONSULTS = 3;
+/** Instrucciones del entregable según el propósito (conversaciones del Asistente). */
+const PURPOSE_TEXT: Record<NonNullable<DelegationResult['purpose']>, string> = {
+  analysis: '',
+  proposal: `Es la PROPUESTA (especificación) de una idea que el propietario ha ido definiendo con el Asistente. Apartados: Objetivo; Alcance; Fuera de alcance; Decisiones aprobadas (cítalas tal cual; no cambies ninguna); Requisitos funcionales; Requisitos no funcionales; Seguridad; Dependencias; Riesgos; Criterios de aceptación (comprobables); Preguntas abiertas. NO propongas cambios al backlog: omite el bloque backlog-ops.\n`,
+  team_review: `Es la REVISIÓN DEL EQUIPO de una propuesta: omisiones, supuestos que cuestionáis (con el motivo), mejoras, complejidad estimada (S/M/L por bloque), habilidades necesarias, decisiones de arquitectura recomendadas y preguntas sin resolver. Atribuye cada aportación a su especialista. NO propongas cambios al backlog: omite el bloque backlog-ops.\n`,
+  stories: `Genera las HISTORIAS del backlog que implementan la propuesta APROBADA, en orden de prioridad (la primera, la más importante). Solo operaciones "add": título claro; descripción con el contexto, los especialistas necesarios y «Origen: propuesta aprobada de la conversación»; criterio comprobable; tamaño S/M/L; dependsOn con el id de una historia existente o con el TÍTULO EXACTO de otra historia de esta misma lista. No dupliques historias que ya existen en el backlog (reutilízalas: no las añadas).\n`
+};
 const TOKENS = { triage: 2000, consult: 3000, synthesis: 12000 } as const;
 const isTruncated = (stop: string | null) => stop === 'max_tokens' || stop === 'length';
 
@@ -114,7 +121,14 @@ function extractJson(text: string): any | null {
   return null;
 }
 
-export function estimateDelegation(slug: string, projectId: string | null, agentRef: any, request: string): AssessmentEstimate & { leadAgentId: string; teamSize: number } {
+export const CHALLENGE_TITLE = 'Cuestionamiento independiente de la propuesta';
+/** Quien cuestiona la propuesta: el Evaluador Gauntlet del proyecto, si existe; si no, el Arquitecto o QA. Nunca el redactor. */
+export function pickChallenger(slug: string, projectId: string | null, lead: Agent): Agent | null {
+  const pool = activeAgents(slug).filter(a => a.id !== lead.id && (!projectId || a.projectId === projectId));
+  return pool.find(a => (a.config.capabilities ?? []).includes('evaluar_gauntlet')) ?? pool.find(a => a.key === 'pj-arquitecto') ?? pool.find(a => a.key === 'pj-qa') ?? null;
+}
+
+export function estimateDelegation(slug: string, projectId: string | null, agentRef: any, request: string, purpose: DelegationResult['purpose'] = 'analysis'): AssessmentEstimate & { leadAgentId: string; teamSize: number } {
   const lead = pickLeadAgent(slug, projectId, agentRef);
   const team = teamOf(slug, lead).slice(0, MAX_CONSULTS);
   const ctxTok = estimateTokens(contextFor(slug, projectId) + request) + 600;
@@ -124,18 +138,20 @@ export function estimateDelegation(slug: string, projectId: string | null, agent
     ...team.map(a => ({ agentId: a.id, agentName: a.config.name, title: `Consulta a ${a.config.name}`, model: a.config.model, estimatedUsd: price(a, ctxTok, TOKENS.consult) })),
     { agentId: lead.id, agentName: lead.config.name, title: 'Entregable y propuestas', model: lead.config.model, estimatedUsd: price(lead, ctxTok + team.length * TOKENS.consult, TOKENS.synthesis) }
   ];
+  const challenger = purpose === 'proposal' ? pickChallenger(slug, projectId, lead) : null;
+  if (challenger) steps.push({ agentId: challenger.id, agentName: challenger.config.name, title: CHALLENGE_TITLE, model: challenger.config.model, estimatedUsd: price(challenger, ctxTok + TOKENS.synthesis, TOKENS.consult) });
   const estimatedUsd = steps.reduce((a, s) => a + s.estimatedUsd, 0);
   return { steps, estimatedUsd, suggestedBudgetUsd: Math.max(0.5, Math.ceil(estimatedUsd * 2 * 2) / 2), leadAgentId: lead.id, teamSize: team.length } as any;
 }
 
-export function createDelegation(slug: string, projectId: string | null, agentRef: any, request: string): Process {
+export function createDelegation(slug: string, projectId: string | null, agentRef: any, request: string, opts: { purpose?: DelegationResult['purpose']; conversationId?: string | null } = {}): Process {
   const req = request.trim();
   if (req.length < 8) throw Object.assign(new Error('Describe el encargo con más detalle.'), { statusCode: 400 });
-  const est = estimateDelegation(slug, projectId, agentRef, req);
+  const est = estimateDelegation(slug, projectId, agentRef, req, opts.purpose ?? 'analysis');
   const lead = agentsRepo(slug).get(est.leadAgentId)!;
   const pid = projectId ?? projectsRepo(slug).list()[0]?.id ?? '';
   const proc = processesRepo(slug).create({ projectId: pid, kind: 'delegated_task', title: `Encargo a ${lead.config.name}: ${req.slice(0, 90)}${req.length > 90 ? '…' : ''}`, estimatedUsd: est.estimatedUsd, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model })) });
-  const d: DelegationResult = { request: req, leadAgentId: lead.id, leadAgentName: lead.config.name, triage: null, consulted: [], deliverable: null, knowledgeDocId: null, backlogOps: [], opsApplied: null };
+  const d: DelegationResult = { request: req, leadAgentId: lead.id, leadAgentName: lead.config.name, triage: null, consulted: [], deliverable: null, knowledgeDocId: null, backlogOps: [], opsApplied: null, purpose: opts.purpose ?? 'analysis', conversationId: opts.conversationId ?? null, challenge: null };
   processesRepo(slug).setDelegation(proc.id, d);
   return processesRepo(slug).get(proc.id)!;
 }
@@ -187,7 +203,9 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
   };
 
   const team = teamOf(slug, lead).slice(0, MAX_CONSULTS);
-  const consultSteps = proc.steps.slice(1, -1); // uno por miembro del equipo, en el mismo orden
+  const challengeIdx = proc.steps.findIndex(s => s.title === CHALLENGE_TITLE);
+  const synIdx = challengeIdx >= 0 ? challengeIdx - 1 : proc.steps.length - 1;
+  const consultSteps = proc.steps.slice(1, synIdx); // uno por miembro del equipo, en el mismo orden
   try {
     // 1 · Validación y plan
     if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
@@ -205,7 +223,7 @@ Responde SOLO con JSON: {"accepted": boolean, "rejectionReason": string|null, "u
     d.triage = { accepted: tri ? tri.accepted !== false : true, understanding: String(tri?.understanding ?? triRes.text.slice(0, 600)), rejectionReason: tri?.rejectionReason ? String(tri.rejectionReason) : null, plan: Array.isArray(tri?.plan) ? tri.plan.map(String) : [] };
     procs.setDelegation(processId, d);
     if (!d.triage.accepted) {
-      consultSteps.forEach(s => procs.stepFinish(s.id, 'skipped', {})); procs.stepFinish(proc.steps.at(-1)!.id, 'skipped', {});
+      consultSteps.forEach(s => procs.stepFinish(s.id, 'skipped', {})); proc.steps.slice(synIdx).forEach(s => procs.stepFinish(s.id, 'skipped', {}));
       d.deliverable = `**El responsable no aceptó el encargo.** ${d.triage.rejectionReason ?? ''}\n\n${d.triage.understanding}`;
       procs.setDelegation(processId, d);
     } else {
@@ -235,26 +253,42 @@ ${d.consulted.length ? `# Aportaciones de tu equipo\n${d.consulted.map(c => `## 
 # Estado real
 ${ctx}
 
-Entrega el resultado del encargo en markdown claro y conciso para el propietario (diagnóstico, decisiones, qué cambia; máx. ~900 palabras). Si el encargo implica cambios en el backlog (replantear, fusionar, descartar, repriorizar, añadir), NO los apliques: propónlos al final en UN bloque \`\`\`backlog con un array JSON de operaciones (máx. 30; "reason" en una frase), usando exactamente estos formatos:
+${PURPOSE_TEXT[d.purpose ?? 'analysis']}Entrega el resultado del encargo en markdown claro y conciso para el propietario (diagnóstico, decisiones, qué cambia; máx. ~900 palabras). Si el encargo implica cambios en el backlog (replantear, fusionar, descartar, repriorizar, añadir), NO los apliques: propónlos al final en UN bloque \`\`\`backlog con un array JSON de operaciones (máx. 30; "reason" en una frase), usando exactamente estos formatos:
 {"op":"add","title":string,"criterion":string,"description":string,"estimate":"S"|"M"|"L","dependsOn":"HU-xxx"|null,"reason":string}
 {"op":"update","story":"HU-xxx","title"?:string,"criterion"?:string,"description"?:string,"estimate"?:"S"|"M"|"L","dependsOn"?:"HU-xxx"|null,"reason":string}
 {"op":"discard","story":"HU-xxx","reason":string}
 {"op":"merge","into":"HU-xxx","from":["HU-yyy"],"title"?:string,"criterion"?:string,"reason":string}
 {"op":"reprioritize","order":["HU-xxx", ...] (ids en el nuevo orden, solo los que cambian de sitio o todos),"reason":string}
 Usa solo ids de historias que existen en el estado real. Cierra el bloque con \`\`\`. Si no hay cambios al backlog, omite el bloque.`;
-      let synRes = await call(proc.steps.length - 1, sys(lead, slug), synPrompt, TOKENS.synthesis);
+      let synRes = await call(synIdx, sys(lead, slug), synPrompt, TOKENS.synthesis);
       let synText = synRes.text;
       for (let i = 0; i < 2 && isTruncated(synRes.stopReason); i++) {
         if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
         log({ step: 'Entregable', continuation: i + 1 }, 'respuesta cortada: se pide continuación');
-        synRes = await call(proc.steps.length - 1, sys(lead, slug), 'Tu respuesta anterior se cortó por el límite de longitud. Continúa EXACTAMENTE desde el último carácter que escribiste, sin repetir nada, sin saludos, manteniendo el formato (si estabas dentro del bloque backlog, continúa el JSON y ciérralo con ```).', TOKENS.synthesis, [{ role: 'user', content: synPrompt }, { role: 'assistant', content: synText }]);
+        synRes = await call(synIdx, sys(lead, slug), 'Tu respuesta anterior se cortó por el límite de longitud. Continúa EXACTAMENTE desde el último carácter que escribiste, sin repetir nada, sin saludos, manteniendo el formato (si estabas dentro del bloque backlog, continúa el JSON y ciérralo con ```).', TOKENS.synthesis, [{ role: 'user', content: synPrompt }, { role: 'assistant', content: synText }]);
         synText += synRes.text;
       }
       const ex = extractBacklogOps(synText);
       const ops = ex.ops;
       d.deliverable = ex.body + (ex.truncated ? '\n\n> ⚠ La respuesta se cortó por longitud: se recuperaron las propuestas completas; puede faltar alguna.' : '');
-      d.backlogOps = ops;
-      const doc = knowledge.add({ projectId: proc.projectId, title: `Encargo · ${d.request.slice(0, 70)}${d.request.length > 70 ? '…' : ''}`, body: `# Encargo\n${d.request}\n\n# Responsable\n${lead.config.name}\n\n${d.consulted.length ? `# Consultas al equipo\n${d.consulted.map(c => `## ${c.agentName}\n**Pregunta:** ${c.question}\n\n${c.answer}`).join('\n\n')}\n\n` : ''}# Entregable\n${d.deliverable}${ops.length ? `\n\n# Propuestas al backlog (${ops.length})\n${ops.map(o => '- ' + JSON.stringify(o)).join('\n')}` : ''}`, authorAgentId: lead.id, authorAgentName: lead.config.name, processId });
+      d.backlogOps = d.purpose === 'proposal' || d.purpose === 'team_review' ? [] : d.purpose === 'stories' ? ops.filter(o => o.op === 'add') : ops;
+      // Propuesta: otro especialista la cuestiona con contexto nuevo (solo el encargo y la propuesta, sin el razonamiento
+      // del redactor) antes de presentártela. Sus hallazgos se presentan junto a la propuesta.
+      if (d.purpose === 'proposal' && challengeIdx >= 0) {
+        if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
+        const ch = agents.get(proc.steps[challengeIdx].agentId)!;
+        const chRes = await call(challengeIdx, sys(ch, slug), `Cuestiona de forma INDEPENDIENTE esta propuesta antes de que llegue al propietario. No la redactaste tú.
+# Encargo y decisiones del propietario
+${d.request}
+
+# Propuesta
+${d.deliverable}
+
+Busca omisiones, supuestos sin respaldo, contradicciones con las decisiones aprobadas, riesgos de seguridad o permisos y criterios de aceptación que no se puedan comprobar. Para cada hallazgo: gravedad (bloqueante, mayor o menor), qué falla, por qué (con la referencia al texto) y la corrección mínima. Si no hay nada grave, dilo. Markdown breve (máx. 400 palabras).`, TOKENS.consult);
+        d.challenge = { agentId: ch.id, agentName: ch.config.name, text: chRes.text.trim() };
+        procs.setDelegation(processId, d);
+      }
+      const doc = knowledge.add({ projectId: proc.projectId, title: `${d.purpose === 'proposal' ? 'Propuesta' : d.purpose === 'team_review' ? 'Revisión del equipo' : d.purpose === 'stories' ? 'Historias propuestas' : 'Encargo'} · ${d.request.split('\n')[0].slice(0, 70)}`, body: `# Encargo\n${d.request}\n\n# Responsable\n${lead.config.name}\n\n${d.consulted.length ? `# Consultas al equipo\n${d.consulted.map(c => `## ${c.agentName}\n**Pregunta:** ${c.question}\n\n${c.answer}`).join('\n\n')}\n\n` : ''}# Entregable\n${d.deliverable}${d.challenge ? `\n\n# Cuestionamiento independiente (${d.challenge.agentName})\n${d.challenge.text}` : ''}${ops.length ? `\n\n# Propuestas al backlog (${ops.length})\n${ops.map(o => '- ' + JSON.stringify(o)).join('\n')}` : ''}`, authorAgentId: lead.id, authorAgentName: lead.config.name, processId });
       d.knowledgeDocId = doc.id;
       procs.setDelegation(processId, d);
     }
@@ -268,17 +302,38 @@ Usa solo ids de historias que existen en el estado real. Cierra el bloque con \`
   }
 }
 
+const normTitle = (t: string) => t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+/** Misma historia: mismo título normalizado o al menos un 80 % de palabras (de 3+ letras) en común. */
+export function sameStory(a: string, b: string): boolean {
+  const x = normTitle(a); const y = normTitle(b); if (x === y) return true;
+  const wa = new Set(x.split(' ').filter(w => w.length > 2)); const wb = new Set(y.split(' ').filter(w => w.length > 2));
+  if (!wa.size || !wb.size) return false;
+  const inter = [...wa].filter(w => wb.has(w)).length; return inter / Math.max(wa.size, wb.size) >= 0.8;
+}
+
 /** Aplica las operaciones propuestas al backlog (acción local, con aprobación explícita del propietario). */
 export function applyBacklogOps(slug: string, processId: string): DelegationResult {
   const procs = processesRepo(slug); const proc = procs.get(processId);
   if (!proc?.delegation) throw Object.assign(new Error('Encargo no encontrado'), { statusCode: 404 });
   const d = proc.delegation; if (d.opsApplied) throw Object.assign(new Error('Las propuestas ya se aplicaron.'), { statusCode: 409 });
   const repo = backlogRepo(slug); const list = () => repo.list(proc.projectId);
-  const find = (ref: string) => { const r = String(ref).trim().toLowerCase(); const n = parseInt(r.replace(/\D+/g, ''), 10); return list().find(b => b.storyId.toLowerCase() === r) ?? (Number.isFinite(n) ? list().find(b => parseInt(b.storyId.replace(/\D+/g, ''), 10) === n) : undefined); };
+  // Por id exacto; el número solo vale si la referencia ES un id de historia («12», «HU-12»): EN-3 nunca es HU-003 y un
+  // título con cifras («Tema v2») nunca se confunde con HU-002.
+  const find = (ref: string) => { const r = String(ref).trim().toLowerCase(); const n = /^(?:hu-?)?\d+$/.test(r) ? parseInt(r.replace(/\D+/g, ''), 10) : NaN; return list().find(b => b.storyId.toLowerCase() === r) ?? (Number.isFinite(n) ? list().find(b => parseInt(b.storyId.replace(/\D+/g, ''), 10) === n) : undefined); };
+  const created = new Map<string, string>();
   const summary: string[] = [];
   for (const op of d.backlogOps) {
     try {
-      if (op.op === 'add') { const it = addManualItem(slug, proc.projectId, { title: op.title, criterion: op.criterion, description: [op.description, op.reason ? `Motivo: ${op.reason}` : ''].filter(Boolean).join('\n'), ownerKey: op.ownerKey ?? undefined, estimate: op.estimate ?? null }); if (op.dependsOn) repo.update(it.id, { dependsOn: op.dependsOn }); summary.push(`${it.storyId} añadida: ${it.title}`); }
+      if (op.op === 'add') {
+        // Sin duplicados: misma historia = mismo título normalizado o ≥ 80 % de palabras en común con una abierta.
+        const dup = list().find(b => b.status !== 'done' && b.status !== 'discarded' && sameStory(b.title, op.title));
+        if (dup) { summary.push(`${dup.storyId} ya existía («${dup.title}»): no se duplica`); created.set(normTitle(op.title), dup.storyId); continue; }
+        const it = addManualItem(slug, proc.projectId, { title: op.title, criterion: op.criterion, description: [op.description, op.reason ? `Motivo: ${op.reason}` : ''].filter(Boolean).join('\n'), ownerKey: op.ownerKey ?? undefined, estimate: op.estimate ?? null });
+        created.set(normTitle(op.title), it.storyId);
+        const dep = op.dependsOn ? (find(op.dependsOn)?.storyId ?? created.get(normTitle(op.dependsOn)) ?? null) : null;
+        if (dep) repo.update(it.id, { dependsOn: dep });
+        summary.push(`${it.storyId} añadida: ${it.title}${op.dependsOn && !dep ? ` (dependencia «${op.dependsOn}» no encontrada)` : ''}`);
+      }
       else if (op.op === 'update') {
         const it = find(op.story); if (!it) throw new Error(`${op.story} no existe`); const patch: any = {}; for (const k of ['title', 'criterion', 'description', 'ownerKey', 'estimate', 'dependsOn'] as const) if (op[k] !== undefined) patch[k] = op[k]; repo.update(it.id, patch);
         // Replantear una historia que estaba en revisión (con un diff pendiente) la devuelve a pendiente: el diff anterior queda superado.

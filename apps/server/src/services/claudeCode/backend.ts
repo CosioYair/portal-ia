@@ -218,7 +218,7 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
     try {
       say(`Enviando el encargo a Claude Code · ${label}`, 'sending');
       const r = await runCliTask({
-        cli, detection: det, model: req.model, system: job ? req.system + READ_HINT : req.system, prompt: req.user, history: req.history,
+        cli, detection: det, model: req.model, system: job ? req.system + READ_HINT : req.system, prompt: req.user, history: req.history, images: req.images,
         schema: req.responseSchema ?? null, maxTurns: s.maxTurns, timeoutMs, signal, onEvent,
         mcp: job ? { command: process.execPath, args: [BRIDGE_SCRIPT], env: { PORTAL_URL: bridgeUrl, PORTAL_BRIDGE_TOKEN: job.token, PORTAL_BRIDGE_MODE: 'job' }, tools: JOB_TOOLS.map(n => `mcp__portal__${n}`) } : null
       });

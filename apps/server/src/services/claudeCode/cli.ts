@@ -34,6 +34,8 @@ export interface CliTaskOptions {
   system: string;
   prompt: string;
   history?: { role: 'user' | 'assistant'; content: string }[];
+  /** Imágenes del encargo: van como bloques de imagen (base64) en el mensaje de `stream-json`, como las admite el CLI. */
+  images?: { mediaType: string; data: string }[];
   schema?: { name: string; description?: string; schema: Record<string, unknown> } | null;
   maxTurns: number;
   timeoutMs: number;
@@ -150,7 +152,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
       const timer = setTimeout(() => stop(ccError('timeout', `Claude Code no terminó dentro del plazo de la ejecución (${Math.round(o.timeoutMs / 1000)} s) y se detuvo. Lo hecho en el proceso se conserva.`)), o.timeoutMs);
       const onAbort = () => stop(ccError('cancelled', 'Ejecución de Claude Code cancelada por el propietario.'));
       o.signal.addEventListener('abort', onAbort, { once: true });
-      const send = (content: string) => child.stdin!.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`);
+      const send = (content: string | unknown[]) => child.stdin!.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`);
 
       const handle = (j: any) => {
         if (j.type === 'system' && j.subtype === 'init') {
@@ -182,7 +184,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
           const untouched = (Number(j.num_turns) || 0) === 0 && !(Number(j.usage?.input_tokens) || 0) && !(Number(j.usage?.output_tokens) || 0);
           if (!gateOk || !untouched) { stop(ccError('backend_unavailable', !gateOk ? 'Claude Code no informó de su configuración (init) antes de la primera respuesta. Se detuvo sin enviar el encargo.' : 'La comprobación previa de Claude Code no se comportó como está documentado (el mensaje en blanco no debía llegar al modelo). Se detuvo sin enviar el encargo.')); return; }
           phase = 'run';
-          send(promptWithHistory(o.prompt, o.history));
+          send(o.images?.length ? [...o.images.map(im => ({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.data } })), { type: 'text', text: promptWithHistory(o.prompt, o.history) }] : promptWithHistory(o.prompt, o.history));
         } else if (j.type === 'result') {
           result = j;
           try { child.stdin!.end(); } catch { /* cerrada */ }

@@ -52,11 +52,15 @@ const init = () => ({
 });
 const blankResult = () => ({ type: 'result', subtype: 'success', is_error: false, result: 'Blank prompt — the message was only whitespace, so nothing was sent to the model.', num_turns: sc.gateModelCall ? 1 : 0, duration_ms: 1, total_cost_usd: 0, usage: { input_tokens: sc.gateModelCall ? 10 : 0, output_tokens: 0 }, session_id: 'sess-fake', permission_denials: [] });
 
+let images = 0;
 if (opt('--input-format') === 'stream-json') {
   let buf = ''; let started = false; let busy = false; const queue = [];
   const next = async () => {
     if (busy || !queue.length) return; busy = true;
-    const msg = queue.shift(); const content = typeof msg?.message?.content === 'string' ? msg.message.content : '';
+    const msg = queue.shift(); const raw = msg?.message?.content;
+    // Contenido en bloques (texto + imágenes en base64), como lo admite el CLI real: se registra cuántas imágenes llegan.
+    const content = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.filter(b => b?.type === 'text').map(b => b.text).join('\n') : '';
+    images = Array.isArray(raw) ? raw.filter(b => b?.type === 'image' && b?.source?.type === 'base64' && b.source.data).length : 0;
     if (!started) {
       started = true;
       if (behavior === 'malformed') { log({ kind: 'run', prompt: content, system, cwd: process.cwd(), behavior }); process.stdout.write('{"type":"system"\nesto no es json\n'); process.exit(0); }
@@ -74,7 +78,7 @@ if (opt('--input-format') === 'stream-json') {
 }
 
 async function run(prompt) {
-  const entry = { kind: 'run', prompt, system, cwd: process.cwd(), behavior };
+  const entry = { kind: 'run', prompt, system, cwd: process.cwd(), behavior, images };
   if (behavior === 'hang') {
     fs.writeFileSync(path.join(here, 'fake-claude.pid'), String(process.pid));
     log(entry);

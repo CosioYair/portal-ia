@@ -198,7 +198,8 @@ test('empresas y proyectos: creación con agentes de plantilla; asistente persis
   assistantRepo.add({ role: 'user', content: 'hola', actions: [], attachments: [{ name: 'captura.png', mediaType: 'image/png', bytes: 1200 }], tokensIn: 0, tokensOut: 0, costUsd: 0, model: null });
   assert.equal(assistantRepo.list().length, 1);
   assert.equal(assistantRepo.list()[0].attachments[0].name, 'captura.png', 'adjuntos persistidos');
-  assistantRepo.clear(); assert.equal(assistantRepo.list().length, 0);
+  // «Limpiar» archiva las conversaciones; nunca borra mensajes ni decisiones (el registro es duradero).
+  assistantRepo.clear(); assert.equal(assistantRepo.list().length, 1, 'el mensaje se conserva');
 });
 
 test('asistente: parseo de respuesta (bloque actions, JSON legado, texto plano) y propuestas con autorización', async () => {
@@ -227,13 +228,22 @@ test('asistente: parseo de respuesta (bloque actions, JSON legado, texto plano) 
     { type: 'execute_story', company: 'portal-ia', project: 'Desarrollo del Portal', story: 'Soportar imágenes en el chat' },
     { type: 'apply_changes', company: 'portal-ia', processId: 'no-existe' }
   ]);
-  assert.equal(acts[0].type, 'add_backlog_item'); assert.equal(acts[0].status, 'done');
-  assert.equal(acts[1].type, 'propose_execution'); assert.equal(acts[1].status, 'pending'); assert.ok(acts[1].processId); assert.ok((acts[1].estimatedUsd ?? 0) > 0);
+  // v0.16: crear una historia desde el chat es una TARJETA que el propietario confirma (nada se crea por lenguaje natural).
+  assert.equal(acts[0].type, 'propose_local'); assert.equal(acts[0].status, 'pending'); assert.equal(acts[0].local!.op, 'add_backlog_item');
+  assert.equal(acts[1].type, 'propose_execution'); assert.equal(acts[1].status, 'failed', 'la historia aún no existe: no se ejecuta lo que no confirmaste');
   assert.equal(acts[2].type, 'propose_apply'); assert.equal(acts[2].status, 'failed');
-  const proc = processesRepo('portal-ia').get(acts[1].processId!);
+  const projectId = projectsRepo('portal-ia').list().find(p => p.name === 'Desarrollo del Portal')!.id;
+  assert.ok(!backlogRepo('portal-ia').list(projectId).some(i => i.title === 'Soportar imágenes en el chat'), 'sin confirmar no se creó');
+  const pending = assistantRepo.add({ role: 'assistant', content: 'Propongo crearla.', actions: acts, attachments: [], tokensIn: 1, tokensOut: 1, costUsd: 0, model: 'x' });
+  const { decideLocal } = await import('../src/services/assistant.ts');
+  assert.equal(decideLocal(pending.id, 0, 'approve').actions[0].status, 'done');
+  assert.ok(backlogRepo('portal-ia').list(projectId).some(i => i.title === 'Soportar imágenes en el chat'), 'creada al confirmarla');
+  assert.throws(() => decideLocal(pending.id, 0, 'approve'), /no se repite/);
+  const acts2 = performActions([{ type: 'execute_story', company: 'portal-ia', project: 'Desarrollo del Portal', story: 'Soportar imágenes en el chat' }]);
+  assert.equal(acts2[0].type, 'propose_execution'); assert.equal(acts2[0].status, 'pending'); assert.ok(acts2[0].processId); assert.ok((acts2[0].estimatedUsd ?? 0) > 0);
+  const proc = processesRepo('portal-ia').get(acts2[0].processId!);
   assert.equal(proc?.status, 'pending_authorization', 'el proceso espera autorización: no se gastó IA');
-  const items = backlogRepo('portal-ia').list(acts[1].projectId!);
-  assert.ok(items.some(i => i.title === 'Soportar imágenes en el chat'));
+  acts[1] = acts2[0];
   // Resolver la propuesta desde la tarjeta
   const msg = assistantRepo.add({ role: 'assistant', content: 'Propongo ejecutarla.', actions: acts, attachments: [], tokensIn: 10, tokensOut: 5, costUsd: 0.001, model: 'x' });
   resolveProposal(msg.id, acts[1].processId!, 'done', 'Autorizada');

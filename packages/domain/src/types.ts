@@ -1023,6 +1023,14 @@ export interface DelegationResult {
   knowledgeDocId: string | null;
   backlogOps: BacklogOp[];
   opsApplied: { at: string; summary: string[] } | null;
+  /**
+   * Para qué es (v0.16): análisis libre (por defecto), propuesta de una conversación (con cuestionamiento independiente
+   * antes de presentarla), revisión del equipo de una propuesta, o historias de una propuesta aprobada (solo «add»).
+   */
+  purpose?: 'analysis' | 'proposal' | 'team_review' | 'stories';
+  conversationId?: string | null;
+  /** Cuestionamiento independiente de la propuesta (otro especialista, contexto nuevo, sin el razonamiento del redactor). */
+  challenge?: { agentId: string; agentName: string; text: string } | null;
 }
 
 // ---- HU-143 · Integrar siempre contra la rama principal ----

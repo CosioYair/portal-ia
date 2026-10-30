@@ -10,6 +10,7 @@ export * from './metrics.ts';
 export * from './gauntlet.ts';
 export * from './batch.ts';
 export * from './assignment.ts';
+export * from './conversation.ts';
 
 export const PROVIDER_META = {
   anthropic: { id: 'anthropic', name: 'Anthropic', consoleHost: 'console.anthropic.com', keyHint: 'sk-ant-…' },
