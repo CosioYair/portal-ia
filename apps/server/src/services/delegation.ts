@@ -44,16 +44,17 @@ export function extractBacklogOps(text: string): { ops: BacklogOp[]; body: strin
   let ops: any[] = []; let truncated = !found.closed;
   try { const v = JSON.parse(found.raw); ops = Array.isArray(v) ? v : []; }
   catch {
-    truncated = true;
-    // Recuperar objetos completos de un array cortado: equilibrio de llaves fuera de cadenas.
+    // Recuperar objetos completos (array cortado u objetos por líneas): equilibrio de llaves fuera de cadenas. Solo hay
+    // corte si el bloque no se cerró o si algún objeto quedó a medias.
     const src = found.raw; let depth = 0, start = -1, inStr = false, esc = false;
     for (let i = 0; i < src.length; i++) {
       const ch = src[i];
       if (inStr) { if (esc) esc = false; else if (ch === '\\') esc = true; else if (ch === '"') inStr = false; continue; }
       if (ch === '"') inStr = true;
       else if (ch === '{') { if (depth === 0) start = i; depth++; }
-      else if (ch === '}') { depth--; if (depth === 0 && start >= 0) { try { ops.push(JSON.parse(src.slice(start, i + 1))); } catch { /* objeto ilegible */ } start = -1; } }
+      else if (ch === '}') { depth--; if (depth === 0 && start >= 0) { try { ops.push(JSON.parse(src.slice(start, i + 1))); } catch { truncated = true; } start = -1; } }
     }
+    if (depth > 0 || inStr) truncated = true;
   }
   const valid = ops.filter((o: any) => o && typeof o.op === 'string' && ['add', 'update', 'discard', 'merge', 'reprioritize'].includes(o.op)) as BacklogOp[];
   const body = (text.slice(0, found.start) + text.slice(found.end)).trim();
@@ -122,7 +123,10 @@ function extractJson(text: string): any | null {
 }
 
 export const CHALLENGE_TITLE = 'Cuestionamiento independiente de la propuesta';
-/** Quien cuestiona la propuesta: el Evaluador Gauntlet del proyecto, si existe; si no, el Arquitecto o QA. Nunca el redactor. */
+/**
+ * Quien cuestiona la propuesta: el Evaluador Gauntlet del proyecto, si existe; si no, el Arquitecto o QA. Nunca el redactor,
+ * y tampoco se le consulta durante la redacción (así su lectura es de verdad independiente).
+ */
 export function pickChallenger(slug: string, projectId: string | null, lead: Agent): Agent | null {
   const pool = activeAgents(slug).filter(a => a.id !== lead.id && (!projectId || a.projectId === projectId));
   return pool.find(a => (a.config.capabilities ?? []).includes('evaluar_gauntlet')) ?? pool.find(a => a.key === 'pj-arquitecto') ?? pool.find(a => a.key === 'pj-qa') ?? null;
@@ -130,7 +134,8 @@ export function pickChallenger(slug: string, projectId: string | null, lead: Age
 
 export function estimateDelegation(slug: string, projectId: string | null, agentRef: any, request: string, purpose: DelegationResult['purpose'] = 'analysis'): AssessmentEstimate & { leadAgentId: string; teamSize: number } {
   const lead = pickLeadAgent(slug, projectId, agentRef);
-  const team = teamOf(slug, lead).slice(0, MAX_CONSULTS);
+  const challenger = purpose === 'proposal' ? pickChallenger(slug, projectId, lead) : null;
+  const team = teamOf(slug, lead).filter(a => a.id !== challenger?.id).slice(0, MAX_CONSULTS);
   const ctxTok = estimateTokens(contextFor(slug, projectId) + request) + 600;
   const price = (a: Agent, inTok: number, outTok: number) => { const p = estimatePricing(a.config.provider, a.config.model); const think = a.config.effort === 'high' ? 6000 : a.config.effort === 'medium' ? 2500 : 0; return (inTok * p.inPerM + (outTok + think) * p.outPerM) / 1_000_000; };
   const steps = [
@@ -138,7 +143,6 @@ export function estimateDelegation(slug: string, projectId: string | null, agent
     ...team.map(a => ({ agentId: a.id, agentName: a.config.name, title: `Consulta a ${a.config.name}`, model: a.config.model, estimatedUsd: price(a, ctxTok, TOKENS.consult) })),
     { agentId: lead.id, agentName: lead.config.name, title: 'Entregable y propuestas', model: lead.config.model, estimatedUsd: price(lead, ctxTok + team.length * TOKENS.consult, TOKENS.synthesis) }
   ];
-  const challenger = purpose === 'proposal' ? pickChallenger(slug, projectId, lead) : null;
   if (challenger) steps.push({ agentId: challenger.id, agentName: challenger.config.name, title: CHALLENGE_TITLE, model: challenger.config.model, estimatedUsd: price(challenger, ctxTok + TOKENS.synthesis, TOKENS.consult) });
   const estimatedUsd = steps.reduce((a, s) => a + s.estimatedUsd, 0);
   return { steps, estimatedUsd, suggestedBudgetUsd: Math.max(0.5, Math.ceil(estimatedUsd * 2 * 2) / 2), leadAgentId: lead.id, teamSize: team.length } as any;
@@ -202,8 +206,8 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
     } finally { unregisterCall(processId, ctrl); }
   };
 
-  const team = teamOf(slug, lead).slice(0, MAX_CONSULTS);
   const challengeIdx = proc.steps.findIndex(s => s.title === CHALLENGE_TITLE);
+  const team = teamOf(slug, lead).filter(a => challengeIdx < 0 || a.id !== proc.steps[challengeIdx].agentId).slice(0, MAX_CONSULTS);
   const synIdx = challengeIdx >= 0 ? challengeIdx - 1 : proc.steps.length - 1;
   const consultSteps = proc.steps.slice(1, synIdx); // uno por miembro del equipo, en el mismo orden
   try {

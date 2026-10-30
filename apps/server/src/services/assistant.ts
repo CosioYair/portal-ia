@@ -22,11 +22,12 @@ import { phaseContext } from './operationalPhase.ts';
 import { CAPABILITIES, type CapabilityPreview, type CapabilityResult } from './capabilities.ts';
 import { agentBackend, agentCaller, claudeCodeGate } from './claudeCode/backend.ts';
 import { lastDetection } from './claudeCode/detect.ts';
-import { backendLabel, STAGE_LABEL } from '@portal-ia/domain';
+import { ASSIGNMENT_STATUS_LABEL, backendLabel, STAGE_LABEL } from '@portal-ia/domain';
 import { monotonicNow } from '../clock.ts';
 import { conversationsRepo } from '../db/conversations.ts';
 import { createConversation, getConversation, ledgerForPrompt, proposeDecisions, recomputeStage } from './conversations.ts';
 import { createAssignment } from './assignments.ts';
+import { assignmentsRepo } from '../db/assignments.ts';
 
 /**
  * Asistente global (lo encarna el «Asistente de Empresa» del espacio interno).
@@ -71,7 +72,14 @@ export const assistantRepo = {
   },
   /** Mensajes con el estado real de los procesos que crearon sus acciones (para que el chat no diga «en ejecución» cuando ya terminó). */
   listLive(limit = 80, conversationId: string | null = null): AssistantMessage[] {
-    return this.list(limit, conversationId).map(m => m.actions.some(a => a.processId && a.workspaceSlug) ? { ...m, actions: m.actions.map(a => {
+    return this.list(limit, conversationId).map(m => m.actions.some(a => (a.processId || a.assignmentId) && a.workspaceSlug) ? { ...m, actions: m.actions.map(a => {
+      // Encargo propuesto: su estado real (al leer; el mensaje no se modifica). Pendiente solo mientras sea borrador.
+      if (a.assignmentId && a.workspaceSlug) {
+        try { const x = assignmentsRepo(a.workspaceSlug).get(a.assignmentId); if (!x || a.status === 'failed') return a;
+          const settled = x.status === 'accepted' || x.status === 'cancelled';
+          return { ...a, status: x.status === 'draft' ? a.status : x.status === 'cancelled' ? 'rejected' as const : 'done' as const, live: { status: x.status, phase: `Encargo ${ASSIGNMENT_STATUS_LABEL[x.status]}`, next: x.status === 'ready_for_review' ? 'Revisa la evidencia y acéptalo o pide cambios.' : x.status === 'running' ? 'Se está ejecutando: sigue el progreso en su tarjeta.' : settled ? 'No requiere ninguna acción.' : 'Decide en su tarjeta.', tone: x.status === 'failed' ? 'err' as const : x.status === 'ready_for_review' || x.status === 'needs_owner' ? 'warn' as const : settled ? 'ok' as const : 'info' as const, settled } };
+        } catch { return a; }
+      }
       if (!a.processId || !a.workspaceSlug) return a;
       try { const p = processesRepo(a.workspaceSlug).get(a.processId); if (!p) return a;
         // Propuesta de un proceso archivado: ya no se autoriza desde el chat (solo se muestra; el mensaje no se modifica).
@@ -200,7 +208,7 @@ const CONVERSATION_GUIDE = `# Cómo trabajar en esta conversación (intención �
 - «Investiga esta idea», «ayúdame a decidir»: explica alternativas, ventajas, inconvenientes e incertidumbres y abre las decisiones que haya que cerrar, UNA por acción:
   {"type":"open_decision","question":string,"context":string,"options":[{"label":string,"pros":string,"cons":string}],"recommendation":string,"risks":string[],"dependsOn":number[] (números de decisiones D previas)}
   Tú NO apruebas decisiones: las aprueba, rechaza, revisa o aplaza el propietario en el registro. No inventes fuentes externas: si hace falta investigar fuera, dilo.
-- Con las decisiones cerradas: el propietario pulsa «Preparar propuesta» (el equipo la redacta y otro especialista la cuestiona); «Consultar al equipo» la revisa; con la propuesta aprobada, «Crear historias». Sugiérelo; no lo hagas tú.
+- Con las decisiones cerradas: el propietario pulsa «Preparar propuesta» (el equipo la redacta y otro especialista la cuestiona); «Consultar al equipo» la revisa; con la propuesta aprobada, «Preparar historias» (y luego «Crear historias»). Sugiérelo; no lo hagas tú.
 - «Implementa», «arregla», «déjalo listo para revisar» (cambio de código directo y acotado): propón un ENCARGO de desarrollo (sin historia), con criterios comprobables y tamaño:
   {"type":"propose_assignment","title":string,"request":string (la petición tal cual),"objective":string,"criteria":string[],"outOfScope":string[],"size":"S"|"M"|"L"}
   Queda como borrador: el propietario lo revisa y lo autoriza (presupuesto, llamadas a la suscripción); hasta entonces no se ejecuta nada.
@@ -366,6 +374,7 @@ export async function chat(userText: string, images: { mediaType: string; data: 
   const models: ModelInfo[] = (() => { try { return JSON.parse(prow.models_json); } catch { return []; } })();
   const attachments: AssistantAttachment[] = [...images.map((im, i) => ({ name: im.name ?? `imagen-${i + 1}`, mediaType: im.mediaType, bytes: Math.round(im.data.length * 0.75) })), ...files];
   const conv = conversationId ? getConversation(conversationId) : (conversationsRepo.list().find(c => c.status === 'active') ?? createConversation(userText.slice(0, 60), null, null));
+  if (conv.title === 'Nueva conversación' && !assistantRepo.list(1, conv.id).length) conversationsRepo.update(conv.id, { title: userText.replace(/\s+/g, ' ').trim().slice(0, 60) || conv.title });
   const user = assistantRepo.add({ role: 'user', content: userText, actions: [], attachments, tokensIn: 0, tokensOut: 0, costUsd: 0, model: null }, conv.id);
   const history = assistantRepo.list(16, conv.id).filter(m => m.id !== user.id).slice(-12).map(m => `${m.role === 'user' ? 'Propietario' : 'Asistente'}: ${m.content.slice(0, 1200)}${m.actions.length ? ` [acciones: ${m.actions.map(x => `${x.type}:${x.status}`).join(', ')}]` : ''}`).join('\n');
   const system = `Eres «${a.config.name}», ${a.template.role.toLowerCase()} de Portal IA, una plataforma local para gestionar empresas operadas por agentes de IA. Hablas con el propietario.

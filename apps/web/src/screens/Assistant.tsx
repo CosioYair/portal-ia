@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { api, type AssistantInfo } from '../lib/api.ts';
+import type { AssistantInfo } from '../lib/api.ts';
 import { fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Chip, KV } from '../components/ui.tsx';
@@ -10,12 +10,11 @@ import { AssistantChat } from '../components/AssistantChat.tsx';
 export function Assistant() {
   const [info, setInfo] = useState<AssistantInfo | null>(null);
   const [pending, setPending] = useState(0);
-  const [key, setKey] = useState(0);
   const draft = (useLocation().state as { draft?: string } | null)?.draft;
   const pct = info ? Math.min(100, Math.round((info.spentThisMonthUsd / Math.max(0.01, info.monthlyLimitUsd)) * 100)) : 0;
   return (
     <Shell crumb="Asistente">
-      <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 16, height: 'calc(100vh - 57px)', boxSizing: 'border-box' }}>
+      <main className="page assist-page" style={{ display: 'flex', flexDirection: 'column', gap: 16, height: 'calc(100vh - 57px)', boxSizing: 'border-box' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <div className="eyebrow">Asistente global</div>
@@ -31,11 +30,10 @@ export function Assistant() {
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
             {info && <Link className="btn btn-ghost btn-sm" to={`/equipo/${info.agentId}`}>Configurar asistente</Link>}
-            <button className="btn btn-ghost btn-sm" onClick={async () => { if (!confirm('¿Borrar la conversación?')) return; await api.clearAssistant(); setKey(k => k + 1); }}>Limpiar conversación</button>
           </div>
         </div>
-        <AssistantChat key={key} onInfo={setInfo} onPending={setPending} initialText={draft} />
-        {info && <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }} className="small muted"><KV k="Cada envío">1 llamada real al modelo del asistente</KV><KV k="Acciones locales">gratuitas e inmediatas (backlog, proyectos, empresas)</KV><KV k="Ejecutar / aplicar">el asistente propone; tú autorizas en la tarjeta</KV></div>}
+        <AssistantChat onInfo={setInfo} onPending={setPending} initialText={draft} />
+        {info && <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }} className="small muted"><KV k="Cada envío">1 llamada real al modelo del asistente</KV><KV k="Cambios locales">sin IA; los confirmas tú en la tarjeta</KV><KV k="Ejecutar / encargos / historias">el asistente propone; tú autorizas en la tarjeta</KV></div>}
       </main>
     </Shell>
   );

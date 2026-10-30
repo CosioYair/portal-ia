@@ -268,3 +268,14 @@ button.chip:hover{border-color:#B8B5AC}
 @media (prefers-reduced-motion: reduce){
 *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;animation-delay:0s!important;transition-duration:.01ms!important;transition-delay:0s!important;scroll-behavior:auto!important}
 }
+
+/* Asistente v0.16: barra y panel de la conversación; menú lateral plegable en móvil. */
+.conv-panel>summary{list-style:none}
+.conv-panel>summary::-webkit-details-marker{display:none}
+@media (max-width:720px){.conv-bar select.input{max-width:100%!important;flex:1 1 100%}.conv-bar .btn{flex:1 1 auto}}
+.assist-cols{flex:1;min-height:0;display:flex;flex-direction:column}
+.assist-main{flex:1;min-height:0;display:flex;flex-direction:column}
+@media (min-width:1180px){.assist-wide{flex-direction:row-reverse}.assist-wide>.assist-side{width:420px;flex:none;border-left:1px solid #EEECE6;overflow:auto}.assist-wide>.assist-side .conv-panel{border-bottom:0}.assist-wide>.assist-side .conv-panel>div{max-height:none!important}}
+@media (max-width:720px){.assist-page{height:auto!important}.assist-page>section.card{min-height:85vh}.assist-main{min-height:60vh}.conv-bar #conv-ws,.conv-bar #conv-pj{flex:1 1 40%!important;max-width:none!important}.conv-panel>div{max-height:45vh!important}}
+.side-toggle{display:none}
+@media (max-width:720px){.side{flex-basis:100%;flex-direction:row;flex-wrap:wrap;align-items:center;gap:6px;padding:10px 12px}.side .ws-btn{flex:1;min-width:0}.side-toggle{display:inline-flex}.side:not(.side-open)>*:not(.ws-btn):not(.side-toggle):not(.sr){display:none!important}.side.side-open{flex-direction:column;align-items:stretch}}

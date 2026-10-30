@@ -119,6 +119,8 @@ test('idea → decisiones una a una → propuesta cuestionada → revisión del 
   assert.ok(challengeStep, 'la propuesta incluye el cuestionamiento');
   const leadStep = prop.body.process.steps[0];
   assert.notEqual(challengeStep.agentId, leadStep.agentId, 'quien cuestiona no es quien redacta');
+  assert.ok(!prop.body.process.steps.some((s: any) => s.title.startsWith('Consulta a') && s.agentId === challengeStep.agentId), 'a quien cuestiona no se le consulta al redactar');
+  assert.match((await inject('GET', A)).body.next, /^Autoriza la propuesta/, 'la siguiente acción es autorizar lo que espera, no revisarlo');
   // Historias sin propuesta aprobada: no.
   const storiesEarly = await inject('POST', `${A}/artifacts`, { kind: 'stories' });
   assert.equal(storiesEarly.status, 409); assert.equal(storiesEarly.body.code, 'proposal_not_approved');
@@ -133,6 +135,7 @@ test('idea → decisiones una a una → propuesta cuestionada → revisión del 
   const synth = calls().find(c => c.rule === 'Es la PROPUESTA');
   assert.ok(synth.markers.includes('Decisiones aprobadas por el propietario') && synth.markers.includes('Decisiones aplazadas'), 'la propuesta recibe lo aprobado y lo aplazado');
   assert.deepEqual(pa.backlogOps, [], 'una propuesta no propone cambios al backlog');
+  assert.ok(!pa.consulted.some((c: any) => c.agentName === pa.challenge.agentName), 'quien cuestiona no participó en la redacción');
 
   // 4 · Revisión del equipo (con consulta al arquitecto).
   const tr = await inject('POST', `${A}/artifacts`, { kind: 'team_review' });
@@ -154,6 +157,7 @@ test('idea → decisiones una a una → propuesta cuestionada → revisión del 
   const drafts = d.artifacts.find((a: any) => a.kind === 'stories');
   assert.deepEqual(drafts.backlogOps.map((o: any) => o.op), ['add', 'add', 'add'], 'solo altas: nunca descarta ni reprioriza');
   assert.equal(backlogRepo(S).list(project.id).length, backlog0, 'los borradores no tocan el backlog');
+  assert.doesNotMatch(drafts.deliverable, /se cortó/, 'un bloque cerrado con un objeto por línea no es un corte');
 
   // 6 · Crear historias: exige autorización explícita; sin duplicados; dependencia por título; no se repite.
   const noAuth = await inject('POST', `${A}/artifacts/${drafts.id}/create-stories`, {});
@@ -191,10 +195,12 @@ test('conversaciones: «Limpiar» archiva sin borrar; leer no escribe; alcance v
 
 test('imágenes: llegan al modelo como bloques (no se finge haberlas analizado)', async () => {
   script();
-  const conv = await inject('POST', '/api/assistant/conversations', { title: 'Captura' });
+  const conv = await inject('POST', '/api/assistant/conversations', {});
+  assert.equal(conv.body.title, 'Nueva conversación');
   const png = Buffer.from('89504e470d0a1a0a', 'hex').toString('base64');
   const r = await inject('POST', '/api/assistant/messages', { text: 'Mira esta captura.', conversationId: conv.body.id, images: [{ mediaType: 'image/png', data: png, name: 'a.png' }] });
   assert.equal(r.status, 200);
   assert.equal(r.body.user.attachments[0].name, 'a.png');
   assert.equal(calls().at(-1).images, 1, 'la imagen se envía al proveedor');
+  assert.equal((await inject('GET', `/api/assistant/conversations/${conv.body.id}`)).body.conversation.title, 'Mira esta captura.', 'el primer mensaje titula la conversación');
 });

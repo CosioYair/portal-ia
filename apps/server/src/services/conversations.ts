@@ -145,7 +145,7 @@ export function decideProposal(conversationId: string, artifactId: string, decis
   const a = syncArtifact(a0);
   if (a.status !== 'ready') throw fail(409, `La propuesta no está lista para decidir (está «${a.status}»).`, 'not_ready');
   const out = artifactsRepo.update(artifactId, x => { x.status = decision === 'approve' ? 'approved' : 'rejected'; x.decidedAt = monotonicNow(); x.content = { ...x.content, summary: noteText }; });
-  note(conversationId, `**Propuesta v${a.version} ${decision === 'approve' ? 'aprobada' : 'rechazada'}** por el propietario${noteText ? `: ${noteText}` : ''}.${decision === 'approve' ? ' Ahora puedes «Crear historias» (borradores que confirmas) o «Ejecutar como encargo».' : ''}`);
+  note(conversationId, `**Propuesta v${a.version} ${decision === 'approve' ? 'aprobada' : 'rechazada'}** por el propietario${noteText ? `: ${noteText}` : ''}.${decision === 'approve' ? ' Ahora puedes «Preparar historias» (borradores que luego creas tú) o pedir al Asistente un encargo de desarrollo.' : ''}`);
   recomputeStage(conversationId);
   return out;
 }
@@ -195,9 +195,10 @@ export function conversationDetail(conversationId: string) {
   });
   const assignments = c.workspaceSlug ? assignmentsRepo(c.workspaceSlug).list().filter(x => x.conversationId === conversationId).map(x => assignmentView(c.workspaceSlug!, x.id)) : [];
   const proposals = artifacts.filter(a => a.kind === 'proposal');
+  const flight = artifacts.find(a => a.status === 'pending_authorization' || a.status === 'running');
   return {
     conversation: c, stage, decisions, artifacts, assignments,
-    next: nextConversationAction(stage, decisions.filter(d => d.status === 'open').length, proposals.some(a => !['failed', 'cancelled', 'rejected'].includes(a.status)), proposals.some(a => a.status === 'approved'))
+    next: nextConversationAction(stage, decisions.filter(d => d.status === 'open').length, proposals.some(a => !['failed', 'cancelled', 'rejected'].includes(a.status)), proposals.some(a => a.status === 'approved'), flight ? { kind: flight.kind, status: flight.status as 'pending_authorization' | 'running' } : null)
   };
 }
 

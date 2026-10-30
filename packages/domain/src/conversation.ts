@@ -68,12 +68,16 @@ export interface ConversationArtifact {
 }
 
 /** Lo siguiente recomendado según la etapa (sin IA): el chat lo muestra siempre. */
-export function nextConversationAction(stage: ConversationStage, open: number, hasProposal: boolean, proposalApproved: boolean): string {
+export function nextConversationAction(stage: ConversationStage, open: number, hasProposal: boolean, proposalApproved: boolean, inFlight: { kind: ConversationArtifactKind; status: 'pending_authorization' | 'running' } | null = null): string {
   if (stage === 'exploration') return 'Cuéntale la idea al Asistente y pídele que la investigue; él propondrá las decisiones que hay que cerrar.';
   if (open > 0) return `Cierra las decisiones abiertas (${open}) una a una: aprobar, rechazar, revisar o aplazar.`;
+  const what = inFlight ? { proposal: 'la propuesta', team_review: 'la revisión del equipo', stories: 'los borradores de historias' }[inFlight.kind] : '';
+  if (inFlight?.status === 'pending_authorization') return `Autoriza ${what} en su tarjeta (presupuesto visible); sin tu autorización no se llama a nadie.`;
+  if (inFlight?.status === 'running') return `El equipo está preparando ${what}: aparecerá aquí al terminar.`;
+  if (stage === 'execution') return 'Sigue el encargo en su tarjeta: autorízalo, revisa la evidencia y acéptalo o pide cambios.';
+  if (stage === 'backlog') return 'Las historias están en el backlog: ejecútalas una a una o en un lote.';
   if (!hasProposal) return 'Con las decisiones cerradas, «Preparar propuesta» (el equipo la redacta y otro especialista la cuestiona antes de presentártela).';
   if (!proposalApproved) return 'Revisa la propuesta: «Consultar al equipo», apruébala o pide cambios.';
-  if (stage === 'approved') return 'Con la propuesta aprobada: «Crear historias» (borradores que confirmas) o «Ejecutar como encargo».';
-  if (stage === 'backlog') return 'Las historias están en el backlog: ejecútalas una a una o en un lote.';
+  if (stage === 'approved') return 'Con la propuesta aprobada: «Preparar historias» (borradores que luego creas tú) o pide al Asistente un encargo de desarrollo.';
   return 'Sigue el encargo en curso: progreso, cambios y revisión.';
 }

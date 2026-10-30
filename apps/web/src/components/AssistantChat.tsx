@@ -3,7 +3,9 @@ import React, { useEffect, useRef, useState, type ClipboardEvent, type ChangeEve
 import { Link } from 'react-router-dom';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
 import type { PendingDecision, Process, StoryDecisionHistory, SupersededDecision } from '@portal-ia/domain';
-import { api, type AssistantAction, type AssistantImage, type AssistantInfo, type AssistantMessage } from '../lib/api.ts';
+import type { AssistantConversation } from '@portal-ia/domain';
+import { api, type AssistantAction, type AssistantImage, type AssistantInfo, type AssistantMessage, type ConversationDetailView } from '../lib/api.ts';
+import { AssignmentCard, CardBoundary, ConversationBar, ConversationPanel, LocalChangeCard, UsageBanner } from './ConversationPanel.tsx';
 import { PendingDecisionCard } from './PendingDecisionCard.tsx';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
@@ -91,7 +93,7 @@ function ProposalCard({ msgId, action, onResolved }: { msgId: string; action: As
         <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>{isExec
           ? (isDeleg
             ? <>Autorizo este <strong>encargo</strong> al agente responsable y a los agentes a su cargo, hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. El resultado quedará en Conocimiento; los cambios al backlog que proponga los aplicaré yo desde el proceso.</>
-            : <>Autorizo que el equipo del proyecto trabaje en <strong>{action.storyId}</strong> leyendo el repositorio, hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. El resultado será un <strong>diff propuesto</strong> que revisaré antes de aplicarse.</>)
+            : <>Autorizo que el equipo del proyecto trabaje en <strong>{action.storyId}</strong> hasta <strong>{fmtUsd(Number(budget) || 0)}</strong> de API: aplica los cambios en un <strong>worktree aislado</strong> (rama propia), los verifica en el sandbox y QA los evalúa. No integra en main ni publica: eso lo decides después. Con Claude Code consume tu suscripción en lugar de API.</>)
           : <>Autorizo aplicar <strong>{action.changes ?? 0} cambio(s)</strong> en una rama <span className="mono">portal-ia/hu-xxx</span> del repositorio (con commit). La rama no se integra en <span className="mono">main</span> sin mi intervención.</>}</span></label>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <button className="btn btn-primary btn-sm" onClick={run} disabled={!auth || busy || (isExec && !(Number(budget) > 0))}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}{busy ? (isExec ? 'Autorizando…' : 'Aplicando…') : (isDeleg ? 'Autorizar el encargo' : isExec ? 'Autorizar y ejecutar' : 'Aplicar cambios')}</button>
@@ -125,12 +127,22 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
   const fileRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  // Conversación actual (sobrevive a recargar: la última elegida; si ya no existe, la activa más reciente).
+  const [convId, setConvId] = useState<string | null>(() => { try { return localStorage.getItem('portal-ia.conversation'); } catch { return null; } });
+  const [conversations, setConversations] = useState<AssistantConversation[]>([]);
+  const [detail, setDetail] = useState<ConversationDetailView | null>(null);
+  useEffect(() => { try { if (convId) localStorage.setItem('portal-ia.conversation', convId); else localStorage.removeItem('portal-ia.conversation'); } catch { /* sin almacenamiento */ } }, [convId]);
+  const load = async (id: string | null = convId) => {
+    const r = await api.assistant(id).catch(e => { if (id && e?.status === 404) return api.assistant(null); throw e; });
+    setInfo(r.info); onInfo?.(r.info); setMsgs(r.messages); setConversations(r.conversations); setConvId(r.conversationId); setDetail(r.detail);
+  };
 
-  useEffect(() => { api.assistant().then(r => { setInfo(r.info); onInfo?.(r.info); setMsgs(r.messages); }).catch(e => setError(e.message)); // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load().catch(e => setError(e.message)); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [msgs.length, busy]);
-  const unsettled = msgs.some(m => m.actions.some(a => a.live && !a.live.settled));
-  useEffect(() => { if (!unsettled) return; const t = setInterval(() => { api.assistant().then(r => { setMsgs(r.messages); setInfo(r.info); }).catch(() => null); }, 10_000); return () => clearInterval(t); }, [unsettled]);
+  const unsettled = msgs.some(m => m.actions.some(a => a.live && !a.live.settled)) || !!detail?.artifacts.some(a => a.status === 'running');
+  useEffect(() => { if (!unsettled) return; const t = setInterval(() => { load().catch(() => null); }, 10_000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unsettled, convId]);
   // HU-161 · consolidación con la bandeja: una sola autorización vigente por historia.
   const [superseded, setSuperseded] = useState<Record<string, SupersededInfo>>({});
   const [decTick, setDecTick] = useState(0);
@@ -214,8 +226,9 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
     setBusy(true); setError(null); setText(''); setImages([]);
     setMsgs(m => [...m, { id: 'tmp', role: 'user', content, actions: [], attachments: all.map(i => ({ name: i.name ?? 'adjunto', mediaType: i.mediaType, bytes: i.bytes })), tokensIn: 0, tokensOut: 0, costUsd: 0, model: null, createdAt: new Date().toISOString() }]);
     try {
-      const r = await api.sendAssistant(content, imgs.map(({ mediaType, data, name }) => ({ mediaType, data, name })), texts.map(f => ({ name: f.name, mediaType: f.mediaType, bytes: f.bytes })));
+      const r = await api.sendAssistant(content, imgs.map(({ mediaType, data, name }) => ({ mediaType, data, name })), texts.map(f => ({ name: f.name, mediaType: f.mediaType, bytes: f.bytes })), convId);
       setMsgs(m => [...m.filter(x => x.id !== 'tmp'), r.user, r.assistant]); setInfo(r.info); onInfo?.(r.info);
+      await load(r.conversationId).catch(() => null); // decisiones, etapa y siguiente acción al día
       if (r.assistant.actions.some(a => a.status === 'done' && (a.type === 'create_company' || a.type === 'create_project'))) await refreshStructure();
       const done = r.assistant.actions.filter(a => a.status === 'done' && a.type !== 'info').length; const pend = r.assistant.actions.filter(a => a.status === 'pending').length;
       if (done || pend) flash([done ? `${done} acción(es) realizadas` : '', pend ? `${pend} propuesta(s) esperan tu autorización` : ''].filter(Boolean).join(' · '));
@@ -223,15 +236,25 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
     finally { setBusy(false); }
   };
   const replaceMsg = (m: AssistantMessage) => setMsgs(list => list.map(x => x.id === m.id ? m : x));
-  const clear = async () => { if (!confirm('¿Borrar la conversación?')) return; await api.clearAssistant(); setMsgs([]); };
+  // Archivar no borra nada: mensajes, decisiones y artefactos se conservan y la conversación se puede reactivar.
+  const archive = async () => { if (!convId) return; await api.updateConversation(convId, { status: 'archived' }); await load(null); };
+  const inMessages = new Set(msgs.flatMap(m => m.actions.map(a => a.assignmentId).filter(Boolean) as string[]));
+  const current = conversations.find(c => c.id === convId) ?? null;
 
   return (
     <section className="card" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+      <div style={{ padding: compact ? '8px 12px' : '10px 18px', borderBottom: '1px solid #EEECE6' }}>
+        <ConversationBar conversations={conversations} current={current} onSelect={id => { setConvId(id); load(id).catch(e => setError(e.message)); }} onChanged={() => { load().catch(e => setError(e.message)); }} />
+      </div>
+      <UsageBanner />
+      <div className={`assist-cols${compact ? '' : ' assist-wide'}`}>
+      {detail && <div className="assist-side"><ConversationPanel detail={{ ...detail, assignments: detail.assignments.filter(x => !inMessages.has(x.id)) }} compact={compact} onChanged={() => { load().catch(e => setError(e.message)); }} /></div>}
+      <div className="assist-main">
       {error && <div style={{ padding: '10px 12px 0' }}><Notice kind="err">{error}</Notice></div>}
       <div style={{ flex: 1, overflow: 'auto', padding: compact ? 12 : 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
         {msgs.length === 0 && <div className="notice notice-info" style={{ alignSelf: 'flex-start', maxWidth: 760 }}>{Icon.info()}<div>
-          Pídeme cosas en lenguaje natural. Puedo <strong>encargar tareas al agente responsable</strong> (revisar y replantear el backlog, proponer la organización de una empresa, evaluar una idea…): él valida la petición, consulta a su equipo y entrega el resultado con propuestas. También <strong>añado historias al backlog</strong> (incluido el propio Portal: así se modifica su código), <strong>propongo ejecutarlas</strong>, <strong>aplico los cambios</strong> aprobados, <strong>creo proyectos y empresas</strong> y respondo sobre el estado real. Todo lo que consume IA o escribe en git aparece como una tarjeta que <strong>tú autorizas aquí mismo</strong>. También puedes adjuntar o pegar capturas de pantalla.
-          {!compact && <div className="small muted" style={{ marginTop: 6 }}>Ejemplos: «añade una historia para que el chat soporte adjuntar imágenes y ejecútala» · «ejecuta la siguiente historia pendiente del portal» · «crea la empresa Panadería Luna con un proyecto Tienda en línea» · «¿qué historias quedan por revisar?»</div>}
+          Pídeme cosas en lenguaje natural. Puedo <strong>investigar una idea contigo</strong> y abrir las decisiones que haya que cerrar (las cierras tú, una a una), preparar la <strong>propuesta</strong> (el equipo la redacta y otro especialista la cuestiona), consultar al equipo y, con tu aprobación, <strong>crear las historias</strong>. Para un cambio concreto propongo un <strong>encargo de desarrollo</strong> sin historia (worktree aislado, sandbox, QA y Gauntlet). También respondo sobre el estado real, propongo ejecutar historias y encargo análisis al agente responsable. Todo lo que consume IA o cambia algo aparece como una tarjeta que <strong>tú autorizas aquí mismo</strong>; nada se hace solo por cómo lo escribas. Elige arriba la empresa y el proyecto de la conversación.
+          {!compact && <div className="small muted" style={{ marginTop: 6 }}>Ejemplos: «quiero un modo oscuro, ayúdame a decidir cómo» · «arregla el texto del pie y déjalo listo para revisar» · «¿por qué falló la última historia?» · «¿qué historias quedan por revisar?»</div>}
         </div></div>}
         {msgs.map(m => <div key={m.id} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start', gap: 6 }}>
           <div className="msg-bubble" style={{ padding: '10px 14px', borderRadius: 12, background: m.role === 'user' ? '#1A1B1E' : '#FAF9F6', color: m.role === 'user' ? '#fff' : '#1A1B1E', border: m.role === 'user' ? 0 : '1px solid #E5E3DC' }}>
@@ -243,6 +266,10 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
           {m.actions.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', maxWidth: 760 }}>
             {m.actions.map((a, i) => a.type === 'propose_operation' && a.operation
               ? <OperationCard key={`${m.id}-${i}`} msgId={m.id} action={a} onResolved={replaceMsg} />
+              : a.type === 'propose_local' && a.status === 'pending'
+              ? <CardBoundary key={`${m.id}-${i}`}><LocalChangeCard msgId={m.id} index={i} action={a} onResolved={replaceMsg} /></CardBoundary>
+              : a.type === 'propose_assignment' && a.assignmentId && a.workspaceSlug && a.status !== 'failed'
+              ? <CardBoundary key={`${m.id}-${i}`}><AssignmentCard slug={a.workspaceSlug} assignmentId={a.assignmentId} onChanged={() => { load().catch(() => null); }} /></CardBoundary>
               : isProposal(a) && a.processId && superseded[a.processId]
               ? <SupersededProposalCard key={`${m.id}-${i}`} action={a} info={superseded[a.processId]} onRestore={restoreSuperseded} />
               : isProposal(a)
@@ -268,8 +295,10 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
           <textarea className="input" value={text} onChange={e => setText(e.target.value)} onPaste={onPaste} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} placeholder={compact ? 'Pídele algo al asistente… (arrastra o pega archivos)' : 'Escribe tu petición, pega una captura o arrastra un archivo .md/.txt… (Enter envía · Shift+Enter salto de línea)'} aria-label="Mensaje para el asistente" style={{ minHeight: 48, height: 48, flex: 1 }} disabled={busy} />
           <button className="btn btn-primary" type="submit" disabled={busy || (!text.trim() && !images.length)}>{Icon.arrow()}{compact ? '' : 'Enviar'}</button>
         </div>
-        {compact && info && <div className="small muted" style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>{info.backendLabel} · {info.billing === 'subscription' ? 'sin cargo a la API' : `≈ ${fmtUsd(info.estimatedPerMessageUsd)} por mensaje · mes ${fmtUsd(info.spentThisMonthUsd)} de ${fmtUsd(info.monthlyLimitUsd)}`}{!info.available && info.unavailableReason ? ` · ⚠ ${info.unavailableReason}` : ''}</span><button type="button" className="lnk" onClick={clear}>limpiar</button></div>}
+        {compact && info && <div className="small muted" style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>{info.backendLabel} · {info.billing === 'subscription' ? 'sin cargo a la API' : `≈ ${fmtUsd(info.estimatedPerMessageUsd)} por mensaje · mes ${fmtUsd(info.spentThisMonthUsd)} de ${fmtUsd(info.monthlyLimitUsd)}`}{!info.available && info.unavailableReason ? ` · ⚠ ${info.unavailableReason}` : ''}</span>{convId && <button type="button" className="lnk" onClick={() => void archive()} title="Se conserva todo; puedes reactivarla">archivar</button>}</div>}
       </form>
+      </div>
+      </div>
     </section>
   );
 }
