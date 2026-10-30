@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Agent, BacklogItem, KnowledgeDoc, Process, UsageToday, PhaseTransition } from '@portal-ia/domain';
 import { BACKLOG_STATUS } from '../lib/labels.ts';
@@ -12,6 +12,11 @@ import { FolderPicker } from '../components/FolderPicker.tsx';
 import { RepoCard } from '../components/RepoCard.tsx';
 import { AssessmentCard } from '../components/AssessmentCard.tsx';
 import { Markdown } from '../components/Markdown.tsx';
+import { SummaryCard } from '../components/SummaryCard.tsx';
+import { Disclosure } from '../components/Disclosure.tsx';
+
+/** HU-163 · Estado de «Qué necesita tu atención»: solo hay cifra cuando los datos ya han llegado. */
+type Attention = { phase: 'loading' } | { phase: 'error'; message: string } | { phase: 'ready'; count: number };
 
 export function Dashboard() {
   const { status, providers, flash, navigate } = useApp();
@@ -26,6 +31,23 @@ export function Dashboard() {
   const [phase, setPhase] = useState<PhaseTransition | null>(null);
   const [reqText, setReqText] = useState('');
   const [sending, setSending] = useState(false);
+  const [attention, setAttention] = useState<Attention>({ phase: 'loading' });
+  const attentionSeq = useRef(0);
+
+  // HU-163 · Mismo endpoint que la bandeja de Autorizaciones. La carga va aparte de load() y no consume IA.
+  const loadAttention = async () => {
+    const seq = ++attentionSeq.current;
+    setAttention({ phase: 'loading' });
+    try {
+      const pending = await api.inbox(ws.slug);
+      if (seq === attentionSeq.current) setAttention({ phase: 'ready', count: pending.length });
+    } catch (e) {
+      if (seq === attentionSeq.current) setAttention({ phase: 'error', message: e instanceof Error ? e.message : 'No se pudieron cargar las decisiones pendientes.' });
+    }
+  };
+  useEffect(() => { void loadAttention(); return () => { attentionSeq.current++; }; // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ws.slug]);
+  const pendingCount = attention.phase === 'ready' ? attention.count : 0;
 
   const load = async () => {
     const [ps, ag, us] = await Promise.all([api.projects(ws.slug), api.agents(ws.slug), api.usageToday(ws.slug)]);
@@ -72,16 +94,30 @@ export function Dashboard() {
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
           <div style={{ flex: '999 1 520px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
-            <section className="card">
-              <div className="card-h"><div className="h3">Qué construye este proyecto</div><Chip xs>contexto aprobado</Chip></div>
-              <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                <p className="med" style={{ lineHeight: 1.55 }}>{project?.description}</p>
-                <div><div className="eyebrow" style={{ marginBottom: 8 }}>Objetivos iniciales</div>
+            <SummaryCard
+              title="Qué necesita tu atención"
+              state={attention.phase}
+              tone={pendingCount > 0 ? 'warn' : 'ok'}
+              value={pendingCount > 0 ? pendingCount : undefined}
+              message={pendingCount > 0 ? (pendingCount === 1 ? 'decisión espera tu respuesta' : 'decisiones esperan tu respuesta') : 'Todo al día'}
+              action={pendingCount > 0 ? { label: 'Revisar y decidir', onClick: () => navigate('/autorizaciones') } : undefined}
+              errorMessage={attention.phase === 'error' ? attention.message : undefined}
+              onRetry={() => void loadAttention()}
+            />
+
+            <section className="card" aria-label="Contexto aprobado del proyecto">
+              <div className="card-b" style={{ padding: '4px 18px', display: 'flex', flexDirection: 'column' }}>
+                <Disclosure title="Qué construye este proyecto" hint="Descripción aprobada">
+                  <p className="med" style={{ lineHeight: 1.55 }}>{project?.description}</p>
+                </Disclosure>
+                <Disclosure title="Objetivos iniciales" hint={`${project?.objectives.length ?? 0} objetivos`}>
                   <ol style={{ paddingLeft: 0, listStyle: 'none', display: 'flex', flexDirection: 'column' }}>
                     {project?.objectives.map((o, i) => <li key={o.id} className="rrow"><span className="mono small muted">0{i + 1}</span><span>{o.text}</span></li>)}
-                  </ol></div>
-                <div><div className="eyebrow" style={{ marginBottom: 8 }}>Arquitectura aprobada</div>
-                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{project?.context.map(c => <Chip key={c.id}>{c.label}</Chip>)}</div></div>
+                  </ol>
+                </Disclosure>
+                <Disclosure title="Arquitectura aprobada" hint={`${project?.context.length ?? 0} elementos`}>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{project?.context.map(c => <Chip key={c.id}>{c.label}</Chip>)}</div>
+                </Disclosure>
               </div>
             </section>
 
@@ -92,9 +128,13 @@ export function Dashboard() {
             </section>}
 
             {project && synthesis && (
-              <section className="card">
-                <div className="card-h"><div><div className="h3">Dirección del proyecto</div><div className="small muted">Síntesis del Coordinador del Proyecto tras la evaluación inicial · {new Date(synthesis.createdAt).toLocaleString('es-MX')}</div></div><Link className="lnk sm13" to="/conocimiento">Ver todos los documentos</Link></div>
-                <div className="card-b" style={{ maxHeight: 520, overflow: 'auto' }}><Markdown text={synthesis.body} /></div>
+              <section className="card" aria-label="Síntesis del proyecto">
+                <div className="card-b" style={{ padding: '4px 18px' }}>
+                  <Disclosure title="Dirección del proyecto" hint={`Síntesis del Coordinador del Proyecto tras la evaluación inicial · ${new Date(synthesis.createdAt).toLocaleString('es-MX')}`}>
+                    <div style={{ maxHeight: 520, overflow: 'auto' }}><Markdown text={synthesis.body} /></div>
+                  </Disclosure>
+                </div>
+                <div className="card-f"><Link className="lnk sm13" to="/conocimiento">Ver todos los documentos</Link></div>
               </section>
             )}
             {project && !synthesis && !phase && <AssessmentCard projectId={project.id} hasRepo={!!project.repository} compact />}
