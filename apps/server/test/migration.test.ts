@@ -12,7 +12,7 @@ import { pathToFileURL } from 'node:url';
  * process_steps, sin template_version en agents, sin tablas lessons/agent_templates/story_*) se abre con el código actual:
  * se hace copia de seguridad antes, las migraciones son aditivas y todas las filas se conservan. Nunca se usan datos reales.
  */
-test('migración 0.11 → 0.14 sobre una copia sintética: copia de seguridad previa, columnas añadidas, filas intactas', () => {
+test('migración 0.11 → 0.15 sobre una copia sintética: copia de seguridad previa, columnas añadidas, filas intactas', () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-migra-'));
   const wsDir = path.join(dataDir, 'workspaces', 'portal-ia'); fs.mkdirSync(wsDir, { recursive: true });
   fs.writeFileSync(path.join(dataDir, '.master.key'), '00'.repeat(32)); // clave sintética (64 hex), no real
@@ -56,10 +56,10 @@ test('migración 0.11 → 0.14 sobre una copia sintética: copia de seguridad pr
   for (const c of ['role', 'reason', 'lessons_used', 'backend']) assert.ok(r.stepCols.includes(c), `columna ${c}`);
   assert.ok(r.agentCols.includes('template_version'));
   // Copia de seguridad previa
-  const backups = fs.readdirSync(path.join(dataDir, 'backups')); assert.equal(backups.length, 1); assert.match(backups[0], /antes-de-0\.14$/);
+  const backups = fs.readdirSync(path.join(dataDir, 'backups')); assert.equal(backups.length, 1); assert.match(backups[0], /antes-de-0\.15$/);
   assert.ok(fs.existsSync(path.join(dataDir, 'backups', backups[0], 'workspaces', 'portal-ia', 'portal-ia.sqlite')));
   assert.ok(fs.existsSync(path.join(dataDir, 'backups', backups[0], '.master.key')));
-  assert.equal(fs.readFileSync(path.join(dataDir, '.schema-version'), 'utf8').trim(), '0.14');
+  assert.equal(fs.readFileSync(path.join(dataDir, '.schema-version'), 'utf8').trim(), '0.15');
   // La copia conserva el esquema antiguo (es una copia previa, no migrada)
   const old = new DatabaseSync(path.join(dataDir, 'backups', backups[0], 'workspaces', 'portal-ia', 'portal-ia.sqlite'));
   assert.ok(!(old.prepare('PRAGMA table_info(process_steps)').all() as any[]).some(c => c.name === 'role')); old.close();

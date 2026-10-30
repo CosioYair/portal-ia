@@ -21,6 +21,7 @@ import { phaseRoutes, registerArchivedGuard } from './routes/phase.ts';
 import { claudeCodeRoutes } from './routes/claudeCode.ts';
 import { metricsRoutes } from './routes/metrics.ts';
 import { gauntletRoutes } from './routes/gauntlet.ts';
+import { batchRoutes } from './routes/batches.ts';
 import { orgEvaluationRoutes } from './routes/orgEvaluation.ts';
 import { VERSION } from './services/system.ts';
 
@@ -68,6 +69,7 @@ export async function buildApp() {
   await app.register(claudeCodeRoutes);
   await app.register(metricsRoutes);
   await app.register(gauntletRoutes);
+  await app.register(batchRoutes);
   await app.register(orgEvaluationRoutes);
 
   // Producción local: sirve apps/web/dist si existe (npm run build). SPA fallback.

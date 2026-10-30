@@ -14,10 +14,11 @@ import { DEPS_MISSING_EXIT } from '../services/sandbox.ts';
 import { recordContextEdit } from '../services/storyThread.ts';
 import { teamReadiness } from '../services/claudeCode/backend.ts';
 import { projectGauntlet, syncEvaluatorStep } from '../services/gauntlet.ts';
-import { branchIntegration, prepareIntegration, processIntegration, resolveIntegrationConflicts, verifyCandidate } from '../services/storyIntegration.ts';
+import { prepareIntegration, processIntegration, resolveIntegrationConflicts, verifyCandidate } from '../services/storyIntegration.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
-import { applyChanges, checkStaleChanges, discardBranch, mergeBranch, pushBranches, removeWorktree, worktreePathFor } from '../services/repoWrite.ts';
+import { applyChanges, checkStaleChanges, discardBranch, pushBranches, worktreePathFor } from '../services/repoWrite.ts';
 import { requirePolicy, PolicyError } from '../services/executionPolicy.ts';
+import { mergeStory } from '../services/storyMerge.ts';
 import { detectSandbox } from '../services/sandbox.ts';
 import { runVerification } from '../services/verification.ts';
 import { newPipeline, resumeStory } from '../services/storyPipeline.ts';
@@ -396,50 +397,14 @@ Proceso: ${proc.id}`, { processId: proc.id });
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ authorized: z.literal(true), into: z.string().trim().min(1).max(80).optional(), skipVerification: z.boolean().optional() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita.' });
-    const procs = processesRepo(slug); const proc = procs.get(id);
-    if (!proc?.result?.applied) return reply.code(409).send({ error: 'Primero aplica los cambios en la rama.' });
-    if (proc.result.merged) return reply.code(409).send({ error: `Ya integrada en ${proc.result.merged.into}.` });
-    if (!proc.result.applied.worktree) return reply.code(409).send({ error: 'Esta iteración se aplicó antes de v0.12 (sin worktree aislado) y no se integra con el flujo actual. Ciérrala como resuelta o descártala y prepara una nueva iteración.', code: 'legacy_applied' });
-    // Orden de cierre: no se integra sin que typecheck haya pasado en esta rama (salvo que el propietario lo fuerce a sabiendas).
-    const after = new Date(proc.result.applied.appliedAt).getTime();
-    const okTypecheck = proc.result.verifications.some(v => v.command === 'typecheck' && v.exitCode === 0 && new Date(v.startedAt).getTime() >= after - 1000);
-    const failedLast = ['typecheck', 'build', 'test'].map(c => proc.result!.verifications.filter(v => v.command === c).at(-1)).filter(v => v && v.exitCode !== 0);
-    // Proyecto interno (el propio Portal): además de typecheck, test y build en sandbox real; en otros proyectos basta typecheck.
-    const internal = slug === INTERNAL_WORKSPACE.slug;
-    const okAfter = (cmd: string, sandboxOnly = false) => proc.result!.verifications.some(v => v.command === cmd && v.exitCode === 0 && new Date(v.startedAt).getTime() >= after - 1000 && (!sandboxOnly || v.isolation === 'docker' || v.isolation === 'wsl' || v.isolation === 'linux-ns'));
-    const missing = internal ? [!okTypecheck ? 'typecheck' : '', !okAfter('test', true) ? 'test (sandbox)' : '', !okAfter('build', true) ? 'build (sandbox)' : ''].filter(Boolean) : [!okTypecheck ? 'typecheck' : ''].filter(Boolean);
-    if (!body.data.skipVerification || internal) {
-      // El proyecto interno (el propio Portal) nunca se integra saltándose la verificación: es un control de seguridad.
-      if (failedLast.length) return reply.code(409).send({ error: `La última verificación falló (${failedLast.map(v => v!.command).join(', ')}). Corrige en la rama o rechaza el diff; integrar código roto dejaría el Portal sin compilar.`, code: 'verification_failed' });
-      if (missing.length) return reply.code(409).send({ error: `Antes de integrar faltan verificaciones en verde tras aplicar: ${missing.join(', ')}. ${internal && missing.some(m => m.includes('sandbox')) ? 'El proyecto interno exige test y build en un sandbox real (Docker/WSL2); sin sandbox no se integra.' : ''}`, code: 'verification_required', missing });
-    }
-    const repo = projectsRepo(slug).repository(proc.projectId); if (!repo) return reply.code(409).send({ error: 'No hay repositorio registrado.' });
-    // main avanzó desde que nació la rama: no se integra a ciegas. Conflictos reales → se dicen con sus archivos (sin
-    // intentar el merge); sin conflictos → primero el candidato (main incorporado en la rama y verificado en el sandbox).
-    const integ = await branchIntegration(repo.path, proc.result.applied.branch, body.data.into).catch(() => null);
-    if (integ?.state === 'conflicts') {
-      const files = integ.conflicts.map(c => c.path);
-      procs.setResult(id, { ...proc.result, mergeError: { at: new Date().toISOString(), message: `main avanzó ${integ.behindCount} commit(s) y hay conflictos reales en ${files.length} archivo(s): ${files.join(', ')}. Nada se modificó.`, files } });
-      return reply.code(409).send({ error: `Hay conflictos reales con ${integ.target} en ${files.join(', ')}: prepara el candidato de integración (se resuelven solo esos conflictos; no hace falta otra iteración).`, code: 'merge_conflict', integration: integ, process: await withGuidance(slug, procs.get(id)!) });
-    }
-    if (integ && integ.behindCount > 0) return reply.code(409).send({ error: `${integ.target} avanzó ${integ.behindCount} commit(s) desde que nació la rama: prepara el candidato de integración (incorpora ${integ.target} en la rama sin IA y se vuelve a verificar) antes de integrar.`, code: 'integration_candidate_required', integration: integ });
+    // Misma integración que el lote pre-autorizado: services/storyMerge.ts (reglas de cierre, candidato y conflictos).
     try {
-      requirePolicy('git_merge', { slug, processId: id, projectId: proc.projectId, authorized: true });
-      const m = await mergeBranch(repo.path, proc.result.applied.branch, body.data.into, { affectedFiles: proc.result.changes.filter(c => !c.error).map(c => c.path), processId: id });
-      procs.setResult(id, { ...proc.result, merged: { into: m.into, commit: m.commit, mergedAt: new Date().toISOString() }, mergeError: null });
-      await removeWorktree(repo.path, id).catch(() => false);
-      procs.logExecution({ projectId: proc.projectId, agentId: proc.steps[0]?.agentId ?? '', kind: 'repo_merge', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() });
-      app.log.info({ processId: id, into: m.into, commit: m.commit, viaWorktree: m.viaWorktree }, 'rama integrada');
-      return await withGuidance(slug, procs.get(id)!);
+      const p = await mergeStory(slug, id, { into: body.data.into, skipVerification: body.data.skipVerification }, (o, m) => app.log.info(o, m));
+      return await withGuidance(slug, p);
     } catch (e: any) {
-      // Conflicto: se guarda para que el recorrido lo explique y ofrezca la corrección (el merge ya se deshizo).
-      if (e.statusCode === 409 && (e.conflict || /conflict/i.test(e.message))) {
-        // Solo los archivos que git dice en conflicto (antes, sin ellos, se listaban TODOS los de la historia).
-        const files: string[] = e.conflictFiles ?? Array.from(new Set(Array.from(String(e.message).matchAll(/Merge conflict in (\S+)/g)).map(x => x[1])));
-        procs.setResult(id, { ...proc.result, mergeError: { at: new Date().toISOString(), message: String(e.message).slice(0, 2000), files } });
-        return reply.code(409).send({ error: e.message, code: 'merge_conflict', process: await withGuidance(slug, procs.get(id)!) });
-      }
-      return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : undefined });
+      const p = processesRepo(slug).get(id);
+      if (e.code === 'merge_conflict') return reply.code(409).send({ error: e.message, code: 'merge_conflict', ...(e.integration ? { integration: e.integration } : {}), ...(p ? { process: await withGuidance(slug, p) } : {}) });
+      return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError || typeof e.code === 'string' ? e.code : undefined, ...(e.missing ? { missing: e.missing } : {}), ...(e.integration ? { integration: e.integration } : {}) });
     }
   });
 

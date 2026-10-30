@@ -121,11 +121,12 @@ export async function prepareCandidate(repoPath: string, worktree: string, branc
 
 // ---------------------------------------------------------------- Proceso de historia
 
-function storyOf(slug: string, processId: string) {
+function storyOf(slug: string, processId: string, opts: { allowOthersRunning?: boolean } = {}) {
   const procs = processesRepo(slug); const proc = procs.get(processId);
   if (!proc || proc.kind !== 'story_execution' || !proc.result) throw fail(404, 'Proceso de historia no encontrado.', 'not_found');
   if (proc.status === 'running' || proc.status === 'pending_authorization') throw fail(409, 'El proceso sigue activo o pendiente de autorizar.', 'active');
-  if (procs.running().length) throw fail(409, 'Hay otro proceso en ejecución. Espera a que termine.', 'busy');
+  // El lote pre-autorizado integra de una en una mientras otras historias trabajan en sus propios worktrees.
+  if (!opts.allowOthersRunning && procs.running().length) throw fail(409, 'Hay otro proceso en ejecución. Espera a que termine.', 'busy');
   const r = proc.result;
   if (r.merged || r.rejected) throw fail(409, r.merged ? 'Ya está integrada.' : 'Este diff se rechazó.', 'closed');
   const wt = r.applied?.worktree;
@@ -191,8 +192,8 @@ export async function verifyCandidate(slug: string, processId: string, log: (o: 
 }
 
 /** Sin conflictos: git prepara el candidato (sin IA). Con conflictos: se registran y se explican; nada cambia. */
-export async function prepareIntegration(slug: string, processId: string): Promise<{ state: 'up_to_date' | 'candidate' | 'conflicts'; status: BranchIntegration }> {
-  const { r, wt, repo } = storyOf(slug, processId);
+export async function prepareIntegration(slug: string, processId: string, opts: { allowOthersRunning?: boolean } = {}): Promise<{ state: 'up_to_date' | 'candidate' | 'conflicts'; status: BranchIntegration }> {
+  const { r, wt, repo } = storyOf(slug, processId, opts);
   const head = await must(wt, ['rev-parse', '--short', 'HEAD']);
   const recorded = await must(wt, ['rev-parse', '--short', `${r.applied!.commit}^{commit}`]);
   if (head !== recorded) throw fail(409, `El worktree tiene commits sin registrar (${recorded} → ${head}): registra primero la corrección externa para que el candidato parta de lo verificado.`, 'unregistered_commits');

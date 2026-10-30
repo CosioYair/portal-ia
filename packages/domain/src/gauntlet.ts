@@ -181,3 +181,16 @@ export const GAUNTLET_TEMPLATE: AgentTemplate = {
 };
 /** Plantillas preparadas para revisión organizativa (catálogo versionado), que NO se crean al iniciar un proyecto. */
 export const PROPOSED_TEMPLATES: AgentTemplate[] = [GAUNTLET_TEMPLATE];
+
+/** Lo que el propietario ve antes de autorizar una historia: modo del proyecto, recomendación y sobrecoste. */
+export interface GauntletAdvice {
+  projectDefault: GauntletConfig;
+  recommended: GauntletRecommendation;
+  evaluator: { id: string; name: string; model: string } | null;
+  overhead: { standard: ReturnType<typeof gauntletOverhead>; deep: ReturnType<typeof gauntletOverhead> };
+}
+export interface GauntletProjectInfo {
+  config: GauntletConfig;
+  evaluator: { id: string; name: string; model: string; effort: string | null; backend: string } | null;
+  template: Pick<AgentTemplate, 'key' | 'name' | 'role' | 'specialization' | 'responsibilities' | 'reportsTo' | 'tools' | 'capabilities' | 'evaluation'>;
+}

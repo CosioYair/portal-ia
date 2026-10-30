@@ -910,6 +910,8 @@ export interface ExecutionResult {
   integration?: IntegrationCandidate | null;
   /** Evaluación Gauntlet: rondas del Evaluador independiente, hallazgos con evidencia y decisión de cada ronda. */
   gauntlet?: GauntletState | null;
+  /** Aceptación del propietario (distinta de QA): cuándo, en qué lote y con qué nota. */
+  acceptance?: { at: string; by: 'owner'; batchId: string | null; note: string | null } | null;
 }
 export interface ExternalCorrection { at: string; commit: string; previousCommit: string; files: string[]; note: string; by: 'owner' }
 /** Integración de la rama de una historia con la rama principal (se calcula al leer, con git y sin IA). */
