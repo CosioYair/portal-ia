@@ -28,13 +28,13 @@ import { expandHome } from '../routes/fs.ts';
  * El resultado son CAMBIOS PROPUESTOS con diff. Nada se escribe en el repositorio hasta que el usuario los aprueba
  * (repoWrite.applyChanges), y la verificación local también requiere autorización por uso.
  */
-export interface StoryOptions { skipQa?: boolean; override?: TeamOverride | null; iterationContext?: string | null }
-const MAX_TOKENS: Record<TeamRole, number> = { planner: 2500, consultant: 2500, implementer: 16000, reviewer: 6000 };
-const TITLES: Record<TeamRole, (name: string) => string> = { planner: () => 'Plan técnico de la historia', consultant: n => `Consulta: ${n}`, implementer: () => 'Implementación (cambios propuestos)', reviewer: () => 'Revisión de calidad' };
+export interface StoryOptions { skipQa?: boolean; override?: TeamOverride | null; iterationContext?: string | null; gauntlet?: boolean }
+const MAX_TOKENS: Record<TeamRole, number> = { planner: 2500, consultant: 2500, implementer: 16000, reviewer: 6000, evaluator: 6000 };
+const TITLES: Record<TeamRole, (name: string) => string> = { planner: () => 'Plan técnico de la historia', consultant: n => `Consulta: ${n}`, implementer: () => 'Implementación (cambios propuestos)', reviewer: () => 'Revisión de calidad', evaluator: () => 'Evaluación Gauntlet (independiente)' };
 
 /** Pasos de la historia a partir del equipo compuesto por capacidades (M3). Sin IA. */
 function stepPlanFor(agents: Agent[], projectId: string, story: StoryText, opts: StoryOptions = {}) {
-  const team = composeTeam(agents, projectId, story, { skipQa: opts.skipQa, override: opts.override ?? null });
+  const team = composeTeam(agents, projectId, story, { skipQa: opts.skipQa, override: opts.override ?? null, gauntlet: opts.gauntlet });
   const byId = new Map(agents.map(a => [a.id, a]));
   const missing = (['planner', 'implementer'] as TeamRole[]).filter(r => !team.members.some(m => m.role === r));
   if (missing.length) throw Object.assign(new Error(`Faltan agentes con capacidad para ${missing.map(r => r === 'planner' ? 'planificar' : 'implementar (con herramienta write_repo)').join(' y ')} en este proyecto. ${team.excluded.map(e => `${e.agentName}: ${e.reason}`).join(' · ')}`), { statusCode: 409 });
@@ -45,7 +45,7 @@ function stepPlanFor(agents: Agent[], projectId: string, story: StoryText, opts:
 export function stepByRole(proc: Process, role: TeamRole): ProcessStep | undefined {
   const byRole = proc.steps.find(s => s.role === role);
   if (byRole || proc.steps.some(s => s.role)) return byRole;
-  const legacy: Record<TeamRole, number> = { planner: 0, implementer: 1, reviewer: 2, consultant: -1 };
+  const legacy: Record<TeamRole, number> = { planner: 0, implementer: 1, reviewer: 2, consultant: -1, evaluator: -1 };
   return legacy[role] >= 0 ? proc.steps[legacy[role]] : undefined;
 }
 

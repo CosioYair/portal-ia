@@ -13,6 +13,7 @@ import { failingTests, testRunSummary } from './failureDiagnosis.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall, withWatchdog } from './providerCalls.ts';
 import { injectLessons, recordDetections } from './lessons.ts';
+import { gauntletStage, toCorrection } from './gauntlet.ts';
 import { callMetricsRepo, promptHash } from '../db/callMetrics.ts';
 import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, testsEvidence, verificationEvidence } from './qaGate.ts';
 /** Veredicto de QA con salida estructurada nativa del proveedor (si la admite); el motor lo valida igualmente. */
@@ -826,13 +827,25 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
       updatePipeline(ctx.slug, ctx.processId, done, { kind: 'done', message: `Implementación completada. ${cfg.autoVerify ? `${cfg.commands.join(', ')} aprobados en el sandbox.` : 'Sin verificación automática.'} QA omitida por el propietario. Lista para tu revisión.` });
       return pipelineOf(ctx.slug, ctx.processId);
     }
-    const qaRan = p.lastQaCommit !== r.applied.commit || !r.review?.verdict;
+    // Tras una corrección del Evaluador Gauntlet, QA no vuelve a revisar lo mismo: el sandbox ya re-verificó el commit y
+    // lo re-evalúa (o ya lo evaluó) el Evaluador. No se pagan dos revisiones del mismo commit.
+    const gauntletReeval = r.review?.verdict === 'approved' && !!r.gauntlet && (!!r.gauntlet.pendingReeval || r.gauntlet.rounds.at(-1)?.commit === r.applied.commit);
+    const qaRan = !gauntletReeval && (p.lastQaCommit !== r.applied.commit || !r.review?.verdict);
     if (qaRan) await qaStage(ctx, cfg);
     const v = processesRepo(ctx.slug).get(ctx.processId)!.result!.review!;
     if (v.verdict === 'approved') {
       const names: Record<string, string> = { typecheck: 'Typecheck', test: 'pruebas', build: 'compilación' };
       const ran = cfg.autoVerify ? `${cfg.commands.map(c => names[c]).join(', ').replace(/, ([^,]*)$/, ' y $1')} aprobad${cfg.commands.length > 1 ? 'os' : 'o'}.` : '';
-      updatePipeline(ctx.slug, ctx.processId, { state: 'verified', phase: 'finished', reason: null, pauseKind: null, finishedAt: now() }, { kind: 'done', message: `Implementación completada. ${ran} QA validó los cambios. Lista para tu revisión.` });
+      // Evaluación Gauntlet (según el modo): crítico independiente sobre el commit aprobado; puede abrir una corrección dirigida.
+      const g = await gauntletStage(ctx, cfg);
+      if (g.outcome === 'correct') {
+        emit(ctx, 'gauntlet', `El Evaluador encontró ${g.toFix.length} brecha(s) con evidencia: corrección dirigida del Desarrollador (no del Evaluador) y nueva evaluación.`, { phase: 'correcting' });
+        if (units) { units.startRound(ctx, cfg, 'gauntlet', g.toFix.map(toCorrection)); continue; }
+        if (!await correct(ctx, cfg, `El Evaluador Gauntlet encontró brechas con evidencia:\n${g.toFix.map(f => `- [${f.severity}] ${f.text}${f.file ? ` (${f.file})` : ''}${f.evidence ? `\n  evidencia: ${f.evidence.split('\n').slice(0, 3).join(' ')}` : ''}${f.expected ? `\n  esperado: ${f.expected}` : ''}`).join('\n')}`, g.toFix.map(f => f.file).filter(Boolean) as string[])) ineffectiveCorrection(ctx);
+        continue;
+      }
+      const gNote = g.state && g.state.status !== 'skipped' ? ` Gauntlet (${g.state.mode}): ${g.state.status === 'passed' ? 'todos los criterios con evidencia' : 'aprobado con hallazgos menores documentados'} en ${g.state.rounds.length} ronda(s).` : '';
+      updatePipeline(ctx.slug, ctx.processId, { state: 'verified', phase: 'finished', reason: null, pauseKind: null, finishedAt: now() }, { kind: 'done', message: `Implementación completada. ${ran} QA validó los cambios.${gNote} Lista para tu revisión.` });
       return pipelineOf(ctx.slug, ctx.processId);
     }
     if (v.verdict === 'blocked_environment') throw new PipelinePause('environment', `QA no pudo validar por el entorno: ${v.overridden ?? v.summary}`);
@@ -874,7 +887,7 @@ export function providerPause(e: any): PipelinePause | null {
 
 /** Cierra el pipeline en pausa/parada con el motivo (sin perder nada) y lo deja listo para «Continuar». */
 export function pausePipeline(ctx: StoryRunCtx, pause: PipelinePause) {
-  const stopped = ['repeated_failure', 'limit', 'qa', 'no_changes', 'refusal', 'provider_refusal', 'unsupported', 'unknown', 'plan', 'disagreement'].includes(pause.kind);
+  const stopped = ['repeated_failure', 'limit', 'qa', 'no_changes', 'refusal', 'provider_refusal', 'unsupported', 'unknown', 'plan', 'disagreement', 'gauntlet'].includes(pause.kind);
   const CLASS: Partial<Record<PipelinePauseKind, AgentFailureKind>> = { budget: 'BUDGET_EXHAUSTED', network: 'PERMISSION_REQUIRED', environment: 'ENVIRONMENT_FAILURE', limit: 'RECOVERABLE_IMPLEMENTATION_ERROR', repeated_failure: 'RECOVERABLE_IMPLEMENTATION_ERROR', missing_information: 'MISSING_INFORMATION', permission: 'PERMISSION_REQUIRED', unsupported: 'UNSUPPORTED_CAPABILITY', provider_refusal: 'PROVIDER_REFUSAL', provider_timeout: 'PROVIDER_TIMEOUT', provider_error: 'PROVIDER_CONNECTION_ERROR', max_turns: 'CLAUDE_CODE_MAX_TURNS_EXHAUSTED', interrupted: 'UNKNOWN_FAILURE', unknown: 'UNKNOWN_FAILURE', too_large: 'INCOMPLETE_OUTPUT', incomplete: 'RECOVERABLE_IMPLEMENTATION_ERROR' };
   const cur = pipelineOf(ctx.slug, ctx.processId);
   updatePipeline(ctx.slug, ctx.processId, { state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, reason: pause.message, phase: 'finished', finishedAt: now(), failureClass: cur.failureClass && ['missing_information', 'permission', 'unsupported', 'provider_refusal'].includes(pause.kind) ? cur.failureClass : CLASS[pause.kind] ?? cur.failureClass ?? null }, { kind: 'pause', message: pause.message });

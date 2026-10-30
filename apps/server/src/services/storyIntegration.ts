@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { gauntletReviewed } from '@portal-ia/domain';
 import type { IntegrationCandidate, BranchIntegration, Process } from '@portal-ia/domain';
 import { backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { changesSinceBase, mainBranch, repoRoot, safeRelPath } from './repoWrite.ts';
@@ -176,7 +177,7 @@ export async function verifyCandidate(slug: string, processId: string, log: (o: 
     ];
     throw new PipelinePause('integration', problems.length
       ? `El candidato de integración (commit ${commit}) no supera las comprobaciones objetivas contra el main actual: ${problems.join(' · ')}. No se llamó a ningún agente y main no cambió.`
-      : `Candidato de integración verificado sin IA (commit ${commit}): ${cfg.autoVerify ? `${cfg.commands.join(', ')} en verde en el sandbox` : 'sin verificación automática configurada'} con el main actual incorporado. ${pipelineOf(slug, processId).lastQaCommit === commit ? '' : 'QA aún no ha revisado este commit. '}Integrar en main sigue siendo decisión tuya.`);
+      : `Candidato de integración verificado sin IA (commit ${commit}): ${cfg.autoVerify ? `${cfg.commands.join(', ')} en verde en el sandbox` : 'sin verificación automática configurada'} con el main actual incorporado. ${pipelineOf(slug, processId).lastQaCommit === commit || gauntletReviewed(r.gauntlet, commit) ? '' : 'QA aún no ha revisado este commit. '}Integrar en main sigue siendo decisión tuya.`);
   } catch (e: any) {
     if (e instanceof PipelinePause) pausePipeline(ctx, e);
     else if (e?.cancelled) { status = 'cancelled'; pausePipeline(ctx, new PipelinePause('cancelled', 'Cancelado por el propietario. Lo hecho se conserva.')); }

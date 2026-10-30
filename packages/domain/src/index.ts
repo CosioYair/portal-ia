@@ -7,6 +7,7 @@ export * from './pipeline.ts';
 export * from './claude-code.ts';
 export * from './orgEvaluation.ts';
 export * from './metrics.ts';
+export * from './gauntlet.ts';
 
 export const PROVIDER_META = {
   anthropic: { id: 'anthropic', name: 'Anthropic', consoleHost: 'console.anthropic.com', keyHint: 'sk-ant-…' },

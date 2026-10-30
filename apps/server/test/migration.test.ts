@@ -52,7 +52,7 @@ test('migración 0.11 → 0.14 sobre una copia sintética: copia de seguridad pr
   const r = JSON.parse(out);
   assert.equal(r.proc.status, 'done'); assert.equal(r.proc.steps, 2); assert.equal(r.proc.roleOfStep2, null); assert.deepEqual(r.proc.lessonsUsed, []); assert.equal(r.proc.merged, 'main'); assert.deepEqual(r.proc.checks, [true, false]); assert.equal(r.proc.spent, 0.5);
   assert.deepEqual(r.agent.caps, ['implementar'], 'capacidades por defecto para agentes antiguos (sin tocar la fila)'); assert.equal(r.agent.tv, null, 'sin versión de plantilla: sigue la v1 hasta opt-in');
-  assert.equal(r.backlog, 'review'); assert.equal(r.knowledge, 1); assert.equal(r.lessons, 0); assert.equal(r.templates, 8); assert.equal(r.tasks, 0); assert.equal(r.hist, 1);
+  assert.equal(r.backlog, 'review'); assert.equal(r.knowledge, 1); assert.equal(r.lessons, 0); assert.equal(r.templates, 9, '8 plantillas activas + la propuesta del Evaluador Gauntlet (solo catálogo, sin agente)'); assert.equal(r.tasks, 0); assert.equal(r.hist, 1);
   for (const c of ['role', 'reason', 'lessons_used', 'backend']) assert.ok(r.stepCols.includes(c), `columna ${c}`);
   assert.ok(r.agentCols.includes('template_version'));
   // Copia de seguridad previa

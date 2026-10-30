@@ -13,6 +13,7 @@ import { flowOptions } from '../services/processView.ts';
 import { DEPS_MISSING_EXIT } from '../services/sandbox.ts';
 import { recordContextEdit } from '../services/storyThread.ts';
 import { teamReadiness } from '../services/claudeCode/backend.ts';
+import { projectGauntlet, syncEvaluatorStep } from '../services/gauntlet.ts';
 import { branchIntegration, prepareIntegration, processIntegration, resolveIntegrationConflicts, verifyCandidate } from '../services/storyIntegration.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { applyChanges, checkStaleChanges, discardBranch, mergeBranch, pushBranches, removeWorktree, worktreePathFor } from '../services/repoWrite.ts';
@@ -20,7 +21,7 @@ import { requirePolicy, PolicyError } from '../services/executionPolicy.ts';
 import { detectSandbox } from '../services/sandbox.ts';
 import { runVerification } from '../services/verification.ts';
 import { newPipeline, resumeStory } from '../services/storyPipeline.ts';
-import { normalizePipeline } from '@portal-ia/domain';
+import { normalizeGauntlet, normalizePipeline } from '@portal-ia/domain';
 import fs from 'node:fs';
 import path from 'node:path';
 import { REPO_ROOT } from '../config.ts';
@@ -39,7 +40,7 @@ const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish)$/;
  * IA cuando el usuario lo autoriza con un presupuesto (POST /authorize). Puede cancelarse; se detiene entre pasos.
  */
 /** Configuración del pipeline autorizado (se normaliza y acota en el servidor). */
-const PIPELINE_INPUT = z.object({ autoApply: z.boolean().optional(), autoVerify: z.boolean().optional(), commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(), allowInstall: z.boolean().optional(), maxOutputRepairs: z.number().int().min(0).max(10).optional(), maxCorrections: z.number().int().min(0).max(10).optional(), maxIdenticalFailures: z.number().int().min(1).max(10).optional(), maxDurationMin: z.number().int().min(1).max(600).optional(), maxConsultations: z.number().int().min(0).max(3).optional(), maxProviderRetries: z.number().int().min(0).max(3).optional(), providerTimeoutSec: z.number().int().min(5).max(900).nullable().optional(), maxContinuations: z.number().int().min(0).max(12).optional() });
+const PIPELINE_INPUT = z.object({ autoApply: z.boolean().optional(), autoVerify: z.boolean().optional(), commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(), allowInstall: z.boolean().optional(), maxOutputRepairs: z.number().int().min(0).max(10).optional(), maxCorrections: z.number().int().min(0).max(10).optional(), maxIdenticalFailures: z.number().int().min(1).max(10).optional(), maxDurationMin: z.number().int().min(1).max(600).optional(), maxConsultations: z.number().int().min(0).max(3).optional(), maxProviderRetries: z.number().int().min(0).max(3).optional(), providerTimeoutSec: z.number().int().min(5).max(900).nullable().optional(), maxContinuations: z.number().int().min(0).max(12).optional(), gauntlet: z.object({ mode: z.enum(['off', 'standard', 'deep']), maxRounds: z.number().int().min(0).max(3).optional() }).optional() });
 
 export async function processRoutes(app: FastifyInstance) {
   // Al servir un proceso se calcula (no se persiste) su estado de activación en el Portal en marcha y la orientación.
@@ -107,12 +108,18 @@ export async function processRoutes(app: FastifyInstance) {
     if (!proc) return reply.code(404).send({ error: 'Proceso no encontrado' });
     if (proc.status !== 'pending_authorization') return reply.code(409).send({ error: 'El proceso ya fue autorizado o finalizado.' });
     if (procs.running().length) return reply.code(409).send({ error: 'Ya hay un proceso en ejecución. Espera a que termine.' });
+    // Gauntlet: el modo de esta tarea (o el del proyecto) y el Evaluador en el equipo autorizado, ANTES de comprobar que el equipo puede ejecutar.
+    const gauntlet = proc.kind === 'story_execution' && body.data.pipeline ? normalizeGauntlet(body.data.pipeline.gauntlet ?? projectGauntlet(slug, proc.projectId)) : null;
+    // Sin Evaluador utilizable (no existe o sería el implementador), la etapa lo registra al llegar y sigue sin él.
+    if (gauntlet) syncEvaluatorStep(slug, id, gauntlet);
     // Claude Code: un equipo que no puede ejecutar (proyecto sin autorizar, consola sin conectar…) no empieza: el
     // proceso seguiría «autorizado» y fallaría en el primer paso. Se rechaza sin cambiar nada y se dice qué falta.
     const readiness = proc.kind === 'story_execution' ? teamReadiness(slug, id) : null;
     if (readiness && !readiness.ready && readiness.fallback !== 'api') return reply.code(409).send({ error: `No se inicia: ${readiness.team.find(t => !t.ready)!.reason}`, code: 'backend_not_ready', readiness });
     // El pipeline (aplicar, verificar, QA con evidencia, correcciones acotadas) forma parte de ESTA autorización; sin él, cada paso se autoriza a mano como antes.
-    if (proc.kind === 'story_execution' && body.data.pipeline && proc.result) procs.setResult(id, { ...proc.result, pipeline: newPipeline(normalizePipeline(body.data.pipeline)) });
+    if (proc.kind === 'story_execution' && body.data.pipeline && proc.result) {
+      procs.setResult(id, { ...procs.get(id)!.result!, pipeline: newPipeline(normalizePipeline({ ...body.data.pipeline, gauntlet: gauntlet ?? undefined })) });
+    }
     procs.authorize(id, body.data.budgetUsd);
     app.log.info({ processId: id, kind: proc.kind, budget: body.data.budgetUsd }, 'proceso autorizado · inicia ejecución');
     const logger = (o: any, m: string) => app.log.info(o, m);
@@ -161,7 +168,9 @@ export async function processRoutes(app: FastifyInstance) {
       : newPipeline(cfg);
     // La respuesta del propietario se entrega al agente que la pidió (una vez) al reanudar.
     if (request && body.data.answer) { pipeline.ownerAnswers = [...(pipeline.ownerAnswers ?? []), { at: new Date().toISOString(), question: request.question, answer: body.data.answer, delivered: false }]; pipeline.ownerRequest = null; }
-    procs.setResult(id, { ...proc.result, pipeline });
+    // Gauntlet cambiado al continuar (más rondas o sin más evaluación): el Evaluador entra o sale del equipo autorizado.
+    if (body.data.pipeline?.gauntlet) syncEvaluatorStep(slug, id, normalizeGauntlet(body.data.pipeline.gauntlet));
+    procs.setResult(id, { ...procs.get(id)!.result!, pipeline });
     procs.resume(id, Math.max(proc.budgetUsd, proc.spentUsd) + (body.data.addBudgetUsd ?? 0));
     app.log.info({ processId: id, addBudget: body.data.addBudgetUsd ?? 0, allowInstall: cfg.allowInstall }, 'pipeline de la historia: continuar (autorizado)');
     const logger = (o: any, m: string) => app.log.info(o, m);

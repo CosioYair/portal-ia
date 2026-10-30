@@ -1,4 +1,5 @@
 import type { PipelineConfig } from './types.ts';
+import { normalizeGauntlet, type GauntletConfig } from './gauntlet.ts';
 
 /**
  * Pipeline autorizado por defecto al ejecutar una historia desde la interfaz: aplicar en el worktree aislado, verificar
@@ -25,7 +26,7 @@ export const DEFAULT_PIPELINE: PipelineConfig = {
 export const PIPELINE_LIMITS = { maxOutputRepairs: 3, maxCorrections: 5, maxIdenticalFailures: 3, maxDurationMin: 180, maxConsultations: 3, maxProviderRetries: 3, providerTimeoutSec: 900, maxContinuations: 12 } as const;
 
 /** Normaliza una configuración recibida (valores fuera de rango se acotan; comandos desconocidos se descartan). */
-export function normalizePipeline(input: Partial<PipelineConfig> | null | undefined): PipelineConfig {
+export function normalizePipeline(input: (Partial<Omit<PipelineConfig, 'gauntlet'>> & { gauntlet?: Partial<GauntletConfig> | null }) | null | undefined): PipelineConfig {
   const c = { ...DEFAULT_PIPELINE, ...(input ?? {}) };
   const int = (v: unknown, min: number, max: number, def: number) => { const n = Math.floor(Number(v)); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def; };
   const order = ['typecheck', 'test', 'build'] as const;
@@ -43,6 +44,7 @@ export function normalizePipeline(input: Partial<PipelineConfig> | null | undefi
     maxConsultations: int(c.maxConsultations, 0, PIPELINE_LIMITS.maxConsultations, DEFAULT_PIPELINE.maxConsultations),
     maxProviderRetries: int(c.maxProviderRetries, 0, PIPELINE_LIMITS.maxProviderRetries, DEFAULT_PIPELINE.maxProviderRetries),
     providerTimeoutSec: c.providerTimeoutSec == null ? null : int(c.providerTimeoutSec, 5, PIPELINE_LIMITS.providerTimeoutSec, 0) || null,
-    maxContinuations: int(c.maxContinuations, 0, PIPELINE_LIMITS.maxContinuations, DEFAULT_PIPELINE.maxContinuations!)
+    maxContinuations: int(c.maxContinuations, 0, PIPELINE_LIMITS.maxContinuations, DEFAULT_PIPELINE.maxContinuations!),
+    gauntlet: normalizeGauntlet(c.gauntlet)
   };
 }
