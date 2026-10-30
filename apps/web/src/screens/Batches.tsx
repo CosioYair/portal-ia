@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { BacklogItem, BatchItemState, BatchItemView, BatchPreview, BatchView, GauntletConfig } from '@portal-ia/domain';
-import { BATCH_LIMITS, INTERNAL_WORKSPACE, normalizeGauntlet } from '@portal-ia/domain';
+import { BATCH_LIMITS, INTERNAL_WORKSPACE, batchMoving, normalizeGauntlet } from '@portal-ia/domain';
 import { api, type BatchRequest } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
@@ -77,8 +77,9 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const [preview, setPreview] = useState<BatchPreview | null>(null); const [fresh, setFresh] = useState(false);
   const [ok, setOk] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
   const [editDep, setEditDep] = useState<{ id: string; value: string } | null>(null);
+  const [owners, setOwners] = useState<Map<string, string>>(new Map());
   const loadItems = () => api.backlog(ws.slug, projectId).then(list => setAll(list.filter(i => !i.archivedAt))).catch(e => setErr(e.message));
-  useEffect(() => { void loadItems(); }, [ws.slug, projectId]);
+  useEffect(() => { void loadItems(); api.agents(ws.slug).then(a => setOwners(new Map(a.map(x => [x.key, x.config.name])))).catch(() => undefined); }, [ws.slug, projectId]);
   const items = all ?? [];
   const pos = useMemo(() => new Map(items.map((i, n) => [i.id, n])), [items]);
   const byId = useMemo(() => new Map(items.map(i => [i.id, i])), [items]);
@@ -114,8 +115,9 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const usedBy = (src: 'api' | 'claude_code') => agents.filter(a => a.source === src).map(a => a.name);
   const fallbackOn = !!req.apiFallback && req.backends!.includes('api') && preview?.summary.connector.fallback === 'api';
   const notReady = (preview?.plan ?? []).filter(p => !p.blockedReason && !p.executable).map(p => p.id);
+  const autoCount = sum ? sum.executable - sum.waitForManualIntegration.length : 0;
   const blockReason = !sel.length ? null : !req.backends?.length ? 'Marca al menos un origen de ejecución (sección 2).' : !fresh ? 'Actualizando la vista previa…' : !sum ? 'Sin vista previa.' : sum.blockedByPermission ? `Hay ${sum.blockedByPermission} historia(s) cuyo equipo no puede ejecutar con lo autorizado: corrígelo (sección 2) o quítalas.` : !sum.executable ? 'Ninguna historia puede empezar.' : !ok ? 'Marca la casilla de autorización.' : null;
-  const autonomous = sum ? [`Ejecutar ${sum.executable} historia(s) con su equipo: plan, implementación en un worktree aislado, verificación en el sandbox y QA`, req.gauntlet!.mode !== 'off' ? `Evaluación Gauntlet ${GAUNTLET_MODE[req.gauntlet!.mode].label.toLowerCase()}` : null, `Hasta ${req.maxCorrections} corrección(es) por historia`, g.merge ? 'Integrar en main cada historia terminada (de una en una, con las mismas verificaciones)' : null, internal && g.activate ? 'Reconstruir y reiniciar el Portal tras integrar (sin nada en marcha)' : null, g.publish ? 'Publicar en GitHub tras integrar' : null, fallbackOn ? 'Ceder a la API (facturable) si Claude Code no está disponible' : null].filter(Boolean) as string[] : [];
+  const autonomous = sum ? [`Ejecutar ${autoCount} historia(s) con su equipo: plan, implementación en un worktree aislado, verificación en el sandbox y QA`, req.gauntlet!.mode !== 'off' ? `Evaluación Gauntlet ${GAUNTLET_MODE[req.gauntlet!.mode].label.toLowerCase()}` : null, `Hasta ${req.maxCorrections} corrección(es) por historia`, g.merge ? 'Integrar en main cada historia terminada (de una en una, con las mismas verificaciones)' : null, internal && g.activate ? 'Reconstruir y reiniciar el Portal tras integrar (sin nada en marcha)' : null, g.publish ? 'Publicar en GitHub tras integrar' : null, fallbackOn ? 'Ceder a la API (facturable) si Claude Code no está disponible' : null].filter(Boolean) as string[] : [];
   const yours = [!g.merge ? 'Integrar en main' : null, internal && !g.activate ? 'Reconstruir y reiniciar el Portal' : null, !g.publish ? 'Publicar en GitHub' : null, 'Aceptar (o no) cada historia: es distinto de QA', 'Ampliar presupuesto, tope de llamadas o duración', 'Lo que se detenga: conflictos, fallos o límites'].filter(Boolean) as string[];
   return (
     <section className="card" data-testid="batch-wizard">
@@ -126,7 +128,7 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
             <div className="bw-section">
               <div className="eyebrow">1 · Historias</div>
               {!all ? <span className="spin" /> : !items.some(i => i.status === 'pending' || i.status === 'blocked') ? <div className="small muted">No hay historias pendientes en el backlog.</div> :
-                <BatchStoryPicker items={items} selected={sel} onAdd={add} onRemove={remove} onClear={() => setSel([])} />}
+                <BatchStoryPicker items={items} owners={owners} selected={sel} onAdd={add} onRemove={remove} onClear={() => setSel([])} />}
               {sel.length > 0 && <details open={sel.length <= 12} data-testid="batch-order">
                 <summary className="small" style={{ cursor: 'pointer' }}><strong>Orden de la selección ({sel.length})</strong> · {custom ? 'orden manual' : 'orden del backlog (su prioridad)'}; el plan pone siempre las dependencias antes</summary>
                 <div className="small muted" style={{ display: 'flex', gap: 8, margin: '6px 0', alignItems: 'center', flexWrap: 'wrap' }}>{custom && <button type="button" className="btn btn-ghost btn-sm" onClick={resetOrder}>Volver al orden del backlog</button>}<span>Cambiar «depende de» se guarda en la historia del backlog (también para lotes futuros), aunque no autorices este lote.</span></div>
@@ -215,16 +217,21 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
               {!sel.length ? <div className="small muted">Elige historias: aquí verás qué empezará, con qué equipo, cuántas llamadas y qué gasto, y lo que seguirá siendo decisión tuya.</div> : !req.backends?.length ? <Notice kind="warn">Ningún origen autorizado: marca Claude Code, la API o ambos en la sección 2.</Notice> : !sum ? <div className="small muted"><span className="spin" /> Actualizando la vista previa (sin IA)…</div> : <>
                 <div className="bw-kpis">
                   <div className="bw-kpi"><span className="small muted">Seleccionadas</span><b>{sum.selected}</b></div>
-                  <div className="bw-kpi"><span className="small muted">Empezarán</span><b>{sum.executable}</b></div>
+                  <div className="bw-kpi"><span className="small muted">Pueden empezar</span><b>{sum.executable}</b></div>
                   <div className="bw-kpi" data-tone={sum.blockedByDependency ? 'warn' : undefined}><span className="small muted">Bloqueadas por dependencias</span><b>{sum.blockedByDependency}</b></div>
                   <div className="bw-kpi" data-tone={sum.blockedByPermission ? 'err' : undefined}><span className="small muted">Sin permiso para empezar</span><b>{sum.blockedByPermission}</b></div>
                 </div>
                 {sum.blockedByPermission > 0 && <button type="button" className="btn btn-secondary btn-sm" onClick={() => remove(notReady)}>Quitar las {notReady.length} que no pueden empezar</button>}
+                {(sum.waitForManualIntegration.length > 0 || sum.fits.min < autoCount) && <div className="small" data-testid="batch-capacity" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {sum.waitForManualIntegration.length > 0 && <Notice kind="warn"><span><strong>{sum.waitForManualIntegration.length}</strong> esperarán a que integres tú su dependencia (no marcaste «Integrar en main»): {sum.waitForManualIntegration.slice(0, 6).join(', ')}{sum.waitForManualIntegration.length > 6 ? '…' : ''}.</span></Notice>}
+                  {sum.fits.min < autoCount && <Notice kind="warn"><span>Con estos límites, el lote se pausará tras ≈ <strong>{sum.fits.min === sum.fits.max ? sum.fits.max : `${sum.fits.min}–${sum.fits.max}`}</strong> de {autoCount} historias ({sum.fits.limitedBy.map(l => l === 'subscription' ? `tope de ${req.maxSubscriptionCalls} llamadas a la suscripción` : `presupuesto de ${fmtUsd(req.totalBudgetUsd)}`).join(' y ')}); después decides si lo amplías.</span></Notice>}
+                  {sum.fits.min < autoCount && sum.fits.limitedBy.includes('subscription') && <button type="button" className="btn btn-secondary btn-sm" onClick={() => set({ maxSubscriptionCalls: Math.min(BATCH_LIMITS.maxSubscriptionCalls, sum.subscriptionCalls.max) })}>Subir el tope de llamadas a {Math.min(BATCH_LIMITS.maxSubscriptionCalls, sum.subscriptionCalls.max)} (máximo estimado)</button>}
+                </div>}
                 <ul className="bw-list">
                   <li><strong>Llamadas a modelos:</strong> {range(sum.calls)} (mín. sin correcciones; máx. con las autorizadas; reparaciones y reintentos pueden sumar más).</li>
                   <li><strong>Suscripción de Claude Code:</strong> {range(sum.subscriptionCalls)} llamada(s) de un tope de {req.maxSubscriptionCalls}. No se cobra por llamada, pero <strong>consume la cuota de tu plan</strong>; el tope se comprueba antes de empezar cada historia.</li>
-                  <li><strong>API (facturable):</strong> ≈ {fmtUsd(preview!.estimateUsd)} de {fmtUsd(req.totalBudgetUsd)} (tope {fmtUsd(req.perStoryBudgetUsd)} por historia).{sum.worstCaseUsd > preview!.estimateUsd ? <> Si Claude Code cede a la API: hasta ≈ {fmtUsd(sum.worstCaseUsd)}.</> : null} Estimación orientativa, no un precio.</li>
-                  <li><strong>Duración:</strong> {sum.duration ? <>≈ {minutes(sum.duration.minutes)} ({req.concurrency} a la vez; mediana de {sum.duration.samples} historias anteriores: {minutes(sum.duration.perStoryMinutes)} cada una). Orientativa.</> : 'sin historial suficiente en este proyecto para estimarla.'}</li>
+                  <li><strong>API (facturable):</strong> ≈ {sum.apiUsd.min === sum.apiUsd.max ? fmtUsd(sum.apiUsd.min) : `${fmtUsd(sum.apiUsd.min)} – ${fmtUsd(sum.apiUsd.max)}`} (con las correcciones autorizadas) de {fmtUsd(req.totalBudgetUsd)}; tope {fmtUsd(req.perStoryBudgetUsd)} por historia.{sum.worstCaseUsd > sum.apiUsd.max ? <> Si Claude Code cede a la API: hasta ≈ {fmtUsd(sum.worstCaseUsd)}.</> : null} Estimación orientativa, no un precio.</li>
+                  <li><strong>Duración:</strong> {sum.duration ? <>≈ {minutes(sum.duration.minutes)} ({req.concurrency} a la vez). Por historia, {minutes(sum.duration.perStoryMinutes)} de mediana (entre {minutes(sum.duration.p25)} y {minutes(sum.duration.p75)}) en {sum.duration.samples} historias anteriores terminadas y verificadas. Orientativa.</> : 'sin historial suficiente (menos de 5 historias terminadas y verificadas en este proyecto) para estimarla.'}</li>
                 </ul>
                 {sum.missingDependencies.length > 0 && <div className="small" data-testid="batch-missing-deps"><strong>Dependencias que faltan</strong> (no se añaden solas):
                   <ul className="bw-list">{sum.missingDependencies.map(m => <li key={m.storyId}><span className="mono">{m.storyId}</span> {m.title ?? ''} <span className="muted">({m.status ? STATUS_LABEL[m.status] : 'no encontrada'}; la necesita{m.requiredBy.length > 1 ? 'n' : ''} {m.requiredBy.join(', ')})</span>{m.eligible && m.itemId ? <> <button type="button" className="lnk" onClick={() => add([m.itemId!])}>Añadir {m.storyId}</button></> : null}</li>)}</ul>
@@ -234,7 +241,7 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
                 <div className="bw-ops small"><strong>Hará sin preguntarte:</strong><ul className="bw-list">{autonomous.map(x => <li key={x}>{x}</li>)}</ul>
                   <strong>Seguirá siendo decisión tuya:</strong><ul className="bw-list">{yours.map(x => <li key={x}>{x}</li>)}</ul></div>
                 {preview!.warnings.map((w, i) => <Notice key={i} kind="warn">{w}</Notice>)}
-                <label className="ck"><input className="cb" type="checkbox" checked={ok} disabled={!sum.executable || sum.blockedByPermission > 0} onChange={e => setOk(e.target.checked)} /><span>Autorizo este lote: <strong>{sum.executable}</strong> de {sum.selected} historia(s) empezarán, con {req.backends!.map(b => b === 'api' ? 'la API (facturable)' : 'Claude Code (suscripción)').join(' y ')}; hasta <strong>{fmtUsd(req.totalBudgetUsd)}</strong> de API y <strong>{req.maxSubscriptionCalls}</strong> llamadas a la suscripción; integrar <strong>{g.merge ? 'sí' : 'no'}</strong>{internal ? <>, reiniciar <strong>{g.activate ? 'sí' : 'no'}</strong></> : null}, publicar <strong>{g.publish ? 'sí' : 'no'}</strong>. Puedo pausarlo, cancelarlo o revocarlo en cualquier momento.</span></label>
+                <label className="ck"><input className="cb" type="checkbox" checked={ok} disabled={!sum.executable || sum.blockedByPermission > 0} onChange={e => setOk(e.target.checked)} /><span>Autorizo este lote: <strong>{sum.executable}</strong> de {sum.selected} historia(s) pueden empezar{sum.fits.min < autoCount ? <> (con estos límites, ≈ {sum.fits.min === sum.fits.max ? sum.fits.max : `${sum.fits.min}–${sum.fits.max}`} antes de pausarse)</> : null}{sum.waitForManualIntegration.length ? <>, {sum.waitForManualIntegration.length} esperarán a que integres</> : null}, con {req.backends!.map(b => b === 'api' ? 'la API (facturable)' : 'Claude Code (suscripción)').join(' y ')}; hasta <strong>{fmtUsd(req.totalBudgetUsd)}</strong> de API y <strong>{req.maxSubscriptionCalls}</strong> llamadas a la suscripción; integrar <strong>{g.merge ? 'sí' : 'no'}</strong>{internal ? <>, reiniciar <strong>{g.activate ? 'sí' : 'no'}</strong></> : null}, publicar <strong>{g.publish ? 'sí' : 'no'}</strong>. Puedo pausarlo, cancelarlo o revocarlo en cualquier momento.</span></label>
               </>}
               {err && <Notice kind="err">{err}</Notice>}
               <button className="btn btn-primary" onClick={authorize} disabled={!!blockReason || busy}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}Autorizar lote</button>
@@ -261,7 +268,7 @@ export function BatchDetail() {
   const act = async (fn: () => Promise<BatchView>, ok: string) => { setBusy(true); try { setB(await fn()); flash(ok); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   if (!b) return <Shell crumb="Ejecución continua"><main className="page">{err ? <Notice kind="err">{err}</Notice> : <span className="spin" />}</main></Shell>;
   // «En marcha» solo si algo avanza: si todo espera tu decisión, se dice.
-  const idle = b.status === 'running' && !b.items.some(i => ['running', 'queued', 'integrating', 'waiting_dependency'].includes(i.state));
+  const idle = b.status === 'running' && !batchMoving(b.items);
   const st = idle ? { label: 'espera tu decisión', tone: 'warn' as const } : STATUS[b.status]; const closed = b.status === 'cancelled' || b.status === 'revoked';
   const pct = (n: number) => `${Math.min(100, Math.round((n / Math.max(0.0001, b.auth.totalBudgetUsd)) * 100))}%`;
   return (
@@ -277,7 +284,7 @@ export function BatchDetail() {
           </div>}
         </div>
         {cancelling && !closed && <section className="card card-b" style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-          <span className="small" style={{ flex: '1 1 260px' }}>Cancelar detiene lo que está en marcha entre pasos y cierra lo pendiente y lo que espera tu decisión. Lo terminado se conserva y puedes aceptarlo; lo hecho en cada proceso, también.</span>
+          <span className="small" style={{ flex: '1 1 260px' }}>Cancelar detiene lo que está en marcha entre pasos y cierra lo pendiente y lo que espera tu decisión. Lo terminado se conserva y puedes aceptarlo; lo hecho en cada proceso, también. Las historias que llegaron a empezar quedan en el backlog «en curso» o «en revisión» con su proceso, y no se pueden elegir en otro lote mientras no vuelvan a «pendiente».</span>
           <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => { setCancelling(false); void act(() => api.batchControl(ws.slug, b.id, 'cancel'), 'Lote cancelado'); }}>Confirmar cancelación</button>
           <button className="btn btn-ghost btn-sm" onClick={() => setCancelling(false)}>No cancelar</button>
         </section>}
@@ -286,7 +293,7 @@ export function BatchDetail() {
           <input className="input" placeholder="Motivo (opcional)" value={revokeReason} onChange={e => setRevokeReason(e.target.value)} style={{ flex: '1 1 220px', height: 32 }} />
           <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => { setRevoking(false); void act(() => api.batchControl(ws.slug, b.id, 'revoke', { reason: revokeReason }), 'Autorización revocada'); }}>Revocar</button>
         </section>}
-        {b.reason && <Notice kind={b.status === 'paused' ? 'warn' : b.status === 'revoked' ? 'err' : 'info'}>{b.reason}</Notice>}
+        {b.reason && <Notice kind={b.status === 'paused' || idle ? 'warn' : b.status === 'revoked' ? 'err' : 'info'}><span>{b.reason}{b.reasonFix ? <> <Link className="lnk" to={b.reasonFix.href}>{b.reasonFix.label}</Link></> : null}</span></Notice>}
         {(b.status === 'paused' || b.status === 'completed') && !closed && b.items.some(i => ['queued', 'waiting_dependency', 'needs_owner', 'awaiting_integration'].includes(i.state)) && <section className="card card-b" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>Añadir presupuesto (USD)<input className="input mono" type="number" min={0} step={0.5} value={addBudget} onChange={e => setAddBudget(e.target.value)} style={{ width: 120, height: 32 }} /></label>
           <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>Añadir llamadas a la suscripción<input className="input mono" type="number" min={0} value={addCalls} onChange={e => setAddCalls(e.target.value)} style={{ width: 120, height: 32 }} /></label>

@@ -131,6 +131,29 @@ No se puede autorizar con historias sin permiso ni sin orígenes.
 
 **Rendimiento:** el contexto del repositorio se mide una vez por vista previa, no una vez por historia.
 
-## Rondas 4–6
+## Ronda 4 · Evaluación independiente de lo corregido (1.ª revisión) y correcciones
 
-Ver la sección «Resultados» (se completa con la evaluación independiente de lo corregido y las mediciones).
+Veredicto del evaluador: **«no listo (cerca)»**. Confirmó en ejecución que el fallo original está resuelto y que la vista
+previa y el arranque dan el mismo motivo. Hallazgos y corrección de cada uno:
+
+| # | Gravedad | Hallazgo | Corrección |
+|---|---|---|---|
+| 1 | mayor | «Empezarán 95» con un tope de 60 llamadas (caben ≈ 20); el tope máximo de 400 hacía imposible un lote de 200 | `summary.fits`: cuántas empiezan antes de pausarse, con la misma regla que el coordinador; aviso y botón explícito «Subir el tope»; tope máximo 2000; KPI «Pueden empezar» |
+| 2 | mayor | Sin «Integrar en main», la dependiente del lote nunca empieza; el monitor decía «en marcha» | `summary.waitForManualIntegration` (aviso, fuera de los totales); `batchMoving()` en el dominio: el monitor y el servidor dicen «espera tu decisión» y por qué |
+| 3 | mayor | Un problema de permisos de todo el lote se trataba historia a historia (6 procesos cancelados, 6 «Reintentar»); el servidor aceptaba un lote que la vista previa bloquea; motivo repetido 4 veces | `createBatch` rechaza (409 `not_authorized`) con los mismos motivos; `startItem` comprueba ANTES de crear el proceso y pausa el lote una vez con el motivo y su enlace (`reasonFix`); motivos sin repetir; `network` pausa todo el lote |
+| 4 | mayor | Duración «≈ 2 min» con historias que se detuvieron | Solo historias verificadas (o integradas) de ≥ 1 min; mediana y p25–p75; ≥ 5 muestras |
+| 5 | menor | El rango con Mayús se recortaba al máximo sin decirlo | Aviso «Se añadieron X de Y: alcanzaste el máximo» |
+| 6 | menor | El coste de API no contaba las correcciones autorizadas | Rango de USD por historia y total (mismo criterio que las llamadas) |
+| 7 | menor | Tras cancelar, las historias empezadas dejan de ser elegibles sin aviso | La confirmación de cancelar lo dice |
+| 8 | menor | El registro decía «falló» y la historia «espera tu decisión» | El texto sigue la clasificación de todo el lote |
+
+Huecos del estándar señalados y añadidos al estándar:
+- que «empezarán» sea cierto con los límites y sin integrar;
+- que el servidor rechace lo que la vista previa bloquea;
+- que una pérdida de permisos durante el lote pause el lote entero;
+- que las muestras de duración sean válidas;
+- ordenar y filtrar por responsable (añadidos a la selección).
+
+## Rondas 5–6
+
+Ver la sección «Resultados» (se completa con la segunda revisión y las mediciones).
