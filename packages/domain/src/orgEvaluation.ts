@@ -109,6 +109,84 @@ export function departmentOf(template: unknown): string | null {
   return typeof d === 'string' && d.trim() ? d.trim() : null;
 }
 
+/** Paso «Contexto y dirección»: indicaciones del propietario antes de cada evaluación. */
+export type OrgBriefAttachmentKind = 'text' | 'image';
+export interface OrgBriefAttachment {
+  name: string;
+  kind: OrgBriefAttachmentKind;
+  /** Solo en archivos de texto. De una imagen nunca se guarda ni se envía el contenido. */
+  content?: string;
+  /** Descripción escrita por el propietario (la única información que se envía de una imagen). */
+  note?: string;
+}
+export interface OrgEvaluationBrief {
+  direction: string;
+  initialContext: string;
+  attachments: OrgBriefAttachment[];
+  /** El propietario eligió «Evaluar sin indicaciones». */
+  skipped: boolean;
+}
+export const ORG_BRIEF_LIMITS = { direction: 4000, initialContext: 8000, attachments: 8, attachmentContent: 20_000, attachmentsTotal: 40_000, attachmentName: 200, attachmentNote: 1000 } as const;
+export const ORG_BRIEF_REQUIRED_MESSAGE = 'Falta el paso «Contexto y dirección»: indica hacia dónde quieres la evaluación o marca «Evaluar sin indicaciones».';
+export const ORG_BRIEF_SKIPPED_TEXT = '(el propietario evalúa sin indicaciones)';
+export const ORG_BRIEF_LEGACY_TEXT = '(evaluación anterior al paso «Contexto y dirección»: sin indicaciones registradas)';
+
+const briefText = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+
+/** Normaliza el brief recibido sin recortar (los límites se comprueban aparte). De las imágenes se descarta el contenido. null si no es un objeto. */
+export function normalizeOrgBrief(raw: unknown): OrgEvaluationBrief | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const attachments = (Array.isArray(r.attachments) ? r.attachments : []).flatMap((a): OrgBriefAttachment[] => {
+    if (!a || typeof a !== 'object' || Array.isArray(a)) return [];
+    const x = a as Record<string, unknown>;
+    const name = briefText(x.name); if (!name) return [];
+    const kind: OrgBriefAttachmentKind = x.kind === 'image' ? 'image' : 'text';
+    const note = briefText(x.note);
+    const content = kind === 'text' && typeof x.content === 'string' ? x.content : '';
+    return [{ name, kind, ...(content.trim() ? { content } : {}), ...(note ? { note } : {}) }];
+  });
+  return { direction: briefText(r.direction), initialContext: briefText(r.initialContext), attachments, skipped: r.skipped === true };
+}
+
+/** Mensaje del primer límite superado, o null si el brief los cumple. */
+export function briefLimitError(b: OrgEvaluationBrief): string | null {
+  const L = ORG_BRIEF_LIMITS;
+  if (b.direction.length > L.direction) return `La dirección supera ${L.direction} caracteres.`;
+  if (b.initialContext.length > L.initialContext) return `El contexto inicial supera ${L.initialContext} caracteres.`;
+  if (b.attachments.length > L.attachments) return `Se admiten como máximo ${L.attachments} adjuntos.`;
+  let total = 0;
+  for (const a of b.attachments) {
+    if (a.name.length > L.attachmentName) return `El nombre del adjunto «${a.name.slice(0, 40)}…» supera ${L.attachmentName} caracteres.`;
+    if ((a.note ?? '').length > L.attachmentNote) return `La descripción de «${a.name}» supera ${L.attachmentNote} caracteres.`;
+    const len = (a.content ?? '').length;
+    if (len > L.attachmentContent) return `El archivo «${a.name}» supera ${L.attachmentContent} caracteres.`;
+    total += len;
+  }
+  if (total > L.attachmentsTotal) return `Los adjuntos suman más de ${L.attachmentsTotal} caracteres.`;
+  return null;
+}
+
+/** Sin dirección, sin contexto inicial y sin adjuntos (o brief ausente). */
+export function briefIsEmpty(b: OrgEvaluationBrief | null | undefined): boolean {
+  return !b || (!b.direction.trim() && !b.initialContext.trim() && b.attachments.length === 0);
+}
+
+/** Markdown del brief para los prompts y el documento. De las imágenes solo se incluyen el nombre y la descripción. */
+export function briefToMarkdown(b: OrgEvaluationBrief | null | undefined): string {
+  if (!b) return ORG_BRIEF_LEGACY_TEXT;
+  if (briefIsEmpty(b)) return ORG_BRIEF_SKIPPED_TEXT;
+  const out: string[] = [];
+  if (b.direction) out.push(`**Dirección del propietario:**\n${b.direction}`);
+  if (b.initialContext) out.push(`**Contexto inicial:**\n${b.initialContext}`);
+  if (b.attachments.length) {
+    out.push(`**Adjuntos (${b.attachments.length}):**\n${b.attachments.map(a => a.kind === 'image'
+      ? `- Imagen «${a.name}»: ${a.note || '(sin descripción)'}`
+      : `- Archivo «${a.name}»${a.note ? ` — ${a.note}` : ''}${a.content ? `\n\n~~~~\n${a.content}\n~~~~` : ''}`).join('\n')}`);
+  }
+  return out.join('\n\n');
+}
+
 export interface OrgEvaluation {
   id: string;
   workspaceSlug: string;
@@ -125,6 +203,8 @@ export interface OrgEvaluation {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Contexto y dirección del propietario (null en las evaluaciones anteriores a este paso). */
+  brief?: OrgEvaluationBrief | null;
 }
 
 export const isOrgEvaluationFinished = (s: OrgEvaluationStatus) => s === 'done' || s === 'failed' || s === 'cancelled';

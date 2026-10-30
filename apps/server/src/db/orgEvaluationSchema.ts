@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
-import type { OrgDecision, OrgEvaluation, OrgEvaluationStatus, OrgProposal, OrgScopeKind } from '@portal-ia/domain';
+import type { OrgDecision, OrgEvaluation, OrgEvaluationBrief, OrgEvaluationStatus, OrgProposal, OrgScopeKind } from '@portal-ia/domain';
 import { workspaceDb } from './workspace.ts';
 
 /**
@@ -27,6 +27,9 @@ export function ensureOrgEvaluationSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_org_evaluations_project_created ON org_evaluations (project_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_org_evaluations_process ON org_evaluations (process_id);
   `);
+  // Paso «Contexto y dirección»: columna aditiva; las filas antiguas quedan con NULL (brief: null).
+  const cols = db.prepare(`PRAGMA table_info(org_evaluations)`).all() as { name: string }[];
+  if (!cols.some(c => c.name === 'brief_json')) db.exec(`ALTER TABLE org_evaluations ADD COLUMN brief_json TEXT NULL`);
 }
 
 const now = () => new Date().toISOString();
@@ -38,17 +41,19 @@ export function orgEvaluationsRepo(slug: string) {
   const map = (r: any): OrgEvaluation => {
     let proposals: OrgProposal[] = [];
     try { const v = JSON.parse(r.proposals_json ?? '[]'); proposals = Array.isArray(v) ? v : []; } catch { proposals = []; }
+    let brief: OrgEvaluationBrief | null = null;
+    if (r.brief_json) { try { const v = JSON.parse(r.brief_json); brief = v && typeof v === 'object' && !Array.isArray(v) ? v as OrgEvaluationBrief : null; } catch { brief = null; } }
     return {
       id: r.id, workspaceSlug: slug, scopeKind: r.scope_kind as OrgScopeKind, projectId: r.project_id ?? null, anchorProjectId: r.anchor_project_id,
       processId: r.process_id ?? null, status: r.status as OrgEvaluationStatus, knowledgeDocId: r.knowledge_doc_id ?? null,
-      summary: r.summary ?? '', proposals, error: r.error ?? null, createdAt: r.created_at, updatedAt: r.updated_at
+      summary: r.summary ?? '', proposals, error: r.error ?? null, createdAt: r.created_at, updatedAt: r.updated_at, brief
     };
   };
   return {
-    create(e: { scopeKind: OrgScopeKind; projectId: string | null; anchorProjectId: string; processId?: string | null; status?: OrgEvaluationStatus }): OrgEvaluation {
+    create(e: { scopeKind: OrgScopeKind; projectId: string | null; anchorProjectId: string; processId?: string | null; status?: OrgEvaluationStatus; brief?: OrgEvaluationBrief | null }): OrgEvaluation {
       const id = crypto.randomUUID(); const at = now();
-      db.prepare(`INSERT INTO org_evaluations (id, scope_kind, project_id, anchor_project_id, process_id, status, summary, proposals_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, '', '[]', ?, ?)`)
-        .run(id, e.scopeKind, e.scopeKind === 'project' ? e.projectId : null, e.anchorProjectId, e.processId ?? null, e.status ?? 'running', at, at);
+      db.prepare(`INSERT INTO org_evaluations (id, scope_kind, project_id, anchor_project_id, process_id, status, summary, proposals_json, brief_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, '', '[]', ?, ?, ?)`)
+        .run(id, e.scopeKind, e.scopeKind === 'project' ? e.projectId : null, e.anchorProjectId, e.processId ?? null, e.status ?? 'running', e.brief ? JSON.stringify(e.brief) : null, at, at);
       return this.get(id)!;
     },
     get(id: string): OrgEvaluation | undefined {
