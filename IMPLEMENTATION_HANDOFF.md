@@ -1,3 +1,65 @@
+# Portal IA · Asistente como interfaz de ejecución, encargos de desarrollo y Gauntlet automático
+
+Fecha: 30 de octubre de 2026. Diseño, estándar de calidad, revisión independiente, medidas y límites:
+`docs/asistente-encargos-y-gauntlet-adaptativo.md`. Todo con proveedor y CLI de Claude Code simulados, datos e
+instancias temporales, **sin abrir `data/`, sin llamadas reales, sin reiniciar el Portal en marcha, sin integrar ni
+publicar**.
+
+**Rama `mejora/asistente-encargos`** sobre `mejora/lotes-autorizacion-seleccion` (`9ea0ce9`, conservada sin cambios;
+`main` = `e9fcbbc`, sin cambios). Commits: tabla de la fase C del documento más `855db5f` (correcciones de la revisión
+independiente, fase D) y la documentación.
+
+**Verificación (última ejecución):** `npm run typecheck` y `npm run build`, exit 0. `npm test`: 429 pruebas, 419 en
+verde, 3 omitidas por plataforma y **7 fallidas, todas con Docker real**, por Docker Desktop (abajo). Recorrido en
+Chromium sin interfaz sobre una instancia aislada: 12/12 (escritorio y móvil). Dos revisiones independientes: la
+primera encontró 13 defectos (corregidos con prueba, salvo el tope por reintento, documentado); la segunda confirmó
+11 y encontró 5 más, entre ellos uno alto y previo (un agente podía leer `.env` por su nombre corto de Windows, `ENV~1`),
+todos corregidos con prueba (detalle en la fase D del documento).
+
+**Qué cambia para ti:**
+- **Conversaciones** en el Asistente, cada una con su empresa y proyecto, que sobreviven a recargar y reiniciar.
+  «Archivar» nunca borra.
+- **Decisiones una a una**: el Asistente propone las preguntas (opciones, recomendación, riesgos); tú apruebas,
+  aplazas, rechazas, revisas o reabres cada una.
+- **Propuesta → revisión del equipo → historias**: cada paso es un encargo de análisis que autorizas con presupuesto;
+  la propuesta la cuestiona otro especialista que no la redactó; las historias se crean solo con tu clic, sin
+  duplicados y con dependencias.
+- **Encargos de desarrollo `EN-n`** («arregla esto y déjalo listo para revisar»): sin crear historia, con el mismo
+  pipeline (worktree y rama propios, Docker, QA, Gauntlet). Se autorizan con presupuesto de API y **tope de llamadas
+  a la suscripción**; se aceptan con la misma regla de cierre que una historia o se piden cambios.
+- **Cambios locales** pedidos por chat (crear o editar historias, reiniciarlas, crear empresa o proyecto): ahora son
+  tarjetas que confirmas; antes se hacían al instante.
+- **Gauntlet automático por defecto** (también en lotes, historia a historia), resuelto sin IA con su motivo; sigue
+  solo con progreso estricto y con un tope duro.
+- **Suscripción**: se guarda el último informe de límites de la CLI (de la cuenta). Con «límite» sin renovar o con
+  uso adicional («overage»), no empieza trabajo nuevo hasta que se renueve o lo reconozcas.
+- **Agentes**: `portal_search` y `portal_diff`, de solo lectura, en el puente MCP.
+
+**Para activarlo** (requiere tu autorización): integrar las dos ramas en `main` (primero
+`mejora/lotes-autorizacion-seleccion`), `npm run build` y reiniciar el Portal. Migraciones aditivas: tablas nuevas,
+columnas `assignment_id` y `conversation_id`; los mensajes antiguos pasan una vez a «Historial anterior».
+
+**Antes, en tu equipo:** Docker Desktop no monta carpetas de `C:` («input/output error») desde las 12:58. Reinícialo y
+ejecuta `PORTAL_REQUIRE_DOCKER=1 npm test` en la rama: las 7 pruebas con Docker real deben pasar, y conviene confirmar en
+el sandbox la corrección de las pruebas inestables (ver el documento).
+
+**Prueba manual en tu Portal** (tras activarlo). Los pasos marcados con 💳 hacen UNA llamada real del Asistente (con
+Claude Code, de tu suscripción); los marcados con 🔒 piden tu autorización con presupuesto y no se hacen solos:
+1. Asistente → «+ Nueva», empresa «Portal IA», proyecto «Desarrollo del Portal». Recarga: la conversación sigue elegida.
+2. 💳 «Quiero un modo oscuro, ayúdame a decidir cómo»: deben aparecer decisiones D1, D2… abiertas, con recomendación,
+   y el panel en «Decisiones». Ninguna aprobada; el backlog no cambia.
+3. Aprueba una, aplaza otra; recarga: siguen así, y el hilo muestra cada decisión con su autor.
+4. «Preparar propuesta»: aparece una tarjeta «espera tu autorización» con pasos, agentes y estimación; «Siguiente» dice
+   «Autoriza la propuesta». No la autorices si no quieres gastar. 🔒
+5. 💳 «Arregla el texto X y déjalo listo para revisar»: aparece la tarjeta «EN-001» en borrador con objetivo, criterios,
+   presupuesto, tope de llamadas y Gauntlet que se aplicará. No se ejecuta nada hasta «Autorizar y ejecutar». 🔒
+6. 💳 «Añade una historia para …»: tarjeta «sin IA · requiere tu confirmación»; «Hacerlo» exige marcar la casilla.
+7. «Archivar» en la barra: la conversación queda marcada 🗄 con «Reactivar»; al elegir otra deja de listarse salvo con
+   «ver archivadas». Nada se borra (mensajes, decisiones y artefactos siguen ahí).
+8. En el móvil (o con la ventana estrecha): «Menú» pliega la navegación y nada se superpone.
+
+---
+
 # Portal IA · Revisión Gauntlet de la ejecución continua (autorización por agente y selección escalable)
 
 Fecha: 30 de octubre de 2026. Detalle (estándar, causa raíz, rondas, rendimiento y limitaciones):
