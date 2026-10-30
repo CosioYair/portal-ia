@@ -167,8 +167,22 @@ Hallazgos nuevos y su corrección:
 | 3 | menor | Con 6 correcciones, el peor caso de 200 historias superaba el tope máximo de 2000 llamadas | Tope máximo 5000 |
 | 4 | menor | «Caben» suponía una historia a la vez | La estimación modela la concurrencia (las de un grupo no ven las llamadas de las otras) y avisa de que el tope puede superarse un poco |
 
-Se acordó un máximo de tres rondas de revisión y corrección; esta fue la tercera. Lo pendiente está en
-«Limitaciones conocidas».
+**Tercera revisión (última).** Veredicto: **«listo, con detalles menores»**. Confirmó en ejecución los 4 hallazgos
+anteriores y señaló 3 detalles menores, que se corrigieron después, solo con pruebas (sin otra revisión
+independiente, por el límite de tres rondas):
+
+- **Regresión mía.** Tratar toda pausa `permission` como de todo el lote también paraba el lote cuando el propio
+  Desarrollador pide un permiso para SU historia. Ahora:
+  - `permission` vuelve a ser de esa historia;
+  - el origen no autorizado lleva su propio código, `origin_not_allowed`, en la pausa (`pipeline.providerCode`), y ese
+    código sí pausa todo el lote, con el motivo «un agente usa un origen que el lote no autoriza».
+- **Falso aviso de «se pausará».** Ocurría cuando el presupuesto no cubre varias historias a la vez. El coordinador en
+  ese caso espera a que terminen, y la estimación ahora hace lo mismo.
+- **Texto de la pausa por origen:**
+  - ya no dice «Claude Code no está disponible»;
+  - no se corta a mitad de palabra;
+  - enlaza al proceso, que es donde se continúa;
+  - no sugiere «autoriza otro lote».
 
 ## Ronda 6 · Rendimiento
 
