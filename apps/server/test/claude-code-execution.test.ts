@@ -212,7 +212,7 @@ test('8 · tarea autorizada de punta a punta: Desarrollador y QA en Claude Code;
   for (const r of runs) { assert.ok(!r.cwd.startsWith(repo) && !r.cwd.includes('worktrees'), 'la CLI no corre en el repositorio ni en el worktree'); }
   // Lectura por el puente MCP: solo lectura, ruta protegida denegada, solo herramientas de ejecución
   const dev = runs.find((r: any) => r.rule === R.dev)!;
-  assert.deepEqual(dev.mcp.tools.sort(), ['portal_knowledge', 'portal_list_files', 'portal_read_file', 'portal_report_progress', 'portal_task_context']);
+  assert.deepEqual(dev.mcp.tools.sort(), ['portal_diff', 'portal_knowledge', 'portal_list_files', 'portal_read_file', 'portal_report_progress', 'portal_search', 'portal_task_context'], 'solo lectura y avance: nada de consola');
   assert.equal(dev.mcp.results[0].isError, false); assert.match(dev.mcp.results[0].text, /export const a = 1/);
   assert.equal(dev.mcp.results[1].isError, true); assert.match(dev.mcp.results[1].text, /protegida/);
   // 24 · QA recibe la evidencia real de la verificación (resultado estructurado nativo de la CLI)
