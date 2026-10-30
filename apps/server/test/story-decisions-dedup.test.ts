@@ -288,7 +288,8 @@ test('GET /inbox/summary: 3 iteraciones pendientes antes y después de migrar, c
   assert.equal(forStory(inboxList, E.id)[0].iteration, 3);
   assert.equal(forStory(inboxList, E.id)[0].supersededCount, 2);
 
-  const pre = (await summary()).json;
+  const preRes = await summary();
+  const pre = preRes.json;
   assert.deepEqual(Object.keys(pre).sort(), SUMMARY_KEYS);
   assert.equal(pre.storiesWithMultipleCurrent, 0, 'la bandeja ya consolida');
   assert.equal(pre.unmarkedDuplicates, 1, 'sin migrar todavía');
@@ -311,8 +312,8 @@ test('GET /inbox/summary: 3 iteraciones pendientes antes y después de migrar, c
   // Comprobaciones en ejecución: mismas expresiones que se entregan al Portal, sobre el cuerpo real.
   assert.ok(matches(post.body, '/"storiesWithMultipleCurrent":0[,}]/'));
   assert.ok(matches(post.body, '/"unmarkedDuplicates":0[,}]/'));
-  assert.ok(matches(pre.body, '/"storiesWithMultipleCurrent":0[,}]/'));
-  assert.ok(!matches(pre.body, '/"unmarkedDuplicates":0[,}]/'), 'antes de migrar la comprobación debe fallar');
+  assert.ok(matches(preRes.body, '/"storiesWithMultipleCurrent":0[,}]/'));
+  assert.ok(!matches(preRes.body, '/"unmarkedDuplicates":0[,}]/'), 'antes de migrar la comprobación debe fallar');
   assert.ok(!matches(JSON.stringify({ ...post.json, storiesWithMultipleCurrent: 1 }), '/"storiesWithMultipleCurrent":0[,}]/'), 'con duplicados la comprobación debe fallar');
   assert.ok(matches((await get(`/api/workspaces/${slug}/inbox`)).body, '/^\\[/'));
 
