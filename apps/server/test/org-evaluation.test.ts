@@ -121,16 +121,16 @@ test('d · flujo completo de proyecto: Coordinador → Gestor, proceso done, doc
   await app.close();
 });
 
-test('e · decisiones individuales: aceptar y rechazar solo registran; los agentes no cambian; decidir dos veces → 409', async () => {
+test('e · decisiones individuales: aceptar y rechazar (con confirmación) solo registran; los agentes no cambian; decidir dos veces → 409', async () => {
   assert.ok(projectEvalId, 'requiere la evaluación de la prueba d');
   const app = await buildApp();
   const agentsBefore = agentsRepo('portal-ia').list().map(a => a.id).sort();
   const url = (pid: string) => `/api/workspaces/portal-ia/org-evaluations/${projectEvalId}/proposals/${pid}`;
   const acc = await app.inject({ method: 'POST', url: url('p1'), payload: { decision: 'accepted' } });
   assert.equal(acc.statusCode, 200, acc.body); assert.equal(acc.json().proposal.decision, 'accepted');
-  const rej = await app.inject({ method: 'POST', url: url('p2'), payload: { decision: 'rejected' } });
-  assert.equal(rej.statusCode, 200); assert.equal(rej.json().proposal.decision, 'rejected');
-  assert.equal((await app.inject({ method: 'POST', url: url('p1'), payload: { decision: 'rejected' } })).statusCode, 409);
+  const rej = await app.inject({ method: 'POST', url: url('p2'), payload: { decision: 'rejected', confirm: true } });
+  assert.equal(rej.statusCode, 200, rej.body); assert.equal(rej.json().proposal.decision, 'rejected');
+  assert.equal((await app.inject({ method: 'POST', url: url('p1'), payload: { decision: 'rejected', confirm: true } })).statusCode, 409);
   assert.equal((await app.inject({ method: 'POST', url: url('p9'), payload: { decision: 'accepted' } })).statusCode, 404);
   assert.equal((await app.inject({ method: 'POST', url: url('p1'), payload: { decision: 'quizas' } })).statusCode, 400);
   assert.deepEqual(agentsRepo('portal-ia').list().map(a => a.id).sort(), agentsBefore, 'decidir no crea ni elimina agentes');
