@@ -404,3 +404,13 @@ test('activación serializada (Portal interno): con nada en marcha se reconstruy
   assert.equal(activations, 2, 'una activación por integración, de una en una');
   await scheduleTick(S, b.id);
 });
+
+test('«depende de» editable (lo usa el plan): otra historia del mismo proyecto, nunca ella misma', async () => {
+  const a = story('Historia TANGO1'); const c = story('Historia TANGO2');
+  const self = await app.inject({ method: 'PATCH', url: `${W}/backlog/${c.id}`, payload: { dependsOn: c.storyId } });
+  assert.equal(self.statusCode, 400); assert.equal(self.json().code, 'invalid_dependency');
+  assert.equal((await app.inject({ method: 'PATCH', url: `${W}/backlog/${c.id}`, payload: { dependsOn: 'HU-999' } })).statusCode, 400);
+  const ok = await app.inject({ method: 'PATCH', url: `${W}/backlog/${c.id}`, payload: { dependsOn: a.storyId } });
+  assert.equal(ok.statusCode, 200, ok.body); assert.equal(ok.json().dependsOn, a.storyId);
+  assert.equal((await app.inject({ method: 'PATCH', url: `${W}/backlog/${c.id}`, payload: { dependsOn: null } })).json().dependsOn, null);
+});

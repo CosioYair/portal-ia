@@ -7,13 +7,15 @@ import { EFFORT_LABELS } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Avatar, Chip, Icon, Notice } from '../components/ui.tsx';
 import { OrgEvaluationPanel } from '../components/OrgEvaluationPanel.tsx';
+import { GauntletProposal } from '../components/Gauntlet.tsx';
 
 export function Team() {
   const { status, providers, navigate } = useApp();
   const ws = status.workspace!;
   const [agents, setAgents] = useState<Agent[]>([]);
   const [evalOpen, setEvalOpen] = useState(false);
-  useEffect(() => { api.agents(ws.slug).then(list => setAgents(list.filter(a => a.scope === 'workspace' || a.projectId === status.project?.id))); }, [ws.slug, status.project?.id]);
+  const reload = () => api.agents(ws.slug).then(list => setAgents(list.filter(a => a.scope === 'workspace' || a.projectId === status.project?.id)));
+  useEffect(() => { void reload(); }, [ws.slug, status.project?.id]);
 
   const byKey = (k: string) => agents.find(a => a.key === k);
   const model = (a: Agent) => providers.find(p => p.id === a.config.provider)?.models.find(m => m.id === a.config.model);
@@ -71,6 +73,8 @@ export function Team() {
             </li></ul>
           </div>
         </section>
+
+        {status.project && <GauntletProposal slug={ws.slug} projectId={status.project.id} onCreated={() => void reload()} />}
 
         <section className="card">
           <div className="card-h"><div className="h3">Relaciones y configuración</div><span className="small muted">Editable desde cada agente</span></div>

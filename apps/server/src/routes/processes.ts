@@ -240,10 +240,12 @@ export async function processRoutes(app: FastifyInstance) {
   app.patch('/api/workspaces/:slug/backlog/:id', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const repo = backlogRepo(slug); if (!repo.get(id)) return reply.code(404).send({ error: 'Historia no encontrada' });
-    const body = z.object({ status: z.enum(['pending', 'in_progress', 'review', 'done', 'blocked']).optional(), title: z.string().trim().min(3).max(200).optional(), criterion: z.string().max(600).optional(), description: z.string().max(4000).optional(), ownerKey: z.string().nullable().optional(), estimate: z.enum(['S', 'M', 'L']).nullable().optional() }).safeParse(req.body);
+    const body = z.object({ status: z.enum(['pending', 'in_progress', 'review', 'done', 'blocked']).optional(), title: z.string().trim().min(3).max(200).optional(), criterion: z.string().max(600).optional(), description: z.string().max(4000).optional(), ownerKey: z.string().nullable().optional(), estimate: z.enum(['S', 'M', 'L']).nullable().optional(), dependsOn: z.string().trim().min(1).max(40).nullable().optional() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Datos no válidos' });
     const { status, ...rest } = body.data;
     const before = repo.get(id)!;
+    // «Depende de» (lo usa el plan de los lotes): otra historia del MISMO proyecto, nunca ella misma.
+    if (rest.dependsOn && (rest.dependsOn === before.storyId || !repo.listAll(before.projectId).some(b => b.storyId === rest.dependsOn))) return reply.code(400).send({ error: `«Depende de» debe ser otra historia de este proyecto (${rest.dependsOn} no lo es).`, code: 'invalid_dependency' });
     if (Object.keys(rest).length) repo.update(id, rest);
     if (status) repo.setStatus(id, status);
     // Una historia ya ejecutada (en revisión, integrada, cerrada…) guarda en su historial qué cambió del contexto.

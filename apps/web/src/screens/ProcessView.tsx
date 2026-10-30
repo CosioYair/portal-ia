@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import type { PipelineConfig, Process, ProcessStep } from '@portal-ia/domain';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
 import { PipelineOptions } from '../components/PipelineOptions.tsx';
+import { GauntletOptions, GauntletReport } from '../components/Gauntlet.tsx';
 import { api, type ProcessBackends } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
@@ -119,6 +120,7 @@ export function ProcessView() {
               <div className="help" style={{ paddingBottom: 26 }}>El proceso se detiene entre pasos si el gasto se acerca al límite.</div>
             </div>
             {proc.kind === 'story_execution' && <PipelineOptions value={pipeline} onChange={setPipeline} team={proc.steps.map(s => ({ agentName: s.agentName, role: s.title, model: s.model ?? '' }))} />}
+            {proc.kind === 'story_execution' && proc.backlogItemId && <GauntletOptions slug={slug} projectId={proc.projectId} itemId={proc.backlogItemId} value={pipeline.gauntlet} onChange={g => setPipeline(p => ({ ...p, gauntlet: g }))} />}
             {proc.kind === 'story_execution' && <TeamBackends slug={slug} processId={proc.id} refreshKey={`${proc.status}|${proc.guidance?.flow?.issue?.title ?? ''}`} />}
             <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo a los agentes indicados a trabajar en este proceso hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. Los resultados son propuestas que revisaré antes de aplicarse.</span></label>
             <button className="btn btn-primary" style={{ alignSelf: 'flex-start' }} onClick={authorize} disabled={!auth || authBusy || !(Number(budget) > 0)}>{authBusy ? <span className="spin spin-light" /> : Icon.arrow()}{authBusy ? 'Autorizando…' : 'Autorizar y comenzar'}</button>
@@ -126,6 +128,7 @@ export function ProcessView() {
         {proc.error && proc.status !== 'failed' && proc.status !== 'budget_exceeded' && <Notice kind="err">{proc.error}</Notice>}
         {proc.status === 'running' && <Notice kind="info">Los agentes implicados están <strong>activos</strong> durante este proceso y volverán a estar inactivos al terminar. {proc.kind === 'story_execution' ? 'Proponen cambios; nada se escribe en el repositorio sin tu aprobación.' : proc.kind === 'delegated_task' ? 'El responsable valida el encargo, consulta a su equipo y entrega el resultado; las propuestas al backlog las aplicas tú.' : 'Solo realizan lectura y análisis; ninguna acción sobre el repositorio.'}</Notice>}
         {proc.kind === 'story_execution' && proc.result && (proc.status === 'done' || proc.result.changes.length > 0) && <StoryResult proc={proc} onChange={setProc} />}
+        {proc.kind === 'story_execution' && proc.result?.gauntlet && <GauntletReport state={proc.result.gauntlet} implementer={proc.steps.find(s => s.role === 'implementer')?.agentName ?? null} />}
         {proc.kind === 'delegated_task' && proc.delegation && (proc.delegation.triage || proc.status !== 'running') && <DelegationResultView proc={proc} onChange={setProc} />}
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
