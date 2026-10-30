@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { backendLabel } from '@portal-ia/domain';
+import { backendLabel, promptSections } from '@portal-ia/domain';
 import type { Agent, AgentBlocker, AgentFailureKind, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError, reasoningHeadroom } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -77,6 +77,28 @@ export function budgetCheck(slug: string, processId: string, agent: Agent, syste
   return { ok: needed <= remaining, needed, remaining };
 }
 
+/** Sistema del paso con sus lecciones validadas y prácticas, inyectadas una sola vez por paso (lo reutilizan sus llamadas). */
+function stepSystem(slug: string, proc: Process, stepId: string, agent: Agent, system0: string, injected: Map<string, string>): string {
+  if (!injected.has(stepId)) {
+    const role = (proc.steps.find(s => s.id === stepId)!.role ?? 'implementer') as TeamRole;
+    injected.set(stepId, injectLessons(slug, stepId, system0, { projectId: proc.projectId, role, tags: [] }, practicesFor(slug, agent)).system);
+  }
+  return injected.get(stepId)!;
+}
+
+/**
+ * Lo máximo que una llamada del paso puede descontar del presupuesto antes de enviarla: con el sistema que recibirá de
+ * verdad (lecciones incluidas) y, si Claude Code puede ceder a la API (alternativa autorizada en el conector), al precio
+ * de la API. Sirve para decidir si varias llamadas caben a la vez.
+ */
+export function worstCaseCallUsd(slug: string, processId: string, stepId: string, system0: string, user: string, maxTokens: number, injected: Map<string, string>): number {
+  const proc = processesRepo(slug).get(processId)!; const agent = agentsRepo(slug).get(proc.steps.find(s => s.id === stepId)!.agentId)!;
+  const system = stepSystem(slug, proc, stepId, agent, system0, injected);
+  const providerId = agent.config.provider as ProviderId;
+  const apiFallback = getClaudeCodeSettings().fallback === 'api' && !!providersRepo.credential(providerId) && providersRepo.get(providerId)?.status === 'connected';
+  return estimateCallUsd(agent, system, user, maxTokens, usesClaudeCode(agent) && !apiFallback ? 'claude-code' : 'api');
+}
+
 export interface CallOptions {
   history?: { role: 'user' | 'assistant'; content: string }[];
   injected: Map<string, string>;
@@ -102,11 +124,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   const enteredAt = Date.now();
   const procs = processesRepo(slug); const proc = procs.get(processId)!;
   const step = proc.steps.find(s => s.id === stepId)!; const agent = agentsRepo(slug).get(step.agentId)!;
-  if (!opts.injected.has(stepId)) {
-    const role = (step.role ?? 'implementer') as TeamRole;
-    opts.injected.set(stepId, injectLessons(slug, step.id, system0, { projectId: proc.projectId, role, tags: [] }, practicesFor(slug, agent)).system);
-  }
-  const system = opts.injected.get(stepId)!;
+  const system = stepSystem(slug, proc, stepId, agent, system0, opts.injected);
   const providerId = agent.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
   const apiConnected = !!cred && prow.status === 'connected';
@@ -147,7 +165,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   const metric = (status: 'done' | 'failed', attempt: number, sentMs: number, d: { tokensIn: number; tokensOut: number; cacheReadTokens: number | null; turns: number | null; tools: Record<string, number> | null; backend: string | null }, errorClass: string | null) => callMetricsRepo(slug).record({
     processId, stepId, agentId: agent.id, role: step.role ?? null, operation: opts.operation ?? step.title.slice(0, 120), backend: d.backend, model: agent.config.model, attempt, status,
     startedAt: new Date(enteredAt).toISOString(), finishedAt: new Date().toISOString(), waitMs: Date.now() - sentMs, buildMs: Math.max(0, (firstSent ?? sentMs) - enteredAt),
-    systemChars: system.length, promptChars: user.length + (opts.history ?? []).reduce((a, h) => a + h.content.length, 0), context: opts.context ?? [],
+    systemChars: system.length, promptChars: user.length + (opts.history ?? []).reduce((a, h) => a + h.content.length, 0), context: opts.context ?? promptSections(user),
     tokensIn: d.tokensIn, tokensOut: d.tokensOut, cacheReadTokens: d.cacheReadTokens, turns: d.turns, tools: d.tools, promptHash: hash, errorClass
   });
   const startedAt = now0.toISOString();

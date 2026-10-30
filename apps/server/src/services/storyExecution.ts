@@ -15,7 +15,7 @@ import { buildRepoContext } from './repoContext.ts';
 import { annotateChanges, fileChangedSince, readRepoFile, type RawChange } from './repoWrite.ts';
 import { DEV_MAX_TOKENS, FILE_FORMAT, sys } from './storyPrompts.ts';
 import { assessDeveloperOutput, failureClassOf, mergeChanges, type ParsedDevOutput } from './devOutput.ts';
-import { callAgentStep, implementerOutputs, isTruncatedStop, newPipeline, pausePipeline, PipelinePause, providerPause, runPipelineStages, settleImplementation, StoryFailure, updateResult, type StoryRunCtx } from './storyPipeline.ts';
+import { callAgentStep, implementerOutputs, isTruncatedStop, newPipeline, pausePipeline, PipelinePause, providerPause, runPipelineStages, settleImplementation, StoryFailure, updateResult, worstCaseCallUsd, type StoryRunCtx } from './storyPipeline.ts';
 export { parseFileBlocks, parseRuntimeChecks } from './devOutput.ts';
 import path from 'node:path';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
@@ -28,6 +28,15 @@ import { expandHome } from '../routes/fs.ts';
  * El resultado son CAMBIOS PROPUESTOS con diff. Nada se escribe en el repositorio hasta que el usuario los aprueba
  * (repoWrite.applyChanges), y la verificación local también requiere autorización por uso.
  */
+/**
+ * Las consultas de especialistas son independientes entre sí (cada una recibe el plan y el árbol): van en paralelo solo
+ * si el presupuesto restante cubre TODAS a la vez con su estimación máxima; si no, de una en una (cada llamada comprueba
+ * el presupuesto antes de enviarse, como siempre). Así ir en paralelo nunca permite superar el presupuesto autorizado.
+ */
+export function consultInParallel(estimates: number[], room: number): boolean {
+  return estimates.length > 1 && estimates.reduce((a, b) => a + b, 0) <= room;
+}
+
 export interface StoryOptions { skipQa?: boolean; override?: TeamOverride | null; iterationContext?: string | null; gauntlet?: boolean }
 const MAX_TOKENS: Record<TeamRole, number> = { planner: 2500, consultant: 2500, implementer: 16000, reviewer: 6000, evaluator: 6000 };
 const TITLES: Record<TeamRole, (name: string) => string> = { planner: () => 'Plan técnico de la historia', consultant: n => `Consulta: ${n}`, implementer: () => 'Implementación (cambios propuestos)', reviewer: () => 'Revisión de calidad', evaluator: () => 'Evaluación Gauntlet (independiente)' };
@@ -219,15 +228,32 @@ Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": st
     }
 
     // 1b · Consultas de especialistas (M3): aportan recomendaciones concretas que recibe el implementador.
-    for (const cs of proc.steps.filter(s => s.role === 'consultant')) {
-      cancelled();
+    const cSteps = proc.steps.filter(s => s.role === 'consultant');
+    const consultOne = async (cs: (typeof cSteps)[number]) => {
       const consultant = agents.get(cs.agentId)!;
-      const cRes = await call(cs.id, sys(consultant, project, item), `Como ${consultant.template.role.toLowerCase()}, aporta recomendaciones concretas y accionables para esta historia desde tu especialidad, a partir del plan del Coordinador. Máximo 10 puntos, cada uno de una o dos líneas, en orden de importancia; indica archivos o pantallas cuando aplique. No escribas código completo.
+      const cRes = await call(cs.id, sys(consultant, project, item), consultPrompt(consultant), MAX_TOKENS.consultant);
+      return { agentId: consultant.id, agentName: consultant.config.name, role: consultant.template.role, text: cRes.text.trim().slice(0, 8000) };
+    };
+    const consultPrompt = (consultant: Agent) => `Como ${consultant.template.role.toLowerCase()}, aporta recomendaciones concretas y accionables para esta historia desde tu especialidad, a partir del plan del Coordinador. Máximo 10 puntos, cada uno de una o dos líneas, en orden de importancia; indica archivos o pantallas cuando aplique. No escribas código completo.
 # Plan
 ${JSON.stringify(plan, null, 2)}
 
-${treeText}`, MAX_TOKENS.consultant);
-      result.consultations!.push({ agentId: consultant.id, agentName: consultant.config.name, role: consultant.template.role, text: cRes.text.trim().slice(0, 8000) });
+${treeText}`;
+    cancelled();
+    const room = (() => { const cur = procs.get(processId)!; return cur.budgetUsd - cur.spentUsd - (cur.unconfirmedUsd ?? 0); })();
+    const estimates = cSteps.map(cs => { const c = agents.get(cs.agentId)!; return worstCaseCallUsd(slug, processId, cs.id, sys(c, project, item), consultPrompt(c), MAX_TOKENS.consultant, injected); });
+    const together = estimates.reduce((a, b) => a + b, 0); const parallel = consultInParallel(estimates, room);
+    if (cSteps.length > 1) log({ processId, consultants: cSteps.length, estimates, together, room, parallel }, parallel ? 'consultas independientes en paralelo (el presupuesto cubre todas)' : 'consultas de una en una (el presupuesto no cubre todas a la vez)');
+    if (parallel) {
+      const done = await Promise.allSettled(cSteps.map(consultOne));
+      // Se conservan las que terminaron; el primer fallo sigue su camino de siempre (pausa o error con su motivo).
+      for (const d of done) if (d.status === 'fulfilled') result.consultations!.push(d.value);
+      save();
+      const failed = done.find(d => d.status === 'rejected') as PromiseRejectedResult | undefined;
+      if (failed) throw failed.reason;
+    } else for (const cs of cSteps) {
+      cancelled();
+      result.consultations!.push(await consultOne(cs));
       save();
     }
     const consultText = result.consultations!.length ? `\n# Aportaciones de especialistas (tenlas en cuenta)\n${result.consultations!.map(c => `## ${c.agentName} · ${c.role}\n${c.text}`).join('\n\n')}\n` : '';

@@ -67,8 +67,15 @@ export function summarizeCalls(rows: CallMetric[], since: string | null = null):
   const dup = group(m => `${m.processId ?? '-'}|${m.promptHash}`);
   const duplicates = Object.values(dup).filter(v => v.length > 1).map(v => ({ processId: v[0].processId, promptHash: v[0].promptHash, count: v.length, role: v[0].role, operation: v[0].operation }));
   const failures = rows.filter(m => m.status === 'failed').reduce((acc, m) => { const k = m.errorClass ?? 'desconocido'; acc[k] = (acc[k] ?? 0) + 1; return acc; }, {} as Record<string, number>);
+  // Partes del contexto agrupadas por tipo («Archivo: src/a.ts» → «Archivo»): lo que más ocupa es lo primero que acotar.
+  const kind = (s: string) => /^[\w.@-]+(\/[\w.@-]+)+$/.test(s.trim()) ? 'contenido de archivo' : s.split(':')[0].trim();
+  const contextBySource = Object.fromEntries(Object.entries(group(m => m.role ?? 'otro')).map(([role, v]) => {
+    const acc = new Map<string, { calls: Set<string>; chars: number }>();
+    for (const m of v) for (const c of m.context ?? []) { const k = kind(c.source); const e = acc.get(k) ?? { calls: new Set<string>(), chars: 0 }; e.calls.add(m.id); e.chars += c.chars; acc.set(k, e); }
+    return [role, Array.from(acc, ([source, e]) => ({ source, calls: e.calls.size, avgChars: Math.round(e.chars / e.calls.size) })).sort((a, b) => b.avgChars * b.calls - a.avgChars * a.calls).slice(0, 8)];
+  }));
   return {
-    since, calls: rows.length, failed: rows.filter(m => m.status === 'failed').length, byRole, byBackend,
+    since, calls: rows.length, failed: rows.filter(m => m.status === 'failed').length, byRole, byBackend, contextBySource,
     split: { modelMs: rows.reduce((a, m) => a + m.waitMs, 0), portalMs: rows.reduce((a, m) => a + m.buildMs, 0) },
     duplicates, failures, repoReads: { total: rows.reduce((a, m) => a + reads(m), 0), callsWithReads: rows.filter(m => reads(m) > 0).length }
   };
