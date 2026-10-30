@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { matches } from '../src/services/runtimeChecks.ts';
+import { parseRuntimeChecks } from '../src/services/devOutput.ts';
 
 // HU-163: tarjeta «Qué necesita tu atención» primero y secciones plegadas (comprobación estática, sin IA).
 // Valida el cableado, no la conducta: QA comprueba en ejecución los estados con y sin pendientes.
@@ -64,4 +66,32 @@ test('Disclosure está cerrado por defecto y pliega descripción, objetivos, arq
   }
   assert.ok(!/<Disclosure[^>]*defaultOpen/.test(dash), 'los plegables del Panel deben estar cerrados por defecto');
   assert.ok(dash.includes('to="/conocimiento"'), 'se mantiene el enlace a Conocimiento');
+});
+
+// Sin «|»: parseRuntimeChecks corta la línea por cada «|». «Tras el título aparece al menos uno de los tres textos»
+// se expresa como doble negación con lookaheads, en lugar de una alternancia (a|b|c).
+const ALTERNATIVES = ['Todo al día', 'decisión espera tu respuesta', 'decisiones esperan tu respuesta'];
+const EXPECT_ATTENTION = `/Qué necesita tu atención(?!${ALTERNATIVES.map(a => `(?![\\s\\S]*${a})`).join('')})/`;
+
+test('la comprobación en ejecución de la tarjeta de atención acierta con y sin pendientes y llega entera', () => {
+  assert.ok(!EXPECT_ATTENTION.includes('|'), 'la expresión no puede contener «|» (el lector de COMPROBACIONES la trocearía)');
+  const checks = parseRuntimeChecks([
+    `- ui / | .summary-card | ${EXPECT_ATTENTION}`,
+    '- ui / | main .card | Qué necesita tu atención',
+    '- ui / | main details.disclosure:not([open]) | Qué construye este proyecto'
+  ].join('\n'));
+  assert.equal(checks.length, 3);
+  assert.deepEqual(checks[0], { kind: 'ui', path: '/', selector: '.summary-card', expect: EXPECT_ATTENTION });
+  assert.equal(checks[1].selector, 'main .card');
+  assert.equal(checks[2].selector, 'main details.disclosure:not([open])');
+  for (const text of [
+    'Qué necesita tu atención\n1\ndecisión espera tu respuesta\nRevisar y decidir',
+    'Qué necesita tu atención\n3\ndecisiones esperan tu respuesta\nRevisar y decidir',
+    'Qué necesita tu atención\nTodo al día'
+  ]) assert.ok(matches(text, EXPECT_ATTENTION), `debe aceptar: ${text.replace(/\n/g, ' ')}`);
+  assert.ok(!matches('1 decisión espera tu respuesta Revisar y decidir', EXPECT_ATTENTION), 'sin el título no debe acertar');
+  assert.ok(!matches('Qué necesita tu atención\nNo se pudo cargar. Reintentar', EXPECT_ATTENTION), 'en error no debe acertar');
+  const dash = read('screens/Dashboard.tsx');
+  assert.ok(dash.includes('title="Qué necesita tu atención"'), 'el título debe coincidir con el del Panel');
+  for (const alt of ALTERNATIVES) assert.ok(dash.includes(`'${alt}'`), `«${alt}» debe aparecer literalmente en Dashboard.tsx`);
 });
