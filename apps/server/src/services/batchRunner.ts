@@ -178,22 +178,28 @@ function stepRange(steps: Step[], auth: BatchAuthorization, evaluatorId: string 
 const addRange = (a: CallRange, b: CallRange): CallRange => ({ min: a.min + b.min, max: a.max + b.max });
 const usd = (n: number) => Number(n.toFixed(4));
 
+type Limit = 'subscription' | 'budget' | 'duration';
 /**
  * Cuántas historias empiezan antes de que los límites pausen el lote, en el orden del plan y con la misma regla que el
- * coordinador: una historia empieza si las llamadas a la suscripción ya hechas no alcanzan el tope y el presupuesto
- * restante cubre el tope por historia.
+ * coordinador: una historia empieza si las llamadas a la suscripción ya hechas no alcanzan el tope, el presupuesto
+ * restante (descontado lo reservado para las que van a la vez) cubre el tope por historia y no se ha superado la duración
+ * máxima. Con varias a la vez, las de un mismo grupo no ven las llamadas ni el gasto de las otras hasta que terminan (por
+ * eso el tope puede superarse un poco). `minutes`: duración por historia del historial (null si no hay datos).
  */
-function fitsUnderLimits(stories: BatchPreviewStory[], auth: BatchAuthorization, pick: 'min' | 'max'): { n: number; limitedBy: ('subscription' | 'budget')[] } {
-  let calls = 0; let spent = 0; let n = 0;
+function fitsUnderLimits(stories: BatchPreviewStory[], auth: BatchAuthorization, pick: 'min' | 'max', minutes: number | null): { n: number; limitedBy: Limit[] } {
+  const c = Math.max(1, auth.concurrency); let calls = 0; let spent = 0; let groupCalls = 0; let groupUsd = 0; let n = 0;
   for (const s of stories) {
-    const limitedBy: ('subscription' | 'budget')[] = [];
+    const limitedBy: Limit[] = []; const inGroup = n % c;
     if (auth.backends.includes('claude_code') && calls >= auth.maxSubscriptionCalls) limitedBy.push('subscription');
-    if (auth.totalBudgetUsd - spent + 1e-9 < auth.perStoryBudgetUsd) limitedBy.push('budget');
+    if (auth.totalBudgetUsd - spent - inGroup * auth.perStoryBudgetUsd + 1e-9 < auth.perStoryBudgetUsd) limitedBy.push('budget');
+    if (minutes !== null && Math.floor(n / c) * minutes > auth.maxDurationMin) limitedBy.push('duration');
     if (limitedBy.length) return { n, limitedBy };
-    n++; calls += s.subscriptionCalls[pick]; spent += (pick === 'min' ? s.estimatedUsd : s.estimatedUsdMax) ?? 0;
+    n++; groupCalls += s.subscriptionCalls[pick]; groupUsd += (pick === 'min' ? s.estimatedUsd : s.estimatedUsdMax) ?? 0;
+    if (n % c === 0) { calls += groupCalls; spent += groupUsd; groupCalls = 0; groupUsd = 0; }
   }
   return { n, limitedBy: [] };
 }
+const LIMIT_TEXT: Record<Limit, string> = { subscription: 'tope de llamadas a la suscripción', budget: 'presupuesto de API', duration: 'duración máxima del lote' };
 
 /** Vista previa SIN guardar nada ni llamar a la IA: plan, equipo y orígenes, llamadas, coste de API, límites, duración y avisos. */
 export function previewBatch(slug: string, projectId: string, input: BatchInput): BatchPreview {
@@ -232,7 +238,8 @@ export function previewBatch(slug: string, projectId: string, input: BatchInput)
   const apiUsd = automatic.reduce((a, s) => addRange(a, { min: s.estimatedUsd ?? 0, max: s.estimatedUsdMax ?? 0 }), { min: 0, max: 0 });
   const calls = automatic.reduce((a, s) => addRange(a, s.calls), { min: 0, max: 0 });
   const subscriptionCalls = automatic.reduce((a, s) => addRange(a, s.subscriptionCalls), { min: 0, max: 0 });
-  const optimistic = fitsUnderLimits(automatic, auth, 'min'); const pessimistic = fitsUnderLimits(automatic, auth, 'max');
+  const hist = automatic.length ? historyMinutes(slug, projectId) : null;
+  const optimistic = fitsUnderLimits(automatic, auth, 'min', hist?.median ?? null); const pessimistic = fitsUnderLimits(automatic, auth, 'max', hist?.p75 ?? null);
   const blockedByDependency = stories.filter(s => !!s.blockedReason).length;
   const blockedByPermission = stories.filter(s => !s.blockedReason && s.team.some(t => !t.ready)).length;
   // Dependencias que faltan: se proponen, nunca se añaden solas al alcance autorizado.
@@ -248,13 +255,13 @@ export function previewBatch(slug: string, projectId: string, input: BatchInput)
   for (const s of stories.filter(x => !x.blockedReason)) (waves[s.wave] ??= []).push(s.storyId);
   const agents = new Map<string, BatchAgentCheck & { stories: number }>();
   for (const s of stories) for (const t of s.team) { const cur = agents.get(t.agentId); agents.set(t.agentId, cur ? { ...cur, stories: cur.stories + 1 } : { ...t, stories: 1 }); }
-  const hist = automatic.length ? historyMinutes(slug, projectId) : null;
   const warnings: string[] = [];
   if (blockedByDependency) warnings.push(`${blockedByDependency} historia(s) bloqueada(s) por dependencias: no se ejecutarán (motivo en cada una).`);
   if (blockedByPermission) warnings.push(`${blockedByPermission} historia(s) no pueden empezar: algún agente de su equipo no puede ejecutar con lo autorizado (detalle y cómo corregirlo en «Equipo y orígenes»). No se autoriza así.`);
   if (manual.length) warnings.push(`${manual.length} historia(s) dependen de otra del lote y, sin «Integrar en main», esperarán a que integres tú su dependencia: ${manual.slice(0, 8).join(', ')}${manual.length > 8 ? '…' : ''}.`);
-  if (optimistic.n < automatic.length) warnings.push(`Con estos límites el lote se pausará tras ≈ ${pessimistic.n === optimistic.n ? optimistic.n : `${pessimistic.n}–${optimistic.n}`} de ${automatic.length} historias (${optimistic.limitedBy.concat(pessimistic.limitedBy).includes('subscription') ? 'tope de llamadas a la suscripción' : 'presupuesto de API'}); después decides si lo amplías.`);
-  else if (pessimistic.n < automatic.length) warnings.push(`Si las historias necesitan todas sus correcciones, el lote podría pausarse tras ≈ ${pessimistic.n} de ${automatic.length} (${pessimistic.limitedBy.includes('subscription') ? 'tope de llamadas a la suscripción' : 'presupuesto de API'}).`);
+  if (optimistic.n < automatic.length) warnings.push(`Con estos límites el lote se pausará tras ≈ ${pessimistic.n === optimistic.n ? optimistic.n : `${pessimistic.n}–${optimistic.n}`} de ${automatic.length} historias (${unique([...optimistic.limitedBy, ...pessimistic.limitedBy].map(l => LIMIT_TEXT[l as Limit])).join(' y ')}); después decides si lo amplías.`);
+  else if (pessimistic.n < automatic.length) warnings.push(`Si las historias necesitan todas sus correcciones (o tardan como las más lentas), el lote podría pausarse tras ≈ ${pessimistic.n} de ${automatic.length} (${pessimistic.limitedBy.map(l => LIMIT_TEXT[l]).join(' y ')}).`);
+  if (auth.concurrency > 1 && auth.backends.includes('claude_code') && subscriptionCalls.max > auth.maxSubscriptionCalls) warnings.push(`Con ${auth.concurrency} a la vez, el tope de llamadas se comprueba al empezar cada historia: las que ya están en marcha terminan y pueden superarlo un poco.`);
   if (apiUsd.min > auth.totalBudgetUsd) warnings.push(`La estimación de API (${apiUsd.min.toFixed(2)} USD) supera el presupuesto total (${auth.totalBudgetUsd} USD): el lote se pausará al agotarlo.`);
   if (automatic.some(s => (s.estimatedUsdMax ?? 0) > auth.perStoryBudgetUsd)) warnings.push('Alguna historia, con sus correcciones, podría gastar más API que el tope por historia: se pausará al alcanzarlo.');
   if (auth.apiFallback && !fallback) warnings.push('Pediste que Claude Code ceda a la API, pero el conector está configurado para pausar: no cederá (se cambia en Proveedores → Claude Code).');
@@ -266,7 +273,7 @@ export function previewBatch(slug: string, projectId: string, input: BatchInput)
     summary: {
       selected: stories.length, executable: runnable.length, blockedByDependency, blockedByPermission, calls, subscriptionCalls,
       apiUsd: { min: usd(apiUsd.min), max: usd(apiUsd.max) }, worstCaseUsd: usd(worst.max),
-      fits: { min: pessimistic.n, max: optimistic.n, limitedBy: unique([...optimistic.limitedBy, ...pessimistic.limitedBy]) as ('subscription' | 'budget')[] },
+      fits: { min: pessimistic.n, max: optimistic.n, limitedBy: unique([...optimistic.limitedBy, ...pessimistic.limitedBy]) as Limit[] },
       waitForManualIntegration: manual, waves, missingDependencies: Array.from(missing.values()),
       duration: hist ? { perStoryMinutes: Math.round(hist.median), p25: Math.round(hist.p25), p75: Math.round(hist.p75), minutes: Math.round(hist.median * Math.ceil(Math.min(optimistic.n, automatic.length) / auth.concurrency)), samples: hist.samples } : null,
       agents: Array.from(agents.values()),
@@ -561,7 +568,7 @@ function startItem(slug: string, id: string, itemId: string) {
   try { p = reuse ?? createStoryProcess(slug, b.projectId, itemId, {}); }
   catch (e: any) { return needsOwner(`No se pudo preparar la historia: ${e?.message ?? e}`); }
   // Claude Code solo cede a la API si el lote lo autoriza (y el conector lo permite): si no, se pausa como siempre.
-  const cfg = normalizePipeline({ autoApply: true, autoVerify: true, commands: b.auth.commands, allowInstall: b.auth.allowInstall, maxCorrections: b.auth.maxCorrections, gauntlet: b.auth.gauntlet, ...(b.auth.apiFallback && b.auth.backends.includes('api') ? {} : { apiFallback: false }) });
+  const cfg = normalizePipeline({ autoApply: true, autoVerify: true, commands: b.auth.commands, allowInstall: b.auth.allowInstall, maxCorrections: b.auth.maxCorrections, gauntlet: b.auth.gauntlet, backends: b.auth.backends, ...(b.auth.apiFallback && b.auth.backends.includes('api') ? {} : { apiFallback: false }) });
   procs.setResult(p.id, { ...procs.get(p.id)!.result!, pipeline: newPipeline(cfg) });
   syncEvaluatorStep(slug, p.id, cfg.gauntlet!);
   procs.authorize(p.id, b.auth.perStoryBudgetUsd);

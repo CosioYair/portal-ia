@@ -148,7 +148,7 @@ export interface Batch {
   revokedAt: string | null;
 }
 
-export const BATCH_LIMITS = { maxItems: 200, maxConcurrency: 3, maxTotalUsd: 500, maxPerStoryUsd: 50, maxDurationMin: 24 * 60, maxCorrections: 6, maxSubscriptionCalls: 2000, maxAutoResumes: 1 } as const;
+export const BATCH_LIMITS = { maxItems: 200, maxConcurrency: 3, maxTotalUsd: 500, maxPerStoryUsd: 50, maxDurationMin: 24 * 60, maxCorrections: 6, maxSubscriptionCalls: 5000, maxAutoResumes: 1 } as const;
 
 // ---------------------------------------------------------------- Planificación determinista
 
@@ -211,6 +211,8 @@ export function classifyStop(pauseKind: PipelinePauseKind | null | undefined, pr
     case 'environment': return { cls: 'environment', batchWide: true };
     // Faltan dependencias en el sandbox y no se autorizó instalar con red: les pasaría lo mismo a todas.
     case 'network': return { cls: 'environment', batchWide: true };
+    // Credencial rechazada, Claude Code no disponible u origen no autorizado en el lote: también afecta a todas.
+    case 'permission': return { cls: 'owner_decision', batchWide: true };
     case 'budget': return { cls: 'budget', batchWide: false };
     case 'provider_timeout': case 'provider_error': case 'interrupted': case 'max_turns': return { cls: 'environment', batchWide: false };
     case 'integration': case 'integration_conflict': return { cls: 'integration', batchWide: false };
@@ -340,10 +342,11 @@ export interface BatchPreview {
     /** Si Claude Code cede a la API (alternativa autorizada), con las correcciones autorizadas. */
     worstCaseUsd: number;
     /**
-     * Cuántas de las que pueden empezar caben antes de que el tope de llamadas a la suscripción o el presupuesto pausen el
-     * lote (en el orden del plan): `max` si gastan lo mínimo, `min` si gastan lo máximo autorizado.
+     * Cuántas de las que pueden empezar caben antes de que el tope de llamadas a la suscripción, el presupuesto o la
+     * duración máxima pausen el lote (en el orden del plan y con la concurrencia): `max` si gastan lo mínimo (y la
+     * duración es la mediana del historial), `min` si gastan lo máximo autorizado (y la duración es el p75).
      */
-    fits: { min: number; max: number; limitedBy: ('subscription' | 'budget')[] };
+    fits: { min: number; max: number; limitedBy: ('subscription' | 'budget' | 'duration')[] };
     /** Dependen de otra del lote y, sin «Integrar en main», esperarán a que la integres tú. */
     waitForManualIntegration: string[];
     /** Oleadas: las de una misma oleada no dependen entre sí (pueden ir a la vez si la concurrencia lo permite). */

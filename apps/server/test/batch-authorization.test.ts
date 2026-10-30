@@ -199,7 +199,7 @@ test('límites: la vista previa dice cuántas caben antes de que el tope de llam
   assert.ok(p.warnings.some((w: string) => /el lote se pausará tras ≈/.test(w)));
   const big = await preview(ids, { maxSubscriptionCalls: p.summary.subscriptionCalls.max });
   assert.equal(big.summary.fits.min, 12, 'con el tope en el máximo estimado caben todas'); assert.equal(big.auth.maxSubscriptionCalls, p.summary.subscriptionCalls.max);
-  assert.equal((await preview(ids, { maxSubscriptionCalls: 2000 })).auth.maxSubscriptionCalls, 2000);
+  assert.equal((await preview(ids, { maxSubscriptionCalls: 5000 })).auth.maxSubscriptionCalls, 5000, 'cabe el peor caso de 200 historias con correcciones');
   // El coste de API también tiene su rango con las correcciones autorizadas.
   await setBackends('api');
   const api = await preview(ids.slice(0, 2), { backends: ['api'], maxCorrections: 3 });
@@ -222,6 +222,12 @@ test('duración: solo cuenta historias que terminaron verificadas (de al menos 1
   fake(true, 20);
   const d = (await preview([a.id])).summary.duration;
   assert.equal(d.samples, 5); assert.equal(d.perStoryMinutes, 12); assert.ok(d.p25 <= d.perStoryMinutes && d.perStoryMinutes <= d.p75);
+  // La duración máxima también cuenta en «caben»: con ~12 min por historia y 15 min de margen, empiezan 2 de 3.
+  const three = [a.id, story('Historia DURACION-2').id, story('Historia DURACION-3').id];
+  const lim = await preview(three, { maxDurationMin: 15 });
+  assert.equal(lim.summary.fits.max, 2); assert.ok(lim.summary.fits.limitedBy.includes('duration'), JSON.stringify(lim.summary.fits));
+  assert.ok(lim.warnings.some((w: string) => /duración máxima del lote/.test(w)));
+  assert.equal((await preview(three, { maxDurationMin: 240 })).summary.fits.max, 3);
 });
 
 test('agente solo API: exige la API autorizada en el lote (se explica qué agente y dónde cambiarlo)', async () => {
@@ -381,4 +387,21 @@ test('volver tras una interrupción: el límite de la suscripción en el primer 
   const cancelled = (await inject('POST', `${W}/batches/${b3.id}/cancel`, {})).json();
   assert.equal(cancelled.items[0].state, 'cancelled'); assert.match(cancelled.items[0].reason, /mientras esperaba tu decisión/);
   ccRules();
+});
+
+test('el origen autorizado se respeta en CADA llamada: un agente cambiado a la API a mitad de la historia no llama; el lote se pausa con el motivo', async () => {
+  await setBackends('claude-code'); apiScript(); ccRules({ slowMs: 400 });
+  const a = story('Historia CAMBIO-ORIGEN');
+  const qa = (await preview([a.id])).plan[0].team.find((t: any) => t.roles.includes('reviewer')).agentId;
+  try {
+    const b = await authorize([a.id]);
+    assert.deepEqual(b.auth.backends, ['claude_code']);
+    await waitFor(() => get(b.id), y => y.items[0].state === 'running', 'empieza');
+    assert.equal((await inject('PUT', `${W}/agents/${qa}/backend`, { backend: 'api', authorized: true })).statusCode, 200);
+    const x = await waitFor(() => get(b.id), y => y.status === 'paused', 'el lote se pausa');
+    assert.equal(x.items[0].state, 'needs_owner'); assert.match(x.reason, /no autoriza ese origen: no se ha hecho la llamada/);
+    assert.equal(apiCalls().length, 0, 'ninguna llamada facturable');
+    assert.equal(x.budget.spent, 0);
+    await close(b.id);
+  } finally { assert.equal((await inject('PUT', `${W}/agents/${qa}/backend`, { backend: 'claude-code', authorized: true })).statusCode, 200); ccRules(); }
 });

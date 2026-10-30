@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { backendLabel, promptSections } from '@portal-ia/domain';
+import { backendLabel, batchSourceOf, promptSections } from '@portal-ia/domain';
 import type { Agent, AgentBlocker, AgentFailureKind, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError, reasoningHeadroom } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -86,6 +86,14 @@ function stepSystem(slug: string, proc: Process, stepId: string, agent: Agent, s
   return injected.get(stepId)!;
 }
 
+/** ¿El agente usa un origen que el lote de este proceso no autoriza? (p. ej. lo cambiaron a la API a mitad de la historia). */
+export function originBlocked(proc: Process, agent: Agent): string | null {
+  const allowed = proc.result?.pipeline?.config.backends;
+  if (!allowed?.length || allowed.includes(batchSourceOf(agentBackend(agent)))) return null;
+  return `«${agent.config.name}» usa ahora ${backendLabel(agentBackend(agent), null, agent.config.provider)} y el lote de esta historia no autoriza ese origen: no se ha hecho la llamada. Devuelve el agente a su origen anterior o autoriza otro lote.`;
+}
+const originFailure = (msg: string) => Object.assign(new Error(msg), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'backend_unavailable', detail: msg } satisfies ProcessFailure });
+
 /**
  * ¿Puede Claude Code ceder a la API en este proceso? Solo si el propietario lo autorizó en el conector, el proveedor
  * está conectado y el proceso no lo prohíbe (un lote que no autoriza la API fija `apiFallback: false`).
@@ -132,6 +140,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   const enteredAt = Date.now();
   const procs = processesRepo(slug); const proc = procs.get(processId)!;
   const step = proc.steps.find(s => s.id === stepId)!; const agent = agentsRepo(slug).get(step.agentId)!;
+  const blocked = originBlocked(proc, agent); if (blocked) throw originFailure(blocked);
   const system = stepSystem(slug, proc, stepId, agent, system0, opts.injected);
   const providerId = agent.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
@@ -313,6 +322,7 @@ export async function stepCall(ctx: StoryRunCtx, agent: Agent, role: TeamRole, t
   if (!b.ok) throw new PipelinePause('budget', `La siguiente llamada («${title}», ≈ ${b.needed.toFixed(2)} USD) superaría el presupuesto autorizado: quedan ${Math.max(0, b.remaining).toFixed(2)} USD. No se ha llamado a la IA; lo hecho se conserva.`);
   // Claude Code no disponible (proyecto sin autorizar, consola desconectada…): se pausa ANTES de crear el paso, como con el
   // presupuesto. Antes quedaba un paso «pendiente» huérfano por cada «Continuar» (HU-159, pasos 21 y 22).
+  if (!reuseStepId) { const blocked = originBlocked(processesRepo(ctx.slug).get(ctx.processId)!, agent); if (blocked) throw originFailure(blocked); }
   if (!reuseStepId && usesClaudeCode(agent)) {
     const proc = processesRepo(ctx.slug).get(ctx.processId)!;
     const g = claudeCodeGate(ctx.slug, agent, proc.projectId);

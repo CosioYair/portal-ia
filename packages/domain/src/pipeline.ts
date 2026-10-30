@@ -46,6 +46,7 @@ export function normalizePipeline(input: (Partial<Omit<PipelineConfig, 'gauntlet
     providerTimeoutSec: c.providerTimeoutSec == null ? null : int(c.providerTimeoutSec, 5, PIPELINE_LIMITS.providerTimeoutSec, 0) || null,
     maxContinuations: int(c.maxContinuations, 0, PIPELINE_LIMITS.maxContinuations, DEFAULT_PIPELINE.maxContinuations!),
     gauntlet: normalizeGauntlet(c.gauntlet),
-    ...(c.apiFallback === false ? { apiFallback: false } : {})
+    ...(c.apiFallback === false ? { apiFallback: false } : {}),
+    ...(Array.isArray(c.backends) && c.backends.length ? { backends: c.backends.filter(b => b === 'api' || b === 'claude_code') } : {})
   };
 }

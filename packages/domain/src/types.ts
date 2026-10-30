@@ -661,6 +661,11 @@ export interface PipelineConfig {
    * autoriza). Sin valor: lo que digan los ajustes del conector, como siempre.
    */
   apiFallback?: boolean;
+  /**
+   * Orígenes permitidos en TODA la ejecución (los fija un lote): si un agente pasa a otro origen a mitad de la historia,
+   * su llamada no se hace y el pipeline se pausa. Sin valor: cualquier origen del agente, como siempre.
+   */
+  backends?: ('api' | 'claude_code')[];
 }
 export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'verify' | 'environment' | 'qa' | 'correction' | 'pause' | 'done' | 'error'
   /** Entrega incremental: unidad de trabajo, continuación de una respuesta cortada y comprobación determinista previa a QA. */
