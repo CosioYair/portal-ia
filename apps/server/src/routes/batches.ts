@@ -3,12 +3,13 @@ import { z } from 'zod';
 import { BATCH_LIMITS } from '@portal-ia/domain';
 import { workspacesRepo } from '../db/platform.ts';
 import { batchesRepo } from '../db/batches.ts';
-import { acceptItems, batchView, cancelBatch, cancelItem, createBatch, getBatch, iterateItem, pauseBatch, previewBatch, rejectItem, reopenItem, resumeBatch, revokeBatch, setBatchLogger } from '../services/batchRunner.ts';
+import { acceptItems, batchView, cancelBatch, cancelItem, createBatch, getBatch, iterateItem, pauseBatch, previewBatch, rejectItem, reopenItem, resumeBatch, retryItem, revokeBatch, setBatchLogger } from '../services/batchRunner.ts';
 
 const BATCH_INPUT = z.object({
   title: z.string().trim().max(120).optional(),
   itemIds: z.array(z.string().min(1)).min(1).max(BATCH_LIMITS.maxItems),
   backends: z.array(z.enum(['api', 'claude_code'])).min(1).max(2).optional(),
+  apiFallback: z.boolean().optional(),
   totalBudgetUsd: z.number().min(0.1).max(BATCH_LIMITS.maxTotalUsd),
   perStoryBudgetUsd: z.number().min(0.1).max(BATCH_LIMITS.maxPerStoryUsd),
   maxCorrections: z.number().int().min(0).max(BATCH_LIMITS.maxCorrections).optional(),
@@ -89,6 +90,12 @@ export async function batchRoutes(app: FastifyInstance) {
     const body = z.object({ authorized: z.literal(true), note: z.string().trim().min(3).max(2000) }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Iterar exige tu autorización y una nota con lo que hay que cambiar.', code: 'authorization_required' });
     try { return batchView(slug, await iterateItem(slug, id, itemId, body.data.note)); } catch (e) { return send(reply, e); }
+  });
+  // Reintentar una historia que no llegó a trabajar, con los límites del lote (puede gastar: exige autorización).
+  app.post('/api/workspaces/:slug/batches/:id/items/:itemId/retry', async (req, reply) => {
+    const { slug, id, itemId } = req.params as any; if (!guard(slug, reply)) return;
+    if (!authorized(req.body)) return reply.code(400).send(DENIED);
+    try { return batchView(slug, retryItem(slug, id, itemId)); } catch (e) { return send(reply, e); }
   });
   app.post('/api/workspaces/:slug/batches/:id/items/:itemId/cancel', async (req, reply) => {
     const { slug, id, itemId } = req.params as any; if (!guard(slug, reply)) return;

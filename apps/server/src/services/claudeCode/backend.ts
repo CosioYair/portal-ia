@@ -79,7 +79,8 @@ export function teamReadiness(slug: string, processId: string) {
   return {
     processId, projectId: proc.projectId, projectName,
     connectorEnabled: s.enabled, subscriptionVerified: det?.billing === 'subscription', projectAuthorized: projectAuthorized(s, slug, proc.projectId),
-    fallback: s.fallback, team, ready: team.every(t => t.ready),
+    // Un proceso de un lote que no autoriza la API nunca cede a ella, aunque el conector lo permita.
+    fallback: proc.result?.pipeline?.config.apiFallback === false ? 'none' as const : s.fallback, team, ready: team.every(t => t.ready),
     /** CLI instalada y sesión (de la última comprobación, sin llamar al modelo). */
     cli: { installed: !!det?.installed, version: det?.version ?? null, authMethod: det?.authMethod ?? null, subscriptionType: det?.subscriptionType ?? null, verified: det?.billing === 'subscription' && det?.probe?.ok !== false, checkedAt: det?.checkedAt ?? null },
     /** Ejecutor gestionado: disponible si el conector está activo con la suscripción verificada; ocupación actual. */

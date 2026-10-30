@@ -124,7 +124,7 @@ async function waitFor<T>(fn: () => Promise<T> | T, ok: (v: T) => boolean, what:
 }
 const settled = (b: any) => !b.items.some((i: any) => ['queued', 'waiting_dependency', 'running', 'integrating'].includes(i.state));
 const authorize = async (body: Record<string, unknown>) => {
-  const res = await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/batches`, payload: { authorized: true, totalBudgetUsd: 5, perStoryBudgetUsd: 1, maxCorrections: 1, commands: ['typecheck', 'test', 'build'], git: { merge: true }, ...body } });
+  const res = await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/batches`, payload: { authorized: true, totalBudgetUsd: 5, perStoryBudgetUsd: 1, maxCorrections: 1, commands: ['typecheck', 'test', 'build'], git: { merge: true }, backends: ['api', 'claude_code'], ...body } });
   assert.equal(res.statusCode, 201, res.body); return res.json();
 };
 const mainLog = () => execSync('git log --first-parent --format=%s main', { cwd: repo, encoding: 'utf8' }).trim().split('\n');
@@ -134,7 +134,7 @@ test('F · la autorización es explícita, persistida y auditable; un lote activ
   setScript([{ key: 'FOXTROT', file: 'src/foxtrot.ts', dev: create('src/foxtrot.ts', 'export const foxtrot = 1;') }]);
   const denied = await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/batches`, payload: { itemIds: [a.id], totalBudgetUsd: 2, perStoryBudgetUsd: 1 } });
   assert.equal(denied.statusCode, 400); assert.equal(denied.json().code, 'authorization_required');
-  const prev = await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/batches/preview`, payload: { itemIds: [a.id], totalBudgetUsd: 2, perStoryBudgetUsd: 1, gauntlet: { mode: 'standard' } } });
+  const prev = await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/batches/preview`, payload: { itemIds: [a.id], totalBudgetUsd: 2, perStoryBudgetUsd: 1, gauntlet: { mode: 'standard' }, backends: ['api'] } });
   assert.equal(prev.statusCode, 200, prev.body);
   assert.equal(prev.json().plan.length, 1); assert.ok(prev.json().estimateUsd > 0); assert.equal(prev.json().auth.git.publish, false, 'publicar desactivado por defecto');
   assert.ok(prev.json().warnings.some((w: string) => /sin Evaluador/.test(w)));
@@ -374,7 +374,7 @@ test('Q · orígenes y aislamiento: un equipo con un origen no autorizado no emp
   setScript([{ key: 'QUEBEC', file: 'src/quebec.ts', dev: create('src/quebec.ts', 'export const q = 1;') }]);
   const b = await authorize({ itemIds: [a.id], title: 'Lote Q', backends: ['claude_code'] });
   const x = await waitFor(() => get(b.id), y => y.items[0].state === 'needs_owner', 'no empieza');
-  assert.match(x.items[0].reason, /origen de ejecución no autorizado en el lote \(api\)/);
+  assert.match(x.items[0].reason, /usa Anthropic API \(facturable\) y este lote no autoriza la API/);
   assert.equal(callsFor('QUEBEC').length, 0, 'ninguna llamada');
   assert.equal(processesRepo(S).get(x.items[0].processId)!.status, 'cancelled', 'el proceso preparado queda cancelado con el motivo (auditable)');
   await app.inject({ method: 'POST', url: `${W}/batches/${b.id}/cancel` });

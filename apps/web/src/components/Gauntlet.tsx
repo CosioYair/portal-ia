@@ -102,7 +102,7 @@ export function GauntletProposal({ slug, projectId, onCreated }: { slug: string;
         <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{t.responsibilities.map((r, i) => <li key={i}>{r}</li>)}</ul>
         <div className="small muted">Reporta a: Coordinador del proyecto · colabora con QA · herramientas: solo lectura del repositorio · capacidad: evaluar entregables · plantilla versionada <span className="mono">{t.key}</span>.</div>
         {info.evaluator
-          ? <div className="small">Evaluador: <strong>{info.evaluator.name}</strong> · <span className="mono">{info.evaluator.model}</span> · origen {info.evaluator.backend === 'claude_code' ? 'Claude Code' : 'API'}</div>
+          ? <div className="small">Evaluador: <strong>{info.evaluator.name}</strong> · <span className="mono">{info.evaluator.model}</span> · origen {info.evaluator.backend === 'api' ? 'API' : 'Claude Code'}</div>
           : <>
             <label className="ck"><input className="cb" type="checkbox" checked={ok} onChange={e => setOk(e.target.checked)} /><span>Apruebo añadir este agente al proyecto (cambio organizativo). Queda inactivo: solo trabaja en las tareas que autorices con Gauntlet.</span></label>
             <div><button className="btn btn-primary btn-sm" onClick={create} disabled={!ok || busy}>{busy ? <span className="spin spin-light" /> : Icon.check()}Aprobar y añadir al equipo</button></div>

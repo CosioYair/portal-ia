@@ -656,6 +656,11 @@ export interface PipelineConfig {
   maxContinuations?: number;
   /** Evaluación Gauntlet (constructor ≠ crítico): modo y rondas máximas de corrección dirigida. Sin él, «off». */
   gauntlet?: GauntletConfig;
+  /**
+   * false = Claude Code nunca cede a la API en este proceso, aunque el conector lo permita (lo fija un lote que no la
+   * autoriza). Sin valor: lo que digan los ajustes del conector, como siempre.
+   */
+  apiFallback?: boolean;
 }
 export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'verify' | 'environment' | 'qa' | 'correction' | 'pause' | 'done' | 'error'
   /** Entrega incremental: unidad de trabajo, continuación de una respuesta cortada y comprobación determinista previa a QA. */

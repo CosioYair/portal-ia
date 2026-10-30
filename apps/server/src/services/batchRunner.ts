@@ -1,17 +1,19 @@
-import { BATCH_LIMITS, DEPENDENCY_BROKEN, DEPENDENCY_SATISFIED, INTERNAL_WORKSPACE, batchBudget, batchSummary, classifyStop, gauntletOverhead, normalizeGauntlet, normalizePipeline, planBatch, type Batch, type BatchAuthorization, type BatchItem, type BatchItemState, type Process, type RuntimeCheck, type RuntimeCheckResult } from '@portal-ia/domain';
+import { BATCH_LIMITS, DEPENDENCY_BROKEN, DEPENDENCY_SATISFIED, INTERNAL_WORKSPACE, backendLabel, batchBudget, batchSourceOf, batchSummary, classifyStop, gauntletOverhead, normalizeGauntlet, normalizePipeline, planBatch, type Batch, type BatchAgentCheck, type BatchAuthorization, type BatchItem, type BatchItemState, type BatchPreview, type BatchPreviewStory, type CallRange, type Process, type ProviderId, type RuntimeCheck, type RuntimeCheckResult } from '@portal-ia/domain';
 import { batchesRepo } from '../db/batches.ts';
 import { callMetricsRepo } from '../db/callMetrics.ts';
-import { workspacesRepo } from '../db/platform.ts';
+import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { isActiveJob, trackJob } from './activeJobs.ts';
 import { cancelProcess, clearCancel, isCancelled } from './assessment.ts';
-import { teamReadiness } from './claudeCode/backend.ts';
+import { agentBackend, claudeCodeGate } from './claudeCode/backend.ts';
+import { lastDetection } from './claudeCode/detect.ts';
+import { getClaudeCodeSettings } from './claudeCode/settings.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { projectEvaluator, syncEvaluatorStep } from './gauntlet.ts';
 import { abortProcessCalls } from './providerCalls.ts';
 import { pushBranches } from './repoWrite.ts';
 import { defaultChecks, runRuntimeChecks } from './runtimeChecks.ts';
-import { createStoryProcess, estimateStory, runStory } from './storyExecution.ts';
+import { createStoryProcess, estimateStory, repoContextChars, runStory } from './storyExecution.ts';
 import { prepareIntegration, verifyCandidate } from './storyIntegration.ts';
 import { mergeStory } from './storyMerge.ts';
 import { newPipeline, resumeStory } from './storyPipeline.ts';
@@ -53,6 +55,7 @@ export const ITEM_LABEL: Record<BatchItemState, string> = {
 export interface BatchInput {
   itemIds: string[];
   backends?: ('api' | 'claude_code')[];
+  apiFallback?: boolean;
   totalBudgetUsd: number; perStoryBudgetUsd: number;
   maxCorrections?: number; maxDurationMin?: number; maxSubscriptionCalls?: number;
   gauntlet?: { mode: 'off' | 'standard' | 'deep'; maxRounds?: number };
@@ -64,12 +67,20 @@ export interface BatchInput {
 }
 
 const clamp = (v: unknown, min: number, max: number, def: number) => { const n = Number(v); return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def; };
-/** Normaliza la autorización: límites acotados (nunca «ilimitado»), publicación desactivada salvo que se pida. */
+/**
+ * Normaliza la autorización: límites acotados (nunca «ilimitado»); la API, integrar, activar y publicar solo si se
+ * piden (activar y publicar exigen integrar); ceder a la API solo si se pide y la API está autorizada en el lote.
+ */
 export function normalizeAuth(projectId: string, input: BatchInput): BatchAuthorization {
   const order = ['typecheck', 'test', 'build'] as const;
+  const itemIds = Array.from(new Set(input.itemIds));
+  if (itemIds.length > BATCH_LIMITS.maxItems) throw fail(400, `Un lote admite hasta ${BATCH_LIMITS.maxItems} historias (elegiste ${itemIds.length}): divídelo en varios lotes.`, 'too_many');
+  // La API es facturable: solo con tu marca. Sin orígenes indicados, solo la suscripción de Claude Code.
+  const backends = Array.from(new Set(input.backends?.length ? input.backends : ['claude_code'])) as BatchAuthorization['backends'];
+  const merge = !!input.git?.merge;
   return {
-    projectId, itemIds: Array.from(new Set(input.itemIds)).slice(0, BATCH_LIMITS.maxItems),
-    backends: Array.from(new Set(input.backends?.length ? input.backends : ['api', 'claude_code'])) as BatchAuthorization['backends'],
+    projectId, itemIds, backends,
+    apiFallback: !!input.apiFallback && backends.includes('api'),
     totalBudgetUsd: clamp(input.totalBudgetUsd, 0.1, BATCH_LIMITS.maxTotalUsd, 1),
     perStoryBudgetUsd: clamp(input.perStoryBudgetUsd, 0.1, BATCH_LIMITS.maxPerStoryUsd, 1),
     maxCorrections: Math.floor(clamp(input.maxCorrections, 0, BATCH_LIMITS.maxCorrections, 3)),
@@ -79,7 +90,7 @@ export function normalizeAuth(projectId: string, input: BatchInput): BatchAuthor
     concurrency: Math.floor(clamp(input.concurrency, 1, BATCH_LIMITS.maxConcurrency, 1)),
     commands: order.filter(c => (input.commands ?? order).includes(c)),
     allowInstall: !!input.allowInstall,
-    git: { merge: !!input.git?.merge, activate: !!input.git?.activate, publish: !!input.git?.publish },
+    git: { merge, activate: merge && !!input.git?.activate, publish: merge && !!input.git?.publish },
     autoResume: input.autoResume !== false
   };
 }
@@ -96,28 +107,137 @@ function selection(slug: string, projectId: string, itemIds: string[]) {
   return { selected: selected as NonNullable<typeof selected[number]>[], backlog };
 }
 
-/** Vista previa SIN guardar nada ni llamar a la IA: plan, estimación por historia, sobrecoste Gauntlet y avisos. */
-export function previewBatch(slug: string, projectId: string, input: BatchInput) {
+const PROVIDERS_LINK = { label: 'Proveedores', href: '/configuracion/proveedor' };
+const CC_LINK = { label: 'Proveedores → Claude Code — Local', href: '/configuracion/proveedor#claude-code' };
+/** ¿Puede Claude Code ceder a la API en las historias del lote? Lo pide el lote, con la API autorizada, y lo permite el conector. */
+const batchFallback = (auth: Pick<BatchAuthorization, 'backends' | 'apiFallback'>, connector: 'none' | 'api') => !!auth.apiFallback && auth.backends.includes('api') && connector === 'api';
+
+/**
+ * Comprobación ÚNICA de los orígenes del equipo de una historia: la usan la vista previa y el arranque real de cada
+ * historia, así que no pueden discrepar. El origen es de cada AGENTE (API, Claude Code gestionado o consola): el lote
+ * debe autorizarlo y el agente debe poder ejecutar con él ahora (conector, proyecto, suscripción, consola, proveedor).
+ * Sin efectos y sin llamar a la IA.
+ */
+export function checkTeam(slug: string, projectId: string, members: { agentId: string; role?: string | null }[], auth: Pick<BatchAuthorization, 'backends' | 'apiFallback'>): BatchAgentCheck[] {
+  const agents = agentsRepo(slug); const billing = lastDetection()?.billing ?? null;
+  const fallback = batchFallback(auth, getClaudeCodeSettings().fallback);
+  return Array.from(new Set(members.map(m => m.agentId))).map((id): BatchAgentCheck => {
+    const roles = Array.from(new Set(members.filter(m => m.agentId === id).map(m => m.role ?? 'implementer')));
+    const a = agents.get(id);
+    if (!a) return { agentId: id, name: 'Agente eliminado', roles, backend: 'api', source: 'api', label: '—', allowed: false, ready: false, problem: 'Un agente del equipo ya no existe.', fix: { label: 'Equipo de IA', href: '/equipo' }, viaFallback: false };
+    const backend = agentBackend(a); const source = batchSourceOf(backend); const name = a.config.name;
+    const providerId = a.config.provider as ProviderId; const api = backendLabel('api', null, providerId);
+    const apiReady = !!providersRepo.credential(providerId) && providersRepo.get(providerId)?.status === 'connected';
+    const base = { agentId: id, name, roles, backend, source, label: backendLabel(backend, billing, providerId), allowed: auth.backends.includes(source), viaFallback: false };
+    const agentLink = { label: `Origen de «${name}» (Equipo de IA)`, href: `/equipo/${id}` };
+    if (!base.allowed) return { ...base, ready: false, fix: agentLink, problem: source === 'api'
+      ? `«${name}» usa ${api} (facturable) y este lote no autoriza la API.`
+      : `«${name}» usa Claude Code (${backend === 'claude-code-terminal' ? 'tu consola' : 'gestionado'}) y este lote no autoriza la suscripción de Claude Code.` };
+    if (source === 'api') return apiReady ? { ...base, ready: true, problem: null, fix: null } : { ...base, ready: false, problem: `El proveedor de «${name}» (${api}) no está conectado.`, fix: PROVIDERS_LINK };
+    const g = claudeCodeGate(slug, a, projectId);
+    const reason = !g.ok ? g.reason : backend === 'claude-code' && billing !== 'subscription' ? `Claude Code no está verificado con tu suscripción (${backendLabel('claude-code', billing ?? 'unverified')}).` : null;
+    if (!reason) return { ...base, ready: true, problem: null, fix: null };
+    const fix = !g.ok && (g.problem === 'console' || g.problem === 'provider') ? agentLink : CC_LINK;
+    if (fallback && apiReady) return { ...base, ready: true, viaFallback: true, problem: `${reason} Usará ${api} (facturable), como autorizaste en el lote.`, fix };
+    return { ...base, ready: false, problem: reason, fix };
+  });
+}
+
+/** Duración orientativa por historia: mediana de las historias terminadas del proyecto (al menos 5). */
+function historyMinutes(slug: string, projectId: string): { perStory: number; samples: number } | null {
+  const mins = processesRepo(slug).list(projectId).filter(p => p.kind === 'story_execution' && p.status === 'done' && p.startedAt && p.finishedAt)
+    .slice(0, 50).map(p => (Date.parse(p.finishedAt!) - Date.parse(p.startedAt!)) / 60_000).filter(m => m > 0).sort((a, b) => a - b);
+  if (mins.length < 5) return null;
+  const mid = Math.floor(mins.length / 2);
+  return { perStory: mins.length % 2 ? mins[mid] : (mins[mid - 1] + mins[mid]) / 2, samples: mins.length };
+}
+
+/**
+ * Llamadas a los modelos de una historia: `min`, una por paso del equipo (y las evaluaciones mínimas del Gauntlet);
+ * `max`, con las correcciones autorizadas (Desarrollador + QA por corrección; el Gauntlet suma sus evaluaciones y
+ * correcciones dirigidas). Reparaciones de formato, continuaciones, unidades de implementación y reintentos pueden sumar
+ * más: es una estimación, no un tope. `counts` filtra qué agentes cuentan (p. ej. solo los de la suscripción).
+ */
+function callRange(steps: { agentId: string; role: string }[], auth: BatchAuthorization, evaluatorId: string | null, counts: (agentId: string) => boolean): CallRange {
+  const g = gauntletOverhead(auth.gauntlet);
+  const dev = steps.find(s => s.role === 'implementer'); const qa = steps.find(s => s.role === 'reviewer');
+  const devCounts = !!dev && counts(dev.agentId); const qaCounts = !!qa && counts(qa.agentId);
+  const ev = !!evaluatorId && counts(evaluatorId);
+  const min = steps.filter(s => counts(s.agentId)).length + (ev ? g.evaluations.min : 0);
+  const max = min + auth.maxCorrections * (Number(devCounts) + Number(qaCounts)) + (ev ? g.evaluations.max - g.evaluations.min : 0) + (evaluatorId && devCounts ? g.corrections.max : 0);
+  return { min, max };
+}
+const addRange = (a: CallRange, b: CallRange): CallRange => ({ min: a.min + b.min, max: a.max + b.max });
+
+/** Vista previa SIN guardar nada ni llamar a la IA: plan, equipo y orígenes, llamadas, coste de API, duración y avisos. */
+export function previewBatch(slug: string, projectId: string, input: BatchInput): BatchPreview {
   const auth = normalizeAuth(projectId, input);
   const { selected, backlog } = selection(slug, projectId, auth.itemIds);
   const plan = planBatch(selected, backlog);
-  const agents = agentsRepo(slug);
-  const stories = plan.map(p => {
+  const connector = getClaudeCodeSettings(); const fallback = batchFallback(auth, connector.fallback);
+  const evaluator = auth.gauntlet.mode !== 'off' ? projectEvaluator(slug, projectId) : null;
+  let worstCaseUsd = 0;
+  // El contexto del repositorio es el mismo para todas: se mide una vez (con 200 historias, ~2 ms menos por historia).
+  let ctxChars: number | undefined; try { ctxChars = repoContextChars(slug, projectId); } catch { /* cada historia explicará el motivo */ }
+  const stories = plan.map((p): BatchPreviewStory => {
     let est: ReturnType<typeof estimateStory> | null = null; let error: string | null = null;
-    try { est = estimateStory(slug, projectId, p.id, {}); } catch (e: any) { error = e.message; }
-    const backends = Array.from(new Set((est?.steps ?? []).map(s => (agents.get(s.agentId)?.config.backend ?? 'api') as 'api' | 'claude_code')));
-    return { ...p, estimatedUsd: est ? Number(est.estimatedUsd.toFixed(4)) : null, backends, disallowedBackends: backends.filter(b => !auth.backends.includes(b)), error };
+    try { est = estimateStory(slug, projectId, p.id, {}, ctxChars); } catch (e: any) { error = e.message; }
+    const steps = (est?.steps ?? []).map(st => ({ agentId: st.agentId, role: st.role as string, usd: st.estimatedUsd }));
+    const team = est ? checkTeam(slug, projectId, [...steps, ...(evaluator ? [{ agentId: evaluator.id, role: 'evaluator' }] : [])], auth) : [];
+    const by = new Map(team.map(t => [t.agentId, t]));
+    const subscription = (id: string) => by.get(id)?.source === 'claude_code' && !by.get(id)!.viaFallback;
+    const problems = [...(p.blockedReason ? [p.blockedReason] : []), ...team.filter(t => !t.ready).map(t => t.problem!), ...(error ? [error] : [])];
+    const backends = Array.from(new Set(team.map(t => t.source)));
+    // Peor caso de API: si Claude Code cede a la API autorizada en el lote.
+    if (!problems.length) worstCaseUsd += steps.filter(st => !subscription(st.agentId) || fallback).reduce((a, st) => a + st.usd, 0);
+    return {
+      ...p, team, backends, disallowedBackends: backends.filter(b => !auth.backends.includes(b)), problems, executable: !problems.length, error,
+      // La suscripción no se cobra por llamada (consume tu cuota): el USD estimado es solo el de la API.
+      estimatedUsd: est ? Number(steps.filter(st => !subscription(st.agentId)).reduce((a, st) => a + st.usd, 0).toFixed(4)) : null,
+      calls: callRange(steps, auth, evaluator?.id ?? null, () => true),
+      subscriptionCalls: callRange(steps, auth, evaluator?.id ?? null, subscription)
+    };
   });
-  const estimate = stories.reduce((s, x) => s + (x.estimatedUsd ?? 0), 0);
+  const runnable = stories.filter(s => s.executable);
+  const estimate = runnable.reduce((s, x) => s + (x.estimatedUsd ?? 0), 0);
+  const calls = runnable.reduce((a, s) => addRange(a, s.calls), { min: 0, max: 0 });
+  const subscriptionCalls = runnable.reduce((a, s) => addRange(a, s.subscriptionCalls), { min: 0, max: 0 });
+  const blockedByDependency = stories.filter(s => !!s.blockedReason).length;
+  const blockedByPermission = stories.filter(s => !s.blockedReason && s.team.some(t => !t.ready)).length;
+  // Dependencias que faltan: se proponen, nunca se añaden solas al alcance autorizado.
+  const inBatch = new Set(selected.map(s => s.storyId)); const byStory = new Map(backlog.map(b => [b.storyId, b]));
+  const missing = new Map<string, BatchPreview['summary']['missingDependencies'][number]>();
+  for (const s of selected) {
+    if (!s.dependsOn || s.dependsOn === s.storyId || inBatch.has(s.dependsOn)) continue;
+    const d = byStory.get(s.dependsOn); if (d?.status === 'done') continue;
+    const m = missing.get(s.dependsOn) ?? { itemId: d?.id ?? null, storyId: s.dependsOn, title: d?.title ?? null, status: d?.status ?? null, eligible: !!d && (d.status === 'pending' || d.status === 'blocked'), requiredBy: [] };
+    m.requiredBy.push(s.storyId); missing.set(s.dependsOn, m);
+  }
+  const waves: string[][] = [];
+  for (const s of stories.filter(x => !x.blockedReason)) (waves[s.wave] ??= []).push(s.storyId);
+  const agents = new Map<string, BatchAgentCheck & { stories: number }>();
+  for (const s of stories) for (const t of s.team) { const cur = agents.get(t.agentId); agents.set(t.agentId, cur ? { ...cur, stories: cur.stories + 1 } : { ...t, stories: 1 }); }
+  const hist = runnable.length ? historyMinutes(slug, projectId) : null;
   const warnings: string[] = [];
-  if (stories.some(s => s.blockedReason)) warnings.push(`${stories.filter(s => s.blockedReason).length} historia(s) bloqueada(s): no se ejecutarán (motivo en cada una).`);
-  if (estimate > auth.totalBudgetUsd) warnings.push(`La estimación (${estimate.toFixed(2)} USD) supera el presupuesto total (${auth.totalBudgetUsd} USD): el lote se pausará al agotarlo.`);
-  if (stories.some(s => (s.estimatedUsd ?? 0) > auth.perStoryBudgetUsd)) warnings.push('Alguna historia estima más que el tope por historia: se pausará al alcanzarlo.');
-  if (stories.some(s => s.disallowedBackends.length)) warnings.push('Alguna historia usa un origen de ejecución que no autorizas en el lote: no empezará (no se cambia de origen).');
-  if (auth.gauntlet.mode !== 'off' && !projectEvaluator(slug, projectId)) warnings.push('Gauntlet activado sin Evaluador en el proyecto: se aplicarán la verificación y QA de siempre.');
+  if (blockedByDependency) warnings.push(`${blockedByDependency} historia(s) bloqueada(s) por dependencias: no se ejecutarán (motivo en cada una).`);
+  if (blockedByPermission) warnings.push(`${blockedByPermission} historia(s) no empezarán: algún agente de su equipo no puede ejecutar con lo autorizado (detalle y cómo corregirlo en «Equipo y orígenes»).`);
+  if (estimate > auth.totalBudgetUsd) warnings.push(`La estimación de API (${estimate.toFixed(2)} USD) supera el presupuesto total (${auth.totalBudgetUsd} USD): el lote se pausará al agotarlo.`);
+  if (runnable.some(s => (s.estimatedUsd ?? 0) > auth.perStoryBudgetUsd)) warnings.push('Alguna historia estima más API que el tope por historia: se pausará al alcanzarlo.');
+  if (auth.backends.includes('claude_code') && subscriptionCalls.max > auth.maxSubscriptionCalls) warnings.push(`Las llamadas a la suscripción podrían llegar a ${subscriptionCalls.max} y el tope del lote es ${auth.maxSubscriptionCalls}: se comprueba antes de empezar cada historia y, al alcanzarlo, el lote se pausa.`);
+  if (auth.apiFallback && !fallback) warnings.push('Pediste que Claude Code ceda a la API, pero el conector está configurado para pausar: no cederá (se cambia en Proveedores → Claude Code).');
+  if (auth.gauntlet.mode !== 'off' && !evaluator) warnings.push('Gauntlet activado sin Evaluador en el proyecto: se aplicarán la verificación y QA de siempre.');
   if (auth.git.activate && slug !== INTERNAL_WORKSPACE.slug) warnings.push('La activación (reconstruir y reiniciar) solo aplica al propio Portal: se ignora en este proyecto.');
   if (auth.concurrency > 1) warnings.push('Con historias en paralelo, la integración y la activación siguen siendo de una en una; las que tocan los mismos archivos pueden necesitar resolver conflictos.');
-  return { auth, plan: stories, estimateUsd: Number(estimate.toFixed(4)), gauntletOverheadPerStory: gauntletOverhead(auth.gauntlet), warnings };
+  return {
+    auth, plan: stories, estimateUsd: Number(estimate.toFixed(4)), gauntletOverheadPerStory: gauntletOverhead(auth.gauntlet), warnings,
+    summary: {
+      selected: stories.length, executable: runnable.length, blockedByDependency, blockedByPermission, calls, subscriptionCalls,
+      worstCaseUsd: Number(worstCaseUsd.toFixed(4)), waves, missingDependencies: Array.from(missing.values()),
+      duration: hist ? { perStoryMinutes: Math.round(hist.perStory), minutes: Math.round(hist.perStory * Math.ceil(runnable.length / auth.concurrency)), samples: hist.samples } : null,
+      agents: Array.from(agents.values()),
+      connector: { enabled: connector.enabled, subscriptionVerified: lastDetection()?.billing === 'subscription', fallback: connector.fallback }
+    }
+  };
 }
 
 /** Autorización explícita y persistida del lote: desde aquí y solo desde aquí el coordinador actúa por su cuenta. */
@@ -229,9 +349,10 @@ function onFinished(slug: string, id: string, it: BatchItem, p: Process) {
   const pl = p.result?.pipeline;
   if (p.status === 'done' && pl?.state === 'verified') return technicalDone(slug, id, it.itemId, p);
   if (p.status === 'cancelled' && batchesRepo(slug).get(id)!.status !== 'running') return setItem(slug, id, it.itemId, { state: 'cancelled', finishedAt: now(), reason: 'Cancelada con el lote.' }, 'cancelada.');
-  const c = classifyStop(pl?.pauseKind, p.status);
+  const c = classifyStop(pl?.pauseKind, p.status, p.result?.failure?.providerCode);
   const reason = pl?.reason ?? p.error ?? 'El pipeline se detuvo.';
-  setItem(slug, id, it.itemId, { state: p.status === 'failed' ? 'failed' : 'needs_owner', failureClass: c.cls, reason, finishedAt: now() }, `${p.status === 'failed' ? 'falló' : 'se detuvo'} (${c.cls}): ${reason.slice(0, 300)}${c.batchWide ? '' : ' Las historias independientes siguen.'}`);
+  // Un motivo de todo el lote (límite de la suscripción, Claude Code no disponible) no es un fallo de la historia: espera tu decisión.
+  setItem(slug, id, it.itemId, { state: p.status === 'failed' && !c.batchWide ? 'failed' : 'needs_owner', failureClass: c.cls, reason, finishedAt: now() }, `${p.status === 'failed' ? 'falló' : 'se detuvo'} (${c.cls}): ${reason.slice(0, 300)}${c.batchWide ? '' : ' Las historias independientes siguen.'}`);
   // El mismo motivo detendría a las demás (límite de la suscripción, sandbox caído): se pausa todo el lote.
   if (c.batchWide) setStatus(slug, id, 'paused', `${it.storyId} se detuvo por un motivo que afecta a todo el lote (${c.cls === 'subscription' ? 'límite de la suscripción de Claude' : 'entorno de verificación'}): ${reason.slice(0, 300)} No se empieza nada más hasta que lo resuelvas y reanudes.`, 'pause');
 }
@@ -378,24 +499,22 @@ function startNext(slug: string, id: string) {
 function startItem(slug: string, id: string, itemId: string) {
   const b = batchesRepo(slug).get(id)!; const it = b.items.find(i => i.itemId === itemId)!;
   const procs = processesRepo(slug);
-  const needsOwner = (reason: string, pid?: string) => { if (pid) procs.finish(pid, 'cancelled', reason); setItem(slug, id, itemId, { state: 'needs_owner', failureClass: 'owner_decision', reason, processId: pid ?? it.processId, processIds: pid ? [...it.processIds, pid] : it.processIds }, `no empieza: ${reason}`); };
+  const needsOwner = (reason: string, pid?: string) => { if (pid) procs.finish(pid, 'cancelled', reason); setItem(slug, id, itemId, { state: 'needs_owner', failureClass: 'owner_decision', notStarted: true, reason, processId: pid ?? it.processId, processIds: pid ? [...it.processIds, pid] : it.processIds }, `no empieza: ${reason}`); };
   let p: Process;
   try {
     const adopted = it.nextProcessId ? procs.get(it.nextProcessId) : undefined;
     p = adopted && adopted.status === 'pending_authorization' ? adopted : createStoryProcess(slug, b.projectId, itemId, {});
   } catch (e: any) { return needsOwner(`No se pudo preparar la historia: ${e?.message ?? e}`); }
-  const cfg = normalizePipeline({ autoApply: true, autoVerify: true, commands: b.auth.commands, allowInstall: b.auth.allowInstall, maxCorrections: b.auth.maxCorrections, gauntlet: b.auth.gauntlet });
+  // Claude Code solo cede a la API si el lote lo autoriza (y el conector lo permite): si no, se pausa como siempre.
+  const cfg = normalizePipeline({ autoApply: true, autoVerify: true, commands: b.auth.commands, allowInstall: b.auth.allowInstall, maxCorrections: b.auth.maxCorrections, gauntlet: b.auth.gauntlet, ...(b.auth.apiFallback && b.auth.backends.includes('api') ? {} : { apiFallback: false }) });
   procs.setResult(p.id, { ...procs.get(p.id)!.result!, pipeline: newPipeline(cfg) });
   syncEvaluatorStep(slug, p.id, cfg.gauntlet!);
-  // El equipo de la historia solo usa orígenes autorizados en el lote; nunca se cambia a otro facturable.
-  const agents = agentsRepo(slug);
-  const used = Array.from(new Set(procs.get(p.id)!.steps.filter(s => s.status === 'pending').map(s => (agents.get(s.agentId)?.config.backend ?? 'api') as 'api' | 'claude_code')));
-  const bad = used.filter(x => !b.auth.backends.includes(x));
-  if (bad.length) return needsOwner(`El equipo usa un origen de ejecución no autorizado en el lote (${bad.join(', ')}). Cambia el origen del agente o autoriza otro lote.`, p.id);
-  const readiness = teamReadiness(slug, p.id);
-  if (readiness && !readiness.ready && readiness.fallback !== 'api') return needsOwner(`El equipo no puede ejecutar: ${readiness.team.find(t => !t.ready)?.reason ?? 'backend no disponible'}`, p.id);
+  // La MISMA comprobación que la vista previa: cada agente con un origen autorizado en el lote y listo para ejecutar.
+  // Nunca se cambia a otro origen facturable por su cuenta.
+  const bad = checkTeam(slug, b.projectId, procs.get(p.id)!.steps.filter(s => s.status === 'pending').map(s => ({ agentId: s.agentId, role: s.role })), b.auth).filter(t => !t.ready);
+  if (bad.length) return needsOwner(`El equipo no puede ejecutar con lo autorizado en el lote: ${bad.map(t => t.problem).join(' ')}`, p.id);
   procs.authorize(p.id, b.auth.perStoryBudgetUsd);
-  setItem(slug, id, itemId, { state: 'running', processId: p.id, processIds: [...it.processIds.filter(x => x !== p.id), p.id], nextProcessId: null, reason: null, failureClass: null, startedAt: now(), finishedAt: null }, `empieza (proceso ${p.id.slice(0, 8)}, tope ${b.auth.perStoryBudgetUsd} USD, ${b.auth.maxCorrections} corrección(es), Gauntlet ${b.auth.gauntlet.mode}).`);
+  setItem(slug, id, itemId, { state: 'running', processId: p.id, processIds: [...it.processIds.filter(x => x !== p.id), p.id], nextProcessId: null, reason: null, failureClass: null, notStarted: false, startedAt: now(), finishedAt: null }, `empieza (proceso ${p.id.slice(0, 8)}, tope ${b.auth.perStoryBudgetUsd} USD, ${b.auth.maxCorrections} corrección(es), Gauntlet ${b.auth.gauntlet.mode}).`);
   procs.logExecution({ projectId: b.projectId, agentId: '', kind: `batch_story_started:${id}`, status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: now() });
   const run = batchDeps.runStory(slug, p.id, logger, () => isCancelled(p.id)).finally(() => { clearCancel(p.id); void scheduleTick(slug, id); });
   trackJob(p.id, run).catch(e => logger({ err: e?.message, processId: p.id }, 'lote: fallo inesperado de la historia'));
@@ -429,7 +548,12 @@ export function pauseBatch(slug: string, id: string): Batch {
 export function resumeBatch(slug: string, id: string, extra: { addBudgetUsd?: number; addSubscriptionCalls?: number } = {}): Batch {
   const b = getBatch(slug, id); controllable(b);
   if (b.status === 'running') throw fail(409, 'El lote ya está en marcha.', 'running');
+  const procs = processesRepo(slug);
   batchesRepo(slug).update(id, x => {
+    // Vuelven a la cola (y se comprueban otra vez) las que no llegaron a trabajar: no empezaron por permisos u orígenes, o
+    // un motivo de todo el lote (límite de la suscripción, Claude Code no disponible) las detuvo sin trabajo que conservar.
+    x.items.filter(i => i.state === 'needs_owner' && (i.notStarted || ((i.failureClass === 'subscription' || i.failureClass === 'environment') && retryable(i, i.processId ? procs.get(i.processId)?.status : null))))
+      .forEach(i => { i.state = i.dependsInBatch ? 'waiting_dependency' : 'queued'; i.reason = 'Vuelve a la cola al reanudar (no tenía trabajo que conservar).'; i.failureClass = null; i.notStarted = false; });
     x.auth.totalBudgetUsd = Math.min(BATCH_LIMITS.maxTotalUsd, x.auth.totalBudgetUsd + Math.max(0, extra.addBudgetUsd ?? 0));
     x.auth.maxSubscriptionCalls = Math.min(BATCH_LIMITS.maxSubscriptionCalls, x.auth.maxSubscriptionCalls + Math.max(0, Math.floor(extra.addSubscriptionCalls ?? 0)));
     // La duración autorizada se concede otra vez desde la reanudación (nunca acumula tiempo sin límite).
@@ -446,7 +570,10 @@ function stopRunning(slug: string, b: Batch) {
 export function cancelBatch(slug: string, id: string): Batch {
   const b = getBatch(slug, id); controllable(b);
   stopRunning(slug, b);
-  batchesRepo(slug).update(id, x => x.items.filter(i => ['queued', 'waiting_dependency'].includes(i.state)).forEach(i => { i.state = 'cancelled'; i.reason = 'Cancelada con el lote antes de empezar.'; }));
+  batchesRepo(slug).update(id, x => x.items.forEach(i => {
+    if (['queued', 'waiting_dependency'].includes(i.state)) { i.state = 'cancelled'; i.reason = 'Cancelada con el lote antes de empezar.'; }
+    if (i.state === 'needs_owner') { i.state = 'cancelled'; i.reason = `Cancelada con el lote mientras esperaba tu decisión (${i.reason ?? 'sin motivo'}). Lo hecho en su proceso se conserva.`; }
+  }));
   setStatus(slug, id, 'cancelled', 'Cancelado por el propietario: lo que estaba en marcha se detiene entre pasos; lo terminado se conserva y puedes aceptarlo.', 'cancel');
   return getBatch(slug, id);
 }
@@ -457,6 +584,7 @@ export function revokeBatch(slug: string, id: string, reason: string | null): Ba
   batchesRepo(slug).update(id, x => x.items.forEach(i => {
     if (['queued', 'waiting_dependency'].includes(i.state)) { i.state = 'cancelled'; i.reason = 'Autorización revocada antes de empezar.'; }
     if (i.state === 'integrating' && !i.mergedCommit) { i.state = 'awaiting_integration'; i.reason = 'Autorización revocada: integrar vuelve a ser decisión tuya.'; }
+    if (i.state === 'needs_owner') { i.state = 'cancelled'; i.reason = `Autorización revocada mientras esperaba tu decisión (${i.reason ?? 'sin motivo'}). Lo hecho en su proceso se conserva.`; }
   }));
   setStatus(slug, id, 'revoked', `Autorización revocada por el propietario${reason ? `: ${reason}` : ''}. No se empieza, integra, activa ni publica nada más.`, 'revoke');
   processesRepo(slug).logExecution({ projectId: b.projectId, agentId: '', kind: `batch_revoked:${id}`, status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: now() });
@@ -467,6 +595,22 @@ export function cancelItem(slug: string, id: string, itemId: string): Batch {
   if (!['queued', 'waiting_dependency', 'running', 'needs_owner', 'blocked'].includes(it.state)) throw fail(409, `No se puede cancelar una historia ${ITEM_LABEL[it.state]}.`, 'invalid_state');
   if (it.state === 'running' && it.processId) { cancelProcess(it.processId); abortProcessCalls(it.processId); }
   setItem(slug, id, itemId, { state: 'cancelled', reason: 'Cancelada por el propietario.', finishedAt: now() }, 'cancelada por ti.');
+  void scheduleTick(slug, id);
+  return getBatch(slug, id);
+}
+
+/** Sin trabajo que conservar: su proceso no existe, se canceló al empezar o falló. Reintentar no repite nada hecho. */
+export function retryable(it: Pick<BatchItem, 'state'>, processStatus: string | null | undefined): boolean {
+  return (it.state === 'needs_owner' || it.state === 'failed') && (!processStatus || processStatus === 'cancelled' || processStatus === 'failed');
+}
+
+/** Reintentar UNA historia dentro del lote (mismos límites): vuelve a la cola y se comprueban otra vez su equipo y orígenes. */
+export function retryItem(slug: string, id: string, itemId: string): Batch {
+  const b = getBatch(slug, id); controllable(b);
+  const it = b.items.find(i => i.itemId === itemId); if (!it) throw fail(404, 'La historia no está en el lote.', 'not_found');
+  const p = it.processId ? processesRepo(slug).get(it.processId) : undefined;
+  if (!retryable(it, p?.status)) throw fail(409, p && (it.state === 'needs_owner' || it.state === 'failed') ? 'Su proceso conserva trabajo en pausa: continúalo desde el proceso (no se repite lo hecho).' : `No se puede reintentar una historia ${ITEM_LABEL[it.state]}.`, 'invalid_state');
+  setItem(slug, id, itemId, { state: it.dependsInBatch ? 'waiting_dependency' : 'queued', reason: b.status === 'running' ? null : 'En cola: empezará al reanudar el lote.', failureClass: null, notStarted: false, finishedAt: null }, `reintentada por ti: vuelve a la cola (se comprueban otra vez su equipo y sus orígenes).`);
   void scheduleTick(slug, id);
   return getBatch(slug, id);
 }

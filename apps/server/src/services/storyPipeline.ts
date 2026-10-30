@@ -87,6 +87,16 @@ function stepSystem(slug: string, proc: Process, stepId: string, agent: Agent, s
 }
 
 /**
+ * ¿Puede Claude Code ceder a la API en este proceso? Solo si el propietario lo autorizó en el conector, el proveedor
+ * está conectado y el proceso no lo prohíbe (un lote que no autoriza la API fija `apiFallback: false`).
+ */
+export function apiFallbackFor(proc: Process, agent: Agent): boolean {
+  const providerId = agent.config.provider as ProviderId;
+  return getClaudeCodeSettings().fallback === 'api' && proc.result?.pipeline?.config.apiFallback !== false
+    && !!providersRepo.credential(providerId) && providersRepo.get(providerId)?.status === 'connected';
+}
+
+/**
  * Lo máximo que una llamada del paso puede descontar del presupuesto antes de enviarla: con el sistema que recibirá de
  * verdad (lecciones incluidas) y, si Claude Code puede ceder a la API (alternativa autorizada en el conector), al precio
  * de la API. Sirve para decidir si varias llamadas caben a la vez.
@@ -94,9 +104,7 @@ function stepSystem(slug: string, proc: Process, stepId: string, agent: Agent, s
 export function worstCaseCallUsd(slug: string, processId: string, stepId: string, system0: string, user: string, maxTokens: number, injected: Map<string, string>): number {
   const proc = processesRepo(slug).get(processId)!; const agent = agentsRepo(slug).get(proc.steps.find(s => s.id === stepId)!.agentId)!;
   const system = stepSystem(slug, proc, stepId, agent, system0, injected);
-  const providerId = agent.config.provider as ProviderId;
-  const apiFallback = getClaudeCodeSettings().fallback === 'api' && !!providersRepo.credential(providerId) && providersRepo.get(providerId)?.status === 'connected';
-  return estimateCallUsd(agent, system, user, maxTokens, usesClaudeCode(agent) && !apiFallback ? 'claude-code' : 'api');
+  return estimateCallUsd(agent, system, user, maxTokens, usesClaudeCode(agent) && !apiFallbackFor(proc, agent) ? 'claude-code' : 'api');
 }
 
 export interface CallOptions {
@@ -132,7 +140,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   // Claude Code si el propietario lo autorizó en los ajustes del conector, y entonces con su presupuesto de siempre.
   let route: 'api' | 'claude-code' = usesClaudeCode(agent) ? 'claude-code' : 'api';
   let fallbackReason: string | null = null;
-  const apiFallbackAllowed = () => getClaudeCodeSettings().fallback === 'api' && apiConnected;
+  const apiFallbackAllowed = () => apiConnected && apiFallbackFor(processesRepo(slug).get(processId)!, agent);
   if (route === 'claude-code') {
     const g = claudeCodeGate(slug, agent, proc.projectId);
     if (!g.ok && apiFallbackAllowed()) { route = 'api'; fallbackReason = g.reason; }
@@ -306,10 +314,9 @@ export async function stepCall(ctx: StoryRunCtx, agent: Agent, role: TeamRole, t
   // Claude Code no disponible (proyecto sin autorizar, consola desconectada…): se pausa ANTES de crear el paso, como con el
   // presupuesto. Antes quedaba un paso «pendiente» huérfano por cada «Continuar» (HU-159, pasos 21 y 22).
   if (!reuseStepId && usesClaudeCode(agent)) {
-    const g = claudeCodeGate(ctx.slug, agent, processesRepo(ctx.slug).get(ctx.processId)!.projectId);
-    const prov = providersRepo.get(agent.config.provider as ProviderId);
-    const apiFallback = getClaudeCodeSettings().fallback === 'api' && !!providersRepo.credential(agent.config.provider as ProviderId) && prov?.status === 'connected';
-    if (!g.ok && !apiFallback) throw Object.assign(new Error(g.reason), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'backend_unavailable', detail: g.reason } satisfies ProcessFailure });
+    const proc = processesRepo(ctx.slug).get(ctx.processId)!;
+    const g = claudeCodeGate(ctx.slug, agent, proc.projectId);
+    if (!g.ok && !apiFallbackFor(proc, agent)) throw Object.assign(new Error(g.reason), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'backend_unavailable', detail: g.reason } satisfies ProcessFailure });
   }
   const stepId = reuseStepId ?? processesRepo(ctx.slug).addStep(ctx.processId, { agentId: agent.id, agentName: agent.config.name, title, model: agent.config.model, role, reason }).id;
   const cfg = processesRepo(ctx.slug).get(ctx.processId)?.result?.pipeline?.config;
