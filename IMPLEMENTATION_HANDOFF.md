@@ -1,20 +1,32 @@
 # Portal IA · Asistente como interfaz de ejecución, encargos de desarrollo y Gauntlet automático
 
-Fecha: 30 de octubre de 2026. Diseño, estándar de calidad, revisión independiente, medidas y límites:
+Fecha: 30–31 de octubre de 2026. Diseño, estándar de calidad, revisión independiente, medidas y límites:
 `docs/asistente-encargos-y-gauntlet-adaptativo.md`. Todo con proveedor y CLI de Claude Code simulados, datos e
 instancias temporales, **sin abrir `data/`, sin llamadas reales, sin reiniciar el Portal en marcha, sin integrar ni
 publicar**.
 
 **Rama `mejora/asistente-encargos`** sobre `mejora/lotes-autorizacion-seleccion` (`9ea0ce9`, conservada sin cambios;
-`main` = `e9fcbbc`, sin cambios). Commits: tabla de la fase C del documento más `855db5f` (correcciones de la revisión
-independiente, fase D) y la documentación.
+`main` = `e9fcbbc`, sin cambios). Commits: tabla de la fase C del documento; después `855db5f`, `28c1a6f` (revisiones), `0bfb300` (seguridad de rutas y
+tope por llamada), `80f66b3` (Gauntlet en la planificación y diagnóstico), `4dec7a0` (iteraciones de encargos y
+recorrido completo) y `79d4521` (tercera revisión), más la documentación.
 
-**Verificación (última ejecución):** `npm run typecheck` y `npm run build`, exit 0. `npm test`: 429 pruebas, 419 en
-verde, 3 omitidas por plataforma y **7 fallidas, todas con Docker real**, por Docker Desktop (abajo). Recorrido en
-Chromium sin interfaz sobre una instancia aislada: 12/12 (escritorio y móvil). Dos revisiones independientes: la
-primera encontró 13 defectos (corregidos con prueba, salvo el tope por reintento, documentado); la segunda confirmó
-11 y encontró 5 más, entre ellos uno alto y previo (un agente podía leer `.env` por su nombre corto de Windows, `ENV~1`),
-todos corregidos con prueba (detalle en la fase D del documento).
+**Estado (31 de octubre de 2026): NO está listo para activar.** Falta la verificación con Docker real. El motor de
+Docker Desktop no arranca desde que se reinició (con tu autorización): el panel abrió un diálogo de error y el
+servicio no levantó. Antes de eso, cualquier montaje de carpetas de `C:` fallaba con «input/output error».
+
+**Verificación (última ejecución, `79d4521`):**
+- `npm run typecheck` y `npm run build`: exit 0.
+- `npm test`: 439 pruebas; 428 en verde, 10 omitidas y 1 fallida.
+  - **Las 7 pruebas con Docker real NO se ejecutaron** (omitidas al no haber motor): no están verificadas.
+  - El recorrido completo del Asistente (`assistant-journey.test.ts`) falla porque exige Docker. Su lógica se validó
+    con el sandbox simulado en una copia temporal (pasa).
+- Recorrido en Chromium sin interfaz sobre una instancia aislada: 12/12 (escritorio y móvil, versión `2f54d3d`).
+- Cuatro revisiones independientes. Los detalles están en el documento (fases D y «Puerta de estabilización»).
+
+**Para dar el visto bueno** (con Docker funcionando), en la rama:
+1. `PORTAL_REQUIRE_DOCKER=1 npm test`. Deben pasar las 7 pruebas con Docker real y el recorrido completo.
+2. Confirmar en el sandbox la corrección de las pruebas inestables: varias ejecuciones de la suite dentro del sandbox,
+   sin fallos.
 
 **Qué cambia para ti:**
 - **Conversaciones** en el Asistente, cada una con su empresa y proyecto, que sobreviven a recargar y reiniciar.
