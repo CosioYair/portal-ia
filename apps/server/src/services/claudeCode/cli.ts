@@ -63,6 +63,9 @@ export interface CliTaskResult {
   apiKeySource: string | null;
   rateLimit: ClaudeCodeRun['rateLimit'];
   permissionDenials: string[];
+  /** Parte de la entrada leída de la caché (incluida en inputTokens) y herramientas usadas (telemetría). */
+  cacheReadTokens?: number;
+  tools?: Record<string, number>;
   /** Lo que la sesión cargó según su «init» (comprobado antes del encargo) y cómo terminó el proceso. */
   session: { model: string | null; tools: string[]; mcpServers: { name: string; status: string }[]; plugins: string[]; permissionMode: string | null } | null;
   exitCode: number | null;
@@ -316,6 +319,7 @@ export function interpretResult(r: any, ctx: { apiKeySource: string | null; rate
     numTurns: typeof r.num_turns === 'number' ? r.num_turns : ctx.turns || null, durationMs: typeof r.duration_ms === 'number' ? r.duration_ms : Date.now() - ctx.started,
     sessionId: typeof r.session_id === 'string' ? r.session_id : null, apiEquivalentUsd: typeof r.total_cost_usd === 'number' ? r.total_cost_usd : null,
     apiKeySource: ctx.apiKeySource, rateLimit: ctx.rateLimit, session: null, exitCode: null,
-    permissionDenials: Array.isArray(r.permission_denials) ? r.permission_denials.map((p: any) => String(p?.tool_name ?? '?')) : []
+    permissionDenials: Array.isArray(r.permission_denials) ? r.permission_denials.map((p: any) => String(p?.tool_name ?? '?')) : [],
+    cacheReadTokens: Number(u.cache_read_input_tokens) || 0, tools: { ...(ctx.tools ?? {}) }
   };
 }

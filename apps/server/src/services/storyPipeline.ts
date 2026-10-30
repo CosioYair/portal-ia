@@ -13,6 +13,7 @@ import { failingTests, testRunSummary } from './failureDiagnosis.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall, withWatchdog } from './providerCalls.ts';
 import { injectLessons, recordDetections } from './lessons.ts';
+import { callMetricsRepo, promptHash } from '../db/callMetrics.ts';
 import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, testsEvidence, verificationEvidence } from './qaGate.ts';
 /** Veredicto de QA con salida estructurada nativa del proveedor (si la admite); el motor lo valida igualmente. */
 const QA_SCHEMA = { name: 'veredicto_qa', description: 'Veredicto de la puerta de calidad con hallazgos y evidencia.', schema: QA_VERDICT_SCHEMA as unknown as Record<string, unknown> };
@@ -86,6 +87,8 @@ export interface CallOptions {
   retries?: number | null;
   /** Qué es esta llamada dentro del paso (p. ej. «Continuación 1: la respuesta anterior se cortó por longitud»). */
   operation?: string | null;
+  /** Orígenes del contexto entregado y su tamaño (telemetría: qué recibió de verdad el agente). */
+  context?: { source: string; chars: number }[];
 }
 
 /**
@@ -95,6 +98,7 @@ export interface CallOptions {
  * paso para la interfaz. Los errores de conexión se reintentan con espera exponencial; un plazo agotado no.
  */
 export async function callAgentStep(slug: string, processId: string, stepId: string, system0: string, user: string, maxTokens: number, opts: CallOptions): Promise<CallResult> {
+  const enteredAt = Date.now();
   const procs = processesRepo(slug); const proc = procs.get(processId)!;
   const step = proc.steps.find(s => s.id === stepId)!; const agent = agentsRepo(slug).get(step.agentId)!;
   if (!opts.injected.has(stepId)) {
@@ -137,19 +141,27 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   let live: LiveCall = { state: 'preparing', provider: providerId, model: agent.config.model, startedAt: now0.toISOString(), lastEvent: 'Preparando la solicitud', lastEventAt: now0.toISOString(), deadlineAt: new Date(now0.getTime() + timeoutMs).toISOString(), timeoutMs, attempt: 1, maxAttempts, estimatedUsd: apiEstimate, inputTokensEstimated: inTok, inputUsd: costUsd(providerId, agent.config.model, inTok, 0), maxOutputTokens: maxTokens + headroom, operation: opts.operation ?? null, ...(route === 'claude-code' ? ccLive() : {}) };
   const setLive = (patch: Partial<LiveCall>) => { live = { ...live, ...patch }; try { procs.setStepLive(step.id, live); } catch { /* el estado en vivo nunca rompe la llamada */ } };
   procs.stepStart(step.id); setLive({});
+  // Telemetría: una fila por llamada (espera al modelo frente a preparación del Portal, tokens, turnos, herramientas).
+  const hash = promptHash(system, user); let firstSent: number | null = null;
+  const metric = (status: 'done' | 'failed', attempt: number, sentMs: number, d: { tokensIn: number; tokensOut: number; cacheReadTokens: number | null; turns: number | null; tools: Record<string, number> | null; backend: string | null }, errorClass: string | null) => callMetricsRepo(slug).record({
+    processId, stepId, agentId: agent.id, role: step.role ?? null, operation: opts.operation ?? step.title.slice(0, 120), backend: d.backend, model: agent.config.model, attempt, status,
+    startedAt: new Date(enteredAt).toISOString(), finishedAt: new Date().toISOString(), waitMs: Date.now() - sentMs, buildMs: Math.max(0, (firstSent ?? sentMs) - enteredAt),
+    systemChars: system.length, promptChars: user.length + (opts.history ?? []).reduce((a, h) => a + h.content.length, 0), context: opts.context ?? [],
+    tokensIn: d.tokensIn, tokensOut: d.tokensOut, cacheReadTokens: d.cacheReadTokens, turns: d.turns, tools: d.tools, promptHash: hash, errorClass
+  });
   const startedAt = now0.toISOString();
   // Registro del ciclo de vida (sin prompts ni respuestas): qué, a quién, cuándo, cuánto tardó y cómo terminó.
   const who = { processId, step: step.title, operation: opts.operation ?? undefined, provider: providerId, model: agent.config.model };
   for (let attempt = 1; ; attempt++) {
     const ctrl = registerCall(processId);
-    const sentAt = new Date();
+    const sentAt = new Date(); firstSent ??= sentAt.getTime();
     const ms = () => Date.now() - sentAt.getTime();
     setLive({ state: 'sending', attempt, lastEvent: attempt > 1 ? `Reenviando la solicitud (intento ${attempt} de ${maxAttempts})` : 'Enviando la solicitud al proveedor', lastEventAt: sentAt.toISOString(), deadlineAt: new Date(sentAt.getTime() + timeoutMs).toISOString() });
     opts.log({ ...who, attempt, maxAttempts, timeoutMs, inputTokensEstimated: inTok, maxOutputTokens: maxTokens, route }, 'llamada al proveedor: enviando');
     try {
       requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
       const request = { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history: opts.history, responseSchema: opts.schema, timeoutMs };
-      let res: { text: string; inputTokens: number; outputTokens: number; stopReason: string | null; refusal?: string | null };
+      let res: { text: string; inputTokens: number; outputTokens: number; stopReason: string | null; refusal?: string | null; numTurns?: number | null; cacheReadTokens?: number; tools?: Record<string, number> };
       let cost: number; let backend: string | null = null;
       if (route === 'claude-code') {
         // Suscripción: 0 USD del presupuesto de API. El uso (tokens, turnos, duración, equivalente estimado) va al registro del conector.
@@ -175,6 +187,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
       opts.log({ ...who, attempt, ms: ms(), tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost: cost.toFixed(4), stop: res.stopReason, backend }, 'paso completado');
+      metric('done', attempt, sentAt.getTime(), { tokensIn: res.inputTokens, tokensOut: res.outputTokens, cacheReadTokens: route === 'claude-code' ? res.cacheReadTokens ?? null : null, turns: res.numTurns ?? null, tools: res.tools ?? null, backend: backend ?? backendLabel('api', null, providerId) }, null);
       return { text: res.text, stopReason: res.stopReason, inputTokens: res.inputTokens, outputTokens: res.outputTokens, costUsd: cost, refusal: res.refusal ?? null };
     } catch (e) {
       const err = e instanceof ProviderRequestError ? e.error : null;
@@ -219,6 +232,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       const u = (e as any)?.usage as { inputTokens: number; outputTokens: number } | undefined;
       procs.stepFinish(step.id, 'failed', { tokensIn: prev.inputTokens + (u?.inputTokens ?? 0), tokensOut: prev.outputTokens + (u?.outputTokens ?? 0), cost: prev.costUsd, outputMd: prev.outputMd, error: msg, backend: route === 'claude-code' ? backendLabel(agentBackend(agent), lastDetection()?.billing) : null });
       if (u) procs.addUsage(processId, u.inputTokens, u.outputTokens, 0);
+      metric('failed', attempt, sentAt.getTime(), { tokensIn: u?.inputTokens ?? 0, tokensOut: u?.outputTokens ?? 0, cacheReadTokens: null, turns: (u as any)?.numTurns ?? null, tools: (u as any)?.tools ?? null, backend: route === 'claude-code' ? backendLabel(agentBackend(agent), lastDetection()?.billing) : backendLabel('api', null, providerId) }, cls.kind);
       if (billed) procs.addUnconfirmed(processId, step.id, estCost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'failed', tokensIn: u?.inputTokens ?? 0, tokensOut: u?.outputTokens ?? 0, cost: 0, startedAt });
       const cancelled = finalErr?.code === 'cancelled';

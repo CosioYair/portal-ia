@@ -50,7 +50,7 @@ export const config = {
 fs.mkdirSync(path.join(config.dataDir, 'workspaces'), { recursive: true });
 
 /** Versión del esquema de datos: cada cambio de versión hace una copia de `data/` antes de abrir las bases (migraciones solo aditivas). */
-export const DATA_SCHEMA_VERSION = '0.13';
+export const DATA_SCHEMA_VERSION = '0.14';
 export function backupDataBeforeMigration(): string | null {
   try {
     const marker = path.join(config.dataDir, '.schema-version');

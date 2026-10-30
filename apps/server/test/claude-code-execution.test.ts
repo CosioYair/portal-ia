@@ -236,6 +236,15 @@ test('8 · tarea autorizada de punta a punta: Desarrollador y QA en Claude Code;
   assert.deepEqual(perAgent.projects, [{ id: project.id, authorized: true }]); assert.equal(perAgent.limits.fallback, 'none');
   assert.equal((await inject('GET', `${W}/agents/no-existe/claude-code`)).statusCode, 404);
   assert.ok(!done.result!.merged, 'nunca integra solo');
+  // Telemetría: una fila por llamada, con origen, espera al modelo, tokens (caché aparte), turnos y huella del encargo.
+  const m = (await inject('GET', `${W}/metrics/calls?processId=${p.id}&raw=1`)).json();
+  const byRole = (r: string) => m.calls.filter((c: any) => c.role === r);
+  assert.equal(byRole('planner').length, 1); assert.equal(byRole('planner')[0].backend, 'Anthropic API'); assert.equal(byRole('planner')[0].cacheReadTokens, null);
+  for (const c of [...byRole('implementer'), ...byRole('reviewer')]) {
+    assert.equal(c.backend, 'Claude Code — Suscripción'); assert.equal(c.status, 'done');
+    assert.equal(c.tokensIn, 2000); assert.equal(c.cacheReadTokens, 500); assert.ok(c.turns >= 1); assert.ok(c.waitMs >= 0 && c.buildMs >= 0); assert.match(c.promptHash, /^[0-9a-f]{16}$/);
+  }
+  assert.equal(m.summary.calls, m.calls.length); assert.equal(m.summary.byRole.reviewer.cacheShare, 0.25); assert.deepEqual(m.summary.duplicates, []);
 });
 
 test('17-18 · límite de la suscripción en el pipeline: pausa con explicación, lo hecho se conserva y NO se llama a la API', async () => {
