@@ -279,11 +279,14 @@ test('L · presupuesto agotado: el lote se pausa antes de empezar otra historia 
 
 test('M · límite de la suscripción: pausa TODO el lote (no empieza la independiente) y el tope de llamadas del lote se respeta', async () => {
   const a = story('Historia MIKE1'); const c = story('Historia MIKE2');
-  setScript([{ key: 'MIKE2', file: 'src/mike2.ts', dev: create('src/mike2.ts', 'export const mike2 = 1;') }]);
-  // La historia termina pausada por el límite de la suscripción (el pipeline ya lo detecta; aquí se prueba el lote).
+  setScript([{ key: 'MIKE1', file: 'src/mike1.ts', dev: create('src/mike1.ts', 'export const mike1 = 1;') }, { key: 'MIKE2', file: 'src/mike2.ts', dev: create('src/mike2.ts', 'export const mike2 = 1;') }]);
+  // La historia termina pausada por el límite de la suscripción (el pipeline ya lo detecta; aquí se prueba el lote). El
+  // límite se renueva después: «Reanudar» vuelve a intentarla y esta vez termina.
+  let limited = true;
   batchDeps.runStory = async (slug, pid) => {
     const procs = processesRepo(slug); const p = procs.get(pid)!;
-    if (!/MIKE1/.test(p.title)) return realRunStory(slug, pid, () => undefined, () => false);
+    if (!/MIKE1/.test(p.title) || !limited) return realRunStory(slug, pid, () => undefined, () => false);
+    limited = false;
     procs.setResult(pid, { ...p.result!, pipeline: { ...p.result!.pipeline!, state: 'paused', pauseKind: 'subscription_limit', reason: 'La suscripción de Claude alcanzó su límite de uso.', phase: 'finished', finishedAt: new Date().toISOString() } });
     procs.finish(pid, 'done', null);
   };
@@ -305,7 +308,8 @@ test('M · límite de la suscripción: pausa TODO el lote (no empieza la indepen
     // Ampliar el tope (autorizado) deja seguir: la segunda historia termina.
     const r2 = await app.inject({ method: 'POST', url: `${W}/batches/${b.id}/resume`, payload: { authorized: true, addSubscriptionCalls: 5 } });
     assert.equal(r2.json().auth.maxSubscriptionCalls, 6);
-    const done = await waitFor(() => get(b.id), x => x.items[1].state === 'awaiting_acceptance', 'la segunda termina tras reanudar');
+    // «Reanudar» también retoma la que paró por el límite (ya renovado; si no, la llamada lo comprobaría y se pausaría otra vez).
+    const done = await waitFor(() => get(b.id), x => x.items.every((i: any) => i.state === 'awaiting_acceptance'), 'las dos terminan tras reanudar');
     assert.equal(done.subscriptionCalls, 1);
     await app.inject({ method: 'POST', url: `${W}/batches/${b.id}/cancel` });
   } finally { batchDeps.runStory = realRunStory; }

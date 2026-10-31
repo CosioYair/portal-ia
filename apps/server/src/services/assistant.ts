@@ -24,7 +24,7 @@ import { agentBackend, agentCaller, claudeCodeGate } from './claudeCode/backend.
 import { lastDetection } from './claudeCode/detect.ts';
 import { ASSIGNMENT_OPEN, ASSIGNMENT_STATUS_LABEL, backendLabel, PORTAL_CAPABILITIES, STAGE_LABEL } from '@portal-ia/domain';
 import { monotonicNow } from '../clock.ts';
-import { conversationsRepo } from '../db/conversations.ts';
+import { conversationsRepo, decisionsRepo } from '../db/conversations.ts';
 import { createConversation, getConversation, ledgerForPrompt, proposeDecisions, recomputeStage, updateConversation } from './conversations.ts';
 import { createAssignment } from './assignments.ts';
 import { assignmentsRepo } from '../db/assignments.ts';
@@ -99,7 +99,7 @@ function liveAction(a: AssistantAction): AssistantAction {
   if (a.assignmentId && a.workspaceSlug) {
     try { const x = assignmentsRepo(a.workspaceSlug).get(a.assignmentId); if (!x || a.status === 'failed') return a;
       const settled = x.status === 'accepted' || x.status === 'cancelled';
-      return { ...a, status: ASSIGNMENT_ACTION[x.status], live: { status: x.status, phase: `Encargo ${ASSIGNMENT_STATUS_LABEL[x.status]}`, next: x.status === 'ready_for_review' ? 'Revisa la evidencia y acéptalo o pide cambios (aceptar no integra en main).' : x.status === 'running' ? 'Se está ejecutando: sigue el progreso en su tarjeta.' : settled ? 'No requiere ninguna acción.' : 'Decide en su tarjeta.', tone: x.status === 'failed' ? 'err' as const : x.status === 'ready_for_review' || x.status === 'needs_owner' ? 'warn' as const : settled ? 'ok' as const : 'info' as const, settled } };
+      return { ...a, status: ASSIGNMENT_ACTION[x.status], live: { status: x.status, phase: `Encargo ${ASSIGNMENT_STATUS_LABEL[x.status]}`, next: x.status === 'ready_for_review' ? 'Revisa la evidencia; para aceptarlo, intégralo en main (y actívalo si es el Portal) y pruébalo; si no, pide cambios.' : x.status === 'running' ? 'Se está ejecutando: sigue el progreso en su tarjeta.' : settled ? 'No requiere ninguna acción.' : 'Decide en su tarjeta.', tone: x.status === 'failed' ? 'err' as const : x.status === 'ready_for_review' || x.status === 'needs_owner' ? 'warn' as const : settled ? 'ok' as const : 'info' as const, settled } };
     } catch { return a; }
   }
   if (!a.processId || !a.workspaceSlug) return a;
@@ -113,7 +113,9 @@ function liveAction(a: AssistantAction): AssistantAction {
 /** Una acción tal como la ve el modelo en el historial: qué es y en qué punto REAL está (nunca un «done» sin contexto). */
 const STATE_TEXT: Record<AssistantAction['status'], string> = { pending: 'espera al propietario', running: 'en marcha', done: 'hecho', failed: 'no se pudo', rejected: 'descartado' };
 const PHASE_TEXT: Partial<Record<PipelinePhase, string>> = { implementing: 'implementación', recovering: 'recuperación', repairing: 'reparación', applying: 'aplicación en el worktree', verifying: 'verificación', installing: 'instalación', qa: 'QA', correcting: 'corrección', finished: 'terminado' };
-const actionForPrompt = (a: AssistantAction) => `${a.label.slice(0, 90)} → ${a.live ? `${a.live.phase}${a.live.settled ? '' : ` (${a.live.next.slice(0, 120)})`}` : a.type === 'open_decision' ? 'abierta: decide el propietario' : `${STATE_TEXT[a.status]}${a.status === 'failed' && a.detail ? `: ${a.detail.slice(0, 160)}` : ''}`}`;
+const DECISION_STATE: Record<string, string> = { open: 'abierta: decide el propietario', approved: 'aprobada', rejected: 'rechazada', deferred: 'aplazada' };
+const decisionForPrompt = (a: AssistantAction) => { const d = a.decisionId ? decisionsRepo.get(a.decisionId) : null; return d ? `Decisión D${d.seq}: ${d.question.slice(0, 90)} → ${DECISION_STATE[d.status] ?? d.status}` : `${a.label.slice(0, 90)} → ver el registro de decisiones`; };
+const actionForPrompt = (a: AssistantAction) => a.type === 'open_decision' ? decisionForPrompt(a) : `${a.label.slice(0, 90)} → ${a.live ? `${a.live.phase}${a.live.settled ? '' : ` (${a.live.next.slice(0, 120)})`}` : `${STATE_TEXT[a.status]}${a.status === 'failed' && a.detail ? `: ${a.detail.slice(0, 160)}` : ''}`}`;
 
 function assistantAgent() {
   const a = activeAgents(INTERNAL_WORKSPACE.slug).find(x => x.key === 'ws-asistente');
@@ -191,7 +193,7 @@ async function platformSnapshot(scope: { workspaceSlug: string | null; projectId
       const integrated = allProcs.filter(x => x.kind === 'story_execution' && x.result?.merged).slice(0, 8);
       if (integrated.length) lines.push(`Historias integradas en main (también de etapas anteriores) y qué cambian para el propietario:\n${integrated.map(x => `  · ${x.title} (integrada ${x.result!.merged!.mergedAt.slice(0, 16)}${x.result!.published ? ', publicada' : ', SIN publicar'}${x.result!.manualTest ? `, prueba manual ${x.result!.manualTest.checks.filter(Boolean).length}/${x.result!.manualTest.steps.length}` : ''}): ${x.result!.userFacing ? x.result!.userFacing.replace(/\s+/g, ' ').slice(0, 400) : `sin explicación para el propietario; archivos: ${x.result!.changes.map(c => c.path).slice(0, 6).join(', ')}`}`).join('\n')}`);
       // Encargos de desarrollo EN-n con su estado REAL (abiertos y los últimos cerrados): sin esto el modelo no puede saber si uno terminó.
-      const ens = assignmentsRepo(ws.slug).list(p.id); const shownEn = [...ens.filter(x => ASSIGNMENT_OPEN.includes(x.status)).slice(-8), ...ens.filter(x => !ASSIGNMENT_OPEN.includes(x.status)).slice(-3)];
+      const ens = assignmentsRepo(ws.slug).list(p.id); const shownEn = [...ens.filter(x => ASSIGNMENT_OPEN.includes(x.status)).slice(0, 8), ...ens.filter(x => !ASSIGNMENT_OPEN.includes(x.status)).slice(0, 3)]; // la lista va de la más reciente a la más antigua
       if (shownEn.length) lines.push(`Encargos de desarrollo (EN-n, sin historia):\n${shownEn.map(x => { const r = x.processId ? processesRepo(ws.slug).get(x.processId)?.result : null; return `- ${x.code} [${ASSIGNMENT_STATUS_LABEL[x.status]}] ${x.title}${r?.pipeline && x.status === 'running' ? ` — fase: ${PHASE_TEXT[r.pipeline.phase] ?? r.pipeline.phase}` : ''}${x.reason && x.status !== 'accepted' ? ` — motivo: ${x.reason.slice(0, 160)}` : ''}${x.outcome ? ` — QA ${x.outcome.qa ?? '—'}, Gauntlet ${x.outcome.gauntlet?.status ?? 'no aplicado'}` : ''} — ${r?.merged ? `integrado en ${r.merged.into}` : 'sin integrar en main'}`; }).join('\n')}`);
       const analyses = procs.filter(x => x.kind === 'delegated_task');
       if (analyses.length) lines.push(`Análisis delegados (documentos; no cambian código): ${analyses.map(x => `${x.title.replace(/^Encargo a /, 'Análisis de ')} [${x.status === 'done' ? 'entregado' : x.status}${x.delegation?.backlogOps.length ? `, ${x.delegation.backlogOps.length} propuesta(s) al backlog ${x.delegation.opsApplied ? 'aplicadas' : 'SIN aplicar'}` : ''}]`).join(' | ')}`);
@@ -451,7 +453,13 @@ ${await platformSnapshot({ workspaceSlug: conv.workspaceSlug, projectId: conv.pr
     const { reply, actions: actionsReq } = parseResponse(res.text);
     const done = performActions(actionsReq.filter(x => x?.type !== 'request_operation'), { conversationId: conv.id, workspaceSlug: conv.workspaceSlug, projectId: conv.projectId });
     const scoped = getConversation(conv.id); // un encargo con proyecto explícito puede haber fijado el alcance
-    const actions = [...done, ...(await prepareOperations(actionsReq.filter(x => x?.type === 'request_operation'), { conversationId: conv.id, workspaceSlug: scoped.workspaceSlug, projectId: scoped.projectId }))];
+    // «…y publícalo cuando termines»: en la misma respuesta que un encargo nuevo, publicar ahora enviaría el main actual,
+    // SIN ese encargo. No se prepara la tarjeta; se dice cuándo se propondrá (con el encargo ya integrado).
+    const opsReq = actionsReq.filter(x => x?.type === 'request_operation');
+    const en = done.find(x => x.type === 'propose_assignment' && x.status === 'pending');
+    const deferred = en ? opsReq.filter(x => x?.capability === 'publish_main') : [];
+    const later: AssistantAction[] = deferred.map(() => ({ type: 'info', status: 'done', label: 'Publicar main: cuando el encargo esté integrado', detail: `No se prepara ahora: publicaría el «main» actual, sin «${en!.label}». Se propone cuando ese encargo esté integrado en main (y activo, si es el Portal).` }));
+    const actions = [...done, ...later, ...(await prepareOperations(opsReq.filter(x => !deferred.includes(x)), { conversationId: conv.id, workspaceSlug: scoped.workspaceSlug, projectId: scoped.projectId }))];
     const assistant = assistantRepo.add({ role: 'assistant', content: reply, actions, attachments: [], tokensIn: res.inputTokens, tokensOut: res.outputTokens, costUsd: cost, model: a.config.model }, conv.id);
     conversationsRepo.touch(conv.id); recomputeStage(conv.id);
     return { user, assistant, conversationId: conv.id };
@@ -505,6 +513,16 @@ export async function decideOperation(messageId: string, operationId: string, de
   if (decision === 'reject') { save({ status: 'rejected', detail: 'Rechazada por el propietario: no se ejecutó nada.', operation: { ...op, decidedAt } }); return assistantRepo.get(messageId)!; }
   const cap = CAPABILITIES[op.capability];
   if (!cap) throw Object.assign(new Error('La operación ya no existe en el catálogo.'), { statusCode: 409 });
+  // Se autoriza lo que mostró la tarjeta: si el estado cambió desde la vista previa (p. ej. main tiene commits que no
+  // mostraba), no se ejecuta y hay que pedirla de nuevo para verlo.
+  if (op.preview.fingerprint) {
+    const fresh = await cap.preview(cap.params.parse(op.params)).catch(() => null);
+    if (fresh?.fingerprint !== op.preview.fingerprint) {
+      const why = 'No se ejecutó: el estado cambió desde que viste la tarjeta (p. ej. «main» tiene commits que no mostraba). Pide la operación de nuevo para ver exactamente qué se haría.';
+      save({ status: 'failed', detail: why, operation: { ...op, decidedAt } });
+      throw Object.assign(new Error(why), { statusCode: 409 });
+    }
+  }
   save({ status: 'running', detail: 'Ejecutando con tu autorización…', operation: { ...op, decidedAt } });
   try {
     const result = await cap.execute(cap.params.parse(op.params));

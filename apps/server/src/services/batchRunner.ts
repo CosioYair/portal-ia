@@ -85,6 +85,8 @@ export function normalizeAuth(projectId: string, input: BatchInput, projectDefau
   const merge = !!input.git?.merge;
   // Sin la API autorizada no hay USD que gastar: 0 es válido (la suscripción la limita su tope de llamadas).
   const minUsd = backends.includes('api') ? 0.1 : 0;
+  const low = (v: unknown) => typeof v === 'number' && Number.isFinite(v) && v < minUsd;
+  if (low(input.totalBudgetUsd) || low(input.perStoryBudgetUsd)) throw fail(400, 'Con la API autorizada como origen hace falta un presupuesto de API de al menos 0,10 USD (total y por historia). Con 0 USD, quita la API: el lote usará solo la suscripción.', 'budget_required');
   return {
     projectId, itemIds, backends,
     apiFallback: !!input.apiFallback && backends.includes('api'),
@@ -427,7 +429,7 @@ function onFinished(slug: string, id: string, it: BatchItem, p: Process) {
   // Un motivo de todo el lote (límite de la suscripción, Claude Code no disponible) no es un fallo de la historia: espera tu decisión.
   setItem(slug, id, it.itemId, { state: p.status === 'failed' && !c.batchWide ? 'failed' : 'needs_owner', failureClass: c.cls, reason, finishedAt: now() }, `${p.status === 'failed' && !c.batchWide ? 'falló' : 'se detuvo'} (${c.cls}): ${clip(reason, 400)}${c.batchWide ? '' : ' Las historias independientes siguen.'}`);
   // El mismo motivo detendría a las demás (límite de la suscripción, sandbox caído): se pausa todo el lote.
-  if (c.batchWide) setStatus(slug, id, 'paused', `${it.storyId} se detuvo por un motivo que afecta a todo el lote (${why}): ${clip(reason, 400)} No se empieza nada más hasta que lo resuelvas y reanudes.`, 'pause', { label: `Proceso de ${it.storyId}`, href: `/procesos/${p.id}` });
+  if (c.batchWide) setStatus(slug, id, 'paused', `${it.storyId} se detuvo por un motivo que afecta a todo el lote (${why}): ${clip(reason, 400)} No se empieza nada más hasta que lo resuelvas y reanudes.${code === 'call_cap' || pl?.pauseKind === 'call_cap' ? ' Para seguir: «Reanudar» concediendo más llamadas a la suscripción; se retoma donde quedó, sin repetir lo hecho.' : ''}`, 'pause', { label: `Proceso de ${it.storyId}`, href: `/procesos/${p.id}` });
 }
 
 function technicalDone(slug: string, id: string, itemId: string, p: Process) {
@@ -627,7 +629,12 @@ function startItem(slug: string, id: string, itemId: string, prep: Prepared) {
     const p = prep.resume; const pl = p.result!.pipeline!;
     if (p.status === 'running') return setItem(slug, id, itemId, { state: 'running', resumeProcessId: null, reason: null, failureClass: null }, 'la retomaste desde el proceso; el lote la sigue.');
     if (resumableInBatch(slug, p) !== 'continue') return setItem(slug, id, itemId, { state: 'needs_owner', resumeProcessId: null, reason: 'Ya no está en una pausa que el lote pueda retomar: decide desde su proceso.' }, 'ya no está en una pausa reanudable: decides tú.');
-    procs.resume(p.id, Math.max(p.budgetUsd ?? 0, p.spentUsd) + (pl.pauseKind === 'budget' ? b.auth.perStoryBudgetUsd : 0));
+    // Tras una pausa por USD se concede otra vez el tope por historia, pero solo si cabe en lo que queda del lote: la parte
+    // no gastada de este proceso (pausado, no cuenta como reservada) más lo nuevo. Nunca se supera el total autorizado.
+    const grant = pl.pauseKind === 'budget' ? b.auth.perStoryBudgetUsd : 0;
+    const unspent = Math.max(0, (p.budgetUsd ?? 0) - p.spentUsd - (p.unconfirmedUsd ?? 0)); const left = budgetOf(slug, b).remaining;
+    if (grant && left + 1e-9 < unspent + grant) return setItem(slug, id, itemId, { state: 'needs_owner', resumeProcessId: null, failureClass: 'budget', reason: `Para seguir haría falta ${(unspent + grant).toFixed(2)} USD de API y al lote le quedan ${left.toFixed(2)}: reanuda concediendo más presupuesto al lote (no se supera el total autorizado).` }, 'sin USD de API suficientes en el lote para seguir: decides tú.');
+    procs.resume(p.id, Math.max(p.budgetUsd ?? 0, p.spentUsd) + grant);
     procs.setResult(p.id, { ...p.result!, pipeline: { ...pl, failures: [], startedAt: now() } });
     setItem(slug, id, itemId, { state: 'running', resumeProcessId: null, usesApi: prep.api, reason: null, failureClass: null, notStarted: false, startedAt: now(), finishedAt: null }, `se retoma donde quedó (proceso ${p.id.slice(0, 8)}), sin repetir lo hecho.`, 'recovery');
     const run = batchDeps.resumeStory(slug, p.id, logger, () => isCancelled(p.id)).finally(() => { clearCancel(p.id); void scheduleTick(slug, id); });
@@ -639,7 +646,11 @@ function startItem(slug: string, id: string, itemId: string, prep: Prepared) {
   catch (e: any) { return needsOwner(`No se pudo preparar la historia: ${e?.message ?? e}`); }
   // Claude Code solo cede a la API si el lote lo autoriza (y el conector lo permite): si no, se pausa como siempre.
   const cfg = normalizePipeline({ autoApply: true, autoVerify: true, commands: b.auth.commands, allowInstall: b.auth.allowInstall, maxCorrections: b.auth.maxCorrections, gauntlet, backends: b.auth.backends, ...(b.auth.apiFallback && b.auth.backends.includes('api') ? {} : { apiFallback: false }) });
-  procs.setResult(p.id, { ...procs.get(p.id)!.result!, pipeline: newPipeline(cfg) });
+  // «Reanudar» tras una pausa ANTES de implementar (p. ej. el tope de llamadas en la revisión del plan): el plan ya pagado
+  // pasa a esta ejecución y no se vuelve a pedir; su revisión, si quedó pendiente, sí se hace.
+  const prevP = !reuse && it.processId ? procs.get(it.processId) : undefined;
+  const carried = prevP?.result?.plan && resumableInBatch(slug, prevP) === 'restart' ? { plan: prevP.result.plan, carriedPlan: true } : {};
+  procs.setResult(p.id, { ...procs.get(p.id)!.result!, ...carried, pipeline: newPipeline(cfg) });
   syncEvaluatorStep(slug, p.id, cfg.gauntlet!);
   procs.authorize(p.id, b.auth.perStoryBudgetUsd);
   setItem(slug, id, itemId, { state: 'running', processId: p.id, processIds: [...it.processIds.filter(x => x !== p.id), p.id], nextProcessId: null, usesApi: prep.api, reason: null, failureClass: null, notStarted: false, startedAt: now(), finishedAt: null }, `empieza (proceso ${p.id.slice(0, 8)}, ${prep.api ? `tope ${b.auth.perStoryBudgetUsd} USD de API` : 'solo con la suscripción (sin USD)'}, ${b.auth.maxCorrections} corrección(es), Gauntlet ${b.auth.gauntlet.mode}).`);
@@ -749,7 +760,7 @@ export function retryable(it: Pick<BatchItem, 'state'>, processStatus: string | 
  */
 export const uncertainCharge = (p: Process, since = '') => p.steps.some(s => s.status === 'failed' && /^Interrumpido/.test(s.error ?? '') && (s.finishedAt ?? '') >= since && (s.unconfirmedUsd ?? 0) > 0);
 /** Pausas que «Reanudar» (autorizado, con el límite ampliado) retoma donde quedaron: no dependen de una decisión sobre el código. */
-const RESUMABLE: PipelinePauseKind[] = ['call_cap', 'environment', 'budget', 'duration', 'interrupted'];
+const RESUMABLE: PipelinePauseKind[] = ['call_cap', 'subscription_limit', 'environment', 'budget', 'duration', 'interrupted'];
 /** ¿«Reanudar» puede seguir con este proceso en pausa? «continue» lo retoma; «restart» no tiene nada que conservar (se vuelve a empezar). */
 export function resumableInBatch(slug: string, p: Process | undefined | null): 'continue' | 'restart' | null {
   const r = p?.result; const pl = r?.pipeline;

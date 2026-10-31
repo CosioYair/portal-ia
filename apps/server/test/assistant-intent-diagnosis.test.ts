@@ -204,7 +204,8 @@ test('Q7 · guarda (pasa hoy): encargo + «publica main» solo deja tarjetas; na
     { type: 'request_operation', capability: 'publish_main', company: S, project: site.slug }
   ]));
   const a = await say(C);
-  assert.deepEqual(a.actions.map((x: any) => [x.type, x.status]), [['propose_assignment', 'pending'], ['propose_operation', 'pending']]);
+  // «…y publícalo cuando termines» con un encargo nuevo: no hay tarjeta de publicar ahora (se propone con el encargo integrado).
+  assert.deepEqual(a.actions.map((x: any) => [x.type, x.status]), [['propose_assignment', 'pending'], ['info', 'done']]);
   assert.equal(remoteHead(), head0, 'proponer no publica');
   assert.equal(processesRepo(S).list(site.id).length, procs0, 'ningún proceso');
   assert.equal(backlogRepo(S).list(site.id).length, bl0, 'ninguna historia');

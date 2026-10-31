@@ -23,6 +23,8 @@ export interface CapabilityPreview {
   /** Lo que queda fuera a propósito (p. ej. otras ramas). */
   excluded: string[];
   target: { workspace: string; projectId: string; projectName: string };
+  /** Estado exacto que muestra la vista previa (p. ej. el commit de main): autorizar exige que siga igual. */
+  fingerprint?: string | null;
 }
 export interface CapabilityResult { summary: string; details: string[] }
 export interface Capability<P = any> {
@@ -86,7 +88,9 @@ const publishMain: Capability<{ company: string; project: string }> = {
     if (st.dirty) details.push(`Hay ${st.dirtyFiles} archivo(s) sin confirmar: NO se publican (solo viajan commits).`);
     details.push('Orden exacta: git push -u <remoto> <main> · sin --force · ninguna otra rama.');
     const excluded = st.storyBranches.filter(b => b !== st.mainBranch).map(b => `${b} (rama de historia: no se publica)`);
-    return { ...base, ok: !blockers.length, details, blockers, excluded };
+    // Lo que se autoriza es ESTE main: si recibe otros commits antes de autorizar, la tarjeta ya no vale.
+    const fingerprint = st.mainBranch ? await git(cwd, ['rev-parse', st.mainBranch]).then(x => x.trim()).catch(() => null) : null;
+    return { ...base, ok: !blockers.length, details, blockers, excluded, fingerprint };
   },
   async execute(p) {
     const pv = await publishMain.preview(p);

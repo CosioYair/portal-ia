@@ -911,6 +911,8 @@ export function verificationsForApplied(r: Pick<ExecutionResult, 'applied' | 've
 }
 export interface ExecutionResult {
   plan: StoryPlan | null;
+  /** El plan viene de una ejecución anterior que se detuvo antes de implementar (p. ej. por el tope de llamadas): no se vuelve a pedir. */
+  carriedPlan?: boolean;
   implementationSummary: string | null;
   /** Explicación para el propietario, sin tecnicismos: qué verá tras integrar y reconstruir, y dónde (menú, botón, ruta). */
   userFacing?: string | null;

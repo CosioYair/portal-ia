@@ -18,7 +18,7 @@ import { callMetricsRepo, promptHash } from '../db/callMetrics.ts';
 import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, testsEvidence, verificationEvidence } from './qaGate.ts';
 /** Veredicto de QA con salida estructurada nativa del proveedor (si la admite); el motor lo valida igualmente. */
 const QA_SCHEMA = { name: 'veredicto_qa', description: 'Veredicto de la puerta de calidad con hallazgos y evidencia.', schema: QA_VERDICT_SCHEMA as unknown as Record<string, unknown> };
-import { annotateChanges, applyChanges, changesSinceBase, checkStaleChanges, commitInWorktree, git, readRepoFile, safeRelPath, type RawChange } from './repoWrite.ts';
+import { annotateChanges, applyChanges, changesSinceBase, checkStaleChanges, commitInWorktree, git, readRepoFile, safeRelPath, scanSecrets, type RawChange } from './repoWrite.ts';
 import { DEPS_MISSING_EXIT } from './sandbox.ts';
 import { DEV_MAX_TOKENS, FILE_FORMAT, PATCH_ONLY_FORMAT, sys } from './storyPrompts.ts';
 import { runVerification, sandboxDeps } from './verification.ts';
@@ -241,7 +241,10 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       if (err?.code === 'call_cap') {
         unregisterCall(processId, ctrl);
         const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
-        procs.stepFinish(step.id, 'failed', { tokensIn: prev.inputTokens, tokensOut: prev.outputTokens, cost: prev.costUsd, outputMd: prev.outputMd, error: err.message });
+        // Si el tope lo alcanzó la recuperación, la ejecución anterior (turnos agotados) sí consumió la suscripción: se registra.
+        const u = (e as any)?.usage as { inputTokens: number; outputTokens: number } | undefined;
+        procs.stepFinish(step.id, 'failed', { tokensIn: prev.inputTokens + (u?.inputTokens ?? 0), tokensOut: prev.outputTokens + (u?.outputTokens ?? 0), cost: prev.costUsd, outputMd: prev.outputMd, error: err.message });
+        if (u) procs.addUsage(processId, u.inputTokens, u.outputTokens, 0);
         throw Object.assign(new Error(err.message), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'call_cap', detail: err.message } satisfies ProcessFailure });
       }
       // Claude Code no disponible o límite de la suscripción: la API solo si el propietario la autorizó como alternativa.
@@ -446,6 +449,8 @@ export function filesContext(base: string, files: string[], budget: number, omit
   let left = budget;
   return Array.from(new Set(files)).map(f => {
     const c = readRepoFile(base, f, 30_000); if (c === null) return `## ${f}\n(no existe aún)`;
+    // Lo mismo que el puente: un posible secreto literal no llega a ningún modelo.
+    if (scanSecrets(c)) return `## ${f}\n(omitido: posible credencial en el archivo)`;
     if (left <= 0) return `## ${f}\n(omitido por tamaño del contexto: ${c.length} caracteres${omittedHint})`;
     left -= c.length; return `## ${f}\n\`\`\`\n${c}\n\`\`\``;
   }).join('\n\n');

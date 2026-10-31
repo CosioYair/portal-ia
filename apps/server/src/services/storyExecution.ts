@@ -199,6 +199,8 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   const config = proc.result?.pipeline?.config ?? null;
   // Plan aceptado por el propietario tras una pausa de la revisión: se reutiliza (ni otro plan ni otra revisión).
   const accepted = proc.result?.gauntlet?.planReview?.ownerAccepted && proc.result.plan ? proc.result.plan : null;
+  // Plan de una ejecución anterior detenida antes de implementar: se reutiliza (ya se pagó); su revisión sí se hace.
+  const carried = !accepted && proc.result?.carriedPlan && proc.result.plan ? proc.result.plan : null;
   const result: ExecutionResult = { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: proc.result?.team ?? null, consultations: [], iterationContext: proc.result?.iterationContext ?? null, pipeline: config ? (accepted && proc.result?.pipeline ? { ...newPipeline(config), events: proc.result.pipeline.events } : newPipeline(config)) : null, failure: null, ...(accepted ? { gauntlet: proc.result!.gauntlet } : {}) };
   const iterText = result.iterationContext ? `\n# Contexto de iteración (feedback del propietario y estado anterior; OBLIGATORIO tenerlo en cuenta)\n${result.iterationContext}\n` : '';
   const involved = Array.from(new Set(proc.steps.map(s => s.agentId)));
@@ -221,14 +223,15 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
     // 1 · Plan técnico
     cancelled();
     const planStep = roleStep('planner'); const coord = agents.get(planStep.agentId)!;
-    const planRes = accepted ? { text: JSON.stringify(accepted), stopReason: 'end_turn' } as any : await call(planStep.id, sys(coord, project, item),
+    if (carried) procs.stepFinish(planStep.id, 'done', { outputMd: 'Plan reutilizado de la ejecución anterior (ya pagado): no se volvió a pedir.' });
+    const planRes = (accepted ?? carried) ? { text: JSON.stringify(accepted ?? carried), stopReason: 'end_turn' } as any : await call(planStep.id, sys(coord, project, item),
       `Elabora el plan técnico para implementar esta historia en el repositorio. Sé concreto: qué archivos hay que leer, qué archivos hay que crear o modificar y qué tareas en orden. Mantén el alcance mínimo que cumpla el criterio de aceptación.
 ${direction ? `\n# Dirección del proyecto (${phase ? 'etapa vigente y línea base' : 'síntesis previa'})\n${direction}\n` : ''}${iterText}
 ${treeText}
 
 El equipo implementará por partes (unidades que caben en una respuesta), así que indica también, por cada archivo a crear o modificar, su propósito, tipo y tamaño previsto en líneas.
 Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "deliverables": [{"path": string, "purpose": string (una frase), "kind": "code"|"test"|"docs"|"config", "estimatedLines": number}] (uno por cada ruta de filesToChange, en orden de dependencia), "acceptance": string[], "risks": string[]}`, 4000);
-    let plan: StoryPlan = accepted ?? planFrom(extractJson(planRes.text), planRes.text.slice(0, 500));
+    let plan: StoryPlan = accepted ?? carried ?? planFrom(extractJson(planRes.text), planRes.text.slice(0, 500));
     // Entrega incremental: un plan sin entregables legibles (JSON cortado o mal formado) se pide UNA vez más, compacto y en
     // el mismo paso; nunca se convierte en una respuesta enorme del Desarrollador con la historia entera.
     if (config?.autoApply && !planHasFiles(plan)) {
@@ -285,7 +288,8 @@ ${treeText}`;
     // Turnos agotados en una consulta (también tras su recuperación sin herramientas): pausa «max_turns» del pipeline con lo
     // hecho conservado (plan y consultas terminadas), no un fallo de la historia ni una repetición a ciegas.
     const asPause = (e: any) => {
-      if (config && e?.failure?.providerCode === 'max_turns') runCtx = { slug, processId, item, project, repoPath: repo.path, plan, consultText: '', iterText, dev: agents.get(roleStep('implementer').agentId)!, qa: null, team: involved.map(id => agents.get(id)).filter(Boolean) as Agent[], log, isCancelled, injected };
+      // Turnos agotados, tope de llamadas (también si lo alcanza la recuperación), límite de la suscripción…: pausa reanudable, no fallo.
+      if (config && providerPause(e)) runCtx = { slug, processId, item, project, repoPath: repo.path, plan, consultText: '', iterText, dev: agents.get(roleStep('implementer').agentId)!, qa: null, team: involved.map(id => agents.get(id)).filter(Boolean) as Agent[], log, isCancelled, injected };
       return e;
     };
     cancelled();
