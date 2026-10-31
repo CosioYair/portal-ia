@@ -291,6 +291,8 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
   const [b, setB] = useState<BatchView | null>(null); const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false); const [addBudget, setAddBudget] = useState('0'); const [addCalls, setAddCalls] = useState('0'); const [resumeOk, setResumeOk] = useState(false);
   const [revoking, setRevoking] = useState(false); const [revokeReason, setRevokeReason] = useState(''); const [cancelling, setCancelling] = useState(false);
+  const [closing, setClosing] = useState(false); const [closeReason, setCloseReason] = useState('');
+  const closeEvent = [...b.events].reverse().find(e => e.message.startsWith('Cerrado manualmente por el propietario'));
   const [picked, setPicked] = useState<string[]>([]); const [checks, setChecks] = useState<Record<string, boolean[]>>({});
   // La nota de aceptación a medias se conserva (por lote); lo que marcas para aceptar, no: es una comprobación tuya, no un borrador.
   const noteDraft = useDraft(draftKey('lote.aceptacion', ws.slug, batchId), ''); const note = noteDraft.value; const setNote = noteDraft.set;
@@ -310,6 +312,7 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}><Chip tone={st.tone}>{st.label}</Chip><Chip xs>Gauntlet {GAUNTLET_MODE[b.auth.gauntlet.mode].label.toLowerCase()}</Chip><Chip xs>{b.auth.concurrency} a la vez</Chip><Chip xs>integrar {b.auth.git.merge ? 'sí' : 'no'}</Chip>{b.auth.git.activate && <Chip xs>activar sí</Chip>}<Chip xs>publicar {b.auth.git.publish ? 'sí' : 'no'}</Chip></div></div>
           {!closed && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {b.status === 'running' && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => act(() => api.batchControl(ws.slug, b.id, 'pause'), 'Lote en pausa')}>Pausar</button>}
+            {b.status === 'paused' && !closing && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setClosing(true); setCloseReason(''); }} title="Sin costo de IA">Cerrar lote…</button>}
             <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setCancelling(c => !c); setRevoking(false); }} aria-expanded={cancelling}>Cancelar lote…</button>
             <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setRevoking(r => !r); setCancelling(false); }} aria-expanded={revoking}>Revocar autorización…</button>
           </div>}
@@ -319,6 +322,15 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
           <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => { setCancelling(false); void act(() => api.batchControl(ws.slug, b.id, 'cancel'), 'Lote cancelado'); }}>Confirmar cancelación</button>
           <button className="btn btn-ghost btn-sm" onClick={() => setCancelling(false)}>No cancelar</button>
         </section>}
+        {closing && b.status === 'paused' && <section className="card card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }} data-testid="batch-close">
+          <div className="sm13"><strong>Cerrar lote</strong> · Sin costo de IA. Queda completado si todas sus historias ya están integradas; si no, cancelado. El motivo y la fecha se registran en el lote.</div>
+          <textarea className="input" placeholder="Motivo del cierre (obligatorio)" maxLength={500} value={closeReason} onChange={e => setCloseReason(e.target.value)} aria-label="Motivo del cierre" />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn btn-primary btn-sm" disabled={busy || closeReason.trim().length < 3} onClick={() => { const r = closeReason.trim(); setClosing(false); void act(() => api.closeBatch(ws.slug, b.projectId, b.id, r), 'Lote cerrado'); }}>Confirmar cierre</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setClosing(false)}>Volver</button>
+          </div>
+        </section>}
+        {closeEvent && <Notice kind="info"><span>{closeEvent.message} · <span className="mono">{when(closeEvent.at)}</span></span></Notice>}
         {revoking && !closed && <section className="card card-b" style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           <span className="small">Revocar detiene lo que está en marcha, cancela lo pendiente y nada terminado se integra, activa ni publica solo.</span>
           <input className="input" placeholder="Motivo (opcional)" value={revokeReason} onChange={e => setRevokeReason(e.target.value)} style={{ flex: '1 1 220px', height: 32 }} />

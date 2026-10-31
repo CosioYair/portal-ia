@@ -3,7 +3,10 @@ import { z } from 'zod';
 import { BATCH_LIMITS } from '@portal-ia/domain';
 import { workspacesRepo } from '../db/platform.ts';
 import { batchesRepo } from '../db/batches.ts';
-import { acceptItems, batchView, cancelBatch, cancelItem, createBatch, getBatch, iterateItem, pauseBatch, previewBatch, rejectItem, reopenItem, resumeBatch, retryItem, revokeBatch, setBatchLogger } from '../services/batchRunner.ts';
+import { acceptItems, batchView, cancelBatch, cancelItem, closeBatch, createBatch, getBatch, iterateItem, pauseBatch, previewBatch, reconcileBatch, rejectItem, reopenItem, resumeBatch, retryItem, revokeBatch, setBatchLogger } from '../services/batchRunner.ts';
+import type { Batch } from '@portal-ia/domain';
+
+const CLOSE_INPUT = z.object({ reason: z.string().trim().min(3).max(500) });
 
 const BATCH_INPUT = z.object({
   title: z.string().trim().max(120).optional(),
@@ -47,13 +50,29 @@ export async function batchRoutes(app: FastifyInstance) {
     if (!body.success) return reply.code(400).send({ error: 'Alcance del lote no válido.', issues: body.error.issues.map(i => `${i.path.join('.')}: ${i.message}`) });
     try { const b = createBatch(slug, projectId, body.data); req.log.info({ batchId: b.id, items: b.items.length }, 'lote autorizado'); return reply.code(201).send(batchView(slug, b)); } catch (e) { return send(reply, e); }
   });
+  // Reconciliación sin IA: un lote en pausa o en marcha con todas sus historias integradas (y activas, si es el Portal) pasa a completado.
+  // Si falla, se registra y se devuelve el lote tal cual: la consulta no se rompe.
+  const reconciled = async (slug: string, b: Batch, log: any): Promise<Batch> => {
+    if (b.status !== 'paused' && b.status !== 'running') return b;
+    try { return await reconcileBatch(slug, b.id); }
+    catch (e: any) { log.warn({ batchId: b.id, err: e?.message }, 'reconciliación del lote fallida'); return b; }
+  };
   app.get('/api/workspaces/:slug/projects/:projectId/batches', async (req, reply) => {
     const { slug, projectId } = req.params as any; if (!guard(slug, reply)) return;
-    return batchesRepo(slug).list(projectId).map(b => batchView(slug, b));
+    const out = [];
+    for (const b of batchesRepo(slug).list(projectId)) out.push(batchView(slug, await reconciled(slug, b, req.log)));
+    return out;
   });
   app.get('/api/workspaces/:slug/batches/:id', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    try { return batchView(slug, getBatch(slug, id)); } catch (e) { return send(reply, e); }
+    try { return batchView(slug, await reconciled(slug, getBatch(slug, id), req.log)); } catch (e) { return send(reply, e); }
+  });
+  // Cierre manual de un lote en pausa: motivo obligatorio, registrado en sus eventos y sin costo de IA (409 si no está en pausa).
+  app.post('/api/workspaces/:slug/projects/:projectId/batches/:id/close', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = CLOSE_INPUT.safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Indica el motivo del cierre (entre 3 y 500 caracteres).', code: 'reason_required' });
+    try { const b = await closeBatch(slug, id, body.data.reason); req.log.info({ batchId: id, status: b.status }, 'lote cerrado manualmente'); return batchView(slug, b); } catch (e) { return send(reply, e); }
   });
 
   const control = (path: string, fn: (slug: string, id: string, body: any) => any, needsAuth = false) =>
