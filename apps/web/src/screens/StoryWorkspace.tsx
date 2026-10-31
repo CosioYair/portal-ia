@@ -191,8 +191,8 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
         {it.archivedAt && <Notice kind="info"><strong>Historia archivada</strong> con la etapa anterior ({new Date(it.archivedAt).toLocaleDateString('es-MX')}). Es histórica: puedes consultarla, pero no admite acciones. Para retomarla, restáurala desde el <Link className="lnk" to="/archivo">archivo histórico</Link>.</Notice>}
         <fieldset disabled={!!it.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
         {last?.guidance?.flow ? <StoryFlowPanel proc={last} story={{ id: it.id, storyId: it.storyId, title: it.title }} variant="story" onChange={onProcChange}
-          onAsk={q => { setText(q); setAsk(true); openTab('chat'); }} onOpenIterations={() => openTab('iteraciones')}
-          onAuthorize={openAuthorize} authorizeSlot={authForm} readOnly={!!it.archivedAt} />
+          onAuthorize={openAuthorize} authorizeSlot={authForm} readOnly={!!it.archivedAt}
+          onAsk={q => { setText(q); setAsk(true); openTab('chat'); }} onOpenIterations={() => openTab('iteraciones')} />
           : last && <><Notice kind={last.guidance?.tone === 'err' ? 'err' : last.guidance?.tone === 'ok' ? 'ok' : last.guidance?.tone === 'warn' ? 'warn' : 'info'}><div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', flex: 1 }}><span><strong>Siguiente paso:</strong> {last.guidance?.next ?? 'abre el proceso para ver en qué punto está.'}</span><Link className={`btn ${it.archivedAt ? 'btn-secondary' : 'btn-primary'} btn-sm`} style={{ marginLeft: 'auto' }} to={`/procesos/${last.id}`}>Ver el proceso</Link></div></Notice>{authForm}</>}
         </fieldset>
 
