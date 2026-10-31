@@ -35,13 +35,22 @@ export function StoryCard({ item, ownerName, status, primary, secondary, highlig
 }) {
   const cls = `story-card${highlight ? ` story-card--${highlight}` : ''}`;
   // «Más acciones» se cierra con Escape (el foco vuelve a su resumen) o al pulsar fuera; los listeners solo existen mientras está abierto.
-  const moreRef = useRef<HTMLDetailsElement>(null);
+  const moreRef = useRef<HTMLDivElement>(null);
   const summaryRef = useRef<HTMLElement>(null);
   const [open, setOpen] = useState(false);
+  const hasMore = secondary.length > 0;
+  // El <details> solo lleva su clase: su estado abierto se sigue con un listener nativo de «toggle» desde el envoltorio.
+  useEffect(() => {
+    const d = moreRef.current?.querySelector('details');
+    if (!d) return;
+    const onToggle = () => setOpen(d.open);
+    d.addEventListener('toggle', onToggle);
+    return () => d.removeEventListener('toggle', onToggle);
+  }, [hasMore]);
   useEffect(() => {
     if (!open) return;
-    const onDown = (e: MouseEvent) => { const d = moreRef.current; if (d && !d.contains(e.target as Node)) { d.open = false; setOpen(false); } };
-    const onKey = (e: KeyboardEvent) => { if (e.key !== 'Escape') return; const d = moreRef.current; if (!d) return; e.preventDefault(); d.open = false; setOpen(false); summaryRef.current?.focus(); };
+    const onDown = (e: MouseEvent) => { const d = moreRef.current?.querySelector('details'); if (d && !d.contains(e.target as Node)) { d.open = false; setOpen(false); } };
+    const onKey = (e: KeyboardEvent) => { if (e.key !== 'Escape') return; const d = moreRef.current?.querySelector('details'); if (!d) return; e.preventDefault(); d.open = false; setOpen(false); summaryRef.current?.focus(); };
     document.addEventListener('mousedown', onDown);
     document.addEventListener('keydown', onKey);
     return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
@@ -69,12 +78,12 @@ export function StoryCard({ item, ownerName, status, primary, secondary, highlig
         {note && <span className="small muted story-card-note">{note}</span>}
         {(primary || secondary.length > 0) && <div className="story-card-actions">
           {primary && <button type="button" className={`btn btn-sm ${primary.variant === 'secondary' ? 'btn-secondary' : 'btn-primary'}`} title={primary.title} onClick={primary.onClick} disabled={primary.disabled}>{primary.label}</button>}
-          {secondary.length > 0 && <details className="story-card-more" ref={moreRef} onToggle={e => setOpen(e.currentTarget.open)}>
+          {hasMore && <div ref={moreRef} style={{ display: 'contents' }}><details className="story-card-more">
             <summary className="btn btn-ghost btn-sm" ref={summaryRef}>Más acciones</summary>
             <div className="story-card-menu">
               {secondary.map(a => <button key={a.label} type="button" className="btn btn-ghost btn-sm" title={a.title} onClick={a.onClick} disabled={a.disabled}>{a.label}</button>)}
             </div>
-          </details>}
+          </details></div>}
         </div>}
       </div>
     </article>
