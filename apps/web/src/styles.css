@@ -131,7 +131,10 @@ button.chip:hover{border-color:#B8B5AC}
 /* «Atrás» global: vuelve a la pantalla anterior del Portal en esta pestaña (o a la pantalla madre). */
 .back-global{gap:6px;max-width:260px;flex-shrink:0}
 .back-global .back-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-@media (max-width:720px){.back-global .back-label{max-width:120px}}
+.top-left{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap}
+/* Móvil: solo el icono (la etiqueta accesible dice a dónde vuelve), en la misma fila que la ubicación y sin hacerla más
+   alta (el área táctil sigue siendo de 32 px). */
+@media (max-width:720px){.back-global{padding-left:8px;padding-right:8px;margin:-6px 0}.back-global .back-label{display:none}}
 .page{padding:28px;width:100%;max-width:1280px}
 .side-sec{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:#686B72;padding:14px 10px 6px}
 .ws-btn{appearance:none;border:1px solid #E5E3DC;background:#fff;border-radius:9px;display:flex;gap:10px;align-items:center;padding:8px 10px;width:100%;font:inherit;cursor:default;color:#1A1B1E}

@@ -103,8 +103,10 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
       </aside>
       <div className="content">
         <header className="top">
-          {back && <button type="button" className="btn btn-ghost btn-sm back-global" onClick={back.go} aria-label={`Atrás: volver a ${back.label}`} title={`Volver a ${back.label} (como el botón Atrás del navegador)`}>{Icon.back()}<span className="back-label">{back.label}</span></button>}
-          <nav className="crumbs" aria-label="Ubicación actual"><span>{ws.name}</span><span className="sep">/</span><span>{project?.name ?? 'Sin proyecto'}</span><span className="sep">/</span><span className="cur">{crumb}</span></nav>
+          <div className="top-left">
+            {back && <button type="button" className="btn btn-ghost btn-sm back-global" onClick={back.go} aria-label={`Atrás: volver a ${back.label}`} title={`Volver a ${back.label} (como el botón Atrás del navegador)`}>{Icon.back()}<span className="back-label">{back.label}</span></button>}
+            <nav className="crumbs" aria-label="Ubicación actual"><span>{ws.name}</span><span className="sep">/</span><span>{project?.name ?? 'Sin proyecto'}</span><span className="sep">/</span><span className="cur">{crumb}</span></nav>
+          </div>
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
             {liveConn === 'down' && <span role="status" aria-label="Sin conexión en tiempo real: la pantalla se actualiza cada 15 s mientras tanto."><Chip tone="warn" xs>sin tiempo real</Chip></span>}
             <Chip dot={usage && usage.running > 0 ? 'pulse' : ''}>{usage && usage.running > 0 ? `${usage.running} proceso(s) en ejecución` : 'Sin procesos en ejecución'}</Chip>
