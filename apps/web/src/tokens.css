@@ -1,8 +1,7 @@
-/* HU-162 · Tokens de diseño (fase 0).
-   Solo declaraciones: copian los valores que ya usa styles.css, así que la interfaz se ve igual.
-   Las hojas aún no las consumen; la fase siguiente sustituirá los valores literales por estas variables.
-   Los nombres usan el prefijo --color-/--font-/--radius-/--shadow-/--dur- para no chocar con los
-   respaldos de BudgetMeter.css (--line, --surface, --ink…). */
+/* HU-162 · Tokens de diseño. HU-174 · story-flow.css, manual-test-feedback.css y
+   components/BudgetMeter.css ya consumen estos tokens en vez de valores escritos a mano.
+   Solo declaraciones: copian los valores exactos que ya se usaban, así que la interfaz se ve igual.
+   Los nombres usan el prefijo --color-/--font-/--radius-/--shadow-/--dur-. */
 :root {
   /* Superficies y fondo */
   --color-bg: #F4F3EF;
@@ -46,12 +45,45 @@
   --color-err-bg: #FBE7E5;
   --color-err-border: #F2C7C3;
   --color-err-text: #9A1F18;
+  --color-err-text-strong: #7F1D16;
+
+  /* Texto secundario, alertas y texto sobre fondo oscuro */
+  --color-text-soft: #5C5F66;
+  --color-text-alert: #8A3A00;
+  --color-on-dark: #fff;
+
+  /* Recorrido guiado: barras de etapa y progreso */
+  --color-flow-done: #2E7D4F;
+  --color-flow-failed: #C2392F;
+  --color-flow-waiting: #F0C66B;
+  --color-flow-run-mid: #7FC4BF;
+  --color-flow-progress: #0B7A75;
+
+  /* Avisos: informativo, error suave, vencido, advertencia suave y pregunta del equipo */
+  --color-info-bg: #F6F8FC;
+  --color-info-border: #D9E2F2;
+  --color-err-bg-soft: #FDF2F1;
+  --color-err-bg-overdue: #FDF5F3;
+  --color-err-border-soft: #E9B4AC;
+  --color-warn-bg-soft: #FFFBF0;
+  --color-ask-bg: #FFFBEF;
+  --color-ask-border: #E8D9A8;
+
+  /* Superficies, bordes y pistas secundarias */
+  --color-surface-muted: #F3F1EC;
+  --color-surface-sunken: #FBFAF7;
+  --color-border-soft: #E4E2DA;
+  --color-track: #ECEAE3;
+  --color-step-divider: rgba(128, 128, 128, 0.25);
 
   /* Tipografías */
   --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   /* Radios */
+  --radius-xs: 2px;
+  --radius-bar: 3px;
+  --radius-badge: 6px;
   --radius-sm: 7px;
   --radius: 8px;
   --radius-card: 10px;
@@ -70,6 +102,7 @@
   --dur-fast: .15s;
   --dur-enter: .2s;
   --dur-screen: .28s;
+  --dur-loop: 1.4s;
 
   /* Foco */
   --focus-ring: 2px solid #0F6E6A;
