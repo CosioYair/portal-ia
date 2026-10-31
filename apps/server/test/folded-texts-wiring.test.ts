@@ -46,8 +46,10 @@ test('Team destaca «Trabajando ahora» antes del organigrama', () => {
   assert.ok(t.includes('Trabajando ahora'));
   assert.ok(t.indexOf('Trabajando ahora') < t.indexOf('Estructura organizativa'), '«Trabajando ahora» debe ir antes del organigrama');
   assert.ok(t.includes("current.filter(a => a.status === 'active')"), 'debe filtrar agentes activos no retirados');
-  assert.ok(t.includes('Nadie trabaja ahora: los agentes se activan solo con una ejecución autorizada.'));
-  assert.ok(t.includes('{active === 0 && <Notice kind="info">'), 'el aviso de inactivos debe depender de active === 0');
+  assert.ok(t.includes('{activeAgents.length > 0'), 'la franja debe depender de que haya agentes activos');
+  assert.ok(t.includes(': <p className="sm13 muted">Ningún agente está activo ahora; todos están configurados pero inactivos.</p>}'), 'el estado vacío debe ir en la rama sin agentes activos');
+  assert.equal(t.split('configurados pero inactivos').length - 1, 1, 'el mensaje de inactivos debe aparecer una sola vez');
+  assert.ok(!t.includes('<Notice kind="info">Todos los agentes están'), 'no debe quedar el aviso duplicado de inactivos');
   assert.ok(lede(t).includes('Ningún agente consume créditos hasta que autorices su ejecución.'), 'la garantía de coste sigue visible');
 });
 

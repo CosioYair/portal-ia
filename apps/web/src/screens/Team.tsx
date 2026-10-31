@@ -5,7 +5,7 @@ import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
-import { Avatar, Chip, Icon, Notice } from '../components/ui.tsx';
+import { Avatar, Chip, Icon } from '../components/ui.tsx';
 import { OrgEvaluationPanel } from '../components/OrgEvaluationPanel.tsx';
 import { GauntletProposal } from '../components/Gauntlet.tsx';
 import { Disclosure } from '../components/Disclosure.tsx';
@@ -66,7 +66,6 @@ export function Team() {
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}><button className="btn btn-secondary" onClick={() => setEvalOpen(o => !o)} aria-expanded={evalOpen}>{Icon.org()}Evaluar organización</button><Link className="btn btn-secondary" to="/equipo/nuevo">{Icon.arrow()}Nuevo agente especializado</Link><button className="btn btn-primary" disabled title="Requiere autorización de ejecución y presupuesto aprobado">Activar equipo</button></div>
         </div>
         {evalOpen && <OrgEvaluationPanel slug={ws.slug} defaultProjectId={status.project?.id ?? null} onClose={() => setEvalOpen(false)} />}
-        {active === 0 && <Notice kind="info">Todos los agentes están <strong>configurados pero inactivos</strong>.</Notice>}
         <Disclosure title="Más información">
           <p className="sm13 med" style={{ lineHeight: 1.5, maxWidth: '78ch' }}>Ningún agente llama a modelos ni consume créditos hasta que lo actives y autorices su ejecución. Selecciona un agente para revisar o editar su configuración. Los agentes retirados se conservan y se pueden reactivar.</p>
         </Disclosure>
@@ -81,7 +80,7 @@ export function Team() {
                   <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}><span>{a.config.name}</span><span className="small muted">{a.template.role}</span></span>
                   <span className="dot dot-ok" aria-hidden="true" />
                 </button>))}</div>
-              : <p className="sm13 muted">Nadie trabaja ahora: los agentes se activan solo con una ejecución autorizada.</p>}
+              : <p className="sm13 muted">Ningún agente está activo ahora; todos están configurados pero inactivos.</p>}
           </div>
         </section>
 
