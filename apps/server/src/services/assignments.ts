@@ -1,3 +1,4 @@
+import { ownerRoundPossible, prepareOwnerRound } from './storyUnits.ts';
 import { ASSIGNMENT_STATUS_LABEL, DEFAULT_PIPELINE, assignmentReady, verificationsForApplied, type Assignment, type AssignmentOutcome, type AssignmentStatus, type Process } from '@portal-ia/domain';
 import { sameWorkRunning } from './executionLocks.ts';
 import { monotonicNow } from '../clock.ts';
@@ -194,6 +195,12 @@ export async function requestAssignmentChanges(slug: string, id: string, note: s
   const a = syncAssignment(slug, id); if (!a) throw fail(404, 'Encargo no encontrado.', 'not_found');
   if (!['ready_for_review', 'needs_owner', 'failed'].includes(a.status)) throw fail(409, `No se piden cambios a un encargo ${ASSIGNMENT_STATUS_LABEL[a.status]}.`, 'invalid_state');
   const p = a.processId ? processesRepo(slug).get(a.processId) : undefined;
+  // Entrega incremental sin integrar: los cambios van como una ronda dirigida sobre SU rama (no se descarta ni se rehace
+  // lo verificado); se aplica al continuar el proceso, con su misma autorización (topes de llamadas y de API).
+  if (ownerRoundPossible(p) && !p!.result?.pipeline?.ownerRequest) {
+    prepareOwnerRound(slug, p!.id, note);
+    return assignmentsRepo(slug).update(id, x => { x.iterationNote = note.trim().slice(0, 2000); x.events.push({ at: monotonicNow(), kind: 'changes', processId: p!.id, message: `Cambios pedidos sobre su rama (sin descartarla): ${note.slice(0, 300)}. Se aplican al continuar, con la misma autorización.` }); });
+  }
   const applied = appliedVersion(slug, a);
   let discarded = '';
   if (applied) {
@@ -220,6 +227,11 @@ export function assignmentView(slug: string, id: string) {
   return {
     ...a, statusLabel: ASSIGNMENT_STATUS_LABEL[a.status],
     process: p ? { id: p.id, status: p.status, spentUsd: p.spentUsd, budgetUsd: p.budgetUsd, estimatedUsd: p.estimatedUsd, steps: p.steps.length,
+      // En pausa con trabajo conservado: «Continuar» la retoma donde quedó (autorizar de nuevo la descartaría).
+      resumable: p.status === 'done' && !!p.result?.pipeline && (p.result.pipeline.state === 'paused' || p.result.pipeline.state === 'stopped') && !p.result.merged && !p.result.rejected && (!!p.result.applied || !!p.result.manifest),
+      ownerRound: ownerRoundPossible(p) && !p.result?.pipeline?.ownerRequest,
+      // El equipo espera una respuesta tuya: se contesta en su proceso (Continuar sin ella se rechaza).
+      question: p.result?.pipeline?.ownerRequest?.question ?? null,
       pipeline: p.result?.pipeline ? { state: p.result.pipeline.state, phase: p.result.pipeline.phase, reason: p.result.pipeline.reason ?? null, corrections: p.result.pipeline.corrections } : null } : null
   };
 }
@@ -227,7 +239,12 @@ export function assignmentView(slug: string, id: string) {
 // ---------------------------------------------------------------- Autorización (crea el proceso y lo autoriza en el mismo acto)
 
 /** Tope de llamadas a la suscripción sugerido: un paso por miembro, correcciones (Desarrollador + QA) y margen del Gauntlet. */
-const suggestedCalls = (steps: number, corrections: number) => Math.min(400, steps + corrections * 2 + 6);
+/**
+ * Tope de llamadas a la suscripción sugerido. Antes (pasos + 2 por corrección + 6, ≈ 13–15) se quedaba corto en encargos
+ * normales: no contaba las unidades de la entrega incremental (hasta 6), la revisión del plan, QA tras cada corrección ni
+ * las rondas del Gauntlet, y casi todos se pausaban por el tope. Sigue siendo un tope (editable), no una estimación.
+ */
+const suggestedCalls = (steps: number, corrections: number) => Math.min(400, steps + 14 + corrections * 6);
 
 /** Lo que se autoriza, ANTES de autorizar (sin IA): equipo, pasos, USD si fuera por la API, Gauntlet resuelto y suscripción. */
 export function assignmentAuthorizationPreview(slug: string, id: string) {

@@ -107,6 +107,8 @@ async function run(prompt) {
   if (mcpFile && sc.mcpRead) entry.mcp = await useMcp(JSON.parse(fs.readFileSync(mcpFile, 'utf8')).mcpServers.portal, sc.mcpRead);
   const rule = (sc.rules ?? []).find(r => prompt.includes(r.match)) ?? null;
   entry.rule = rule?.match ?? null;
+  // `delayMs`: tarda en responder (p. ej. una unidad larga de un lote mientras el Asistente contesta).
+  if (rule?.delayMs) await new Promise(r => setTimeout(r, rule.delayMs));
   log(entry);
   out({ type: 'assistant', message: { content: [...(entry.mcp ? [{ type: 'tool_use', name: 'mcp__portal__portal_read_file', input: {} }] : []), { type: 'text', text: '…' }] }, session_id: 'sess-fake' });
   if (sc.slowMs) await new Promise(r => setTimeout(r, sc.slowMs));

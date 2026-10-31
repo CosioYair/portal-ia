@@ -314,7 +314,11 @@ export async function runHostTypecheckMin(worktree: string, repoRoot: string, ti
   const tsc = path.join(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc');
   if (!fs.existsSync(tsc)) return { command: 'typecheck', exitCode: 1, output: 'No se encontró el compilador TypeScript en node_modules del Portal.', startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - t0, isolation: 'host-min' };
   let output = '[verificación mínima en el equipo: tsc --noEmit; no se ejecutan scripts del repositorio]\n'; let code = 0;
-  for (const proj of ['packages/domain/tsconfig.json', 'packages/ai-adapters/tsconfig.json', 'apps/server/tsconfig.json', 'apps/web/tsconfig.json']) {
+  const projects = ['packages/domain/tsconfig.json', 'packages/ai-adapters/tsconfig.json', 'apps/server/tsconfig.json', 'apps/web/tsconfig.json'];
+  // Un repositorio sin ninguno de estos proyectos (cualquier proyecto externo) no se comprobó: NUNCA cuenta como verde
+  // (antes salía con 0 y la integración de un proyecto externo, que solo exige typecheck, aceptaba código sin verificar).
+  if (!projects.some(proj => fs.existsSync(path.join(worktree, proj)))) return { command: 'typecheck', exitCode: 1, output: `${output}\nNo se comprobó nada: este repositorio no tiene los proyectos TypeScript que conoce la verificación mínima. Hace falta el sandbox (Docker) o los comandos propios del proyecto; no cuenta como verificado.`, startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - t0, isolation: 'unavailable' };
+  for (const proj of projects) {
     if (!fs.existsSync(path.join(worktree, proj))) continue;
     const nmLink = path.join(worktree, 'node_modules');
     if (!fs.existsSync(nmLink)) { try { fs.symlinkSync(path.join(repoRoot, 'node_modules'), nmLink, 'junction'); } catch { /* sin enlace: tsc buscará hacia arriba */ } }

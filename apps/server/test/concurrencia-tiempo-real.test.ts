@@ -347,16 +347,18 @@ test('Ronda B · C2 · la iteración del lote que autorizas tú desde su proceso
   await waitFor(get, x => x.items[0].state === 'awaiting_integration', 'terminada técnicamente');
   assert.equal((await inject('POST', `${W}/batches/${id}/pause`, {})).statusCode, 200);
   const it = await inject('POST', `${W}/batches/${id}/items/${a.id}/iterate`, { authorized: true, note: 'otra vuelta' }); assert.equal(it.statusCode, 200, it.body);
-  const p2 = (await get()).items[0].nextProcessId; assert.ok(p2);
+  // Su trabajo no está en main: los cambios van sobre SU rama (mismo proceso), sin descartarla ni crear otra iteración.
+  const it1 = (await get()).items[0]; const p2 = it1.processId;
+  assert.equal(it1.resumeProcessId, p2); assert.equal(it1.nextProcessId, null);
   const plansBefore = calls().filter(c => c.rule === 'Historia RAPIDA.*Elabora el plan técnico').length;
-  assert.equal((await authorize(p2)).statusCode, 200, 'la autorizas tú desde su proceso');
+  assert.equal((await inject('POST', `${W}/processes/${p2}/continue`, { authorized: true })).statusCode, 200, 'la continúas tú desde su proceso');
   assert.equal((await inject('POST', `${W}/batches/${id}/resume`, { authorized: true })).statusCode, 200);
   await waitFor(() => statusOf(p2), s => s === 'done' || s === 'failed', 'termina');
   await scheduleTick(S, id);
   assert.equal(processesRepo(S).get(p2)!.status, 'done', processesRepo(S).get(p2)!.error ?? '');
-  assert.equal(calls().filter(c => c.rule === 'Historia RAPIDA.*Elabora el plan técnico').length - plansBefore, 1, 'un solo plan pagado para esa iteración');
+  assert.equal(calls().filter(c => c.rule === 'Historia RAPIDA.*Elabora el plan técnico').length - plansBefore, 0, 'sin plan nuevo: se corrige sobre lo que ya había');
   const ev = (await get()).events.map((e: any) => e.message).join(' | ');
-  assert.ok(!ev.includes(`empieza (proceso ${p2.slice(0, 8)}`), `el lote no la empezó otra vez: ${ev.slice(-600)}`);
+  assert.ok(!ev.includes(`se retoma donde quedó (proceso ${p2.slice(0, 8)})`), `el lote no la retomó otra vez: ${ev.slice(-600)}`);
 });
 
 test('Ronda B · M3 · la iteración seguida fuera del lote no oscila: integrada → pendiente de aceptación estable, y tu «No aceptar» se respeta', async () => {

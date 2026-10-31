@@ -206,6 +206,7 @@ async function prepareIntegrationLocked(slug: string, processId: string): Promis
   const { r, wt, repo } = storyOf(slug, processId);
   const head = await must(wt, ['rev-parse', '--short', 'HEAD']);
   const recorded = await must(wt, ['rev-parse', '--short', `${r.applied!.commit}^{commit}`]);
+  if (head !== recorded && await adoptCandidate(slug, processId, repo.path, wt, head, recorded)) return { state: 'candidate', status: await branchIntegration(repo.path, r.applied!.branch) };
   if (head !== recorded) throw fail(409, `El worktree tiene commits sin registrar (${recorded} → ${head}): registra primero la corrección externa para que el candidato parta de lo verificado.`, 'unregistered_commits');
   const res = await prepareCandidate(repo.path, wt, r.applied!.branch, await mainBranch(repoRoot(repo.path), r.applied!.branch));
   if (res.state === 'conflicts') {
@@ -215,6 +216,24 @@ async function prepareIntegrationLocked(slug: string, processId: string): Promis
   }
   if (res.state === 'candidate') await recordCandidate(slug, processId, repo.path, wt, res, 'git');
   return { state: res.state, status: res.status };
+}
+
+/**
+ * Un reinicio entre el commit del candidato y su registro deja un merge del Portal sin registrar: se adopta (sin rehacer
+ * nada ni pagar otra vez la resolución) si es nuestro mensaje, su primer padre es lo verificado y el segundo está en main.
+ */
+async function adoptCandidate(slug: string, processId: string, repoPath: string, wt: string, head: string, recorded: string): Promise<boolean> {
+  const msg = (await run(wt, ['log', '-1', '--format=%s', head])).out.trim();
+  if (!/^Incorpora .* para integrar.*\(Portal IA\)$/.test(msg)) return false;
+  const parents = lines((await run(wt, ['rev-list', '--parents', '-n', '1', head])).out)[0]?.split(' ').slice(1) ?? [];
+  if (parents.length !== 2 || !parents[0].startsWith(recorded)) return false;
+  const target = await mainBranch(repoRoot(repoPath), (await must(wt, ['rev-parse', '--abbrev-ref', 'HEAD'])));
+  if ((await run(wt, ['merge-base', '--is-ancestor', parents[1], target])).code !== 0) return false;
+  const conflicts = (msg.match(/resolviendo \d+ conflicto\(s\): (.*) \(Portal IA\)$/)?.[1] ?? '').split(', ').map(x => x.trim()).filter(Boolean);
+  const status = await branchIntegration(repoPath, await must(wt, ['rev-parse', '--abbrev-ref', 'HEAD']), target);
+  const files = lines(await must(wt, ['diff', '--name-only', recorded, head]));
+  await recordCandidate(slug, processId, repoPath, wt, { state: 'candidate', status: { ...status, targetHead: parents[1].slice(0, 7), conflicts: conflicts.map(p => ({ path: p, message: 'CONFLICT' })) }, commit: head, previous: recorded, files }, conflicts.length ? 'agent' : 'git');
+  return true;
 }
 
 /**

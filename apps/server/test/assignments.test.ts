@@ -102,32 +102,30 @@ test('encargo directo: definirlo no llama a la IA ni crea procesos; autorizarlo 
   assert.equal(acc.statusCode, 409); assert.equal(acc.json().code, 'not_merged');
 });
 
-test('pedir cambios: queda la nota y la siguiente ejecución (autorizada aparte) la recibe con el resultado anterior; la anterior se conserva', async () => {
+test('pedir cambios: se aplican sobre SU rama (sin descartar lo verificado) con la misma autorización; la nota llega al Desarrollador; «Continuar» en vez de reautorizar', async () => {
   script('src/en2.ts');
   const a = await define('Crear el archivo EN dos');
   assert.equal((await inject('POST', `${W}/assignments/${a.id}/authorize`, { authorized: true, budgetUsd: 2 })).statusCode, 200);
   const x = await waitFor(() => get(a.id), y => y.status === 'ready_for_review', 'listo');
-  // Con la versión aplicada sin integrar, pedir cambios exige confirmar su descarte (como iterar una historia).
-  const noConfirm = await inject('POST', `${W}/assignments/${a.id}/changes`, { note: 'Nota del propietario: el valor debe ser 2' });
-  assert.equal(noConfirm.statusCode, 409); assert.equal(noConfirm.json().code, 'discard_confirmation_required');
-  const firstBranch = processesRepo(S).get(x.processId)!.result!.applied!.branch;
-  assert.notEqual(execSync(`git branch --list ${firstBranch}`, { cwd: repo }).toString().trim(), '', 'sin confirmar no se toca la rama');
-  const ch = await inject('POST', `${W}/assignments/${a.id}/changes`, { note: 'Nota del propietario: el valor debe ser 2', discardApplied: true });
-  assert.equal(ch.statusCode, 200, ch.body); assert.equal(ch.json().status, 'changes_requested');
-  assert.equal(execSync(`git branch --list ${firstBranch}`, { cwd: repo }).toString().trim(), '', 'confirmado: la rama sin integrar se borró');
-  script('src/en2.ts', 2);
-  assert.equal((await inject('POST', `${W}/assignments/${a.id}/authorize`, { authorized: true, budgetUsd: 2 })).statusCode, 200);
-  const y = await waitFor(() => get(a.id), z => z.processIds.length === 2 && !['running', 'pending_authorization'].includes(z.status), 'segunda ejecución');
-  const p2 = processesRepo(S).get(y.processId)!;
-  assert.match(p2.result!.iterationContext ?? '', /Nota del propietario: el valor debe ser 2/); assert.match(p2.result!.iterationContext ?? '', /Criterios de aceptación vigentes/);
+  assert.equal(x.process.ownerRound, true, 'entrega incremental sin integrar: los cambios pueden ir sobre su rama');
+  const p1 = processesRepo(S).get(x.processId)!; const branch = p1.result!.applied!.branch; const wt = p1.result!.applied!.worktree!;
+  // La corrección dirigida con tu nota (patch sobre lo ya entregado, no reimplementación desde main).
+  const rules = JSON.parse(fs.readFileSync(scriptPath, 'utf8'));
+  rules.rules.unshift({ match: 'Corrige la implementación', text: `=== RESUMEN ===\nAjusta el valor.\n=== ARCHIVO: src/en2.ts | patch ===\n<<<< BUSCAR\nexport const v = 1;\n==== REEMPLAZAR\nexport const v = 2;\n>>>> FIN\n=== FIN ARCHIVO ===\n` });
+  fs.writeFileSync(scriptPath, JSON.stringify(rules));
+  const plans = calls().filter(c => /Elabora el plan técnico/.test(c.rule ?? '')).length;
+  const ch = await inject('POST', `${W}/assignments/${a.id}/changes`, { note: 'Nota del propietario: el valor debe ser 2' });
+  assert.equal(ch.statusCode, 200, ch.body);
+  const after1 = await get(a.id);
+  assert.equal(after1.status, 'needs_owner'); assert.equal(after1.process.resumable, true, 'la tarjeta ofrece «Continuar» (no reautorizar, que descartaría)');
+  assert.notEqual(execSync(`git branch --list ${branch}`, { cwd: repo }).toString().trim(), '', 'la rama se conserva');
+  assert.equal((await inject('POST', `${W}/processes/${x.processId}/continue`, { authorized: true })).statusCode, 200);
+  const y = await waitFor(() => get(a.id), z => z.status === 'ready_for_review', 'cambios aplicados');
+  assert.equal(y.processIds.length, 1, 'el MISMO proceso, sin otra ejecución');
+  assert.equal(fs.readFileSync(path.join(wt, 'src/en2.ts'), 'utf8').replace(/\r\n/g, '\n'), 'export const v = 2;\n');
+  assert.equal(calls().filter(c => /Elabora el plan técnico/.test(c.rule ?? '')).length, plans, 'sin plan nuevo');
   assert.ok(calls().some(c => c.markers?.includes('Nota del propietario')), 'la nota llega a los agentes');
-  assert.ok(processesRepo(S).get(x.processId), 'la ejecución anterior se conserva');
-  // Pedir cambios descartó la versión anterior no integrada (como iterar una historia): rechazada, sin worktree ni rama,
-  // y ya no se integra; la nueva ejecución terminó (antes chocaba con la rama de la anterior).
-  const old = processesRepo(S).get(x.processId)!; assert.ok(old.result!.rejected); assert.ok(!fs.existsSync(old.result!.applied!.worktree!));
-  assert.equal(y.status, 'ready_for_review', `${y.status}: ${y.reason ?? ''}`);
-  const merge = await inject('POST', `${W}/processes/${x.processId}/merge`, { authorized: true });
-  assert.equal(merge.statusCode, 409, merge.body);
+  assert.ok(!processesRepo(S).get(x.processId)!.result!.rejected, 'lo verificado no se descartó');
   // Rechazar el diff de la vigente: el encargo espera tu decisión (no se queda «listo» con «Aceptar»).
   if (y.status === 'ready_for_review') {
     assert.equal((await inject('POST', `${W}/processes/${y.processId}/reject`, {})).statusCode, 200);

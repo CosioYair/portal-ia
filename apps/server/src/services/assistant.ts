@@ -229,6 +229,8 @@ Qué propones según lo que pida el propietario (esta tabla manda sobre cualquie
 - Operación git del catálogo (la ejecuta el Portal con el MISMO servicio que su botón, solo cuando él pulsa «Autorizar» en la tarjeta):
   {"type":"request_operation","capability":"publish_main","company":slug,"project":slug} → publica la rama principal en su remoto (sin forzar, solo main; la tarjeta muestra qué commits y qué queda fuera).
   Si la publicación debe esperar a un encargo («…y publícalo cuando termines»), NO la propongas ahora: explícale que se propone cuando el EN esté integrado en main (y activo, si es el Portal).
+Mejorar algo que ya existe («mejora…», «haz que…», «quiero que funcione así», «propón mejoras y aplícalas», «arregla el flujo de…») también es un ENCARGO directo: investiga, concreta objetivo y criterios comprobables y propónlo; no crees historias salvo que pida historias o el alcance sea un conjunto grande de entregas independientes, y no lo conviertas en análisis salvo que pida SOLO un estudio sin cambios.
+Si tienes herramientas portal_* (lectura del repositorio del proyecto), úsalas antes de proponer un encargo de código: cita en el objetivo y los criterios los archivos y funciones reales que has visto (sin inventar ninguno) y di qué no has podido comprobar.
 Si pide algo de esta tabla, propónlo (no le mandes a otra pantalla ni digas que no puedes). Si pide algo que no existe, dilo; si es un cambio de código, es un encargo. Nunca inventes operaciones ni órdenes de shell. El equipo SÍ puede modificar el código del propio Portal IA.`;
 
 const CONVERSATION_GUIDE = `# Cómo trabajar en esta conversación (intención → acción)
@@ -425,10 +427,13 @@ export async function chat(userText: string, images: { mediaType: string; data: 
   if (conv.title === 'Nueva conversación' && !assistantRepo.list(1, conv.id).length) conversationsRepo.update(conv.id, { title: userText.replace(/\s+/g, ' ').trim().slice(0, 60) || conv.title });
   const user = assistantRepo.add({ role: 'user', content: userText, actions: [], attachments, tokensIn: 0, tokensOut: 0, costUsd: 0, model: null }, conv.id);
   // Las acciones, con su estado REAL (no el guardado al proponer o autorizar): el modelo no puede dar por hecho lo que no terminó.
-  const history = assistantRepo.listLive(16, conv.id).filter(m => m.id !== user.id).slice(-12).map(m => `${m.role === 'user' ? 'Propietario' : 'Asistente'}: ${m.content.slice(0, 1200)}${m.actions.length ? ` [acciones: ${m.actions.map(actionForPrompt).join('; ')}]` : ''}`).join('\n');
+  // Los últimos turnos van casi completos (el contexto inmediato es el que se perdía); los anteriores, resumidos.
+  const recent = assistantRepo.listLive(16, conv.id).filter(m => m.id !== user.id).slice(-12);
+  const history = recent.map((m, i) => `${m.role === 'user' ? 'Propietario' : 'Asistente'}: ${m.content.slice(0, i >= recent.length - 4 ? 6000 : 1200)}${m.actions.length ? ` [acciones: ${m.actions.map(actionForPrompt).join('; ')}]` : ''}`).join('\n');
   const system = `Eres «${a.config.name}», ${a.template.role.toLowerCase()} de Portal IA, una plataforma local para gestionar empresas operadas por agentes de IA. Hablas con el propietario.
 ${a.config.specialization}
 Qué es Portal IA: su primer cliente es él mismo; el proyecto «Desarrollo del Portal» del espacio interno tiene registrado el repositorio del propio Portal y su equipo lo mejora (incluido este chat) con encargos EN-n o historias.
+Dirección del producto (visión del propietario en docs/vision-producto.md; hoja de ruta propuesta en docs/hoja-de-ruta-capacidades.md): una empresa operada por agentes con autonomía DENTRO de lo autorizado; los lotes se terminan técnicamente antes de su aceptación y se integran en orden; después, incorporar proyectos existentes (p. ej. Orbiventt) y nuevos, y más adelante marketing y otras áreas. Es DIRECCIÓN, no política: no concede permisos, no activa integraciones ni autoriza gasto; úsala para orientar propuestas y explícalo así si te preguntan.
 Principios: nunca inventes datos: usa solo el estado real de abajo (tienes visibilidad completa del Portal: versión en marcha, git, cada historia con su fase y siguiente paso, qué aportó cada historia integrada y dónde se ve); cuando el propietario pregunte «dónde veo X» o «ya está hecho», responde con el estado real y la pantalla exacta; si algo está integrado pero el Portal en marcha es anterior, dilo claramente; nada con costo sin autorización (tú propones, el propietario autoriza en la tarjeta); si algo no existe aún, dilo y propón el encargo (o historias, si las pide).
 Formato de respuesta: claro y aireado. Empieza con una frase de respuesta directa; luego, si hace falta, 2-4 apartados cortos con título en negrita, viñetas de una línea y pasos numerados cuando haya un orden; sin párrafos largos; máximo ~200 palabras salvo que pidan detalle.
 ${PORTAL_CAPABILITIES}
@@ -447,7 +452,11 @@ ${await platformSnapshot({ workspaceSlug: conv.workspaceSlug, projectId: conv.pr
     requirePolicy('ai_call', { slug: INTERNAL_WORKSPACE.slug, agentId: a.id, authorized: true }); // enviar el mensaje es la autorización (límite mensual ya comprobado)
     const req = { model: a.config.model, system, user: prompt, maxTokens: 3000, effort: a.config.effort, supportsEffort: !!models.find(m => m.id === a.config.model)?.supportsEffort, images };
     // Backend del Asistente: con Claude Code, la suscripción (sin cargo a la API); si no está disponible, se dice y NO se usa la API.
-    const caller = agentCaller(INTERNAL_WORKSPACE.slug, a, null, 'Asistente');
+    // Con un proyecto fijado (y autorizado para Claude Code), el Asistente lee su repositorio con el puente de SOLO lectura
+    // (las mismas rutas protegidas que los agentes: nunca .env, data/, credenciales): investiga antes de proponer. Carril
+    // propio: no espera detrás del trabajo de los lotes.
+    const reads = !!conv.workspaceSlug && !!conv.projectId && info.backend !== 'api' && claudeCodeGate(conv.workspaceSlug, a, conv.projectId).ok;
+    const caller = agentCaller(reads ? conv.workspaceSlug! : INTERNAL_WORKSPACE.slug, a, reads ? conv.projectId : null, 'Asistente', null, null, { interactive: true });
     const res = caller
       ? await caller.complete({ ...req, images: images.length ? images : undefined, user: prompt })
       : await getAdapter(providerId)!.complete(decryptSecret(cred!.ciphertext), { workspaceId: prow.workspace_id }, req);

@@ -58,4 +58,6 @@ export function acquireWork(slug: string, p: Pick<Process, 'id' | 'backlogItemId
 }
 
 /** Pruebas y diagnóstico: arriendos vigentes. */
+/** Tras un reinicio real no queda ningún arriendo en memoria (las pruebas lo simulan con esto). */
+export function forgetLeases() { leases.clear(); }
 export function activeLeases(): { key: string; what: string; since: number }[] { return [...leases].map(([key, l]) => ({ key, what: l.what, since: l.since })); }

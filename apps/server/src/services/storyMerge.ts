@@ -2,7 +2,7 @@ import { INTERNAL_WORKSPACE, verificationsForApplied, type BranchIntegration, ty
 import { changed } from './live.ts';
 import { processesRepo, projectsRepo } from '../db/workspace.ts';
 import { requirePolicy } from './executionPolicy.ts';
-import { mergeBranch, removeWorktree } from './repoWrite.ts';
+import { git, mainBranch, mergeBranch, removeWorktree, repoRoot } from './repoWrite.ts';
 import { branchIntegration } from './storyIntegration.ts';
 import { withRepoLock } from './repoLock.ts';
 
@@ -26,6 +26,26 @@ async function mergeStoryLocked(slug: string, id: string, opts: { into?: string;
   if (!proc?.result?.applied) throw fail(409, 'Primero aplica los cambios en la rama.');
   if (proc.result.merged) throw fail(409, `Ya integrada en ${proc.result.merged.into}.`);
   if (!proc.result.applied.worktree) throw fail(409, 'Esta iteración se aplicó antes de v0.12 (sin worktree aislado) y no se integra con el flujo actual. Ciérrala como resuelta o descártala y prepara una nueva iteración.', 'legacy_applied');
+  const repoA = projectsRepo(slug).repository(proc.projectId);
+  if (repoA) {
+    const root = repoRoot(repoA.path); const branch = proc.result.applied.branch; const verified = proc.result.applied.commit;
+    const target = opts.into ?? await mainBranch(root, branch);
+    // Se integra EXACTAMENTE el commit verificado: un commit añadido después a la rama (sin registrar) no entra a ciegas.
+    const head = await git(root, ['rev-parse', branch]).catch(() => '');
+    const full = await git(root, ['rev-parse', `${verified}^{commit}`]).catch(() => '');
+    if (head && full && head !== full) throw fail(409, `La rama ${branch} tiene commits sin registrar (${verified} → ${head.slice(0, 7)}): registra primero la corrección externa para integrar lo verificado.`, 'unregistered_commits');
+    // Ya está en main (p. ej. un reinicio entre la integración y su registro): se registra la integración existente en vez
+    // de crear otra (nunca dos merges de la misma historia).
+    const inMain = full ? await git(root, ['merge-base', '--is-ancestor', full, target]).then(() => true).catch(() => false) : false;
+    if (inMain) {
+      const merges = (await git(root, ['log', '--first-parent', '--merges', '--format=%h', '--ancestry-path', `${full}..${target}`]).catch(() => '')).split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+      const commit = merges.at(-1) ?? (await git(root, ['rev-parse', '--short', target]));
+      procs.setResult(id, { ...proc.result, merged: { into: target, commit, mergedAt: new Date().toISOString() }, mergeError: null });
+      changed({ ws: null, entity: 'system', id: null });
+      log({ processId: id, into: target, commit }, 'la rama ya estaba integrada: se registra la integración existente (sin otro merge)');
+      return procs.get(id)!;
+    }
+  }
   // Orden de cierre: no se integra sin que typecheck haya pasado en esta rama (salvo que el propietario lo fuerce a sabiendas).
   // Evidencia de ESTA versión del código (por el commit verificado; la hora solo en registros antiguos sin commit).
   const fresh = verificationsForApplied(proc.result, 1000);

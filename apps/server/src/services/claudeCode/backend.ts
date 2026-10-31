@@ -111,7 +111,7 @@ export function completeWith(cc: ReturnType<typeof agentCaller>, providerId: Pro
  * no está disponible, se dice por qué y NO se usa la API en su lugar (la alternativa por API es solo de los pasos de
  * procesos autorizados y la decide el propietario en los ajustes del conector).
  */
-export function agentCaller(slug: string, agent: Agent, projectId: string | null, title: string, processId: string | null = null, role: string | null = null): { backend: ExecutionBackend; label: string; subscription: boolean; complete: (req: CompletionRequest, signal?: AbortSignal) => Promise<ClaudeCodeCompletion> } | null {
+export function agentCaller(slug: string, agent: Agent, projectId: string | null, title: string, processId: string | null = null, role: string | null = null, opts: { interactive?: boolean } = {}): { backend: ExecutionBackend; label: string; subscription: boolean; complete: (req: CompletionRequest, signal?: AbortSignal) => Promise<ClaudeCodeCompletion> } | null {
   const b = agentBackend(agent);
   if (b === 'api') return null;
   if (b === 'claude-code-terminal') throw Object.assign(new Error(`«${agent.config.name}» usa tu consola de Claude Code, que atiende tareas de procesos y no respuestas inmediatas. Cambia su backend a «Claude Code (gestionado)» o a la API para esto. No se ha usado la API.`), { statusCode: 409 });
@@ -121,25 +121,31 @@ export function agentCaller(slug: string, agent: Agent, projectId: string | null
     backend: b, label: backendLabel(b, lastDetection()?.billing), subscription: true,
     // Con el proceso: cada llamada cuenta para su tope de llamadas a la suscripción (y su ejecución queda ligada a él).
     // El papel decide si una consulta que agota los turnos se recupera UNA vez sin herramientas (ver claudeCodeComplete).
-    complete: (req, signal) => claudeCodeComplete({ slug, projectId: projectId ?? '', processId, stepId: null, agent, role, title }, req, signal ?? new AbortController().signal, () => undefined)
+    complete: (req, signal) => claudeCodeComplete({ slug, projectId: projectId ?? '', processId, stepId: null, agent, role, title, interactive: !!opts.interactive }, req, signal ?? new AbortController().signal, () => undefined)
   };
 }
 
 // ---------------------------------------------------------------- Concurrencia y duplicados
 
-let active = 0; const waiters: (() => void)[] = [];
+/**
+ * Dos carriles: el del trabajo de los procesos (máximo configurado en el conector) y uno de UNA ejecución para la
+ * conversación con el propietario. Antes compartían el único hueco: el Asistente podía esperar hasta el plazo entero de una
+ * unidad de un lote para contestar. Cada ejecución sigue contando en el registro y en los topes de llamadas.
+ */
+const lanes = { work: { active: 0, waiters: [] as (() => void)[] }, interactive: { active: 0, waiters: [] as (() => void)[] } };
 const runningKeys = new Set<string>();
-async function acquireSlot(max: number, signal: AbortSignal, onWait: (n: number) => void) {
-  while (active >= Math.max(1, max)) {
+async function acquireSlot(max: number, signal: AbortSignal, onWait: (n: number) => void, lane: keyof typeof lanes = 'work') {
+  const l = lanes[lane]; const limit = lane === 'interactive' ? 1 : Math.max(1, max);
+  while (l.active >= limit) {
     if (signal.aborted) throw ccError('cancelled', 'Cancelado mientras esperaba turno para Claude Code.');
-    onWait(active);
-    await new Promise<void>(res => { const w = () => { signal.removeEventListener('abort', w); res(); }; waiters.push(w); signal.addEventListener('abort', w, { once: true }); });
+    onWait(l.active);
+    await new Promise<void>(res => { const w = () => { signal.removeEventListener('abort', w); res(); }; l.waiters.push(w); signal.addEventListener('abort', w, { once: true }); });
   }
   if (signal.aborted) throw ccError('cancelled', 'Cancelado mientras esperaba turno para Claude Code.');
-  active++;
+  l.active++;
 }
-function releaseSlot() { active = Math.max(0, active - 1); waiters.shift()?.(); }
-export const runningClaudeCode = () => active;
+function releaseSlot(lane: keyof typeof lanes = 'work') { const l = lanes[lane]; l.active = Math.max(0, l.active - 1); l.waiters.shift()?.(); }
+export const runningClaudeCode = () => lanes.work.active + lanes.interactive.active;
 
 const liveListeners = new Map<string, (text: string) => void>();
 setProgressListener((t, message) => {
@@ -155,7 +161,9 @@ export function readRootFor(slug: string, processId: string | null, projectId: s
   return repo ? repoRoot(repo.path) : null;
 }
 
-export interface ExecutionTarget { slug: string; projectId: string; processId: string | null; stepId: string | null; agent: Agent; role: string | null; title: string }
+export interface ExecutionTarget { slug: string; projectId: string; processId: string | null; stepId: string | null; agent: Agent; role: string | null; title: string;
+  /** Conversación con el propietario (el chat del Asistente): carril propio, nunca espera detrás del trabajo de los procesos. */
+  interactive?: boolean }
 export interface ClaudeCodeCompletion extends CompletionResult { backendLabel: string; billing: ClaudeCodeBilling; apiEquivalentUsd: number | null; runId: string; numTurns?: number | null; cacheReadTokens?: number; tools?: Record<string, number>;
   /** Respuesta de la recuperación sin herramientas tras agotar los turnos (el motivo); su uso incluye el de la ejecución agotada. */
   recovered?: string | null }
@@ -268,9 +276,10 @@ async function claudeCodeRun(t: ExecutionTarget, req: CompletionRequest, signal:
   if (runningKeys.has(key)) throw ccError('backend_unavailable', 'Ya hay una ejecución idéntica de Claude Code en curso para este paso: no se duplica.');
   runningKeys.add(key);
   try {
-    await acquireSlot(s.maxConcurrent, signal, n => say(`En cola: ${n} ejecución(es) de Claude Code en curso (máximo ${s.maxConcurrent}). Nada se ha enviado y el plazo de la llamada aún no corre.`, 'queued'));
+    const lane = t.interactive ? 'interactive' as const : 'work' as const;
+    await acquireSlot(s.maxConcurrent, signal, n => say(lane === 'interactive' ? 'En cola: el Asistente termina otra respuesta. Nada se ha enviado y el plazo aún no corre.' : `En cola: ${n} ejecución(es) de Claude Code en curso (máximo ${s.maxConcurrent}). Nada se ha enviado y el plazo de la llamada aún no corre.`, 'queued'), lane);
     // Tope de llamadas: comprobado y registrado en el mismo tramo síncrono (sin «await» entre medias): sin carreras.
-    const cap = callCapCheck(t.slug, t.processId); if (!cap.ok) { releaseSlot(); throw ccError('call_cap', cap.detail); }
+    const cap = callCapCheck(t.slug, t.processId); if (!cap.ok) { releaseSlot(lane); throw ccError('call_cap', cap.detail); }
     const run = runs.start({ mode: 'cli', projectId: t.projectId, processId: t.processId, stepId: t.stepId, agentId: t.agent.id, agentName: t.agent.config.name, model: req.model, billing: det.billing, authMethod: det.authMethod, subscriptionType: det.subscriptionType });
     const job = tools && s.repoRead && readRoot ? registerJobTask({ ...base, mode: 'cli', system: '', prompt: '', schema: null, readRoot, runId: run.id, toolBudget: toolBudget(s.maxTurns) }) : null;
     liveListeners.set(run.id, m => say(m));
@@ -300,6 +309,6 @@ async function claudeCodeRun(t: ExecutionTarget, req: CompletionRequest, signal:
       // Lo que consultó por el puente antes de agotar los turnos: el punto de partida de la recuperación sin herramientas.
       if (code === 'max_turns' && job) Object.assign(e, { evidence: [...(job.task.uses ?? [])] });
       throw e;
-    } finally { liveListeners.delete(run.id); job?.done(); releaseSlot(); }
+    } finally { liveListeners.delete(run.id); job?.done(); releaseSlot(lane); }
   } finally { runningKeys.delete(key); }
 }

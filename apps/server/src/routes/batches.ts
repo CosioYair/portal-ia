@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { BATCH_LIMITS } from '@portal-ia/domain';
 import { workspacesRepo } from '../db/platform.ts';
 import { batchesRepo } from '../db/batches.ts';
-import { acceptItems, batchView, cancelBatch, cancelItem, closeBatch, createBatch, getBatch, iterateItem, pauseBatch, previewBatch, reconcileBatch, rejectItem, reopenItem, resumeBatch, retryItem, revokeBatch, setBatchLogger } from '../services/batchRunner.ts';
+import { acceptItems, batchView, cancelBatch, cancelItem, closeBatch, createBatch, getBatch, iterateItem, pauseBatch, postponeItem, previewBatch, reconcileBatch, rejectItem, reopenItem, restoreItem, resumeBatch, retryItem, revokeBatch, setBatchLogger } from '../services/batchRunner.ts';
 import type { Batch } from '@portal-ia/domain';
 
 const CLOSE_INPUT = z.object({ reason: z.string().trim().min(3).max(500) });
@@ -23,7 +23,7 @@ const BATCH_INPUT = z.object({
   concurrency: z.number().int().min(1).max(BATCH_LIMITS.maxConcurrency).optional(),
   commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(),
   allowInstall: z.boolean().optional(),
-  git: z.object({ merge: z.boolean().optional(), activate: z.boolean().optional(), publish: z.boolean().optional() }).optional(),
+  git: z.object({ merge: z.boolean().optional(), activate: z.boolean().optional(), publish: z.boolean().optional(), integration: z.enum(['auto', 'on_acceptance']).optional() }).optional(),
   autoResume: z.boolean().optional()
 });
 
@@ -121,6 +121,17 @@ export async function batchRoutes(app: FastifyInstance) {
     const { slug, id, itemId } = req.params as any; if (!guard(slug, reply)) return;
     if (!authorized(req.body)) return reply.code(400).send(DENIED);
     try { return batchView(slug, retryItem(slug, id, itemId)); } catch (e) { return send(reply, e); }
+  });
+  // Aplazar (decisión tomada: no se integra en este lote) y recuperar. Sin IA.
+  app.post('/api/workspaces/:slug/batches/:id/items/:itemId/postpone', async (req, reply) => {
+    const { slug, id, itemId } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ note: z.string().trim().max(1000).optional() }).safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Nota no válida.' });
+    try { return batchView(slug, postponeItem(slug, id, itemId, body.data.note || null)); } catch (e) { return send(reply, e); }
+  });
+  app.post('/api/workspaces/:slug/batches/:id/items/:itemId/restore', async (req, reply) => {
+    const { slug, id, itemId } = req.params as any; if (!guard(slug, reply)) return;
+    try { return batchView(slug, restoreItem(slug, id, itemId)); } catch (e) { return send(reply, e); }
   });
   app.post('/api/workspaces/:slug/batches/:id/items/:itemId/cancel', async (req, reply) => {
     const { slug, id, itemId } = req.params as any; if (!guard(slug, reply)) return;

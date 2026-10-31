@@ -135,7 +135,9 @@ const { batchesRepo } = await import('../src/db/batches.ts');
 test('R5-1 · iteración dirigida en el lote que se pausa por el tope en la revisión del plan: «Reanudar» ¿reutiliza su plan (con la nota) o replanifica sin la nota?', async () => {
   await setBackends('claude-code'); ccRules(); apiScript();
   const a = story('Historia R5-ITER');
-  const b = await authorize([a.id], { totalBudgetUsd: 0, perStoryBudgetUsd: 0, concurrency: 1, gauntlet: { mode: 'deep' }, maxSubscriptionCalls: 1000 });
+  // Integrada al terminar: su iteración es un proceso NUEVO que parte de main (sin integrar, los cambios irían sobre su
+  // rama como una ronda dirigida, sin plan nuevo; eso lo cubre lote-integracion-al-aceptar).
+  const b = await authorize([a.id], { totalBudgetUsd: 0, perStoryBudgetUsd: 0, concurrency: 1, gauntlet: { mode: 'deep' }, maxSubscriptionCalls: 1000, git: { merge: true } });
   try {
     const done = await waitFor(() => get(b.id), y => settled(y) && !y.items.some((i: any) => i.state === 'running'), 'primera ejecución asentada', 60_000);
     console.log('R5-1 primera:', describeItems(done));

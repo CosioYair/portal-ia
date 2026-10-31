@@ -928,8 +928,10 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
     // Tras una corrección del Evaluador Gauntlet, QA no vuelve a revisar lo mismo: el sandbox ya re-verificó el commit y
     // lo re-evalúa (o ya lo evaluó) el Evaluador. No se pagan dos revisiones del mismo commit.
     const gauntletReeval = r.review?.verdict === 'approved' && !!r.gauntlet && (!!r.gauntlet.pendingReeval || r.gauntlet.rounds.at(-1)?.commit === r.applied.commit);
-    const qaRan = !gauntletReeval && (p.lastQaCommit !== r.applied.commit || !r.review?.verdict);
+    const qaRequested = !!p.qaRequestedFor && p.qaRequestedFor === r.applied.commit;
+    const qaRan = qaRequested || (!gauntletReeval && (p.lastQaCommit !== r.applied.commit || !r.review?.verdict));
     if (qaRan) await qaStage(ctx, cfg);
+    if (qaRequested) updatePipeline(ctx.slug, ctx.processId, { qaRequestedFor: null });
     const v = processesRepo(ctx.slug).get(ctx.processId)!.result!.review!;
     if (v.verdict === 'approved') {
       const names: Record<string, string> = { typecheck: 'Typecheck', test: 'pruebas', build: 'compilación' };

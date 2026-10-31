@@ -708,6 +708,8 @@ export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' |
   | 'integration' | 'integration_conflict'
   /** El Evaluador Gauntlet dejó brechas bloqueantes al llegar a su límite (o sin progreso): decide el propietario. */
   | 'gauntlet'
+  /** Pediste cambios sobre la rama (sin descartarla): la ronda está preparada y espera su turno para aplicarse. */
+  | 'owner_changes'
   | 'missing_information' | 'permission' | 'unsupported' | 'provider_refusal' | 'provider_timeout' | 'provider_error' | 'interrupted' | 'unknown'
   /** Entrega incremental: un entregable no cabe en la salida del modelo ni por secciones, o faltan entregables tras los intentos permitidos. */
   | 'too_large' | 'incomplete'
@@ -737,6 +739,8 @@ export interface PipelineStatus {
   lastAssessment: DevOutputAssessment | null;
   /** Commit del worktree que QA evaluó por última vez (si cambia, QA vuelve a evaluar). */
   lastQaCommit?: string | null;
+  /** QA debe volver a evaluar ESTE commit (p. ej. no pudo verificar y el lote lo pide una vez con la evidencia actual). */
+  qaRequestedFor?: string | null;
   /** Clase del último fallo (decide la recuperación). */
   failureClass?: AgentFailureKind | null;
   /** Pregunta pendiente para el propietario (información, permiso o decisión). */
@@ -812,7 +816,7 @@ export interface WorkUnit {
   costUsd: number;
   stepIds: string[];
   /** Origen (unidades de corrección): QA, verificación o comprobación de completitud, con los hallazgos que corrige. */
-  source?: 'plan' | 'qa' | 'verification' | 'completeness' | 'gauntlet';
+  source?: 'plan' | 'qa' | 'verification' | 'completeness' | 'gauntlet' | 'owner';
   findings?: { severity: IssueSeverity; text: string; file: string | null; evidence: string | null; expected?: string | null }[];
   /** Último problema (para no repetir lo mismo y para el propietario). */
   error: string | null;
@@ -861,7 +865,7 @@ export interface StoryManifest {
   /** QA va por la suscripción de Claude Code (su revisión no se estima en USD de la API). */
   qaSubscription?: boolean;
   /** Rondas de corrección: de dónde vienen, cuántas unidades y cuántas aplicaron cambios. */
-  rounds: { at: string; source: 'qa' | 'verification' | 'completeness' | 'gauntlet'; units: number; applied: number }[];
+  rounds: { at: string; source: 'qa' | 'verification' | 'completeness' | 'gauntlet' | 'owner'; units: number; applied: number }[];
   gate: CompletenessGate | null;
   /** Comprobación posterior a la verificación: ¿cada prueba nueva se ejecutó de verdad en el sandbox? */
   testRun?: { commit: string | null; at: string; results: { path: string; state: CheckState; detail: string }[] } | null;

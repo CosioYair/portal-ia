@@ -219,7 +219,11 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
   const load = () => api.assignment(slug, assignmentId).then(setA).catch(e => setErr(e.message));
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, assignmentId]);
-  const authorizable = !!a && ['draft', 'changes_requested', 'needs_owner', 'failed'].includes(a.status);
+  // En pausa con trabajo conservado se CONTINÚA (autorizar otra ejecución descartaría lo hecho y lo ya pagado).
+  const resumable = !!a?.process?.resumable && (a.status === 'needs_owner' || a.status === 'changes_requested');
+  const question = a?.process?.question ?? null;
+  const authorizable = !!a && ['draft', 'changes_requested', 'needs_owner', 'failed'].includes(a.status) && !resumable;
+  const [moreCalls, setMoreCalls] = useState('0');
   useEffect(() => { if (!authorizable || pre) return; api.assignmentAuthorization(slug, assignmentId).then(p => { setPre(p); }).catch(e => setErr(e.message)); }, [authorizable, pre, slug, assignmentId]);
   // Tiempo real: el encargo y su proceso (aquí, en otra pestaña o al terminar) al momento; respaldo cada 30 s si corre.
   useLive(c => c.ws === slug && ((c.entity === 'assignment' && c.id === assignmentId) || (c.entity === 'process' && c.itemId === assignmentId && c.kind !== 'progress')), () => load(), { minMs: 1500 });
@@ -240,6 +244,14 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
       {a.outOfScope.length > 0 && <div className="small muted">Fuera de alcance: {a.outOfScope.join(' · ')}</div>}
       {a.reason && a.status !== 'accepted' && <Notice kind="warn">{a.reason}</Notice>}
       {a.process && <div className="small muted">{a.status === 'running' && a.process.pipeline?.phase ? `${a.process.pipeline.phase} · ` : ''}{a.process.pipeline?.reason && a.process.pipeline.reason !== a.reason ? `${a.process.pipeline.reason} · ` : ''}{fmtUsd(a.process.spentUsd)} de {fmtUsd(a.process.budgetUsd ?? 0)} de API{link && <> · <Link className="lnk" to={link}>ver el proceso y la evidencia</Link></>}</div>}
+      {resumable && question && a.process && <Notice kind="warn"><span>El equipo espera tu respuesta: «{question}» · <Link className="lnk" to={`/empresa/${slug}/procesos/${a.process.id}`}>contéstala en el proceso</Link> (seguirá con tu respuesta, sin repetir nada).</span></Notice>}
+      {resumable && !question && a.process && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }} data-testid={`assignment-continue-${a.code}`}>
+        <div className="small">Lo hecho se conserva en su rama. <strong>Continuar</strong> lo retoma donde quedó, con la misma autorización{Number(moreCalls) > 0 ? <> y <strong>{Math.floor(Number(moreCalls))}</strong> llamadas más a la suscripción</> : null}; no se repite nada ni se descarta.</div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'end', flexWrap: 'wrap' }}>
+          <div><label className="label" htmlFor={`em-${a.id}`}>Llamadas a la suscripción adicionales</label><input id={`em-${a.id}`} className="input mono" style={{ width: 120 }} type="number" min={0} max={400} step={1} value={moreCalls} onChange={e => setMoreCalls(e.target.value)} /></div>
+          <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void act(() => api.continueProcess(slug, a.process!.id, Number(moreCalls) > 0 ? { addSubscriptionCalls: Math.floor(Number(moreCalls)) } : {}), `${a.code} continúa`)}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}Continuar</button>
+        </div>
+      </div>}
       {authorizable && pre && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         {pre.missing && <Notice kind="warn">Falta antes de autorizar: {pre.missing}</Notice>}
         {!pre.subscription.ok && <Notice kind="warn">{pre.subscription.reason}</Notice>}
@@ -259,9 +271,10 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
           <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void act(() => api.acceptAssignment(slug, a.id, null), `${a.code} aceptado`)}>Aceptar</button>
           <label className="sr" htmlFor={`en-${a.id}`}>Qué cambiar</label>
           <input id={`en-${a.id}`} className="input" style={{ flex: 1, minWidth: 180, height: 30 }} value={note} onChange={e => setNote(e.target.value)} placeholder="Qué cambiar (para pedir cambios)" />
-          <button type="button" className="btn btn-ghost btn-sm" disabled={busy || note.trim().length < 3 || !discard} onClick={() => void act(() => api.requestAssignmentChanges(slug, a.id, note.trim(), discard), 'Cambios pedidos: autoriza la siguiente iteración')}>Pedir cambios</button>
+          {/* Con entrega incremental, los cambios van sobre su rama y se aplican YA con la misma autorización (un clic). */}
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy || note.trim().length < 3 || (!a.process?.ownerRound && !discard)} onClick={() => void act(async () => { await api.requestAssignmentChanges(slug, a.id, note.trim(), discard); if (a.process?.ownerRound) await api.continueProcess(slug, a.process.id, {}); }, a.process?.ownerRound ? 'Cambios pedidos: el equipo los aplica sobre su rama' : 'Cambios pedidos: autoriza la siguiente iteración')}>Pedir cambios</button>
         </div>
-        <label className="ck small"><input className="cb" type="checkbox" checked={discard} onChange={e => setDiscard(e.target.checked)} /><span>Para pedir cambios, descarto esta versión (su worktree y su rama sin integrar).</span></label>
+        {a.process?.ownerRound ? <div className="small muted">Los cambios se aplican sobre su rama (no se descarta lo hecho) con la misma autorización.</div> : <label className="ck small"><input className="cb" type="checkbox" checked={discard} onChange={e => setDiscard(e.target.checked)} /><span>Para pedir cambios, descarto esta versión (su worktree y su rama sin integrar).</span></label>}
         <div className="small muted">Aceptar exige lo mismo que cerrar una historia (aplicado, verificado, probado); integrar en main sigue siendo una decisión aparte. Pedir cambios descarta esta versión (su rama sin integrar) y prepara otra ejecución desde main con tu nota, que autorizas aparte.</div>
       </div>}
       {['draft', 'changes_requested', 'needs_owner', 'failed', 'ready_for_review'].includes(a.status) && <div><button type="button" className="lnk small" disabled={busy} onClick={() => void act(() => api.cancelAssignment(slug, a.id), `${a.code} cancelado`)}>cancelar el encargo</button></div>}

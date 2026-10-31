@@ -14,7 +14,7 @@ import { applyChanges, changesSinceBase, commitInWorktree, hashText, mainBranch,
 import { diagnoseFailure, diagnosisPrompt, failingTests, staleCorrectionUnits } from './failureDiagnosis.ts';
 import { verificationEvidence, zeroTests } from './qaGate.ts';
 import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
-import { agentHeadroom, apiFallbackFor, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, retryForeignFailure, stepCall, updatePipeline, updateResult, verifyStage, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
+import { agentHeadroom, apiFallbackFor, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, retryForeignFailure, stepCall, storyRunContext, updatePipeline, updateResult, verifyStage, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
 import { usesClaudeCode } from './claudeCode/backend.ts';
 import { monotonicNow } from '../clock.ts';
 
@@ -673,7 +673,7 @@ export function verificationFindings(v: VerificationRun): Finding[] {
  * Agrupa hallazgos en unidades dirigidas: por archivo (como mucho 3 hallazgos y 6 unidades por ronda). Un entregable del
  * plan que no está en el worktree se ENTREGA (unidad de construcción), no se «parchea».
  */
-export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' | 'verification' | 'completeness' | 'gauntlet', findings: (Finding | QaFinding)[]) {
+export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' | 'verification' | 'completeness' | 'gauntlet' | 'owner', findings: (Finding | QaFinding)[]) {
   const man = manifestOf(ctx); const wt = worktreeOf(ctx);
   // Un intercambio por hallazgo: si QA mantiene lo que el equipo ya discutió con evidencia, decide el propietario (sin bucle pagado).
   const persisting = source === 'qa' ? findings.filter(f => (man.disputes ?? []).some(d => sameFinding(d, { file: f.file ?? null, text: f.text }))) : [];
@@ -694,9 +694,12 @@ export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' |
   }
   // Sin archivo: se asocia a los archivos de código cambiados (como mucho 3).
   const general = byFile.get('*'); byFile.delete('*');
-  if (general?.length) { const target = changed.filter(p => CODE_EXT.test(p)).slice(0, 3); const k = target[0] ?? changed[0] ?? ''; if (k) byFile.set(k, [...(byFile.get(k) ?? []), ...general]); }
+  // Cambios que pidió el propietario sin nombrar un archivo: UNA unidad con todos los archivos de la historia (y los que
+  // mencione su nota), para que el cambio pueda tocar los que haga falta (antes iba a un único archivo arbitrario).
+  const ownerFiles = source === 'owner' && general?.length ? Array.from(new Set([...filesIn(general.map(f => f.text).join(' ')).map(f => resolve(clean(f))).filter(f => !!f && (man.deliverables.some(d => d.path === f) || (wt && fs.existsSync(path.join(wt, f))))), ...changed.filter(p => CODE_EXT.test(p)), ...changed])).slice(0, 6) : [];
+  if (general?.length && !ownerFiles.length) { const target = changed.filter(p => CODE_EXT.test(p)).slice(0, 3); const k = target[0] ?? changed[0] ?? ''; if (k) byFile.set(k, [...(byFile.get(k) ?? []), ...general]); }
   const groups = Array.from(byFile, ([file, fs2]) => ({ file, findings: fs2.slice(0, 3) })).slice(0, 6);
-  if (!groups.length) throw new PipelinePause('qa', 'Los hallazgos no permiten identificar qué archivo corregir; decide tú con la evidencia.');
+  if (!groups.length && !ownerFiles.length) throw new PipelinePause('qa', 'Los hallazgos no permiten identificar qué archivo corregir; decide tú con la evidencia.');
   const units: WorkUnit[] = groups.map((g, i) => {
     const d = man.deliverables.find(x => x.path === g.file);
     const missing = !!d && d.status !== 'dropped' && !(wt && fs.existsSync(path.join(wt, g.file)));
@@ -705,8 +708,34 @@ export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' |
       ? newUnit(ctx, ctx.dev, id, { kind: 'build', title: `Entregar ${base(g.file)}`, purpose: d!.purpose, files: [g.file], dependsOn: [], estimatedOutputTokens: d!.estimatedLines * TOKENS_PER_LINE + 400, source, findings: g.findings, round })
       : newUnit(ctx, ctx.dev, id, { kind: 'correction', title: `${base(g.file)}: ${g.findings[0].text}`.slice(0, 120), purpose: g.findings.map(f => f.text).join(' · '), files: [g.file], dependsOn: [], estimatedOutputTokens: 1500, source, findings: g.findings, round });
   });
+  if (ownerFiles.length) units.push(newUnit(ctx, ctx.dev, `r${round + 1}-${units.length + 1}`, { kind: 'correction', title: `Cambios pedidos: ${general![0].text}`.slice(0, 120), purpose: general!.map(f => f.text).join(' · '), files: ownerFiles, dependsOn: [], estimatedOutputTokens: 3000, source, findings: general!.slice(0, 4), round }));
   saveManifest(ctx, m => { m.rounds.push({ at: now(), source, units: units.length, applied: 0 }); m.units.push(...units); for (const u of units) if (u.kind === 'build') { const d = m.deliverables.find(x => x.path === u.files[0]); if (d) { d.status = 'pending'; d.unitId = u.id; } } });
-  emit(ctx, 'unit', `Corrección dirigida (${source === 'qa' ? 'hallazgos de QA' : source === 'verification' ? 'verificación del sandbox' : source === 'gauntlet' ? 'brechas del Evaluador Gauntlet' : 'comprobación previa a QA'}): ${units.length} unidad(es), solo los archivos afectados. Lo que ya funciona no se regenera.`, { phase: 'correcting', detail: units.map(u => `${u.files[0]}: ${u.findings?.length ?? 0} hallazgo(s)`).join(' · ') });
+  emit(ctx, 'unit', `Corrección dirigida (${source === 'qa' ? 'hallazgos de QA' : source === 'verification' ? 'verificación del sandbox' : source === 'gauntlet' ? 'brechas del Evaluador Gauntlet' : source === 'owner' ? 'cambios que pidió el propietario' : 'comprobación previa a QA'}): ${units.length} unidad(es), solo los archivos afectados. Lo que ya funciona no se regenera.`, { phase: 'correcting', detail: units.map(u => `${u.files[0]}: ${u.findings?.length ?? 0} hallazgo(s)`).join(' · ') });
+}
+
+/** ¿Se pueden aplicar cambios sobre la rama de esta ejecución (entrega incremental, worktree vivo, sin integrar ni en marcha)? */
+export function ownerRoundPossible(p: Process | undefined): boolean {
+  return !!p && !p.result?.merged && !p.result?.rejected && !!p.result?.manifest && !!p.result.applied?.worktree && fs.existsSync(p.result.applied.worktree) && p.status !== 'running' && p.status !== 'pending_authorization';
+}
+
+/**
+ * Pediste cambios sobre una historia terminada y SIN integrar: se preparan como una ronda dirigida sobre su MISMA rama
+ * (no se descarta ni se rehace lo verificado), con una corrección autorizada más para ella. El pipeline la aplica al
+ * retomarse («Continuar» o el turno del lote) y repite verificación, QA y Gauntlet sobre el commit nuevo. Sin IA aquí.
+ */
+export function prepareOwnerRound(slug: string, processId: string, note: string, failedSteps: string[] = []): Process {
+  const fail = (message: string, code: string) => Object.assign(new Error(message), { statusCode: 409, code });
+  const p = processesRepo(slug).get(processId);
+  if (!p?.result?.manifest || !p.result.applied?.worktree || !fs.existsSync(p.result.applied.worktree)) throw fail('Esta iteración no tiene una entrega incremental con worktree: se prepara una iteración nueva.', 'no_manifest');
+  if (p.result.merged) throw fail('Ya está integrada: los cambios van en una iteración nueva sobre main.', 'merged');
+  if (p.status === 'running' || p.status === 'pending_authorization') throw fail('El proceso sigue activo o pendiente de autorizar.', 'active');
+  const text = note.trim(); if (!text) throw fail('Indica qué cambiar.', 'note_required');
+  const { ctx } = storyRunContext(slug, processId, () => undefined, () => false);
+  const cfg = pipelineOf(slug, processId).config;
+  const findings: Finding[] = [{ severity: 'alta', text: clip(text, 1200), file: null, evidence: null, expected: null }, ...failedSteps.map(s => s.trim()).filter(Boolean).slice(0, 8).map(s => ({ severity: 'alta' as IssueSeverity, text: `Paso de la prueba que falló: ${clip(s, 300)}`, file: null, evidence: null, expected: null }))];
+  startRound(ctx, cfg, 'owner', findings);
+  updatePipeline(slug, processId, { state: 'paused', pauseKind: 'owner_changes', phase: 'finished', reason: `Pediste cambios sobre su rama (sin descartarla): «${clip(text, 300)}». Se aplican en su turno y se repiten verificación, QA y Gauntlet.`, config: { ...cfg, maxCorrections: cfg.maxCorrections + 1 } }, { kind: 'info', message: `El propietario pidió cambios: ${clip(text, 400)}` });
+  return processesRepo(slug).get(processId)!;
 }
 
 /**

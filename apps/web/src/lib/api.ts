@@ -81,7 +81,7 @@ export type ConversationArtifactView = ConversationArtifact & {
   deliverable: string | null; challenge: { agentName: string; text: string } | null; consulted: { agentName: string; question: string; answer: string }[];
   backlogOps: { op: string; title?: string; criterion?: string; estimate?: string | null; dependsOn?: string | null }[]; opsApplied: { summary: string[] } | null;
 };
-export type AssignmentView = Assignment & { statusLabel: string; process: { id: string; status: string; spentUsd: number; budgetUsd: number | null; estimatedUsd: number | null; steps: number; pipeline: { state: string; phase: string | null; reason: string | null; corrections: number } | null } | null };
+export type AssignmentView = Assignment & { statusLabel: string; process: { id: string; status: string; spentUsd: number; budgetUsd: number | null; estimatedUsd: number | null; steps: number; resumable?: boolean; ownerRound?: boolean; question?: string | null; pipeline: { state: string; phase: string | null; reason: string | null; corrections: number } | null } | null };
 export interface ConversationDetailView { conversation: AssistantConversation; stage: ConversationStage; decisions: ConversationDecision[]; artifacts: ConversationArtifactView[]; assignments: AssignmentView[]; next: string }
 export interface UsageGateView { report: ClaudeCodeUsageReport | null; ok: boolean; reason: string | null; warning: string | null }
 export interface AssignmentAuthPreview {
@@ -340,7 +340,9 @@ export const api = {
   reopenBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/reopen`, { method: 'POST', body: '{}' }),
   iterateBatchItem: (slug: string, id: string, itemId: string, note: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/iterate`, { method: 'POST', body: JSON.stringify({ authorized: true, note }) }),
   retryBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/retry`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
-  cancelBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/cancel`, { method: 'POST', body: '{}' })
+  cancelBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/cancel`, { method: 'POST', body: '{}' }),
+  postponeBatchItem: (slug: string, id: string, itemId: string, note: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/postpone`, { method: 'POST', body: JSON.stringify({ note }) }),
+  restoreBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/restore`, { method: 'POST', body: '{}' })
 };
 
 /** Alcance que el propietario autoriza para un lote (lo normaliza y acota el servidor). */
@@ -348,5 +350,5 @@ export interface BatchRequest {
   title?: string; itemIds: string[]; backends?: ('api' | 'claude_code')[]; apiFallback?: boolean;
   totalBudgetUsd: number; perStoryBudgetUsd: number; maxCorrections?: number; maxDurationMin?: number; maxSubscriptionCalls?: number;
   gauntlet?: GauntletConfig; concurrency?: number; commands?: ('typecheck' | 'test' | 'build')[]; allowInstall?: boolean;
-  git?: { merge?: boolean; activate?: boolean; publish?: boolean }; autoResume?: boolean;
+  git?: { merge?: boolean; activate?: boolean; publish?: boolean; integration?: 'auto' | 'on_acceptance' }; autoResume?: boolean;
 }

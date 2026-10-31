@@ -1,3 +1,5 @@
+import { projectsRepo } from '../db/workspace.ts';
+import { discoverProject } from '../services/projectDiscovery.ts';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
@@ -28,6 +30,14 @@ export async function phaseRoutes(app: FastifyInstance) {
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
   const fail = (reply: any, e: any) => reply.code(e instanceof PolicyError ? (e.code === 'authorization_required' ? 400 : 403) : e.statusCode ?? 500).send({ error: e.message, code: e.code, running: e.running });
 
+  // Descubrimiento de un proyecto existente (incorporación): solo lee metadatos de SU repositorio registrado, sin IA ni
+  // ejecutar nada; devuelve una PROPUESTA de perfil (comandos, herramientas, documentación). Descubrir no autoriza nada.
+  app.get('/api/workspaces/:slug/projects/:projectId/discovery', async (req, reply) => {
+    const { slug, projectId } = req.params as any; if (!guard(slug, reply)) return;
+    const repo = projectsRepo(slug).repository(projectId);
+    if (!repo) return reply.code(409).send({ error: 'El proyecto no tiene repositorio registrado.', code: 'no_repo' });
+    try { return await discoverProject(repo.path); } catch (e: any) { return fail(reply, e); }
+  });
   app.get('/api/workspaces/:slug/projects/:projectId/phase', async (req, reply) => {
     const { slug, projectId } = req.params as any; if (!guard(slug, reply)) return;
     return { current: currentPhase(slug, projectId), transitions: listTransitions(slug, projectId), defaultName: DEFAULT_PHASE_NAME };

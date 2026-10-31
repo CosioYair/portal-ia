@@ -78,7 +78,8 @@ function script() {
     { match: 'Elabora el plan técnico', text: PLAN },
     { match: 'Evalúa la implementación con la EVIDENCIA real', text: QA_OK },
     { match: 'Evalúa de forma INDEPENDIENTE', text: EV_PASS },
-    { match: 'Nota del propietario: usa una coma', text: DEV('Hola, mundo') },
+    // La corrección con tu nota va sobre lo ya entregado (su rama): parchea el texto actual, no el de main.
+    { match: 'Nota del propietario: usa una coma', text: `=== RESUMEN ===\nAjusta el pie.\n=== ARCHIVO: src/pie.ts | patch ===\n<<<< BUSCAR\nexport const pie = "Hola, mundo";\n==== REEMPLAZAR\nexport const pie = "Hola, mundo";\nexport const piePuntuado = true;\n>>>> FIN\n=== FIN ARCHIVO ===\n` },
     { match: 'Implementa la historia', text: DEV('Hola, mundo') },
     { match: 'Cómo trabajar en esta conversación', text: 'Anotado.' }
   ] }));
@@ -144,14 +145,15 @@ test('recorrido completo del Asistente con el sandbox Docker real (sin omitir Do
   assert.equal(p1.result!.gauntlet?.planReview?.status, 'approved', 'el plan se revisó antes de implementar');
   assert.equal(stories(), s1, 'el encargo no crea historias'); assert.equal(git('rev-parse', 'main'), mainHead, 'nunca integra solo en main');
   assert.match(p1.result!.applied!.branch, /en-\d{3}/i);
-  // 10 · Revisar y pedir cambios: la siguiente ejecución se autoriza aparte y recibe la nota.
-  assert.equal((await json('POST', `${E}/changes`, { note: 'Nota del propietario: usa una coma después de Hola', discardApplied: true })).status, 200);
-  assert.equal((await json('POST', `${E}/authorize`, { authorized: true, budgetUsd: 3, allowInstall: true, gauntlet: { mode: 'standard' } })).status, 200);
-  a = await waitFor(async () => (await json('GET', E)).body, v => v.processIds.length === 2 && !['running', 'pending_authorization'].includes(v.status), 'segunda ejecución', 600_000);
-  assert.equal(a.status, 'ready_for_review', `${a.status}: ${a.reason ?? ''}`);
+  // 10 · Revisar y pedir cambios: se aplican sobre SU rama (sin descartar lo verificado) con la misma autorización.
+  assert.equal((await json('POST', `${E}/changes`, { note: 'Nota del propietario: usa una coma después de Hola' })).status, 200);
+  assert.equal((await json('POST', `${W}/processes/${p1.id}/continue`, { authorized: true })).status, 200);
+  a = await waitFor(async () => (await json('GET', E)).body, v => v.status === 'ready_for_review' && (processesRepo(S).get(p1.id)!.result!.manifest?.rounds ?? []).some(r => r.source === 'owner' && r.applied > 0), 'cambios aplicados sobre su rama', 600_000);
+  assert.equal(a.processIds.length, 1, 'el mismo proceso: no se rehace desde main');
   assert.ok(calls().some(c => c.markers?.includes('Nota del propietario: usa una coma')), 'la nota llega a los agentes');
-  const old = processesRepo(S).get(p1.id)!; assert.ok(old.result!.rejected, 'la versión anterior no integrada se descartó al pedir cambios');
-  assert.equal((await json('POST', `${W}/processes/${p1.id}/merge`, { authorized: true })).status, 409, 'y ya no se puede integrar');
+  const same = processesRepo(S).get(p1.id)!; assert.ok(!same.result!.rejected, 'lo verificado no se descartó');
+  assert.match(fs.readFileSync(path.join(same.result!.applied!.worktree!, 'src/pie.ts'), 'utf8'), /piePuntuado/);
+  for (const cmd of ['typecheck', 'test', 'build']) assert.ok(same.result!.verifications.some(v => v.command === cmd && v.exitCode === 0 && v.isolation === 'docker' && v.commit === same.result!.applied!.commit), `${cmd} en Docker real sobre el commit nuevo`);
   // 11 · El trabajo terminado queda en el historial de la organización.
   assert.ok(a.knowledgeDocId); assert.ok(knowledgeRepo(S).list(project.id).some(k => k.id === a.knowledgeDocId));
   assert.ok(knowledgeRepo(S).list(project.id).some(k => /^Propuesta/.test(k.title)), 'la propuesta también quedó en Conocimiento');

@@ -25,6 +25,15 @@ export type BatchItemState =
   | 'awaiting_integration'
   /** Terminada técnicamente (verificada, QA, Gauntlet, integrada y activa si correspondía): falta TU aceptación. */
   | 'awaiting_acceptance'
+  /**
+   * Integración al aceptar: terminada técnicamente (verificada, QA y Gauntlet) y con su evidencia vigente o arrastrada;
+   * NO está en main. Espera tu revisión en el orden de integración del lote.
+   */
+  | 'ready'
+  /** Integración al aceptar: main cambió algo que la afecta y su candidato se pone al día (git, sandbox y QA si hace falta). */
+  | 'revalidating'
+  /** La aplazaste: no se integra en este lote; cuenta como decisión tomada. Puedes recuperarla. */
+  | 'postponed'
   | 'accepted'
   /** No aceptada: con tus notas y los pasos que fallaron (puede iterarse dentro del lote). */
   | 'rejected'
@@ -58,6 +67,18 @@ export interface BatchGitAuthorization {
   activate: boolean;
   /** Publicar en GitHub. Desactivado por defecto; nunca se activa solo. */
   publish: boolean;
+  /**
+   * Cuándo integra el lote (con `merge`): 'on_acceptance' termina técnicamente TODO el lote y cada historia entra en main
+   * cuando la aceptas, en el orden de integración y con los candidatos posteriores puestos al día; 'auto' (lotes
+   * anteriores sin el campo) integra cada historia al terminarla y la aceptas ya integrada.
+   */
+  integration?: BatchIntegrationPolicy;
+}
+
+export type BatchIntegrationPolicy = 'auto' | 'on_acceptance';
+/** Política efectiva: sin «Integrar en main», manual (la integras tú desde el proceso). */
+export function integrationPolicy(auth: Pick<BatchAuthorization, 'git'>): BatchIntegrationPolicy | 'manual' {
+  return auth.git.merge ? (auth.git.integration ?? 'auto') : 'manual';
 }
 
 export interface BatchAuthorization {
@@ -88,7 +109,15 @@ export interface BatchAuthorization {
   autoResume: boolean;
 }
 
-export interface BatchAcceptance { at: string; note: string | null; checks: boolean[] | null }
+export interface BatchAcceptance {
+  at: string; note: string | null; checks: boolean[] | null;
+  /**
+   * Integración al aceptar: commit que revisaste y huella de SUS cambios (`git patch-id` del diff sin contexto respecto a
+   * main). Si al ponerla al día cambia su código (conflictos resueltos por el agente, correcciones), la huella cambia y la
+   * aceptación se anula: vuelves a revisarla. Un merge limpio de main conserva la huella y la aceptación.
+   */
+  commit?: string | null; patchId?: string | null;
+}
 export interface BatchRejection { at: string; note: string; failedSteps: string[]; taskIds: string[] }
 
 export interface BatchItem {
@@ -128,6 +157,209 @@ export interface BatchItem {
   dismissedProcessIds?: string[];
   /** Candidatos preparados de nuevo porque main avanzó mientras se verificaba el anterior (máximo 3 seguidos). */
   integrationRetries?: number;
+  /** ¿Sigue valiendo su evidencia con el main actual? (sin IA; ver `CandidateFreshness`). */
+  freshness?: CandidateFreshness | null;
+  /** Puesta al día en curso (integración al aceptar): paso persistido para retomarla tras un reinicio sin repetir lo hecho. */
+  revalidation?: { at: string; step: 'merge' | 'resolve' | 'verify' | 'qa'; mainHead: string | null; causes: string[] } | null;
+  /** Revisiones de QA repetidas por el lote con evidencia nueva (QA no pudo verificar): como mucho una. */
+  qaRetries?: number;
+  /** Aplazada por ti: desde qué estado (para recuperarla) y con qué nota. */
+  postponed?: { at: string; from: BatchItemState; note: string | null } | null;
+}
+
+/**
+ * ¿La evidencia de una historia terminada (QA, Gauntlet, verificación) sigue valiendo con el main ACTUAL? Sin IA:
+ * - `current`: se produjo contra el main actual (o su candidato ya lo incorpora y está verificado);
+ * - `clean_carry`: main avanzó sin tocar ningún archivo de la historia ni compartido: la evidencia se arrastra y al
+ *   integrar se verifica otra vez sin IA;
+ * - `stale`: main cambió archivos de la historia o compartidos (`overlap`, por `causes`): hay que ponerla al día antes de
+ *   presentarla como vigente (merge, sandbox y QA de lo que cambió);
+ * - `unknown`: no se pudo calcular (sin rama o sin git): nunca se presenta como vigente.
+ */
+export interface CandidateFreshness {
+  status: 'current' | 'clean_carry' | 'stale' | 'unknown';
+  /** Commit de main contra el que se produjo la evidencia. */
+  base: string | null;
+  mainHead: string | null;
+  /** Commit de la historia (rama o candidato) al que se refiere la evidencia. */
+  head: string | null;
+  overlap: string[];
+  /** Historias (storyId) integradas en main desde `base`, si se saben. */
+  causes: string[];
+  /** Conflictos previstos (git merge-tree en memoria) al incorporar el main actual, si está `stale`. */
+  conflicts?: string[];
+  checkedAt: string;
+  detail: string | null;
+}
+
+// ---------------------------------------------------------------- Orden de integración (sin IA)
+
+/** Base de los archivos de una historia para ordenar: los reales de su rama, los del plan o los que menciona su texto. */
+export type FileBasis = 'actual' | 'planned' | 'predicted' | 'none';
+export interface IntegrationPlanInput {
+  itemId: string; storyId: string; title: string;
+  dependsOn: string | null;
+  /** Orden del propietario (prioridad de negocio): desempata cuando nada técnico decide. */
+  ownerOrder: number;
+  files: string[];
+  basis: FileBasis;
+  /** Archivos que la historia CREA (rama real) y archivos que su texto menciona: dependencia implícita. */
+  adds?: string[];
+  mentions?: string[];
+}
+export interface IntegrationPlanNote { itemId: string; text: string }
+export interface IntegrationPlan {
+  computedAt: string;
+  /** itemIds en el orden propuesto (solo las que faltan por integrar). */
+  order: string[];
+  basis: Record<FileBasis, number>;
+  notes: IntegrationPlanNote[];
+  overlaps: { a: string; b: string; files: string[] }[];
+}
+
+/** Archivos compartidos por todo un proyecto TypeScript: un cambio en ellos puede afectar a cualquier historia. */
+export const SHARED_FILE = /^packages\/domain\/|\/db\/|executionPolicy|tokens\.css$|(^|\/)package(-lock)?\.json$|\/app\.ts$|(^|\/)tsconfig[^/]*\.json$/;
+const LOCKFILE = /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/;
+
+/**
+ * Orden de integración propuesto, sin IA y explicado. No es el orden de los identificadores: 1) dependencias explícitas
+ * (obligatorias); 2) dependencias implícitas (una historia menciona un archivo que otra crea); 3) en cada grupo de
+ * historias que tocan los mismos archivos, primero la más transversal (toca archivos compartidos o coincide con más
+ * historias), para que las demás se adapten a ella una sola vez; 4) a igualdad, tu orden (prioridad de negocio). Las
+ * aristas «blandas» que crearían un ciclo se descartan. `isShared` permite otra definición por proyecto.
+ */
+export function integrationOrder(inputs: IntegrationPlanInput[], isShared: (f: string) => boolean = f => SHARED_FILE.test(f)): Omit<IntegrationPlan, 'computedAt'> {
+  const ids = inputs.map(i => i.itemId); const by = new Map(inputs.map(i => [i.itemId, i]));
+  const byStory = new Map(inputs.map(i => [i.storyId, i.itemId]));
+  const files = new Map(inputs.map(i => [i.itemId, new Set(i.files.filter(f => !LOCKFILE.test(f)))]));
+  const edges = new Map<string, Set<string>>(ids.map(id => [id, new Set()]));
+  const notes: IntegrationPlanNote[] = []; const overlaps: IntegrationPlan['overlaps'] = [];
+  const reaches = (from: string, to: string): boolean => {
+    const seen = new Set<string>(); const stack = [from];
+    while (stack.length) { const x = stack.pop()!; if (x === to) return true; if (seen.has(x)) continue; seen.add(x); stack.push(...edges.get(x)!); }
+    return false;
+  };
+  const addEdge = (a: string, b: string) => { if (a === b || reaches(b, a)) return false; edges.get(a)!.add(b); return true; };
+  // 1) Explícitas.
+  for (const i of inputs) { const d = i.dependsOn ? byStory.get(i.dependsOn) : undefined; if (d && addEdge(d, i.itemId)) notes.push({ itemId: i.itemId, text: `Después de ${i.dependsOn}: depende de ella (dependencia declarada).` }); }
+  // 2) Implícitas: B menciona un archivo que A crea.
+  for (const a of inputs) for (const b of inputs) {
+    if (a === b || !a.adds?.length || !b.mentions?.length) continue;
+    const hit = a.adds.filter(f => b.mentions!.some(m => m === f || f.endsWith(`/${m}`)));
+    if (hit.length && !edges.get(a.itemId)!.has(b.itemId) && addEdge(a.itemId, b.itemId)) notes.push({ itemId: b.itemId, text: `Después de ${a.storyId}: menciona ${hit.slice(0, 2).join(', ')}, que crea ${a.storyId} (dependencia implícita).` });
+  }
+  // 3) Solapes y transversalidad.
+  const overlapCount = new Map(ids.map(id => [id, 0]));
+  for (let x = 0; x < inputs.length; x++) for (let y = x + 1; y < inputs.length; y++) {
+    const a = inputs[x].itemId, b = inputs[y].itemId;
+    const shared = [...files.get(a)!].filter(f => files.get(b)!.has(f));
+    if (!shared.length) continue;
+    overlaps.push({ a, b, files: shared.slice(0, 12) });
+    overlapCount.set(a, overlapCount.get(a)! + 1); overlapCount.set(b, overlapCount.get(b)! + 1);
+  }
+  const sharedOf = (id: string) => [...files.get(id)!].filter(isShared);
+  const weight = (id: string) => sharedOf(id).length * 2 + overlapCount.get(id)!;
+  for (const o of overlaps) {
+    const [first, second] = weight(o.a) !== weight(o.b) ? (weight(o.a) > weight(o.b) ? [o.a, o.b] : [o.b, o.a]) : (by.get(o.a)!.ownerOrder <= by.get(o.b)!.ownerOrder ? [o.a, o.b] : [o.b, o.a]);
+    if (edges.get(first)!.has(second) || reaches(first, second)) continue;
+    if (!addEdge(first, second)) continue;
+    const f = by.get(first)!, s = by.get(second)!;
+    if (f.ownerOrder > s.ownerOrder) {
+      const sh = sharedOf(first);
+      notes.push({ itemId: first, text: `Antes que ${s.storyId} (aunque la elegiste después): comparten ${o.files.slice(0, 3).join(', ')}${o.files.length > 3 ? '…' : ''} y ${f.storyId} es más transversal (${sh.length ? `toca ${sh.slice(0, 2).join(', ')}, compartidos por todo el proyecto` : `coincide con ${overlapCount.get(first)} historias del lote`}): ${s.storyId} se adapta a ella una sola vez.` });
+    } else notes.push({ itemId: second, text: `Después de ${f.storyId}: comparten ${o.files.slice(0, 3).join(', ')}${o.files.length > 3 ? '…' : ''}; se pondrá al día con lo que integre ${f.storyId}.` });
+  }
+  // 4) Kahn con tu orden como desempate.
+  const indeg = new Map(ids.map(id => [id, 0]));
+  for (const [, to] of edges) for (const t of to) indeg.set(t, indeg.get(t)! + 1);
+  const order: string[] = []; const avail = ids.filter(id => indeg.get(id) === 0);
+  while (avail.length) {
+    avail.sort((a, b) => by.get(a)!.ownerOrder - by.get(b)!.ownerOrder);
+    const x = avail.shift()!; order.push(x);
+    for (const t of edges.get(x)!) { indeg.set(t, indeg.get(t)! - 1); if (indeg.get(t) === 0) avail.push(t); }
+  }
+  for (const id of ids) if (!order.includes(id)) order.push(id); // ciclo de dependencias declaradas: ya lo bloquea planBatch
+  for (const i of inputs) if (i.basis === 'none') notes.push({ itemId: i.itemId, text: 'Aún no se saben sus archivos: se ordena por tu prioridad y se recalcula al planificarla.' });
+  const basis = { actual: 0, planned: 0, predicted: 0, none: 0 } as Record<FileBasis, number>;
+  for (const i of inputs) basis[i.basis]++;
+  return { order, basis, notes, overlaps };
+}
+
+/** Rutas o nombres de archivo que menciona un texto (para predecir archivos y dependencias implícitas). */
+export function mentionedFiles(text: string): string[] {
+  const out = new Set<string>();
+  for (const m of text.matchAll(/(?:^|[\s`'"(«])((?:[\w.-]+\/)*[\w.-]+\.(?:tsx?|jsx?|mjs|cjs|css|scss|json|md|html|sql|ya?ml|py|go|rs))(?=$|[\s`'"),.:;»])/g)) out.add(m[1].replace(/^\.\//, ''));
+  return Array.from(out);
+}
+
+// ---------------------------------------------------------------- Ciclo de vida del lote (sin IA)
+
+/** Situación de una historia para el resumen del lote. */
+export type ItemOutcome = 'in_progress' | 'waiting' | 'ready' | 'decision' | 'technical_blocker' | 'integrating' | 'integrated' | 'accepted' | 'rejected' | 'postponed' | 'cancelled';
+export function itemOutcome(it: Pick<BatchItem, 'state' | 'failureClass'>): ItemOutcome {
+  switch (it.state) {
+    case 'queued': case 'running': case 'revalidating': return 'in_progress';
+    case 'waiting_dependency': case 'external': return 'waiting';
+    case 'ready': case 'awaiting_integration': return 'ready';
+    case 'needs_owner': return it.failureClass === 'environment' || it.failureClass === 'failure' || it.failureClass === 'dependency' ? 'technical_blocker' : 'decision';
+    case 'failed': case 'blocked': return 'technical_blocker';
+    case 'integrating': return 'integrating';
+    case 'awaiting_acceptance': return 'integrated';
+    case 'accepted': return 'accepted';
+    case 'rejected': return 'rejected';
+    case 'postponed': return 'postponed';
+    case 'cancelled': return 'cancelled';
+  }
+}
+
+export interface BatchLifecycle {
+  policy: BatchIntegrationPolicy | 'manual';
+  /** technical: aún trabaja el equipo · acceptance: te toca revisar · integrating: entrando en main · done: todo resuelto. */
+  phase: 'technical' | 'acceptance' | 'integrating' | 'done';
+  technicallyComplete: boolean;
+  counts: Record<ItemOutcome, number>;
+  /** Listas para que las revises (integración al aceptar) o para aceptar ya integradas (automática). */
+  readyForOwner: number;
+  /** La siguiente que te toca revisar, en el orden de integración. */
+  next: string | null;
+  headline: string;
+}
+const FINAL_OUTCOMES: ItemOutcome[] = ['accepted', 'rejected', 'postponed', 'cancelled'];
+const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many}`;
+
+/**
+ * Resumen del lote para el propietario: en qué fase está y qué falta, distinguiendo lo listo para tu aceptación, lo que
+ * necesita una decisión tuya y lo bloqueado por un problema técnico. «Técnicamente completo» = nada técnico en marcha.
+ * No se da por terminado mientras quede trabajo aceptado sin integrar o decisiones tuyas pendientes.
+ */
+export function batchLifecycle(items: Pick<BatchItem, 'itemId' | 'storyId' | 'state' | 'failureClass' | 'dependsOn' | 'dependsInBatch'>[], policy: BatchIntegrationPolicy | 'manual', order: string[] = []): BatchLifecycle {
+  const counts = { in_progress: 0, waiting: 0, ready: 0, decision: 0, technical_blocker: 0, integrating: 0, integrated: 0, accepted: 0, rejected: 0, postponed: 0, cancelled: 0 } as Record<ItemOutcome, number>;
+  for (const i of items) counts[itemOutcome(i)]++;
+  const readyForOwner = counts.ready + counts.integrated;
+  const technicallyComplete = counts.in_progress === 0 && counts.integrating === 0;
+  const done = items.length > 0 && items.every(i => FINAL_OUTCOMES.includes(itemOutcome(i)));
+  const phase: BatchLifecycle['phase'] = done ? 'done' : counts.integrating ? 'integrating' : counts.in_progress ? 'technical' : 'acceptance';
+  const rank = new Map(order.map((id, k) => [id, k]));
+  const sorted = [...items].sort((a, b) => (rank.get(a.itemId) ?? 1e6) - (rank.get(b.itemId) ?? 1e6));
+  const integratedIds = new Set(items.filter(i => ['accepted', 'awaiting_acceptance'].includes(i.state)).map(i => i.storyId));
+  const reviewable = sorted.find(i => (i.state === 'ready' || i.state === 'awaiting_acceptance' || i.state === 'awaiting_integration') && (!i.dependsInBatch || !i.dependsOn || integratedIds.has(i.dependsOn)));
+  const next = (reviewable ?? sorted.find(i => itemOutcome(i) === 'decision'))?.itemId ?? null;
+  const total = n(items.length, 'historia', 'historias');
+  const parts = [
+    readyForOwner ? `${readyForOwner} ${policy === 'on_acceptance' ? (readyForOwner === 1 ? 'lista para tu aceptación (sin integrar)' : 'listas para tu aceptación (sin integrar)') : (readyForOwner === 1 ? 'lista para tu aceptación' : 'listas para tu aceptación')}` : '',
+    counts.decision ? `${counts.decision} ${counts.decision === 1 ? 'requiere una decisión tuya' : 'requieren una decisión tuya'}` : '',
+    counts.technical_blocker ? `${counts.technical_blocker} ${counts.technical_blocker === 1 ? 'bloqueada por un problema técnico' : 'bloqueadas por un problema técnico'}` : '',
+    counts.waiting ? `${counts.waiting} ${counts.waiting === 1 ? 'espera a otra historia' : 'esperan a otras historias'}` : '',
+    counts.accepted ? `${counts.accepted} ${counts.accepted === 1 ? 'aceptada e integrada' : 'aceptadas e integradas'}` : '',
+    counts.postponed ? `${counts.postponed} ${counts.postponed === 1 ? 'aplazada' : 'aplazadas'}` : '',
+    counts.rejected ? `${counts.rejected} no ${counts.rejected === 1 ? 'aceptada' : 'aceptadas'}` : '',
+    counts.cancelled ? `${counts.cancelled} ${counts.cancelled === 1 ? 'cancelada' : 'canceladas'}` : ''
+  ].filter(Boolean).join(', ');
+  const headline = phase === 'done' ? `Lote resuelto: ${total} — ${parts}.`
+    : phase === 'integrating' ? `Integrando en main (de una en una): ${counts.integrating} en curso · ${total} — ${parts || 'sin más pendientes'}.`
+    : technicallyComplete ? `Lote técnicamente completo: ${total} — ${parts}.`
+    : `El equipo trabaja: ${counts.in_progress} en curso de ${total}${parts ? ` · ${parts}` : ''}.`;
+  return { policy, phase, technicallyComplete, counts, readyForOwner, next, headline };
 }
 
 export interface BatchEvent {
@@ -164,6 +396,8 @@ export interface Batch {
    * estaban integradas (y activas, si es el Portal); si no, 'cancelled'. No usa IA.
    */
   closed?: { at: string; reason: string; outcome: 'completed' | 'cancelled' } | null;
+  /** Orden de integración propuesto (sin IA), recalculado al saberse mejor qué archivos toca cada historia. */
+  integrationPlan?: IntegrationPlan | null;
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
@@ -273,7 +507,7 @@ const round = (n: number) => Math.round(n * 1e6) / 1e6;
 export function batchMoving(items: Pick<BatchItem, 'storyId' | 'state' | 'dependsOn' | 'dependsInBatch'>[]): boolean {
   const by = new Map(items.map(i => [i.storyId, i]));
   const moving = (i: (typeof items)[number], seen: Set<string>): boolean => {
-    if (i.state === 'running' || i.state === 'queued' || i.state === 'integrating') return true;
+    if (i.state === 'running' || i.state === 'queued' || i.state === 'integrating' || i.state === 'revalidating') return true;
     if (i.state !== 'waiting_dependency' || !i.dependsInBatch || !i.dependsOn || seen.has(i.storyId)) return false;
     seen.add(i.storyId); const d = by.get(i.dependsOn);
     return !!d && moving(d, seen);
@@ -283,7 +517,7 @@ export function batchMoving(items: Pick<BatchItem, 'storyId' | 'state' | 'depend
 
 /** Resumen por estado para el monitor (cuántas completas, bloqueadas, pendientes de aceptación…). */
 export function batchSummary(items: Pick<BatchItem, 'state'>[]): Record<BatchItemState, number> {
-  const out = { queued: 0, waiting_dependency: 0, running: 0, integrating: 0, needs_owner: 0, awaiting_integration: 0, awaiting_acceptance: 0, accepted: 0, rejected: 0, failed: 0, blocked: 0, cancelled: 0, external: 0 } as Record<BatchItemState, number>;
+  const out = { queued: 0, waiting_dependency: 0, running: 0, integrating: 0, needs_owner: 0, awaiting_integration: 0, awaiting_acceptance: 0, ready: 0, revalidating: 0, postponed: 0, accepted: 0, rejected: 0, failed: 0, blocked: 0, cancelled: 0, external: 0 } as Record<BatchItemState, number>;
   for (const i of items) out[i.state]++;
   return out;
 }
@@ -303,6 +537,7 @@ export interface BatchItemView extends BatchItem {
 export interface BatchView extends Omit<Batch, 'items'> {
   items: BatchItemView[];
   summary: Record<BatchItemState, number>;
+  lifecycle: BatchLifecycle;
   budget: { spent: number; reserved: number; remaining: number; canStart: boolean };
   subscriptionCalls: number;
 }
