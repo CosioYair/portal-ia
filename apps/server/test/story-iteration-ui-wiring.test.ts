@@ -61,6 +61,19 @@ test('HU-166: la autorización se hace desde la cabecera, sin cambiar de pestañ
   assert.ok(!ws.slice(iterIdx).includes('onClick={authorize}'), 'en Iteraciones ya no hay un segundo formulario de autorización');
   assert.ok(!ws.includes("btn btn-primary btn-sm\" onClick={() => openTab('iteraciones')}"), 'el aviso de decisión ya no lleva a Iteraciones para autorizar');
   assert.ok(!ws.includes('Autorízala en la pestaña Iteraciones.'));
+  // Siempre hay un botón principal: si flow no trae acción principal, el respaldo es «Ver el proceso y los agentes».
+  assert.ok(panel.includes("const fallback = variant === 'story' && !primary && !readOnly;"), 'el respaldo solo aparece cuando no hay acción principal');
+  assert.match(panel, /fallback && <Link className="btn btn-primary btn-sm" to=\{`\/procesos\/\$\{proc\.id\}`\}>\{Icon\.arrow\(\)\}Ver el proceso y los agentes<\/Link>/, 'el respaldo es el btn-primary de la cabecera');
+  assert.ok(panel.includes('(flow.actions.length > 0 || fallback)'), 'el bloque de acciones se muestra también con solo el respaldo');
+  assert.ok(panel.includes('!fallback && <Link className="btn btn-ghost btn-sm" to={`/procesos/${proc.id}`}>Ver el proceso y los agentes</Link>'), 'sin duplicar el enlace secundario cuando el respaldo es el principal');
+  // Historia archivada: el enlace principal al archivo queda fuera del fieldset desactivado.
+  const archIdx = ws.indexOf('{it.archivedAt && <Link className="btn btn-primary btn-sm" to="/archivo">');
+  const fsIdx = ws.indexOf('<fieldset disabled={!!it.archivedAt}');
+  assert.ok(archIdx > 0, 'la historia archivada tiene un enlace btn-primary al archivo');
+  assert.ok(fsIdx > 0 && archIdx < fsIdx, 'el enlace al archivo está fuera del fieldset desactivado');
+  // Sin proceso: «pending» → Ejecutar desde Backlog; cualquier otro estado (p. ej. descartada) → Volver al Backlog.
+  assert.ok(ws.includes("{!last && it.status === 'pending' && !it.archivedAt && <button className=\"btn btn-primary btn-sm\" onClick={() => navigate(`/backlog?ejecutar=${it.id}`)}>"), 'sin proceso y pendiente: Ejecutar desde Backlog');
+  assert.ok(ws.includes("{!last && it.status !== 'pending' && !it.archivedAt && <Link className=\"btn btn-primary btn-sm\" to=\"/backlog\">"), 'sin proceso y no pendiente: btn-primary Volver al Backlog');
 });
 
 test('pipeline autorizado: la autorización de una historia incluye el pipeline en las 4 entradas y el panel continúa/repara con presupuesto', () => {
