@@ -100,6 +100,16 @@ export function Backlog() {
     if (force) { const reason = prompt(`Cerrar ${it.storyId} como resuelta fuera del flujo (sin ejecutarla ni integrar cambios). Indica brevemente por qué:`); if (reason === null) return; setBusy(true); try { await api.markStoryDone(ws.slug, it.id, { force: true, reason: reason.trim() || 'resuelta fuera del flujo' }); flash(`${it.storyId} cerrada`); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } return; }
     setBusy(true); try { await api.markStoryDone(ws.slug, it.id); flash(`${it.storyId} completada`); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); }
   };
+  // HU-165 · Cancelar = «no se hará»: queda en Descartadas (no en Completadas). No consume IA; el servidor deja el motivo en el hilo.
+  const cancelStory = async (it: BacklogItem) => {
+    if (!confirm(`¿Cancelar ${it.storyId} · ${it.title}?\n\nNo se hará: la historia queda en «Descartadas», no en Completadas.\nSi ya está resuelta por otra vía, usa «Cerrar sin ejecutar».`)) return;
+    const reason = prompt(`Motivo para cancelar ${it.storyId} (mínimo 3 caracteres):`);
+    if (reason === null) return;
+    if (reason.trim().length < 3) { flash('Indica un motivo de al menos 3 caracteres para cancelar la historia', 'err'); return; }
+    setBusy(true);
+    try { await api.discardStory(ws.slug, it.id, reason); flash(`${it.storyId} cancelada · queda en Descartadas`); await load(); }
+    catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); }
+  };
   const decisions = (() => {
     // El servidor ya consolida por historia; por seguridad se deja una sola entrada por historia (la iteración más alta).
     const loose: PendingDecision[] = []; const byStory = new Map<string, PendingDecision>();
@@ -132,26 +142,28 @@ export function Backlog() {
   const storyActions = (it: BacklogItem): { primary?: StoryCardAction; secondary: StoryCardAction[] } => {
     const lp = lastProc(it); const secondary: StoryCardAction[] = []; let primary: StoryCardAction | undefined;
     const toStory = () => navigate(`/historias/${it.id}`);
-    const storySpace: StoryCardAction = { label: 'Espacio de la historia', onClick: toStory };
+    const storySpace: StoryCardAction = { label: 'Espacio de la historia', title: 'Detalle, edición y conversación con el equipo', onClick: toStory };
+    // Siempre la primera de «Más acciones», en todos los estados (también pendientes sin ejecutar).
+    secondary.push(storySpace);
     if (it.status === 'review') {
       const diffLabel = lp?.result?.applied ? 'Continuar' : 'Revisar diff';
       if (lp?.result?.merged && /Listo para cerrar/.test(lp.guidance?.phase ?? '')) {
         primary = { label: 'Cerrar historia', onClick: () => closeStory(it, false), disabled: busy };
         secondary.push({ label: diffLabel, onClick: toStory });
       } else if (lp) primary = { label: diffLabel, onClick: toStory };
-      else secondary.push(storySpace);
       if (lp && !lp.result?.applied) secondary.push({ label: 'Devolver a pendiente', title: 'Rechaza el diff pendiente y deja la historia lista para ejecutarse de nuevo', onClick: () => resetItem(it), disabled: busy });
     } else if (it.status === 'in_progress') {
       if (lp) primary = { label: 'Ver proceso', variant: 'secondary', onClick: () => navigate(`/procesos/${lp.id}`) };
-      secondary.push(storySpace);
     } else if (it.status === 'pending' || it.status === 'blocked') {
       if (it.status === 'blocked' || depOk(it)) primary = { label: 'Ejecutar', onClick: () => setSel(it), disabled: !!running || !project?.repository };
-      if (lp || it.status !== 'pending') secondary.push(storySpace);
     } else {
       if (lp) primary = { label: 'Ver', variant: 'secondary', onClick: () => navigate(`/procesos/${lp.id}`) };
-      secondary.push(storySpace);
     }
-    if (it.status !== 'done' && it.status !== 'in_progress' && it.status !== 'discarded') secondary.push({ label: 'Cerrar sin ejecutar', title: 'Cerrar sin ejecutar: la historia ya está resuelta por otra vía', onClick: () => closeStory(it, true), disabled: busy });
+    if (it.status !== 'done' && it.status !== 'in_progress' && it.status !== 'discarded') {
+      // «Cancelar historia» nunca es la acción principal: solo va en «Más acciones».
+      secondary.push({ label: 'Cancelar historia', title: 'No se hará: la historia queda en Descartadas (pide confirmación y motivo)', onClick: () => cancelStory(it), disabled: busy });
+      secondary.push({ label: 'Cerrar sin ejecutar', title: 'Cerrar sin ejecutar: la historia ya está resuelta por otra vía y queda en Completadas', onClick: () => closeStory(it, true), disabled: busy });
+    }
     return { primary, secondary };
   };
 
