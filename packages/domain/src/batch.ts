@@ -120,7 +120,8 @@ export interface BatchItem {
 
 export interface BatchEvent {
   at: string;
-  kind: 'authorized' | 'planned' | 'item' | 'integration' | 'activation' | 'pause' | 'resume' | 'cancel' | 'revoke' | 'acceptance' | 'budget' | 'recovery' | 'completed';
+  /** 'close': cierre manual del propietario (con su motivo en el mensaje), sin IA. */
+  kind: 'authorized' | 'planned' | 'item' | 'integration' | 'activation' | 'pause' | 'resume' | 'cancel' | 'revoke' | 'acceptance' | 'budget' | 'recovery' | 'completed' | 'close';
   itemId?: string | null;
   message: string;
 }
@@ -146,6 +147,11 @@ export interface Batch {
   activation: BatchActivation | null;
   /** Dónde se corrige el motivo de la pausa (p. ej. Proveedores → Claude Code), si lo hay. */
   reasonFix?: { label: string; href: string } | null;
+  /**
+   * Cierre manual de un lote en pausa: cuándo, con qué motivo y cómo quedó. Queda 'completed' si todas sus historias
+   * estaban integradas (y activas, si es el Portal); si no, 'cancelled'. No usa IA.
+   */
+  closed?: { at: string; reason: string; outcome: 'completed' | 'cancelled' } | null;
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
