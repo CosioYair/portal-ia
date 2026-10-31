@@ -8,8 +8,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 /**
  * Recorrido completo del Asistente (prioridad 5), de punta a punta, en una instancia aislada: proveedor SIMULADO (0 USD,
- * ninguna llamada real), repositorio sintético y el SANDBOX DOCKER REAL para verificar el encargo. Exige Docker: si no
- * está disponible, la prueba FALLA (no se omite). Pasos: conversación con alcance → investigar una idea → cerrar decisiones
+ * ninguna llamada real), repositorio sintético y el SANDBOX DOCKER REAL para verificar el encargo. Exige Docker: sin él se
+ * omite y lo dice (también dentro del sandbox del propio Portal), salvo con PORTAL_REQUIRE_DOCKER=1, donde FALLA. Pasos: conversación con alcance → investigar una idea → cerrar decisiones
  * una a una → guardar y recuperar → propuesta con cuestionamiento independiente → consultar al equipo → autorizar la
  * creación de historias → encargo de desarrollo SIN historia → verificado con Docker, QA y Gauntlet (con revisión del plan)
  * → revisar y pedir cambios → segunda iteración → el trabajo terminado queda en el historial (Conocimiento).
@@ -84,7 +84,11 @@ function script() {
   ] }));
 }
 
-test('recorrido completo del Asistente con el sandbox Docker real (sin omitir Docker)', async () => {
+// Sin Docker (otro equipo, o dentro del sandbox del propio Portal, que no tiene Docker) se omite y lo dice; con
+// PORTAL_REQUIRE_DOCKER=1 (la puerta de integración) FALLA: nunca se da por superada sin Docker.
+const requireDocker = process.env.PORTAL_REQUIRE_DOCKER === '1';
+const dockerReady = (await sandboxDeps.detect(true)).available === 'docker';
+test('recorrido completo del Asistente con el sandbox Docker real (sin omitir Docker)', { skip: dockerReady || requireDocker ? false : 'Docker no disponible (obligatoria con PORTAL_REQUIRE_DOCKER=1)' }, async () => {
   const det = await sandboxDeps.detect(true);
   assert.equal(det.available, 'docker', `Esta prueba exige Docker: ${det.detail ?? det.available}`);
   script();

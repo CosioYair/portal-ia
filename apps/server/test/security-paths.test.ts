@@ -129,8 +129,8 @@ test('por HTTP (como lo usa la CLI por MCP): rutas codificadas y alias tampoco d
   } finally { job.done(); }
 });
 
-test('escrituras: ningún enlace o unión saca una escritura o un borrado de la carpeta; los hooks del repositorio no se ejecutan', async () => {
-  const { writablePath, applyChanges, annotateChanges } = await import('../src/services/repoWrite.ts');
+test('escrituras: ningún enlace o unión saca una escritura o un borrado de la carpeta', async () => {
+  const { writablePath } = await import('../src/services/repoWrite.ts');
   const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-sec-wt-')); const fuera = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-sec-victima-'));
   fs.writeFileSync(path.join(fuera, 'victima.txt'), 'ORIGINAL');
   let linked = false; try { fs.symlinkSync(fuera, path.join(wt, 'enlace'), 'junction'); linked = true; } catch (e: any) { if (e.code !== 'EPERM') throw e; }
@@ -139,6 +139,16 @@ test('escrituras: ningún enlace o unión saca una escritura o un borrado de la 
     assert.equal(fs.readFileSync(path.join(fuera, 'victima.txt'), 'utf8'), 'ORIGINAL');
   }
   assert.ok(writablePath(wt, 'src/nuevo.ts').endsWith(path.join('src', 'nuevo.ts')), 'lo normal sí');
+});
+
+// Dentro del sandbox del Portal /tmp es un tmpfs «noexec»: git ignora todo hook y el control positivo no puede pasar. Ahí se
+// omite y lo dice; los commits del Portal se hacen en el equipo, donde esta prueba sí se ejecuta.
+const tmpExec = process.platform === 'win32' || (() => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-sec-exec-')); const f = path.join(d, 'x.sh'); fs.writeFileSync(f, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  try { execFileSync(f); return true; } catch { return false; } finally { fs.rmSync(d, { recursive: true, force: true }); }
+})();
+test('escrituras: los hooks del repositorio no se ejecutan en los commits del Portal', { skip: tmpExec ? false : 'el directorio temporal no permite ejecutar scripts (noexec): git ignoraría el hook también en el control' }, async () => {
+  const { applyChanges, annotateChanges } = await import('../src/services/repoWrite.ts');
   // Un hook versionado (como los de husky) que un agente hubiera editado NO se ejecuta en los commits del Portal.
   const r2 = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-sec-hooks-')); const marca = path.join(os.tmpdir(), `portal-ia-hook-${Date.now()}.txt`);
   const g2 = (...a: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: r2, windowsHide: true }).toString();
