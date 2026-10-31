@@ -13,7 +13,8 @@ import { applyChanges, changesSinceBase, commitInWorktree, hashText, readRepoFil
 import { diagnoseFailure, diagnosisPrompt, failingTests, staleCorrectionUnits } from './failureDiagnosis.ts';
 import { verificationEvidence, zeroTests } from './qaGate.ts';
 import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
-import { agentHeadroom, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, retryForeignFailure, stepCall, updatePipeline, updateResult, verifyStage, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
+import { agentHeadroom, apiFallbackFor, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, retryForeignFailure, stepCall, updatePipeline, updateResult, verifyStage, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
+import { usesClaudeCode } from './claudeCode/backend.ts';
 import { monotonicNow } from '../clock.ts';
 
 /**
@@ -86,6 +87,10 @@ function unitUsd(agent: Agent, inputTokens: number, outputTokens: number): numbe
   return (inputTokens * p.inPerM + (outputTokens + agentHeadroom(agent) * 0.5) * p.outPerM) / 1_000_000;
 }
 const unitMaxTokens = (u: WorkUnit) => Math.min(DEV_MAX_TOKENS, Math.max(4000, Math.ceil(u.estimatedOutputTokens * 1.6) + 1000));
+/** ¿La llamada del agente irá por la suscripción? La misma regla que worstCaseCallUsd: Claude Code sin alternativa por la API autorizada. */
+const viaSubscription = (ctx: StoryRunCtx, agent: Agent | null) => !!agent && usesClaudeCode(agent) && !apiFallbackFor(processesRepo(ctx.slug).get(ctx.processId)!, agent);
+/** Texto de una estimación: USD de la API o, por la suscripción, solo equivalente API orientativo (no se cobra). */
+const usdLabel = (usd: number, subscription: boolean | undefined) => subscription ? `≈ ${usd.toFixed(2)} USD equivalente API (orientativo: va por tu suscripción, no se cobra)` : `≈ ${usd.toFixed(2)} USD estimados`;
 
 function newUnit(ctx: StoryRunCtx, agent: Agent, id: string, u: Pick<WorkUnit, 'kind' | 'title' | 'purpose' | 'files' | 'dependsOn' | 'estimatedOutputTokens'> & Partial<WorkUnit>): WorkUnit {
   const plan = ctx.plan;
@@ -93,7 +98,7 @@ function newUnit(ctx: StoryRunCtx, agent: Agent, id: string, u: Pick<WorkUnit, '
   return {
     id, kind: u.kind, title: u.title.slice(0, 160), purpose: u.purpose.slice(0, 600), files: u.files, acceptance: u.acceptance ?? relevantAcceptance(plan?.acceptance ?? [], `${u.purpose} ${u.files.join(' ')}`), dependsOn: u.dependsOn,
     agentId: agent.id, agentName: agent.config.name, role: 'implementer', status: 'pending', attempts: 0, continuations: 0, repairs: 0,
-    estimatedOutputTokens: u.estimatedOutputTokens, estimatedUsd: unitUsd(agent, 2500 + Math.ceil(ctxChars / 3.5), u.estimatedOutputTokens), costUsd: 0, stepIds: [],
+    estimatedOutputTokens: u.estimatedOutputTokens, estimatedUsd: unitUsd(agent, 2500 + Math.ceil(ctxChars / 3.5), u.estimatedOutputTokens), subscription: viaSubscription(ctx, agent), costUsd: 0, stepIds: [],
     source: u.source ?? 'plan', findings: u.findings, round: u.round, error: null, startedAt: null, finishedAt: null
   };
 }
@@ -122,7 +127,7 @@ export function buildManifest(ctx: StoryRunCtx): StoryManifest {
     const id = `u${i + 1}`; g.forEach(d => { d.unitId = id; });
     return newUnit(ctx, ctx.dev, id, { kind: 'build', title: `${LABEL[g[0].kind]}: ${g.map(d => base(d.path)).join(', ')}`, purpose: g.map(d => `${base(d.path)}: ${d.purpose}`).join(' · '), files: g.map(d => d.path), dependsOn: i ? [`u${i}`] : [], estimatedOutputTokens: est(g) + 400 });
   });
-  return { version: 1, deliverables, units, unitOutputBudget: UNIT_TEXT_BUDGET, rounds: [], gate: null, createdAt: now() };
+  return { version: 1, deliverables, units, unitOutputBudget: UNIT_TEXT_BUDGET, qaSubscription: viaSubscription(ctx, ctx.qa), rounds: [], gate: null, createdAt: now() };
 }
 
 /** Entregables por historia: más se explica y se pide dividir (nunca se descartan en silencio). */
@@ -142,18 +147,21 @@ export function planProblem(plan: StoryPlan): string | null {
 
 /**
  * Inicio de la entrega incremental: guarda el manifiesto (punto de control) y comprueba ANTES de gastar que el
- * presupuesto alcanza para implementar todas las unidades; si no, pausa sin llamar a la IA.
+ * presupuesto de la API alcanza para implementar las unidades que irán por la API; si no, pausa sin llamar a la IA.
+ * Las unidades por la suscripción de Claude Code no descuentan USD (las limita su tope de llamadas): su estimación es solo
+ * el equivalente API orientativo y nunca detiene nada.
  */
 export function startIncremental(ctx: StoryRunCtx, plannedStepId?: string | null) {
   const man = buildManifest(ctx);
   // El paso «Implementación» planificado pasa a ser la primera unidad (mismo agente; un paso por llamada a partir de ahí).
   if (plannedStepId && man.units[0]) { man.units[0].reservedStepId = plannedStepId; processesRepo(ctx.slug).renameStep(plannedStepId, `Unidad 1 de ${man.units.length}: ${man.units[0].title}`.slice(0, 180), `Entrega incremental (unidad 1 de ${man.units.length}): ${man.units[0].files.join(', ')}`.slice(0, 300)); }
   updateResult(ctx.slug, ctx.processId, r => ({ ...r, manifest: man }));
-  const total = man.units.reduce((s, u) => s + u.estimatedUsd, 0);
-  emit(ctx, 'unit', `Plan dividido en ${man.units.length} unidad(es) de trabajo para ${man.deliverables.length} entregable(s). Cada unidad se aplica y se conserva al terminar; ninguna respuesta tiene que contener la historia entera.`, { phase: 'implementing', detail: `${man.units.map((u, i) => `${i + 1}. ${u.title}`).join(' · ')} — ≈ ${total.toFixed(2)} USD estimados para implementarlas (sin QA ni correcciones).` });
+  const api = man.units.filter(u => !u.subscription); const total = api.reduce((s, u) => s + u.estimatedUsd, 0);
+  const equivalent = man.units.filter(u => u.subscription).reduce((s, u) => s + u.estimatedUsd, 0);
+  emit(ctx, 'unit', `Plan dividido en ${man.units.length} unidad(es) de trabajo para ${man.deliverables.length} entregable(s). Cada unidad se aplica y se conserva al terminar; ninguna respuesta tiene que contener la historia entera.`, { phase: 'implementing', detail: `${man.units.map((u, i) => `${i + 1}. ${u.title}`).join(' · ')} — ${[api.length ? `≈ ${total.toFixed(2)} USD de API estimados para implementarlas` : null, equivalent ? `${usdLabel(equivalent, true)}${api.length ? '' : ' para implementarlas'}` : null].filter(Boolean).join(' · ')} (sin QA ni correcciones).` });
   const p = processesRepo(ctx.slug).get(ctx.processId)!;
   const remaining = p.budgetUsd - p.spentUsd - (p.unconfirmedUsd ?? 0);
-  if (total > remaining) throw new PipelinePause('budget', `El plan necesita ≈ ${total.toFixed(2)} USD solo para implementar sus ${man.units.length} unidades y quedan ${Math.max(0, remaining).toFixed(2)} USD autorizados. No se empieza para no dejar la historia a medias; el plan y el manifiesto se conservan. Autoriza más presupuesto («Continuar») o acota la historia.`);
+  if (api.length && total > remaining) throw new PipelinePause('budget', `El plan necesita ≈ ${total.toFixed(2)} USD de API solo para implementar sus ${api.length} unidades y quedan ${Math.max(0, remaining).toFixed(2)} USD autorizados. No se empieza para no dejar la historia a medias; el plan y el manifiesto se conservan. Autoriza más presupuesto («Continuar») o acota la historia.`);
 }
 
 // ---------------------------------------------------------------- Contexto selectivo de cada unidad
@@ -528,7 +536,7 @@ async function runUnitInner(ctx: StoryRunCtx, cfg: PipelineConfig, unitId: strin
   const agent = ctx.team.find(a => a.id === unit.agentId) ?? ctx.dev;
   const isCorrection = unit.kind === 'correction';
   setUnit(ctx, unitId, { status: 'running', startedAt: unit.startedAt ?? now() });
-  if (!unit.outputs?.length) emit(ctx, 'unit', `${label[0].toUpperCase()}${label.slice(1)}: ${unit.title} — ${agent.config.name}.`, { phase: isCorrection ? 'correcting' : 'implementing', aiCall: true, detail: `${unit.files.join(', ')} · ≈ ${unit.estimatedUsd.toFixed(2)} USD estimados` });
+  if (!unit.outputs?.length) emit(ctx, 'unit', `${label[0].toUpperCase()}${label.slice(1)}: ${unit.title} — ${agent.config.name}.`, { phase: isCorrection ? 'correcting' : 'implementing', aiCall: true, detail: `${unit.files.join(', ')} · ${usdLabel(unit.estimatedUsd, unit.subscription)}` });
   let strategy: string | null = unit.error ? `Intento anterior: ${unit.error}` : null;
   // Tras agotar los turnos: intento ACOTADO. El contenido de lo relacionado va en el encargo y se pide no explorar.
   if ((unit.maxTurns ?? 0) > 0) strategy = `El intento anterior agotó los turnos de Claude Code explorando el repositorio con herramientas sin llegar a entregar. Esta vez TODO lo necesario está en este encargo (archivos implicados y relacionados, con su contenido actual): NO uses herramientas de lectura salvo que falte algo imprescindible, y entrega la respuesta directamente. Corrige SOLO lo indicado.`;
@@ -967,9 +975,11 @@ export function deliveryProgress(p: Process): DeliveryProgress | null {
   const qaApproved = r.review?.verdict === 'approved' && !!r.applied && (pl?.lastQaCommit === r.applied.commit || gauntletReviewed(r.gauntlet, r.applied.commit));
   const running = p.status === 'running' ? man.units.find(u => u.status === 'running') ?? man.units.find(u => u.status === 'pending') : undefined;
   const corrUnits = man.units.filter(u => u.source && u.source !== 'plan');
-  const pendingUsd = man.units.filter(u => u.status === 'pending' || u.status === 'running').reduce((s, u) => s + u.estimatedUsd, 0);
+  // Lo pendiente por la API (USD que pueden gastarse) y, aparte, el equivalente API de lo que va por la suscripción.
+  const pendingOf = (sub: boolean) => man.units.filter(u => (u.status === 'pending' || u.status === 'running') && !!u.subscription === sub).reduce((s, u) => s + u.estimatedUsd, 0);
+  const pendingUsd = pendingOf(false);
   const qaSteps = p.steps.filter(s => s.role === 'reviewer' && s.status === 'done' && s.costUsd > 0);
-  const qaUsd = qaApproved ? 0 : qaSteps.length ? qaSteps.reduce((s, x) => s + x.costUsd, 0) / qaSteps.length : 0.25;
+  const qaUsd = qaApproved || man.qaSubscription ? 0 : qaSteps.length ? qaSteps.reduce((s, x) => s + x.costUsd, 0) / qaSteps.length : 0.25;
   const paused = pl && (pl.state === 'paused' || pl.state === 'stopped');
   const planUnits = man.units.filter(u => (u.source ?? 'plan') === 'plan');
   const next = p.status === 'running'
@@ -987,6 +997,7 @@ export function deliveryProgress(p: Process): DeliveryProgress | null {
     continuations: pl?.continuations ?? 0,
     spentUsd: p.spentUsd,
     remainingEstimateUsd: Number((pendingUsd + qaUsd).toFixed(4)),
+    subscriptionEquivalentUsd: Number(pendingOf(true).toFixed(4)),
     blocker: paused ? pl!.reason : null,
     next
   };

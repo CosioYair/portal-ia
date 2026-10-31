@@ -191,8 +191,8 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
             <div className="bw-section">
               <div className="eyebrow">3 · Límites (nunca ilimitados)</div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(160px, 100%), 1fr))', gap: 12 }}>
-                {num('totalBudgetUsd', 'Presupuesto de API total (USD)', 0.1, BATCH_LIMITS.maxTotalUsd, 0.5)}
-                {num('perStoryBudgetUsd', 'Tope de API por historia (USD)', 0.1, BATCH_LIMITS.maxPerStoryUsd, 0.5)}
+                {num('totalBudgetUsd', 'Presupuesto de API total (USD)', req.backends!.includes('api') ? 0.1 : 0, BATCH_LIMITS.maxTotalUsd, 0.5)}
+                {num('perStoryBudgetUsd', 'Tope de API por historia (USD)', req.backends!.includes('api') ? 0.1 : 0, BATCH_LIMITS.maxPerStoryUsd, 0.5)}
                 {num('maxSubscriptionCalls', 'Llamadas a la suscripción (tope)', 0, BATCH_LIMITS.maxSubscriptionCalls)}
                 {num('maxCorrections', 'Correcciones por historia', 0, BATCH_LIMITS.maxCorrections)}
                 {num('maxDurationMin', 'Duración máx. del lote (min)', 5, BATCH_LIMITS.maxDurationMin, 5)}
@@ -320,7 +320,7 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
           <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => { setRevoking(false); void act(() => api.batchControl(ws.slug, b.id, 'revoke', { reason: revokeReason }), 'Autorización revocada'); }}>Revocar</button>
         </section>}
         {b.reason && <Notice kind={b.status === 'paused' || idle ? 'warn' : b.status === 'revoked' ? 'err' : 'info'}><span>{b.reason}{b.reasonFix ? <> <Link className="lnk" to={b.reasonFix.href}>{b.reasonFix.label}</Link></> : null}</span></Notice>}
-        {(b.status === 'paused' || b.status === 'completed') && !closed && b.items.some(i => ['queued', 'waiting_dependency', 'needs_owner', 'awaiting_integration'].includes(i.state)) && <section className="card card-b" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        {(b.status === 'paused' || b.status === 'completed' || idle) && !closed && b.items.some(i => ['queued', 'waiting_dependency', 'needs_owner', 'awaiting_integration'].includes(i.state)) && <section className="card card-b" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>Añadir presupuesto (USD)<input className="input mono" type="number" min={0} step={0.5} value={addBudget} onChange={e => setAddBudget(e.target.value)} style={{ width: 120, height: 32 }} /></label>
           <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>Añadir llamadas a la suscripción<input className="input mono" type="number" min={0} value={addCalls} onChange={e => setAddCalls(e.target.value)} style={{ width: 120, height: 32 }} /></label>
           <label className="ck" style={{ flex: '1 1 260px' }}><input className="cb" type="checkbox" checked={resumeOk} onChange={e => setResumeOk(e.target.checked)} /><span>Autorizo reanudar con estos límites (la duración autorizada cuenta desde ahora).</span></label>

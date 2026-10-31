@@ -385,7 +385,8 @@ Responde SOLO con JSON: {"approve": boolean, "summary": string, "issues": string
     setWorkStatus(slug, item, 'review', processId);
   } catch (e: any) {
     // Fallo del proveedor tras la entrega del Desarrollador (con pipeline): pausa, no fallo; lo hecho se conserva.
-    const pp = runCtx && config && !(e instanceof PipelinePause) ? providerPause(e) : null;
+    // USD de la API insuficientes dentro de una llamada (p. ej. al reintentar) tras la entrega: pausa reanudable, como al continuar.
+    const pp = runCtx && config && !(e instanceof PipelinePause) ? providerPause(e) ?? (e?.budget && handedOff ? new PipelinePause('budget', e.message) : null) : null;
     if (pp && e?.failure) updateResult(slug, processId, x => ({ ...x, failure: e.failure }));
     if ((e instanceof PipelinePause || pp) && runCtx) {
       // Pausa o parada del pipeline: el proceso termina «done» con lo hecho conservado y el motivo; «Continuar» lo retoma.

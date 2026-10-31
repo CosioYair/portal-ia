@@ -217,11 +217,12 @@ export async function runOrgEvaluation(slug: string, processId: string, log: (o:
     const models: ModelInfo[] = JSON.parse(prow.models_json);
     const cur = procs.get(processId)!; const p = estimatePricing(providerId, agent.config.model);
     const stepEst = (estimateTokens(system + user) * p.inPerM + maxTokens * p.outPerM) / 1_000_000;
-    if (cur.spentUsd + (cur.unconfirmedUsd ?? 0) + stepEst * 0.5 > cur.budgetUsd) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${cur.spentUsd.toFixed(2)} de ${cur.budgetUsd.toFixed(2)} USD).`), { budget: true });
+    // Por la suscripción (cc) no hay USD que comprobar: la limita su tope de llamadas.
+    if (!cc && cur.spentUsd + (cur.unconfirmedUsd ?? 0) + stepEst * 0.5 > cur.budgetUsd) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${cur.spentUsd.toFixed(2)} de ${cur.budgetUsd.toFixed(2)} USD).`), { budget: true });
     procs.stepStart(step.id); const startedAt = new Date().toISOString();
     const ctrl = registerCall(processId);
     try {
-      requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
+      requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true, route: cc ? 'claude-code' : 'api' });
       const timeoutMs = callTimeoutMs(maxTokens, agent.config.effort);
       const res = await withWatchdog(completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history, timeoutMs }, ctrl.signal), ctrl, timeoutMs);
       const cost = cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);

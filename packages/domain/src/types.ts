@@ -709,7 +709,9 @@ export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' |
   /** Hay un commit en el worktree que el equipo no hizo (registrarlo), o una corrección externa ya verificada espera a QA. */
   | 'external'
   /** Claude Code: la suscripción alcanzó su límite de uso; se espera a la renovación o a otra autorización del propietario. */
-  | 'subscription_limit';
+  | 'subscription_limit'
+  /** Se usaron las llamadas a la suscripción autorizadas (del proceso o del lote): no es USD; continuar concede más llamadas. */
+  | 'call_cap';
 export type PipelinePhase = 'implementing' | 'recovering' | 'repairing' | 'applying' | 'verifying' | 'installing' | 'qa' | 'correcting' | 'finished';
 export interface PipelineStatus {
   config: PipelineConfig;
@@ -797,6 +799,8 @@ export interface WorkUnit {
   /** Salida de texto prevista (tokens) y costo estimado antes de llamar. */
   estimatedOutputTokens: number;
   estimatedUsd: number;
+  /** Su agente va por la suscripción de Claude Code (sin alternativa por la API): estimatedUsd es solo el equivalente API orientativo. */
+  subscription?: boolean;
   /** Costo confirmado de sus llamadas (suma de sus pasos). */
   costUsd: number;
   stepIds: string[];
@@ -847,6 +851,8 @@ export interface StoryManifest {
   units: WorkUnit[];
   /** Salida de texto máxima por unidad (tokens) con la que se dividió el trabajo. */
   unitOutputBudget: number;
+  /** QA va por la suscripción de Claude Code (su revisión no se estima en USD de la API). */
+  qaSubscription?: boolean;
   /** Rondas de corrección: de dónde vienen, cuántas unidades y cuántas aplicaron cambios. */
   rounds: { at: string; source: 'qa' | 'verification' | 'completeness' | 'gauntlet'; units: number; applied: number }[];
   gate: CompletenessGate | null;
@@ -876,8 +882,10 @@ export interface DeliveryProgress {
   corrections: { applied: number; max: number; requested: number; ineffective: number; attempts: number };
   continuations: number;
   spentUsd: number;
-  /** Estimación de lo que falta (unidades pendientes + QA), nunca confirmada. */
+  /** Estimación de lo que falta POR LA API (unidades pendientes + QA), nunca confirmada. */
   remainingEstimateUsd: number;
+  /** Lo que falta por la suscripción de Claude Code, como equivalente API orientativo (no se cobra en USD). */
+  subscriptionEquivalentUsd?: number;
   blocker: string | null;
   next: string;
 }

@@ -1,4 +1,4 @@
-import { BATCH_LIMITS, DEPENDENCY_BROKEN, DEPENDENCY_SATISFIED, INTERNAL_WORKSPACE, backendLabel, batchBudget, batchMoving, batchSourceOf, batchSummary, classifyStop, DEFAULT_GAUNTLET, gauntletOverhead, normalizeGauntlet, normalizePipeline, planBatch, type Batch, type BatchAgentCheck, type BatchAuthorization, type BatchItem, type BatchItemState, type BatchPreview, type BatchPreviewStory, type CallRange, type GauntletConfig, type Process, type ProviderId, type RuntimeCheck, type RuntimeCheckResult } from '@portal-ia/domain';
+import { BATCH_LIMITS, DEPENDENCY_BROKEN, DEPENDENCY_SATISFIED, INTERNAL_WORKSPACE, backendLabel, batchBudget, batchMoving, batchSourceOf, batchSummary, classifyStop, DEFAULT_GAUNTLET, gauntletOverhead, normalizeGauntlet, normalizePipeline, planBatch, type Batch, type BatchAgentCheck, type BatchAuthorization, type BatchFailureClass, type BatchItem, type BatchItemState, type BatchPreview, type BatchPreviewStory, type CallRange, type GauntletConfig, type PipelinePauseKind, type Process, type ProviderId, type RuntimeCheck, type RuntimeCheckResult } from '@portal-ia/domain';
 import { batchesRepo } from '../db/batches.ts';
 import { callMetricsRepo } from '../db/callMetrics.ts';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
@@ -49,6 +49,11 @@ export const ITEM_LABEL: Record<BatchItemState, string> = {
   needs_owner: 'esperando tu decisión', awaiting_integration: 'pendiente de integrar (decides tú)', awaiting_acceptance: 'pendiente de tu aceptación',
   accepted: 'aceptada', rejected: 'no aceptada', failed: 'fallida', blocked: 'bloqueada', cancelled: 'cancelada'
 };
+/** Por qué espera una historia detenida (según su clase): nunca se presenta como trabajo terminado. */
+const WAIT_LABEL: Record<BatchFailureClass, string> = {
+  owner_decision: 'espera tu decisión', environment: 'espera al entorno', budget: 'sin USD de la API autorizados', subscription: 'en pausa por la suscripción',
+  failure: 'falló: decides tú', dependency: 'bloqueada por su dependencia', integration: 'integración: decides tú'
+};
 
 // ---------------------------------------------------------------- Autorización y plan
 
@@ -78,11 +83,13 @@ export function normalizeAuth(projectId: string, input: BatchInput, projectDefau
   // La API es facturable: solo con tu marca. Sin orígenes indicados, solo la suscripción de Claude Code.
   const backends = Array.from(new Set(input.backends?.length ? input.backends : ['claude_code'])) as BatchAuthorization['backends'];
   const merge = !!input.git?.merge;
+  // Sin la API autorizada no hay USD que gastar: 0 es válido (la suscripción la limita su tope de llamadas).
+  const minUsd = backends.includes('api') ? 0.1 : 0;
   return {
     projectId, itemIds, backends,
     apiFallback: !!input.apiFallback && backends.includes('api'),
-    totalBudgetUsd: clamp(input.totalBudgetUsd, 0.1, BATCH_LIMITS.maxTotalUsd, 1),
-    perStoryBudgetUsd: clamp(input.perStoryBudgetUsd, 0.1, BATCH_LIMITS.maxPerStoryUsd, 1),
+    totalBudgetUsd: clamp(input.totalBudgetUsd, minUsd, BATCH_LIMITS.maxTotalUsd, 1),
+    perStoryBudgetUsd: clamp(input.perStoryBudgetUsd, minUsd, BATCH_LIMITS.maxPerStoryUsd, 1),
     maxCorrections: Math.floor(clamp(input.maxCorrections, 0, BATCH_LIMITS.maxCorrections, 3)),
     maxDurationMin: Math.floor(clamp(input.maxDurationMin, 5, BATCH_LIMITS.maxDurationMin, 240)),
     maxSubscriptionCalls: Math.floor(clamp(input.maxSubscriptionCalls, 0, BATCH_LIMITS.maxSubscriptionCalls, 60)),
@@ -115,6 +122,11 @@ const unique = (xs: string[]) => Array.from(new Set(xs));
 const clip = (s: string, n: number) => s.length <= n ? s : `${s.slice(0, n).replace(/\s+\S*$/, '')}…`;
 /** ¿Puede Claude Code ceder a la API en las historias del lote? Lo pide el lote, con la API autorizada, y lo permite el conector. */
 const batchFallback = (auth: Pick<BatchAuthorization, 'backends' | 'apiFallback'>, connector: 'none' | 'api') => !!auth.apiFallback && auth.backends.includes('api') && connector === 'api';
+/**
+ * ¿Puede gastar USD de la API la historia de este equipo? Algún agente en la API, uno que ya cede a ella, o Claude Code con
+ * la alternativa por la API autorizada (la misma regla que worstCaseCallUsd). Solo esas reservan y necesitan presupuesto.
+ */
+export const needsApi = (team: Pick<BatchAgentCheck, 'source' | 'viaFallback'>[], fallback = false) => team.some(t => t.source === 'api' || t.viaFallback || (fallback && t.source === 'claude_code'));
 
 /**
  * Comprobación ÚNICA de los orígenes del equipo de una historia: la usan la vista previa, la autorización del lote y el
@@ -187,21 +199,23 @@ type Limit = 'subscription' | 'budget' | 'duration';
  * coordinador: una historia empieza si las llamadas a la suscripción ya hechas no alcanzan el tope, el presupuesto
  * restante (descontado lo reservado para las que van a la vez) cubre el tope por historia y no se ha superado la duración
  * máxima. Con varias a la vez, las de un mismo grupo no ven las llamadas ni el gasto de las otras hasta que terminan (por
- * eso el tope puede superarse un poco). `minutes`: duración por historia del historial (null si no hay datos).
+ * eso el tope puede superarse un poco). `minutes`: duración por historia del historial (null si no hay datos). Solo las
+ * historias cuyo equipo puede gastar API (`needsApi`) reservan y necesitan USD; las de la suscripción, no.
  */
-function fitsUnderLimits(stories: BatchPreviewStory[], auth: BatchAuthorization, pick: 'min' | 'max', minutes: number | null): { n: number; limitedBy: Limit[] } {
-  const c = Math.max(1, auth.concurrency); let calls = 0; let spent = 0; let groupCalls = 0; let groupUsd = 0; let n = 0; let inGroup = 0; let rounds = 0;
-  const close = () => { calls += groupCalls; spent += groupUsd; groupCalls = 0; groupUsd = 0; inGroup = 0; rounds++; };
-  const room = () => auth.totalBudgetUsd - spent - inGroup * auth.perStoryBudgetUsd + 1e-9 >= auth.perStoryBudgetUsd;
+function fitsUnderLimits(stories: BatchPreviewStory[], auth: BatchAuthorization, pick: 'min' | 'max', minutes: number | null, fallback = false): { n: number; limitedBy: Limit[] } {
+  const c = Math.max(1, auth.concurrency); let calls = 0; let spent = 0; let groupCalls = 0; let groupUsd = 0; let n = 0; let inGroup = 0; let inGroupApi = 0; let rounds = 0;
+  const close = () => { calls += groupCalls; spent += groupUsd; groupCalls = 0; groupUsd = 0; inGroup = 0; inGroupApi = 0; rounds++; };
+  const room = () => auth.totalBudgetUsd - spent - inGroupApi * auth.perStoryBudgetUsd + 1e-9 >= auth.perStoryBudgetUsd;
   for (const s of stories) {
+    const api = needsApi(s.team, fallback);
     // Si lo reservado para las que van a la vez no deja sitio, el coordinador espera a que terminen (no pausa el lote).
-    if (inGroup > 0 && !room()) close();
+    if (api && inGroupApi > 0 && !room()) close();
     const limitedBy: Limit[] = [];
     if (auth.backends.includes('claude_code') && calls >= auth.maxSubscriptionCalls) limitedBy.push('subscription');
-    if (!room()) limitedBy.push('budget');
+    if (api && !room()) limitedBy.push('budget');
     if (minutes !== null && rounds * minutes > auth.maxDurationMin) limitedBy.push('duration');
     if (limitedBy.length) return { n, limitedBy };
-    n++; inGroup++; groupCalls += s.subscriptionCalls[pick]; groupUsd += (pick === 'min' ? s.estimatedUsd : s.estimatedUsdMax) ?? 0;
+    n++; inGroup++; if (api) inGroupApi++; groupCalls += s.subscriptionCalls[pick]; groupUsd += (pick === 'min' ? s.estimatedUsd : s.estimatedUsdMax) ?? 0;
     if (inGroup === c) close();
   }
   return { n, limitedBy: [] };
@@ -250,7 +264,7 @@ export function previewBatch(slug: string, projectId: string, input: BatchInput)
   const calls = automatic.reduce((a, s) => addRange(a, s.calls), { min: 0, max: 0 });
   const subscriptionCalls = automatic.reduce((a, s) => addRange(a, s.subscriptionCalls), { min: 0, max: 0 });
   const hist = automatic.length ? historyMinutes(slug, projectId) : null;
-  const optimistic = fitsUnderLimits(automatic, auth, 'min', hist?.median ?? null); const pessimistic = fitsUnderLimits(automatic, auth, 'max', hist?.p75 ?? null);
+  const optimistic = fitsUnderLimits(automatic, auth, 'min', hist?.median ?? null, fallback); const pessimistic = fitsUnderLimits(automatic, auth, 'max', hist?.p75 ?? null, fallback);
   const blockedByDependency = stories.filter(s => !!s.blockedReason).length;
   const blockedByPermission = stories.filter(s => !s.blockedReason && s.team.some(t => !t.ready)).length;
   // Dependencias que faltan: se proponen, nunca se añaden solas al alcance autorizado.
@@ -409,7 +423,7 @@ function onFinished(slug: string, id: string, it: BatchItem, p: Process) {
   const code = p.result?.failure?.providerCode ?? pl?.providerCode ?? null;
   const c = classifyStop(pl?.pauseKind, p.status, code);
   const reason = pl?.reason ?? p.error ?? 'El pipeline se detuvo.';
-  const why = c.cls === 'subscription' ? 'límite de la suscripción de Claude' : code === 'origin_not_allowed' ? 'un agente usa un origen que el lote no autoriza' : code === 'backend_unavailable' ? 'Claude Code no disponible' : 'entorno de verificación';
+  const why = code === 'call_cap' || pl?.pauseKind === 'call_cap' ? 'tope de llamadas a la suscripción autorizado' : c.cls === 'subscription' ? 'límite de la suscripción de Claude' : code === 'origin_not_allowed' ? 'un agente usa un origen que el lote no autoriza' : code === 'backend_unavailable' ? 'Claude Code no disponible' : 'entorno de verificación';
   // Un motivo de todo el lote (límite de la suscripción, Claude Code no disponible) no es un fallo de la historia: espera tu decisión.
   setItem(slug, id, it.itemId, { state: p.status === 'failed' && !c.batchWide ? 'failed' : 'needs_owner', failureClass: c.cls, reason, finishedAt: now() }, `${p.status === 'failed' && !c.batchWide ? 'falló' : 'se detuvo'} (${c.cls}): ${clip(reason, 400)}${c.batchWide ? '' : ' Las historias independientes siguen.'}`);
   // El mismo motivo detendría a las demás (límite de la suscripción, sandbox caído): se pausa todo el lote.
@@ -521,7 +535,9 @@ function processesOf(slug: string, b: Batch) {
   return b.items.flatMap(i => i.processIds).map(pid => procs.get(pid)).filter(Boolean) as Process[];
 }
 export function budgetOf(slug: string, b: Batch) {
-  return batchBudget(b.auth, processesOf(slug, b).map(p => ({ spentUsd: p.spentUsd, unconfirmedUsd: p.unconfirmedUsd ?? 0, budgetUsd: p.budgetUsd ?? 0, running: p.status === 'running' })));
+  // Solo reservan las historias en marcha cuyo equipo puede gastar API (`usesApi`; las anteriores al campo, sí).
+  const api = new Map(b.items.flatMap(i => i.processIds.map(pid => [pid, i.usesApi !== false] as const)));
+  return batchBudget(b.auth, processesOf(slug, b).map(p => ({ spentUsd: p.spentUsd, unconfirmedUsd: p.unconfirmedUsd ?? 0, budgetUsd: p.budgetUsd ?? 0, running: p.status === 'running', api: api.get(p.id) ?? true })));
 }
 /** Llamadas a la suscripción de Claude Code hechas por las historias del lote (telemetría de llamadas). */
 export function subscriptionCalls(slug: string, b: Batch): number {
@@ -540,8 +556,11 @@ function startNext(slug: string, id: string) {
     const foreign = processesRepo(slug).running().filter(p => !mine.has(p.id));
     if (foreign.length) { const reason = `Espera: hay otro proceso en ejecución fuera del lote (${foreign[0].title}).`; if (next.reason !== reason) setItem(slug, id, next.itemId, { reason }); return; }
     if (slug === INTERNAL_WORKSPACE.slug && b.auth.git.activate && b.items.some(i => i.state === 'integrating' && i.mergedCommit && !i.activated)) return;
+    let prep: Prepared;
+    try { prep = prepareItem(slug, b, next); } catch (e: any) { notStartable(slug, id, next, `No se pudo preparar la historia: ${e?.message ?? e}`); continue; }
+    // Los USD solo limitan a una historia cuyo equipo puede gastar API; una solo con la suscripción no los reserva ni los necesita.
     const budget = budgetOf(slug, b);
-    if (!budget.canStart) {
+    if (prep.api && !budget.canStart) {
       if (!running.length) setStatus(slug, id, 'paused', `El presupuesto restante del lote (${budget.remaining.toFixed(2)} USD de ${b.auth.totalBudgetUsd}) no cubre el tope de otra historia (${b.auth.perStoryBudgetUsd} USD). Lo hecho se conserva; amplía el presupuesto para seguir.`, 'budget');
       return;
     }
@@ -550,33 +569,69 @@ function startNext(slug: string, id: string) {
       if (!running.length) setStatus(slug, id, 'paused', `Se alcanzó el tope de llamadas a la suscripción de Claude autorizado en el lote (${cc} de ${b.auth.maxSubscriptionCalls}). No se asume que la suscripción sea ilimitada: amplíalo para seguir.`, 'budget');
       return;
     }
-    startItem(slug, id, next.itemId);
+    startItem(slug, id, next.itemId, prep);
   }
 }
 
-/** Crea (o adopta la iteración preparada), autoriza con los límites del lote y ejecuta la historia con el pipeline. */
-function startItem(slug: string, id: string, itemId: string) {
+/** No empieza (no se pudo preparar): espera tu decisión; reanudar o reintentar la vuelve a comprobar. */
+function notStartable(slug: string, id: string, it: BatchItem, reason: string, pid?: string) {
+  if (pid) processesRepo(slug).finish(pid, 'cancelled', reason);
+  setItem(slug, id, it.itemId, { state: 'needs_owner', failureClass: 'owner_decision', notStarted: true, resumeProcessId: null, reason, processId: pid ?? it.processId, processIds: pid ? [...it.processIds, pid] : it.processIds }, `no empieza: ${reason}`);
+}
+
+type Prepared = { resume: Process | null; reuse: Process | null; members: { agentId: string; role?: string | null }[]; gauntlet: GauntletConfig; team: BatchAgentCheck[]; api: boolean };
+/**
+ * Con qué equipo empezaría (o se retomaría) una historia del lote, sin crear nada ni llamar a la IA: sus agentes, su
+ * Gauntlet, la comprobación de orígenes (la MISMA que la vista previa) y si puede gastar USD de la API.
+ */
+function prepareItem(slug: string, b: Batch, it: BatchItem): Prepared {
+  const procs = processesRepo(slug);
+  const resume = it.resumeProcessId ? procs.get(it.resumeProcessId) ?? null : null;
+  const adopted = !resume && it.nextProcessId ? procs.get(it.nextProcessId) : undefined;
+  const reuse = adopted && adopted.status === 'pending_authorization' ? adopted : null;
+  let members: { agentId: string; role?: string | null }[]; let gauntlet: GauntletConfig = b.auth.gauntlet;
+  if (resume) {
+    // Se retoma el proceso en pausa: su equipo autorizado (pasos no omitidos) y su Gauntlet ya resuelto.
+    members = resume.steps.filter(s => s.status !== 'skipped').map(s => ({ agentId: s.agentId, role: s.role }));
+    gauntlet = resume.result?.pipeline?.config.gauntlet ?? gauntlet;
+  } else {
+    members = reuse ? reuse.steps.filter(s => s.status === 'pending').map(s => ({ agentId: s.agentId, role: s.role })) : estimateStory(slug, b.projectId, it.itemId, {}).steps.map(s => ({ agentId: s.agentId, role: s.role }));
+    gauntlet = resolveGauntletFor(slug, { id: reuse?.id ?? '', projectId: b.projectId, backlogItemId: it.itemId, assignmentId: null }, b.auth.gauntlet);
+    const evaluator = gauntlet.mode !== 'off' ? projectEvaluator(slug, b.projectId) : null;
+    if (evaluator) members.push({ agentId: evaluator.id, role: 'evaluator' });
+  }
+  const team = checkTeam(slug, b.projectId, members, b.auth);
+  return { resume, reuse, members, gauntlet, team, api: needsApi(team, batchFallback(b.auth, getClaudeCodeSettings().fallback)) };
+}
+
+/** Crea (o adopta la iteración preparada, o retoma la pausa), autoriza con los límites del lote y ejecuta la historia con el pipeline. */
+function startItem(slug: string, id: string, itemId: string, prep: Prepared) {
   const b = batchesRepo(slug).get(id)!; const it = b.items.find(i => i.itemId === itemId)!;
   const procs = processesRepo(slug);
-  const needsOwner = (reason: string, pid?: string) => { if (pid) procs.finish(pid, 'cancelled', reason); setItem(slug, id, itemId, { state: 'needs_owner', failureClass: 'owner_decision', notStarted: true, reason, processId: pid ?? it.processId, processIds: pid ? [...it.processIds, pid] : it.processIds }, `no empieza: ${reason}`); };
-  const adopted = it.nextProcessId ? procs.get(it.nextProcessId) : undefined;
-  const reuse = adopted && adopted.status === 'pending_authorization' ? adopted : null;
+  const needsOwner = (reason: string, pid?: string) => notStartable(slug, id, it, reason, pid);
+  const { reuse, gauntlet } = prep;
   // La MISMA comprobación que la vista previa, ANTES de crear nada: cada agente con un origen autorizado en el lote y
   // listo para ejecutar (nunca se cambia a otro origen facturable). Si algo falla (el conector, el proyecto o un origen
   // cambiaron durante el lote), se pausa TODO el lote una vez, con el motivo y dónde corregirlo; «Reanudar» lo comprueba
   // otra vez. No se crea ningún proceso ni se llama a la IA.
-  let members: { agentId: string; role?: string | null }[]; let gauntlet: GauntletConfig = b.auth.gauntlet;
-  try {
-    members = reuse ? reuse.steps.filter(s => s.status === 'pending').map(s => ({ agentId: s.agentId, role: s.role })) : estimateStory(slug, b.projectId, itemId, {}).steps.map(s => ({ agentId: s.agentId, role: s.role }));
-    gauntlet = resolveGauntletFor(slug, { id: reuse?.id ?? '', projectId: b.projectId, backlogItemId: itemId, assignmentId: null }, b.auth.gauntlet);
-    const evaluator = gauntlet.mode !== 'off' ? projectEvaluator(slug, b.projectId) : null;
-    if (evaluator) members.push({ agentId: evaluator.id, role: 'evaluator' });
-  } catch (e: any) { return needsOwner(`No se pudo preparar la historia: ${e?.message ?? e}`); }
-  const bad = checkTeam(slug, b.projectId, members, b.auth).filter(t => !t.ready);
+  const bad = prep.team.filter(t => !t.ready);
   if (bad.length) {
     const why = unique(bad.map(t => t.problem!)).join(' ');
     setItem(slug, id, itemId, { reason: `No ha empezado: ${why}` });
     setStatus(slug, id, 'paused', `No se empieza nada más: ${why} Corrígelo y pulsa «Reanudar»; no se ha creado ningún proceso ni se ha llamado a la IA.`, 'pause', bad.find(t => t.fix)?.fix ?? null);
+    return;
+  }
+  if (prep.resume) {
+    // Retomar la pausa (autorizado con «Reanudar»), en su turno y sin repetir lo hecho. Si ya no está en pausa (la
+    // continuaste desde el proceso), el lote la sigue o decides tú. Tras una pausa por USD se concede otra vez el tope por historia.
+    const p = prep.resume; const pl = p.result!.pipeline!;
+    if (p.status === 'running') return setItem(slug, id, itemId, { state: 'running', resumeProcessId: null, reason: null, failureClass: null }, 'la retomaste desde el proceso; el lote la sigue.');
+    if (resumableInBatch(slug, p) !== 'continue') return setItem(slug, id, itemId, { state: 'needs_owner', resumeProcessId: null, reason: 'Ya no está en una pausa que el lote pueda retomar: decide desde su proceso.' }, 'ya no está en una pausa reanudable: decides tú.');
+    procs.resume(p.id, Math.max(p.budgetUsd ?? 0, p.spentUsd) + (pl.pauseKind === 'budget' ? b.auth.perStoryBudgetUsd : 0));
+    procs.setResult(p.id, { ...p.result!, pipeline: { ...pl, failures: [], startedAt: now() } });
+    setItem(slug, id, itemId, { state: 'running', resumeProcessId: null, usesApi: prep.api, reason: null, failureClass: null, notStarted: false, startedAt: now(), finishedAt: null }, `se retoma donde quedó (proceso ${p.id.slice(0, 8)}), sin repetir lo hecho.`, 'recovery');
+    const run = batchDeps.resumeStory(slug, p.id, logger, () => isCancelled(p.id)).finally(() => { clearCancel(p.id); void scheduleTick(slug, id); });
+    trackJob(p.id, run).catch(e => logger({ err: e?.message, processId: p.id }, 'lote: fallo inesperado al retomar'));
     return;
   }
   let p: Process;
@@ -587,7 +642,7 @@ function startItem(slug: string, id: string, itemId: string) {
   procs.setResult(p.id, { ...procs.get(p.id)!.result!, pipeline: newPipeline(cfg) });
   syncEvaluatorStep(slug, p.id, cfg.gauntlet!);
   procs.authorize(p.id, b.auth.perStoryBudgetUsd);
-  setItem(slug, id, itemId, { state: 'running', processId: p.id, processIds: [...it.processIds.filter(x => x !== p.id), p.id], nextProcessId: null, reason: null, failureClass: null, notStarted: false, startedAt: now(), finishedAt: null }, `empieza (proceso ${p.id.slice(0, 8)}, tope ${b.auth.perStoryBudgetUsd} USD, ${b.auth.maxCorrections} corrección(es), Gauntlet ${b.auth.gauntlet.mode}).`);
+  setItem(slug, id, itemId, { state: 'running', processId: p.id, processIds: [...it.processIds.filter(x => x !== p.id), p.id], nextProcessId: null, usesApi: prep.api, reason: null, failureClass: null, notStarted: false, startedAt: now(), finishedAt: null }, `empieza (proceso ${p.id.slice(0, 8)}, ${prep.api ? `tope ${b.auth.perStoryBudgetUsd} USD de API` : 'solo con la suscripción (sin USD)'}, ${b.auth.maxCorrections} corrección(es), Gauntlet ${b.auth.gauntlet.mode}).`);
   procs.logExecution({ projectId: b.projectId, agentId: '', kind: `batch_story_started:${id}`, status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: now() });
   const run = batchDeps.runStory(slug, p.id, logger, () => isCancelled(p.id)).finally(() => { clearCancel(p.id); void scheduleTick(slug, id); });
   trackJob(p.id, run).catch(e => logger({ err: e?.message, processId: p.id }, 'lote: fallo inesperado de la historia'));
@@ -599,7 +654,12 @@ function maybeComplete(slug: string, id: string) {
   const waiting = b.items.filter(i => i.state === 'needs_owner' || i.state === 'awaiting_integration');
   const deps = b.items.filter(i => i.state === 'waiting_dependency');
   if (waiting.length || deps.length) {
-    const reason = `Lo automático terminó; esperan tu decisión: ${[...waiting.map(i => `${i.storyId} (${ITEM_LABEL[i.state]})`), ...deps.map(i => `${i.storyId} (espera a ${i.dependsOn})`)].join(', ')}.`;
+    // Nada avanza solo, pero no está «terminado»: cada historia dice por qué espera. Si alguna puede seguir con «Reanudar»
+    // (tope de llamadas, entorno, USD de la API, duración o un reinicio), el lote queda EN PAUSA con ese motivo.
+    const list = [...waiting.map(i => `${i.storyId} (${i.state === 'needs_owner' ? WAIT_LABEL[i.failureClass ?? 'owner_decision'] : ITEM_LABEL[i.state]})`), ...deps.map(i => `${i.storyId} (espera a ${i.dependsOn})`)].join(', ');
+    const resumable = waiting.filter(i => canResume(slug, i));
+    if (resumable.length) return setStatus(slug, id, 'paused', `En pausa: ${resumable.map(i => i.storyId).join(', ')} puede(n) seguir con «Reanudar» (amplía antes el límite que corresponda), donde quedaron y sin repetir lo hecho. Estado: ${list}.`, 'pause');
+    const reason = `Nada avanza sin ti; esperan tu decisión: ${list}.`;
     if (b.reason !== reason) batchesRepo(slug).update(id, x => { x.reason = reason; x.events.push({ at: now(), kind: 'item', message: reason }); });
     return;
   }
@@ -621,13 +681,18 @@ export function pauseBatch(slug: string, id: string): Batch {
 /** Reanudar (autorizado): con presupuesto o tope de suscripción ampliados si se indican; la duración cuenta desde ahora. */
 export function resumeBatch(slug: string, id: string, extra: { addBudgetUsd?: number; addSubscriptionCalls?: number } = {}): Batch {
   const b = getBatch(slug, id); controllable(b);
-  if (b.status === 'running') throw fail(409, 'El lote ya está en marcha.', 'running');
-  const procs = processesRepo(slug);
+  // «En marcha» de verdad solo si algo avanza: un lote donde todo espera tu decisión también se reanuda.
+  if (b.status === 'running' && batchMoving(b.items)) throw fail(409, 'El lote ya está en marcha.', 'running');
   batchesRepo(slug).update(id, x => {
-    // Vuelven a la cola (y se comprueban otra vez) las que no llegaron a trabajar: no empezaron por permisos u orígenes, o
-    // un motivo de todo el lote (límite de la suscripción, Claude Code no disponible) las detuvo sin trabajo que conservar.
-    x.items.filter(i => i.state === 'needs_owner' && (i.notStarted || ((i.failureClass === 'subscription' || i.failureClass === 'environment') && retryable(i, i.processId ? procs.get(i.processId)?.status : null))))
-      .forEach(i => { i.state = i.dependsInBatch ? 'waiting_dependency' : 'queued'; i.reason = 'Vuelve a la cola al reanudar (no tenía trabajo que conservar).'; i.failureClass = null; i.notStarted = false; });
+    // Vuelven a la cola (y se comprueban otra vez) las que no llegaron a trabajar (permisos u orígenes, o un motivo de todo
+    // el lote sin trabajo que conservar) y, en su turno y sin repetir lo hecho, las que quedaron en una pausa reanudable
+    // (tope de llamadas, entorno, USD de la API, duración, reinicio sin cobro incierto). Solo con esta acción del propietario.
+    for (const i of x.items) {
+      const mode = requeueMode(slug, i); if (!mode) continue;
+      i.state = i.dependsInBatch ? 'waiting_dependency' : 'queued'; i.failureClass = null; i.notStarted = false;
+      i.resumeProcessId = mode === 'continue' ? i.processId : null;
+      i.reason = mode === 'continue' ? 'Se retoma donde quedó al reanudar (no se repite lo hecho).' : 'Vuelve a la cola al reanudar (no tenía trabajo que conservar).';
+    }
     x.auth.totalBudgetUsd = Math.min(BATCH_LIMITS.maxTotalUsd, x.auth.totalBudgetUsd + Math.max(0, extra.addBudgetUsd ?? 0));
     x.auth.maxSubscriptionCalls = Math.min(BATCH_LIMITS.maxSubscriptionCalls, x.auth.maxSubscriptionCalls + Math.max(0, Math.floor(extra.addSubscriptionCalls ?? 0)));
     // La duración autorizada se concede otra vez desde la reanudación (nunca acumula tiempo sin límite).
@@ -678,6 +743,31 @@ export function retryable(it: Pick<BatchItem, 'state'>, processStatus: string | 
   return (it.state === 'needs_owner' || it.state === 'failed') && (!processStatus || processStatus === 'cancelled' || processStatus === 'failed');
 }
 
+/**
+ * Una llamada POR LA API interrumpida por un reinicio pudo facturarse sin confirmación (queda como «sin confirmar» en su
+ * paso): no se reenvía sola. Una de la suscripción no tiene cobro incierto (su ejecución ya cuenta en el tope de llamadas).
+ */
+export const uncertainCharge = (p: Process, since = '') => p.steps.some(s => s.status === 'failed' && /^Interrumpido/.test(s.error ?? '') && (s.finishedAt ?? '') >= since && (s.unconfirmedUsd ?? 0) > 0);
+/** Pausas que «Reanudar» (autorizado, con el límite ampliado) retoma donde quedaron: no dependen de una decisión sobre el código. */
+const RESUMABLE: PipelinePauseKind[] = ['call_cap', 'environment', 'budget', 'duration', 'interrupted'];
+/** ¿«Reanudar» puede seguir con este proceso en pausa? «continue» lo retoma; «restart» no tiene nada que conservar (se vuelve a empezar). */
+export function resumableInBatch(slug: string, p: Process | undefined | null): 'continue' | 'restart' | null {
+  const r = p?.result; const pl = r?.pipeline;
+  if (!p || !r || !pl || p.status !== 'done' || pl.state !== 'paused' || !pl.pauseKind || !RESUMABLE.includes(pl.pauseKind) || r.merged || r.rejected || pl.ownerRequest) return null;
+  if (pl.pauseKind === 'interrupted' && uncertainCharge(p, pl.startedAt)) return null;
+  const work = !!r.manifest || !!r.applied || r.changes.some(c => !c.error) || p.steps.some(s => s.role === 'implementer' && !!s.outputMd?.trim());
+  return work ? 'continue' : 'restart';
+}
+/** Qué hace «Reanudar» con una historia que espera tu decisión (null: nada; decides tú desde su proceso). */
+function requeueMode(slug: string, it: BatchItem): 'continue' | 'restart' | null {
+  if (it.state !== 'needs_owner') return null;
+  if (it.notStarted) return 'restart';
+  const p = it.processId ? processesRepo(slug).get(it.processId) : undefined;
+  if ((it.failureClass === 'subscription' || it.failureClass === 'environment') && retryable(it, p?.status)) return 'restart';
+  return resumableInBatch(slug, p);
+}
+const canResume = (slug: string, it: BatchItem) => requeueMode(slug, it) !== null;
+
 /** Reintentar UNA historia dentro del lote (mismos límites): vuelve a la cola y se comprueban otra vez su equipo y orígenes. */
 export function retryItem(slug: string, id: string, itemId: string): Batch {
   const b = getBatch(slug, id); controllable(b);
@@ -694,7 +784,7 @@ export function retryItem(slug: string, id: string, itemId: string): Batch {
     }
   };
   reopen(it.storyId);
-  setItem(slug, id, itemId, { state: it.dependsInBatch ? 'waiting_dependency' : 'queued', reason: b.status === 'running' ? null : 'En cola: empezará al reanudar el lote.', failureClass: null, notStarted: false, finishedAt: null }, `reintentada por ti: vuelvea la cola (se comprueban otra vez su equipo y sus orígenes).`);
+  setItem(slug, id, itemId, { state: it.dependsInBatch ? 'waiting_dependency' : 'queued', reason: b.status === 'running' ? null : 'En cola: empezará al reanudar el lote.', failureClass: null, notStarted: false, resumeProcessId: null, finishedAt: null }, `reintentada por ti: vuelvea la cola (se comprueban otra vez su equipo y sus orígenes).`);
   void scheduleTick(slug, id);
   return getBatch(slug, id);
 }
@@ -758,7 +848,7 @@ export async function iterateItem(slug: string, id: string, itemId: string, note
   const { process } = await iterateStory(slug, itemId, note, { reopen: true, discardApplied: true });
   batchesRepo(slug).update(id, x => {
     const y = x.items.find(i => i.itemId === itemId)!;
-    Object.assign(y, { state: 'queued', nextProcessId: process.id, reason: `Nueva iteración con tu nota: ${note.slice(0, 200)}`, failureClass: null, finishedAt: null, mergedCommit: null, activated: false });
+    Object.assign(y, { state: 'queued', nextProcessId: process.id, resumeProcessId: null, reason: `Nueva iteración con tu nota: ${note.slice(0, 200)}`, failureClass: null, finishedAt: null, mergedCommit: null, activated: false });
     x.events.push({ at: now(), kind: 'item', itemId, message: `${y.storyId}: iteración dirigida preparada (proceso ${process.id.slice(0, 8)}); se ejecuta en su turno dentro de los límites del lote.` });
     if (x.status === 'completed') { x.status = 'running'; x.finishedAt = null; x.reason = null; }
   });
@@ -784,7 +874,8 @@ export async function resumeBatches(log: (o: any, m: string) => void = logger): 
         const pl = p.result?.pipeline;
         if (p.status === 'done' && pl?.state === 'paused' && pl.pauseKind === 'interrupted') {
           const since = it.startedAt ?? '';
-          const uncertain = p.steps.some(s => s.status === 'failed' && /^Interrumpido/.test(s.error ?? '') && (s.finishedAt ?? '') >= since);
+          // Cobro incierto solo si la llamada interrumpida iba por la API (con la suscripción no hay USD en juego).
+          const uncertain = uncertainCharge(p, since);
           if (b.auth.autoResume && it.autoResumes < BATCH_LIMITS.maxAutoResumes && !uncertain) {
             procs.resume(p.id, Math.max(p.budgetUsd ?? 0, p.spentUsd));
             procs.setResult(p.id, { ...p.result!, pipeline: { ...pl, failures: [], startedAt: now() } });
@@ -794,7 +885,7 @@ export async function resumeBatches(log: (o: any, m: string) => void = logger): 
             n++;
             continue;
           }
-          setItem(ws.slug, b.id, it.itemId, { state: 'needs_owner', failureClass: 'environment', reason: uncertain ? 'Interrumpida por un reinicio con una llamada en curso: su cobro (o uso de la suscripción) no está confirmado. No se reenvía sola: decide si continuar.' : 'Interrumpida por un reinicio y ya se retomó una vez sola: decide si continuar.' }, uncertain ? 'interrumpida con una llamada en curso: decides tú (no se reenvía sola).' : 'interrumpida otra vez: decides tú.', 'recovery');
+          setItem(ws.slug, b.id, it.itemId, { state: 'needs_owner', failureClass: 'environment', reason: uncertain ? 'Interrumpida por un reinicio con una llamada por la API en curso: su cobro no está confirmado. No se reenvía sola: decide si continuar.' : 'Interrumpida por un reinicio y ya se retomó una vez sola: decide si continuar.' }, uncertain ? 'interrumpida con una llamada en curso: decides tú (no se reenvía sola).' : 'interrumpida otra vez: decides tú.', 'recovery');
         }
       }
       await finishActivation(ws.slug, b.id).catch(e => log({ err: e?.message, batchId: b.id }, 'lote: no se pudo comprobar la activación'));

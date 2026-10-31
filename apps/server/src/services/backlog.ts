@@ -124,11 +124,12 @@ export async function extractBacklogWithAI(slug: string, projectId: string, maxU
   if (!synthesis) throw Object.assign(new Error('No hay una síntesis en Conocimiento. Ejecuta primero la evaluación inicial.'), { statusCode: 409 });
   const est = estimateExtraction(slug, projectId);
   if (!est) throw Object.assign(new Error('Falta el Coordinador del Proyecto.'), { statusCode: 409 });
-  if (est.estimatedUsd > maxUsd) throw Object.assign(new Error(`La extracción cuesta aprox. ${est.estimatedUsd.toFixed(3)} USD, por encima del tope (${maxUsd.toFixed(2)} USD).`), { statusCode: 409 });
   const coord = activeAgents(slug).find(a => a.key === 'pj-coordinador' && a.projectId === projectId) ?? activeAgents(slug).find(a => a.key === 'pj-coordinador')!;
   const providerId = coord.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
   const cc = agentCaller(slug, coord, projectId, 'Extracción del backlog');
+  // El tope en USD solo limita la API: por la suscripción (cc) la extracción no se cobra en USD.
+  if (!cc && est.estimatedUsd > maxUsd) throw Object.assign(new Error(`La extracción cuesta aprox. ${est.estimatedUsd.toFixed(3)} USD, por encima del tope (${maxUsd.toFixed(2)} USD).`), { statusCode: 409 });
   if (!cc && (!cred || prow.status !== 'connected')) throw Object.assign(new Error('El proveedor del Coordinador no está conectado.'), { statusCode: 409 });
   const agents = activeAgents(slug).map(a => `${a.key}: ${a.config.name}`).join(', ');
   const startedAt = new Date().toISOString();

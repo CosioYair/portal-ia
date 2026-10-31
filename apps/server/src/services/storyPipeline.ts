@@ -78,7 +78,8 @@ export function budgetCheck(slug: string, processId: string, agent: Agent, syste
   const cur = processesRepo(slug).get(processId)!;
   // Lo no confirmado (llamadas abortadas o interrumpidas que pudieron facturarse) cuenta como gastado: criterio prudente.
   const needed = estimateCallUsd(agent, system, user, maxTokens, route); const remaining = cur.budgetUsd - cur.spentUsd - (cur.unconfirmedUsd ?? 0);
-  return { ok: needed <= remaining, needed, remaining };
+  // Una llamada que no descuenta USD (suscripción) nunca se bloquea por USD, aunque la API haya agotado o superado el presupuesto.
+  return { ok: needed === 0 || needed <= remaining, needed, remaining };
 }
 
 /** Sistema del paso con sus lecciones validadas y prácticas, inyectadas una sola vez por paso (lo reutilizan sus llamadas). */
@@ -161,8 +162,9 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   }
   const requireApi = () => {
     if (!apiConnected) throw Object.assign(new Error(`El proveedor ${providerId} no está conectado.`), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'no_credential', detail: `El proveedor ${providerId} no está conectado: conéctalo en Proveedores.` } satisfies ProcessFailure });
-    const b = budgetCheck(slug, processId, agent, system, user, maxTokens, 'api');
-    if (!b.ok) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${proc.spentUsd.toFixed(2)} de ${proc.budgetUsd.toFixed(2)} USD${proc.unconfirmedUsd ? ` + ${proc.unconfirmedUsd.toFixed(2)} sin confirmar` : ''}; esta llamada necesita ≈ ${b.needed.toFixed(2)} USD).`), { budget: true, needed: b.needed, remaining: b.remaining, failure: { kind: 'budget', class: 'BUDGET_EXHAUSTED', detail: 'Presupuesto insuficiente para la siguiente llamada.' } satisfies ProcessFailure });
+    // Lo que se reenvía (historial de una continuación) también se factura: cuenta en la estimación, como en `inTok`.
+    const b = budgetCheck(slug, processId, agent, system, user + (opts.history ?? []).map(h => h.content).join(''), maxTokens, 'api'); const cur = procs.get(processId)!;
+    if (!b.ok) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${cur.spentUsd.toFixed(2)} de ${cur.budgetUsd.toFixed(2)} USD${cur.unconfirmedUsd ? ` + ${cur.unconfirmedUsd.toFixed(2)} sin confirmar` : ''}; esta llamada necesita ≈ ${b.needed.toFixed(2)} USD).`), { budget: true, needed: b.needed, remaining: b.remaining, failure: { kind: 'budget', class: 'BUDGET_EXHAUSTED', detail: 'Presupuesto insuficiente para la siguiente llamada.' } satisfies ProcessFailure });
   };
   // El tope de llamadas a la suscripción se comprueba antes de CADA ejecución de la CLI (claudeCode/callCap.ts).
   if (route === 'api') requireApi();
@@ -200,7 +202,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
     setLive({ state: 'sending', attempt, lastEvent: attempt > 1 ? `Reenviando la solicitud (intento ${attempt} de ${maxAttempts})` : 'Enviando la solicitud al proveedor', lastEventAt: sentAt.toISOString(), deadlineAt: new Date(sentAt.getTime() + timeoutMs).toISOString() });
     opts.log({ ...who, attempt, maxAttempts, timeoutMs, inputTokensEstimated: inTok, maxOutputTokens: maxTokens, route }, 'llamada al proveedor: enviando');
     try {
-      requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
+      requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true, route });
       const request = { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history: opts.history, responseSchema: opts.schema, timeoutMs };
       let res: { text: string; inputTokens: number; outputTokens: number; stopReason: string | null; refusal?: string | null; numTurns?: number | null; cacheReadTokens?: number; tools?: Record<string, number>; recovered?: string | null };
       let cost: number; let backend: string | null = null;
@@ -234,12 +236,13 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       return { text: res.text, stopReason: res.stopReason, inputTokens: res.inputTokens, outputTokens: res.outputTokens, costUsd: cost, refusal: res.refusal ?? null, recovered: res.recovered ?? null };
     } catch (e) {
       const err = e instanceof ProviderRequestError ? e.error : null;
-      // Tope de llamadas a la suscripción: NO se llamó. Se detiene como un presupuesto agotado (nunca cede a la API ni reintenta).
+      // Tope de llamadas a la suscripción: NO se llamó. Pausa reanudable de la suscripción (no USD; providerPause → «call_cap»):
+      // nunca cede a la API ni reintenta; continuar concede más llamadas.
       if (err?.code === 'call_cap') {
         unregisterCall(processId, ctrl);
         const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
         procs.stepFinish(step.id, 'failed', { tokensIn: prev.inputTokens, tokensOut: prev.outputTokens, cost: prev.costUsd, outputMd: prev.outputMd, error: err.message });
-        throw Object.assign(new Error(err.message), { budget: true, failure: { kind: 'budget', class: 'BUDGET_EXHAUSTED', detail: err.message } satisfies ProcessFailure });
+        throw Object.assign(new Error(err.message), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'call_cap', detail: err.message } satisfies ProcessFailure });
       }
       // Claude Code no disponible o límite de la suscripción: la API solo si el propietario la autorizó como alternativa.
       if (route === 'claude-code' && (err?.code === 'usage_limit' || err?.code === 'backend_unavailable') && apiFallbackAllowed()) {
@@ -256,6 +259,15 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       }
       // Reintento acotado solo para errores de conexión (sin respuesta útil), con espera exponencial y cancelable.
       if (isTransient(e) && attempt < maxAttempts && !ctrl.signal.aborted) {
+        // Por la API, el intento fallido pudo facturarse: cuenta como NO confirmado y el presupuesto se comprueba otra vez ANTES de reenviar.
+        if (route === 'api' && maybeBilled(e)) {
+          procs.addUnconfirmed(processId, step.id, costUsd(providerId, agent.config.model, inTok, 0));
+          try { requireApi(); } catch (b) {
+            const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
+            procs.stepFinish(step.id, 'failed', { tokensIn: prev.inputTokens, tokensOut: prev.outputTokens, cost: prev.costUsd, outputMd: prev.outputMd, error: (b as Error).message });
+            throw b;
+          }
+        }
         const wait = backoffMs(attempt);
         setLive({ state: 'retrying', lastEvent: `${err?.message ?? 'Error de conexión'} · reintento ${attempt + 1} de ${maxAttempts} en ${Math.round(wait / 1000)} s`, lastEventAt: new Date().toISOString() });
         opts.log({ step: step.title, attempt, wait, code: err?.code }, 'error transitorio del proveedor: reintento');
@@ -944,6 +956,7 @@ export function providerPause(e: any): PipelinePause | null {
   const f: ProcessFailure | undefined = e?.failure; if (!f?.class) return null;
   // Conector Claude Code: nunca se cambia solo a un origen facturable; se pausa con el motivo y lo hecho se conserva.
   if (f.providerCode === 'usage_limit') return new PipelinePause('subscription_limit', `${f.detail} Lo hecho se conserva y no se ha cambiado a otro proveedor facturable. «Continuar» cuando se renueve el límite, o asigna otro backend al agente.`);
+  if (f.providerCode === 'call_cap') return new PipelinePause('call_cap', `${f.detail} Es el tope de llamadas a tu suscripción, no USD de la API; nada cambió a otro proveedor.`, 'call_cap');
   if (f.providerCode === 'max_turns') return new PipelinePause('max_turns', `${f.detail} Lo hecho se conserva (commits, salidas y verificaciones). No se repite el mismo encargo: el siguiente intento es acotado o decides tú.`);
   if (f.providerCode === 'origin_not_allowed') return new PipelinePause('permission', `${f.detail} Lo hecho se conserva.`, f.providerCode);
   if (f.providerCode === 'backend_unavailable') return new PipelinePause('permission', `Claude Code no está disponible para este paso: ${f.detail} Lo hecho se conserva y no se ha cambiado a otro proveedor facturable. Corrígelo y pulsa «Continuar».`, f.providerCode);
@@ -956,7 +969,7 @@ export function providerPause(e: any): PipelinePause | null {
 /** Cierra el pipeline en pausa/parada con el motivo (sin perder nada) y lo deja listo para «Continuar». */
 export function pausePipeline(ctx: StoryRunCtx, pause: PipelinePause) {
   const stopped = ['repeated_failure', 'limit', 'qa', 'no_changes', 'refusal', 'provider_refusal', 'unsupported', 'unknown', 'plan', 'disagreement', 'gauntlet'].includes(pause.kind);
-  const CLASS: Partial<Record<PipelinePauseKind, AgentFailureKind>> = { budget: 'BUDGET_EXHAUSTED', network: 'PERMISSION_REQUIRED', environment: 'ENVIRONMENT_FAILURE', limit: 'RECOVERABLE_IMPLEMENTATION_ERROR', repeated_failure: 'RECOVERABLE_IMPLEMENTATION_ERROR', missing_information: 'MISSING_INFORMATION', permission: 'PERMISSION_REQUIRED', unsupported: 'UNSUPPORTED_CAPABILITY', provider_refusal: 'PROVIDER_REFUSAL', provider_timeout: 'PROVIDER_TIMEOUT', provider_error: 'PROVIDER_CONNECTION_ERROR', max_turns: 'CLAUDE_CODE_MAX_TURNS_EXHAUSTED', interrupted: 'UNKNOWN_FAILURE', unknown: 'UNKNOWN_FAILURE', too_large: 'INCOMPLETE_OUTPUT', incomplete: 'RECOVERABLE_IMPLEMENTATION_ERROR' };
+  const CLASS: Partial<Record<PipelinePauseKind, AgentFailureKind>> = { budget: 'BUDGET_EXHAUSTED', network: 'PERMISSION_REQUIRED', environment: 'ENVIRONMENT_FAILURE', limit: 'RECOVERABLE_IMPLEMENTATION_ERROR', repeated_failure: 'RECOVERABLE_IMPLEMENTATION_ERROR', missing_information: 'MISSING_INFORMATION', permission: 'PERMISSION_REQUIRED', unsupported: 'UNSUPPORTED_CAPABILITY', provider_refusal: 'PROVIDER_REFUSAL', provider_timeout: 'PROVIDER_TIMEOUT', provider_error: 'PROVIDER_CONNECTION_ERROR', max_turns: 'CLAUDE_CODE_MAX_TURNS_EXHAUSTED', interrupted: 'UNKNOWN_FAILURE', unknown: 'UNKNOWN_FAILURE', too_large: 'INCOMPLETE_OUTPUT', incomplete: 'RECOVERABLE_IMPLEMENTATION_ERROR', call_cap: 'PERMISSION_REQUIRED' };
   const cur = pipelineOf(ctx.slug, ctx.processId);
   updatePipeline(ctx.slug, ctx.processId, { state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, providerCode: pause.providerCode, reason: pause.message, phase: 'finished', finishedAt: now(), failureClass: cur.failureClass && ['missing_information', 'permission', 'unsupported', 'provider_refusal'].includes(pause.kind) ? cur.failureClass : CLASS[pause.kind] ?? cur.failureClass ?? null }, { kind: 'pause', message: pause.message });
 }

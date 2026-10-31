@@ -32,7 +32,10 @@ export function authorizeProcess(slug: string, id: string, input: AuthorizeInput
   if (gauntlet) syncEvaluatorStep(slug, id, gauntlet);
   // Claude Code: un equipo que no puede ejecutar (proyecto sin autorizar, consola sin conectar…) no empieza.
   const readiness = story ? teamReadiness(slug, id) : null;
-  if (readiness && !readiness.ready && readiness.fallback !== 'api') throw fail(409, `No se inicia: ${readiness.team.find(t => !t.ready)!.reason}`, 'backend_not_ready', { readiness });
+  // Sin presupuesto de API (0 USD): solo con TODO el equipo por la suscripción, sin alternativa por la API; lo limita su tope de llamadas.
+  const noApi = !(input.budgetUsd >= 0.1);
+  if (noApi && !(story && input.pipeline && readiness?.team.length && readiness.team.every(t => t.backend !== 'api'))) throw fail(400, 'Sin presupuesto de API (0 USD) todo el equipo debe ir por tu suscripción de Claude Code (la limita su tope de llamadas). Asigna un presupuesto de API o cambia el origen de los agentes que usan la API.', 'budget_required');
+  if (readiness && !readiness.ready && (readiness.fallback !== 'api' || noApi)) throw fail(409, `No se inicia: ${readiness.team.find(t => !t.ready)!.reason}`, 'backend_not_ready', { readiness });
   if (readiness?.team.some(t => t.backend !== 'api')) {
     const gate = subscriptionGate();
     if (!gate.ok) throw fail(409, `No se inicia: ${gate.reason}`, 'subscription_limit', { report: gate.report });
@@ -41,7 +44,7 @@ export function authorizeProcess(slug: string, id: string, input: AuthorizeInput
     // Con la suscripción el USD no limita nada: sin tope indicado, el de un lote (60 llamadas), ampliable al continuar.
     const subscription = !!readiness?.team.some(t => t.backend !== 'api');
     const maxSubscriptionCalls = input.pipeline.maxSubscriptionCalls ?? (subscription ? DEFAULT_SUBSCRIPTION_CALLS : undefined);
-    procs.setResult(id, { ...procs.get(id)!.result!, pipeline: newPipeline(normalizePipeline({ ...input.pipeline, maxSubscriptionCalls, gauntlet: gauntlet ?? undefined })) });
+    procs.setResult(id, { ...procs.get(id)!.result!, pipeline: newPipeline(normalizePipeline({ ...input.pipeline, maxSubscriptionCalls, gauntlet: gauntlet ?? undefined, ...(noApi ? { apiFallback: false } : {}) })) });
   }
   // Encargos de análisis y evaluaciones: tope por proceso (cada paso puede necesitar continuaciones), contado en cada llamada.
   if (!story && proc.maxSubscriptionCalls == null) procs.setCallCap(id, Math.max(6, proc.steps.length * 3));

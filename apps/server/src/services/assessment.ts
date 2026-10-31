@@ -112,11 +112,11 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
       if (!cc && (!cred || prow.status !== 'connected')) { procs.stepFinish(step.id, 'failed', { error: 'proveedor no conectado' }); finalStatus = 'failed'; finalError = `El proveedor ${providerId} no está conectado.`; continue; }
       const models: { id: string; supportsEffort: boolean }[] = JSON.parse(prow.models_json);
       const modelInfo = models.find(m => m.id === agent.config.model);
-      // Comprobación de presupuesto ANTES de llamar: estimación conservadora del paso.
+      // Comprobación de presupuesto ANTES de llamar: estimación conservadora del paso. Por la suscripción (cc) no hay USD que comprobar.
       const current = procs.get(processId)!;
       const p = estimatePricing(providerId, agent.config.model);
       const stepEstimate = ((repoCtx.length / 3.5 + 4000) * p.inPerM + STEP_PLAN[i].maxTokens * p.outPerM) / 1_000_000;
-      if (current.spentUsd + (current.unconfirmedUsd ?? 0) + stepEstimate * 0.6 > current.budgetUsd) {
+      if (!cc && current.spentUsd + (current.unconfirmedUsd ?? 0) + stepEstimate * 0.6 > current.budgetUsd) {
         procs.stepFinish(step.id, 'skipped', { error: `presupuesto insuficiente (gastado ${current.spentUsd.toFixed(2)} de ${current.budgetUsd.toFixed(2)} USD)` });
         finalStatus = 'budget_exceeded'; finalError = 'Se alcanzó el presupuesto autorizado antes de completar todos los pasos.'; continue;
       }
@@ -126,7 +126,7 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
       // Plazo proporcional y cancelación real: «Cancelar» aborta esta petición (ver providerCalls.ts).
       const ctrl = registerCall(processId);
       try {
-        requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
+        requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true, route: cc ? 'claude-code' : 'api' });
       const timeoutMs = callTimeoutMs(STEP_PLAN[i].maxTokens, agent.config.effort);
       const res = await withWatchdog(completeWith(cc, providerId, cred, prow, {
           model: agent.config.model, system: systemPrompt, user: userPrompt,

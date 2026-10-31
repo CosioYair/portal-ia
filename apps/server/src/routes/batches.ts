@@ -10,8 +10,9 @@ const BATCH_INPUT = z.object({
   itemIds: z.array(z.string().min(1)).min(1).max(BATCH_LIMITS.maxItems),
   backends: z.array(z.enum(['api', 'claude_code'])).min(1).max(2).optional(),
   apiFallback: z.boolean().optional(),
-  totalBudgetUsd: z.number().min(0.1).max(BATCH_LIMITS.maxTotalUsd),
-  perStoryBudgetUsd: z.number().min(0.1).max(BATCH_LIMITS.maxPerStoryUsd),
+  // 0 solo tiene sentido sin la API autorizada (normalizeAuth exige 0,1 USD como mínimo si se autoriza la API).
+  totalBudgetUsd: z.number().min(0).max(BATCH_LIMITS.maxTotalUsd),
+  perStoryBudgetUsd: z.number().min(0).max(BATCH_LIMITS.maxPerStoryUsd),
   maxCorrections: z.number().int().min(0).max(BATCH_LIMITS.maxCorrections).optional(),
   maxDurationMin: z.number().int().min(5).max(BATCH_LIMITS.maxDurationMin).optional(),
   maxSubscriptionCalls: z.number().int().min(0).max(BATCH_LIMITS.maxSubscriptionCalls).optional(),

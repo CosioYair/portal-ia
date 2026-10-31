@@ -335,7 +335,7 @@ function DeliveryPanel({ d, running, next }: { d: DeliveryProgress; running: boo
     <div className="sf-del-meta small">
       <span>Correcciones aplicadas {d.corrections.applied} de {d.corrections.max}{d.corrections.requested ? ` · ${d.corrections.requested} unidad(es) de corrección pedidas` : ''}{d.corrections.ineffective ? ` · ${d.corrections.ineffective} ronda(s) sin efecto` : ''}</span>
       {d.continuations > 0 && <span>{d.continuations} continuación(es) de respuestas cortadas (no cuentan como correcciones)</span>}
-      <span className="mono">{fmtUsd(d.spentUsd)} confirmados · ≈ {fmtUsd(d.remainingEstimateUsd)} estimados para terminar</span>
+      <span className="mono">{fmtUsd(d.spentUsd)} confirmados · ≈ {fmtUsd(d.remainingEstimateUsd)} de API estimados para terminar{d.subscriptionEquivalentUsd ? ` · por tu suscripción ≈ ${fmtUsd(d.subscriptionEquivalentUsd)} equivalente API (orientativo, no se cobra)` : ''}</span>
     </div>
     {d.blocker && !next && <div className="small sf-del-blocker"><strong>Bloqueo actual:</strong> {d.blocker}</div>}
     <div className="small"><strong>Siguiente:</strong> {next ? <>{next} <span className="muted">(ver «Problema actual»)</span></> : d.next}</div>

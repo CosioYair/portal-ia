@@ -103,6 +103,10 @@ export interface BatchItem {
   processIds: string[];
   /** Proceso de iteración preparado (pendiente de autorizar) que el lote adopta al reanudar el elemento. */
   nextProcessId?: string | null;
+  /** Proceso en pausa que «Reanudar» (autorizado) retoma donde quedó, en su turno y sin repetir lo hecho. */
+  resumeProcessId?: string | null;
+  /** Su equipo puede gastar USD de la API (algún agente en la API o con la alternativa autorizada). Sin el campo: sí. */
+  usesApi?: boolean;
   autoResumes: number;
   /** No llegó a empezar (equipo sin permiso u origen no autorizado): reanudar o reintentar la vuelve a comprobar. */
   notStarted?: boolean;
@@ -203,7 +207,8 @@ export function planBatch(selected: PlanInput[], backlog: PlanInput[]): PlannedI
  * agente para SU historia (`permission`) solo detiene esa historia.
  */
 export function classifyStop(pauseKind: PipelinePauseKind | null | undefined, processStatus: string, providerCode?: string | null): { cls: BatchFailureClass; batchWide: boolean } {
-  if (providerCode === 'usage_limit') return { cls: 'subscription', batchWide: true };
+  // Límite de uso de la suscripción o tope de llamadas autorizado (no es USD): les pasaría lo mismo a las demás.
+  if (providerCode === 'usage_limit' || providerCode === 'call_cap' || pauseKind === 'call_cap') return { cls: 'subscription', batchWide: true };
   if (providerCode === 'backend_unavailable') return { cls: 'environment', batchWide: true };
   // Un agente pasó a un origen que el lote no autoriza: les pasaría lo mismo a las demás que lo usan.
   if (providerCode === 'origin_not_allowed') return { cls: 'owner_decision', batchWide: true };
@@ -232,11 +237,12 @@ export const DEPENDENCY_BROKEN: BatchItemState[] = ['failed', 'blocked', 'cancel
 
 /**
  * Presupuesto del lote: lo gastado (incluido el coste no confirmado de llamadas interrumpidas, por prudencia) más lo
- * reservado para las historias en marcha (su tope por historia). Solo empieza otra si cabe su tope completo.
+ * reservado para las historias en marcha que pueden gastar API (su tope por historia). `canStart`: cabe el tope completo
+ * de otra historia que use la API. Una historia solo con la suscripción no reserva ni necesita USD (`api: false`).
  */
-export function batchBudget(auth: Pick<BatchAuthorization, 'totalBudgetUsd' | 'perStoryBudgetUsd'>, procs: { spentUsd: number; unconfirmedUsd: number; budgetUsd: number; running: boolean }[]) {
+export function batchBudget(auth: Pick<BatchAuthorization, 'totalBudgetUsd' | 'perStoryBudgetUsd'>, procs: { spentUsd: number; unconfirmedUsd: number; budgetUsd: number; running: boolean; api?: boolean }[]) {
   const spent = procs.reduce((s, p) => s + p.spentUsd + p.unconfirmedUsd, 0);
-  const reserved = procs.filter(p => p.running).reduce((s, p) => s + Math.max(0, p.budgetUsd - p.spentUsd - p.unconfirmedUsd), 0);
+  const reserved = procs.filter(p => p.running && p.api !== false).reduce((s, p) => s + Math.max(0, p.budgetUsd - p.spentUsd - p.unconfirmedUsd), 0);
   const remaining = Math.max(0, auth.totalBudgetUsd - spent - reserved);
   return { spent: round(spent), reserved: round(reserved), remaining: round(remaining), canStart: remaining + 1e-9 >= auth.perStoryBudgetUsd };
 }
