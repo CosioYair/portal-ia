@@ -14,25 +14,9 @@ import { StoryResult } from '../components/StoryResult.tsx';
 import { DelegationResultView } from '../components/DelegationResultView.tsx';
 import { StoryFlowPanel } from '../components/StoryFlowPanel.tsx';
 import { serverNow, stepDurationMs } from '../lib/liveStatus.ts';
-
-const P_LABEL: Record<Process['status'], { label: string; tone: '' | 'ok' | 'warn' | 'err'; dot: '' | 'ok' | 'pulse' | 'err' }> = {
-  pending_authorization: { label: 'Pendiente de autorización', tone: 'warn', dot: '' },
-  running: { label: 'En ejecución', tone: 'warn', dot: 'pulse' },
-  done: { label: 'Completado', tone: 'ok', dot: 'ok' },
-  failed: { label: 'Con errores', tone: 'err', dot: 'err' },
-  cancelled: { label: 'Cancelado', tone: '', dot: '' },
-  budget_exceeded: { label: 'Presupuesto agotado', tone: 'err', dot: 'err' }
-};
-/**
- * Estado que ve el propietario: un proceso «terminado» cuyo pipeline está pausado o detenido NO está completado
- * (HU-159 figuraba «Completado» mientras esperaba una autorización). Pausado = espera tu decisión; detenido = se paró.
- */
-function procLabel(p: Process) {
-  const pl = p.result?.pipeline;
-  if (p.status === 'done' && pl?.state === 'paused') return { label: 'Pausado · espera tu decisión', tone: 'warn' as const, dot: '' as const };
-  if (p.status === 'done' && pl?.state === 'stopped' && pl.pauseKind && pl.pauseKind !== 'no_changes') return { label: 'Detenido · decides tú', tone: 'warn' as const, dot: '' as const };
-  return P_LABEL[p.status];
-}
+import { Disclosure } from '../components/Disclosure.tsx';
+import { ProcessHeader } from '../components/ProcessHeader.tsx';
+import { PROCESS_FILTERS, procLabel, processFilterKey, type NextStepTarget, type ProcessFilterKey } from '../lib/processView.ts';
 
 export function ProcessView() {
   const { processId } = useParams();
@@ -80,8 +64,15 @@ function ProcessViewOf({ processId }: { processId: string }) {
   if (error) return <Shell crumb="Proceso"><main className="page"><Notice kind="err">{error}</Notice></main></Shell>;
   if (!proc) return <Shell crumb="Proceso"><main className="page"><span className="spin" aria-label="Cargando" /></main></Shell>;
   const st = procLabel(proc);
-  const tokens = proc.inputTokens + proc.outputTokens;
   const pct = proc.budgetUsd ? Math.min(100, Math.round((proc.spentUsd / proc.budgetUsd) * 100)) : 0;
+  // HU-167: el siguiente paso solo desplaza y enfoca su sección (o navega a la historia). Nunca ejecuta acciones con costo.
+  const goNext = (t: NextStepTarget) => {
+    if (t.kind === 'link') { navigate(t.to); return; }
+    const el = document.getElementById(t.id) ?? document.getElementById('sec-steps');
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    el.focus({ preventScroll: true });
+  };
 
   // En curso: hasta ahora (hora del servidor), aunque el paso conserve el final de una llamada anterior (continuación).
   const stepTime = (s: ProcessStep) => { const sec = Math.round((stepDurationMs(s, serverNow()) ?? 0) / 1000); return sec < 60 ? `${sec} s` : `${Math.floor(sec / 60)} min ${sec % 60} s`; };
@@ -94,7 +85,7 @@ function ProcessViewOf({ processId }: { processId: string }) {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <Link className="lnk sm13" to="/actividad">← Actividad</Link>
             <h1 className="h1" style={{ fontSize: 26 }}>{proc.title}</h1>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone={st.tone} dot={st.dot}>{st.label}</Chip><Chip className="mono">{tokens} tokens · {fmtUsd(proc.spentUsd)} de {fmtUsd(proc.budgetUsd)}</Chip><Chip xs>{proc.steps.filter(s => s.status === 'done').length} de {proc.steps.length} pasos</Chip></div>
+            <ProcessHeader proc={proc} status={st} onNext={goNext} />
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             {proc.kind === 'story_execution' && proc.backlogItemId && <Link className="btn btn-secondary" to={`/historias/${proc.backlogItemId}`}>Espacio de la historia {Icon.arrow()}</Link>}
@@ -106,17 +97,17 @@ function ProcessViewOf({ processId }: { processId: string }) {
 
         {proc.archivedAt && <Notice kind="info"><strong>Proceso archivado</strong> con la etapa anterior ({new Date(proc.archivedAt).toLocaleDateString('es-MX')}). Es histórico: se puede consultar, pero no admite acciones. <Link className="lnk" to="/archivo">Archivo histórico</Link>.</Notice>}
         <fieldset disabled={!!proc.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
-        {proc.kind === 'story_execution' && proc.guidance?.flow && <StoryFlowPanel proc={proc} variant="process" onChange={setProc}
-          story={proc.backlogItemId ? { id: proc.backlogItemId, storyId: proc.title.split(' · ')[0], title: proc.title.split(' · ').slice(1).join(' · ') || proc.title } : null} />}
-        {proc.guidance && !proc.guidance.flow && proc.status !== 'pending_authorization' && !proc.archivedAt && <Notice kind={proc.guidance.tone}><div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
-          <div><strong>{proc.guidance.phase}.</strong> <span style={{ fontWeight: 600 }}>Siguiente paso:</span> {proc.guidance.next}</div>
+        {proc.kind === 'story_execution' && proc.guidance?.flow && <div id="sec-flow" tabIndex={-1}><StoryFlowPanel proc={proc} variant="process" onChange={setProc}
+          story={proc.backlogItemId ? { id: proc.backlogItemId, storyId: proc.title.split(' · ')[0], title: proc.title.split(' · ').slice(1).join(' · ') || proc.title } : null} /></div>}
+        {proc.guidance && !proc.guidance.flow && proc.status !== 'pending_authorization' && !proc.archivedAt && <div id="sec-recovery" tabIndex={-1}><Notice kind={proc.guidance.tone}><div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
+          <div><strong>{proc.guidance.phase}.</strong></div>
           {proc.kind === 'story_execution' && !proc.archivedAt && (proc.status === 'failed' || proc.status === 'cancelled' || proc.status === 'budget_exceeded') && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             {!!proc.steps[1]?.outputMd && !proc.result?.applied && <button className="btn btn-primary btn-sm" onClick={recover} disabled={fixBusy !== null}>{fixBusy === 'recover' ? <span className="spin spin-light" /> : Icon.check()}Recuperar el resultado (sin IA)</button>}
             <button className="btn btn-secondary btn-sm" onClick={retry} disabled={fixBusy !== null}>{fixBusy === 'retry' ? <span className="spin" /> : Icon.arrow()}Volver a ejecutar la historia</button>
             {fixErr && <span className="sm13" style={{ color: '#9A1F18' }}>{fixErr}</span>}
           </div>}
-        </div></Notice>}
-        {proc.status === 'pending_authorization' && !proc.archivedAt && <section className="card" id="sec-authorize" style={{ borderColor: '#F0C66B', background: '#FFFBF0' }}>
+        </div></Notice></div>}
+        {proc.status === 'pending_authorization' && !proc.archivedAt && <section className="card" id="sec-authorize" tabIndex={-1} style={{ borderColor: '#F0C66B', background: '#FFFBF0' }}>
           <div className="card-h"><div><div className="h3">Autorizar este proceso</div><div className="small muted">Consume IA. Nada se ha gastado todavía. Costo estimado ≈ {fmtUsd(proc.estimatedUsd)}.</div></div><Chip tone="warn" xs>requiere tu autorización</Chip></div>
           <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {authErr && <Notice kind="err">{authErr}</Notice>}
@@ -131,23 +122,31 @@ function ProcessViewOf({ processId }: { processId: string }) {
             <button className="btn btn-primary" style={{ alignSelf: 'flex-start' }} onClick={authorize} disabled={!auth || authBusy || !(Number(budget) > 0)}>{authBusy ? <span className="spin spin-light" /> : Icon.arrow()}{authBusy ? 'Autorizando…' : 'Autorizar y comenzar'}</button>
           </div></section>}
         {proc.error && proc.status !== 'failed' && proc.status !== 'budget_exceeded' && <Notice kind="err">{proc.error}</Notice>}
-        {proc.status === 'running' && <Notice kind="info">Los agentes implicados están <strong>activos</strong> durante este proceso y volverán a estar inactivos al terminar. {proc.kind === 'story_execution' ? 'Proponen cambios; nada se escribe en el repositorio sin tu aprobación.' : proc.kind === 'delegated_task' ? 'El responsable valida el encargo, consulta a su equipo y entrega el resultado; las propuestas al backlog las aplicas tú.' : 'Solo realizan lectura y análisis; ninguna acción sobre el repositorio.'}</Notice>}
-        {proc.kind === 'story_execution' && proc.result && (proc.status === 'done' || proc.result.changes.length > 0) && <StoryResult proc={proc} onChange={setProc} />}
+        {proc.status === 'running' && <Disclosure title="Agentes activos durante el proceso"><Notice kind="info">Los agentes implicados están <strong>activos</strong> durante este proceso y volverán a estar inactivos al terminar. {proc.kind === 'story_execution' ? 'Proponen cambios; nada se escribe en el repositorio sin tu aprobación.' : proc.kind === 'delegated_task' ? 'El responsable valida el encargo, consulta a su equipo y entrega el resultado; las propuestas al backlog las aplicas tú.' : 'Solo realizan lectura y análisis; ninguna acción sobre el repositorio.'}</Notice></Disclosure>}
+        {proc.kind === 'story_execution' && proc.result && (proc.status === 'done' || proc.result.changes.length > 0) && <div id="sec-result" tabIndex={-1}><StoryResult proc={proc} onChange={setProc} /></div>}
         {proc.kind === 'story_execution' && proc.result?.gauntlet && <GauntletReport state={proc.result.gauntlet} implementer={proc.steps.find(s => s.role === 'implementer')?.agentName ?? null} />}
         {proc.kind === 'delegated_task' && proc.delegation && (proc.delegation.triage || proc.status !== 'running') && <DelegationResultView proc={proc} onChange={setProc} />}
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
-          <div style={{ flex: '999 1 520px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div id="sec-steps" tabIndex={-1} style={{ flex: '999 1 520px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
             {proc.steps.map((s, i) => (
               <section key={s.id} className="card">
                 <button className="card-h" style={{ width: '100%', background: 'transparent', border: 0, borderBottom: open === s.id ? '1px solid #EEECE6' : 0, font: 'inherit', cursor: 'pointer', textAlign: 'left', borderRadius: 10 }} onClick={() => setOpen(open === s.id ? null : s.id)} aria-expanded={open === s.id}>
                   <div style={{ display: 'flex', gap: 12, alignItems: 'center', minWidth: 0 }}>
                     <span className="ili-ic" style={s.status === 'done' ? { background: '#E3F1EF', color: '#0B5652' } : undefined}>{s.status === 'done' ? Icon.check() : s.status === 'running' ? <span className="spin" /> : <span className="mono">{i + 1}</span>}</span>
-                    <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}><span className="h3">{s.title}</span><span className="small muted">{s.agentName}{s.role ? ` · ${s.role === 'planner' ? 'planifica' : s.role === 'implementer' ? 'implementa' : s.role === 'reviewer' ? 'revisa' : 'consulta'}` : ''} · <span className="mono">{s.model}</span>{s.backend && <> · <Chip xs tone="accent">{s.backend}</Chip></>}{s.status === 'done' && <> · {s.inputTokens + s.outputTokens} tokens · {fmtUsd(s.costUsd)} {s.backend?.startsWith('Claude Code') ? <span title="Ejecutado con la suscripción de Claude: no descuenta del presupuesto de API">sin cargo a la API</span> : <span title="Costo calculado con los tokens que devolvió el proveedor">real</span>}</>}{s.reason && <span title={s.reason}> · ⓘ</span>}</span></span>
+                    <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}><span className="h3">{s.title}</span><span className="small muted">{s.agentName}{s.role ? ` · ${s.role === 'planner' ? 'planifica' : s.role === 'implementer' ? 'implementa' : s.role === 'reviewer' ? 'revisa' : 'consulta'}` : ''}</span></span>
                   </div>
-                  <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>{s.startedAt && <span className="small muted mono" title={s.status === 'running' && s.inputTokens + s.outputTokens ? 'Uso confirmado de las llamadas ANTERIORES de este paso; la llamada en curso aún no tiene consumo confirmado.' : undefined}>{stepTime(s)}{s.inputTokens + s.outputTokens ? ` · ${s.inputTokens + s.outputTokens} tok · ${fmtUsd(s.costUsd)}${s.status === 'running' ? ' confirmados antes' : ''}` : ''}</span>}{stepChip(s)}</span>
+                  <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>{s.startedAt && <span className="small muted mono">{stepTime(s)}</span>}{stepChip(s)}</span>
                 </button>
                 {open === s.id && <div className="card-b">
+                  <Disclosure title="Detalles técnicos">
+                    <div className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      <div>Modelo: <span className="mono">{s.model ?? '—'}</span></div>
+                      {s.backend && <div>Backend: <Chip xs tone="accent">{s.backend}</Chip></div>}
+                      {s.inputTokens + s.outputTokens > 0 && <div><span className="mono">{s.inputTokens + s.outputTokens} tokens · {fmtUsd(s.costUsd)}</span> {s.status === 'running' ? <span title="Uso confirmado de las llamadas ANTERIORES de este paso; la llamada en curso aún no tiene consumo confirmado.">confirmados antes</span> : s.backend?.startsWith('Claude Code') ? <span title="Ejecutado con la suscripción de Claude: no descuenta del presupuesto de API">sin cargo a la API</span> : <span title="Costo calculado con los tokens que devolvió el proveedor">real</span>}</div>}
+                      {s.reason && <div>Motivo: {s.reason}</div>}
+                    </div>
+                  </Disclosure>
                   {s.error && <Notice kind="err">{s.error}</Notice>}
                   {s.status === 'running' && <p className="sm13 muted">En curso: el estado real de la llamada al proveedor está en la cabecera de arriba. Esta vista consulta el servidor cada 2 segundos.</p>}
                   {/* Paso en curso con salida de llamadas anteriores (continuación): texto plano y plegado, sin interpretarlo. */}
@@ -184,7 +183,10 @@ export function ProcessList() {
   const { status, navigate } = useApp();
   const slug = status.workspace!.slug; const projectId = status.project!.id;
   const [list, setList] = useState<Process[] | null>(null);
+  const [filter, setFilter] = useState<'all' | ProcessFilterKey>('all');
   useEffect(() => { api.processes(slug, projectId).then(setList).catch(() => setList([])); }, [slug, projectId]);
+  const countOf = (k: 'all' | ProcessFilterKey) => !list ? 0 : k === 'all' ? list.length : list.filter(p => processFilterKey(p) === k).length;
+  const rows = !list ? [] : filter === 'all' ? list : list.filter(p => processFilterKey(p) === filter);
   return (
     <Shell crumb="Actividad">
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -192,8 +194,12 @@ export function ProcessList() {
         <section className="card">
           <div className="card-h"><div className="h3">Procesos</div><span className="small muted">{list?.length ?? 0} en total</span></div>
           {list && list.length === 0 && <div className="card-b"><p className="muted sm13">Aún no hay procesos. La evaluación inicial se lanza desde el panel; las historias, desde el backlog.</p></div>}
-          {list && list.length > 0 && <div style={{ overflowX: 'auto' }}><table className="tbl"><thead><tr><th>Proceso</th><th>Estado</th><th>Pasos</th><th>Tokens</th><th>Costo</th><th>Creado</th></tr></thead>
-            <tbody>{list.map(p => { const st = procLabel(p); return <tr key={p.id}><td><button className="lnk" onClick={() => navigate(`/procesos/${p.id}`)}>{p.title}</button></td><td><Chip tone={st.tone} xs dot={st.dot}>{st.label}</Chip></td><td className="med">{p.steps.filter(s => s.status === 'done').length}/{p.steps.length}</td><td className="mono" style={{ fontSize: 12 }}>{p.inputTokens + p.outputTokens}</td><td className="mono" style={{ fontSize: 12 }}>{fmtUsd(p.spentUsd)}</td><td className="med">{new Date(p.createdAt).toLocaleString('es-MX')}</td></tr>; })}</tbody></table></div>}
+          {list && list.length > 0 && <div className="card-b filter-group" role="group" aria-label="Filtrar por estado">
+            {PROCESS_FILTERS.map(f => <button key={f.key} type="button" className={`btn btn-sm ${filter === f.key ? 'btn-primary' : 'btn-secondary'}`} aria-pressed={filter === f.key} onClick={() => setFilter(f.key)}>{f.label} ({countOf(f.key)})</button>)}
+          </div>}
+          {list && list.length > 0 && rows.length === 0 && <div className="card-b"><p className="muted sm13" role="status">Ningún proceso con este estado.</p></div>}
+          {list && rows.length > 0 && <div style={{ overflowX: 'auto' }}><table className="tbl"><thead><tr><th>Proceso</th><th>Estado</th><th>Pasos</th><th>Tokens</th><th>Costo</th><th>Creado</th></tr></thead>
+            <tbody>{rows.map(p => { const st = procLabel(p); return <tr key={p.id}><td><button className="lnk" onClick={() => navigate(`/procesos/${p.id}`)}>{p.title}</button></td><td><Chip tone={st.tone} xs dot={st.dot}>{st.label}</Chip></td><td className="med">{p.steps.filter(s => s.status === 'done').length}/{p.steps.length}</td><td className="mono" style={{ fontSize: 12 }}>{p.inputTokens + p.outputTokens}</td><td className="mono" style={{ fontSize: 12 }}>{fmtUsd(p.spentUsd)}</td><td className="med">{new Date(p.createdAt).toLocaleString('es-MX')}</td></tr>; })}</tbody></table></div>}
         </section>
       </main>
     </Shell>
