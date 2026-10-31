@@ -175,6 +175,34 @@ test('docker: un script malicioso no ve el Portal ni los datos, no escribe fuera
   }
 });
 
+test('docker: un script que repunta el .git del worktree (gitdir propio con core.fsmonitor) no ejecuta nada en el equipo: se detecta, se restaura y falla', { skip: process.env.PORTAL_INSIDE_SANDBOX ? 'ya dentro de un sandbox' : st.available !== 'docker' && process.env.PORTAL_REQUIRE_DOCKER !== '1' ? 'Docker no disponible' : false }, async () => {
+  assert.equal(st.available, 'docker', 'Docker no está disponible para la prueba de aislamiento real');
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-docker-gitdir-'));
+  fs.writeFileSync(path.join(repo, 'README.md'), '# r\n'); execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm Base', { cwd: repo });
+  const wt = path.resolve(repo, '..', `${path.basename(repo)}-worktrees`, 'p1'); fs.mkdirSync(path.dirname(wt), { recursive: true });
+  execSync(`git -C "${repo}" worktree add -q --detach "${wt}" HEAD`);
+  const original = fs.readFileSync(path.join(wt, '.git'), 'utf8');
+  // Marca en el equipo, fuera del worktree: si el git del Portal ejecutara el fsmonitor del gitdir falso, aparecería.
+  const marker = path.join(path.dirname(wt), 'FUERA-DEL-SANDBOX.txt');
+  const markerSh = marker.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_m, d: string) => `/${d.toLowerCase()}`);
+  const attack = `git init -q /tmp/r && cp -r /tmp/r/.git .g && rm -f .git && printf 'gitdir: .g\\n' > .git && git config -f .g/config core.bare false && git config -f .g/config core.fsmonitor 'echo ESCAPADO > "${markerSh}"; false'`;
+  const name = `g-${Date.now().toString(36)}`;
+  fs.writeFileSync(path.join(wt, 'package.json'), JSON.stringify({ name, version: '1.0.0', scripts: { test: attack } }));
+  fs.writeFileSync(path.join(wt, 'package-lock.json'), JSON.stringify({ name, version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name, version: '1.0.0' } } }));
+  const volume = depsVolumeName(wt);
+  try {
+    assert.equal((await runInSandbox(wt, repo, 'install', { timeoutMs: 120_000 })).exitCode, 0);
+    const r = await runInSandbox(wt, repo, 'test', { timeoutMs: 120_000 });
+    assert.equal(r.tampered, true, r.output); assert.equal(r.exitCode, 1); assert.match(r.output, /\[seguridad\]/);
+    assert.equal(fs.readFileSync(path.join(wt, '.git'), 'utf8'), original, 'el .git original se restauró');
+    execSync('git status --porcelain', { cwd: wt, stdio: 'ignore' });
+    assert.equal(fs.existsSync(marker), false, 'el git del equipo no ejecutó nada del gitdir falso');
+  } finally {
+    for (let i = 0; i < 10; i++) { try { execFileSync('docker', ['volume', 'rm', '-f', volume], { stdio: 'ignore', env: dockerCliEnv() }); break; } catch { await new Promise(r => setTimeout(r, 500)); } }
+    execSync(`git -C "${repo}" worktree remove --force "${wt}"`);
+  }
+});
+
 test('motor colgado tras terminar el comando: con la marca de salida no se espera al tiempo máximo; se retira el contenedor y se usa su código', async () => {
   const { runProcess } = await import('../src/services/sandbox.ts');
   let removed = 0; const t0 = Date.now();

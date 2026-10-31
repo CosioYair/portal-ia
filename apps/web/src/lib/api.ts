@@ -64,6 +64,8 @@ export interface AssignmentAuthPreview {
   /** Lo que falta para autorizar (o null si está listo). */
   missing: string | null; estimatedUsd: number; suggestedBudgetUsd: number; steps: number; agents: { name: string; role: string | null; model: string | null }[];
   gauntlet: GauntletConfig; suggestedSubscriptionCalls: number; subscription: { ok: boolean; reason?: string; warning?: string | null; report: ClaudeCodeUsageReport | null };
+  /** Rama de una versión anterior aplicada sin integrar: otra ejecución exige descartarla (con tu confirmación). */
+  discardBranch: string | null;
 }
 export interface AssistantImage { mediaType: string; data: string; name?: string }
 export interface AssistantMessage { id: string; role: 'user' | 'assistant'; content: string; actions: AssistantAction[]; attachments: AssistantAttachment[]; tokensIn: number; tokensOut: number; costUsd: number; model: string | null; createdAt: string }
@@ -201,7 +203,7 @@ export const api = {
   decideLocal: (messageId: string, index: number, decision: 'approve' | 'reject') => request<{ message: AssistantMessage }>(`/api/assistant/messages/${messageId}/local/${index}/${decision}`, { method: 'POST', body: JSON.stringify(decision === 'approve' ? { authorized: true } : {}) }),
   assignment: (slug: string, id: string) => request<AssignmentView>(`/api/workspaces/${slug}/assignments/${id}`),
   assignmentAuthorization: (slug: string, id: string) => request<AssignmentAuthPreview>(`/api/workspaces/${slug}/assignments/${id}/authorization`),
-  authorizeAssignment: (slug: string, id: string, body: { budgetUsd: number; maxSubscriptionCalls?: number; gauntlet?: { mode: 'auto' | 'off' | 'standard' | 'deep' } }) => request<{ assignment: Assignment }>(`/api/workspaces/${slug}/assignments/${id}/authorize`, { method: 'POST', body: JSON.stringify({ ...body, authorized: true }) }),
+  authorizeAssignment: (slug: string, id: string, body: { budgetUsd: number; maxSubscriptionCalls?: number; gauntlet?: { mode: 'auto' | 'off' | 'standard' | 'deep' }; discardApplied?: boolean }) => request<{ assignment: Assignment }>(`/api/workspaces/${slug}/assignments/${id}/authorize`, { method: 'POST', body: JSON.stringify({ ...body, authorized: true }) }),
   acceptAssignment: (slug: string, id: string, note: string | null) => request<Assignment>(`/api/workspaces/${slug}/assignments/${id}/accept`, { method: 'POST', body: JSON.stringify(note ? { note } : {}) }),
   requestAssignmentChanges: (slug: string, id: string, note: string, discardApplied = false) => request<Assignment>(`/api/workspaces/${slug}/assignments/${id}/changes`, { method: 'POST', body: JSON.stringify({ note, discardApplied }) }),
   cancelAssignment: (slug: string, id: string) => request<Assignment>(`/api/workspaces/${slug}/assignments/${id}/cancel`, { method: 'POST', body: JSON.stringify({}) }),

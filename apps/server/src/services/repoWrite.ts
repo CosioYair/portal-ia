@@ -261,6 +261,7 @@ export async function applyChanges(repoPath: string, branch: string, changes: Pr
       files.push(c.path);
     }
     await git(wt, ['add', '-A']);
+    await unstageProtected(wt);
     const staged = await git(wt, ['diff', '--cached', '--name-only']);
     if (!staged) throw Object.assign(new Error('Los cambios propuestos no modifican nada respecto al repositorio.'), { statusCode: 409 });
     await git(wt, ['-c', 'user.name=Portal IA', '-c', 'user.email=portal-ia@local', 'commit', '-q', '-m', message]);
@@ -270,6 +271,17 @@ export async function applyChanges(repoPath: string, branch: string, changes: Pr
     try { await git(cwd, ['worktree', 'remove', '--force', wt]); if (!branchExisted) await git(cwd, ['branch', '-D', branch]); } catch { /* informar el error original */ }
     throw e;
   }
+}
+
+/**
+ * Un commit del Portal nunca incluye rutas protegidas (`.npmrc`, `.claude/`, `.env*`, `.git`…), aunque las haya escrito lo
+ * ejecutado en el sandbox (el worktree se monta con escritura): `git add -A` las prepararía y acabarían integradas en main
+ * sin que la revisión las muestre. Se retiran del commit y quedan sin confirmar en el worktree.
+ */
+async function unstageProtected(wt: string): Promise<string[]> {
+  const bad = (await git(wt, ['diff', '--cached', '--name-only', '-z'])).split('\0').filter(f => f && readProtectedReason(f) !== null);
+  if (bad.length) await git(wt, ['--literal-pathspecs', 'reset', '-q', '--', ...bad]);
+  return bad;
 }
 
 /**
@@ -292,6 +304,7 @@ export async function commitInWorktree(wt: string, changes: ProposedChange[], me
     files.push(c.path);
   }
   await git(wt, ['add', '-A']);
+  await unstageProtected(wt);
   const staged = await git(wt, ['diff', '--cached', '--name-only']);
   if (!staged) throw Object.assign(new Error('La corrección no modifica nada respecto al worktree.'), { statusCode: 409, code: 'no_effect' });
   await git(wt, ['-c', 'user.name=Portal IA', '-c', 'user.email=portal-ia@local', 'commit', '-q', '-m', message]);

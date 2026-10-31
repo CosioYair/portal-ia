@@ -890,7 +890,7 @@ export interface ProcessFailure { kind: 'output_contract' | 'provider' | 'budget
   /** Lo que se pide al propietario para seguir (procesos sin pipeline). */
   request?: OwnerRequest | null }
 export type Isolation = 'docker' | 'wsl' | 'linux-ns' | 'host-min' | 'unavailable';
-export interface VerificationRun { command: string; exitCode: number | null; output: string; startedAt: string; finishedAt: string; durationMs: number; /** Dónde se ejecutó: sandbox real (docker/wsl), verificación mínima en el equipo (solo tsc) o no disponible. */ isolation?: Isolation;  /** Commit del worktree verificado: identifica a qué versión del código corresponde (no la hora). */ commit?: string | null; }
+export interface VerificationRun { command: string; exitCode: number | null; output: string; startedAt: string; finishedAt: string; durationMs: number; /** Dónde se ejecutó: sandbox real (docker/wsl), verificación mínima en el equipo (solo tsc) o no disponible. */ isolation?: Isolation;  /** Commit del worktree verificado: identifica a qué versión del código corresponde (no la hora). */ commit?: string | null; /** Lo ejecutado en el sandbox cambió el `.git` del worktree (se restauró): incidente de seguridad, no un fallo del código. */ tampered?: boolean; }
 /**
  * Verificaciones que corresponden a la versión aplicada ahora. Con el commit registrado (desde v0.16), por identidad
  * del commit: la hora no sirve (el reloj puede retroceder, p. ej. en la VM de Docker, y una verificación válida pasaría

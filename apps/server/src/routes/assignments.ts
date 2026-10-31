@@ -50,9 +50,9 @@ export async function assignmentRoutes(app: FastifyInstance) {
   app.post('/api/workspaces/:slug/assignments/:id/authorize', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     if (!authorized(req.body)) return reply.code(400).send(DENIED);
-    const body = z.object({ budgetUsd: z.number().min(0.1).max(500), maxSubscriptionCalls: z.number().int().min(1).max(2000).optional(), maxCorrections: z.number().int().min(0).max(5).optional(), allowInstall: z.boolean().optional(), gauntlet: z.object({ mode: z.enum(['off', 'standard', 'deep', 'auto']) }).optional() }).passthrough().safeParse(req.body);
+    const body = z.object({ budgetUsd: z.number().min(0.1).max(500), maxSubscriptionCalls: z.number().int().min(1).max(2000).optional(), maxCorrections: z.number().int().min(0).max(5).optional(), allowInstall: z.boolean().optional(), discardApplied: z.boolean().optional(), gauntlet: z.object({ mode: z.enum(['off', 'standard', 'deep', 'auto']) }).optional() }).passthrough().safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Indica el presupuesto de API (USD) y, si quieres, el tope de llamadas a la suscripción.' });
-    try { const r = authorizeAssignment(slug, id, body.data, (o, m) => app.log.info(o, m)); return { assignment: assignmentView(slug, r.assignment.id), processId: r.process.id }; } catch (e) { return send(reply, e); }
+    try { const r = await authorizeAssignment(slug, id, body.data, (o, m) => app.log.info(o, m)); return { assignment: assignmentView(slug, r.assignment.id), processId: r.process.id }; } catch (e) { return send(reply, e); }
   });
   app.post('/api/workspaces/:slug/assignments/:id/accept', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;

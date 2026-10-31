@@ -195,6 +195,13 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
   } else set('execute', 'done', `${p.steps.filter(s => s.status === 'done').length} agentes · ${usd(p.spentUsd)} USD de ${usd(p.budgetUsd)} USD`);
 
   const finish = (): StoryFlow => {
+    // Sin nada entregado (p. ej. una pausa durante la revisión del plan), «continuar» no tiene de dónde seguir y la ruta lo
+    // rechaza (nothing_to_continue): no se ofrece un botón que no puede funcionar. Se vuelve a ejecutar (plan y revisión).
+    if (r && actions.some(a => a.id === 'pipeline_resume') && !r.applied && !(r.changes ?? []).some(c => !c.error) && !p.steps.some(s => s.role === 'implementer' && s.outputMd?.trim()) && !r.manifest) {
+      for (let i = actions.length - 1; i >= 0; i--) if (actions[i].id === 'pipeline_resume') actions.splice(i, 1);
+      if (p.backlogItemId && !actions.some(a => a.id === 'retry_process')) actions.unshift(act('retry_process', 'Volver a ejecutar la historia', 'Aún no hay nada entregado que continuar: se crea un proceso nuevo pendiente de tu autorización (se repiten el plan y su revisión; ninguna implementación).', ['authorization', 'ai_budget']));
+      if (issue) issue = { ...issue, explanation: `${issue.explanation} Aún no hay nada entregado que continuar: ${p.backlogItemId ? 'vuelve a ejecutar la historia' : 'vuelve a autorizar el encargo desde su tarjeta en el Asistente'} (se repiten el plan y su revisión).`.trim() };
+    }
     const stages: FlowStage[] = keys.map(k => ({ key: k, label: LABELS[k], ...st[k] }));
     const current = forced ?? (stages.find(s => !['done', 'warning'].includes(s.status)) ?? stages[stages.length - 1]).key;
     if (st[current]?.status === 'pending') st[current].status = 'current';

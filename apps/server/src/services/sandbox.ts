@@ -208,10 +208,41 @@ export const clipSandboxOutput = (s: string) => {
 const redact = clipSandboxOutput;
 
 /**
+ * El `.git` del worktree (montado con escritura en el sandbox) decide qué gitdir y qué configuración usa el SIGUIENTE git
+ * que lanza el Portal en el equipo. Si lo ejecutado en el sandbox lo apunta a un gitdir propio (core.fsmonitor, filtros…),
+ * ese git ejecutaría órdenes fuera del aislamiento: se compara antes y después de cada ejecución.
+ */
+function gitPointer(worktree: string): string {
+  const f = path.join(worktree, '.git');
+  try {
+    const st = fs.lstatSync(f);
+    if (st.isFile()) return `file:${fs.readFileSync(f, 'utf8')}`;
+    if (st.isDirectory()) { const cfg = path.join(f, 'config'); return `dir:${fs.existsSync(cfg) ? fs.readFileSync(cfg, 'utf8') : ''}`; }
+    return 'link';
+  } catch { return 'none'; }
+}
+/** Repone el `.git` original. Lo cambiado se aparta renombrándolo (no se recorre ni se borra: podría contener enlaces). */
+function restoreGitPointer(worktree: string, before: string): void {
+  const f = path.join(worktree, '.git');
+  if (before.startsWith('dir:')) { fs.writeFileSync(path.join(f, 'config'), before.slice(4)); return; }
+  try { fs.lstatSync(f); fs.renameSync(f, path.join(worktree, `.git-sandbox-${Date.now()}`)); } catch { /* ya no existe */ }
+  if (before.startsWith('file:')) fs.writeFileSync(f, before.slice(5));
+}
+
+/**
  * Ejecuta un comando permitido sobre el worktree del proceso en el sandbox disponible.
  * `install` necesita red; se permite solo si `allowNetwork` (autorización aparte con el diff de package.json a la vista).
+ * Si lo ejecutado cambió el `.git` del worktree, se restaura antes de volver y la ejecución falla como incidente de seguridad.
  */
 export async function runInSandbox(worktree: string, repoRoot: string, command: string, opts: { allowNetwork?: boolean; timeoutMs?: number } = {}): Promise<VerificationRun> {
+  const before = gitPointer(worktree);
+  const run = await runUnguarded(worktree, repoRoot, command, opts);
+  if (gitPointer(worktree) === before) return run;
+  restoreGitPointer(worktree, before);
+  return { ...run, exitCode: 1, tampered: true, output: `${run.output}\n[seguridad] Lo ejecutado en el sandbox modificó el .git del worktree (podría hacer que el Portal ejecutara órdenes fuera del aislamiento). Se restauró el original y la ejecución se da por fallida: revisa el código de este proceso antes de continuar.` };
+}
+
+async function runUnguarded(worktree: string, repoRoot: string, command: string, opts: { allowNetwork?: boolean; timeoutMs?: number }): Promise<VerificationRun> {
   const script = COMMANDS[command];
   if (!script) throw Object.assign(new Error(`Comando no permitido: ${command}`), { statusCode: 400 });
   const startedAt = new Date().toISOString(); const t0 = Date.now(); const timeoutMs = opts.timeoutMs ?? 10 * 60_000;

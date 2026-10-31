@@ -337,6 +337,20 @@ test('revisión del plan sin progreso y con un bloqueante: se pausa ANTES de imp
   assert.equal(byRule(R.dev).length, devBefore, 'sin llamada de implementación');
 });
 
+test('la revisión del plan falla por el proveedor: sin nada entregado no se ofrece un «continuar» imposible, sino volver a ejecutar', async () => {
+  resetMockCalls(); try { fs.unlinkSync(logPath); } catch { /* vacío */ }
+  fs.writeFileSync(scriptPath, JSON.stringify({ markers: MARKERS, rules: [{ match: 'revisor independiente de planes técnicos', error: 'network' }, { match: R.plan, text: PLAN }, { match: R.qa, text: QA_OK }, { match: R.dev, text: DEV }] }));
+  const { p } = await authorize('Revisión del plan sin red', { gauntlet: { mode: 'deep' }, maxProviderRetries: 0 });
+  assert.equal(p.result!.pipeline!.state, 'paused', p.result!.pipeline!.reason ?? ''); assert.equal(byRule(R.dev).length, 0, 'nada implementado');
+  const flow = await flowOf(p.id);
+  const ids = flow.actions.map((a: any) => a.id);
+  assert.ok(!ids.includes('pipeline_resume'), `sin «continuar» que la ruta rechazaría: ${ids.join(', ')}`);
+  assert.ok(ids.includes('retry_process'), ids.join(', ')); assert.match(flow.issue.explanation, /Aún no hay nada entregado/);
+  // La ruta sigue rechazando continuar (coherente con lo que se ofrece) y volver a ejecutar sí funciona.
+  assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/continue`, payload: { authorized: true } })).json().code, 'nothing_to_continue');
+  assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/retry`, payload: {} })).statusCode, 201);
+});
+
 test('E · continuar sin más evaluación tras la detención: sin IA, sin repetir QA ni la evaluación; las brechas quedan documentadas', async () => {
   setScript([GAPS, GAPS]);
   const { p } = await authorize('E sin más evaluación', { gauntlet: { mode: 'standard' } });

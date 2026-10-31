@@ -239,6 +239,28 @@ test('K · reinicio con una llamada en curso: cobro incierto → no se reenvía 
   await app.inject({ method: 'POST', url: `${W}/batches/${b.id}/cancel` });
 });
 
+test('K · reinicio antes de la entrega con una dependiente: reintentar la historia reabre la que quedó bloqueada por ella', async () => {
+  const a = story('Historia LIMA-BASE'); const dep = story('Historia LIMA-DEP', a.storyId);
+  const stories = [{ key: 'LIMA-BASE', file: 'src/lima.ts', dev: create('src/lima.ts', 'export const lima = 1;') }, { key: 'LIMA-DEP', file: 'src/lima.ts', dev: patch('src/lima.ts', 'export const lima = 1;', 'export const lima = 2;') }];
+  // El plan de la base sigue en curso cuando el Portal «se reinicia» (antes de cualquier entrega del Desarrollador).
+  setScript(stories, [{ match: 'LIMA-BASE.*Elabora el plan técnico', delayMs: 60_000, text: plan('src/lima.ts') }]);
+  const b = await authorize({ itemIds: [a.id, dep.id], title: 'Lote L-dep' });
+  const pid = (await waitFor(() => get(b.id), x => !!x.items[0].processId, 'proceso creado')).items[0].processId;
+  await waitFor(() => processesRepo(S).get(pid)!.steps.some(s => s.role === 'planner' && s.status === 'running'), v => v, 'planificando');
+  recoverInterruptedProcesses(() => undefined); abortProcessCalls(pid);
+  await resumeBatches(() => undefined);
+  const depOf = (y: any) => y.items.find((i: any) => i.itemId === dep.id);
+  const x = await waitFor(() => get(b.id), y => settled(y), 'tras el reinicio');
+  assert.equal(depOf(x).state, 'blocked', JSON.stringify(x.items.map((i: any) => [i.storyId, i.state, i.reason])));
+  setScript(stories);
+  const r = await app.inject({ method: 'POST', url: `${W}/batches/${b.id}/items/${a.id}/retry`, payload: { authorized: true } });
+  assert.equal(r.statusCode, 200, r.body);
+  assert.equal(depOf(r.json()).state, 'waiting_dependency', 'la dependiente vuelve a esperar a su dependencia (no queda bloqueada para siempre)');
+  if ((await get(b.id)).status !== 'running') assert.equal((await app.inject({ method: 'POST', url: `${W}/batches/${b.id}/resume`, payload: { authorized: true } })).statusCode, 200);
+  const done = await waitFor(() => get(b.id), y => settled(y) && y.items.every((i: any) => i.state === 'awaiting_acceptance' || ['failed', 'blocked', 'needs_owner', 'cancelled'].includes(i.state)), 'lote tras reintentar');
+  assert.deepEqual(done.items.map((i: any) => i.state), ['awaiting_acceptance', 'awaiting_acceptance'], JSON.stringify(done.items.map((i: any) => i.reason)));
+});
+
 test('L · presupuesto agotado: el lote se pausa antes de empezar otra historia y «Reanudar» con más presupuesto sigue', async () => {
   const a = story('Historia LIMA1'); const c = story('Historia LIMA2');
   setScript([{ key: 'LIMA1', file: 'src/lima1.ts', dev: create('src/lima1.ts', 'export const lima1 = 1;') }, { key: 'LIMA2', file: 'src/lima2.ts', dev: create('src/lima2.ts', 'export const lima2 = 1;') }]);

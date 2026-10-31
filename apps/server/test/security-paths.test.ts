@@ -141,6 +141,19 @@ test('escrituras: ningún enlace o unión saca una escritura o un borrado de la 
   assert.ok(writablePath(wt, 'src/nuevo.ts').endsWith(path.join('src', 'nuevo.ts')), 'lo normal sí');
 });
 
+test('commits: lo que deja lo ejecutado en el sandbox en rutas protegidas no entra en el commit del Portal', async () => {
+  const { commitInWorktree, annotateChanges } = await import('../src/services/repoWrite.ts');
+  const r3 = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-sec-commit-'));
+  const g3 = (...a: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { cwd: r3, windowsHide: true }).toString();
+  g3('init', '-q', '-b', 'main'); fs.writeFileSync(path.join(r3, 'README.md'), 'x\n'); g3('add', '-A'); g3('commit', '-qm', 'base');
+  // Como si los hubiera escrito una prueba ejecutada en el sandbox (el worktree se monta con escritura):
+  fs.writeFileSync(path.join(r3, '.npmrc'), '//registro/:_authToken=SINTETICO\n'); fs.mkdirSync(path.join(r3, '.claude')); fs.writeFileSync(path.join(r3, '.claude', 'settings.json'), '{}');
+  fs.writeFileSync(path.join(r3, '.env.local'), 'CLAVE=sintetica\n');
+  await commitInWorktree(r3, annotateChanges(r3, [{ path: 'src/a.ts', action: 'create', content: 'export const a = 1;\n' }]), 'corrección');
+  assert.deepEqual(g3('show', '--name-only', '--format=', 'HEAD').split('\n').filter(Boolean), ['src/a.ts'], 'solo lo validado');
+  assert.ok(fs.existsSync(path.join(r3, '.npmrc')) && g3('status', '--porcelain').includes('.npmrc'), 'lo protegido queda sin confirmar en el worktree');
+});
+
 // Dentro del sandbox del Portal /tmp es un tmpfs «noexec»: git ignora todo hook y el control positivo no puede pasar. Ahí se
 // omite y lo dice; los commits del Portal se hacen en el equipo, donde esta prueba sí se ejecuta.
 const tmpExec = process.platform === 'win32' || (() => {

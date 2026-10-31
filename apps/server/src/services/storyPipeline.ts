@@ -704,6 +704,7 @@ export async function verifyStage(ctx: StoryRunCtx, cfg: PipelineConfig): Promis
       run = await runVerification(ctx.slug, ctx.processId, cmd, false);
       if (run.exitCode === null) throw new PipelinePause('environment', `${cmd} no terminó dos veces seguidas (tiempo agotado). Comprueba que Docker Desktop responde y pulsa «Continuar».`);
     }
+    if (run.tampered) throw new PipelinePause('environment', `Incidente de seguridad durante ${cmd}: lo ejecutado en el sandbox modificó el .git del worktree. Se restauró y no se llama a ningún agente; revisa el código de este proceso antes de continuar o descártalo.`);
     if (run.isolation === 'unavailable') throw new PipelinePause('environment', `El sandbox dejó de estar disponible durante ${cmd}. Arranca Docker Desktop y pulsa «Continuar».`);
     if (run.exitCode === DEPS_MISSING_EXIT) throw new PipelinePause('environment', 'El sandbox sigue sin dependencias tras instalarlas. Revisa el detalle de la instalación.');
     if (run.exitCode !== 0) return run;

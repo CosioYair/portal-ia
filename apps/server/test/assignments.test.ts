@@ -159,10 +159,39 @@ test('una autorización que no puede empezar no deja procesos pendientes: el rec
     const procsOfA = processesRepo(S).list(project.id).filter(p => p.assignmentId === a.id);
     assert.equal(procsOfA.length, 1); assert.equal(procsOfA[0].status, 'cancelled', 'el proceso recién creado se cancela'); assert.match(procsOfA[0].error ?? '', /No se inició/);
     const x = await get(a.id); assert.equal(x.status, 'needs_owner'); assert.match(x.reason ?? '', /No se inicia/);
+    assert.equal(x.processId, null, 'la ejecución cancelada no pasa a ser la vigente (la siguiente iteración no pierde el contexto anterior)');
   } finally { agentsRepo(S).updateConfig(dev.id, { ...dev.config, backend: 'api' }); }
 });
 
 // Que un equipo en Claude Code no empiece ni llame a la CLI con el límite vigente se prueba en claude-code-execution.test.ts.
+test('otra ejecución sobre una versión aplicada sin integrar exige confirmar su descarte antes de crear o pagar nada', async () => {
+  script('src/en6.ts');
+  const a = await define('Crear el archivo EN seis');
+  // La primera ejecución se aplica pero su test falla y no hay correcciones: espera tu decisión con la versión aplicada.
+  const run0 = sandboxDeps.run;
+  sandboxDeps.run = async (wt, root, command, o) => { const r = await run0(wt, root, command, o); return command === 'test' ? { ...r, exitCode: 1, output: 'not ok 1 - falla' } : r; };
+  let x: any;
+  try {
+    assert.equal((await inject('POST', `${W}/assignments/${a.id}/authorize`, { authorized: true, budgetUsd: 2, maxCorrections: 0 })).statusCode, 200);
+    x = await waitFor(() => get(a.id), y => !['running', 'pending_authorization'].includes(y.status), 'primera ejecución');
+  } finally { sandboxDeps.run = run0; }
+  const p1 = processesRepo(S).get(x.processId)!;
+  assert.ok(['needs_owner', 'failed'].includes(x.status), x.status); assert.ok(p1.result?.applied?.worktree && !p1.result.rejected && !p1.result.merged, 'versión aplicada sin integrar');
+  const before = calls().length; const procs = () => processesRepo(S).list(project.id).filter(p => p.assignmentId === a.id).length; const n0 = procs();
+  const pre = (await inject('GET', `${W}/assignments/${a.id}/authorization`)).json();
+  assert.equal(pre.discardBranch, p1.result!.applied!.branch, 'la vista previa dice qué versión se descartaría');
+  const r = await inject('POST', `${W}/assignments/${a.id}/authorize`, { authorized: true, budgetUsd: 2 });
+  assert.equal(r.statusCode, 409, r.body); assert.equal(r.json().code, 'discard_confirmation_required');
+  assert.equal(procs(), n0, 'sin confirmar no se crea ningún proceso'); assert.equal(calls().length, before, 'ni se paga nada');
+  assert.ok(!processesRepo(S).get(p1.id)!.supersededBy && fs.existsSync(p1.result!.applied!.worktree!), 'la versión aplicada sigue intacta');
+  script('src/en6.ts', 2);
+  const ok = await inject('POST', `${W}/assignments/${a.id}/authorize`, { authorized: true, budgetUsd: 2, discardApplied: true });
+  assert.equal(ok.statusCode, 200, ok.body);
+  const y = await waitFor(() => get(a.id), z => z.processId !== p1.id && !['running', 'pending_authorization'].includes(z.status), 'segunda ejecución');
+  assert.equal(y.status, 'ready_for_review', `${y.status}: ${y.reason ?? ''}`);
+  const old = processesRepo(S).get(p1.id)!; assert.ok(old.result!.rejected, 'la anterior queda descartada'); assert.ok(!fs.existsSync(old.result!.applied!.worktree!));
+});
+
 test('el último informe de límites del CLI se muestra tal cual (sin cuotas inventadas) y reconocerlo exige tu autorización', async () => {
   saveUsageReport({ status: 'rejected', resetsAt: Math.floor(Date.now() / 1000) + 3600, utilization: 1, errorCode: null, rateLimitType: 'five_hour', windows: [], overage: false }, 'prueba');
   const gate = (await inject('GET', '/api/claude-code/usage')).json();

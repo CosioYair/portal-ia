@@ -684,7 +684,17 @@ export function retryItem(slug: string, id: string, itemId: string): Batch {
   const it = b.items.find(i => i.itemId === itemId); if (!it) throw fail(404, 'La historia no está en el lote.', 'not_found');
   const p = it.processId ? processesRepo(slug).get(it.processId) : undefined;
   if (!retryable(it, p?.status)) throw fail(409, p && (it.state === 'needs_owner' || it.state === 'failed') ? 'Su proceso conserva trabajo en pausa: continúalo desde el proceso (no se repite lo hecho).' : `No se puede reintentar una historia ${ITEM_LABEL[it.state]}.`, 'invalid_state');
-  setItem(slug, id, itemId, { state: it.dependsInBatch ? 'waiting_dependency' : 'queued', reason: b.status === 'running' ? null : 'En cola: empezará al reanudar el lote.', failureClass: null, notStarted: false, finishedAt: null }, `reintentada por ti: vuelve a la cola (se comprueban otra vez su equipo y sus orígenes).`);
+  // Las que quedaron bloqueadas SOLO porque esta falló (y las suyas, en cadena) vuelven a esperarla: si no, reintentarla
+  // dejaría a sus dependientes bloqueadas para siempre (no se pueden reintentar ni iterar estando bloqueadas).
+  const reopen = (storyId: string, seen = new Set<string>()) => {
+    if (seen.has(storyId)) return; seen.add(storyId);
+    for (const d of getBatch(slug, id).items.filter(i => i.state === 'blocked' && i.failureClass === 'dependency' && i.dependsOn === storyId)) {
+      setItem(slug, id, d.itemId, { state: 'waiting_dependency', failureClass: null, reason: `Espera a ${storyId}, que vuelve a ejecutarse.`, finishedAt: null }, `vuelve a esperar a ${storyId} (reintentada por ti).`);
+      reopen(d.storyId, seen);
+    }
+  };
+  reopen(it.storyId);
+  setItem(slug, id, itemId, { state: it.dependsInBatch ? 'waiting_dependency' : 'queued', reason: b.status === 'running' ? null : 'En cola: empezará al reanudar el lote.', failureClass: null, notStarted: false, finishedAt: null }, `reintentada por ti: vuelvea la cola (se comprueban otra vez su equipo y sus orígenes).`);
   void scheduleTick(slug, id);
   return getBatch(slug, id);
 }

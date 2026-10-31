@@ -14,6 +14,9 @@ if (process.env.PORTAL_GIT_HOOKS !== '1' && !process.env.PORTAL_GIT_NO_HOOKS_SET
   const n = Number(process.env.GIT_CONFIG_COUNT ?? 0) || 0;
   process.env[`GIT_CONFIG_KEY_${n}`] = 'core.hooksPath';
   process.env[`GIT_CONFIG_VALUE_${n}`] = NO_HOOKS_DIR;
-  process.env.GIT_CONFIG_COUNT = String(n + 1);
+  // core.fsmonitor también ejecuta una orden en cada git status/add: tampoco la decide el repositorio.
+  process.env[`GIT_CONFIG_KEY_${n + 1}`] = 'core.fsmonitor';
+  process.env[`GIT_CONFIG_VALUE_${n + 1}`] = 'false';
+  process.env.GIT_CONFIG_COUNT = String(n + 2);
   process.env.PORTAL_GIT_NO_HOOKS_SET = '1';
 }

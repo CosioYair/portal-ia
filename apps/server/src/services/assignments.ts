@@ -42,16 +42,45 @@ export function createAssignment(slug: string, projectId: string, input: Assignm
   return assignmentsRepo(slug).event(a.id, { kind: 'created', message: `Encargo ${a.code} creado: ${a.title}` });
 }
 
+/** Lo que impide preparar otra ejecución (sin tocar nada): objetivo y criterios, estado y ejecución activa. */
+function checkPreparable(slug: string, a: Assignment): void {
+  const missing = assignmentReady(a); if (missing) throw fail(409, missing, 'not_ready');
+  if (!['draft', 'changes_requested', 'needs_owner', 'failed'].includes(a.status)) throw fail(409, `El encargo está ${ASSIGNMENT_STATUS_LABEL[a.status]}: no se prepara otra ejecución.`, 'invalid_state');
+  const cur = a.processId ? processesRepo(slug).get(a.processId) : undefined;
+  if (cur && (cur.status === 'running' || cur.status === 'pending_authorization')) throw fail(409, 'El encargo ya tiene una ejecución en marcha o pendiente de autorizar.', 'active_process');
+}
+
+/**
+ * La iteración cuya versión sigue aplicada sin integrar (su worktree tiene la rama del encargo). Se buscan todas, no
+ * solo la vigente: una autorización fallida no debe ocultarla. Mientras exista, otra ejecución chocaría con su rama.
+ */
+function appliedVersion(slug: string, a: Assignment): Process | null {
+  for (const pid of [...a.processIds].reverse()) { const p = processesRepo(slug).get(pid); if (p?.result?.applied?.worktree && !p.result.merged && !p.result.rejected) return p; }
+  return null;
+}
+
+/** Descarta esa versión con tu confirmación: retira su worktree y su rama (nunca el checkout principal) y la marca rechazada. */
+async function discardAppliedVersion(slug: string, a: Assignment, p: Process, reason: string): Promise<string> {
+  const branch = p.result!.applied!.branch; let discarded = '';
+  const repo = projectsRepo(slug).repository(a.projectId);
+  if (repo) {
+    requirePolicy('delete_worktree', { slug, processId: p.id, projectId: a.projectId, authorized: true });
+    const d = await discardBranch(repo.path, p.id, branch);
+    discarded = ` Versión anterior descartada: worktree ${d.worktreeRemoved ? 'retirado' : 'ya no existía'}, rama ${branch} ${d.branchDeleted ? 'borrada' : 'conservada (integrada o activa)'}.`;
+  }
+  processesRepo(slug).setResult(p.id, { ...p.result!, rejected: { at: monotonicNow(), reason } });
+  return discarded;
+}
+
 /**
  * Prepara la ejecución: el mismo proceso que una historia (equipo por capacidades, estimación), pendiente de TU
  * autorización. No llama a la IA. Exige objetivo y criterios comprobables.
  */
 export function prepareAssignment(slug: string, id: string): { assignment: Assignment; process: Process } {
   const repo = assignmentsRepo(slug); let a = repo.get(id); if (!a) throw fail(404, 'Encargo no encontrado.', 'not_found');
-  const missing = assignmentReady(a); if (missing) throw fail(409, missing, 'not_ready');
-  if (!['draft', 'changes_requested', 'needs_owner', 'failed'].includes(a.status)) throw fail(409, `El encargo está ${ASSIGNMENT_STATUS_LABEL[a.status]}: no se prepara otra ejecución.`, 'invalid_state');
-  const cur = a.processId ? processesRepo(slug).get(a.processId) : undefined;
-  if (cur && (cur.status === 'running' || cur.status === 'pending_authorization')) throw fail(409, 'El encargo ya tiene una ejecución en marcha o pendiente de autorizar.', 'active_process');
+  checkPreparable(slug, a);
+  const applied = appliedVersion(slug, a);
+  if (applied) throw fail(409, `La versión anterior está aplicada en ${applied.result!.applied!.branch} sin integrar: otra ejecución chocaría con su rama. Para ejecutar la nueva, descártala (worktree y rama): confírmalo explícitamente.`, 'discard_confirmation_required');
   const iterationContext = a.iterationNote ? iterationContextOf(slug, a) : null;
   const p = createWorkProcess(slug, a.projectId, assignmentAsItem(a), { iterationContext }, { assignmentId: a.id });
   a = repo.update(id, x => {
@@ -164,16 +193,11 @@ export async function requestAssignmentChanges(slug: string, id: string, note: s
   const a = syncAssignment(slug, id); if (!a) throw fail(404, 'Encargo no encontrado.', 'not_found');
   if (!['ready_for_review', 'needs_owner', 'failed'].includes(a.status)) throw fail(409, `No se piden cambios a un encargo ${ASSIGNMENT_STATUS_LABEL[a.status]}.`, 'invalid_state');
   const p = a.processId ? processesRepo(slug).get(a.processId) : undefined;
+  const applied = appliedVersion(slug, a);
   let discarded = '';
-  if (p?.result?.applied?.worktree && !p.result.merged && !p.result.rejected) {
-    if (!opts.discardApplied) throw fail(409, `La versión entregada está aplicada en ${p.result.applied.branch} sin integrar. Pedir cambios la descarta (worktree y rama): confírmalo explícitamente.`, 'discard_confirmation_required');
-    const repo = projectsRepo(slug).repository(a.projectId);
-    if (repo) {
-      requirePolicy('delete_worktree', { slug, processId: p.id, projectId: a.projectId, authorized: true });
-      const d = await discardBranch(repo.path, p.id, p.result.applied.branch);
-      discarded = ` Versión anterior descartada: worktree ${d.worktreeRemoved ? 'retirado' : 'ya no existía'}, rama ${p.result.applied.branch} ${d.branchDeleted ? 'borrada' : 'conservada (integrada o activa)'}.`;
-    }
-    processesRepo(slug).setResult(p.id, { ...p.result, rejected: { at: monotonicNow(), reason: 'descartada al pedir cambios: la siguiente ejecución parte de main con la nota del propietario' } });
+  if (applied) {
+    if (!opts.discardApplied) throw fail(409, `La versión entregada está aplicada en ${applied.result!.applied!.branch} sin integrar. Pedir cambios la descarta (worktree y rama): confírmalo explícitamente.`, 'discard_confirmation_required');
+    discarded = await discardAppliedVersion(slug, a, applied, 'descartada al pedir cambios: la siguiente ejecución parte de main con la nota del propietario');
   }
   return assignmentsRepo(slug).update(id, x => { x.status = 'changes_requested'; x.iterationNote = note.trim().slice(0, 2000); x.events.push({ at: monotonicNow(), kind: 'changes', processId: p?.id, message: `Cambios pedidos: ${note.slice(0, 300)}.${discarded}` }); });
 }
@@ -213,7 +237,7 @@ export function assignmentAuthorizationPreview(slug: string, id: string) {
   // La misma resolución que al autorizar (mismo texto del elemento de trabajo y mismo historial): lo que ves es lo que corre.
   const g = resolveGauntletFor(slug, { id: '', projectId: a.projectId, backlogItemId: null, assignmentId: a.id }, projectGauntlet(slug, a.projectId));
   const agents = est.steps.map(s => ({ name: s.agentName, role: s.role, model: s.model }));
-  return { missing, estimatedUsd: est.estimatedUsd, suggestedBudgetUsd: est.suggestedBudgetUsd, steps: est.steps.length, agents, gauntlet: g, suggestedSubscriptionCalls: suggestedCalls(est.steps.length, DEFAULT_PIPELINE.maxCorrections), subscription: subscriptionGate() };
+  return { missing, estimatedUsd: est.estimatedUsd, suggestedBudgetUsd: est.suggestedBudgetUsd, steps: est.steps.length, agents, gauntlet: g, suggestedSubscriptionCalls: suggestedCalls(est.steps.length, DEFAULT_PIPELINE.maxCorrections), subscription: subscriptionGate(), discardBranch: appliedVersion(slug, a)?.result?.applied?.branch ?? null };
 }
 
 /**
@@ -221,8 +245,17 @@ export function assignmentAuthorizationPreview(slug: string, id: string) {
  * con la autorización única (processAuthorization). Si no puede empezar, el proceso recién creado se cancela con el
  * motivo: nunca queda un proceso pendiente que otra pantalla pudiera ejecutar con otros límites.
  */
-export function authorizeAssignment(slug: string, id: string, input: { budgetUsd: number; maxSubscriptionCalls?: number | null; maxCorrections?: number | null; gauntlet?: { mode: 'off' | 'standard' | 'deep' | 'auto' } | null; allowInstall?: boolean }, log: (o: any, m: string) => void): { assignment: Assignment; process: Process } {
+export async function authorizeAssignment(slug: string, id: string, input: { budgetUsd: number; maxSubscriptionCalls?: number | null; maxCorrections?: number | null; gauntlet?: { mode: 'off' | 'standard' | 'deep' | 'auto' } | null; allowInstall?: boolean; discardApplied?: boolean }, log: (o: any, m: string) => void): Promise<{ assignment: Assignment; process: Process }> {
   if (processesRepo(slug).running().length) throw fail(409, 'Ya hay un proceso en ejecución. Espera a que termine.', 'busy');
+  const before = assignmentsRepo(slug).get(id); if (!before) throw fail(404, 'Encargo no encontrado.', 'not_found');
+  // Lo que impide empezar se comprueba ANTES de descartar nada; sin tu confirmación no se crea ni se paga nada.
+  checkPreparable(slug, before);
+  const applied = appliedVersion(slug, before);
+  if (applied) {
+    if (!input.discardApplied) throw fail(409, `La versión anterior está aplicada en ${applied.result!.applied!.branch} sin integrar: otra ejecución chocaría con su rama. Para ejecutar la nueva, descártala (worktree y rama): confírmalo explícitamente.`, 'discard_confirmation_required');
+    const discarded = await discardAppliedVersion(slug, before, applied, 'descartada al autorizar otra ejecución: la nueva parte de main');
+    assignmentsRepo(slug).update(id, x => { x.events.push({ at: monotonicNow(), kind: 'status', processId: applied.id, message: `Para ejecutar otra versión, descartaste la anterior.${discarded}` }); });
+  }
   const { assignment, process } = prepareAssignment(slug, id);
   const maxCorrections = input.maxCorrections ?? DEFAULT_PIPELINE.maxCorrections;
   try {
@@ -232,6 +265,8 @@ export function authorizeAssignment(slug: string, id: string, input: { budgetUsd
   } catch (e: any) {
     processesRepo(slug).unsupersedeBy(process.id); // la iteración anterior vuelve a ser la vigente
     processesRepo(slug).finish(process.id, 'cancelled', `No se inició: ${e.message}`);
+    // La cancelada no pasa a ser la vigente: la siguiente iteración parte de la anterior (su resultado y su contexto).
+    assignmentsRepo(slug).update(id, x => { x.processId = before.processId; });
     if (assignmentsRepo(slug).get(id)?.status !== 'needs_owner') assignmentsRepo(slug).update(id, x => { x.status = 'needs_owner'; x.reason = e.message; x.events.push({ at: monotonicNow(), kind: 'status', processId: process.id, message: `No se inició: ${String(e.message).slice(0, 300)}` }); });
     throw e;
   }
