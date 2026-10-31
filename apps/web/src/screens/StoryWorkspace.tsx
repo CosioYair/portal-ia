@@ -139,9 +139,10 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
   useEffect(() => { if (pending && !budget) setBudget(Math.max(0.5, Math.ceil(pending.estimatedUsd * 2 * 2) / 2).toFixed(2)); }, [pending, budget]);
   const authorize = async () => { if (!pending) return; setIterBusy(true); try { await api.authorizeProcess(slug, pending.id, Number(budget), pipeline); flash(`Iteración autorizada con ${fmtUsd(Number(budget))}`); setAuthIter(false); setAuthOpen(false); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setIterBusy(false); } };
   // Otra iteración vigente: el formulario y la casilla no se arrastran (HU-161).
-  useEffect(() => { setAuthOpen(false); setAuthIter(false); }, [pending?.id]);
+  // El presupuesto también se reinicia: la iteración nueva lo recalcula con su propia estimación.
+  useEffect(() => { setAuthOpen(false); setAuthIter(false); setBudget(''); }, [pending?.id]);
+  // Sin iteración vigente (superada o historial aún sin coincidir) se avisa en la cabecera; nunca se cambia de pestaña solo.
   const openAuthorize = () => {
-    if (!pending) { openTab('iteraciones'); return; } // solo si no hay iteración vigente que autorizar: se revisa el historial
     setAuthOpen(true);
     setTimeout(() => document.getElementById('sec-authorize-story')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
   };
@@ -159,6 +160,9 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
     <PipelineOptions compact value={pipeline} onChange={setPipeline} />
     <GauntletOptions slug={slug} projectId={ctx.item.projectId} itemId={ctx.item.id} value={pipeline.gauntlet} onChange={g => setPipeline(p => ({ ...p, gauntlet: g }))} />
     <div className="sf-authorize-row"><button className="btn btn-primary btn-sm" onClick={authorize} disabled={!authIter || iterBusy || !(Number(budget) > 0)}>{iterBusy ? <span className="spin spin-light" /> : Icon.arrow()}Autorizar iteración</button><button className="btn btn-ghost btn-sm" onClick={() => setAuthOpen(false)} disabled={iterBusy}>Cancelar</button></div>
+  </div> : authOpen && !pending ? <div id="sec-authorize-story" className="sf-authorize" role="status" aria-label="Autorización superada">
+    <div className="sf-authorize-head"><strong className="sm13">Esta autorización está superada; decide sobre la vigente o restáurala</strong></div>
+    <div className="sf-authorize-row"><button className="lnk small" onClick={() => openTab('iteraciones')}>Ver el historial de autorizaciones</button><button className="btn btn-ghost btn-sm" onClick={() => setAuthOpen(false)}>Cerrar</button></div>
   </div> : null;
 
   return (
@@ -172,6 +176,7 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {!last && it.status === 'pending' && !it.archivedAt && <button className="btn btn-primary btn-sm" onClick={() => navigate(`/backlog?ejecutar=${it.id}`)}>{Icon.arrow()}Ejecutar desde Backlog</button>}
+            {!last && it.status !== 'pending' && !it.archivedAt && <Link className="btn btn-primary btn-sm" to="/backlog">{Icon.arrow()}Volver al Backlog</Link>}
             {it.archivedAt && <Link className="btn btn-primary btn-sm" to="/archivo">{Icon.arrow()}Restaurar desde el archivo</Link>}
             {it.status !== 'in_progress' && it.status !== 'done' && it.status !== 'discarded' && !it.archivedAt && <button className="btn btn-ghost btn-sm" title="No se hará: la historia queda en Descartadas (pide confirmación y motivo)" onClick={cancelStory} disabled={cancelBusy}>{cancelBusy ? <span className="spin" /> : Icon.x(14)}Cancelar historia</button>}
           </div>
