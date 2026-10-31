@@ -45,6 +45,37 @@ test('recorrido guiado: una sola cabecera (StoryFlowPanel) en la historia y en e
   assert.match(panel, /requires\.some\(r => r === 'authorization' \|\| r === 'network'\) && confirming\?\.id !== a\.id/, 'lo que exige autorización o red pide confirmación antes');
 });
 
+// HU-166 · Motivo: la autorización estaba en una pestaña secundaria (Iteraciones); ahora el siguiente paso, incluida la
+// autorización, está siempre en la cabecera (StoryFlowPanel, desde guidance.flow), sin cambiar de pestaña ni de hash.
+test('HU-166: la autorización se hace desde la cabecera, sin cambiar de pestaña', () => {
+  const panel = read('components/StoryFlowPanel.tsx');
+  assert.match(panel, /onAuthorize\?: \(\) => void/); assert.match(panel, /authorizeSlot\?: ReactNode/);
+  assert.match(panel, /a\.id === 'authorize'\) \{ if \(variant === 'story' && onAuthorize\) onAuthorize\(\)/, '«Autorizar…» abre el formulario en la cabecera');
+  assert.ok(panel.includes('{!readOnly && authorizeSlot}'), 'el formulario se muestra bajo las acciones de la cabecera');
+  const ws = read('screens/StoryWorkspace.tsx');
+  assert.match(ws, /<StoryFlowPanel proc=\{last\}[^\n]*\n?[^\n]*onAuthorize=\{openAuthorize\} authorizeSlot=\{authForm\}/, 'la historia pasa onAuthorize y authorizeSlot a la cabecera');
+  assert.ok(ws.includes('id="sec-authorize-story"'), 'el formulario de autorización vive en la cabecera');
+  const iterIdx = ws.indexOf("{tab === 'iteraciones' &&"); assert.ok(iterIdx > 0, 'existe la pestaña Iteraciones');
+  const authIdx = ws.indexOf('api.authorizeProcess(slug, pending.id, Number(budget), pipeline)');
+  assert.ok(authIdx > 0 && authIdx < iterIdx, 'la llamada de autorización no está en la pestaña Iteraciones');
+  assert.ok(!ws.slice(iterIdx).includes('onClick={authorize}'), 'en Iteraciones ya no hay un segundo formulario de autorización');
+  assert.ok(!ws.includes("btn btn-primary btn-sm\" onClick={() => openTab('iteraciones')}"), 'el aviso de decisión ya no lleva a Iteraciones para autorizar');
+  assert.ok(!ws.includes('Autorízala en la pestaña Iteraciones.'));
+  // Siempre hay un botón principal: si flow no trae acción principal, el respaldo es «Ver el proceso y los agentes».
+  assert.ok(panel.includes("const fallback = variant === 'story' && !primary && !readOnly;"), 'el respaldo solo aparece cuando no hay acción principal');
+  assert.match(panel, /fallback && <Link className="btn btn-primary btn-sm" to=\{`\/procesos\/\$\{proc\.id\}`\}>\{Icon\.arrow\(\)\}Ver el proceso y los agentes<\/Link>/, 'el respaldo es el btn-primary de la cabecera');
+  assert.ok(panel.includes('(flow.actions.length > 0 || fallback)'), 'el bloque de acciones se muestra también con solo el respaldo');
+  assert.ok(panel.includes('!fallback && <Link className="btn btn-ghost btn-sm" to={`/procesos/${proc.id}`}>Ver el proceso y los agentes</Link>'), 'sin duplicar el enlace secundario cuando el respaldo es el principal');
+  // Historia archivada: el enlace principal al archivo queda fuera del fieldset desactivado.
+  const archIdx = ws.indexOf('{it.archivedAt && <Link className="btn btn-primary btn-sm" to="/archivo">');
+  const fsIdx = ws.indexOf('<fieldset disabled={!!it.archivedAt}');
+  assert.ok(archIdx > 0, 'la historia archivada tiene un enlace btn-primary al archivo');
+  assert.ok(fsIdx > 0 && archIdx < fsIdx, 'el enlace al archivo está fuera del fieldset desactivado');
+  // Sin proceso: «pending» → Ejecutar desde Backlog; cualquier otro estado (p. ej. descartada) → Volver al Backlog.
+  assert.ok(ws.includes("{!last && it.status === 'pending' && !it.archivedAt && <button className=\"btn btn-primary btn-sm\" onClick={() => navigate(`/backlog?ejecutar=${it.id}`)}>"), 'sin proceso y pendiente: Ejecutar desde Backlog');
+  assert.ok(ws.includes("{!last && it.status !== 'pending' && !it.archivedAt && <Link className=\"btn btn-primary btn-sm\" to=\"/backlog\">"), 'sin proceso y no pendiente: btn-primary Volver al Backlog');
+});
+
 test('pipeline autorizado: la autorización de una historia incluye el pipeline en las 4 entradas y el panel continúa/repara con presupuesto', () => {
   for (const [file, re] of [['screens/Backlog.tsx', /api\.authorizeProcess\(ws\.slug, p\.id, Number\(budget\), pipeline\)/], ['screens/ProcessView.tsx', /api\.authorizeProcess\(slug, proc\.id, Number\(budget\), proc\.kind === 'story_execution' \? pipeline : undefined\)/], ['screens/StoryWorkspace.tsx', /api\.authorizeProcess\(slug, pending\.id, Number\(budget\), pipeline\)/], ['components/AssistantChat.tsx', /action\.type === 'propose_execution' \? DEFAULT_PIPELINE : undefined/]] as const) assert.match(read(file), re, file);
   for (const file of ['screens/Backlog.tsx', 'screens/ProcessView.tsx', 'screens/StoryWorkspace.tsx']) assert.match(read(file), /<PipelineOptions /, file);

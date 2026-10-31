@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { DeliveryProgress, FlowAction, FlowActionId, FlowIssue, LiveCall, PipelineEvent, Process, ProcessStep, StoryContext } from '@portal-ia/domain';
 import { api, ApiError, type ProcessBackends } from '../lib/api.ts';
@@ -33,6 +33,12 @@ interface Props {
   /** Espacio de la historia: abre el chat con la pregunta preparada / la pestaña Iteraciones. */
   onAsk?: (text: string) => void;
   onOpenIterations?: () => void;
+  /** HU-166 · Espacio de la historia: «Autorizar…» abre el formulario en la propia cabecera (sin cambiar de pestaña). */
+  onAuthorize?: () => void;
+  /** HU-166 · Formulario de autorización que se muestra justo debajo de las acciones de la cabecera. */
+  authorizeSlot?: ReactNode;
+  /** Historia archivada: solo consulta; la acción principal es el enlace al archivo (fuera de este panel). */
+  readOnly?: boolean;
 }
 
 /**
@@ -40,7 +46,7 @@ interface Props {
  * son responsables, cuánto se ha gastado, qué lo bloquea y qué hacer ahora. Todo viene del servidor (guidance.flow); las
  * acciones usan las rutas existentes y piden la autorización que cada una exige antes de ejecutar nada.
  */
-export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIterations }: Props) {
+export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIterations, onAuthorize, authorizeSlot, readOnly }: Props) {
   const { status, flash, navigate } = useApp();
   const slug = status.workspace!.slug;
   const flow = proc.guidance?.flow;
@@ -85,7 +91,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
     if (a.id === 'manual_test') return go('sec-test');
     if (a.id === 'rebuild') { window.scrollTo({ top: 0, behavior: 'smooth' }); setMsg('Usa «Reconstruir y reiniciar» en la barra amarilla de arriba: construye la versión nueva aparte y reinicia el Portal; si el build falla, la versión anterior sigue en marcha.'); return; }
     if (a.id === 'sandbox_help') { setShowAll(true); setMsg('Guía completa: docs/sandbox.md en la carpeta del Portal. Cuando Docker Desktop diga «Engine running», pulsa «Comprobar el sandbox de nuevo».'); return; }
-    if (a.id === 'authorize') { if (variant === 'story' && onOpenIterations) onOpenIterations(); else go('sec-authorize'); return; }
+    if (a.id === 'authorize') { if (variant === 'story' && onAuthorize) onAuthorize(); else if (variant === 'story' && onOpenIterations) onOpenIterations(); else go('sec-authorize'); return; }
     if (a.id === 'ask_team') { if (!itemId) return; if (onAsk) onAsk(askText); else navigate(`/historias/${itemId}#chat`, { state: { ask: askText } }); return; }
     if ((a.id === 'request_fix' || a.id === 'new_iteration') && itemId) { setBusy(a.id); try { setComposer(await api.story(slug, itemId)); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } return; }
     // El resto se ejecuta aquí: las que exigen autorización/red piden confirmación explícita antes
@@ -148,6 +154,10 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
 
   const primary = flow.actions.find(a => a.primary);
   const secondary = flow.actions.filter(a => !a.primary);
+  // HU-166 · Siempre hay un botón principal en la cabecera: si el servidor no trae ninguno, solo se navega al proceso (no se ejecuta nada).
+  const fallback = variant === 'story' && !primary && !readOnly;
+  // Con un formulario abierto (confirmación o autorización), el botón principal es el de ese formulario.
+  const subForm = !!confirming || !!authorizeSlot;
   const details = issue ? (showAll ? issue.details : issue.details.slice(0, 6)) : [];
   const agents = proc.steps;
   const orphan = issue?.kind === 'process_interrupted';
@@ -166,7 +176,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
           <Chip xs className="mono">{fmtUsd(proc.spentUsd)} de {fmtUsd(proc.budgetUsd)} autorizados</Chip>
           {(proc.unconfirmedUsd ?? 0) > 0 && <span title="Costo posible de llamadas interrumpidas o fallidas que el proveedor no confirmó. No se suma al gasto real, pero sí se reserva del presupuesto."><Chip xs tone="warn" className="mono">≈ {fmtUsd(proc.unconfirmedUsd!)} sin confirmar</Chip></span>}
           <Chip xs>{flow.progress.done} de {flow.progress.total} etapas</Chip>
-          {variant === 'story' ? <Link className="btn btn-ghost btn-sm" to={`/procesos/${proc.id}`}>Ver el proceso y los agentes</Link> : itemId && <Link className="btn btn-ghost btn-sm" to={`/historias/${itemId}`}>{Icon.back()} Espacio de la historia</Link>}
+          {variant === 'story' ? !fallback && <Link className="btn btn-ghost btn-sm" to={`/procesos/${proc.id}`}>Ver el proceso y los agentes</Link> : itemId && <Link className="btn btn-ghost btn-sm" to={`/historias/${itemId}`}>{Icon.back()} Espacio de la historia</Link>}
         </div>
       </div>
 
@@ -220,11 +230,13 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       {cc && ccRelevant && <ClaudeCodeCard cc={cc} />}
       {verified && <div className="sf-headline is-ok" role="status" aria-label="Autorización verificada">{Icon.okc()}<span>{verified}</span></div>}
 
-      {flow.actions.length > 0 && <div className="sf-actions" aria-label="Acciones">
-        {primary && <button className="btn btn-primary btn-sm" onClick={() => void run(primary)} disabled={busy !== null} title={primary.description}>{busy === primary.id ? <span className="spin spin-light" /> : Icon.arrow()}{primary.label}</button>}
+      {!readOnly && (flow.actions.length > 0 || fallback) && <div className="sf-actions" aria-label="Acciones">
+        {primary && <button className={`btn ${subForm ? 'btn-secondary' : 'btn-primary'} btn-sm`} onClick={() => void run(primary)} disabled={busy !== null} title={primary.description}>{busy === primary.id ? <span className={subForm ? 'spin' : 'spin spin-light'} /> : Icon.arrow()}{primary.label}</button>}
+        {fallback && <Link className="btn btn-primary btn-sm" to={`/procesos/${proc.id}`}>{Icon.arrow()}Ver el proceso y los agentes</Link>}
         {secondary.map(a => <button key={a.id} className="btn btn-secondary btn-sm" onClick={() => void run(a)} disabled={busy !== null} title={a.description}>{busy === a.id ? <span className="spin" /> : null}{a.label}</button>)}
       </div>}
-      {primary && !confirming && !composer && <span className="small muted">{primary.description}{primary.requires.length ? ` · ${primary.requires.map(r => REQ[r]).join(', ')}` : ''}</span>}
+      {!readOnly && authorizeSlot}
+      {!readOnly && primary && !confirming && !composer && !authorizeSlot && <span className="small muted">{primary.description}{primary.requires.length ? ` · ${primary.requires.map(r => REQ[r]).join(', ')}` : ''}</span>}
 
       {confirming && <div className="sf-confirm" aria-label="Confirmar acción">
         <strong className="sm13">{confirming.label}</strong>
