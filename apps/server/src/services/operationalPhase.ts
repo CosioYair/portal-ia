@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { changed } from './live.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BacklogItem, KnowledgeDoc, PhaseTransition, PhaseTransitionPreview, PreservedCounts, Process, ProjectArchive } from '@portal-ia/domain';
@@ -215,6 +216,7 @@ export async function startPhase(slug: string, projectId: string, opts: { name?:
     if (Number(runningNow.n) > 0) throw Object.assign(new Error('Un proceso empezó a ejecutarse: vuelve a revisar la vista previa.'), { statusCode: 409, code: 'running_processes' });
     db.prepare(`UPDATE backlog_items SET archived_at = ?, archive_id = ? WHERE project_id = ? AND archived_at IS NULL`).run(at, id, projectId);
     db.prepare(`UPDATE processes SET archived_at = ?, archive_id = ? WHERE project_id = ? AND archived_at IS NULL AND status <> 'running'`).run(at, id, projectId);
+    changed({ ws: slug, entity: 'backlog', id: null, projectId }); changed({ ws: slug, entity: 'process', id: null, projectId });
     const doc = knowledgeRepo(slug).add({ projectId, title, body, authorAgentId: null, authorAgentName: 'Portal IA (registro sin IA)', processId: null, version: prevBaselines + 1 });
     db.prepare(`INSERT INTO phase_transitions (id, project_id, name, started_at, started_by, git_head, git_branch, baseline_doc_id, summary_json) VALUES (?, ?, ?, ?, 'owner', ?, ?, ?, ?)`)
       .run(id, projectId, name, at, preview.git.head, preview.git.branch, doc.id, JSON.stringify(summary));
@@ -233,6 +235,7 @@ export function revertPhase(slug: string, projectId: string, transitionId: strin
   try {
     db.prepare(`UPDATE backlog_items SET archived_at = NULL, archive_id = NULL WHERE archive_id = ?`).run(transitionId);
     db.prepare(`UPDATE processes SET archived_at = NULL, archive_id = NULL WHERE archive_id = ?`).run(transitionId);
+    changed({ ws: slug, entity: 'backlog', id: null }); changed({ ws: slug, entity: 'process', id: null });
     db.prepare(`UPDATE phase_transitions SET reverted_at = ?, revert_reason = ? WHERE id = ?`).run(at, (opts.reason ?? '').slice(0, 500) || null, transitionId);
     db.exec('COMMIT');
   } catch (e) { db.exec('ROLLBACK'); throw e; }
@@ -249,6 +252,7 @@ export function restoreStory(slug: string, itemId: string, opts: { authorized?: 
   db.exec('BEGIN IMMEDIATE');
   try {
     db.prepare(`UPDATE processes SET archived_at = NULL, archive_id = NULL WHERE backlog_item_id = ? AND archive_id IS ?`).run(it.id, it.archiveId ?? null);
+    changed({ ws: slug, entity: 'process', id: null, itemId: it.id });
     db.prepare(`UPDATE backlog_items SET archived_at = NULL, archive_id = NULL, description = ?, updated_at = ? WHERE id = ?`)
       .run(`${it.description ? it.description + '\n' : ''}[${now().slice(0, 10)}] Restaurada desde el archivo por el propietario.`, now(), it.id);
     db.exec('COMMIT');

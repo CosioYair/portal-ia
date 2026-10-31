@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { changed } from './live.ts';
 import { nextConversationAction, type AssistantConversation, type ConversationArtifact, type ConversationArtifactKind, type ConversationDecision, type ConversationStage, type DecisionOption } from '@portal-ia/domain';
 import { monotonicNow } from '../clock.ts';
 import { artifactsRepo, conversationsRepo, decisionsRepo } from '../db/conversations.ts';
@@ -41,6 +42,7 @@ export function updateConversation(id: string, patch: { title?: string; workspac
 function note(conversationId: string, content: string) {
   const id = crypto.randomUUID(); const at = monotonicNow();
   platform.prepare(`INSERT INTO assistant_messages (id, role, content, actions_json, attachments_json, tokens_in, tokens_out, cost_usd, model, created_at, conversation_id) VALUES (?, 'assistant', ?, '[]', '[]', 0, 0, 0, 'portal', ?, ?)`).run(id, content, at, conversationId);
+  changed({ ws: null, entity: 'assistant', id: conversationId });
   conversationsRepo.touch(conversationId);
 }
 

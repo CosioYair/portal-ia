@@ -12,7 +12,28 @@ export class ApiError extends Error {
   constructor(public status: number, message: string, public body?: any) { super(message); }
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+/**
+ * Versión de cada proceso tal como la vio ESTA pestaña (la sirve el servidor). Las acciones sobre un proceso la envían
+ * como `seenVersion`: si otra pestaña, un lote o el equipo lo cambiaron mientras tanto, el servidor no hace nada (409
+ * `stale_view`) y la pantalla se actualiza para decidir con el estado real.
+ */
+const seenVersions = new Map<string, string>();
+function noteVersions(body: any) {
+  const one = (p: any) => { if (p && typeof p === 'object' && typeof p.id === 'string' && typeof p.version === 'string') seenVersions.set(p.id, p.version); };
+  if (Array.isArray(body)) body.forEach(one);
+  else if (body && typeof body === 'object') { one(body); if (Array.isArray(body.processes)) body.processes.forEach(one); one(body.lastProcess); one(body.process); }
+}
+const VERSIONED = /\/processes\/([^/?]+)\/(authorize|continue|accept-plan|apply|merge|publish|reject|recover|retry|verify|verify\/install-and-retry|runtime-check|integration\/prepare|integration\/resolve|external-correction|manual-test\/generate|convert-to-analysis)$/;
+function withSeenVersion(url: string, init?: RequestInit): RequestInit | undefined {
+  const m = init?.method === 'POST' ? url.match(VERSIONED) : null; const v = m ? seenVersions.get(m[1]) : undefined;
+  if (!m || !v) return init;
+  let body: any = {}; try { body = init!.body ? JSON.parse(String(init!.body)) : {}; } catch { return init; }
+  if (!body || typeof body !== 'object' || Array.isArray(body) || 'seenVersion' in body) return init;
+  return { ...init, body: JSON.stringify({ ...body, seenVersion: v }) };
+}
+
+async function request<T>(url: string, init0?: RequestInit): Promise<T> {
+  const init = withSeenVersion(url, init0);
   const headers: Record<string, string> = init?.body ? { 'Content-Type': 'application/json' } : {};
   // Las lecturas no pueden quedarse colgadas: un sondeo sin respuesta detendría la actualización de la pantalla.
   const isRead = !init?.method || init.method === 'GET';
@@ -27,6 +48,9 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   noteResponse(res.headers.get('x-server-time'), sentAt, Date.now()); noteBundle(res.headers.get('x-portal-web'));
   const text = await res.text();
   const body = text ? JSON.parse(text) : null;
+  // Solo lo que la pantalla va a mostrar cuenta como «visto»: el estado que acompaña a un 409 «stale_view» no (un segundo
+  // clic en el mismo botón antiguo también se rechaza hasta que la pantalla se actualiza y lo enseña).
+  if (res.ok) noteVersions(body);
   if (!res.ok) throw new ApiError(res.status, body?.error ?? body?.lastError?.message ?? `Error ${res.status}`, body);
   return body as T;
 }
@@ -138,6 +162,8 @@ export const api = {
   assessmentEstimate: (slug: string, projectId: string) => request<AssessmentEstimate>(`/api/workspaces/${slug}/projects/${projectId}/assessment/estimate`),
   createAssessment: (slug: string, projectId: string) => request<Process>(`/api/workspaces/${slug}/projects/${projectId}/assessment`, { method: 'POST' }),
   processes: (slug: string, projectId: string) => request<Process[]>(`/api/workspaces/${slug}/projects/${projectId}/processes`),
+  /** Listado resumido (sin salidas de los agentes ni diffs): lo que usan Actividad, Panel, Backlog y la evaluación inicial. */
+  processSummaries: (slug: string, projectId: string) => request<Process[]>(`/api/workspaces/${slug}/projects/${projectId}/processes?view=summary`),
   process: (slug: string, id: string) => request<Process>(`/api/workspaces/${slug}/processes/${id}`),
   /** Autoriza un proceso. En historias, `pipeline` incluye en ESTA autorización aplicar, verificar, QA con evidencia y correcciones acotadas. */
   authorizeProcess: (slug: string, id: string, budgetUsd: number, pipeline?: PipelineConfig) => request<Process>(`/api/workspaces/${slug}/processes/${id}/authorize`, { method: 'POST', body: JSON.stringify({ budgetUsd, authorized: true, ...(pipeline ? { pipeline } : {}) }) }),
@@ -224,7 +250,7 @@ export const api = {
   repoNormalizeEol: (slug: string, projectId: string) => request<{ commit: string | null; files: number }>(`/api/workspaces/${slug}/projects/${projectId}/repository/normalize-eol`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   repoPublishMain: (slug: string, projectId: string) => request<{ remote: string; url: string | null; branches: string[] }>(`/api/workspaces/${slug}/projects/${projectId}/repository/publish-main`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   systemStatus: () => request<SystemStatus>('/api/system/status'),
-  systemUpdate: (opts: { install?: boolean; restart?: boolean } = {}) => request<{ update: NonNullable<SystemStatus['update']>; install: boolean }>('/api/system/update', { method: 'POST', body: JSON.stringify({ authorized: true, ...opts }) }),
+  systemUpdate: (opts: { install?: boolean; restart?: boolean; interruptRunning?: boolean } = {}) => request<{ update: NonNullable<SystemStatus['update']>; install: boolean }>('/api/system/update', { method: 'POST', body: JSON.stringify({ authorized: true, ...opts }) }),
   delegationEstimate: (slug: string, body: { projectId?: string | null; agent?: string; request: string }) => request<AssessmentEstimate & { leadAgentId: string; teamSize: number }>(`/api/workspaces/${slug}/delegations/estimate`, { method: 'POST', body: JSON.stringify(body) }),
   createDelegation: (slug: string, body: { projectId?: string | null; agent?: string; request: string }) => request<Process>(`/api/workspaces/${slug}/delegations`, { method: 'POST', body: JSON.stringify(body) }),
   applyBacklogOps: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/backlog-ops/apply`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
@@ -236,6 +262,7 @@ export const api = {
   resetStory: (slug: string, id: string, reason?: string) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/reset`, { method: 'POST', body: JSON.stringify({ reason }) }),
   recoverProcess: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/recover`, { method: 'POST' }),
   acceptPlan: (slug: string, processId: string, addBudgetUsd = 0) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/accept-plan`, { method: 'POST', body: JSON.stringify({ authorized: true, addBudgetUsd }) }),
+  convertToAnalysis: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/convert-to-analysis`, { method: 'POST', body: JSON.stringify({}) }),
   retryProcess: (slug: string, processId: string, skipQa = false) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/retry`, { method: 'POST', body: JSON.stringify({ skipQa }) }),
   mergeProcess: (slug: string, processId: string, skipVerification = false) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/merge`, { method: 'POST', body: JSON.stringify({ authorized: true, skipVerification }) }),
   publishProcess: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/publish`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),

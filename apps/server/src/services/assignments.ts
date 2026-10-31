@@ -1,4 +1,5 @@
 import { ASSIGNMENT_STATUS_LABEL, DEFAULT_PIPELINE, assignmentReady, verificationsForApplied, type Assignment, type AssignmentOutcome, type AssignmentStatus, type Process } from '@portal-ia/domain';
+import { sameWorkRunning } from './executionLocks.ts';
 import { monotonicNow } from '../clock.ts';
 import { assignmentsRepo } from '../db/assignments.ts';
 import { knowledgeRepo, onProcessFinish, processesRepo, projectsRepo } from '../db/workspace.ts';
@@ -246,8 +247,9 @@ export function assignmentAuthorizationPreview(slug: string, id: string) {
  * motivo: nunca queda un proceso pendiente que otra pantalla pudiera ejecutar con otros límites.
  */
 export async function authorizeAssignment(slug: string, id: string, input: { budgetUsd: number; maxSubscriptionCalls?: number | null; maxCorrections?: number | null; gauntlet?: { mode: 'off' | 'standard' | 'deep' | 'auto' } | null; allowInstall?: boolean; discardApplied?: boolean }, log: (o: any, m: string) => void): Promise<{ assignment: Assignment; process: Process }> {
-  if (processesRepo(slug).running().length) throw fail(409, 'Ya hay un proceso en ejecución. Espera a que termine.', 'busy');
   const before = assignmentsRepo(slug).get(id); if (!before) throw fail(404, 'Encargo no encontrado.', 'not_found');
+  // Solo otro proceso de ESTE encargo impide empezar (no los de otras historias o encargos).
+  { const busy = sameWorkRunning(slug, { id: '', backlogItemId: null, assignmentId: id }); if (busy) throw fail(409, `Este encargo ya tiene un proceso en ejecución («${busy.title}»). Espera a que termine.`, 'busy'); }
   // Lo que impide empezar se comprueba ANTES de descartar nada; sin tu confirmación no se crea ni se paga nada.
   checkPreparable(slug, before);
   const applied = appliedVersion(slug, before);

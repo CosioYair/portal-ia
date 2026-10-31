@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { acquireWork } from '../services/executionLocks.ts';
 import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
 import { backlogRepo } from '../db/workspace.ts';
@@ -71,6 +72,9 @@ export async function storyRoutes(app: FastifyInstance) {
     // reopen: reabre una historia cerrada/descartada · discardApplied: confirma descartar el worktree y la rama de una iteración aplicada sin integrar.
     const body = z.object({ note: z.string().trim().max(2000).nullable().optional(), reopen: z.boolean().optional(), discardApplied: z.boolean().optional() }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Datos de la iteración no válidos' });
-    try { const r = await iterateStory(slug, id, body.data.note || null, { reopen: body.data.reopen, discardApplied: body.data.discardApplied }); app.log.info({ story: id, processId: r.process.id, actions: r.actions }, 'nueva iteración creada'); return reply.code(201).send(r); } catch (e: any) { return fail(reply, e); }
+    // Una operación a la vez por historia (descartar su rama aplicada choca con lo que esté haciendo su proceso).
+    const lease = acquireWork(slug, { id: '', backlogItemId: id, assignmentId: null }, String(req.id), 'preparar una iteración');
+    if ('conflict' in lease) return reply.code(409).send({ error: lease.conflict, code: 'busy' });
+    try { const r = await iterateStory(slug, id, body.data.note || null, { reopen: body.data.reopen, discardApplied: body.data.discardApplied }); app.log.info({ story: id, processId: r.process.id, actions: r.actions }, 'nueva iteración creada'); return reply.code(201).send(r); } catch (e: any) { return fail(reply, e); } finally { lease.release(); }
   });
 }

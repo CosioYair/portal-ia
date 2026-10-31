@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { semaphore, withRwLock } from './capacity.ts';
 import os from 'node:os';
 import path from 'node:path';
 import { config } from '../config.ts';
@@ -78,6 +79,8 @@ export function depsVolumeName(worktree: string, image: string = SANDBOX_IMAGE):
  * (apagado normal, reinicio por el supervisor) se eliminan, para que no queden huérfanos ocupando el motor.
  */
 const activeContainers = new Set<string>();
+/** Contenedores del sandbox a la vez (PORTAL_SANDBOX_MAX_CONTAINERS, por defecto 3): el resto espera turno. */
+const sandboxSlots = semaphore(() => Number(process.env.PORTAL_SANDBOX_MAX_CONTAINERS) || 3);
 process.once('exit', () => {
   if (!activeContainers.size) return;
   try { execFileSync('docker', ['rm', '-f', ...activeContainers], { env: dockerCliEnv(), stdio: 'ignore', timeout: 10_000, windowsHide: true }); } catch { /* motor parado */ }
@@ -255,11 +258,20 @@ async function runUnguarded(worktree: string, repoRoot: string, command: string,
     const name = `portal-ia-sbx-${randomBytes(6).toString('hex')}`;
     const env = dockerCliEnv();
     const args = buildDockerRunArgs({ worktree, command, script, image: SANDBOX_IMAGE, volume, allowNetwork, name });
-    // Matar el CLI no detiene el contenedor: al agotar el tiempo se elimina por nombre.
-    activeContainers.add(name);
-    const remove = () => { spawn('docker', ['rm', '-f', name], { env, stdio: 'ignore', windowsHide: true }).on('error', () => { /* sin docker */ }); };
-    const r = await runProcess('docker', args, { timeoutMs, env, onTimeout: remove, onStuck: remove });
-    activeContainers.delete(name);
+    // Varias historias verifican a la vez: un máximo de contenedores (cada uno con 2 CPU y 2 GB) y el volumen de
+    // dependencias con cerrojo lector/escritor («install» lo vacía y lo llena; los demás lo leen). La espera no consume
+    // el tiempo máximo del comando, que empieza al lanzar el contenedor.
+    const release = await sandboxSlots.acquire();
+    let r: Awaited<ReturnType<typeof runProcess>>;
+    try {
+      r = await withRwLock(`deps:${volume}`, command === 'install', async () => {
+        // Matar el CLI no detiene el contenedor: al agotar el tiempo se elimina por nombre.
+        activeContainers.add(name);
+        const remove = () => { spawn('docker', ['rm', '-f', name], { env, stdio: 'ignore', windowsHide: true }).on('error', () => { /* sin docker */ }); };
+        try { return await runProcess('docker', args, { timeoutMs, env, onTimeout: remove, onStuck: remove }); }
+        finally { activeContainers.delete(name); }
+      });
+    } finally { release(); }
     const marked = splitExitMark(r.output);
     // El código lo da el CLI; si el motor se quedó colgado tras terminar el comando, el que imprimió el propio contenedor.
     const code = r.stuck ? marked.code : r.code;

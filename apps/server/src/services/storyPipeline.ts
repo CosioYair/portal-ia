@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { addQueuedMs, queuedMsOf } from './capacity.ts';
 import path from 'node:path';
 import { backendLabel, batchSourceOf, promptSections, verificationsForApplied } from '@portal-ia/domain';
 import type { Agent, AgentBlocker, AgentFailureKind, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
@@ -208,7 +209,15 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       let cost: number; let backend: string | null = null;
       if (route === 'claude-code') {
         // Suscripción: 0 USD del presupuesto de API. El uso (tokens, turnos, duración, equivalente estimado) va al registro del conector.
-        const cc = await withWatchdog(claudeCodeComplete({ slug, projectId: proc.projectId, processId, stepId, agent, role: step.role ?? null, title: step.title }, request, ctrl.signal, setLive), ctrl, timeoutMs);
+        // En cola (máximo de ejecuciones de Claude Code a la vez): el plazo de la llamada y la duración de la historia no
+        // corren hasta que sale; el estado en vivo dice «En cola» (no «ejecutando»).
+        let started!: () => void; const out = new Promise<void>(r => { started = r; }); let queuedAt: number | null = null;
+        const onCcLive = (patch: Partial<LiveCall>) => {
+          if (patch.state === 'queued') queuedAt ??= Date.now();
+          else if (patch.state && patch.state !== 'preparing') { if (queuedAt !== null) { addQueuedMs(processId, Date.now() - queuedAt); queuedAt = null; } started(); patch = { ...patch, deadlineAt: new Date(Date.now() + timeoutMs).toISOString() }; }
+          setLive(patch);
+        };
+        const cc = await withWatchdog(claudeCodeComplete({ slug, projectId: proc.projectId, processId, stepId, agent, role: step.role ?? null, title: step.title }, request, ctrl.signal, onCcLive).finally(() => { if (queuedAt !== null) { addQueuedMs(processId, Date.now() - queuedAt); queuedAt = null; } started(); }), ctrl, timeoutMs, { startAfter: out });
         res = cc; cost = 0; backend = cc.backendLabel;
       } else {
         res = await withWatchdog(getAdapter(providerId)!.complete(decryptSecret(cred!.ciphertext), { workspaceId: prow.workspace_id }, {
@@ -341,7 +350,9 @@ export interface StoryRunCtx {
 export const fileExistsIn = (base: string) => (rel: string) => { try { return fs.existsSync(path.join(base, safeRelPath(rel))); } catch { return false; } };
 /** Duración máxima autorizada (se comprueba antes de cada unidad y de cada llamada, no solo por vuelta del pipeline). */
 export function checkDuration(ctx: StoryRunCtx, cfg: PipelineConfig) {
-  if (Date.now() - new Date(pipelineOf(ctx.slug, ctx.processId).startedAt).getTime() > cfg.maxDurationMin * 60_000) throw new PipelinePause('duration', `Se alcanzó la duración máxima autorizada (${cfg.maxDurationMin} min). Lo hecho se conserva; puedes continuar.`);
+  // La espera en la cola de Claude Code (otras historias usando los huecos) no cuenta como duración de esta historia.
+  const startedAt = pipelineOf(ctx.slug, ctx.processId).startedAt;
+  if (Date.now() - new Date(startedAt).getTime() - queuedMsOf(ctx.processId, startedAt) > cfg.maxDurationMin * 60_000) throw new PipelinePause('duration', `Se alcanzó la duración máxima autorizada (${cfg.maxDurationMin} min). Lo hecho se conserva; puedes continuar.`);
 }
 export const checkCancelled = (ctx: StoryRunCtx) => { if (ctx.isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true }); };
 
@@ -846,7 +857,10 @@ export async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
   // Entrega incremental: estado de cada comprobación y, si QA ya revisó un commit anterior, el diff completo solo de lo que cambió.
   let unchanged: string[] = []; const reviewed = r.manifest?.reviewedCommit ?? null; let checks: import('@portal-ia/domain').DeliveryCheck[] = [];
   if (r.manifest) {
-    const units = await import('./storyUnits.ts'); checks = units.deliveryChecks(proc);
+    const units = await import('./storyUnits.ts');
+    // Historias solo de CSS: la equivalencia de estilos (sin IA) entra en la evidencia de QA.
+    try { await units.styleEvidence(ctx); } catch { /* sin evidencia de estilos: QA decide con el resto */ }
+    checks = units.deliveryChecks(processesRepo(ctx.slug).get(ctx.processId)!);
     if (reviewed && r.applied?.worktree) {
       try { const changed = new Set((await git(r.applied.worktree, ['diff', '--name-only', reviewed, 'HEAD'])).split('\n').map(x => x.trim()).filter(Boolean)); unchanged = r.changes.filter(c => !c.error && !changed.has(c.path)).map(c => c.path); }
       catch { unchanged = []; /* commit anterior inalcanzable: revisión completa */ }

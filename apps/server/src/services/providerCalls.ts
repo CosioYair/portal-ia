@@ -95,16 +95,18 @@ export const inflightCount = (processId: string) => inflight.get(processId)?.siz
  * que no respeta la señal, una lectura que no se corta—, se aborta y se da por agotada. Ninguna llamada puede quedar
  * «esperando» para siempre. PORTAL_PROVIDER_WATCHDOG_GRACE_MS cambia el margen (pruebas).
  */
-export function withWatchdog<T>(call: Promise<T>, ctrl: AbortController, timeoutMs: number): Promise<T> {
+export function withWatchdog<T>(call: Promise<T>, ctrl: AbortController, timeoutMs: number, opts: { startAfter?: Promise<void> } = {}): Promise<T> {
   const grace = Number(process.env.PORTAL_PROVIDER_WATCHDOG_GRACE_MS) || 15_000;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined; let settled = false;
   const guard = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
+    // El plazo cuenta desde que la llamada sale de verdad: esperar turno en la cola de Claude Code no lo consume.
+    const arm = () => { if (settled) return; timer = setTimeout(() => {
       ctrl.abort();
       reject(new ProviderRequestError({ code: 'timeout', message: `La llamada superó su plazo (${Math.round(timeoutMs / 1000)} s) y no terminó al abortarla; el Portal la da por agotada. La solicitud pudo haberse procesado y facturado.` }));
-    }, timeoutMs + grace);
+    }, timeoutMs + grace); };
+    if (opts.startAfter) void opts.startAfter.then(arm, arm); else arm();
   });
-  return Promise.race([call, guard]).finally(() => clearTimeout(timer));
+  return Promise.race([call, guard]).finally(() => { settled = true; clearTimeout(timer); });
 }
 
 /** Espera abortable (entre reintentos): si se cancela el proceso, deja de esperar. */

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { useEntryRecorder } from './lib/nav.ts';
 import { Navigate, Route, Routes, useLocation, useNavigate, useNavigationType, useParams } from 'react-router-dom';
 import type { Project, ProviderView, Workspace } from '@portal-ia/domain';
 import { api, type BootstrapStatus } from './lib/api.ts';
@@ -64,20 +65,25 @@ function SelectionHistory({ sel, workspaces, select }: { sel: Selection | null; 
  * donde estabas, esperando a que la pantalla cargue su contenido; una navegación nueva empieza arriba (o en su #ancla).
  */
 function ScrollMemory() {
-  const { pathname, search, hash } = useLocation(); const type = useNavigationType();
+  const { pathname, search, hash, key: entry } = useLocation(); const type = useNavigationType();
+  useEntryRecorder();
   useEffect(() => {
-    const key = `portal-ia.scroll.${pathname}${search}`;
-    let saved = 0; try { saved = Number(sessionStorage.getItem(key) ?? 0); } catch { /* sin almacenamiento */ }
-    let tries = 0; let timer: ReturnType<typeof setTimeout> | undefined;
-    const restore = () => { if (window.scrollY >= saved - 2 || ++tries > 20) return; window.scrollTo(0, saved); timer = setTimeout(restore, 100); };
+    // Por ENTRADA del historial (Atrás vuelve exactamente donde estabas en esa visita); al recargar, la de la pantalla.
+    const key = `portal-ia.scroll.${pathname}${search}`; const keyEntry = `portal-ia.scroll.e.${entry}`;
+    let saved = 0; try { saved = Number(sessionStorage.getItem(keyEntry) ?? sessionStorage.getItem(key) ?? 0); } catch { /* sin almacenamiento */ }
+    // Se espera a que la pantalla tenga altura suficiente (datos que llegan después), hasta 8 s; si te desplazas tú, se para.
+    let tries = 0; let timer: ReturnType<typeof setTimeout> | undefined; let userMoved = false;
+    const stop = () => { userMoved = true; };
+    const restore = () => { if (userMoved || Math.abs(window.scrollY - saved) <= 2 || ++tries > 80) return; if (document.documentElement.scrollHeight - window.innerHeight >= saved - 2) window.scrollTo(0, saved); timer = setTimeout(restore, 100); };
+    window.addEventListener('wheel', stop, { passive: true }); window.addEventListener('touchmove', stop, { passive: true }); window.addEventListener('keydown', stop);
     if (type === 'POP' && saved > 0) timer = setTimeout(restore, 50); else if (type !== 'POP' && !hash) window.scrollTo(0, 0);
     // Se guarda la posición del momento del desplazamiento (al salir, la pantalla nueva ya ha cambiado la altura).
     let pending: number | null = null; let st: ReturnType<typeof setTimeout> | undefined;
-    const write = () => { if (pending === null) return; try { sessionStorage.setItem(key, String(pending)); } catch { /* sin almacenamiento */ } pending = null; };
+    const write = () => { if (pending === null) return; try { sessionStorage.setItem(key, String(pending)); sessionStorage.setItem(keyEntry, String(pending)); } catch { /* sin almacenamiento */ } pending = null; };
     const save = () => { pending = Math.round(window.scrollY); clearTimeout(st); st = setTimeout(write, 150); };
     window.addEventListener('scroll', save, { passive: true });
-    return () => { clearTimeout(timer); clearTimeout(st); write(); window.removeEventListener('scroll', save); };
-  }, [pathname, search, hash, type]);
+    return () => { clearTimeout(timer); clearTimeout(st); write(); window.removeEventListener('scroll', save); window.removeEventListener('wheel', stop); window.removeEventListener('touchmove', stop); window.removeEventListener('keydown', stop); };
+  }, [pathname, search, hash, type, entry]);
   return null;
 }
 

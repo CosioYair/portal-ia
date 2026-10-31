@@ -1,4 +1,5 @@
 import { normalizeGauntlet, normalizePipeline, type PipelineConfig, type Process } from '@portal-ia/domain';
+import { sameWorkRunning } from './executionLocks.ts';
 import { processesRepo } from '../db/workspace.ts';
 import { trackJob } from './activeJobs.ts';
 import { clearCancel, isCancelled, runAssessment } from './assessment.ts';
@@ -25,7 +26,8 @@ export function authorizeProcess(slug: string, id: string, input: AuthorizeInput
   const procs = processesRepo(slug); const proc = procs.get(id);
   if (!proc) throw fail(404, 'Proceso no encontrado');
   if (proc.status !== 'pending_authorization') throw fail(409, 'El proceso ya fue autorizado o finalizado.');
-  if (procs.running().length) throw fail(409, 'Ya hay un proceso en ejecución. Espera a que termine.');
+  // Solo otro proceso de la MISMA historia o encargo impide empezar (antes, cualquiera): ver services/executionLocks.ts.
+  const busy = sameWorkRunning(slug, proc); if (busy) throw fail(409, `Esta historia ya tiene otro proceso en ejecución («${busy.title}»). Espera a que termine o cancélalo; las demás historias no se ven afectadas.`, 'busy');
   const story = proc.kind === 'story_execution';
   // Gauntlet: el modo de esta tarea (o el del proyecto); `auto` se resuelve aquí y se guarda resuelto.
   const gauntlet = story && input.pipeline ? resolveGauntletFor(slug, proc, normalizeGauntlet(input.pipeline.gauntlet ?? projectGauntlet(slug, proc.projectId))) : null;

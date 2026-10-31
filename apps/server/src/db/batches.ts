@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type { Batch, BatchEvent } from '@portal-ia/domain';
 import { workspaceDb } from './workspace.ts';
+import { changed } from '../services/live.ts';
 
 /**
  * Lotes de ejecución continua (v0.15): un documento por lote (autorización, plan, estado de cada historia y registro
@@ -30,6 +31,7 @@ export function batchesRepo(slug: string) {
     b.updatedAt = new Date().toISOString();
     if (b.events.length > MAX_EVENTS) b.events = [{ at: b.events[0].at, kind: 'item', message: `(${b.events.length - MAX_EVENTS + 1} eventos anteriores resumidos)` }, ...b.events.slice(-(MAX_EVENTS - 1))];
     d.prepare('UPDATE batches SET status = ?, doc_json = ?, updated_at = ? WHERE id = ?').run(b.status, JSON.stringify(b), b.updatedAt, b.id);
+    changed({ ws: slug, entity: 'batch', id: b.id, projectId: b.projectId });
     return b;
   };
   return {
@@ -38,6 +40,7 @@ export function batchesRepo(slug: string) {
       const now = new Date().toISOString();
       const doc: Batch = { ...b, id: crypto.randomUUID(), createdAt: now, updatedAt: now };
       d.prepare('INSERT INTO batches (id, project_id, status, doc_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(doc.id, doc.projectId, doc.status, JSON.stringify(doc), now, now);
+      changed({ ws: slug, entity: 'batch', id: doc.id, projectId: doc.projectId });
       return doc;
     },
     /** Lee, modifica y guarda en una sola operación síncrona (sin carreras dentro de este proceso). */

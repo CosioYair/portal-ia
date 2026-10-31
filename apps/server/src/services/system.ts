@@ -1,4 +1,7 @@
 import fs from 'node:fs';
+import { workspacesRepo } from '../db/platform.ts';
+import { withRepoLock } from './repoLock.ts';
+import { changed } from './live.ts';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import type { ActivationState, SystemStatus } from '@portal-ia/domain';
@@ -138,7 +141,7 @@ export async function activationOf(mergeCommit: string, mergedAt: string): Promi
 export async function systemStatus(): Promise<SystemStatus> {
   const b = buildInfo(); const sb = await detectSandbox().catch(() => null);
   const isGit = (await ensureRepo()).isGit;
-  const base: SystemStatus = { version: VERSION, startedAt, repoRoot: REPO_ROOT, isGit, startCommit, headCommit: null, branch: null, changedFiles: [], action: 'none', stories: [], update, buildCommit: b.buildCommit, buildAt: b.buildAt, sandbox: sb ? { available: sb.available, detail: sb.detail } : null };
+  const base: SystemStatus = { version: VERSION, startedAt, repoRoot: REPO_ROOT, isGit, startCommit, headCommit: null, branch: null, changedFiles: [], action: 'none', stories: [], update, buildCommit: b.buildCommit, buildAt: b.buildAt, sandbox: sb ? { available: sb.available, detail: sb.detail } : null, running: runningEverywhere() };
   if (!isGit) return base;
   const headCommit = await git(REPO_ROOT, ['rev-parse', '--short', 'HEAD']).catch(() => null);
   const branch = await git(REPO_ROOT, ['symbolic-ref', '--short', '-q', 'HEAD']).catch(() => null) || null;
@@ -155,11 +158,13 @@ export async function systemStatus(): Promise<SystemStatus> {
   return { ...base, headCommit, branch, changedFiles, action: classifyImpact(changedFiles), stories: Array.from(stories) };
 }
 
-function run(cmd: string, args: string[], onLine: (l: string) => void): Promise<number> {
+function run(cmd: string, args: string[], onLine: (l: string) => void, timeoutMs = 15 * 60_000): Promise<number> {
   return new Promise(resolve => {
     const child = spawn(cmd, args, { cwd: REPO_ROOT, env: { ...process.env, CI: '1', FORCE_COLOR: '0' }, shell: process.platform === 'win32' });
+    // Un comando colgado no deja el Portal «reconstruyéndose» para siempre (ni bloquea el carril del repositorio).
+    const timer = setTimeout(() => { onLine(`\n✖ ${cmd} ${args[0]} superó ${Math.round(timeoutMs / 60_000)} min: se detiene.\n`); try { child.kill(); } catch { /* ya terminó */ } }, timeoutMs);
     child.stdout.on('data', d => onLine(String(d))); child.stderr.on('data', d => onLine(String(d)));
-    child.on('close', code => resolve(code ?? 1)); child.on('error', e => { onLine(String(e.message)); resolve(1); });
+    child.on('close', code => { clearTimeout(timer); resolve(code ?? 1); }); child.on('error', e => { clearTimeout(timer); onLine(String(e.message)); resolve(1); });
   });
 }
 
@@ -167,28 +172,45 @@ function run(cmd: string, args: string[], onLine: (l: string) => void): Promise<
  * Reconstruye el Portal (npm install si cambiaron dependencias + npm run build) y, si se pide, reinicia el servidor
  * relanzando este mismo proceso. Requiere autorización explícita (herramienta «Ejecución»).
  */
-export async function startUpdate(opts: { install: boolean; restart: boolean }, log: (o: any, m: string) => void) {
+export async function startUpdate(opts: { install: boolean; restart: boolean; interruptRunning?: boolean }, log: (o: any, m: string) => void) {
   if (update?.status === 'running') throw Object.assign(new Error('Ya hay una actualización en curso.'), { statusCode: 409 });
   const outcome = opts.restart ? buildOutcome() : null;
   update = { status: 'running', log: '', startedAt: new Date().toISOString(), finishedAt: null, outcome };
+  changed({ ws: null, entity: 'system', id: null });
   const append = (l: string) => { if (update) update.log = (update.log + l).slice(-20_000); };
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  (async () => {
+  void (async () => {
     try {
       if (opts.install) { append('> npm install\n'); const c = await run(npm, ['install', '--no-audit', '--no-fund'], append); if (c !== 0) throw new Error(`npm install terminó con código ${c}`); }
+      // Solo el build de la interfaz va por el carril del repositorio (con tope de tiempo): ninguna integración en main
+      // cambia los archivos a mitad, y el commit anotado es el que se construyó.
+      const commit = await withRepoLock(REPO_ROOT, async () => {
+      const commit = await git(REPO_ROOT, ['rev-parse', '--short', 'HEAD']).catch(() => null);
       // Construir aparte (dist.next) y sustituir solo si el build termina: si falla, la interfaz anterior sigue sirviéndose.
       const dist = config.webDist; const next = `${dist}.next`; const prev = `${dist}.prev`;
       fs.rmSync(next, { recursive: true, force: true });
       append('\n> npm run build --workspace apps/web -- --outDir dist.next\n');
-      const b = await run(npm, ['run', 'build', '--workspace', 'apps/web', '--', '--outDir', 'dist.next', '--emptyOutDir'], append);
+      const b = await run(npm, ['run', 'build', '--workspace', 'apps/web', '--', '--outDir', 'dist.next', '--emptyOutDir'], append, 10 * 60_000);
       if (b !== 0 || !fs.existsSync(path.join(next, 'index.html'))) throw new Error(`npm run build terminó con código ${b}: la interfaz anterior se mantiene.`);
-      const commit = await git(REPO_ROOT, ['rev-parse', '--short', 'HEAD']).catch(() => null);
       fs.writeFileSync(path.join(next, 'build-info.json'), JSON.stringify({ commit, builtAt: new Date().toISOString(), version: VERSION }));
       fs.rmSync(prev, { recursive: true, force: true });
       if (fs.existsSync(dist)) fs.renameSync(dist, prev);
       fs.renameSync(next, dist);
+      return commit;
+      });
       append(`✓ interfaz reconstruida (commit ${commit ?? '?'}); la anterior queda en dist.prev\n`);
+      // Antes de reiniciar se vuelve a mirar: si mientras se construía empezó algo (no debería: no se empieza trabajo nuevo
+      // durante la reconstrucción), no se interrumpe sin tu confirmación; queda reconstruido y pendiente de reiniciar.
+      const running = runningEverywhere();
+      if (opts.restart && running.length && !opts.interruptRunning) {
+        append(`\n⚠ No se reinicia: hay ${running.length} proceso(s) en ejecución (${running.slice(0, 3).map(r => r.title).join(', ')}). Reinicia cuando terminen.\n`);
+        update = { ...update!, status: 'done', finishedAt: new Date().toISOString(), restartSkipped: `Hay ${running.length} proceso(s) en ejecución: no se reinició para no interrumpirlos.` };
+        changed({ ws: null, entity: 'system', id: null });
+        log({ running: running.length }, 'actualización completada sin reiniciar (procesos en marcha)');
+        return;
+      }
       update = { ...update!, status: 'done', finishedAt: new Date().toISOString() };
+      changed({ ws: null, entity: 'system', id: null });
       log({ restart: opts.restart }, 'actualización completada');
       if (opts.restart) setTimeout(() => {
         // Con supervisor (npm start → scripts/portal-start.mjs): apagado limpio con código 75 y relanzamiento automático.
@@ -197,12 +219,22 @@ export async function startUpdate(opts: { install: boolean; restart: boolean }, 
         else restartSelf();
       }, 800);
     } catch (e: any) {
-      append(`\n✖ ${e.message}\n`); update = { ...update!, status: 'failed', finishedAt: new Date().toISOString() }; log({ err: e.message }, 'actualización fallida');
+      append(`\n✖ ${e.message}\n`); update = { ...update!, status: 'failed', finishedAt: new Date().toISOString() }; changed({ ws: null, entity: 'system', id: null }); log({ err: e.message }, 'actualización fallida');
       // M4: la activación fallida es un error objetivo de la última historia integrada y no activada.
       try { recordActivationFailure(update.log); } catch { /* sin lección */ }
     }
   })();
   return update;
+}
+
+/** ¿Se está reconstruyendo el Portal ahora (para reiniciarse al terminar)? Mientras tanto no empieza trabajo nuevo. */
+export const updateRunning = () => update?.status === 'running';
+
+/** Procesos en ejecución en todos los espacios: reconstruir y reiniciar los interrumpiría (quedan en pausa, se retoman a mano). */
+export function runningEverywhere(): { slug: string; id: string; title: string }[] {
+  const out: { slug: string; id: string; title: string }[] = [];
+  for (const ws of workspacesRepo.list()) { try { for (const p of processesRepo(ws.slug).running()) out.push({ slug: ws.slug, id: p.id, title: p.title }); } catch { /* espacio sin base */ } }
+  return out;
 }
 
 /** Registra una lección «activación fallida» en la última historia del Portal integrada y aún no activa. */

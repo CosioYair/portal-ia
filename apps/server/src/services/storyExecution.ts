@@ -80,7 +80,22 @@ export function planFrom(j: any, fallbackSummary: string): StoryPlan {
     .map((d: any) => ({ path: planPath(String(d.path ?? d.file ?? d.ruta)), purpose: String(d.purpose ?? d.proposito ?? '').slice(0, 300), kind: ['code', 'test', 'docs', 'config'].includes(d.kind) ? d.kind : undefined, estimatedLines: Number.isFinite(Number(d.estimatedLines)) ? Number(d.estimatedLines) : undefined })).filter((d: any) => d.path);
   return { summary: String(j?.summary ?? fallbackSummary), tasks: asStrings(j?.tasks, 40), filesToRead: asStrings(j?.filesToRead, 8).map(planPath).filter(Boolean), filesToChange: Array.from(new Set(asStrings(j?.filesToChange).map(planPath).filter(Boolean))), acceptance: asStrings(j?.acceptance), risks: asStrings(j?.risks, 20), ...(deliverables.length ? { deliverables } : {}) };
 }
+/** Commit actual de la rama principal del repositorio (completo). */
+async function mainHead(repoPath: string): Promise<string> { const { git, mainBranch, repoRoot } = await import('./repoWrite.ts'); const root = repoRoot(repoPath); return (await git(root, ['rev-parse', `refs/heads/${await mainBranch(root)}`])).trim(); }
 const planHasFiles = (p: StoryPlan) => p.filesToChange.length > 0 || (p.deliverables?.length ?? 0) > 0;
+/**
+ * ¿El plan dice A PROPÓSITO que no hay archivos que cambiar? Solo con un JSON legible: `noCodeChange: true`, o
+ * `filesToChange` presente y vacío, sin entregables, y un resumen que lo explica (solo lectura, sin cambios…). Un JSON
+ * cortado o sin el campo NO cuenta: ese se vuelve a pedir en formato compacto como siempre.
+ */
+export function declaresNoCode(raw: any): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const noFiles = Array.isArray(raw.filesToChange) && raw.filesToChange.length === 0 && !(Array.isArray(raw.deliverables) && raw.deliverables.length);
+  if (!noFiles) return false;
+  if (raw.noCodeChange === true) return true;
+  const text = `${raw.summary ?? ''} ${Array.isArray(raw.risks) ? raw.risks.join(' ') : ''}`;
+  return /solo lectura|s[oó]lo de lectura|no se (cambia|modifica|toca)|ning[uú]n archivo|sin cambios (de|en el) c[oó]digo|no (requiere|necesita|hay) cambios|read-only|no code change/i.test(text);
+}
 
 function extractJson(text: string): any | null {
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1];
@@ -235,11 +250,15 @@ ${direction ? `\n# Dirección del proyecto (${phase ? 'etapa vigente y línea ba
 ${treeText}
 
 El equipo implementará por partes (unidades que caben en una respuesta), así que indica también, por cada archivo a crear o modificar, su propósito, tipo y tamaño previsto en líneas.
-Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "deliverables": [{"path": string, "purpose": string (una frase), "kind": "code"|"test"|"docs"|"config", "estimatedLines": number}] (uno por cada ruta de filesToChange, en orden de dependencia), "acceptance": string[], "risks": string[]}`, 4000);
-    let plan: StoryPlan = accepted ?? carried ?? planFrom(extractJson(planRes.text), planRes.text.slice(0, 500));
+Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "deliverables": [{"path": string, "purpose": string (una frase), "kind": "code"|"test"|"docs"|"config", "estimatedLines": number}] (uno por cada ruta de filesToChange, en orden de dependencia), "acceptance": string[], "risks": string[], "noCodeChange": boolean (true SOLO si la historia no requiere crear ni modificar ningún archivo del repositorio, p. ej. una auditoría o un documento en Conocimiento; entonces filesToChange va vacío)}`, 4000);
+    const rawPlan = accepted || carried ? null : extractJson(planRes.text);
+    let plan: StoryPlan = accepted ?? carried ?? planFrom(rawPlan, planRes.text.slice(0, 500));
+    // Sin archivos A PROPÓSITO (auditoría, análisis, documento): no es un JSON ilegible. No se vuelve a pedir el plan (sería
+    // la misma respuesta pagada otra vez) ni se implementa a ciegas: se explica (más abajo) y se ofrece un encargo de análisis.
+    const noCode = !!config?.autoApply && !planHasFiles(plan) && declaresNoCode(rawPlan);
     // Entrega incremental: un plan sin entregables legibles (JSON cortado o mal formado) se pide UNA vez más, compacto y en
     // el mismo paso; nunca se convierte en una respuesta enorme del Desarrollador con la historia entera.
-    if (config?.autoApply && !planHasFiles(plan)) {
+    if (config?.autoApply && !planHasFiles(plan) && !noCode) {
       log({ processId, stop: planRes.stopReason }, 'plan sin entregables legibles: se pide una vez en formato compacto');
       const again = await call(planStep.id, sys(coord, project, item), `Tu respuesta anterior no se pudo leer como un plan con archivos (JSON cortado o sin «filesToChange»). Devuelve SOLO el JSON del plan, compacto y completo: "summary" (máximo 3 frases), "tasks" (máximo 10, una línea cada una), "filesToRead" (máximo 6), "filesToChange" (TODAS las rutas a crear o modificar), "deliverables" (una por ruta: path, purpose de 12 palabras como mucho, kind, estimatedLines), "acceptance" (todos los criterios) y "risks" (máximo 3). Sin texto alrededor.`, 3000, [{ role: 'user', content: 'Elabora el plan técnico de la historia (JSON).' }, { role: 'assistant', content: planRes.text.slice(0, 12_000) }], 'Plan en formato compacto: el anterior no traía entregables legibles');
       plan = planFrom(extractJson(again.text), plan.summary);
@@ -252,6 +271,11 @@ Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": st
       const team0 = involved.map(id => agents.get(id)).filter(Boolean) as Agent[];
       const implStep0 = roleStep('implementer'); const qaStep0 = stepByRole(proc, 'reviewer');
       runCtx = { slug, processId, item, project, repoPath: repo.path, plan, consultText: '', iterText, dev: agents.get(implStep0.agentId)!, qa: qaStep0 ? agents.get(qaStep0.agentId)! : null, team: team0, log, isCancelled, injected };
+      if (noCode) {
+        result.planNoCode = { summary: plan.summary.slice(0, 600), at: new Date().toISOString(), basis: result.planBasis ?? null }; save();
+        handedOff = true;
+        throw new PipelinePause('plan', `El Coordinador concluyó que esta historia no cambia ningún archivo del repositorio: «${plan.summary.slice(0, 400)}». Una ejecución de historia solo entrega cambios de código, así que no se implementa nada. Para un análisis o un documento, conviértela en un encargo de análisis (se autoriza aparte); si sí debe cambiar código, reformúlala (nueva iteración). Volver a ejecutarla tal cual daría el mismo resultado.`);
+      }
       const { planProblem } = await import('./storyUnits.ts');
       const problem = planProblem(plan);
       if (problem) { handedOff = true; throw new PipelinePause('plan', problem); }
@@ -329,7 +353,9 @@ ${treeText}`;
       const rc: StoryRunCtx = { slug, processId, item, project, repoPath: repo.path, plan, consultText, iterText, dev, qa, team, log, isCancelled, injected };
       runCtx = rc;
       const units = await import('./storyUnits.ts');
-      units.startIncremental(rc, implStep.status === 'pending' ? implStep.id : null);
+      // Base de la historia: el main que verá el Desarrollador en su primera unidad (ver ExecutionResult.baseCommit).
+      const baseCommit = await mainHead(repo.path).catch(() => null);
+      units.startIncremental(rc, implStep.status === 'pending' ? implStep.id : null, baseCommit);
       await runPipelineStages(rc);
       const fin = procs.get(processId)!.result!;
       knowledge.add({ projectId: project.id, title: `${item.storyId} · Plan e implementación incremental — ${item.title}`, body: `# Plan\n${plan.summary}\n\n${plan.tasks.map(t => '- ' + t).join('\n')}\n\n# Entregables\n${(fin.manifest?.deliverables ?? []).map(d => `- [${d.status}] ${d.path}${d.note ? ` — ${d.note}` : ''}`).join('\n')}\n\n# Implementación\n${fin.implementationSummary ?? ''}\n\n# Revisión QA\n${fin.review ? `${fin.review.verdict ?? (fin.review.approve ? 'approved' : 'rejected')} — ${fin.review.summary}` : 'sin revisión'}${fin.pipeline ? `\n\n# Pipeline\n${fin.pipeline.events.map(e => `- ${e.message}`).join('\n')}` : ''}`, authorAgentId: coord.id, authorAgentName: coord.config.name, processId });
@@ -491,6 +517,9 @@ export function retryStory(slug: string, processId: string, opts: StoryOptions =
   if (!item) throw Object.assign(new Error('La historia ya no existe en el backlog.'), { statusCode: 404 });
   if (item.status === 'done' || item.status === 'discarded') throw Object.assign(new Error(`La historia está ${item.status === 'done' ? 'completada' : 'descartada'}; reábrela desde el backlog si quieres repetirla.`), { statusCode: 409 });
   if (item.status === 'in_progress') throw Object.assign(new Error('La historia ya está en ejecución.'), { statusCode: 409 });
+  // El Coordinador ya concluyó que esta historia (con este texto) no cambia código: repetirla igual pagaría la misma respuesta.
+  const nc = proc.result?.planNoCode;
+  if (nc && nc.basis && nc.basis === storyBasis(item, proc.result?.iterationContext ?? null)) throw Object.assign(new Error('La historia no ha cambiado y el Coordinador ya concluyó que no cambia ningún archivo: volver a ejecutarla daría lo mismo. Conviértela en un encargo de análisis, reformúlala (nueva iteración) o ciérrala.'), { statusCode: 409, code: 'plan_no_code_unchanged' });
   return createStoryProcess(slug, proc.projectId, item.id, opts);
 }
 

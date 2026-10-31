@@ -1,4 +1,7 @@
 import type { FastifyInstance } from 'fastify';
+import { updateRunning } from '../services/system.ts';
+import { processVersion } from '../services/revision.ts';
+import { acquireWork, sameWorkRunning } from '../services/executionLocks.ts';
 import type { Process, VerificationRun } from '@portal-ia/domain';
 import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
@@ -9,7 +12,7 @@ import { abortProcessCalls } from '../services/providerCalls.ts';
 import { createStoryProcess, estimateManualTest, estimateStory, generateManualTest, recoverStory, retryStory, runStory, stepByRole } from '../services/storyExecution.ts';
 import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
 import { describeProcess } from '../services/guidance.ts';
-import { flowOptions } from '../services/processView.ts';
+import { flowOptions, slimResult } from '../services/processView.ts';
 import { DEPS_MISSING_EXIT } from '../services/sandbox.ts';
 import { recordContextEdit, threadRepo } from '../services/storyThread.ts';
 import { teamReadiness } from '../services/claudeCode/backend.ts';
@@ -38,6 +41,10 @@ import { workItemOf } from '../services/workItems.ts';
 import { closingBlocker } from '../services/closing.ts';
 
 /** Rutas con efecto (IA o git) que nunca deben actuar sobre una iteración superada de su historia (HU-161). */
+/** Nombre de cada operación con arriendo, para explicar un choque («HU-175 tiene otra operación en curso (integrar en main)»). */
+const OPERATION: Record<string, string> = { authorize: 'autorizar', continue: 'continuar', 'accept-plan': 'seguir con el plan', apply: 'aplicar el diff', merge: 'integrar en main', publish: 'publicar', reject: 'rechazar el diff', recover: 'recuperar', retry: 'volver a ejecutar', verify: 'verificar en el sandbox', 'verify/install-and-retry': 'instalar y verificar', 'runtime-check': 'comprobar en ejecución', 'integration/prepare': 'preparar el candidato de integración', 'integration/resolve': 'resolver conflictos', 'external-correction': 'registrar una corrección externa', 'manual-test/generate': 'generar la prueba manual', 'convert-to-analysis': 'convertir en encargo de análisis' };
+/** Operaciones que ponen a trabajar a la IA o al sandbox: no empiezan mientras el Portal se reconstruye para reiniciarse. */
+const STARTS_WORK = /^(authorize|continue|accept-plan|integration\/prepare|integration\/resolve|external-correction|manual-test\/generate|verify|verify\/install-and-retry|recover|runtime-check)$/;
 const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish|continue|accept-plan)$/;
 
 /**
@@ -60,7 +67,7 @@ export async function processRoutes(app: FastifyInstance) {
     }
     const item = q.kind === 'story_execution' && q.backlogItemId ? backlogRepo(slug).get(q.backlogItemId) : undefined;
     const fo = await flowOptions(slug, q, item);
-    return { ...q, guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, ...fo, backends: q.kind === 'story_execution' ? teamReadiness(slug, q.id) : null }) };
+    return { ...q, version: processVersion(q), guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, ...fo, backends: q.kind === 'story_execution' ? teamReadiness(slug, q.id) : null }) };
   };
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
 
@@ -81,6 +88,36 @@ export async function processRoutes(app: FastifyInstance) {
     }
   });
 
+  // Una operación a la vez POR HISTORIA (no global): desde que se comprueba hasta que responde, aunque espere a git o al
+  // sandbox (dos clics, dos pestañas o el lote a la vez). «Cancelar» nunca se bloquea. Ver services/executionLocks.ts.
+  const LEASED = /\/processes\/:id\/(authorize|continue|accept-plan|apply|merge|publish|reject|recover|retry|verify|verify\/install-and-retry|runtime-check|integration\/prepare|integration\/resolve|external-correction|manual-test\/generate|convert-to-analysis)$/;
+  app.addHook('preHandler', async (req, reply) => {
+    if (req.method !== 'POST') return;
+    const url: string = (req as any).routeOptions?.url ?? (req as any).routerPath ?? '';
+    const m = url.match(LEASED); if (!m) return;
+    const { slug, id } = (req.params ?? {}) as { slug?: string; id?: string };
+    if (!slug || !id || !workspacesRepo.get(slug)) return;
+    const proc = processesRepo(slug).get(id); if (!proc) return;
+    // Pestaña desactualizada: la acción se decidió viendo otra versión del proceso (otra pestaña, el lote o el equipo lo
+    // cambiaron). No se ejecuta; se devuelve el estado actual para decidir con él.
+    const seen = (req.body as any)?.seenVersion;
+    if (typeof seen === 'string' && seen && seen !== processVersion(proc)) { reply.code(409).send({ error: 'Este proceso cambió desde que lo cargaste (en otra pestaña, en un lote o por el equipo). No se ha hecho nada: revisa su estado actual y vuelve a decidir.', code: 'stale_view', process: await withGuidance(slug, proc) }); return reply; }
+    // Reconstruyendo el Portal (se reiniciará al terminar): no empieza nada nuevo que el reinicio interrumpiría.
+    if (STARTS_WORK.test(m[1]) && updateRunning()) { reply.code(409).send({ error: 'El Portal se está reconstruyendo y se reiniciará al terminar: no se empieza trabajo nuevo que el reinicio interrumpiría. Vuelve a intentarlo en unos minutos.', code: 'rebuilding' }); return reply; }
+    const got = acquireWork(slug, proc, String(req.id), OPERATION[m[1]] ?? m[1]);
+    if ('conflict' in got) { reply.code(409).send({ error: got.conflict, code: 'busy' }); return reply; }
+    (req as any).releaseWork = got.release;
+  });
+  // El arriendo se suelta cuando termina el manejador (también si el navegador se fue a mitad: «onResponse» no llegaría
+  // nunca y la historia quedaría bloqueada); «onResponse» queda como respaldo. Soltar dos veces no hace nada.
+  app.addHook('onRoute', opts => {
+    const methods = Array.isArray(opts.method) ? opts.method : [opts.method];
+    if (!methods.includes('POST') || !LEASED.test(opts.url ?? '')) return;
+    const handler = opts.handler as (this: unknown, req: any, reply: any) => unknown;
+    opts.handler = async function (this: unknown, req: any, reply: any) { try { return await handler.call(this, req, reply); } finally { req.releaseWork?.(); } } as typeof opts.handler;
+  });
+  app.addHook('onResponse', async req => { (req as any).releaseWork?.(); });
+
   app.get('/api/workspaces/:slug/projects/:projectId/assessment/estimate', async (req, reply) => {
     const { slug, projectId } = req.params as any; if (!guard(slug, reply)) return;
     try { return estimateAssessment(slug, projectId); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
@@ -94,8 +131,25 @@ export async function processRoutes(app: FastifyInstance) {
 
   app.get('/api/workspaces/:slug/projects/:projectId/processes', async (req, reply) => {
     const { slug, projectId } = req.params as any; if (!guard(slug, reply)) return;
+    if ((req.query as any)?.view === 'summary') return processSummaries(slug, projectId);
     return Promise.all(processesRepo(slug).list(projectId).map(p => withGuidance(slug, p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p)));
   });
+
+  /**
+   * Vista resumida para los listados (Actividad, Panel, Backlog, evaluación inicial): sin las salidas de los agentes ni el
+   * detalle pesado del resultado (diffs, registros, plan, eventos). La orientación (fase y siguiente paso) solo se calcula
+   * para lo que esos listados muestran: la iteración vigente de las historias en revisión y las 6 últimas integradas.
+   */
+  const processSummaries = async (slug: string, projectId: string): Promise<Process[]> => {
+    const list = processesRepo(slug).listLight(projectId);
+    const review = new Set(backlogRepo(slug).list(projectId).filter(i => i.status === 'review' && i.lastProcessId).map(i => i.lastProcessId!));
+    const merged = list.filter(p => p.kind === 'story_execution' && p.result?.merged).slice(0, 6).map(p => p.id);
+    const guided = new Set([...review, ...merged]);
+    return Promise.all(list.map(async p => {
+      const guidance = guided.has(p.id) ? (await withGuidance(slug, processesRepo(slug).get(p.id)!)).guidance : undefined;
+      return { ...p, result: slimResult(p.result), delegation: p.delegation ? { ...p.delegation, deliverable: '' } : null, ...(guidance ? { guidance } : {}), version: processVersion(p), summary: true } as Process;
+    }));
+  };
 
   app.get('/api/workspaces/:slug/processes/:id', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
@@ -128,7 +182,7 @@ export async function processRoutes(app: FastifyInstance) {
     const pr = proc.result.gauntlet?.planReview;
     if (proc.result.merged || proc.result.rejected) return reply.code(409).send({ error: proc.result.merged ? 'Ya está integrado en la rama principal.' : 'Esta iteración se rechazó; crea una nueva iteración.' });
     if (proc.result.pipeline?.pauseKind !== 'plan' || pr?.status !== 'paused') return reply.code(409).send({ error: 'Solo se acepta un plan que la revisión independiente dejó en pausa.', code: 'not_plan_review_pause' });
-    if (procs.running().length) return reply.code(409).send({ error: 'Ya hay un proceso en ejecución. Espera a que termine.' });
+    { const busy = sameWorkRunning(slug, proc); if (busy) return reply.code(409).send({ error: `Esta historia ya tiene otro proceso en ejecución («${busy.title}»). Espera a que termine.`, code: 'busy' }); }
     // Las mismas comprobaciones que «continuar»: un equipo que no puede ejecutar no empieza (sin cambiar nada).
     const readiness = teamReadiness(slug, id);
     if (readiness && !readiness.ready && readiness.fallback !== 'api') return reply.code(409).send({ error: `No se continúa: ${readiness.team.find(t => !t.ready)!.reason}`, code: 'backend_not_ready', readiness });
@@ -148,7 +202,7 @@ export async function processRoutes(app: FastifyInstance) {
     if (proc.result.merged || proc.result.rejected) return reply.code(409).send({ error: proc.result.merged ? 'Ya está integrado en la rama principal.' : 'Este diff se rechazó; crea una nueva iteración.' });
     const hasOutput = proc.steps.some(s => s.role === 'implementer' && s.outputMd?.trim());
     if (!proc.result.applied && !proc.result.changes.some(c => !c.error) && !hasOutput && !proc.result.manifest) return reply.code(409).send({ error: 'El Desarrollador no entregó nada que continuar: vuelve a ejecutar la historia.', code: 'nothing_to_continue' });
-    if (procs.running().length) return reply.code(409).send({ error: 'Ya hay un proceso en ejecución. Espera a que termine.' });
+    { const busy = sameWorkRunning(slug, proc); if (busy) return reply.code(409).send({ error: `Esta historia ya tiene otro proceso en ejecución («${busy.title}»). Espera a que termine.`, code: 'busy' }); }
     // Claude Code: si la configuración GUARDADA no deja ejecutar al equipo (proyecto sin autorizar, conector desactivado,
     // consola sin conectar) y no autorizaste la API como alternativa, continuar solo volvería a detenerse. Se rechaza
     // aquí, sin eventos, pasos ni cambios en el proceso (HU-159 acumuló pausas idénticas por cada «Continuar»).
@@ -348,6 +402,28 @@ export async function processRoutes(app: FastifyInstance) {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ skipQa: z.boolean().optional() }).safeParse(req.body ?? {});
     try { const p = retryStory(slug, id, { skipQa: body.success ? !!body.data.skipQa : false }); app.log.info({ from: id, processId: p.id }, 'historia relanzada (pendiente de autorización)'); return reply.code(201).send(await withGuidance(slug, p)); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+
+  // La historia no cambia código (lo concluyó el Coordinador): encargo de análisis con la historia y su plan. Queda pendiente
+  // de autorización (sin IA hasta entonces) y es uno solo: pedirlo otra vez devuelve el mismo.
+  app.post('/api/workspaces/:slug/processes/:id/convert-to-analysis', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const procs = processesRepo(slug); const proc = procs.get(id);
+    const nc = proc?.result?.planNoCode;
+    if (!proc || proc.kind !== 'story_execution' || !proc.backlogItemId || !nc) return reply.code(409).send({ error: 'Solo una historia que el Coordinador concluyó que no cambia código se convierte en un encargo de análisis.', code: 'not_no_code' });
+    const prev = nc.analysisProcessId ? procs.get(nc.analysisProcessId) : undefined;
+    if (prev && prev.status !== 'cancelled') return reply.code(200).send(await withGuidance(slug, prev));
+    const item = backlogRepo(slug).get(proc.backlogItemId); if (!item) return reply.code(404).send({ error: 'La historia ya no existe en el backlog.' });
+    const plan = proc.result!.plan;
+    const request = [`Encargo de análisis a partir de ${item.storyId} «${item.title}». El Coordinador concluyó que no cambia ningún archivo del repositorio: ${nc.summary}`,
+      item.description?.trim() ? `Descripción: ${item.description.trim()}` : '', item.criterion?.trim() ? `Criterio de aceptación: ${item.criterion.trim()}` : '',
+      plan?.tasks.length ? `Tareas del plan:\n${plan.tasks.map(t => `- ${t}`).join('\n')}` : '', plan?.filesToRead.length ? `Archivos a revisar: ${plan.filesToRead.join(', ')}` : ''].filter(Boolean).join('\n\n').slice(0, 7000);
+    try {
+      const created = createDelegation(slug, proc.projectId, null, request, { purpose: 'analysis' });
+      procs.setResult(id, { ...procs.get(id)!.result!, planNoCode: { ...nc, analysisProcessId: created.id } });
+      app.log.info({ from: id, processId: created.id }, 'historia sin código convertida en encargo de análisis (pendiente de autorización)');
+      return reply.code(201).send(await withGuidance(slug, created));
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
 
   // ---- Encargos delegados a un agente responsable (sin IA hasta autorizar) ----
@@ -566,7 +642,7 @@ Proceso: ${proc.id}`, { processId: proc.id });
     if (!body.success) return reply.code(400).send({ error: 'Resolver los conflictos con el equipo exige tu autorización explícita.', code: 'authorization_required' });
     const procs = processesRepo(slug); const proc = procs.get(id);
     if (!proc || proc.kind !== 'story_execution' || !proc.result?.applied?.worktree) return reply.code(404).send({ error: 'Proceso de historia no encontrado.' });
-    if (proc.status === 'running' || procs.running().length) return reply.code(409).send({ error: 'Hay un proceso en ejecución. Espera a que termine.' });
+    if (proc.status === 'running' || sameWorkRunning(slug, proc)) return reply.code(409).send({ error: 'Esta historia tiene un proceso en ejecución. Espera a que termine.', code: 'busy' });
     if (proc.result.merged || proc.result.rejected) return reply.code(409).send({ error: 'Esta historia ya está cerrada.' });
     const readiness = teamReadiness(slug, id);
     if (readiness && !readiness.ready && readiness.fallback !== 'api') return reply.code(409).send({ error: `No se inicia: ${readiness.team.find(t => !t.ready)!.reason}`, code: 'backend_not_ready', readiness });

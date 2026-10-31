@@ -9,6 +9,8 @@ import { fmtUsd } from '../lib/labels.ts';
 import { Chip, Icon, Notice, StatusIcon } from './ui.tsx';
 import { SystemBar } from './SystemBar.tsx';
 import { AssistantDock } from './AssistantDock.tsx';
+import { useLive, useLiveConnection } from '../lib/live.ts';
+import { useBack } from '../lib/nav.ts';
 
 const SOON = [['Herramientas y MCP', Icon.plug], ['Organización', Icon.org]] as const;
 
@@ -36,16 +38,21 @@ function CreateDialog({ kind, onClose }: { kind: 'company' | 'project'; onClose:
     </div></div>;
 }
 
+const usageCache = new Map<string, UsageToday>();
+
 export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNode }) {
   const { status, providers, workspaces, projects, select, navigate } = useApp();
   const ws = status.workspace!; const project = status.project;
-  const [usage, setUsage] = useState<UsageToday | null>(null);
+  // Cada pantalla monta su Shell: el consumo de hoy se recuerda entre pantallas (se ve al instante) y se actualiza cuando
+  // algo cambia (procesos, llamadas), no cada 5 s. Sin conexión en tiempo real, el respaldo de lib/live.ts lo vuelve a pedir.
+  const [usage, setUsage] = useState<UsageToday | null>(() => usageCache.get(ws.slug) ?? null);
   const [dialog, setDialog] = useState<'company' | 'project' | null>(null);
-  useEffect(() => {
-    let alive = true;
-    const tick = async () => { try { const u = await api.usageToday(ws.slug); if (alive) setUsage(u); } catch { /* backend ausente */ } if (alive) setTimeout(tick, 5000); };
-    void tick(); return () => { alive = false; };
+  const loadUsage = () => api.usageToday(ws.slug).then(u => { usageCache.set(ws.slug, u); setUsage(u); }).catch(() => { /* backend ausente */ });
+  useEffect(() => { void loadUsage(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.slug]);
+  useLive(c => c.ws === ws.slug && (c.entity === 'usage' || (c.entity === 'process' && c.kind !== 'progress')), () => loadUsage(), { minMs: 2500 });
+  const back = useBack();
+  const liveConn = useLiveConnection();
   const connected = providers.filter(p => p.status === 'connected');
   // Pestaña abierta con una interfaz anterior a la que sirve ahora el Portal (reconstruido y reiniciado): sus acciones
   // pueden no existir o comportarse distinto. Se pide recargar en vez de seguir con botones obsoletos.
@@ -96,8 +103,10 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
       </aside>
       <div className="content">
         <header className="top">
+          {back && <button type="button" className="btn btn-ghost btn-sm back-global" onClick={back.go} aria-label={`Atrás: volver a ${back.label}`} title={`Volver a ${back.label} (como el botón Atrás del navegador)`}>{Icon.back()}<span className="back-label">{back.label}</span></button>}
           <nav className="crumbs" aria-label="Ubicación actual"><span>{ws.name}</span><span className="sep">/</span><span>{project?.name ?? 'Sin proyecto'}</span><span className="sep">/</span><span className="cur">{crumb}</span></nav>
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            {liveConn === 'down' && <span role="status" aria-label="Sin conexión en tiempo real: la pantalla se actualiza cada 15 s mientras tanto."><Chip tone="warn" xs>sin tiempo real</Chip></span>}
             <Chip dot={usage && usage.running > 0 ? 'pulse' : ''}>{usage && usage.running > 0 ? `${usage.running} proceso(s) en ejecución` : 'Sin procesos en ejecución'}</Chip>
             <Chip className="mono" >hoy · {usage?.calls ?? 0} llamadas · {usage?.tokens ?? 0} tokens · {fmtUsd(usage?.costUsd ?? 0)}</Chip>
             <span className="avatar" role="img" aria-label="Propietario">{Icon.user()}</span>

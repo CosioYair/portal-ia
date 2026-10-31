@@ -1,8 +1,10 @@
 import { INTERNAL_WORKSPACE, verificationsForApplied, type BranchIntegration, type Process } from '@portal-ia/domain';
+import { changed } from './live.ts';
 import { processesRepo, projectsRepo } from '../db/workspace.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { mergeBranch, removeWorktree } from './repoWrite.ts';
 import { branchIntegration } from './storyIntegration.ts';
+import { withRepoLock } from './repoLock.ts';
 
 /**
  * Integración de la rama de una historia en la rama principal (una sola implementación para la ruta manual y para el
@@ -13,6 +15,13 @@ export type MergeError = Error & { statusCode: number; code?: string; missing?: 
 const fail = (statusCode: number, message: string, code?: string, extra: Record<string, unknown> = {}): MergeError => Object.assign(new Error(message), { statusCode, code, ...extra });
 
 export async function mergeStory(slug: string, id: string, opts: { into?: string; skipVerification?: boolean } = {}, log: (o: any, m: string) => void = () => undefined): Promise<Process> {
+  // Todo (leer el proceso, comprobar si main avanzó, combinar y registrar) en el carril del repositorio: dos integraciones
+  // a la vez (lote y manual, o dos historias) se hacen una detrás de otra y la segunda ve el main que dejó la primera.
+  const p0 = processesRepo(slug).get(id); const repo0 = p0 ? projectsRepo(slug).repository(p0.projectId) : null;
+  if (!repo0) return mergeStoryLocked(slug, id, opts, log);
+  return withRepoLock(repo0.path, () => mergeStoryLocked(slug, id, opts, log));
+}
+async function mergeStoryLocked(slug: string, id: string, opts: { into?: string; skipVerification?: boolean }, log: (o: any, m: string) => void): Promise<Process> {
   const procs = processesRepo(slug); const proc = procs.get(id);
   if (!proc?.result?.applied) throw fail(409, 'Primero aplica los cambios en la rama.');
   if (proc.result.merged) throw fail(409, `Ya integrada en ${proc.result.merged.into}.`);
@@ -44,7 +53,11 @@ export async function mergeStory(slug: string, id: string, opts: { into?: string
   requirePolicy('git_merge', { slug, processId: id, projectId: proc.projectId, authorized: true });
   try {
     const m = await mergeBranch(repo.path, proc.result.applied.branch, opts.into, { affectedFiles: proc.result.changes.filter(c => !c.error).map(c => c.path), processId: id });
-    procs.setResult(id, { ...proc.result, merged: { into: m.into, commit: m.commit, mergedAt: new Date().toISOString() }, mergeError: null });
+    const pl0 = proc.result.pipeline;
+    const pipeline = pl0 && (pl0.state === 'paused' || pl0.state === 'stopped') ? { ...pl0, state: 'verified' as const, pauseKind: null, reason: null, events: [...pl0.events, { at: new Date().toISOString(), kind: 'integration' as const, message: `Integrada en ${m.into} (${m.commit}). La pausa anterior («${(pl0.reason ?? '').slice(0, 160)}») queda resuelta.` }] } : pl0;
+    procs.setResult(id, { ...proc.result, merged: { into: m.into, commit: m.commit, mergedAt: new Date().toISOString() }, mergeError: null, pipeline });
+    // main cambió: el aviso «Reconstruir y reiniciar» de cualquier pestaña debe aparecer ya (sin esperar a su sondeo).
+    changed({ ws: null, entity: 'system', id: null });
     await removeWorktree(repo.path, id).catch(() => false);
     procs.logExecution({ projectId: proc.projectId, agentId: proc.steps[0]?.agentId ?? '', kind: 'repo_merge', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() });
     log({ processId: id, into: m.into, commit: m.commit, viaWorktree: m.viaWorktree }, 'rama integrada');

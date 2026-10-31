@@ -44,7 +44,9 @@ export function projectEvaluator(slug: string, projectId: string): Agent | null 
 export function resolveGauntletFor(slug: string, proc: Pick<Process, 'id' | 'projectId' | 'backlogItemId' | 'assignmentId'>, cfg: GauntletConfig): GauntletConfig {
   if (cfg.mode !== 'auto') return cfg;
   const item = workItemOf(slug, proc);
-  const prev = processesRepo(slug).listAll(proc.projectId).filter(p => p.kind === 'story_execution' && p.id !== proc.id && ((proc.backlogItemId && p.backlogItemId === proc.backlogItemId) || (proc.assignmentId && p.assignmentId === proc.assignmentId)));
+  const repo = processesRepo(slug);
+  const own = new Map([...(proc.backlogItemId ? repo.listByBacklogItem(proc.backlogItemId) : []), ...(proc.assignmentId ? repo.listByAssignment(proc.assignmentId) : [])].map(p => [p.id, p] as const));
+  const prev = [...own.values()].filter(p => p.kind === 'story_execution' && p.id !== proc.id && p.projectId === proc.projectId);
   return resolveGauntlet(cfg, { hasEvaluator: !!projectEvaluator(slug, proc.projectId), estimate: item?.estimate ?? null, text: item ? `${item.title} ${item.criterion ?? ''} ${item.description ?? ''}` : '', iterations: prev.length + 1, qaRejections: prev.filter(p => p.result?.review?.verdict === 'rejected').length });
 }
 
@@ -52,7 +54,7 @@ export function resolveGauntletFor(slug: string, proc: Pick<Process, 'id' | 'pro
 export function gauntletAdvice(slug: string, projectId: string, itemId: string) {
   const item = backlogRepo(slug).get(itemId);
   if (!item) throw fail(404, 'Historia no encontrada.', 'not_found');
-  const procs = processesRepo(slug).listAll(projectId).filter(p => p.backlogItemId === itemId && p.kind === 'story_execution');
+  const procs = processesRepo(slug).listByBacklogItem(itemId).filter(p => p.kind === 'story_execution');
   const qaRejections = procs.filter(p => p.result?.review?.verdict === 'rejected').length;
   const evaluator = projectEvaluator(slug, projectId);
   const rec = recommendGauntlet({ hasEvaluator: !!evaluator, estimate: item.estimate ?? null, text: `${item.title} ${item.criterion ?? ''} ${item.description ?? ''}`, iterations: procs.length + 1, qaRejections });

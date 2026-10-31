@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useLive } from '../lib/live.ts';
 import { Link } from 'react-router-dom';
 import type { Agent, BacklogItem, KnowledgeDoc, Process, UsageToday, PhaseTransition } from '@portal-ia/domain';
 import { BACKLOG_STATUS } from '../lib/labels.ts';
@@ -60,7 +61,8 @@ export function Dashboard() {
   // HU-163 · Mismo endpoint que la bandeja de Autorizaciones. La carga va aparte de load() y no consume IA.
   const loadAttention = async () => {
     const seq = ++attentionSeq.current;
-    setAttention({ phase: 'loading' });
+    // Solo la primera vez se muestra «cargando»: al actualizar en tiempo real se conserva lo que había (sin parpadeo).
+    setAttention(a => a.phase === 'ready' ? a : { phase: 'loading' });
     try {
       const pending = await api.inbox(ws.slug);
       if (seq === attentionSeq.current) setAttention({ phase: 'ready', count: pending.length });
@@ -76,10 +78,14 @@ export function Dashboard() {
     const [ps, ag, us] = await Promise.all([api.projects(ws.slug), api.agents(ws.slug), api.usageToday(ws.slug)]);
     const cur = ps.find(p => p.id === status.project?.id) ?? ps[0] ?? null;
     setProject(cur); setAgents(ag.filter(a => a.scope === 'workspace' || a.projectId === cur?.id)); setUsage(us);
-    if (cur) { const [pr, kd, bl, ph] = await Promise.all([api.processes(ws.slug, cur.id).catch(() => []), api.knowledge(ws.slug, cur.id).catch(() => []), api.backlog(ws.slug, cur.id).catch(() => []), api.phase(ws.slug, cur.id).catch(() => null)]); setProcs(pr); setDocs(kd); setBacklog(bl); setPhase(ph?.current ?? null); }
+    if (cur) { const [pr, kd, bl, ph] = await Promise.all([api.processSummaries(ws.slug, cur.id).catch(() => []), api.knowledge(ws.slug, cur.id).catch(() => []), api.backlog(ws.slug, cur.id).catch(() => []), api.phase(ws.slug, cur.id).catch(() => null)]); setProcs(pr); setDocs(kd); setBacklog(bl); setPhase(ph?.current ?? null); }
   };
-  useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Un fallo al cargar (p. ej. el servidor reiniciándose) no rompe la pantalla: se conserva lo que había y el tiempo
+  // real (o su respaldo) lo vuelve a pedir.
+  useEffect(() => { load().catch(() => undefined); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.slug, status.project?.id]);
+  // Tiempo real: procesos, historias, lotes y encargos del espacio (aquí, en otra pestaña o en un lote) sin recargar.
+  useLive(c => c.ws === ws.slug && c.kind !== 'progress' && ['process', 'backlog', 'batch', 'assignment', 'knowledge'].includes(c.entity), () => Promise.all([load(), loadAttention()]), { minMs: 2500 });
 
   const connected = providers.filter(p => p.status === 'connected');
   const modelShort = (a: Agent) => providers.find(p => p.id === a.config.provider)?.models.find(m => m.id === a.config.model)?.short ?? a.config.model;

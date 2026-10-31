@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { revisionStatus } from './revision.ts';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -9,7 +10,7 @@ import { processesRepo } from '../db/workspace.ts';
 import { clip, type ParsedDevOutput } from './devOutput.ts';
 import { diagnosticsFor, filesIn } from './diagnostics.ts';
 import { requirePolicy } from './executionPolicy.ts';
-import { applyChanges, changesSinceBase, commitInWorktree, hashText, readRepoFile, safeRelPath } from './repoWrite.ts';
+import { applyChanges, changesSinceBase, commitInWorktree, hashText, mainBranch, readRepoFile, safeRelPath } from './repoWrite.ts';
 import { diagnoseFailure, diagnosisPrompt, failingTests, staleCorrectionUnits } from './failureDiagnosis.ts';
 import { verificationEvidence, zeroTests } from './qaGate.ts';
 import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
@@ -151,8 +152,9 @@ export function planProblem(plan: StoryPlan): string | null {
  * Las unidades por la suscripción de Claude Code no descuentan USD (las limita su tope de llamadas): su estimación es solo
  * el equivalente API orientativo y nunca detiene nada.
  */
-export function startIncremental(ctx: StoryRunCtx, plannedStepId?: string | null) {
+export function startIncremental(ctx: StoryRunCtx, plannedStepId?: string | null, baseCommit?: string | null) {
   const man = buildManifest(ctx);
+  if (baseCommit && !resultOf(ctx).applied && !resultOf(ctx).baseCommit) updateResult(ctx.slug, ctx.processId, r => ({ ...r, baseCommit }));
   // El paso «Implementación» planificado pasa a ser la primera unidad (mismo agente; un paso por llamada a partir de ahí).
   if (plannedStepId && man.units[0]) { man.units[0].reservedStepId = plannedStepId; processesRepo(ctx.slug).renameStep(plannedStepId, `Unidad 1 de ${man.units.length}: ${man.units[0].title}`.slice(0, 180), `Entrega incremental (unidad 1 de ${man.units.length}): ${man.units[0].files.join(', ')}`.slice(0, 300)); }
   updateResult(ctx.slug, ctx.processId, r => ({ ...r, manifest: man }));
@@ -365,7 +367,8 @@ async function commitUnit(ctx: StoryRunCtx, unit: WorkUnit, label: string, valid
   let commit: string; let files: string[];
   const msg = `${ctx.item.storyId}: ${label} — ${unit.title}\n\nEntrega incremental del equipo de agentes de Portal IA (pipeline autorizado).\nProceso: ${ctx.processId}`;
   if (!r.applied) {
-    const a = await applyChanges(ctx.repoPath, `portal-ia/${ctx.item.storyId.toLowerCase()}`, valid, msg, { processId: ctx.processId });
+    // La rama nace del commit de main que vio el Desarrollador (fijado al empezar), no del main de ahora.
+    const a = await applyChanges(ctx.repoPath, `portal-ia/${ctx.item.storyId.toLowerCase()}`, valid, msg, { processId: ctx.processId, base: r.baseCommit ?? null });
     commit = a.commit; files = a.files;
     updateResult(ctx.slug, ctx.processId, x => ({ ...x, applied: { ...a, appliedAt: now() } }));
   } else {
@@ -812,7 +815,9 @@ export function testFileExecuted(content: string | null, output: string | null):
   const names = Array.from(content.matchAll(/\b(?:test|it|describe)(?:\.\w+)?\s*\(\s*(['"`])((?:(?!\1)[^\\\n]){3,140})\1/g)).map(m => m[2]);
   if (output === null) return { state: 'undetermined', detail: 'no hay una ejecución de «test» en verde sobre este commit' };
   if (!names.length) return { state: 'undetermined', detail: 'no se encontraron nombres de casos en el archivo' };
-  const seen = names.filter(n => output.includes(n));
+  // TAP escapa «#» y «\» en los nombres («sobre \#FFFFFF»): se comparan con la salida sin esos escapes.
+  const plain = output.replace(/\\([#\\])/g, '$1');
+  const seen = names.filter(n => output.includes(n) || plain.includes(n));
   if (seen.length) return { state: 'passed', detail: `${seen.length} de ${names.length} caso(s) aparecen en la salida de «test»` };
   // Salida recortada sin todas las líneas de resultado: que no aparezca no prueba que no se ejecutara.
   if (/caracteres omitidos/.test(output) && !/los nombres de todas las pruebas superadas/.test(output)) return { state: 'undetermined', detail: 'la salida de «test» se recortó y no conserva los nombres de todas las pruebas superadas' };
@@ -836,6 +841,21 @@ export function testEvidence(ctx: StoryRunCtx, cfg: PipelineConfig): { notRun: {
   const notRun = results.filter(x => x.state === 'failed'); const unknown = results.filter(x => x.state === 'undetermined');
   emit(ctx, 'gate', notRun.length ? `${notRun.length} prueba(s) nueva(s) no se ejecutaron en el sandbox: se corrigen antes de pagar a QA.` : unknown.length ? `No se pudo determinar si ${unknown.length} prueba(s) nueva(s) se ejecutaron; QA lo sabrá (no cuenta como evidencia).` : `Las ${results.length} prueba(s) nueva(s) se ejecutaron en el sandbox.`, { phase: 'verifying', detail: results.map(x => `${x.path}: ${x.detail}`).join(' · ') });
   return { notRun, run };
+}
+
+/**
+ * Historia que solo cambia hojas de estilo: compara los valores resueltos antes y después (sin navegador ni IA) y lo deja
+ * en el manifiesto, por commit, para QA y para ti. Si no aplica (cambia algo más que CSS), no hace nada.
+ */
+export async function styleEvidence(ctx: StoryRunCtx): Promise<void> {
+  const r = resultOf(ctx); const man = manifestOf(ctx); const wt = worktreeOf(ctx);
+  if (!r.applied || !wt || man.styleCheck?.commit === r.applied.commit) return;
+  const { styleEquivalenceCheck } = await import('./cssEquivalence.ts');
+  const main = await mainBranch(ctx.repoPath, r.applied.branch).catch(() => 'main');
+  const check = await styleEquivalenceCheck(wt, main, (r.changes ?? []).filter(c => !c.error).map(c => c.path));
+  if (!check) return;
+  saveManifest(ctx, m => { m.styleCheck = { commit: r.applied!.commit, at: now(), check }; });
+  emit(ctx, 'gate', check.state === 'passed' ? 'Estilos resueltos idénticos antes y después (comprobado sin navegador ni IA).' : check.state === 'failed' ? 'Los estilos resueltos cambian respecto a la base (comprobado sin IA): QA lo recibe como evidencia.' : 'No se pudo determinar si los estilos resueltos son idénticos: QA lo sabrá (no cuenta como evidencia).', { phase: 'verifying', detail: check.detail });
 }
 
 export function afterVerification(ctx: StoryRunCtx, cfg: PipelineConfig): boolean {
@@ -863,6 +883,7 @@ export function deliveryChecks(p: Process): DeliveryCheck[] {
   const hasTests = (r.changes ?? []).some(c => !c.error && c.action !== 'delete' && isTestEntry(c.path));
   const st: CheckState = !hasTests ? 'not_applicable' : !tr ? 'undetermined' : tr.results.some(x => x.state === 'failed') ? 'failed' : tr.results.some(x => x.state === 'undetermined') ? 'undetermined' : 'passed';
   out.push({ name: 'pruebas nuevas ejecutadas', state: st, detail: !hasTests ? 'sin pruebas nuevas en el diff' : !tr ? 'aún sin comprobar sobre el último commit' : tr.results.map(x => `${x.path}: ${x.detail}`).join(' · ') });
+  if (man?.styleCheck && man.styleCheck.commit === r.applied?.commit) out.push(man.styleCheck.check);
   return out;
 }
 
@@ -972,7 +993,9 @@ export function deliveryProgress(p: Process): DeliveryProgress | null {
   const comp = ['typecheck', 'build'].map(last).filter(Boolean) as VerificationRun[];
   const compiles = !comp.length ? null : comp.every(v => v.exitCode === 0) ? true : comp.some(v => v.exitCode !== 0 && v.exitCode !== null && v.exitCode !== 86 && v.isolation !== 'unavailable') ? false : null;
   const complete = planned.every(d => d.status === 'delivered' || d.status === 'dropped') && (!man.gate || man.gate.commit !== r.applied?.commit || man.gate.ok);
-  const qaApproved = r.review?.verdict === 'approved' && !!r.applied && (pl?.lastQaCommit === r.applied.commit || gauntletReviewed(r.gauntlet, r.applied.commit));
+  // QA «aprobado» solo si la aprobación cubre el commit actual (también el candidato que solo añade main): ver revision.ts.
+  const revision = revisionStatus(p);
+  const qaApproved = !!revision?.qa.coversHead;
   const running = p.status === 'running' ? man.units.find(u => u.status === 'running') ?? man.units.find(u => u.status === 'pending') : undefined;
   const corrUnits = man.units.filter(u => u.source && u.source !== 'plan');
   // Lo pendiente por la API (USD que pueden gastarse) y, aparte, el equivalente API de lo que va por la suscripción.
@@ -980,18 +1003,21 @@ export function deliveryProgress(p: Process): DeliveryProgress | null {
   const pendingUsd = pendingOf(false);
   const qaSteps = p.steps.filter(s => s.role === 'reviewer' && s.status === 'done' && s.costUsd > 0);
   const qaUsd = qaApproved || man.qaSubscription ? 0 : qaSteps.length ? qaSteps.reduce((s, x) => s + x.costUsd, 0) / qaSteps.length : 0.25;
-  const paused = pl && (pl.state === 'paused' || pl.state === 'stopped');
+  // Integrada en main (o rechazada): una pausa anterior (p. ej. «candidato… QA aún no ha revisado») ya no es el estado.
+  const paused = pl && (pl.state === 'paused' || pl.state === 'stopped') && !r.merged && !r.rejected;
   const planUnits = man.units.filter(u => (u.source ?? 'plan') === 'plan');
   const next = p.status === 'running'
     ? running ? `${running.kind === 'correction' ? 'Corrección dirigida' : 'Entregar'} «${running.title}» (${running.agentName})` : pl?.phase === 'verifying' || pl?.phase === 'installing' ? 'Verificar en el sandbox (typecheck, pruebas, build)' : pl?.phase === 'qa' ? 'Revisión de QA con la evidencia' : 'El equipo trabaja'
+    : r.merged ? (r.manualTest?.steps.length ? 'Tu aceptación: sigue la prueba paso a paso' : 'Tu aceptación: comprueba el resultado y cierra o itera')
     : qaApproved ? 'Tu revisión: el diff y la evidencia están listos (integrar sigue siendo decisión tuya)'
-    : paused ? 'Decide en «Problema actual»: continuar, acotar o rechazar' : 'Revisar el resultado';
+    : paused ? 'Decide en «Problema actual» con las acciones que ofrece' : 'Revisar el resultado';
   return {
     deliverables: man.deliverables.map(d => ({ path: d.path, kind: d.kind, status: d.status, planned: d.planned, note: d.note, unit: d.unitId, lines: d.lines })),
     delivered, total: planned.length,
     units: { done: man.units.filter(u => u.status === 'done').length, total: man.units.length },
     currentUnit: running ? { title: running.title, agentName: running.agentName, kind: running.kind, index: (running.source ?? 'plan') === 'plan' ? planUnits.findIndex(u => u.id === running.id) + 1 : man.units.findIndex(u => u.id === running.id) + 1, total: (running.source ?? 'plan') === 'plan' ? planUnits.length : man.units.length } : null,
     levels: { compiles, complete, qaApproved },
+    revision,
     checks: deliveryChecks(p),
     corrections: { applied: pl?.corrections ?? 0, max: pl?.config.maxCorrections ?? 0, requested: corrUnits.length, ineffective: pl?.ineffectiveRounds ?? 0, attempts: pl?.correctionAttempts ?? 0 },
     continuations: pl?.continuations ?? 0,

@@ -87,7 +87,8 @@ test('plegables cerrados por defecto: «Detalles técnicos» del paso y «Agente
 test('Actividad: filtro por estado con aria-pressed, contadores y mensaje sin resultados', () => {
   const view = read('screens/ProcessView.tsx');
   const list = view.slice(view.indexOf('export function ProcessList'));
-  assert.match(list, /useState<'all' \| ProcessFilterKey>\('all'\)/);
+  // El filtro se conserva por entrada del historial (Atrás lo recupera); por defecto, «Todos».
+  assert.match(list, /use(?:State|EntryState)<'all' \| ProcessFilterKey>\((?:'actividad\.filtro', )?'all'\)/);
   assert.match(list, /role="group" aria-label="Filtrar por estado"/);
   assert.match(list, /aria-pressed=\{filter === f\.key\}/);
   assert.match(list, /\{f\.label\} \(\{countOf\(f\.key\)\}\)/);

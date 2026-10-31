@@ -1,4 +1,7 @@
 import fs from 'node:fs';
+import { revisionStatus } from './revision.ts';
+import { withRepoLock } from './repoLock.ts';
+import { sameWorkRunning } from './executionLocks.ts';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -123,12 +126,12 @@ export async function prepareCandidate(repoPath: string, worktree: string, branc
 
 // ---------------------------------------------------------------- Proceso de historia
 
-function storyOf(slug: string, processId: string, opts: { allowOthersRunning?: boolean } = {}) {
+function storyOf(slug: string, processId: string) {
   const procs = processesRepo(slug); const proc = procs.get(processId);
   if (!proc || proc.kind !== 'story_execution' || !proc.result) throw fail(404, 'Proceso de historia no encontrado.', 'not_found');
   if (proc.status === 'running' || proc.status === 'pending_authorization') throw fail(409, 'El proceso sigue activo o pendiente de autorizar.', 'active');
-  // El lote pre-autorizado integra de una en una mientras otras historias trabajan en sus propios worktrees.
-  if (!opts.allowOthersRunning && procs.running().length) throw fail(409, 'Hay otro proceso en ejecución. Espera a que termine.', 'busy');
+  // Otras historias pueden seguir trabajando en sus worktrees; solo otro proceso de ESTA historia lo impide.
+  if (sameWorkRunning(slug, proc)) throw fail(409, 'Esta historia tiene otro proceso en ejecución. Espera a que termine.', 'busy');
   const r = proc.result;
   if (r.merged || r.rejected) throw fail(409, r.merged ? 'Ya está integrada.' : 'Este diff se rechazó.', 'closed');
   const wt = r.applied?.worktree;
@@ -180,7 +183,7 @@ export async function verifyCandidate(slug: string, processId: string, log: (o: 
     ];
     throw new PipelinePause('integration', problems.length
       ? `El candidato de integración (commit ${commit}) no supera las comprobaciones objetivas contra el main actual: ${problems.join(' · ')}. No se llamó a ningún agente y main no cambió.`
-      : `Candidato de integración verificado sin IA (commit ${commit}): ${cfg.autoVerify ? `${cfg.commands.join(', ')} en verde en el sandbox` : 'sin verificación automática configurada'} con el main actual incorporado. ${pipelineOf(slug, processId).lastQaCommit === commit || gauntletReviewed(r.gauntlet, commit) ? '' : 'QA aún no ha revisado este commit. '}Integrar en main sigue siendo decisión tuya.`);
+      : `Candidato de integración verificado sin IA (commit ${commit}): ${cfg.autoVerify ? `${cfg.commands.join(', ')} en verde en el sandbox` : 'sin verificación automática configurada'} con el main actual incorporado. ${revisionStatus(procs.get(processId)!)?.qa.why ?? ''} Integrar en main sigue siendo decisión tuya.`);
   } catch (e: any) {
     if (e instanceof PipelinePause) pausePipeline(ctx, e);
     else if (e?.cancelled) { status = 'cancelled'; pausePipeline(ctx, new PipelinePause('cancelled', 'Cancelado por el propietario. Lo hecho se conserva.')); }
@@ -194,8 +197,13 @@ export async function verifyCandidate(slug: string, processId: string, log: (o: 
 }
 
 /** Sin conflictos: git prepara el candidato (sin IA). Con conflictos: se registran y se explican; nada cambia. */
-export async function prepareIntegration(slug: string, processId: string, opts: { allowOthersRunning?: boolean } = {}): Promise<{ state: 'up_to_date' | 'candidate' | 'conflicts'; status: BranchIntegration }> {
-  const { r, wt, repo } = storyOf(slug, processId, opts);
+export async function prepareIntegration(slug: string, processId: string): Promise<{ state: 'up_to_date' | 'candidate' | 'conflicts'; status: BranchIntegration }> {
+  const { repo } = storyOf(slug, processId);
+  // main entra en la rama de la historia en el carril del repositorio: nunca a la vez que otra integración en main.
+  return withRepoLock(repo.path, () => prepareIntegrationLocked(slug, processId));
+}
+async function prepareIntegrationLocked(slug: string, processId: string): Promise<{ state: 'up_to_date' | 'candidate' | 'conflicts'; status: BranchIntegration }> {
+  const { r, wt, repo } = storyOf(slug, processId);
   const head = await must(wt, ['rev-parse', '--short', 'HEAD']);
   const recorded = await must(wt, ['rev-parse', '--short', `${r.applied!.commit}^{commit}`]);
   if (head !== recorded) throw fail(409, `El worktree tiene commits sin registrar (${recorded} → ${head}): registra primero la corrección externa para que el candidato parta de lo verificado.`, 'unregistered_commits');

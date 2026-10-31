@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { acquireWork } from '../services/executionLocks.ts';
 import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
 import { acceptAssignment, assignmentAuthorizationPreview, assignmentView, authorizeAssignment, cancelAssignment, createAssignment, listAssignments, requestAssignmentChanges, updateAssignment } from '../services/assignments.ts';
@@ -53,7 +54,9 @@ export async function assignmentRoutes(app: FastifyInstance) {
     // 0 USD de API es válido si todo el equipo va por la suscripción (lo comprueba authorizeProcess; el tope de llamadas sigue).
     const body = z.object({ budgetUsd: z.number().min(0).max(500), maxSubscriptionCalls: z.number().int().min(1).max(2000).optional(), maxCorrections: z.number().int().min(0).max(5).optional(), allowInstall: z.boolean().optional(), discardApplied: z.boolean().optional(), gauntlet: z.object({ mode: z.enum(['off', 'standard', 'deep', 'auto']) }).optional() }).passthrough().safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Indica el presupuesto de API (USD) y, si quieres, el tope de llamadas a la suscripción.' });
-    try { const r = await authorizeAssignment(slug, id, body.data, (o, m) => app.log.info(o, m)); return { assignment: assignmentView(slug, r.assignment.id), processId: r.process.id }; } catch (e) { return send(reply, e); }
+    const lease = acquireWork(slug, { id: '', backlogItemId: null, assignmentId: id }, String(req.id), 'autorizar el encargo');
+    if ('conflict' in lease) return reply.code(409).send({ error: lease.conflict, code: 'busy' });
+    try { const r = await authorizeAssignment(slug, id, body.data, (o, m) => app.log.info(o, m)); return { assignment: assignmentView(slug, r.assignment.id), processId: r.process.id }; } catch (e) { return send(reply, e); } finally { lease.release(); }
   });
   app.post('/api/workspaces/:slug/assignments/:id/accept', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
@@ -64,7 +67,9 @@ export async function assignmentRoutes(app: FastifyInstance) {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ note: z.string().trim().min(3).max(2000), discardApplied: z.boolean().optional() }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Explica qué hay que cambiar.' });
-    try { await requestAssignmentChanges(slug, id, body.data.note, { discardApplied: body.data.discardApplied }); return assignmentView(slug, id); } catch (e) { return send(reply, e); }
+    const lease = acquireWork(slug, { id: '', backlogItemId: null, assignmentId: id }, String(req.id), 'pedir cambios');
+    if ('conflict' in lease) return reply.code(409).send({ error: lease.conflict, code: 'busy' });
+    try { await requestAssignmentChanges(slug, id, body.data.note, { discardApplied: body.data.discardApplied }); return assignmentView(slug, id); } catch (e) { return send(reply, e); } finally { lease.release(); }
   });
   app.post('/api/workspaces/:slug/assignments/:id/cancel', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;

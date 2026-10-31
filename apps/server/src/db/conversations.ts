@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { changed } from '../services/live.ts';
 import type { ConversationArtifact, ConversationArtifactKind, ConversationDecision, ConversationStage, DecisionStatus, AssistantConversation } from '@portal-ia/domain';
 import { monotonicNow } from '../clock.ts';
 import { platform } from './platform.ts';
@@ -38,16 +39,16 @@ export const conversationsRepo = {
   get(id: string): AssistantConversation | null { const r = platform.prepare(`SELECT * FROM assistant_conversations WHERE id = ?`).get(id); return r ? mapConv(r) : null; },
   create(title: string, workspaceSlug: string | null, projectId: string | null): AssistantConversation {
     const id = crypto.randomUUID(); const at = monotonicNow();
-    platform.prepare(`INSERT INTO assistant_conversations (id, title, stage, workspace_slug, project_id, status, created_at, updated_at) VALUES (?, ?, 'exploration', ?, ?, 'active', ?, ?)`).run(id, title.slice(0, 120) || 'Conversación', workspaceSlug, projectId, at, at);
+    platform.prepare(`INSERT INTO assistant_conversations (id, title, stage, workspace_slug, project_id, status, created_at, updated_at) VALUES (?, ?, 'exploration', ?, ?, 'active', ?, ?)`).run(id, title.slice(0, 120) || 'Conversación', workspaceSlug, projectId, at, at); changed({ ws: null, entity: 'assistant', id: null });
     return this.get(id)!;
   },
   update(id: string, patch: Partial<Pick<AssistantConversation, 'title' | 'stage' | 'workspaceSlug' | 'projectId' | 'status'>>): AssistantConversation {
     const c = this.get(id); if (!c) throw Object.assign(new Error('Conversación no encontrada'), { statusCode: 404 });
     const n = { ...c, ...patch };
-    platform.prepare(`UPDATE assistant_conversations SET title = ?, stage = ?, workspace_slug = ?, project_id = ?, status = ?, updated_at = ? WHERE id = ?`).run(n.title, n.stage, n.workspaceSlug, n.projectId, n.status, monotonicNow(), id);
+    platform.prepare(`UPDATE assistant_conversations SET title = ?, stage = ?, workspace_slug = ?, project_id = ?, status = ?, updated_at = ? WHERE id = ?`).run(n.title, n.stage, n.workspaceSlug, n.projectId, n.status, monotonicNow(), id); changed({ ws: null, entity: 'assistant', id: null });
     return this.get(id)!;
   },
-  touch(id: string) { platform.prepare(`UPDATE assistant_conversations SET updated_at = ? WHERE id = ?`).run(monotonicNow(), id); }
+  touch(id: string) { platform.prepare(`UPDATE assistant_conversations SET updated_at = ? WHERE id = ?`).run(monotonicNow(), id); changed({ ws: null, entity: 'assistant', id: null }); }
 };
 
 export const decisionsRepo = {
@@ -57,13 +58,13 @@ export const decisionsRepo = {
     const seq = ((platform.prepare(`SELECT MAX(seq) AS n FROM assistant_decisions WHERE conversation_id = ?`).get(conversationId) as any)?.n ?? 0) + 1;
     const at = monotonicNow();
     const doc: ConversationDecision = { ...d, id: crypto.randomUUID(), conversationId, seq, status: 'open', answer: null, note: null, history: [], createdAt: at, updatedAt: at, decidedAt: null };
-    platform.prepare(`INSERT INTO assistant_decisions (id, conversation_id, seq, doc_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(doc.id, conversationId, seq, JSON.stringify(doc), doc.status, at, at);
+    platform.prepare(`INSERT INTO assistant_decisions (id, conversation_id, seq, doc_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(doc.id, conversationId, seq, JSON.stringify(doc), doc.status, at, at); changed({ ws: null, entity: 'assistant', id: null });
     return doc;
   },
   update(id: string, fn: (d: ConversationDecision) => void): ConversationDecision {
     const d = this.get(id); if (!d) throw Object.assign(new Error('Decisión no encontrada'), { statusCode: 404 });
     fn(d); d.updatedAt = monotonicNow();
-    platform.prepare(`UPDATE assistant_decisions SET doc_json = ?, status = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(d), d.status, d.updatedAt, id);
+    platform.prepare(`UPDATE assistant_decisions SET doc_json = ?, status = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(d), d.status, d.updatedAt, id); changed({ ws: null, entity: 'assistant', id: null });
     return d;
   }
 };
@@ -79,13 +80,13 @@ export const artifactsRepo = {
     const version = ((platform.prepare(`SELECT MAX(version) AS n FROM assistant_artifacts WHERE conversation_id = ? AND kind = ?`).get(conversationId, kind) as any)?.n ?? 0) + 1;
     const at = monotonicNow();
     const doc: ConversationArtifact = { id: crypto.randomUUID(), conversationId, kind, version, status, content, basedOn: meta.basedOn ?? null, calls: meta.calls ?? 0, agents: meta.agents ?? [], createdAt: at, updatedAt: at, decidedAt: null };
-    platform.prepare(`INSERT INTO assistant_artifacts (id, conversation_id, kind, version, status, doc_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(doc.id, conversationId, kind, version, status, JSON.stringify(doc), at, at);
+    platform.prepare(`INSERT INTO assistant_artifacts (id, conversation_id, kind, version, status, doc_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(doc.id, conversationId, kind, version, status, JSON.stringify(doc), at, at); changed({ ws: null, entity: 'assistant', id: null });
     return doc;
   },
   update(id: string, fn: (a: ConversationArtifact) => void): ConversationArtifact {
     const a = this.get(id); if (!a) throw Object.assign(new Error('Artefacto no encontrado'), { statusCode: 404 });
     fn(a); a.updatedAt = monotonicNow();
-    platform.prepare(`UPDATE assistant_artifacts SET doc_json = ?, status = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(a), a.status, a.updatedAt, id);
+    platform.prepare(`UPDATE assistant_artifacts SET doc_json = ?, status = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(a), a.status, a.updatedAt, id); changed({ ws: null, entity: 'assistant', id: null });
     return a;
   }
 };

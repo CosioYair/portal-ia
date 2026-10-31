@@ -52,9 +52,14 @@ export async function batchRoutes(app: FastifyInstance) {
   });
   // Reconciliación sin IA: un lote en pausa o en marcha con todas sus historias integradas (y activas, si es el Portal) pasa a completado.
   // Si falla, se registra y se devuelve el lote tal cual: la consulta no se rompe.
+  // Con el tiempo real las pantallas vuelven a pedir el lote a menudo: la comprobación con git (y la activación) no se
+  // repite si el lote no cambió en los últimos 15 s; cualquier cambio del lote la vuelve a hacer en la siguiente consulta.
+  const checked = new Map<string, { at: number; updatedAt: string }>();
   const reconciled = async (slug: string, b: Batch, log: any): Promise<Batch> => {
     if (b.status !== 'paused' && b.status !== 'running') return b;
-    try { return await reconcileBatch(slug, b.id); }
+    const k = `${slug}:${b.id}`; const last = checked.get(k);
+    if (last && last.updatedAt === b.updatedAt && Date.now() - last.at < 15_000) return b;
+    try { const r = await reconcileBatch(slug, b.id); checked.set(k, { at: Date.now(), updatedAt: r.updatedAt }); return r; }
     catch (e: any) { log.warn({ batchId: b.id, err: e?.message }, 'reconciliación del lote fallida'); return b; }
   };
   app.get('/api/workspaces/:slug/projects/:projectId/batches', async (req, reply) => {

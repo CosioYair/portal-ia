@@ -1,4 +1,6 @@
 import { agentCaller, completeWith } from './claudeCode/backend.ts';
+import { processVersion } from './revision.ts';
+import { changed } from './live.ts';
 import crypto from 'node:crypto';
 import type { BacklogItem, ModelInfo, Process, ProviderId, StoryContext, StoryIterationState, StoryMessage, StoryTask, TeamMember } from '@portal-ia/domain';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
@@ -46,25 +48,28 @@ export function threadRepo(slug: string) {
     add(m: Omit<StoryMessage, 'id' | 'createdAt'>): StoryMessage {
       const id = crypto.randomUUID();
       db.prepare(`INSERT INTO story_threads (id, backlog_item_id, role, agent_id, agent_name, content, process_id, cost_usd, tokens, proposals, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, m.backlogItemId, m.role, m.agentId, m.agentName, m.content, m.processId, m.costUsd, m.tokens, m.proposals ? JSON.stringify(m.proposals) : null, now());
+      changed({ ws: slug, entity: 'story', id: m.backlogItemId, itemId: m.backlogItemId });
       return mapMsg(db.prepare(`SELECT * FROM story_threads WHERE id = ?`).get(id));
     },
     tasks(itemId: string): StoryTask[] { return (db.prepare(`SELECT * FROM story_tasks WHERE backlog_item_id = ? ORDER BY status DESC, created_at`).all(itemId) as any[]).map(mapTask); },
     addTask(t: { backlogItemId: string; title: string; assigneeAgentId?: string | null; assigneeName?: string | null; source?: string; processId?: string | null }): StoryTask {
       const id = crypto.randomUUID();
       db.prepare(`INSERT INTO story_tasks (id, backlog_item_id, title, status, assignee_agent_id, assignee_name, source, process_id, created_at) VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?)`).run(id, t.backlogItemId, t.title.trim().slice(0, 300), t.assigneeAgentId ?? null, t.assigneeName ?? null, t.source ?? 'owner', t.processId ?? null, now());
+      changed({ ws: slug, entity: 'story', id: t.backlogItemId, itemId: t.backlogItemId });
       return mapTask(db.prepare(`SELECT * FROM story_tasks WHERE id = ?`).get(id));
     },
     setTask(id: string, status: 'open' | 'done'): StoryTask | undefined {
       db.prepare(`UPDATE story_tasks SET status = ?, done_at = ? WHERE id = ?`).run(status, status === 'done' ? now() : null, id);
-      const r = db.prepare(`SELECT * FROM story_tasks WHERE id = ?`).get(id); return r ? mapTask(r) : undefined;
+      const r = db.prepare(`SELECT * FROM story_tasks WHERE id = ?`).get(id) as any; if (r) changed({ ws: slug, entity: 'story', id: r.backlog_item_id, itemId: r.backlog_item_id }); return r ? mapTask(r) : undefined;
     },
-    deleteTask(id: string) { db.prepare(`DELETE FROM story_tasks WHERE id = ?`).run(id); }
+    deleteTask(id: string) { const r = db.prepare(`SELECT backlog_item_id FROM story_tasks WHERE id = ?`).get(id) as any; db.prepare(`DELETE FROM story_tasks WHERE id = ?`).run(id); if (r) changed({ ws: slug, entity: 'story', id: r.backlog_item_id, itemId: r.backlog_item_id }); }
   };
 }
 
 function storyProcesses(slug: string, item: BacklogItem): Process[] {
-  // Todas (también las archivadas): el espacio de una historia archivada sigue mostrando su historial.
-  return processesRepo(slug).listAll(item.projectId).filter(p => p.backlogItemId === item.id && p.kind === 'story_execution');
+  // Todas (también las archivadas): el espacio de una historia archivada sigue mostrando su historial. Solo las de esta
+  // historia (índice por historia), de la más reciente a la más antigua; antes se cargaba el proyecto entero cada 3 s.
+  return processesRepo(slug).listByBacklogItem(item.id).filter(p => p.kind === 'story_execution').reverse();
 }
 
 /** Contexto completo de la historia. Sin IA. */
@@ -83,10 +88,12 @@ export async function storyContext(slug: string, itemId: string): Promise<StoryC
     if (runtime && p.result?.merged) { const activation = await activationOf(p.result.merged.commit, p.result.merged.mergedAt).catch(() => null); q = { ...p, result: { ...p.result, activation } }; }
     const fo = await flowOptions(slug, q, item);
     const superseded = supersededOf(p);
-    return { ...q, iteration: iters.get(p.id) ?? procs.length - i, superseded, guidance: describeProcess(q, { isPortalRepo: isPortal, storyStatus: q.id === item.lastProcessId || !item.lastProcessId || q.id === procs[0]?.id ? item.status : null, ...fo, supersededByIteration: superseded?.byIteration ?? null }) };
+    return { ...q, version: processVersion(q), iteration: iters.get(p.id) ?? procs.length - i, superseded, guidance: describeProcess(q, { isPortalRepo: isPortal, storyStatus: q.id === item.lastProcessId || !item.lastProcessId || q.id === procs[0]?.id ? item.status : null, ...fo, supersededByIteration: superseded?.byIteration ?? null }) };
   }));
   // La iteración «actual» es la más reciente (también si está pendiente de autorización), no la última que llegó a ejecutarse.
   const last = enriched[0] ?? null;
+  // Las iteraciones anteriores se listan como historial: sin las salidas de sus agentes (están en la vista de su proceso).
+  for (let i = 1; i < enriched.length; i++) enriched[i] = { ...enriched[i], steps: enriched[i].steps.map(st => ({ ...st, outputMd: null, live: null })) };
   // Equipo: el registrado por el compositor en la iteración más reciente que lo tenga; en procesos antiguos (sin papeles), por posición.
   const withTeam = enriched.find(p => p.result?.team?.members?.length);
   const legacyRole = (i: number) => (['planner', 'implementer', 'reviewer'] as const)[i] ?? 'consultant';

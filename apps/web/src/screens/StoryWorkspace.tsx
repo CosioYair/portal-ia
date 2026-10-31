@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { useEntryTitle } from '../lib/nav.ts';
+import { useLatest, useLive } from '../lib/live.ts';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import type { PendingDecision, PipelineConfig, Process, StoryContext, StoryDecisionHistory } from '@portal-ia/domain';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
@@ -37,10 +39,16 @@ export function StoryWorkspace() {
   return <StoryWorkspaceOf key={storyId} storyId={storyId!} />;
 }
 
+/** Último contexto visto de cada historia (memoria de la pestaña): al volver se muestra al instante y se actualiza. */
+const storyCache = new Map<string, StoryContext>();
+
 function StoryWorkspaceOf({ storyId }: { storyId: string }) {
   const { status, flash, navigate } = useApp();
   const slug = status.workspace!.slug;
-  const [ctx, setCtx] = useState<StoryContext | null>(null);
+  // Volver a la historia (Atrás) la muestra al instante con lo último que se vio mientras se pide lo actual.
+  const [ctx, setCtx0] = useState<StoryContext | null>(() => storyCache.get(`${slug}/${storyId}`) ?? null);
+  const latest = useLatest();
+  const setCtx: typeof setCtx0 = v => setCtx0(prev => { const next = typeof v === 'function' ? (v as (p: StoryContext | null) => StoryContext | null)(prev) : v; if (next) storyCache.set(`${slug}/${storyId}`, next); return next; });
   const [err, setErr] = useState<string | null>(null);
   const { hash, state: navState, pathname, search } = useLocation();
   const [tab, setTab] = useState<Tab>(() => tabFromHash(hash) ?? 'estado');
@@ -50,10 +58,16 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
   const [decisions, setDecisions] = useState<StoryDecisionHistory | null>(null);
   const [decErr, setDecErr] = useState<string | null>(null);
   const loadDecisions = () => api.storyDecisions(slug, storyId!).then(h => { setDecisions(h); setDecErr(null); }).catch((e: any) => setDecErr(e.message));
-  const load = async () => { try { const c = await api.story(slug, storyId!); loaded.current = true; setCtx(c); setErr(null); void loadDecisions(); return c; } catch (e: any) { if (!loaded.current) setErr(e.message); return null; } };
-  // El sondeo se reanuda cuando el último proceso vuelve a estar activo (p. ej. al continuar desde la cabecera).
+  const load = async () => { try { const c = await latest.run(() => api.story(slug, storyId!)); if (c === undefined) return null; loaded.current = true; setCtx(c); setErr(null); void loadDecisions(); return c; } catch (e: any) { if (!loaded.current) setErr(e.message); return null; } };
   const active = ctx?.lastProcess?.status === 'running' || ctx?.lastProcess?.status === 'pending_authorization';
-  useEffect(() => { let alive = true; let timer: ReturnType<typeof setTimeout> | undefined; const tick = async () => { const c = await load(); if (!alive) return; if (c === null ? active : c.lastProcess && (c.lastProcess.status === 'running' || c.lastProcess.status === 'pending_authorization')) timer = setTimeout(tick, c === null ? 5000 : 3000); }; void tick(); return () => { alive = false; clearTimeout(timer); }; // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEntryTitle(ctx ? `${ctx.item.storyId} · ${ctx.item.title.slice(0, 40)}` : null);
+  useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slug, storyId]);
+  // Tiempo real: cualquier cambio de esta historia (sus procesos, su fila del backlog, su conversación) o del Portal
+  // (activación) se vuelve a pedir al momento, también si lo hizo otra pestaña o el lote. Mientras algo corre, además, una
+  // comprobación de respaldo cada 15 s por si el canal no entrega nada.
+  useLive(c => c.ws === slug && ((c.entity === 'process' && (c.itemId === storyId || !!ctx?.processes.some(p => p.id === c.id))) || ((c.entity === 'backlog' || c.entity === 'story') && (c.id === storyId || c.itemId === storyId))) || c.entity === 'system', () => load(), { minMs: 1000 });
+  useEffect(() => { if (!active) return; const t = setInterval(() => { void load(); }, 15_000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, storyId, active]);
   // La pestaña vive en el hash (#estado, #iteraciones…): así navegar a /historias/:id#iteraciones desde cualquier pestaña
   // (p. ej. tras enviar el feedback de la prueba) siempre la abre y recarga el contexto.

@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
 import type { DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, PendingDecisionsSummary, Process, RestoreSupersededResult, StoryDecisionHistory, SupersededDecision } from '@portal-ia/domain';
 import { backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
+import { ensureOpsParsed } from './delegation.ts';
 
 /** Error con código HTTP para que la ruta lo traduzca tal cual. */
 export class InboxError extends Error {
@@ -222,28 +223,20 @@ async function fetchProcess(app: FastifyInstance, slug: string, id: string): Pro
   return res.body as unknown as Process;
 }
 
-/** Lista todo lo pendiente del espacio indicado, de más antiguo a más reciente (las más antiguas primero), cada una con su costo e impacto. Solo lee: no cambia nada. */
-export async function listPendingDecisions(app: FastifyInstance, slug: string): Promise<PendingDecision[]> {
+/**
+ * Lista todo lo pendiente del espacio indicado, de más antiguo a más reciente (las más antiguas primero), cada una con su
+ * costo e impacto. Solo lee: no cambia nada salvo interpretar (una vez) las propuestas de backlog de un encargo terminado.
+ * Lee los procesos SIN el texto de los pasos y directamente de la base (antes pedía el listado completo con su orientación
+ * por cada proyecto y lo volvía a leer entero: varios segundos con el servidor bloqueado en cada navegación).
+ */
+export async function listPendingDecisions(_app: FastifyInstance, slug: string): Promise<PendingDecision[]> {
   const out: PendingDecision[] = [];
   const repo = processesRepo(slug);
   for (const project of projectsRepo(slug).list()) {
-    const res = await call(app, 'GET', `/api/workspaces/${slug}/projects/${project.id}/processes`);
-    if (res.status !== 200 || !Array.isArray(res.body)) {
-      const code = res.status === 200 || res.status >= 500 ? 502 : res.status;
-      throw new InboxError(code, res.body && !Array.isArray(res.body) ? String(res.body.error ?? 'No se pudo leer los procesos') : 'No se pudo leer los procesos');
-    }
-    // Todas las iteraciones (también archivadas) para numerar; el marcado de superada se toma siempre de la base.
-    const all = repo.listAll(project.id);
-    const stored = new Map(all.map(x => [x.id, x] as const));
-    const listedFull: Process[] = [];
-    for (const listed of res.body as unknown as Process[]) {
-      let p = listed;
-      // Si el listado viene sin el resultado estructurado, se lee el proceso completo.
-      if (p.status === 'done' && p.result === undefined && p.delegation === undefined) p = (await fetchProcess(app, slug, p.id)) ?? p;
-      const s = stored.get(p.id);
-      listedFull.push({ ...p, supersededBy: s?.supersededBy ?? null, supersededAt: s?.supersededAt ?? null });
-    }
-    out.push(...consolidateDecisions(slug, listedFull, all));
+    // Todas las iteraciones (también archivadas) para numerar; las vigentes (sin archivar) para decidir.
+    const all = repo.listLight(project.id, { archived: true });
+    const active = all.filter(p => !p.archivedAt).map(p => p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p);
+    out.push(...consolidateDecisions(slug, active, all));
   }
   return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
@@ -260,7 +253,7 @@ export async function summarizePendingDecisions(app: FastifyInstance, slug: stri
   let unmarked = 0;
   let supersededPending = 0;
   for (const project of projectsRepo(slug).list()) {
-    const all = repo.listAll(project.id);
+    const all = repo.listLight(project.id, { archived: true });
     unmarked += unmarkedDuplicates(slug, all);
     supersededPending += all.filter(p => p.supersededBy && !p.archivedAt && decisionsFromProcess(slug, p).length > 0).length;
   }

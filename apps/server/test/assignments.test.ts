@@ -138,15 +138,16 @@ test('pedir cambios: queda la nota y la siguiente ejecución (autorizada aparte)
 test('una autorización que no puede empezar no deja procesos pendientes: el recién creado se cancela con el motivo y el encargo espera tu decisión', async () => {
   script('src/en3.ts');
   const a = await define('Crear el archivo EN tres');
-  // Ya hay un proceso en ejecución: se comprueba ANTES de crear nada.
-  const blocker = processesRepo(S).create({ projectId: project.id, kind: 'story_execution', title: 'otro en marcha', estimatedUsd: 0, steps: [] });
+  // Este encargo ya tiene un proceso en ejecución: se comprueba ANTES de crear nada (uno de OTRO trabajo no lo impide:
+  // ver concurrency.test.ts).
+  const blocker = processesRepo(S).create({ projectId: project.id, kind: 'story_execution', title: 'otro en marcha', estimatedUsd: 0, assignmentId: a.id, steps: [] });
   processesRepo(S).authorize(blocker.id, 1);
   try {
     const r = await inject('POST', `${W}/assignments/${a.id}/authorize`, { authorized: true, budgetUsd: 2 });
-    assert.equal(r.statusCode, 409); assert.match(r.json().error, /Ya hay un proceso en ejecución/);
+    assert.equal(r.statusCode, 409); assert.match(r.json().error, /ya tiene (un|otro) proceso en ejecución/);
     const x = await get(a.id);
     assert.equal(x.status, 'draft', 'sin proceso creado: comprobado antes de crear nada');
-    assert.equal(processesRepo(S).list(project.id).filter(p => p.assignmentId === a.id).length, 0);
+    assert.equal(processesRepo(S).list(project.id).filter(p => p.assignmentId === a.id && p.id !== blocker.id).length, 0);
   } finally { processesRepo(S).finish(blocker.id, 'cancelled', 'fin de la prueba'); }
   // El equipo no puede ejecutar: el Desarrollador quedó en Claude Code y el conector se desactivó después (la API ya no
   // deja asignarlo así, por eso se simula en la base). Falla DESPUÉS de crear el proceso, que se cancela con el motivo:
@@ -156,7 +157,7 @@ test('una autorización que no puede empezar no deja procesos pendientes: el rec
   try {
     const r = await inject('POST', `${W}/assignments/${a.id}/authorize`, { authorized: true, budgetUsd: 2 });
     assert.equal(r.statusCode, 409, r.body); assert.equal(r.json().code, 'backend_not_ready');
-    const procsOfA = processesRepo(S).list(project.id).filter(p => p.assignmentId === a.id);
+    const procsOfA = processesRepo(S).list(project.id).filter(p => p.assignmentId === a.id && p.id !== blocker.id);
     assert.equal(procsOfA.length, 1); assert.equal(procsOfA[0].status, 'cancelled', 'el proceso recién creado se cancela'); assert.match(procsOfA[0].error ?? '', /No se inició/);
     const x = await get(a.id); assert.equal(x.status, 'needs_owner'); assert.match(x.reason ?? '', /No se inicia/);
     assert.equal(x.processId, null, 'la ejecución cancelada no pasa a ser la vigente (la siguiente iteración no pierde el contexto anterior)');

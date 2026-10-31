@@ -1,4 +1,5 @@
 import '../gitSafety.ts';
+import { withRepoLock } from './repoLock.ts';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -231,7 +232,7 @@ export function worktreePathFor(repoPath: string, processId: string): string {
  * rama ni se toca. La rama de la historia nace de la rama principal; si ya existe (iteración), se reutiliza.
  * Rollback: eliminar el worktree (y la rama si la creamos nosotros y no tiene commits propios). Nunca `reset --hard`.
  */
-export async function applyChanges(repoPath: string, branch: string, changes: ProposedChange[], message: string, opts: { processId?: string } = {}): Promise<{ branch: string; commit: string; files: string[]; worktree: string | null }> {
+export async function applyChanges(repoPath: string, branch: string, changes: ProposedChange[], message: string, opts: { processId?: string; base?: string | null } = {}): Promise<{ branch: string; commit: string; files: string[]; worktree: string | null }> {
   const cwd = repoRoot(repoPath);
   if (!fs.existsSync(path.join(cwd, '.git'))) throw Object.assign(new Error('La carpeta registrada no es un repositorio git.'), { statusCode: 400 });
   if (!/^[A-Za-z0-9._\/-]{1,80}$/.test(branch)) throw Object.assign(new Error('Nombre de rama no válido.'), { statusCode: 400 });
@@ -240,12 +241,16 @@ export async function applyChanges(repoPath: string, branch: string, changes: Pr
   const processId = opts.processId ?? `p-${Date.now().toString(36)}`;
   const wt = worktreePathFor(cwd, processId);
   fs.mkdirSync(path.dirname(wt), { recursive: true });
-  // Un worktree anterior del mismo proceso (reintento) se reutiliza si está sano; si no, se retira.
-  if (fs.existsSync(wt)) { await git(cwd, ['worktree', 'remove', '--force', wt]).catch(() => ''); if (fs.existsSync(wt)) fs.rmSync(wt, { recursive: true, force: true }); await git(cwd, ['worktree', 'prune']).catch(() => ''); }
-  const branchExisted = !!(await git(cwd, ['branch', '--list', branch])).trim();
-  const base = await mainBranch(cwd, branch);
-  if (branchExisted) await git(cwd, ['worktree', 'add', '-q', wt, branch]);
-  else await git(cwd, ['worktree', 'add', '-q', '-b', branch, wt, base]);
+  // Crear el worktree (y la rama desde main) va por el carril del repositorio: nunca a la vez que una integración en main.
+  const branchExisted = await withRepoLock(cwd, async () => {
+    // Un worktree anterior del mismo proceso (reintento) se reutiliza si está sano; si no, se retira.
+    if (fs.existsSync(wt)) { await git(cwd, ['worktree', 'remove', '--force', wt]).catch(() => ''); if (fs.existsSync(wt)) fs.rmSync(wt, { recursive: true, force: true }); await git(cwd, ['worktree', 'prune']).catch(() => ''); }
+    const existed = !!(await git(cwd, ['branch', '--list', branch])).trim();
+    const base = opts.base ?? await mainBranch(cwd, branch);
+    if (existed) await git(cwd, ['worktree', 'add', '-q', wt, branch]);
+    else await git(cwd, ['worktree', 'add', '-q', '-b', branch, wt, base]);
+    return existed;
+  });
   const files: string[] = [];
   try {
     for (const c of changes) {
@@ -268,7 +273,7 @@ export async function applyChanges(repoPath: string, branch: string, changes: Pr
     const commit = await git(wt, ['rev-parse', '--short', 'HEAD']);
     return { branch, commit, files, worktree: wt };
   } catch (e) {
-    try { await git(cwd, ['worktree', 'remove', '--force', wt]); if (!branchExisted) await git(cwd, ['branch', '-D', branch]); } catch { /* informar el error original */ }
+    await withRepoLock(cwd, async () => { try { await git(cwd, ['worktree', 'remove', '--force', wt]); if (!branchExisted) await git(cwd, ['branch', '-D', branch]); } catch { /* informar el error original */ } });
     throw e;
   }
 }
@@ -334,16 +339,19 @@ export async function changesSinceBase(repoPath: string, wt: string): Promise<Pr
 /** Retira el worktree de un proceso (tras integrar o rechazar). Solo rutas bajo `<repo>-worktrees`. */
 export async function removeWorktree(repoPath: string, processId: string): Promise<boolean> {
   const cwd = repoRoot(repoPath); const wt = worktreePathFor(cwd, processId);
-  if (!fs.existsSync(wt)) { await git(cwd, ['worktree', 'prune']).catch(() => ''); return false; }
-  await git(cwd, ['worktree', 'remove', '--force', wt]).catch(() => '');
-  if (fs.existsSync(wt)) fs.rmSync(wt, { recursive: true, force: true });
-  await git(cwd, ['worktree', 'prune']).catch(() => '');
-  return true;
+  return withRepoLock(cwd, async () => {
+    if (!fs.existsSync(wt)) { await git(cwd, ['worktree', 'prune']).catch(() => ''); return false; }
+    await git(cwd, ['worktree', 'remove', '--force', wt]).catch(() => '');
+    if (fs.existsSync(wt)) fs.rmSync(wt, { recursive: true, force: true });
+    await git(cwd, ['worktree', 'prune']).catch(() => '');
+    return true;
+  });
 }
 
 /** Descarta la rama de una historia no integrada: retira el worktree y borra la rama solo si main no la contiene. Nunca toca el checkout principal. */
 export async function discardBranch(repoPath: string, processId: string, branch: string): Promise<{ worktreeRemoved: boolean; branchDeleted: boolean }> {
   const cwd = repoRoot(repoPath);
+  return withRepoLock(cwd, async () => {
   const worktreeRemoved = await removeWorktree(cwd, processId);
   const main = await mainBranch(cwd, branch);
   const merged = (await git(cwd, ['branch', '--merged', main, '--format=%(refname:short)']).catch(() => '')).split('\n').map(s => s.trim());
@@ -352,6 +360,7 @@ export async function discardBranch(repoPath: string, processId: string, branch:
   if (current === branch) return { worktreeRemoved, branchDeleted: false }; // es la rama activa del checkout: no se toca
   const branchDeleted = await git(cwd, ['branch', '-D', branch]).then(() => true).catch(() => false);
   return { worktreeRemoved, branchDeleted };
+  });
 }
 
 /** Worktrees de procesos existentes (para listar huérfanos y limpiarlos con autorización). */
@@ -393,6 +402,9 @@ export async function mainBranch(cwd: string, exclude = ''): Promise<string> {
  * si está en otra rama, se integra en un worktree temporal de main y se actualiza la referencia.
  */
 export async function mergeBranch(repoPath: string, branch: string, into?: string, opts: { affectedFiles?: string[]; processId?: string } = {}): Promise<{ into: string; commit: string; viaWorktree: boolean }> {
+  return withRepoLock(repoRoot(repoPath), () => mergeBranchLocked(repoPath, branch, into, opts));
+}
+async function mergeBranchLocked(repoPath: string, branch: string, into: string | undefined, opts: { affectedFiles?: string[]; processId?: string }): Promise<{ into: string; commit: string; viaWorktree: boolean }> {
   const cwd = repoRoot(repoPath);
   const target = into ?? await mainBranch(cwd, branch);
   if (target === branch) throw Object.assign(new Error('La rama de destino no puede ser la misma rama de trabajo.'), { statusCode: 400 });
@@ -411,11 +423,13 @@ export async function mergeBranch(repoPath: string, branch: string, into?: strin
   // El checkout principal está en otra rama: no lo tocamos. Merge en un worktree temporal de main.
   const tmp = worktreePathFor(cwd, `merge-${Date.now().toString(36)}`);
   fs.mkdirSync(path.dirname(tmp), { recursive: true });
-  await git(cwd, ['worktree', 'add', '-q', '--detach', tmp, target]);
+  const old = await git(cwd, ['rev-parse', `refs/heads/${target}`]);
+  await git(cwd, ['worktree', 'add', '-q', '--detach', tmp, old]);
   try {
     await execFileP('git', [...GIT_ID, 'merge', '--no-ff', '--no-edit', '-m', mergeMsg, branch], { cwd: tmp, maxBuffer: 10 * 1024 * 1024 });
     const commit = await git(tmp, ['rev-parse', 'HEAD']);
-    await git(cwd, ['update-ref', `refs/heads/${target}`, commit]);
+    // Solo si main sigue donde estaba al empezar (valor anterior esperado): nunca se pisa una integración ajena.
+    await git(cwd, ['update-ref', `refs/heads/${target}`, commit, old]);
     return { into: target, commit: commit.slice(0, 7), viaWorktree: true };
   } catch (e: any) {
     await git(tmp, ['merge', '--abort']).catch(() => '');

@@ -1,4 +1,5 @@
 import { verificationsForApplied, type Process, type ProcessGuidance } from '@portal-ia/domain';
+import { revisionStatus } from './revision.ts';
 import { runtimeVerified } from './runtimeChecks.ts';
 import { DEPS_MISSING_EXIT } from './sandbox.ts';
 import { buildStoryFlow, type FlowOptions } from './storyFlow.ts';
@@ -56,6 +57,9 @@ function describePhase(p: Process, opts: GuidanceOptions): ProcessGuidance {
   const applicable = r.changes.filter(c => !c.error).length;
   if (r.rejected && !r.merged) return { phase: r.applied ? (r.applied.worktree ? 'Diff rechazado (rama descartada)' : 'Iteración anterior a v0.12 descartada (rama conservada)') : 'Diff rechazado', next: `Motivo: ${r.rejected.reason}. La historia volvió a pendiente; ejecútala de nuevo cuando quieras.`, tone: 'warn', settled: true };
   if (!r.applied) {
+    // Detenida en el plan: el Desarrollador ni siquiera trabajó (no se le culpa de «no entregar cambios»).
+    if (!applicable && r.planNoCode) return { phase: 'Sin cambios de código (lo concluyó el Coordinador)', next: 'Conviértela en un encargo de análisis, reformúlala para que cambie código (nueva iteración) o ciérrala. Repetirla tal cual daría lo mismo.', tone: 'warn', settled: false };
+    if (!applicable && r.pipeline?.pauseKind === 'plan') return { phase: 'Detenida en el plan (nada implementado)', next: 'Revisa «Problema actual»: el plan no se pudo ejecutar por partes.', tone: 'warn', settled: false };
     if (!applicable) return { phase: 'Terminado sin cambios aplicables', next: 'El Desarrollador no entregó cambios válidos. Acota la historia y vuelve a ejecutarla.', tone: 'err', settled: true };
     if (r.review && !r.review.approve) return { phase: `Diff entregado · QA NO aprueba (${r.review.issues.length} observaciones)`, next: 'Lee las observaciones de QA antes de decidir. Si son graves, pulsa «Rechazar el diff» y vuelve a ejecutar con un criterio más acotado; si son menores, aplica, verifica con typecheck/test y corrige en la rama.', tone: 'warn', settled: false };
     return { phase: `Diff listo para revisar (${applicable} archivo(s)${r.review ? ', QA aprobó' : ''})`, next: 'Revisa los cambios y, si estás conforme, pulsa «Aplicar» para escribirlos en una rama.', tone: 'warn', settled: false };
@@ -90,7 +94,15 @@ function describePhase(p: Process, opts: GuidanceOptions): ProcessGuidance {
     const need = opts.isPortalRepo ? ['typecheck', 'test', 'build'] : ['typecheck'];
     const missing = need.filter(c => !(lastOf(c)?.exitCode === 0));
     if (missing.length) return { phase: step(4, `Aplicado en ${r.applied.branch} · falta verificar (${missing.join(', ')})`), next: `Ejecuta ${missing.join(', ')} desde el proceso (en sandbox${opts.isPortalRepo ? '; el Portal exige test y build en Docker/WSL2' : ''}) y, en verde, pulsa «Integrar en la rama principal».`, tone: 'warn', settled: false };
-    return { phase: step(5, `Verificado en ${r.applied.branch} · falta integrar`), next: 'Pulsa «Integrar en la rama principal» (merge sin fast-forward en main).', tone: 'warn', settled: false };
+    // Verificado, pero la fase y el siguiente paso dicen lo mismo que «Problema actual»: QA por commit, conflictos con main
+    // o una decisión pendiente (antes decía «Pulsa Integrar» aunque QA no hubiera revisado el candidato).
+    const rev = revisionStatus(p); const pl = r.pipeline;
+    if (r.mergeError?.files.length) return { phase: step(5, `Verificado en ${r.applied.branch} · main tiene cambios que chocan`), next: `main cambió ${r.mergeError.files.slice(0, 4).join(', ')}: prepara el candidato de integración (sin IA) desde el proceso; si hay conflictos reales, decides cómo resolverlos.`, tone: 'warn', settled: false };
+    if (rev && rev.qa.state === 'inconclusive') return { phase: step(5, `Verificado en ${r.applied.branch} · QA no pudo verificar`), next: `${rev.qa.why} Decide en «Problema actual»: pedir a QA que vuelva a evaluar, integrar bajo tu criterio o rechazar.`, tone: 'warn', settled: false };
+    if (rev && rev.qa.state === 'rejected') return { phase: step(5, `Verificado en ${r.applied.branch} · QA no aprueba`), next: `${rev.qa.why} Revisa los hallazgos en «Problema actual».`, tone: 'warn', settled: false };
+    if (rev && rev.qa.state === 'approved' && !rev.qa.coversHead) return { phase: step(5, `Verificado en ${r.applied.branch} · falta que QA revise ${rev.head}`), next: `${rev.qa.why} Pide a QA que revise el candidato o intégralo bajo tu criterio.`, tone: 'warn', settled: false };
+    if (pl && (pl.state === 'paused' || pl.state === 'stopped') && pl.pauseKind !== 'integration') return { phase: step(5, `Verificado en ${r.applied.branch} · espera tu decisión`), next: 'Decide en «Problema actual» con las acciones que ofrece.', tone: 'warn', settled: false };
+    return { phase: step(5, `Verificado en ${r.applied.branch} · falta integrar`), next: `${rev?.qa.coversHead ? `${rev.qa.why} ` : ''}Pulsa «Integrar en main» (merge sin fast-forward en main).`, tone: 'warn', settled: false };
   }
   if (portal) {
     const act = r.activation!;

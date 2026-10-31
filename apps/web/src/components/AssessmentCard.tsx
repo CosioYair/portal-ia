@@ -21,7 +21,7 @@ export function AssessmentCard({ projectId, hasRepo, compact }: { projectId: str
 
   useEffect(() => {
     api.assessmentEstimate(slug, projectId).then(e => { setEst(e); setBudget(e.suggestedBudgetUsd.toFixed(2)); }).catch(e => setError(e.message));
-    api.processes(slug, projectId).then(ps => setExisting(ps.find(p => p.kind === 'initial_assessment') ?? null)).catch(() => {});
+    api.processSummaries(slug, projectId).then(ps => setExisting(ps.find(p => p.kind === 'initial_assessment') ?? null)).catch(() => {});
   }, [slug, projectId, hasRepo]);
 
   const start = async () => {

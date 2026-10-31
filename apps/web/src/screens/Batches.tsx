@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEntryTitle } from '../lib/nav.ts';
+import { useLatest, useLive } from '../lib/live.ts';
 import { Link, useParams } from 'react-router-dom';
 import type { BacklogItem, BatchItemState, BatchItemView, BatchPreview, BatchView, GauntletConfig } from '@portal-ia/domain';
 import { BATCH_LIMITS, INTERNAL_WORKSPACE, batchMoving, normalizeGauntlet } from '@portal-ia/domain';
@@ -15,7 +17,7 @@ const STATUS: Record<BatchView['status'], { label: string; tone: '' | 'ok' | 'wa
   running: { label: 'en marcha', tone: 'accent' }, paused: { label: 'en pausa', tone: 'warn' }, completed: { label: 'terminado', tone: 'ok' }, cancelled: { label: 'cancelado', tone: '' }, revoked: { label: 'autorización revocada', tone: 'err' }
 };
 const TONE: Record<BatchItemState, '' | 'ok' | 'warn' | 'err' | 'accent'> = {
-  queued: '', waiting_dependency: '', running: 'accent', integrating: 'accent', needs_owner: 'warn', awaiting_integration: 'warn', awaiting_acceptance: 'warn', accepted: 'ok', rejected: 'err', failed: 'err', blocked: 'err', cancelled: ''
+  queued: '', waiting_dependency: '', running: 'accent', integrating: 'accent', needs_owner: 'warn', awaiting_integration: 'warn', awaiting_acceptance: 'warn', accepted: 'ok', rejected: 'err', failed: 'err', blocked: 'err', cancelled: '', external: 'accent'
 };
 const GROUPS: { label: string; states: BatchItemState[] }[] = [
   { label: 'Pendientes de tu aceptación', states: ['awaiting_acceptance'] },
@@ -35,8 +37,11 @@ export function Batches() {
   const [list, setList] = useState<BatchView[] | null>(null);
   // El asistente abierto (y su borrador) sobreviven a recargar o ir a otra pantalla y volver.
   const [creating, setCreating] = usePersistentState(`portal-ia.lotes.asistente.${ws.slug}.${projectId}`, false);
-  const load = () => api.batches(ws.slug, projectId).then(setList).catch(() => setList([]));
-  useEffect(() => { void load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [ws.slug, projectId]);
+  const load = () => api.batches(ws.slug, projectId).then(setList).catch(() => setList(l => l ?? []));
+  // Tiempo real (lotes y procesos de este proyecto) en vez de pedir la lista cada 5 s aunque nada cambie.
+  useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ws.slug, projectId]);
+  useLive(c => c.ws === ws.slug && (c.entity === 'batch' || (c.entity === 'process' && c.kind !== 'progress')) && (!c.projectId || c.projectId === projectId), () => load(), { minMs: 1500 });
   const active = list?.find(b => b.status === 'running' || b.status === 'paused');
   return (
     <Shell crumb="Ejecución continua">
@@ -296,9 +301,17 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
   const [picked, setPicked] = useState<string[]>([]); const [checks, setChecks] = useState<Record<string, boolean[]>>({});
   // La nota de aceptación a medias se conserva (por lote); lo que marcas para aceptar, no: es una comprobación tuya, no un borrador.
   const noteDraft = useDraft(draftKey('lote.aceptacion', ws.slug, batchId), ''); const note = noteDraft.value; const setNote = noteDraft.set;
-  const load = () => api.batch(ws.slug, batchId!).then(x => { setB(x); setErr(null); }).catch(e => setErr(e.message));
-  useEffect(() => { void load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, [ws.slug, batchId]);
-  const act = async (fn: () => Promise<BatchView>, ok: string) => { setBusy(true); try { setB(await fn()); flash(ok); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
+  const latest = useLatest();
+  useEntryTitle(b ? `Lote · ${b.title.slice(0, 40)}` : null);
+  const load = () => latest.run(() => api.batch(ws.slug, batchId!)).then(x => { if (x === undefined) return; setB(x); setErr(null); }).catch(e => setErr(e.message));
+  // Tiempo real: el lote y los procesos de sus historias (aquí, en otra pestaña o fuera del lote) al momento; mientras
+  // está en marcha, un respaldo cada 20 s por si el canal calla.
+  useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ws.slug, batchId]);
+  useLive(c => c.ws === ws.slug && ((c.entity === 'batch' && c.id === batchId) || (c.entity === 'process' && c.kind !== 'progress' && !!b?.items.some(i => i.processId === c.id || i.followedProcessId === c.id || i.itemId === c.itemId))), () => load(), { minMs: 1000 });
+  useEffect(() => { if (b?.status !== 'running') return; const t = setInterval(() => { void load(); }, 20_000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ws.slug, batchId, b?.status]);
+  const act = async (fn: () => Promise<BatchView>, ok: string) => { setBusy(true); latest.bump(); try { setB(await fn()); flash(ok); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   if (!b) return <Shell crumb="Ejecución continua"><main className="page">{err ? <Notice kind="err">{err}</Notice> : <span className="spin" />}</main></Shell>;
   // «En marcha» solo si algo avanza: si todo espera tu decisión, se dice.
   const idle = b.status === 'running' && !batchMoving(b.items);

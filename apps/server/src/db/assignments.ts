@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { Assignment, AssignmentEvent } from '@portal-ia/domain';
 import { monotonicNow } from '../clock.ts';
 import { workspaceDb } from './workspace.ts';
+import { changed } from '../services/live.ts';
 
 /**
  * Encargos de desarrollo del propietario (v0.16): un documento por encargo, como los lotes. Tabla aditiva que se crea
@@ -30,6 +31,7 @@ export function assignmentsRepo(slug: string) {
     a.updatedAt = monotonicNow();
     if (a.events.length > MAX_EVENTS) a.events = a.events.slice(-MAX_EVENTS);
     d.prepare('UPDATE assignments SET status = ?, doc_json = ?, updated_at = ? WHERE id = ?').run(a.status, JSON.stringify(a), a.updatedAt, a.id);
+    changed({ ws: slug, entity: 'assignment', id: a.id, projectId: a.projectId });
     return a;
   };
   return {
@@ -41,6 +43,7 @@ export function assignmentsRepo(slug: string) {
       const max = (d.prepare(`SELECT MAX(CAST(SUBSTR(code, 4) AS INTEGER)) AS n FROM assignments`).get() as any)?.n ?? 0;
       const doc: Assignment = { ...a, id: crypto.randomUUID(), code: `EN-${String(max + 1).padStart(3, '0')}`, events: a.events ?? [], createdAt: at, updatedAt: at };
       d.prepare('INSERT INTO assignments (id, code, project_id, status, doc_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(doc.id, doc.code, doc.projectId, doc.status, JSON.stringify(doc), at, at);
+      changed({ ws: slug, entity: 'assignment', id: doc.id, projectId: doc.projectId });
       return doc;
     },
     /** Lee, modifica y guarda en una sola operación síncrona. */

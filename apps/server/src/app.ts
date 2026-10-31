@@ -24,6 +24,7 @@ import { gauntletRoutes } from './routes/gauntlet.ts';
 import { batchRoutes } from './routes/batches.ts';
 import { assignmentRoutes } from './routes/assignments.ts';
 import { orgEvaluationRoutes } from './routes/orgEvaluation.ts';
+import { liveRoutes } from './routes/live.ts';
 import { VERSION } from './services/system.ts';
 
 /** Script principal del paquete de la interfaz que se sirve (p. ej. «index-BYW4Vz5N.js»), o null sin paquete construido. Se relee cada 10 s. */
@@ -73,6 +74,7 @@ export async function buildApp() {
   await app.register(batchRoutes);
   await app.register(assignmentRoutes);
   await app.register(orgEvaluationRoutes);
+  await app.register(liveRoutes);
 
   // Producción local: sirve apps/web/dist si existe (npm run build). SPA fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {

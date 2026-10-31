@@ -20,8 +20,9 @@ test('la casilla de autorización sigue siendo obligatoria y systemUpdate solo s
   const bar = read('components/SystemBar.tsx');
   assert.equal(bar.split('api.systemUpdate(').length - 1, 1, 'una sola llamada a api.systemUpdate');
   const upd = bar.slice(bar.indexOf('const update = async'), bar.indexOf('if (!st ||'));
-  assert.ok(upd.includes('api.systemUpdate({ restart: true })'), 'la llamada está dentro de update()');
-  assert.match(bar, /onClick=\{update\} disabled=\{!auth\}/);
+  assert.ok(upd.includes('api.systemUpdate({ restart: true'), 'la llamada está dentro de update()');
+  // La casilla sigue siendo obligatoria (y, con procesos en marcha, además la de interrumpirlos).
+  assert.match(bar, /onClick=\{update\} disabled=\{!auth(?: \|\| \(restart && running\.length > 0 && !interrupt\))?\}/);
   assert.equal(bar.split('onClick={update}').length - 1, 1, 'solo el botón de confirmar ejecuta update');
   assert.match(bar, /<span>Autorizo ejecutar <span className="mono">npm install<\/span>/);
   assert.match(bar, /setAuth\(false\); setPhase\('idle'\); setOpen\('confirm'\)/, '«Reintentar» deja la casilla sin marcar');

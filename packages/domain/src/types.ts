@@ -240,7 +240,8 @@ export interface ProcessStep {
  * Estado real de una llamada al proveedor. Sin streaming, el proveedor no informa de progreso hasta terminar: «esperando
  * respuesta» no significa que esté generando; solo se sabe cuándo se envió, cuándo llegaron las cabeceras y el plazo.
  */
-export type LiveCallState = 'preparing' | 'sending' | 'waiting' | 'receiving' | 'processing' | 'retrying' | 'cancelling';
+/** `queued`: esperando un hueco de Claude Code (máximo de ejecuciones a la vez): nada se ha enviado y el plazo aún no corre. */
+export type LiveCallState = 'preparing' | 'queued' | 'sending' | 'waiting' | 'receiving' | 'processing' | 'retrying' | 'cancelling';
 export interface LiveCall {
   state: LiveCallState;
   provider: string;
@@ -306,6 +307,10 @@ export interface Process {
   supersededAt?: string | null;
   /** HU-161 · Número de iteración de la historia (1..N por fecha de creación). Se calcula al servir el contexto de la historia y no se persiste. */
   iteration?: number;
+  /** Vista resumida de un listado (`?view=summary`): sin salidas de los agentes ni el detalle pesado del resultado. */
+  summary?: boolean;
+  /** Versión para decidir (la calcula el servidor al servir el proceso): las acciones la devuelven como `seenVersion`. */
+  version?: string;
   /**
    * HU-161 · Iteración que sustituye a esta (se calcula al servir el contexto de la historia y no se persiste).
    * null o ausente = vigente. Si está presente, el cliente no ofrece «Autorizar» y la muestra solo en el historial.
@@ -369,6 +374,8 @@ export type FlowActionId =
   | 'sandbox_help' | 'refresh_sandbox' | 'request_fix' | 'ask_team' | 'tasks_from_issue' | 'merge' | 'rebuild'
   | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'accept_plan' | 'retry_process' | 'recover' | 'new_iteration'
   | 'pipeline_resume' | 'repair_output'
+  /** La historia no cambia código (lo concluyó el Coordinador): encargo de análisis pendiente de tu autorización, sin IA hasta entonces. */
+  | 'convert_to_analysis'
   /** Conector Claude Code: autorizar el proyecto o pasar a «gestionado» los agentes sin consola, y continuar (sin repetir lo hecho). */
   | 'claude_code_fix'
   /** Registrar como corrección del propietario un commit hecho fuera del equipo (consola) y verificarlo sin IA. */
@@ -858,6 +865,8 @@ export interface StoryManifest {
   gate: CompletenessGate | null;
   /** Comprobación posterior a la verificación: ¿cada prueba nueva se ejecutó de verdad en el sandbox? */
   testRun?: { commit: string | null; at: string; results: { path: string; state: CheckState; detail: string }[] } | null;
+  /** Historias que solo cambian CSS: ¿los valores resueltos antes y después son idénticos? (sin navegador ni IA; ver cssEquivalence.ts). */
+  styleCheck?: { commit: string | null; at: string; check: DeliveryCheck } | null;
   /** Hallazgos de QA que el equipo discutió con evidencia (cada uno, como mucho un intercambio). */
   disputes?: { file: string | null; finding: string; answer: string; round: number; at: string }[];
   /** Último commit que QA revisó (las revisiones siguientes reciben completo solo lo que cambió desde entonces). */
@@ -870,6 +879,25 @@ export interface StoryManifest {
 export type CheckState = 'passed' | 'failed' | 'not_applicable' | 'undetermined';
 export interface DeliveryCheck { name: string; state: CheckState; detail: string }
 /** Resumen de la entrega para la interfaz (calculado al servir el proceso). */
+/**
+ * Estado de QA y de la verificación referido a COMMITS (lo calcula el servidor; ver services/revision.ts): qué commit
+ * aprobó QA, cuál es el actual (o el candidato de integración), si la aprobación lo cubre y por qué.
+ */
+export interface RevisionStatus {
+  head: string | null;
+  qa: {
+    state: 'not_run' | 'approved' | 'rejected' | 'inconclusive' | 'blocked_environment';
+    commit: string | null;
+    coverage: 'direct' | 'gauntlet' | 'carried_clean_merge' | 'carried_with_overlap' | 'superseded' | 'none';
+    /** La aprobación cubre el commit actual (directa, Gauntlet o candidato que solo añade main sin tocar la historia). */
+    coversHead: boolean;
+    why: string;
+  };
+  candidate: { commit: string; previous: string; target: string; targetHead: string; resolvedBy: 'git' | 'agent' | null; conflicts: string[]; overlap: string[] } | null;
+  verifiedHead: boolean;
+  merged: { commit: string; into: string; mergedAt: string } | null;
+}
+
 export interface DeliveryProgress {
   deliverables: { path: string; kind: DeliverableKind; status: DeliverableStatus; planned: boolean; note: string | null; unit: string | null; lines: number | null }[];
   delivered: number; total: number;
@@ -877,6 +905,8 @@ export interface DeliveryProgress {
   currentUnit: { title: string; agentName: string; kind: WorkUnitKind; index: number; total: number } | null;
   /** Tres niveles distintos: compila ≠ funcionalidad completa ≠ QA aprobó los criterios. */
   levels: { compiles: boolean | null; complete: boolean; qaApproved: boolean };
+  /** QA y verificación por commit (la misma verdad para todas las pantallas). */
+  revision?: RevisionStatus | null;
   /** Cada comprobación con su estado explícito (typecheck, test, build y que las pruebas nuevas se ejecutaron). */
   checks: DeliveryCheck[];
   corrections: { applied: number; max: number; requested: number; ineffective: number; attempts: number };
@@ -915,6 +945,18 @@ export interface ExecutionResult {
   carriedPlan?: boolean;
   /** Huella de la historia (título, criterio, descripción) y del contexto de iteración con que se hizo el plan. */
   planBasis?: string | null;
+  /**
+   * Commit de main sobre el que trabaja la historia (se fija al empezar la implementación). La rama nace de él, no del main
+   * de ese momento: si otra historia integra mientras esta trabaja, git lo combina después (candidato) en vez de que una
+   * versión completa escrita sobre lo anterior lo deshaga en silencio.
+   */
+  baseCommit?: string | null;
+  /**
+   * El Coordinador concluyó, a propósito, que la historia no cambia archivos del repositorio (auditoría, análisis, documento
+   * en Conocimiento): no se implementa a ciegas ni se repite igual; se ofrece convertirla en un encargo de análisis.
+   * `basis` es la huella de la historia (`planBasis`) con la que lo concluyó: volver a ejecutarla sin cambiarla no sirve.
+   */
+  planNoCode?: { summary: string; at: string; basis: string | null; /** Encargo de análisis creado a partir de ella (uno solo). */ analysisProcessId?: string | null } | null;
   implementationSummary: string | null;
   /** Explicación para el propietario, sin tecnicismos: qué verá tras integrar y reconstruir, y dónde (menú, botón, ruta). */
   userFacing?: string | null;
@@ -1011,6 +1053,8 @@ export interface SystemStatus {
   startCommit: string | null; headCommit: string | null; branch: string | null;
   /** Commit con el que se construyó la web servida (apps/web/dist/build-info.json) y cuándo. */
   buildCommit?: string | null; buildAt?: string | null;
+  /** Procesos en ejecución (todos los espacios): reiniciar los interrumpiría; la interfaz lo dice y pide confirmarlo. */
+  running?: { slug: string; id: string; title: string }[];
   /** Sandbox detectado para verificar código generado. */
   sandbox?: { available: Isolation; detail: string } | null;
   /** Archivos cambiados entre el commit arrancado y HEAD (y sin confirmar). */
@@ -1018,7 +1062,7 @@ export interface SystemStatus {
   /** Acción necesaria para ver los cambios: ninguna, recargar el navegador o reconstruir y reiniciar. */
   action: 'none' | 'reload' | 'restart';
   stories: string[];
-  update: { status: 'idle' | 'running' | 'done' | 'failed'; log: string; startedAt: string | null; finishedAt: string | null; /** Qué pasará al terminar: reinicio automático (supervisor) o apagado con comandos para arrancar a mano. */ outcome?: ServerLifecycleOutcome | null } | null;
+  update: { status: 'idle' | 'running' | 'done' | 'failed'; log: string; startedAt: string | null; finishedAt: string | null; /** Qué pasará al terminar: reinicio automático (supervisor) o apagado con comandos para arrancar a mano. */ outcome?: ServerLifecycleOutcome | null; /** Se reconstruyó pero no se reinició (había procesos en marcha y no confirmaste interrumpirlos). */ restartSkipped?: string | null } | null;
 }
 
 /** Operación propuesta sobre el backlog por un agente (se aplica solo con aprobación del propietario). */

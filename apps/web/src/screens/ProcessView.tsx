@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { useEntryState, useEntryTitle } from '../lib/nav.ts';
+import { useLatest, useLive } from '../lib/live.ts';
 import { Link, useParams } from 'react-router-dom';
 import type { PipelineConfig, Process, ProcessStep } from '@portal-ia/domain';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
@@ -24,26 +26,35 @@ export function ProcessView() {
   return <ProcessViewOf key={processId} processId={processId!} />;
 }
 
+/** Último estado visto de cada proceso (memoria de la pestaña): al volver se muestra al instante y se actualiza. */
+const procCache = new Map<string, Process>();
+
 function ProcessViewOf({ processId }: { processId: string }) {
   const { status, flash, navigate } = useApp();
   const slug = status.workspace!.slug;
-  const [proc, setProc] = useState<Process | null>(null);
+  // Volver al proceso (Atrás) lo muestra al instante con lo último visto mientras se pide lo actual.
+  const [proc, setProc0] = useState<Process | null>(() => procCache.get(`${slug}/${processId}`) ?? null);
+  const setProc = (p: Process | null) => { if (p) procCache.set(`${slug}/${processId}`, p); setProc0(p); };
+  const latest = useLatest();
   const [open, setOpen] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // El sondeo se reanuda cuando el proceso vuelve a estar activo (p. ej. al continuar): nunca se muestra un estado congelado.
   const active = proc?.status === 'running' || proc?.status === 'pending_authorization';
+  useEntryTitle(proc ? `Proceso · ${proc.title.slice(0, 40)}` : null);
   // Un fallo del sondeo no lo detiene ni borra la pantalla: se sigue intentando y la cabecera avisa de que los datos
   // pueden estar desactualizados (el proceso puede seguir trabajando en el servidor).
   const loaded = useRef(false);
-  useEffect(() => {
-    let alive = true; let timer: ReturnType<typeof setTimeout> | undefined;
-    const tick = async () => {
-      try { const p = await api.process(slug, processId!); if (!alive) return; loaded.current = true; setError(null); setProc(p); if (p.status === 'running' || p.status === 'pending_authorization') timer = setTimeout(tick, p.status === 'running' ? 2000 : 5000); }
-      catch (e: any) { if (!alive) return; if (!loaded.current) setError(e.message); timer = setTimeout(tick, 5000); }
-    };
-    void tick();
-    return () => { alive = false; clearTimeout(timer); };
+  const reload = async () => {
+    try { const p = await latest.run(() => api.process(slug, processId!)); if (p === undefined) return; loaded.current = true; setError(null); setProc(p); }
+    catch (e: any) { if (!loaded.current) setError(e.message); }
+  };
+  useEffect(() => { void reload(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slug, processId]);
+  // Tiempo real: cada cambio de ESTE proceso (estado, pasos, llamada en curso) o del Portal (activación) se vuelve a pedir
+  // al momento, también si lo hizo otra pestaña o el lote; mientras corre, un respaldo cada 15 s por si el canal calla.
+  useLive(c => (c.ws === slug && c.entity === 'process' && c.id === processId) || c.entity === 'system', () => reload(), { minMs: 700 });
+  useEffect(() => { if (!active) return; const t = setInterval(() => { void reload(); }, 15_000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, processId, active]);
 
   useEffect(() => { if (proc && !open) { const last = [...proc.steps].reverse().find(s => s.status === 'done' || s.status === 'running'); if (last) setOpen(last.id); } }, [proc, open]);
@@ -179,12 +190,19 @@ function ProcessViewOf({ processId }: { processId: string }) {
   );
 }
 
+const listCache = new Map<string, Process[]>();
+
 export function ProcessList() {
   const { status, navigate } = useApp();
   const slug = status.workspace!.slug; const projectId = status.project!.id;
-  const [list, setList] = useState<Process[] | null>(null);
-  const [filter, setFilter] = useState<'all' | ProcessFilterKey>('all');
-  useEffect(() => { api.processes(slug, projectId).then(setList).catch(() => setList([])); }, [slug, projectId]);
+  const [list, setList] = useState<Process[] | null>(() => listCache.get(`${slug}/${projectId}`) ?? null);
+  // El filtro elegido se conserva al volver con «Atrás» (por pestaña).
+  const [filter, setFilter] = useEntryState<'all' | ProcessFilterKey>('actividad.filtro', 'all');
+  const loadList = () => api.processSummaries(slug, projectId).then(l => { listCache.set(`${slug}/${projectId}`, l); setList(l); }).catch(() => setList(l => l ?? []));
+  useEffect(() => { void loadList(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slug, projectId]);
+  // Un proceso que empieza, se pausa o termina (aquí, en otra pestaña o en un lote) aparece sin recargar.
+  useLive(c => c.ws === slug && c.entity === 'process' && c.kind !== 'progress' && (!c.projectId || c.projectId === projectId), () => loadList(), { minMs: 2000 });
   const countOf = (k: 'all' | ProcessFilterKey) => !list ? 0 : k === 'all' ? list.length : list.filter(p => processFilterKey(p) === k).length;
   const rows = !list ? [] : filter === 'all' ? list : list.filter(p => processFilterKey(p) === filter);
   return (

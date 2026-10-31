@@ -47,11 +47,26 @@ export function testsEvidence(verifications: VerificationRun[]): string {
   return `- test: ${t.exitCode === 0 ? 'OK' : 'FALLÓ'}${pass ? ` · ${pass} prueba(s) correctas` : ''}${files.length ? ` · archivos: ${files.join(', ')}` : ''}`;
 }
 
+/**
+ * Reparte un tope de caracteres entre varios diffs sin que uno enorme (p. ej. un CSS minificado) deje fuera a los demás:
+ * los pequeños van enteros y el resto se reparte a partes iguales; cada recorte se dice con los caracteres omitidos.
+ */
+export function fairClip(parts: string[], total: number): string[] {
+  const out = [...parts]; let budget = total;
+  const order = parts.map((p, i) => i).sort((a, b) => parts[a].length - parts[b].length);
+  order.forEach((i, k) => {
+    const share = Math.floor(budget / (order.length - k));
+    if (parts[i].length > share) out[i] = `${parts[i].slice(0, Math.max(0, share - 80))}\n… (diff recortado: ${parts[i].length - Math.max(0, share - 80)} caracteres omitidos)`;
+    budget -= Math.min(parts[i].length, share);
+  });
+  return out;
+}
+
 export function qaEvidencePrompt(input: { criterion: string; plan: StoryPlan | null; summary: string; changes: ProposedChange[]; verifications: VerificationRun[]; required: string[]; attempts: string[]; consultText: string; manifest?: StoryManifest | null; previousFindings?: QaFinding[]; tests?: string; checks?: DeliveryCheck[]; unchangedSinceReview?: string[]; reviewedCommit?: string | null; external?: ExternalCorrection[] }): string {
   const files = input.changes.filter(c => !c.error).map(c => `${c.action} ${c.path} (${c.before}→${c.after} líneas)`).join('\n');
   // Revisión siguiente: el diff completo solo de lo que cambió desde la anterior; lo demás ya lo revisaste (se lista).
   const same = new Set(input.unchangedSinceReview ?? []);
-  const diffs = input.changes.filter(c => !c.error && !same.has(c.path)).map(c => c.diff ?? '').join('\n\n').slice(0, 50_000);
+  const diffs = fairClip(input.changes.filter(c => !c.error && !same.has(c.path)).map(c => c.diff ?? ''), 50_000).join('\n\n');
   const sameList = same.size ? `# Sin cambios desde tu revisión anterior (commit ${input.reviewedCommit ?? '?'}): ya los revisaste; el diff de abajo es solo lo que cambió\n${Array.from(same).map(p => `- ${p}`).join('\n')}\n` : '';
   const STATE: Record<string, string> = { passed: 'SUPERADA', failed: 'FALLIDA', not_applicable: 'no aplica', undetermined: 'NO DETERMINADA (no es evidencia)' };
   const checks = input.checks?.length ? `# Estado de cada comprobación\n${input.checks.map(c => `- ${c.name}: ${STATE[c.state]} · ${c.detail}`).join('\n')}\n` : '';

@@ -1,4 +1,5 @@
 import { OperationCard } from './OperationCard.tsx';
+import { useLive } from '../lib/live.ts';
 import React, { useEffect, useRef, useState, type ClipboardEvent, type ChangeEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
@@ -151,8 +152,11 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
   }, [loaded, initialText]);
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [msgs.length, busy]);
   const unsettled = msgs.some(m => m.actions.some(a => a.live && !a.live.settled)) || !!detail?.artifacts.some(a => a.status === 'running');
-  useEffect(() => { if (!unsettled) return; const t = setInterval(() => { load().catch(() => null); }, 10_000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unsettled, convId]);
+  // Tiempo real: el estado de lo que propuso el Asistente (encargos, procesos, operaciones) y la conversación se ven al
+  // momento, también con el panel cerrado y abierto después; sin conexión, el respaldo de lib/live.ts lo vuelve a pedir.
+  useLive(c => c.entity === 'assistant' || (c.kind !== 'progress' && (c.entity === 'assignment' || c.entity === 'process' || c.entity === 'batch')), () => { if (!busy) load().catch(() => null); }, { minMs: 2000, enabled: loaded });
+  useEffect(() => { if (!unsettled) return; const t = setInterval(() => { if (!busy) load().catch(() => null); }, 30_000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unsettled, convId, busy]);
   // HU-161 · consolidación con la bandeja: una sola autorización vigente por historia.
   const [superseded, setSuperseded] = useState<Record<string, SupersededInfo>>({});
   const [decTick, setDecTick] = useState(0);

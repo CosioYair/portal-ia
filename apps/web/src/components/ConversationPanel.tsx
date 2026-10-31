@@ -1,4 +1,5 @@
 import { Component, useEffect, useState, type ReactNode } from 'react';
+import { useLive } from '../lib/live.ts';
 import { Link } from 'react-router-dom';
 import { STAGE_LABEL, type AssistantConversation, type ConversationDecision, type Project } from '@portal-ia/domain';
 import { api, type AssignmentAuthPreview, type AssignmentView, type AssistantAction, type AssistantMessage, type ConversationArtifactView, type ConversationDetailView, type UsageGateView } from '../lib/api.ts';
@@ -220,7 +221,9 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
   }, [slug, assignmentId]);
   const authorizable = !!a && ['draft', 'changes_requested', 'needs_owner', 'failed'].includes(a.status);
   useEffect(() => { if (!authorizable || pre) return; api.assignmentAuthorization(slug, assignmentId).then(p => { setPre(p); }).catch(e => setErr(e.message)); }, [authorizable, pre, slug, assignmentId]);
-  useEffect(() => { if (a?.status !== 'running') return; const t = setInterval(() => void load(), 8000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Tiempo real: el encargo y su proceso (aquí, en otra pestaña o al terminar) al momento; respaldo cada 30 s si corre.
+  useLive(c => c.ws === slug && ((c.entity === 'assignment' && c.id === assignmentId) || (c.entity === 'process' && c.itemId === assignmentId && c.kind !== 'progress')), () => load(), { minMs: 1500 });
+  useEffect(() => { if (a?.status !== 'running') return; const t = setInterval(() => void load(), 30_000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [a?.status]);
   if (!a) return err ? <Notice kind="err">{err}</Notice> : null;
   const act = async (fn: () => Promise<unknown>, msg: string) => { setBusy(true); setErr(null); try { await fn(); flash(msg); setOk(false); cardDraft.clear(); setDiscard(false); setPre(null); await load(); onChanged?.(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };

@@ -6,6 +6,8 @@ import { config } from '../config.ts';
 import { defaultCapabilitiesFor } from '@portal-ia/domain';
 import type { ClaudeCodeRun, ClaudeCodeRunStatus, ClaudeCodeUsage, DelegationResult, Agent, AgentConfig, AgentStatus, AgentTemplate, BacklogItem, BacklogStatus, ContextItem, ExecutionResult, KnowledgeDoc, Objective, Process, ProcessStatus, ProcessStep, Project, Repository, Scope, StepStatus, UsageToday } from '@portal-ia/domain';
 import { monotonicNow } from '../clock.ts';
+import { changed } from '../services/live.ts';
+import { clearQueued } from '../services/capacity.ts';
 
 /**
  * Una base SQLite por espacio de trabajo: data/workspaces/<slug>/<slug>.sqlite
@@ -172,6 +174,18 @@ export function workspaceDb(slug: string): DatabaseSync {
     duration_ms INTEGER, num_turns INTEGER, tokens_in INTEGER, tokens_out INTEGER, api_equivalent_usd REAL, error TEXT, rate_limit_json TEXT, progress TEXT
   );
   `);
+  // Índices (aditivos, idempotentes): sin ellos cada proceso leía TODA la tabla de pasos (decenas de MB) y una lista de
+  // procesos o la bandeja bloqueaban el servidor varios segundos. No cambian datos; una versión anterior los ignora.
+  db.exec(`
+  CREATE INDEX IF NOT EXISTS process_steps_process ON process_steps(process_id, position);
+  CREATE INDEX IF NOT EXISTS processes_project ON processes(project_id, created_at);
+  CREATE INDEX IF NOT EXISTS processes_backlog_item ON processes(backlog_item_id, created_at);
+  CREATE INDEX IF NOT EXISTS processes_status ON processes(status);
+  CREATE INDEX IF NOT EXISTS processes_assignment ON processes(assignment_id);
+  CREATE INDEX IF NOT EXISTS backlog_items_project ON backlog_items(project_id, position);
+  CREATE INDEX IF NOT EXISTS claude_code_runs_process ON claude_code_runs(process_id);
+  CREATE INDEX IF NOT EXISTS execution_history_started ON execution_history(started_at);
+  `);
   // Ejecuciones que quedaron «en curso» al apagarse el servidor: la CLI ya no existe (murió con él) → interrumpidas.
   db.prepare(`UPDATE claude_code_runs SET status = 'interrupted', finished_at = ?, error = COALESCE(error, 'El Portal se reinició durante la ejecución; lo hecho en el proceso se conserva.') WHERE status IN ('queued','running')`).run(now());
   // HU-161: consolida (sin borrar) las autorizaciones duplicadas por iteración que ya existían. Nunca impide abrir la base.
@@ -253,14 +267,17 @@ export function agentsRepo(slug: string) {
       const tpl = { initials: t.initials, role: t.role, reportsTo: t.reportsTo, supervises: t.supervises, collaborates: t.collaborates, evaluation: t.evaluation, tier: t.tier };
       db.prepare(`INSERT INTO agents (id, key, project_id, template_id, scope, status, config_json, config_edited, template_json, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, 'inactive', ?, 0, ?, ?, ?)`).run(id, t.key, projectId, t.id, t.scope, JSON.stringify(config), JSON.stringify(tpl), ts, ts);
+      changed({ ws: slug, entity: 'agent', id, projectId });
       return this.get(id)!;
     },
     updateConfig(id: string, config: AgentConfig): Agent {
       db.prepare(`UPDATE agents SET config_json = ?, config_edited = 1, updated_at = ? WHERE id = ?`).run(JSON.stringify(config), now(), id);
+      changed({ ws: slug, entity: 'agent', id });
       return this.get(id)!;
     },
     setStatus(id: string, status: AgentStatus) {
       db.prepare(`UPDATE agents SET status = ?, updated_at = ? WHERE id = ?`).run(status, now(), id);
+      changed({ ws: slug, entity: 'agent', id, kind: 'progress' });
     },
     /** Agente especializado creado por el usuario (plantilla 'custom'). */
     createCustom(input: { key: string; scope: Scope; projectId: string | null; config: AgentConfig; template: Agent['template'] }): Agent {
@@ -272,7 +289,7 @@ export function agentsRepo(slug: string) {
     updateTemplateMeta(id: string, template: Agent['template']) {
       db.prepare(`UPDATE agents SET template_json = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(template), now(), id);
     },
-    delete(id: string) { db.prepare(`DELETE FROM agents WHERE id = ?`).run(id); },
+    delete(id: string) { db.prepare(`DELETE FROM agents WHERE id = ?`).run(id); changed({ ws: slug, entity: 'agent', id }); },
     keyExists(key: string): boolean { return !!db.prepare(`SELECT 1 FROM agents WHERE key = ?`).get(key); }
   };
 }
@@ -287,6 +304,7 @@ export function knowledgeRepo(slug: string) {
       const id = uuid();
       db.prepare(`INSERT INTO knowledge (id, project_id, title, body, author_agent_id, author_agent_name, process_id, version, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(id, d.projectId, d.title, d.body, d.authorAgentId, d.authorAgentName, d.processId, d.version ?? 1, now());
+      changed({ ws: slug, entity: 'knowledge', id, projectId: d.projectId });
       return this.get(id)!;
     }
   };
@@ -299,10 +317,13 @@ export function onProcessFinish(fn: (slug: string, processId: string) => void) {
 export function processesRepo(slug: string) {
   const db = workspaceDb(slug);
   const mapStep = (r: any): ProcessStep => ({ id: r.id, processId: r.process_id, position: r.position, agentId: r.agent_id, agentName: r.agent_name, title: r.title, status: r.status, model: r.model, inputTokens: r.tokens_in, outputTokens: r.tokens_out, costUsd: r.cost_usd, outputMd: r.output_md, error: r.error, startedAt: r.started_at, finishedAt: r.finished_at, role: r.role ?? null, reason: r.reason ?? null, lessonsUsed: r.lessons_used ? JSON.parse(r.lessons_used) : [], live: r.live_json ? JSON.parse(r.live_json) : null, unconfirmedUsd: r.unconfirmed_usd ?? 0, backend: r.backend ?? null });
-  const mapProc = (r: any): Process => ({ id: r.id, projectId: r.project_id, kind: r.kind, title: r.title, status: r.status, budgetUsd: r.budget_usd, estimatedUsd: r.estimated_usd, spentUsd: r.spent_usd, inputTokens: r.tokens_in, outputTokens: r.tokens_out, createdAt: r.created_at, authorizedAt: r.authorized_at, startedAt: r.started_at, finishedAt: r.finished_at, error: r.error,
+  const mapProcRow = (r: any): Omit<Process, 'steps'> => ({ id: r.id, projectId: r.project_id, kind: r.kind, title: r.title, status: r.status, budgetUsd: r.budget_usd, estimatedUsd: r.estimated_usd, spentUsd: r.spent_usd, inputTokens: r.tokens_in, outputTokens: r.tokens_out, createdAt: r.created_at, authorizedAt: r.authorized_at, startedAt: r.started_at, finishedAt: r.finished_at, error: r.error,
     result: r.result_json ? JSON.parse(r.result_json) : null, delegation: r.delegation_json ? JSON.parse(r.delegation_json) : null, backlogItemId: r.backlog_item_id ?? null, assignmentId: r.assignment_id ?? null, maxSubscriptionCalls: r.max_subscription_calls ?? null, unconfirmedUsd: r.unconfirmed_usd ?? 0,
-    archivedAt: r.archived_at ?? null, archiveId: r.archive_id ?? null, supersededBy: r.superseded_by ?? null, supersededAt: r.superseded_at ?? null,
-    steps: (db.prepare(`SELECT * FROM process_steps WHERE process_id = ? ORDER BY position`).all(r.id) as any[]).map(mapStep) });
+    archivedAt: r.archived_at ?? null, archiveId: r.archive_id ?? null, supersededBy: r.superseded_by ?? null, supersededAt: r.superseded_at ?? null });
+  // Tiempo real: avisa QUÉ proceso cambió (con su proyecto e historia), nunca el contenido. Ver services/live.ts.
+  const touch = (id: string, kind: 'state' | 'progress' = 'state') => { const r = db.prepare(`SELECT project_id, backlog_item_id, assignment_id FROM processes WHERE id = ?`).get(id) as any; changed({ ws: slug, entity: 'process', id, projectId: r?.project_id ?? null, itemId: r?.backlog_item_id ?? r?.assignment_id ?? null, kind }); };
+  const touchStep = (stepId: string, kind: 'state' | 'progress' = 'state') => { const r = db.prepare(`SELECT process_id FROM process_steps WHERE id = ?`).get(stepId) as any; if (r?.process_id) touch(r.process_id, kind); };
+  const mapProc = (r: any): Process => ({ ...mapProcRow(r), steps: (db.prepare(`SELECT * FROM process_steps WHERE process_id = ? ORDER BY position`).all(r.id) as any[]).map(mapStep) });
   return {
     /** Procesos activos (los archivados al iniciar una etapa quedan fuera del flujo: ver listAll / listArchived). */
     list(projectId: string): Process[] { return (db.prepare(`SELECT * FROM processes WHERE project_id = ? AND archived_at IS NULL ORDER BY created_at DESC`).all(projectId) as any[]).map(mapProc); },
@@ -315,6 +336,7 @@ export function processesRepo(slug: string) {
       db.prepare(`INSERT INTO processes (id, project_id, kind, title, status, estimated_usd, created_at, backlog_item_id, assignment_id) VALUES (?, ?, ?, ?, 'pending_authorization', ?, ?, ?, ?)`).run(id, p.projectId, p.kind, p.title, p.estimatedUsd, now(), p.backlogItemId ?? null, p.assignmentId ?? null);
       const ins = db.prepare(`INSERT INTO process_steps (id, process_id, position, agent_id, agent_name, title, model, role, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       p.steps.forEach((s, i) => ins.run(uuid(), id, i, s.agentId, s.agentName, s.title, s.model, s.role ?? null, s.reason ?? null));
+      touch(id);
       return this.get(id)!;
     },
     /** Paso añadido durante la ejecución (reparación de la entrega, corrección, nueva revisión de QA). Devuelve el paso. */
@@ -322,12 +344,13 @@ export function processesRepo(slug: string) {
       const pos = ((db.prepare(`SELECT COALESCE(MAX(position), -1) AS m FROM process_steps WHERE process_id = ?`).get(processId) as any).m as number) + 1;
       const id = uuid();
       db.prepare(`INSERT INTO process_steps (id, process_id, position, agent_id, agent_name, title, model, role, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, processId, pos, s.agentId, s.agentName, s.title, s.model, s.role ?? null, s.reason ?? null);
+      touch(processId);
       return this.get(processId)!.steps.find(x => x.id === id)!;
     },
     /** Un paso planificado que pasa a ser otra cosa antes de empezar (p. ej. la primera unidad de la entrega incremental). */
-    renameStep(stepId: string, title: string, reason?: string | null) { db.prepare(`UPDATE process_steps SET title = ?, reason = COALESCE(?, reason) WHERE id = ?`).run(title, reason ?? null, stepId); },
+    renameStep(stepId: string, title: string, reason?: string | null) { db.prepare(`UPDATE process_steps SET title = ?, reason = COALESCE(?, reason) WHERE id = ?`).run(title, reason ?? null, stepId); touchStep(stepId); },
     /** Reanudar un proceso con más presupuesto (autorizado por el propietario): vuelve a «en ejecución». */
-    resume(id: string, budgetUsd: number) { db.prepare(`UPDATE processes SET status = 'running', budget_usd = ?, finished_at = NULL, error = NULL WHERE id = ?`).run(budgetUsd, id); },
+    resume(id: string, budgetUsd: number) { db.prepare(`UPDATE processes SET status = 'running', budget_usd = ?, finished_at = NULL, error = NULL WHERE id = ?`).run(budgetUsd, id); touch(id); },
     setStepLessons(stepId: string, ids: string[]) { db.prepare(`UPDATE process_steps SET lessons_used = ? WHERE id = ?`).run(JSON.stringify(ids), stepId); },
     /** Métricas de participación de un agente derivadas de process_steps (sin IA). */
     agentStats(agentId: string): { steps: number; done: number; failed: number; costUsd: number; byRole: Record<string, number>; lastAt: string | null } {
@@ -338,24 +361,42 @@ export function processesRepo(slug: string) {
     },
     authorize(id: string, budgetUsd: number) {
       db.prepare(`UPDATE processes SET status = 'running', budget_usd = ?, authorized_at = ?, started_at = ? WHERE id = ?`).run(budgetUsd, now(), now(), id);
+      touch(id);
     },
-    setResult(id: string, result: ExecutionResult) { db.prepare(`UPDATE processes SET result_json = ? WHERE id = ?`).run(JSON.stringify(result), id); },
-    setDelegation(id: string, d: DelegationResult) { db.prepare(`UPDATE processes SET delegation_json = ? WHERE id = ?`).run(JSON.stringify(d), id); },
+    setResult(id: string, result: ExecutionResult) { db.prepare(`UPDATE processes SET result_json = ? WHERE id = ?`).run(JSON.stringify(result), id); touch(id); },
+    setDelegation(id: string, d: DelegationResult) { db.prepare(`UPDATE processes SET delegation_json = ? WHERE id = ?`).run(JSON.stringify(d), id); touch(id); },
     /** HU-161 · Todos los procesos de una historia (activos y archivados), de la iteración más antigua a la más reciente. */
     listByAssignment(assignmentId: string): Process[] { return (db.prepare(`SELECT * FROM processes WHERE assignment_id = ? ORDER BY created_at, id`).all(assignmentId) as any[]).map(mapProc); },
     listByBacklogItem(itemId: string): Process[] { return (db.prepare(`SELECT * FROM processes WHERE backlog_item_id = ? ORDER BY created_at, id`).all(itemId) as any[]).map(mapProc); },
+    /** Ids de las iteraciones de una historia, de la más reciente a la más antigua (mismo orden que listAll), sin cargarlas. */
+    storyIterationIds(itemId: string): string[] { return (db.prepare(`SELECT id FROM processes WHERE backlog_item_id = ? AND kind = 'story_execution' ORDER BY created_at DESC`).all(itemId) as any[]).map(r => r.id); },
+    /**
+     * Procesos de un proyecto SIN el texto de los pasos (listados, bandeja, resúmenes): una sola consulta de pasos para
+     * todos en lugar de una por proceso, y sin las salidas de los agentes (lo que más pesa).
+     */
+    listLight(projectId: string, opts: { archived?: boolean } = {}): Process[] {
+      const where = opts.archived ? '' : ' AND archived_at IS NULL';
+      const rows = db.prepare(`SELECT * FROM processes WHERE project_id = ?${where} ORDER BY created_at DESC`).all(projectId) as any[];
+      const steps = new Map<string, ProcessStep[]>();
+      for (const s of db.prepare(`SELECT id, process_id, position, agent_id, agent_name, title, status, model, tokens_in, tokens_out, cost_usd, NULL AS output_md, error, started_at, finished_at, role, reason, lessons_used, live_json, unconfirmed_usd, backend
+        FROM process_steps WHERE process_id IN (SELECT id FROM processes WHERE project_id = ?${where}) ORDER BY process_id, position`).all(projectId) as any[]) {
+        const list = steps.get(s.process_id) ?? []; list.push(mapStep(s)); steps.set(s.process_id, list);
+      }
+      return rows.map(r => ({ ...mapProcRow(r), steps: steps.get(r.id) ?? [] }));
+    },
     /** HU-161 · Marca la decisión de un proceso como superada por otra iteración. No cambia su estado ni borra nada. */
     markSuperseded(id: string, byId: string): boolean {
       const r = db.prepare(`UPDATE processes SET superseded_by = ?, superseded_at = ? WHERE id = ? AND id <> ?`).run(byId, now(), id, byId);
+      if (Number(r.changes) > 0) touch(id);
       return Number(r.changes) > 0;
     },
     /**
      * HU-161 · Restaura una autorización superada (reversible). Para que la historia siga teniendo una sola vigente,
      * las demás iteraciones con decisión pendiente pasan a superadas por la restaurada. Todo en una transacción.
      */
-    setCallCap(id: string, n: number | null) { db.prepare(`UPDATE processes SET max_subscription_calls = ? WHERE id = ?`).run(n, id); },
+    setCallCap(id: string, n: number | null) { db.prepare(`UPDATE processes SET max_subscription_calls = ? WHERE id = ?`).run(n, id); touch(id); },
     /** Deshace las marcas puestas por un proceso que nunca empezó (se canceló al no poder autorizarse). */
-    unsupersedeBy(byId: string): number { return Number(db.prepare(`UPDATE processes SET superseded_by = NULL, superseded_at = NULL WHERE superseded_by = ?`).run(byId).changes); },
+    unsupersedeBy(byId: string): number { const ids = (db.prepare(`SELECT id FROM processes WHERE superseded_by = ?`).all(byId) as any[]).map(r => r.id as string); const n = Number(db.prepare(`UPDATE processes SET superseded_by = NULL, superseded_at = NULL WHERE superseded_by = ?`).run(byId).changes); ids.forEach(x => touch(x)); return n; },
     restoreSuperseded(id: string): { restored: string; superseded: string[] } | null {
       const r = db.prepare(`SELECT id, backlog_item_id, assignment_id, superseded_by FROM processes WHERE id = ?`).get(id) as any;
       if (!r || r.superseded_by == null) return null;
@@ -371,32 +412,38 @@ export function processesRepo(slug: string) {
         }
         db.exec('COMMIT');
       } catch (e) { db.exec('ROLLBACK'); throw e; }
+      [id, ...superseded].forEach(x => touch(x));
       return { restored: id, superseded };
     },
     finish(id: string, status: ProcessStatus, error: string | null = null) {
       db.prepare(`UPDATE processes SET status = ?, finished_at = ?, error = ? WHERE id = ?`).run(status, now(), error, id);
+      touch(id); clearQueued(id);
       for (const fn of finishListeners) { try { fn(slug, id); } catch { /* un oyente no impide terminar */ } }
     },
     /** Estado real de la llamada en curso de un paso (null al terminar). */
-    setStepLive(stepId: string, live: unknown | null) { db.prepare(`UPDATE process_steps SET live_json = ? WHERE id = ?`).run(live ? JSON.stringify(live) : null, stepId); },
+    setStepLive(stepId: string, live: unknown | null) { db.prepare(`UPDATE process_steps SET live_json = ? WHERE id = ?`).run(live ? JSON.stringify(live) : null, stepId); touchStep(stepId, 'progress'); },
     /** Costo posiblemente facturado y NO confirmado (llamada abortada, caída, reinicio): se registra aparte del gasto confirmado. */
     addUnconfirmed(processId: string, stepId: string | null, usd: number) {
       if (!(usd > 0)) return;
       db.prepare(`UPDATE processes SET unconfirmed_usd = unconfirmed_usd + ? WHERE id = ?`).run(usd, processId);
       if (stepId) db.prepare(`UPDATE process_steps SET unconfirmed_usd = unconfirmed_usd + ? WHERE id = ?`).run(usd, stepId);
+      touch(processId, 'progress');
     },
     addUsage(id: string, tokensIn: number, tokensOut: number, cost: number) {
       db.prepare(`UPDATE processes SET tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, spent_usd = spent_usd + ? WHERE id = ?`).run(tokensIn, tokensOut, cost, id);
+      touch(id, 'progress');
     },
     // Una continuación reutiliza el paso: el final y el error de la llamada anterior no pueden seguir visibles mientras corre.
-    stepStart(stepId: string) { db.prepare(`UPDATE process_steps SET status = 'running', started_at = ?, finished_at = NULL, error = NULL WHERE id = ?`).run(now(), stepId); },
+    stepStart(stepId: string) { db.prepare(`UPDATE process_steps SET status = 'running', started_at = ?, finished_at = NULL, error = NULL WHERE id = ?`).run(now(), stepId); touchStep(stepId); },
     stepFinish(stepId: string, status: StepStatus, data: { tokensIn?: number; tokensOut?: number; cost?: number; outputMd?: string | null; error?: string | null; backend?: string | null }) {
       db.prepare(`UPDATE process_steps SET status = ?, tokens_in = ?, tokens_out = ?, cost_usd = ?, output_md = ?, error = ?, finished_at = ?, live_json = NULL, backend = COALESCE(?, backend) WHERE id = ?`)
         .run(status, data.tokensIn ?? 0, data.tokensOut ?? 0, data.cost ?? 0, data.outputMd ?? null, data.error ?? null, now(), data.backend ?? null, stepId);
+      touchStep(stepId);
     },
     logExecution(e: { projectId: string; agentId: string; kind: string; status: string; tokensIn: number; tokensOut: number; cost: number; startedAt: string }) {
       db.prepare(`INSERT INTO execution_history (id, project_id, agent_id, kind, status, tokens_in, tokens_out, cost_usd, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(uuid(), e.projectId, e.agentId, e.kind, e.status, e.tokensIn, e.tokensOut, e.cost, e.startedAt, now());
+      changed({ ws: slug, entity: 'usage', id: null, projectId: e.projectId, kind: 'progress' });
     }
   };
 }
@@ -404,6 +451,7 @@ export function processesRepo(slug: string) {
 export function backlogRepo(slug: string) {
   const db = workspaceDb(slug);
   const map = (r: any): BacklogItem => ({ id: r.id, projectId: r.project_id, storyId: r.story_id, title: r.title, ownerKey: r.owner_key, dependsOn: r.depends_on, estimate: r.estimate, criterion: r.criterion, description: r.description, status: r.status, position: r.position, sourceProcessId: r.source_process_id, lastProcessId: r.last_process_id, createdAt: r.created_at, updatedAt: r.updated_at, archivedAt: r.archived_at ?? null, archiveId: r.archive_id ?? null });
+  const touchItem = (id: string) => { const r = db.prepare(`SELECT project_id FROM backlog_items WHERE id = ?`).get(id) as any; changed({ ws: slug, entity: 'backlog', id, projectId: r?.project_id ?? null, itemId: id }); };
   return {
     /** Backlog activo. Las historias archivadas al iniciar una etapa siguen en la base (listAll / listArchived). */
     list(projectId: string): BacklogItem[] { return (db.prepare(`SELECT * FROM backlog_items WHERE project_id = ? AND archived_at IS NULL ORDER BY position, created_at`).all(projectId) as any[]).map(map); },
@@ -417,19 +465,22 @@ export function backlogRepo(slug: string) {
       const id = uuid(); const ts = now();
       db.prepare(`INSERT INTO backlog_items (id, project_id, story_id, title, owner_key, depends_on, estimate, criterion, description, status, position, source_process_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(id, i.projectId, i.storyId, i.title, i.ownerKey, i.dependsOn, i.estimate, i.criterion, i.description, i.status ?? 'pending', this.nextPosition(i.projectId), i.sourceProcessId, ts, ts);
+      touchItem(id);
       return this.get(id)!;
     },
     setStatus(id: string, status: BacklogStatus, lastProcessId?: string | null) {
       if (lastProcessId !== undefined) db.prepare(`UPDATE backlog_items SET status = ?, last_process_id = ?, updated_at = ? WHERE id = ?`).run(status, lastProcessId, now(), id);
       else db.prepare(`UPDATE backlog_items SET status = ?, updated_at = ? WHERE id = ?`).run(status, now(), id);
+      touchItem(id);
     },
     update(id: string, patch: Partial<Pick<BacklogItem, 'title' | 'criterion' | 'description' | 'ownerKey' | 'estimate' | 'dependsOn'>>) {
       const cur = this.get(id); if (!cur) return;
       const n = { ...cur, ...patch };
       db.prepare(`UPDATE backlog_items SET title = ?, criterion = ?, description = ?, owner_key = ?, estimate = ?, depends_on = ?, updated_at = ? WHERE id = ?`).run(n.title, n.criterion, n.description, n.ownerKey, n.estimate, n.dependsOn, now(), id);
+      touchItem(id);
     },
-    setPosition(id: string, position: number) { db.prepare(`UPDATE backlog_items SET position = ?, updated_at = ? WHERE id = ?`).run(position, now(), id); },
-    delete(id: string) { db.prepare(`DELETE FROM backlog_items WHERE id = ?`).run(id); }
+    setPosition(id: string, position: number) { db.prepare(`UPDATE backlog_items SET position = ?, updated_at = ? WHERE id = ?`).run(position, now(), id); touchItem(id); },
+    delete(id: string) { const r = db.prepare(`SELECT project_id FROM backlog_items WHERE id = ?`).get(id) as any; db.prepare(`DELETE FROM backlog_items WHERE id = ?`).run(id); changed({ ws: slug, entity: 'backlog', id, projectId: r?.project_id ?? null, itemId: id }); }
   };
 }
 

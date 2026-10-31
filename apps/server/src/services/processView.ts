@@ -1,4 +1,4 @@
-import type { BacklogItem, Process } from '@portal-ia/domain';
+import type { BacklogItem, ExecutionResult, Process, ProposedChange } from '@portal-ia/domain';
 import { backlogRepo, processesRepo } from '../db/workspace.ts';
 import type { GuidanceOptions } from './guidance.ts';
 import { listFeedback } from './manual-test-feedback.ts';
@@ -25,8 +25,9 @@ export async function flowOptions(slug: string, p: Process, item?: BacklogItem |
   const u = lastUpdate();
   const updateFailedLog = r?.merged && u?.status === 'failed' && u.finishedAt && u.finishedAt > r.merged.mergedAt ? u.log : null;
   const it = item ?? (p.backlogItemId ? backlogRepo(slug).get(p.backlogItemId) : null);
-  const siblings = it ? processesRepo(slug).listAll(p.projectId).filter(x => x.backlogItemId === it.id && x.kind === 'story_execution') : [];
-  const idx = siblings.findIndex(x => x.id === p.id);
+  // Número de iteración: solo los ids de la historia (antes se cargaban TODOS los procesos del proyecto por cada uno).
+  const siblings = it ? processesRepo(slug).storyIterationIds(it.id) : [];
+  const idx = siblings.indexOf(p.id);
   // «En ejecución» sin ejecución viva en este servidor: nada trabaja de verdad (no se muestra como actividad sana).
   const orphan = p.status === 'running' && !isActiveJob(p.id);
   // Solo para historias detenidas con worktree vivo: ¿alguien confirmó o cambió algo fuera del equipo? (git, sin IA)
@@ -36,4 +37,21 @@ export async function flowOptions(slug: string, p: Process, item?: BacklogItem |
   const repo = r?.applied && !r.merged && !r.rejected && p.status !== 'running' ? projectsRepo(slug).repository(p.projectId) : null;
   const integration = repo && r?.applied ? await branchIntegration(repo.path, r.applied.branch).catch(() => null) : null;
   return { failedStepDetails, sandbox, updateFailedLog, iteration: idx >= 0 ? { number: siblings.length - idx, total: siblings.length } : null, orphan, drift, integration };
+}
+
+/**
+ * Resultado reducido para los listados: lo que muestran (estado del pipeline, aplicado, integrado, publicado, prueba
+ * manual, para el propietario, archivos cambiados) sin diffs, contenidos, registros de verificación, plan ni eventos.
+ */
+export function slimResult(r: ExecutionResult | null | undefined): ExecutionResult | null {
+  if (!r) return null;
+  const { plan: _plan, consultations: _c, manifest: _m, repairs: _r, externalCorrections: _e, ...rest } = r;
+  return {
+    ...rest, plan: null,
+    changes: (r.changes ?? []).map((c): ProposedChange => ({ ...c, content: null, diff: null })),
+    verifications: (r.verifications ?? []).map(v => ({ ...v, output: '' })),
+    pipeline: r.pipeline ? { ...r.pipeline, events: r.pipeline.events.slice(-3), failures: [] } : r.pipeline,
+    gauntlet: r.gauntlet ? { ...r.gauntlet, rounds: [], planReview: r.gauntlet.planReview ? { ...r.gauntlet.planReview, rounds: [] } : r.gauntlet.planReview } : r.gauntlet,
+    review: r.review ? { ...r.review, findings: [] } as ExecutionResult['review'] : null
+  };
 }

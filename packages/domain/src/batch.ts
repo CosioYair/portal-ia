@@ -31,7 +31,13 @@ export type BatchItemState =
   | 'failed'
   /** No se ejecuta: su dependencia no se completó, hay un ciclo o depende de algo fuera del lote sin terminar. */
   | 'blocked'
-  | 'cancelled';
+  | 'cancelled'
+  /**
+   * Sigue FUERA del lote: autorizaste una iteración de esta historia desde su espacio (`followedProcessId`). El lote la
+   * sigue para mostrar su estado, pero no la ejecuta, reintenta, itera, reanuda ni integra, y su gasto no cuenta en la
+   * autorización del lote (tiene la suya). Integrada → pendiente de tu aceptación; cancelada o rechazada → decides tú.
+   */
+  | 'external';
 
 /**
  * Origen de ejecución que autoriza un lote: la API del proveedor (facturable, en USD) o la suscripción de Claude Code.
@@ -116,6 +122,12 @@ export interface BatchItem {
   activated?: boolean;
   acceptance?: BatchAcceptance | null;
   rejection?: BatchRejection | null;
+  /** Iteración autorizada fuera del lote que el lote sigue (estado 'external'); nunca está en `processIds`. */
+  followedProcessId?: string | null;
+  /** Iteraciones de fuera del lote ya resueltas (canceladas o rechazadas): no se vuelven a seguir. */
+  dismissedProcessIds?: string[];
+  /** Candidatos preparados de nuevo porque main avanzó mientras se verificaba el anterior (máximo 3 seguidos). */
+  integrationRetries?: number;
 }
 
 export interface BatchEvent {
@@ -271,7 +283,7 @@ export function batchMoving(items: Pick<BatchItem, 'storyId' | 'state' | 'depend
 
 /** Resumen por estado para el monitor (cuántas completas, bloqueadas, pendientes de aceptación…). */
 export function batchSummary(items: Pick<BatchItem, 'state'>[]): Record<BatchItemState, number> {
-  const out = { queued: 0, waiting_dependency: 0, running: 0, integrating: 0, needs_owner: 0, awaiting_integration: 0, awaiting_acceptance: 0, accepted: 0, rejected: 0, failed: 0, blocked: 0, cancelled: 0 } as Record<BatchItemState, number>;
+  const out = { queued: 0, waiting_dependency: 0, running: 0, integrating: 0, needs_owner: 0, awaiting_integration: 0, awaiting_acceptance: 0, accepted: 0, rejected: 0, failed: 0, blocked: 0, cancelled: 0, external: 0 } as Record<BatchItemState, number>;
   for (const i of items) out[i.state]++;
   return out;
 }

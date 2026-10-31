@@ -20,6 +20,10 @@ export const P_LABEL: Record<Process['status'], ProcStatusLabel> = {
  */
 export function procLabel(p: Process): ProcStatusLabel {
   const pl = p.result?.pipeline;
+  // En marcha pero esperando turno (máximo de ejecuciones de Claude Code a la vez): en cola, no bloqueado ni trabajando.
+  if (p.status === 'running' && p.steps.some(s => s.status === 'running' && s.live?.state === 'queued')) return { label: 'En cola · espera un hueco', tone: '', dot: 'pulse' };
+  // Integrada en main: una pausa anterior (p. ej. el candidato antes de integrar) ya no es su estado.
+  if (p.status === 'done' && p.result?.merged) return { label: 'Integrada en main', tone: 'ok', dot: '' };
   if (p.status === 'done' && pl?.state === 'paused') return { label: 'Pausado · espera tu decisión', tone: 'warn', dot: '' };
   if (p.status === 'done' && pl?.state === 'stopped' && pl.pauseKind && pl.pauseKind !== 'no_changes') return { label: 'Detenido · decides tú', tone: 'warn', dot: '' };
   return P_LABEL[p.status];
@@ -43,6 +47,7 @@ export function processFilterKey(p: Process): ProcessFilterKey {
   if (p.status === 'failed' || p.status === 'budget_exceeded') return 'failed';
   if (p.status === 'cancelled') return 'cancelled';
   const pl = p.result?.pipeline;
+  if (p.result?.merged) return 'done';
   if (pl?.state === 'paused') return 'waiting';
   if (pl?.state === 'stopped' && pl.pauseKind && pl.pauseKind !== 'no_changes') return 'waiting';
   return 'done';

@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { useLatest, useLive } from '../lib/live.ts';
+import { useTabState } from '../lib/nav.ts';
 import { Link } from 'react-router-dom';
 import type { Agent, AssessmentEstimate, BacklogItem, PendingDecision, PendingDecisionKind, PhaseTransition, PipelineConfig, Process } from '@portal-ia/domain';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
@@ -9,7 +11,7 @@ import { useApp } from '../lib/store.ts';
 import { BACKLOG_STATUS, fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Chip, Icon, Notice } from '../components/ui.tsx';
-import { draftKey, useDraft, usePersistentState } from '../lib/persist.ts';
+import { draftKey, useDraft } from '../lib/persist.ts';
 import { TeamReady } from '../components/TeamReady.tsx';
 import { StoryCard, STATUS_ICON, type StoryCardAction } from '../components/StoryCard.tsx';
 import { Disclosure } from '../components/Disclosure.tsx';
@@ -24,13 +26,18 @@ const DECISION_CTA: Record<PendingDecisionKind, string> = {
 const decisionTarget = (d: PendingDecision) => d.storyId ? `/historias/${d.storyId}${d.kind === 'process_authorization' ? '#iteraciones' : ''}` : `/procesos/${d.processId}`;
 const supersededNote = (n: number) => n === 1 ? '1 autorización anterior superada' : `${n} autorizaciones anteriores superadas`;
 
+const backlogCache = new Map<string, { items: BacklogItem[]; procs: Process[] }>();
+
 /** Backlog del proyecto: historias del plan (importadas de la síntesis) y solicitudes del propietario. Desde aquí se ejecutan. */
 export function Backlog() {
   const { status, flash, navigate } = useApp();
   const ws = status.workspace!; const projectId = status.project!.id;
-  const [items, setItems] = useState<BacklogItem[] | null>(null);
+  // Volver al Backlog (Atrás) lo muestra al instante con lo último visto mientras se pide lo actual.
+  const cached = backlogCache.get(`${ws.slug}/${projectId}`);
+  const [items, setItems] = useState<BacklogItem[] | null>(cached?.items ?? null);
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [procs, setProcs] = useState<Process[]>([]);
+  const [procs, setProcs] = useState<Process[]>(cached?.procs ?? []);
+  const latest = useLatest();
   // HU-161 · lo pendiente sale de la bandeja consolidada (una entrada por historia), no se deduce de los procesos.
   const [inbox, setInbox] = useState<PendingDecision[] | null>(null);
   const [inboxErr, setInboxErr] = useState<string | null>(null);
@@ -53,21 +60,32 @@ export function Backlog() {
   const [teamAdd, setTeamAdd] = useState<string[]>([]);
   const [teamRemove, setTeamRemove] = useState<string[]>([]);
   // Búsqueda, filtro y secciones abiertas: por proyecto (antes las secciones eran comunes a todos los proyectos).
-  const [q, setQ] = usePersistentState(`portal-ia.backlog.busqueda.${ws.slug}.${projectId}`, '');
-  const [filter, setFilter] = usePersistentState<'open' | 'all' | 'done' | 'discarded'>(`portal-ia.backlog.filtro.${ws.slug}.${projectId}`, 'open');
-  const [openSec, setOpenSec] = usePersistentState<Record<string, boolean>>(`portal-ia.backlog.sec.${ws.slug}.${projectId}`, {});
+  const [q, setQ] = useTabState(`portal-ia.backlog.busqueda.${ws.slug}.${projectId}`, '');
+  const [filter, setFilter] = useTabState<'open' | 'all' | 'done' | 'discarded'>(`portal-ia.backlog.filtro.${ws.slug}.${projectId}`, 'open');
+  const [openSec, setOpenSec] = useTabState<Record<string, boolean>>(`portal-ia.backlog.sec.${ws.slug}.${projectId}`, {});
   const toggleSec = (k: string) => setOpenSec(o => ({ ...o, [k]: !(o[k] ?? true) }));
 
   const load = async () => {
-    const [b, a, p, ps, ph] = await Promise.all([api.backlog(ws.slug, projectId), api.agents(ws.slug), api.processes(ws.slug, projectId), api.projects(ws.slug), api.phase(ws.slug, projectId).catch(() => null)]);
+    const r = await latest.run(() => Promise.all([api.backlog(ws.slug, projectId), api.agents(ws.slug), api.processSummaries(ws.slug, projectId), api.projects(ws.slug), api.phase(ws.slug, projectId).catch(() => null)]));
+    if (!r) return; const [b, a, p, ps, ph] = r;
+    backlogCache.set(`${ws.slug}/${projectId}`, { items: b, procs: p });
     setItems(b); setAgents(a); setProcs(p); setProject(ps[0] ?? null); setPhase(ph?.current ?? null);
     // Enlace directo «/backlog?ejecutar=<id>» (p. ej. desde la historia): abre su diálogo, que sigue pidiendo tu autorización.
     const want = new URLSearchParams(location.search).get('ejecutar'); const target = want ? b.find(i => i.id === want && (i.status === 'pending' || i.status === 'blocked')) : null;
     if (want) { navigate(`${location.pathname}${location.hash}`, { replace: true }); if (target) setSel(target); }
     void api.inbox(ws.slug).then(d => { setInbox(d); setInboxErr(null); }).catch((e: any) => setInboxErr(e.message));
   };
-  useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Un fallo al cargar (p. ej. el servidor reiniciándose) no rompe la pantalla: se conserva lo que había y el tiempo
+  // real (o su respaldo) lo vuelve a pedir.
+  useEffect(() => { load().catch(() => setItems(i => i ?? [])); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.slug, projectId]);
+  // Tiempo real: historias y procesos de este proyecto (aquí, en otra pestaña o en un lote) y lo pendiente de decidir.
+  const refresh = async () => {
+    const r = await latest.run(() => Promise.all([api.backlog(ws.slug, projectId), api.processSummaries(ws.slug, projectId)])); if (!r) return;
+    backlogCache.set(`${ws.slug}/${projectId}`, { items: r[0], procs: r[1] }); setItems(r[0]); setProcs(r[1]);
+    void api.inbox(ws.slug).then(d => { setInbox(d); setInboxErr(null); }).catch((e: any) => setInboxErr(e.message));
+  };
+  useLive(c => c.ws === ws.slug && (c.entity === 'backlog' || ((c.entity === 'process' || c.entity === 'assignment') && c.kind !== 'progress')) && (!c.projectId || c.projectId === projectId), () => refresh(), { minMs: 2000 });
 
   useEffect(() => {
     setEst(null); setEstError(null); setExecError(null); setAuth(false);
@@ -122,7 +140,9 @@ export function Backlog() {
     return [...loose, ...byStory.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   })();
   const owner = (k: string | null) => agents.find(a => a.key === k);
-  const running = procs.find(p => p.status === 'running');
+  // Varias historias pueden ejecutarse a la vez; solo una misma historia no puede tener dos procesos en marcha.
+  const runningList = procs.filter(p => p.status === 'running');
+  const busyStory = (itemId: string) => runningList.some(p => p.backlogItemId === itemId);
   const lastProc = (it: BacklogItem) => procs.find(p => p.id === it.lastProcessId) ?? procs.find(p => p.backlogItemId === it.id);
   const depOk = (it: BacklogItem) => { if (!it.dependsOn) return true; const d = items?.find(x => x.storyId === it.dependsOn); return !d || d.status === 'done' || d.status === 'discarded'; };
   const pending = items?.filter(i => i.status !== 'done' && i.status !== 'discarded') ?? [];
@@ -155,7 +175,7 @@ export function Backlog() {
     } else if (it.status === 'in_progress') {
       if (lp) primary = { label: 'Ver proceso', variant: 'secondary', onClick: () => navigate(`/procesos/${lp.id}`) };
     } else if (it.status === 'pending' || it.status === 'blocked') {
-      if (it.status === 'blocked' || depOk(it)) primary = { label: 'Ejecutar', onClick: () => setSel(it), disabled: !!running || !project?.repository };
+      if (it.status === 'blocked' || depOk(it)) primary = { label: 'Ejecutar', onClick: () => setSel(it), disabled: busyStory(it.id) || !project?.repository };
     } else {
       if (lp) primary = { label: 'Ver', variant: 'secondary', onClick: () => navigate(`/procesos/${lp.id}`) };
     }
@@ -174,7 +194,7 @@ export function Backlog() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div className="eyebrow">Backlog{phase ? ` · etapa «${phase.name}»` : ''}</div>
             <h1 className="h1" style={{ fontSize: 26 }}>Plan del proyecto y solicitudes</h1>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip>{items?.length ?? 0} historias</Chip><Chip tone="ok">{items?.filter(i => i.status === 'done').length ?? 0} completadas</Chip><Chip tone="accent">{items?.filter(i => i.status === 'review').length ?? 0} para revisar</Chip><Chip>{pending.length} abiertas</Chip>{running && <Chip tone="warn" dot="pulse">1 en ejecución</Chip>}</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip>{items?.length ?? 0} historias</Chip><Chip tone="ok">{items?.filter(i => i.status === 'done').length ?? 0} completadas</Chip><Chip tone="accent">{items?.filter(i => i.status === 'review').length ?? 0} para revisar</Chip><Chip>{pending.length} abiertas</Chip>{runningList.length > 0 && <Chip tone="warn" dot="pulse">{runningList.length} en ejecución</Chip>}</div>
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             {!phase && <button className="btn btn-secondary" onClick={() => importPlan(false)} disabled={busy}>{Icon.book()}Importar historias de la síntesis</button>}
@@ -187,7 +207,7 @@ export function Backlog() {
         {!project?.repository && <Notice kind="warn">Para ejecutar historias hace falta el repositorio registrado (los agentes leen el código y proponen cambios sobre él). <Link className="lnk" to="/panel">Registrarlo desde el panel</Link>.</Notice>}
         {inboxErr && <Notice kind="err"><strong>No se pudieron cargar las autorizaciones pendientes.</strong> {inboxErr} <Link className="lnk" to="/autorizaciones">Abrir Autorizaciones</Link></Notice>}
 
-        {running && <Notice kind="info">Hay un proceso en ejecución: <button className="lnk" onClick={() => navigate(`/procesos/${running.id}`)}>{running.title}</button>. Las historias se ejecutan de una en una.</Notice>}
+        {runningList.length > 0 && <Notice kind="info">{runningList.length === 1 ? 'Hay un proceso en ejecución' : `Hay ${runningList.length} procesos en ejecución`}: {runningList.slice(0, 3).map((r, i) => <span key={r.id}>{i ? ', ' : ''}<button className="lnk" onClick={() => navigate(`/procesos/${r.id}`)}>{r.title}</button></span>)}. Puedes ejecutar otras historias a la vez; si no queda un hueco de Claude Code libre, esperan «En cola» sin perder nada.</Notice>}
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
           <div style={{ flex: '999 1 560px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -195,7 +215,7 @@ export function Backlog() {
               <div className="card-b backlog-highlight-body">
                 {next && <div className="backlog-highlight-next">
                   <div className="backlog-highlight-next-text"><div className="eyebrow">Siguiente: {next.storyId}</div><div style={{ fontWeight: 600 }}>{next.title}</div></div>
-                  <button className="btn btn-primary" onClick={() => setSel(next)} disabled={!!running || !project?.repository}>{Icon.arrow()}Ejecutar siguiente</button>
+                  <button className="btn btn-primary" onClick={() => setSel(next)} disabled={busyStory(next.id) || !project?.repository}>{Icon.arrow()}Ejecutar siguiente</button>
                 </div>}
                 {decisions.length > 0 && <div className="backlog-highlight-decisions">
                   <div className="h3">Pendientes de tu decisión ({decisions.length})</div>
@@ -264,10 +284,10 @@ export function Backlog() {
                   <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo que los agentes del proyecto trabajen en la historia <strong>{sel.storyId}</strong> con lectura del repositorio, hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. Los cambios resultantes serán <strong>propuestas</strong> que revisaré antes de aplicarse en una rama git.</span></label>
                 </div>
                 <div className="modal-f">
-                  <span className="small muted">{running ? 'Hay otro proceso en ejecución; espera a que termine.' : 'Podrás seguir cada paso en Procesos.'}</span>
+                  <span className="small muted">{sel && busyStory(sel.id) ? 'Esta historia ya tiene un proceso en ejecución; espera a que termine.' : runningList.length ? 'Se ejecutará a la vez que lo que ya está en marcha (si no hay hueco, espera en cola). Podrás seguir cada paso en Procesos.' : 'Podrás seguir cada paso en Procesos.'}</span>
                   <div style={{ display: 'flex', gap: 10 }}>
                     <button className="btn btn-ghost" onClick={() => setSel(null)} disabled={busy}>Cancelar</button>
-                    <button className="btn btn-primary" onClick={execute} disabled={!auth || busy || !est || !(Number(budget) > 0) || !!running}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}{busy ? 'Autorizando…' : 'Autorizar y ejecutar historia'}</button>
+                    <button className="btn btn-primary" onClick={execute} disabled={!auth || busy || !est || !(Number(budget) > 0) || (!!sel && busyStory(sel.id))}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}{busy ? 'Autorizando…' : 'Autorizar y ejecutar historia'}</button>
                   </div>
                 </div>
               </div>

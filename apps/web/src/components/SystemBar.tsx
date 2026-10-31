@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useLive } from '../lib/live.ts';
 import type { SystemStatus } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { Icon } from './ui.tsx';
@@ -18,26 +19,33 @@ export function SystemBar() {
   const [open, setOpen] = useState<'none' | 'details' | 'confirm'>('none');
   const authRef = useRef<HTMLInputElement | null>(null);
   const startedRef = useRef<string | null>(null);
+  // Esta pestaña lanzó la actualización (las demás solo la ven: no se quedan en «Reconstruyendo…» al terminar).
+  const mine = useRef(false);
+  // Reiniciar con procesos en marcha los interrumpe (quedan en pausa): exige una confirmación aparte.
+  const [interrupt, setInterrupt] = useState(false);
+  // Tiempo real: integrar en main, empezar o terminar una actualización, o un proceso que empieza o acaba, se ve al momento.
+  const [poke, setPoke] = useState(0);
+  useLive(c => c.entity === 'system' || (c.entity === 'process' && c.kind !== 'progress'), () => setPoke(x => x + 1), { minMs: 2000 });
 
   useEffect(() => {
     let alive = true;
     const tick = async () => {
-      try { const s = await api.systemStatus(); if (!alive) return; setSt(s); if (!startedRef.current) startedRef.current = s.startedAt; if (s.update?.status === 'running') { setPhase('updating'); setLog(s.update.log); } else if (s.update?.status === 'failed' && phase === 'updating') { setPhase('failed'); setLog(s.update.log); } }
+      try { const s = await api.systemStatus(); if (!alive) return; setSt(s); if (!startedRef.current) startedRef.current = s.startedAt; if (s.update?.status === 'running') { setPhase('updating'); setLog(s.update.log); } else if (s.update?.status === 'failed' && phase === 'updating') { setPhase('failed'); setLog(s.update.log); } else if (phase === 'updating' && !mine.current) setPhase('idle'); }
       catch { /* servidor reiniciando o ausente */ }
       if (alive) setTimeout(tick, phase === 'updating' ? 1500 : 30_000);
     };
     void tick(); const onFocus = () => void tick(); window.addEventListener('focus', onFocus);
     return () => { alive = false; window.removeEventListener('focus', onFocus); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [phase]);
+  }, [phase, poke]);
 
   // Al abrir la confirmación con «Actualizar», el foco pasa a la casilla obligatoria.
   useEffect(() => { if (open === 'confirm') authRef.current?.focus(); }, [open]);
 
   const update = async () => {
-    setPhase('updating'); setLog(''); setShowLog(true);
+    setPhase('updating'); setLog(''); setShowLog(true); mine.current = true;
     try {
-      const r = await api.systemUpdate({ restart: true });
+      const r = await api.systemUpdate({ restart: true, ...(running.length && interrupt ? { interruptRunning: true } : {}) });
       setOutcome(r.update.outcome ?? null);
       const manual = r.update.outcome?.mode === 'shutdown';
       // Seguir el log hasta que termine; luego esperar al reinicio (startedAt distinto) y recargar — o, sin supervisor, mostrar los comandos.
@@ -47,6 +55,8 @@ export function SystemBar() {
         let s: SystemStatus | null = null; try { s = await api.systemStatus(); misses = 0; } catch { s = null; misses++; }
         if (s?.update?.status === 'running') { setLog(s.update.log); continue; }
         if (s?.update?.status === 'failed') { setLog(s.update.log); setPhase('failed'); return; }
+        // Reconstruido sin reiniciar (empezó algo mientras tanto y no confirmaste interrumpirlo): se dice y se para aquí.
+        if (s?.update?.status === 'done' && s.update.restartSkipped) { setLog(s.update.log); setPhase('failed'); mine.current = false; return; }
         if (s?.update?.status === 'done' && s.startedAt === startedRef.current) { setLog(s.update.log); setPhase(manual ? 'stopped' : 'restarting'); continue; }
         if (s && s.startedAt !== startedRef.current) { location.reload(); return; }
         if (!s) { setPhase(manual ? 'stopped' : 'restarting'); if (manual && misses >= 2) return; continue; }
@@ -55,6 +65,7 @@ export function SystemBar() {
   };
 
   if (!st || (st.action === 'none' && phase === 'idle')) return null;
+  const running = st.running ?? [];
   const restart = st.action === 'restart';
   const toggle = (p: 'details' | 'confirm') => setOpen(o => (o === p ? 'none' : p));
   const busy = phase === 'updating' || phase === 'restarting';
@@ -67,7 +78,7 @@ export function SystemBar() {
           {phase === 'updating' && 'Reconstruyendo… (puede tardar un par de minutos)'}
           {phase === 'restarting' && 'Reiniciando el Portal… la página se recargará sola.'}
           {phase === 'stopped' && <><strong>El Portal se ha reconstruido y apagado</strong>: arráncalo a mano (comandos en Detalles)</>}
-          {phase === 'failed' && <><strong>La actualización falló</strong>: revisa el registro en Detalles</>}
+          {phase === 'failed' && (st.update?.restartSkipped ? <><strong>Reconstruido, sin reiniciar</strong>: {st.update.restartSkipped} Reinicia cuando terminen.</> : <><strong>La actualización falló</strong>: revisa el registro en Detalles</>)}
         </span>
         <span className="sysbar-sep" aria-hidden="true">·</span>
         <button className="btn btn-ghost btn-sm" aria-expanded={open === 'details'} onClick={() => toggle('details')}>Detalles</button>
@@ -86,8 +97,12 @@ export function SystemBar() {
       </div>}
       {open === 'confirm' && phase === 'idle' && <div className="sysbar-panel" id="sysbar-confirm">
         <label className="ck"><input ref={authRef} className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo ejecutar <span className="mono">npm install</span> (si cambiaron dependencias), <span className="mono">npm run build</span>{restart ? ' y reiniciar el servidor del Portal' : ''} en la carpeta de esta instalación.</span></label>
+        {restart && running.length > 0 && <div role="alert" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <span><strong>Hay {running.length} proceso(s) en ejecución</strong> ({running.slice(0, 3).map(r => `«${r.title}»`).join(', ')}{running.length > 3 ? '…' : ''}). Reiniciar los interrumpe: quedan en pausa, sin repetir lo hecho, y se retoman con «Continuar». Lo más seguro es esperar a que terminen.</span>
+          <label className="ck"><input className="cb" type="checkbox" checked={interrupt} onChange={e => setInterrupt(e.target.checked)} /><span>Entiendo que se interrumpirán y quiero reiniciar ahora.</span></label>
+        </div>}
         <div className="sysbar-actions">
-          <button className="btn btn-primary btn-sm" onClick={update} disabled={!auth}>{Icon.arrow()}{restart ? 'Reconstruir y reiniciar el Portal' : 'Reconstruir y recargar'}</button>
+          <button className="btn btn-primary btn-sm" onClick={update} disabled={!auth || (restart && running.length > 0 && !interrupt)}>{Icon.arrow()}{restart ? 'Reconstruir y reiniciar el Portal' : 'Reconstruir y recargar'}</button>
           <button className="btn btn-ghost btn-sm" onClick={() => setOpen('none')}>Cancelar</button>
         </div>
       </div>}

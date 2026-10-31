@@ -1,4 +1,5 @@
 import { useCallback, useContext, useEffect, useState } from 'react';
+import { useLive } from '../lib/live.ts';
 import { useLocation, useNavigate } from 'react-router-dom';
 import type { DecisionVerdict, PendingDecision, PendingDecisionKind } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
@@ -23,6 +24,8 @@ export function InboxScreen() {
   }, [slug]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  // Una decisión nueva o resuelta (aquí, en otra pestaña, en un lote o desde el Asistente) aparece sin pulsar «Actualizar».
+  useLive(c => c.ws === slug && c.kind !== 'progress' && (c.entity === 'process' || c.entity === 'assignment' || c.entity === 'batch'), () => refresh(), { minMs: 2000, enabled: !!slug });
 
   const onResolved = useCallback((d: PendingDecision, verdict: DecisionVerdict) => {
     ctx?.flash(`${verdict === 'approve' ? 'Aprobada' : 'Denegada'}: ${d.title}`);
@@ -85,22 +88,21 @@ export function InboxScreen() {
 }
 
 /** Acceso flotante a la bandeja con el contador de pendientes (se oculta dentro de la propia pantalla). */
+const inboxCountCache = new Map<string, number>();
+
 export function InboxLauncher() {
   const ctx = useContext(AppContext);
   const navigate = useNavigate();
   const location = useLocation();
   const slug = ctx?.status.workspace?.slug ?? null;
-  const [count, setCount] = useState<number | null>(null);
+  const [count, setCount] = useState<number | null>(() => (slug ? inboxCountCache.get(slug) : undefined) ?? null);
   const here = location.pathname.startsWith('/autorizaciones');
-
-  useEffect(() => {
-    if (!slug) return;
-    let alive = true;
-    const tick = () => { api.inbox(slug).then(l => { if (alive) setCount(l.length); }).catch(() => { if (alive) setCount(null); }); };
-    tick();
-    const t = window.setInterval(tick, 30000);
-    return () => { alive = false; window.clearInterval(t); };
-  }, [slug, location.pathname]);
+  const tick = () => { if (!slug) return; api.inbox(slug).then(l => { inboxCountCache.set(slug, l.length); setCount(l.length); }).catch(() => setCount(null)); };
+  // Al cambiar de espacio se pide; después, solo cuando cambia algo que puede crear o cerrar una decisión (tiempo real),
+  // no cada 30 s ni en cada navegación (antes, con muchos procesos, cada navegación bloqueaba el servidor segundos).
+  useEffect(() => { tick(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slug]);
+  useLive(c => c.ws === slug && c.kind !== 'progress' && (c.entity === 'process' || c.entity === 'assignment' || c.entity === 'batch'), tick, { minMs: 3000, enabled: !!slug });
 
   if (!slug || here) return null;
   return (

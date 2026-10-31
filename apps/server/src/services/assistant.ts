@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import { changed } from './live.ts';
+import { sameWorkRunning } from './executionLocks.ts';
 import path from 'node:path';
 import { REPO_ROOT } from '../config.ts';
 import { expandHome } from '../routes/fs.ts';
@@ -79,12 +81,13 @@ export const assistantRepo = {
     // Todo mensaje pertenece a una conversación: sin indicarla, va a la activa más reciente (o a una nueva).
     conversationId ??= conversationsRepo.list().find(c => c.status === 'active')?.id ?? conversationsRepo.create('Conversación', null, null).id;
     platform.prepare(`INSERT INTO assistant_messages (id, role, content, actions_json, attachments_json, tokens_in, tokens_out, cost_usd, model, created_at, conversation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, m.role, m.content, JSON.stringify(m.actions), JSON.stringify(m.attachments), m.tokensIn, m.tokensOut, m.costUsd, m.model, ts, conversationId);
+    changed({ ws: null, entity: 'assistant', id: conversationId });
     return { ...m, id, createdAt: ts };
   },
-  updateActions(id: string, actions: AssistantAction[]) { platform.prepare(`UPDATE assistant_messages SET actions_json = ? WHERE id = ?`).run(JSON.stringify(actions), id); },
+  updateActions(id: string, actions: AssistantAction[]) { platform.prepare(`UPDATE assistant_messages SET actions_json = ? WHERE id = ?`).run(JSON.stringify(actions), id); changed({ ws: null, entity: 'assistant', id: null }); },
   get(id: string): AssistantMessage | undefined { const r = platform.prepare(`SELECT * FROM assistant_messages WHERE id = ?`).get(id); return r ? mapMsg(r) : undefined; },
   /** «Limpiar» archiva conversaciones; nunca borra mensajes ni decisiones (el registro es duradero). */
-  clear() { platform.exec(`UPDATE assistant_conversations SET status = 'archived' WHERE status = 'active'`); }
+  clear() { platform.exec(`UPDATE assistant_conversations SET status = 'archived' WHERE status = 'active'`); changed({ ws: null, entity: 'assistant', id: null }); }
 };
 
 /** Estado de la acción según el estado REAL del encargo: «done» solo cuando el propietario lo aceptó. */
@@ -382,8 +385,9 @@ export function executeActions(actionsReq: any[]): AssistantAction[] {
           if (!byTitle?.storyId) throw e; story = resolveStory(ws.slug, p.id, byTitle.storyId);
         }
         if (proposed.has(story.storyId.toLowerCase())) { actions.push({ type: 'info', status: 'done', label: `${story.storyId} ya estaba propuesta en esta respuesta`, detail: 'Se omite la propuesta duplicada.' }); continue; }
-        const runningNow = processesRepo(ws.slug).running();
-        if (runningNow.length) throw new Error(`Hay un proceso en ejecución («${runningNow[0].title}»). Las historias se ejecutan de una en una; vuelve a pedirlo cuando termine.`);
+        // Solo otro proceso de ESTA historia lo impide: las historias distintas pueden ejecutarse a la vez.
+        const busy = sameWorkRunning(ws.slug, { id: '', backlogItemId: story.id, assignmentId: null });
+        if (busy) throw new Error(`${story.storyId} ya tiene un proceso en ejecución («${busy.title}»). Vuelve a pedirlo cuando termine.`);
         const est = estimateStory(ws.slug, p.id, story.id);
         const proc = createStoryProcess(ws.slug, p.id, story.id);
         actions.push({ type: 'propose_execution', status: proc.status === 'pending_authorization' ? 'pending' : 'done', label: `Ejecutar ${story.storyId} · ${story.title}`, detail: `Coordinador → Desarrollador → QA sobre el repositorio registrado. Costo estimado ≈ ${est.estimatedUsd.toFixed(2)} USD.`, link: `/empresa/${ws.slug}/proyecto/${p.id}/procesos/${proc.id}`, processId: proc.id, workspaceSlug: ws.slug, projectId: p.id, storyId: story.storyId, estimatedUsd: est.estimatedUsd, suggestedBudgetUsd: est.suggestedBudgetUsd });
@@ -391,8 +395,6 @@ export function executeActions(actionsReq: any[]): AssistantAction[] {
       else if (act.type === 'delegate_task') {
         const ws = resolveCompany(act.company);
         let project = null; if (act.project) { try { project = resolveProject(ws.slug, act.project); } catch { project = null; } }
-        const runningNow = processesRepo(ws.slug).running();
-        if (runningNow.length) throw new Error(`Hay un proceso en ejecución («${runningNow[0].title}»). Vuelve a pedirlo cuando termine.`);
         const est = estimateDelegation(ws.slug, project?.id ?? null, act.agent, String(act.request ?? ''));
         const proc = createDelegation(ws.slug, project?.id ?? null, act.agent, String(act.request ?? ''));
         const lead = est.steps[0];

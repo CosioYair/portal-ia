@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { sameWorkRunning } from './executionLocks.ts';
 import type { ExternalCorrection, Process } from '@portal-ia/domain';
 import { backlogRepo, processesRepo } from '../db/workspace.ts';
 import { changesSinceBase, git, readRepoFile, safeRelPath } from './repoWrite.ts';
@@ -21,7 +22,7 @@ export async function registerExternalCorrection(slug: string, processId: string
   const procs = processesRepo(slug); const proc = procs.get(processId);
   if (!proc || proc.kind !== 'story_execution' || !proc.result) throw fail(404, 'Proceso de historia no encontrado.', 'not_found');
   if (proc.status === 'running' || proc.status === 'pending_authorization') throw fail(409, 'El proceso sigue activo o pendiente de autorizar: espera a que se detenga.', 'active');
-  if (procs.running().length) throw fail(409, 'Hay otro proceso en ejecución. Espera a que termine.', 'busy');
+  if (sameWorkRunning(slug, proc)) throw fail(409, 'Esta historia tiene otro proceso en ejecución. Espera a que termine.', 'busy');
   const r = proc.result;
   if (r.merged || r.rejected) throw fail(409, r.merged ? 'Ya está integrado en la rama principal.' : 'Este diff se rechazó; crea una nueva iteración.', 'closed');
   const wt = r.applied?.worktree;

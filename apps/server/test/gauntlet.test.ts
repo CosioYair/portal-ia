@@ -314,8 +314,8 @@ test('revisión del plan sin progreso y con un bloqueante: se pausa ANTES de imp
   const accept = flow.actions.find((a: any) => a.id === 'accept_plan'); assert.ok(accept, JSON.stringify(flow.actions.map((a: any) => a.id)));
   assert.equal(flow.issue?.title, 'La revisión independiente del plan dejó una brecha bloqueante: decides tú', 'el título dice el motivo real (no «por partes»)');
   const plans = byRule(R.plan).length; const reviews = byRule(R.review).length;
-  // Con otro proceso en marcha, no: como al continuar.
-  const blocker = processesRepo(S).create({ projectId: project.id, kind: 'story_execution', title: 'otro en marcha', estimatedUsd: 0, steps: [] }); processesRepo(S).authorize(blocker.id, 1);
+  // Con otro proceso DE ESTA HISTORIA en marcha, no: como al continuar (uno de otra historia no lo impide; ver concurrency.test.ts).
+  const blocker = processesRepo(S).create({ projectId: project.id, kind: 'story_execution', title: 'otro en marcha', estimatedUsd: 0, backlogItemId: p.backlogItemId, steps: [] }); processesRepo(S).authorize(blocker.id, 1);
   assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/accept-plan`, payload: { authorized: true } })).statusCode, 409); processesRepo(S).finish(blocker.id, 'cancelled', 'fin');
   assert.equal((await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/accept-plan`, payload: {} })).statusCode, 400, 'exige autorización');
   const res = await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/accept-plan`, payload: { authorized: true, addBudgetUsd: 0.5 } });

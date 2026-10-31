@@ -1,4 +1,6 @@
 import { BATCH_LIMITS, DEPENDENCY_BROKEN, DEPENDENCY_SATISFIED, INTERNAL_WORKSPACE, backendLabel, batchBudget, batchMoving, batchSourceOf, batchSummary, classifyStop, DEFAULT_GAUNTLET, gauntletOverhead, normalizeGauntlet, normalizePipeline, planBatch, type Batch, type BatchAgentCheck, type BatchAuthorization, type BatchFailureClass, type BatchItem, type BatchItemState, type BatchPreview, type BatchPreviewStory, type CallRange, type GauntletConfig, type PipelinePauseKind, type Process, type ProviderId, type RuntimeCheck, type RuntimeCheckResult } from '@portal-ia/domain';
+import { revisionStatus } from './revision.ts';
+import { acquireWork, workConflict } from './executionLocks.ts';
 import { batchesRepo } from '../db/batches.ts';
 import { callMetricsRepo } from '../db/callMetrics.ts';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
@@ -18,7 +20,7 @@ import { prepareIntegration, verifyCandidate } from './storyIntegration.ts';
 import { mergeStory } from './storyMerge.ts';
 import { newPipeline, resumeStory } from './storyPipeline.ts';
 import { iterateStory, threadRepo } from './storyThread.ts';
-import { activationOf, isAncestor, startUpdate, systemStatus } from './system.ts';
+import { activationOf, isAncestor, startUpdate, systemStatus, updateRunning } from './system.ts';
 
 /**
  * Coordinador del lote (determinista, sin IA): ver packages/domain/src/batch.ts. Reutiliza el pipeline de cada
@@ -47,8 +49,10 @@ export const batchDeps = {
 export const ITEM_LABEL: Record<BatchItemState, string> = {
   queued: 'en cola', waiting_dependency: 'esperando su dependencia', running: 'en ejecución', integrating: 'integrándose',
   needs_owner: 'esperando tu decisión', awaiting_integration: 'pendiente de integrar (decides tú)', awaiting_acceptance: 'pendiente de tu aceptación',
-  accepted: 'aceptada', rejected: 'no aceptada', failed: 'fallida', blocked: 'bloqueada', cancelled: 'cancelada'
+  accepted: 'aceptada', rejected: 'no aceptada', failed: 'fallida', blocked: 'bloqueada', cancelled: 'cancelada', external: 'sigue fuera del lote'
 };
+/** Proceso que cuenta para la historia ahora: la iteración que autorizaste fuera del lote, si la hay; si no, la del lote. */
+const currentProcessId = (it: Pick<BatchItem, 'processId' | 'followedProcessId'>) => it.followedProcessId ?? it.processId;
 /** Por qué espera una historia detenida (según su clase): nunca se presenta como trabajo terminado. */
 const WAIT_LABEL: Record<BatchFailureClass, string> = {
   owner_decision: 'espera tu decisión', environment: 'espera al entorno', budget: 'sin USD de la API autorizados', subscription: 'en pausa por la suscripción',
@@ -353,14 +357,6 @@ export function scheduleTick(slug: string, id: string): Promise<void> {
   ticking.set(key, run); return run;
 }
 
-const repoLocks = new Map<string, Promise<unknown>>();
-/** Integración y activación de una en una por repositorio (también entre lotes). */
-async function withRepoLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const prev = repoLocks.get(key) ?? Promise.resolve();
-  const next = prev.catch(() => undefined).then(fn);
-  repoLocks.set(key, next.catch(() => undefined));
-  return next;
-}
 
 async function tick(slug: string, id: string) {
   const repo = batchesRepo(slug);
@@ -396,11 +392,50 @@ function setStatus(slug: string, id: string, status: Batch['status'], reason: st
   });
 }
 
+/** Estados en los que una iteración que autorizas desde la historia pasa a «sigue fuera del lote». */
+const ADOPTABLE: BatchItemState[] = ['queued', 'needs_owner', 'failed', 'rejected', 'awaiting_integration', 'awaiting_acceptance'];
+
+/**
+ * ¿Hay una iteración de esta historia creada FUERA del lote después de que el lote la empezara (o se autorizara)? Las del
+ * lote (`processIds`, `nextProcessId`) y las de otros lotes en marcha no cuentan; una cancelada tampoco.
+ */
+function outsideIteration(slug: string, b: Batch, it: BatchItem): Process | null {
+  // Las del lote, la que ya sigue y las de fuera que ya se resolvieron (canceladas o rechazadas) no se adoptan otra vez.
+  const mine = new Set([...it.processIds, it.nextProcessId ?? '', it.resumeProcessId ?? '', it.followedProcessId ?? '', ...(it.dismissedProcessIds ?? [])]);
+  const others = new Set(batchesRepo(slug).active().filter(x => x.id !== b.id).flatMap(x => x.items.flatMap(i => [...i.processIds, i.nextProcessId ?? ''])));
+  const since = it.startedAt ?? b.createdAt;
+  const latest = processesRepo(slug).listByBacklogItem(it.itemId).filter(p => p.kind === 'story_execution').at(-1);
+  if (!latest || mine.has(latest.id) || others.has(latest.id) || latest.status === 'cancelled' || latest.createdAt <= since) return null;
+  return latest;
+}
+
+/** Sigue (sin ejecutarla) la iteración que autorizaste fuera del lote: su estado, su integración o su cancelación. */
+function followExternal(slug: string, id: string, it: BatchItem, p: Process) {
+  const ref = `proceso ${p.id.slice(0, 8)}`;
+  if (p.result?.merged) return setItem(slug, id, it.itemId, { state: 'awaiting_acceptance', mergedCommit: p.result.merged.commit, activated: false, failureClass: null, finishedAt: now(), reason: `Integrada fuera del lote (${ref}, ${p.result.merged.commit}): falta tu aceptación.` }, `su iteración fuera del lote (${ref}) quedó integrada en main (${p.result.merged.commit}); pendiente de tu aceptación.`, 'integration');
+  if (p.status === 'cancelled' || p.result?.rejected) return setItem(slug, id, it.itemId, { state: 'needs_owner', failureClass: 'owner_decision', reason: `La iteración fuera del lote (${ref}) se ${p.result?.rejected ? 'rechazó' : 'canceló'}: decide si el lote la retoma (reintentar o iterar).`, followedProcessId: null, dismissedProcessIds: [...(it.dismissedProcessIds ?? []), p.id] }, `su iteración fuera del lote (${ref}) se ${p.result?.rejected ? 'rechazó' : 'canceló'}; decides tú.`);
+  const reason = p.status === 'pending_authorization' ? `Iteración preparada fuera del lote (${ref}), pendiente de tu autorización: el lote no la ejecuta ni la repite; la sigue.`
+    : p.status === 'running' ? `En marcha fuera del lote (${ref}, autorizada por ti): el lote la sigue sin ejecutarla otra vez ni integrarla.`
+    : `Iteración fuera del lote (${ref}) detenida o terminada sin integrar: decides tú desde su proceso (integrarla no está en la autorización del lote).`;
+  if (it.reason !== reason) setItem(slug, id, it.itemId, { reason });
+}
+
 /** Refleja en cada historia lo que pasó en su proceso (también lo que hiciste tú fuera del lote). */
 function syncItems(slug: string, id: string) {
   const b = batchesRepo(slug).get(id); if (!b) return;
   const procs = processesRepo(slug);
-  for (const it of b.items) {
+  for (const it0 of b.items) {
+    let it = it0;
+    if (ADOPTABLE.includes(it.state)) {
+      const ext = outsideIteration(slug, b, it);
+      if (ext) {
+        setItem(slug, id, it.itemId, { state: 'external', followedProcessId: ext.id, failureClass: null }, `autorizaste una iteración fuera del lote (proceso ${ext.id.slice(0, 8)}): el lote la sigue, no la ejecuta otra vez ni la integra, y su gasto no cuenta en el lote.`);
+        it = batchesRepo(slug).get(id)!.items.find(i => i.itemId === it0.itemId)!;
+      }
+    }
+    if (it.state === 'external') { const fp = it.followedProcessId ? procs.get(it.followedProcessId) : undefined; if (fp) followExternal(slug, id, it, fp); continue; }
+    // La iteración preparada por el lote (en cola) la autorizaste tú desde su proceso: el lote la sigue, no la repite.
+    if (it.state === 'queued' && it.nextProcessId) { const np = procs.get(it.nextProcessId); if (np && np.status === 'running') { setItem(slug, id, it.itemId, { state: 'running', processId: np.id, processIds: [...it.processIds.filter(x => x !== np.id), np.id], nextProcessId: null, reason: null, startedAt: now(), finishedAt: null }, `la autorizaste desde su proceso (${np.id.slice(0, 8)}): el lote la sigue sin ejecutarla otra vez.`); continue; } }
     const p = it.processId ? procs.get(it.processId) : undefined; if (!p) continue;
     if (it.state === 'running') {
       if (p.status === 'running') continue; // en marcha (o huérfano: lo trata la recuperación al arrancar)
@@ -462,18 +497,26 @@ async function integrate(slug: string, id: string, itemId: string) {
   const b = batchesRepo(slug).get(id)!; const it = b.items.find(i => i.itemId === itemId)!;
   const procs = processesRepo(slug); const pid = it.processId!;
   const repoPath = projectsRepo(slug).repository(b.projectId)?.path ?? b.projectId;
-  await withRepoLock(repoPath, async () => {
+  // Arriendo de la historia: ni tú ni otro lote la tocáis mientras se integra. Preparar el candidato e integrar en main
+  // van por el carril del repositorio (cada uno lo toma); verificar el candidato (minutos) no lo bloquea.
+  const lease = acquireWork(slug, procs.get(pid)!, `batch:${id}`, 'integración del lote');
+  if ('conflict' in lease) { const reason = `Espera para integrar: ${lease.conflict}`; if (it.reason !== reason) setItem(slug, id, itemId, { reason }); return; }
+  try {
     const p = procs.get(pid)!;
     if (p.result?.merged) return afterMerge(slug, id, itemId, p);
     try {
-      // main avanzó (otra historia del lote ya integrada): candidato sin IA y verificación objetiva antes de integrar.
-      const prep = await prepareIntegration(slug, pid, { allowOthersRunning: true });
+      // main avanzó (otra historia ya integrada): candidato sin IA y verificación objetiva antes de integrar.
+      const prep = await prepareIntegration(slug, pid);
       if (prep.state === 'conflicts') return setItem(slug, id, itemId, { state: 'needs_owner', failureClass: 'integration', reason: `Conflictos reales con ${prep.status.target} en ${prep.status.conflicts.map(c => c.path).join(', ')}. Nada cambió en main; resuélvelos desde el proceso.` }, 'conflictos reales al integrar: decides tú (main no cambió).', 'integration');
       if (prep.state === 'candidate') {
         setItem(slug, id, itemId, {}, `main avanzó: candidato preparado sin IA; se verifica en el sandbox antes de integrar.`, 'integration');
         await verifyCandidate(slug, pid, logger, () => isCancelled(pid));
       }
       if (batchesRepo(slug).get(id)!.status !== 'running') return setItem(slug, id, itemId, { state: 'awaiting_integration', reason: 'El lote se pausó antes de integrar: intégrala desde el proceso o reanuda el lote.' });
+      // La integración pre-autorizada solo con la aprobación de QA cubriendo lo que se integra (por commit): un candidato
+      // con conflictos resueltos por el agente, o en el que main tocó archivos de la historia, espera a QA o a ti.
+      const rev = revisionStatus(procs.get(pid)!);
+      if (rev && rev.qa.state === 'approved' && !rev.qa.coversHead) return setItem(slug, id, itemId, { state: 'needs_owner', failureClass: 'integration', reason: `${rev.qa.why} Pide a QA que revise el candidato o intégralo tú desde el proceso.` }, `no se integra sola: ${rev.qa.why}`, 'integration');
       const m = await mergeStory(slug, pid, {}, logger);
       if (b.auth.git.publish) {
         requirePolicy('git_push', { slug, processId: pid, projectId: b.projectId, authorized: true });
@@ -481,11 +524,15 @@ async function integrate(slug: string, id: string, itemId: string) {
         procs.setResult(pid, { ...procs.get(pid)!.result!, published: { ...pushed, pushedAt: now() } });
         setItem(slug, id, itemId, {}, `publicada en ${pushed.remote} (pre-autorizado en el lote).`, 'integration');
       }
+      setItem(slug, id, itemId, { integrationRetries: 0 });
       afterMerge(slug, id, itemId, procs.get(pid)!);
     } catch (e: any) {
+      // main avanzó mientras se verificaba el candidato (otra integración): se prepara otro en la siguiente vuelta, sin IA.
+      const n = (getBatch(slug, id).items.find(i => i.itemId === itemId)?.integrationRetries ?? 0) + 1;
+      if (e?.code === 'integration_candidate_required' && n <= 3) return setItem(slug, id, itemId, { integrationRetries: n, reason: `main avanzó mientras se verificaba el candidato: se prepara otro sin IA (intento ${n} de 3).` }, `main avanzó durante la verificación; nuevo candidato (intento ${n} de 3).`, 'integration');
       setItem(slug, id, itemId, { state: 'needs_owner', failureClass: 'integration', reason: `No se integró: ${e?.message ?? e}` }, `no se integró (main no cambió): ${String(e?.message ?? e).slice(0, 300)}`, 'integration');
     }
-  });
+  } finally { lease.release(); }
 }
 
 /** Proyecto interno: reconstruir y reiniciar el Portal (de una en una, con nada en marcha). Devuelve true si se pidió. */
@@ -494,7 +541,14 @@ async function maybeActivate(slug: string, id: string): Promise<boolean> {
   if (slug !== INTERNAL_WORKSPACE.slug || !b.auth.git.activate || b.activation?.state === 'requested') return b.activation?.state === 'requested';
   const pending = b.items.filter(i => i.state === 'integrating' && i.mergedCommit && !i.activated);
   if (!pending.length) return false;
-  if (b.items.some(i => i.state === 'running' || (i.state === 'integrating' && !i.mergedCommit)) || processesRepo(slug).running().length) return false;
+  if (b.items.some(i => i.state === 'running' || (i.state === 'integrating' && !i.mergedCommit))) return false;
+  // Reiniciar interrumpiría lo que esté en marcha (también lo que autorizaste fuera del lote): se espera y se dice por qué.
+  const others = processesRepo(slug).running();
+  if (others.length) {
+    const reason = `Activación pendiente de ${pending.map(i => i.storyId).join(', ')}: se reconstruirá y reiniciará el Portal cuando terminen ${others.length} proceso(s) en marcha (${others.slice(0, 3).map(p => `«${p.title}»`).join(', ')}); reiniciar ahora los interrumpiría.`;
+    if (b.reason !== reason) batchesRepo(slug).update(id, x => { x.reason = reason; });
+    return false;
+  }
   requirePolicy('restart_portal', { slug, authorized: true });
   batchesRepo(slug).update(id, x => {
     x.activation = { state: 'requested', requestedAt: now(), commit: pending.at(-1)!.mergedCommit ?? null, itemIds: pending.map(i => i.itemId), detail: null };
@@ -550,13 +604,18 @@ export function subscriptionCalls(slug: string, b: Batch): number {
 function startNext(slug: string, id: string) {
   for (;;) {
     const b = batchesRepo(slug).get(id)!; if (b.status !== 'running') return;
+    // Reconstruyendo el Portal para reiniciarlo: no se empieza nada que el reinicio interrumpiría (se sigue al volver).
+    if (updateRunning()) return;
     const running = b.items.filter(i => i.state === 'running');
     if (running.length >= b.auth.concurrency) return;
-    const next = b.items.filter(i => i.state === 'queued').sort((x, y) => x.order - y.order)[0]; if (!next) return;
-    // Fuera del lote se mantiene «un proceso a la vez»: no se empieza mientras corre otro que no es del lote.
-    const mine = new Set(b.items.flatMap(i => i.processIds));
-    const foreign = processesRepo(slug).running().filter(p => !mine.has(p.id));
-    if (foreign.length) { const reason = `Espera: hay otro proceso en ejecución fuera del lote (${foreign[0].title}).`; if (next.reason !== reason) setItem(slug, id, next.itemId, { reason }); return; }
+    // Solo espera la historia que tiene otra operación o proceso propio en marcha fuera del lote; las demás empiezan.
+    let next: BatchItem | undefined;
+    for (const q of b.items.filter(i => i.state === 'queued').sort((x, y) => x.order - y.order)) {
+      const c = workConflict(slug, { id: '', backlogItemId: q.itemId, assignmentId: null });
+      if (!c) { next = q; break; }
+      const reason = `Espera: ${c}`; if (q.reason !== reason) setItem(slug, id, q.itemId, { reason });
+    }
+    if (!next) return;
     if (slug === INTERNAL_WORKSPACE.slug && b.auth.git.activate && b.items.some(i => i.state === 'integrating' && i.mergedCommit && !i.activated)) return;
     let prep: Prepared;
     try { prep = prepareItem(slug, b, next); } catch (e: any) { notStartable(slug, id, next, `No se pudo preparar la historia: ${e?.message ?? e}`); continue; }
@@ -647,6 +706,12 @@ function startItem(slug: string, id: string, itemId: string, prep: Prepared) {
   let p: Process;
   try { p = reuse ?? createStoryProcess(slug, b.projectId, itemId, prevContext ? { iterationContext: prevContext } : {}); }
   catch (e: any) { return needsOwner(`No se pudo preparar la historia: ${e?.message ?? e}`); }
+  // Solo se empieza un proceso PENDIENTE de autorizar: si ya está en marcha (lo autorizaste tú) o terminó, el lote lo
+  // sigue; nunca se le reinicia el pipeline ni se ejecuta dos veces.
+  if (p.status !== 'pending_authorization') {
+    if (p.status === 'running') return setItem(slug, id, itemId, { state: 'running', processId: p.id, processIds: [...it.processIds.filter(x => x !== p.id), p.id], nextProcessId: null, reason: null, failureClass: null, startedAt: now(), finishedAt: null }, `ya estaba en marcha (proceso ${p.id.slice(0, 8)}, autorizado por ti): el lote la sigue sin ejecutarla otra vez.`);
+    return setItem(slug, id, itemId, { state: 'needs_owner', failureClass: 'owner_decision', processId: p.id, processIds: [...it.processIds.filter(x => x !== p.id), p.id], nextProcessId: null, reason: 'Su proceso ya no está pendiente de autorizar: decide desde su proceso.' }, 'su proceso ya no está pendiente: decides tú.');
+  }
   // Claude Code solo cede a la API si el lote lo autoriza (y el conector lo permite): si no, se pausa como siempre.
   const cfg = normalizePipeline({ autoApply: true, autoVerify: true, commands: b.auth.commands, allowInstall: b.auth.allowInstall, maxCorrections: b.auth.maxCorrections, gauntlet, backends: b.auth.backends, ...(b.auth.apiFallback && b.auth.backends.includes('api') ? {} : { apiFallback: false }) });
   // «Reanudar» tras una pausa ANTES de implementar (p. ej. el tope de llamadas en la revisión del plan): el plan ya pagado
@@ -667,7 +732,7 @@ function startItem(slug: string, id: string, itemId: string, prep: Prepared) {
 function maybeComplete(slug: string, id: string) {
   const b = batchesRepo(slug).get(id)!;
   if (batchMoving(b.items)) return;
-  const waiting = b.items.filter(i => i.state === 'needs_owner' || i.state === 'awaiting_integration');
+  const waiting = b.items.filter(i => i.state === 'needs_owner' || i.state === 'awaiting_integration' || i.state === 'external');
   const deps = b.items.filter(i => i.state === 'waiting_dependency');
   if (waiting.length || deps.length) {
     // Nada avanza solo, pero no está «terminado»: cada historia dice por qué espera. Si alguna puede seguir con «Reanudar»
@@ -839,6 +904,7 @@ export function cancelBatch(slug: string, id: string): Batch {
   batchesRepo(slug).update(id, x => x.items.forEach(i => {
     if (['queued', 'waiting_dependency'].includes(i.state)) { i.state = 'cancelled'; i.reason = 'Cancelada con el lote antes de empezar.'; }
     if (i.state === 'needs_owner') { i.state = 'cancelled'; i.reason = `Cancelada con el lote mientras esperaba tu decisión (${i.reason ?? 'sin motivo'}). Lo hecho en su proceso se conserva.`; }
+    if (i.state === 'external') { i.state = 'cancelled'; i.reason = 'Cancelada con el lote; su iteración fuera del lote sigue como la autorizaste.'; }
   }));
   setStatus(slug, id, 'cancelled', 'Cancelado por el propietario: lo que estaba en marcha se detiene entre pasos; lo terminado se conserva y puedes aceptarlo.', 'cancel');
   return getBatch(slug, id);
@@ -851,6 +917,7 @@ export function revokeBatch(slug: string, id: string, reason: string | null): Ba
     if (['queued', 'waiting_dependency'].includes(i.state)) { i.state = 'cancelled'; i.reason = 'Autorización revocada antes de empezar.'; }
     if (i.state === 'integrating' && !i.mergedCommit) { i.state = 'awaiting_integration'; i.reason = 'Autorización revocada: integrar vuelve a ser decisión tuya.'; }
     if (i.state === 'needs_owner') { i.state = 'cancelled'; i.reason = `Autorización revocada mientras esperaba tu decisión (${i.reason ?? 'sin motivo'}). Lo hecho en su proceso se conserva.`; }
+    if (i.state === 'external') { i.state = 'cancelled'; i.reason = 'Autorización del lote revocada; su iteración fuera del lote sigue como la autorizaste.'; }
   }));
   setStatus(slug, id, 'revoked', `Autorización revocada por el propietario${reason ? `: ${reason}` : ''}. No se empieza, integra, activa ni publica nada más.`, 'revoke');
   processesRepo(slug).logExecution({ projectId: b.projectId, agentId: '', kind: `batch_revoked:${id}`, status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: now() });
@@ -899,6 +966,7 @@ const canResume = (slug: string, it: BatchItem) => requeueMode(slug, it) !== nul
 export function retryItem(slug: string, id: string, itemId: string): Batch {
   const b = getBatch(slug, id); controllable(b);
   const it = b.items.find(i => i.itemId === itemId); if (!it) throw fail(404, 'La historia no está en el lote.', 'not_found');
+  if (it.state === 'external') throw fail(409, `${it.storyId} sigue fuera del lote con la iteración que autorizaste: decide desde su proceso (el lote no la repite).`, 'external');
   const p = it.processId ? processesRepo(slug).get(it.processId) : undefined;
   if (!retryable(it, p?.status)) throw fail(409, p && (it.state === 'needs_owner' || it.state === 'failed') ? 'Su proceso conserva trabajo en pausa: continúalo desde el proceso (no se repite lo hecho).' : `No se puede reintentar una historia ${ITEM_LABEL[it.state]}.`, 'invalid_state');
   // Las que quedaron bloqueadas SOLO porque esta falló (y las suyas, en cadena) vuelven a esperarla: si no, reintentarla
@@ -911,7 +979,7 @@ export function retryItem(slug: string, id: string, itemId: string): Batch {
     }
   };
   reopen(it.storyId);
-  setItem(slug, id, itemId, { state: it.dependsInBatch ? 'waiting_dependency' : 'queued', reason: b.status === 'running' ? null : 'En cola: empezará al reanudar el lote.', failureClass: null, notStarted: false, resumeProcessId: null, finishedAt: null }, `reintentada por ti: vuelvea la cola (se comprueban otra vez su equipo y sus orígenes).`);
+  setItem(slug, id, itemId, { state: it.dependsInBatch ? 'waiting_dependency' : 'queued', reason: b.status === 'running' ? null : 'En cola: empezará al reanudar el lote.', failureClass: null, notStarted: false, resumeProcessId: null, finishedAt: null, followedProcessId: null }, `reintentada por ti: vuelvea la cola (se comprueban otra vez su equipo y sus orígenes).`);
   void scheduleTick(slug, id);
   return getBatch(slug, id);
 }
@@ -924,7 +992,7 @@ export async function acceptItems(slug: string, id: string, itemIds: string[], n
   const wrong = items.filter(i => !i || i.state !== 'awaiting_acceptance');
   if (wrong.length) throw fail(409, `Solo se aceptan historias terminadas técnicamente: ${wrong.map(i => i ? `${i.storyId} está ${ITEM_LABEL[i.state]}` : 'una no está en el lote').join(' · ')}.`, 'not_ready');
   for (const it of items as BatchItem[]) {
-    const p = procs.get(it.processId!)!;
+    const p = procs.get(currentProcessId(it)!)!;
     if (slug === INTERNAL_WORKSPACE.slug && !it.activated && p.result?.merged) {
       const st = await batchDeps.activation(p.result.merged.commit, p.result.merged.mergedAt);
       if (!st.active) throw fail(409, `${it.storyId} está integrada pero no activa en el Portal en marcha: ${st.reason}`, 'not_activated');
@@ -934,7 +1002,7 @@ export async function acceptItems(slug: string, id: string, itemIds: string[], n
     if (c && steps.length && (c.length !== steps.length || c.some(x => !x))) throw fail(409, `${it.storyId}: marca todos los pasos de la prueba o no la aceptes (usa «No aceptar» con los pasos que fallaron).`, 'checks_incomplete');
   }
   for (const it of items as BatchItem[]) {
-    const p = procs.get(it.processId!)!; const at = now();
+    const p = procs.get(currentProcessId(it)!)!; const at = now();
     const mt = p.result?.manualTest;
     procs.setResult(p.id, { ...p.result!, acceptance: { at, by: 'owner', batchId: id, note }, ...(mt && checks[it.itemId] ? { manualTest: { ...mt, checks: checks[it.itemId] } } : {}) });
     backlogRepo(slug).setStatus(it.itemId, 'done', p.id);
@@ -972,10 +1040,14 @@ export async function iterateItem(slug: string, id: string, itemId: string, note
   const b = getBatch(slug, id); controllable(b);
   const it = b.items.find(i => i.itemId === itemId);
   if (!it || !['rejected', 'needs_owner', 'failed', 'awaiting_acceptance', 'awaiting_integration'].includes(it.state)) throw fail(409, `Solo se itera una historia no aceptada, detenida o fallida${it ? ` (está ${ITEM_LABEL[it.state]})` : ''}.`, 'invalid_state');
-  const { process } = await iterateStory(slug, itemId, note, { reopen: true, discardApplied: true });
+  const lease = acquireWork(slug, { id: '', backlogItemId: itemId, assignmentId: null }, `batch-iterate:${id}`, 'preparar una iteración del lote');
+  if ('conflict' in lease) throw fail(409, lease.conflict, 'busy');
+  let process: Process;
+  try { ({ process } = await iterateStory(slug, itemId, note, { reopen: true, discardApplied: true })); } finally { lease.release(); }
   batchesRepo(slug).update(id, x => {
     const y = x.items.find(i => i.itemId === itemId)!;
-    Object.assign(y, { state: 'queued', nextProcessId: process.id, resumeProcessId: null, reason: `Nueva iteración con tu nota: ${note.slice(0, 200)}`, failureClass: null, finishedAt: null, mergedCommit: null, activated: false });
+    // El lote vuelve a llevar la historia: la iteración que seguía de fuera queda como resuelta (no se vuelve a seguir).
+    Object.assign(y, { state: 'queued', nextProcessId: process.id, resumeProcessId: null, followedProcessId: null, dismissedProcessIds: [...(y.dismissedProcessIds ?? []), ...(y.followedProcessId ? [y.followedProcessId] : [])], reason: `Nueva iteración con tu nota: ${note.slice(0, 200)}`, failureClass: null, finishedAt: null, mergedCommit: null, activated: false });
     x.events.push({ at: now(), kind: 'item', itemId, message: `${y.storyId}: iteración dirigida preparada (proceso ${process.id.slice(0, 8)}); se ejecuta en su turno dentro de los límites del lote.` });
     if (x.status === 'completed') { x.status = 'running'; x.finishedAt = null; x.reason = null; }
   });
@@ -1040,7 +1112,7 @@ export function setBatchLogger(log: (o: any, m: string) => void) { logger = log;
 export function batchView(slug: string, b: Batch) {
   const procs = processesRepo(slug);
   const items = b.items.map(it => {
-    const p = it.processId ? procs.get(it.processId) : undefined; const r = p?.result;
+    const cur = currentProcessId(it); const p = cur ? procs.get(cur) : undefined; const r = p?.result;
     return {
       ...it, label: ITEM_LABEL[it.state],
       process: p ? { id: p.id, status: p.status, spentUsd: p.spentUsd, unconfirmedUsd: p.unconfirmedUsd ?? 0, budgetUsd: p.budgetUsd, pipeline: r?.pipeline ? { state: r.pipeline.state, phase: r.pipeline.phase, pauseKind: r.pipeline.pauseKind, reason: r.pipeline.reason, corrections: r.pipeline.corrections } : null, gauntlet: r?.gauntlet ? { mode: r.gauntlet.mode, status: r.gauntlet.status, rounds: r.gauntlet.rounds.length, reason: r.gauntlet.reason } : null, review: r?.review?.verdict ?? null, merged: r?.merged ?? null, manualTest: r?.manualTest ? { steps: r.manualTest.steps, checks: r.manualTest.checks } : null, userFacing: r?.userFacing ?? null, implementer: p.steps.find(s => s.role === 'implementer')?.agentName ?? null, evaluator: p.steps.find(s => s.role === 'evaluator' && s.status !== 'skipped')?.agentName ?? null } : null
