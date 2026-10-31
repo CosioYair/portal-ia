@@ -12,7 +12,7 @@ import { pathToFileURL } from 'node:url';
  * process_steps, sin template_version en agents, sin tablas lessons/agent_templates/story_*) se abre con el código actual:
  * se hace copia de seguridad antes, las migraciones son aditivas y todas las filas se conservan. Nunca se usan datos reales.
  */
-test('migración 0.11 → 0.15 sobre una copia sintética: copia de seguridad previa, columnas añadidas, filas intactas', () => {
+test('migración 0.11 → 0.16 sobre una copia sintética: copia de seguridad previa, columnas añadidas, filas intactas', () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-migra-'));
   const wsDir = path.join(dataDir, 'workspaces', 'portal-ia'); fs.mkdirSync(wsDir, { recursive: true });
   fs.writeFileSync(path.join(dataDir, '.master.key'), '00'.repeat(32)); // clave sintética (64 hex), no real
@@ -46,7 +46,7 @@ test('migración 0.11 → 0.15 sobre una copia sintética: copia de seguridad pr
     const { threadRepo } = await import('${pathToFileURL(path.resolve('src/services/storyThread.ts')).href}');
     const p = processesRepo('portal-ia').get('pr1'); const a = agentsRepo('portal-ia').get('a1'); const b = backlogRepo('portal-ia').get('b1');
     const cols = (t) => workspaceDb('portal-ia').prepare('PRAGMA table_info(' + t + ')').all().map(c => c.name);
-    console.log(JSON.stringify({ proc: { status: p.status, steps: p.steps.length, roleOfStep2: p.steps[1].role, lessonsUsed: p.steps[1].lessonsUsed, merged: p.result.merged.into, checks: p.result.manualTest.checks, spent: p.spentUsd }, agent: { caps: a.config.capabilities, tv: a.templateVersion }, backlog: b.status, knowledge: knowledgeRepo('portal-ia').list('p1').length, lessons: lessonsRepo('portal-ia').list().length, templates: templatesRepo('portal-ia').keys().length, tasks: threadRepo('portal-ia').tasks('b1').length, stepCols: cols('process_steps'), agentCols: cols('agents'), hist: workspaceDb('portal-ia').prepare('SELECT COUNT(*) AS n FROM execution_history').get().n }));
+    console.log(JSON.stringify({ proc: { status: p.status, steps: p.steps.length, roleOfStep2: p.steps[1].role, lessonsUsed: p.steps[1].lessonsUsed, merged: p.result.merged.into, checks: p.result.manualTest.checks, spent: p.spentUsd }, agent: { caps: a.config.capabilities, tv: a.templateVersion }, backlog: b.status, knowledge: knowledgeRepo('portal-ia').list('p1').length, lessons: lessonsRepo('portal-ia').list().length, templates: templatesRepo('portal-ia').keys().length, tasks: threadRepo('portal-ia').tasks('b1').length, stepCols: cols('process_steps'), agentCols: cols('agents'), procCols: cols('processes'), hist: workspaceDb('portal-ia').prepare('SELECT COUNT(*) AS n FROM execution_history').get().n }));
   `;
   const out = execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { cwd: path.resolve('.'), env: { ...process.env, PORTAL_DATA_DIR: dataDir, PORTAL_SANDBOX: 'none' }, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim().split('\n').pop()!;
   const r = JSON.parse(out);
@@ -54,12 +54,14 @@ test('migración 0.11 → 0.15 sobre una copia sintética: copia de seguridad pr
   assert.deepEqual(r.agent.caps, ['implementar'], 'capacidades por defecto para agentes antiguos (sin tocar la fila)'); assert.equal(r.agent.tv, null, 'sin versión de plantilla: sigue la v1 hasta opt-in');
   assert.equal(r.backlog, 'review'); assert.equal(r.knowledge, 1); assert.equal(r.lessons, 0); assert.equal(r.templates, 9, '8 plantillas activas + la propuesta del Evaluador Gauntlet (solo catálogo, sin agente)'); assert.equal(r.tasks, 0); assert.equal(r.hist, 1);
   for (const c of ['role', 'reason', 'lessons_used', 'backend']) assert.ok(r.stepCols.includes(c), `columna ${c}`);
+  // Esquema 0.16 (encargos y tope de llamadas): columnas nuevas en processes, cubiertas por la copia previa.
+  for (const c of ['assignment_id', 'max_subscription_calls']) assert.ok(r.procCols.includes(c), `columna ${c}`);
   assert.ok(r.agentCols.includes('template_version'));
   // Copia de seguridad previa
-  const backups = fs.readdirSync(path.join(dataDir, 'backups')); assert.equal(backups.length, 1); assert.match(backups[0], /antes-de-0\.15$/);
+  const backups = fs.readdirSync(path.join(dataDir, 'backups')); assert.equal(backups.length, 1); assert.match(backups[0], /antes-de-0\.16$/);
   assert.ok(fs.existsSync(path.join(dataDir, 'backups', backups[0], 'workspaces', 'portal-ia', 'portal-ia.sqlite')));
   assert.ok(fs.existsSync(path.join(dataDir, 'backups', backups[0], '.master.key')));
-  assert.equal(fs.readFileSync(path.join(dataDir, '.schema-version'), 'utf8').trim(), '0.15');
+  assert.equal(fs.readFileSync(path.join(dataDir, '.schema-version'), 'utf8').trim(), '0.16');
   // La copia conserva el esquema antiguo (es una copia previa, no migrada)
   const old = new DatabaseSync(path.join(dataDir, 'backups', backups[0], 'workspaces', 'portal-ia', 'portal-ia.sqlite'));
   assert.ok(!(old.prepare('PRAGMA table_info(process_steps)').all() as any[]).some(c => c.name === 'role')); old.close();
