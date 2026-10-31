@@ -5,6 +5,8 @@ const svg = (d: ReactNode, size = 16, extra?: string) => (
 );
 const S = { stroke: 'currentColor', strokeWidth: 1.5 } as const;
 const R = { stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' } as const;
+/** HU-168 · Trazo de los iconos nuevos: 1,5 px redondeado. S y R no cambian, así los iconos anteriores quedan igual. */
+const L = { stroke: 'currentColor', strokeWidth: 1.5, strokeLinecap: 'round', strokeLinejoin: 'round' } as const;
 
 export const Icon = {
   arrow: () => svg(<path d="M3 8h10M9 4l4 4-4 4" {...R} />),
@@ -30,8 +32,49 @@ export const Icon = {
   plug: () => svg(<path d="M5.5 2v3M10.5 2v3M3.5 5h9v2.5a4.5 4.5 0 0 1-9 0zM8 12v2.5" {...R} strokeWidth={1.5} />),
   wallet: () => svg(<><rect x="2" y="4" width="12" height="9" rx="1.5" {...S} /><path d="M2 7h12M10.5 10.25h1.5" {...S} strokeLinecap="round" /></>),
   org: () => svg(<><rect x="5.5" y="2" width="5" height="3.5" rx="1" {...S} /><rect x="1.5" y="10.5" width="4" height="3.5" rx="1" {...S} /><rect x="10.5" y="10.5" width="4" height="3.5" rx="1" {...S} /><path d="M8 5.5v2.5M3.5 10.5V8h9v2.5" {...S} /></>),
-  gear: () => svg(<><circle cx="8" cy="8" r="2.25" {...S} /><path d="M8 1.75v1.75M8 12.5v1.75M1.75 8H3.5M12.5 8h1.75M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M3.6 12.4l1.2-1.2M11.2 4.8l1.2-1.2" {...S} strokeLinecap="round" /></>)
+  gear: () => svg(<><circle cx="8" cy="8" r="2.25" {...S} /><path d="M8 1.75v1.75M8 12.5v1.75M1.75 8H3.5M12.5 8h1.75M3.6 3.6l1.2 1.2M11.2 11.2l1.2 1.2M3.6 12.4l1.2-1.2M11.2 4.8l1.2-1.2" {...S} strokeLinecap="round" /></>),
+  // HU-168 · Iconos del Portal (SVG propios, 16×16, trazo 1,5 px, currentColor)
+  story: () => svg(<><rect x="3" y="2" width="10" height="12" rx="1.5" {...L} /><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3" {...L} /></>),
+  process: () => svg(<><circle cx="3.5" cy="8" r="1.75" {...L} /><circle cx="12.5" cy="4" r="1.75" {...L} /><circle cx="12.5" cy="12" r="1.75" {...L} /><path d="M5.25 8h2.5M7.75 4v8M7.75 4h3M7.75 12h3" {...L} /></>),
+  authorization: () => svg(<><path d="M8 1.75l5 2v4c0 3-2.25 5.25-5 6.5-2.75-1.25-5-3.5-5-6.5v-4z" {...L} /><path d="M5.75 8l1.6 1.6 2.9-3.1" {...L} /></>),
+  agent: () => svg(<><rect x="3" y="5" width="10" height="8" rx="2" {...L} /><path d="M8 2.5V5M6 9h.01M10 9h.01M6.5 11.25h3" {...L} /></>),
+  file: () => svg(<path d="M4 1.75h5l3 3v9.5H4zM9 1.75v3h3" {...L} />),
+  publish: () => svg(<path d="M8 10.5V2.75M5 5.75l3-3 3 3M2.75 10.5v2.75h10.5V10.5" {...L} />),
+  panelWide: () => svg(<><rect x="1.75" y="3" width="12.5" height="10" rx="1.5" {...L} /><path d="M10.5 3v10M8 8H4M5.75 6.25 4 8l1.75 1.75" {...L} /></>),
+  panelNarrow: () => svg(<><rect x="1.75" y="3" width="12.5" height="10" rx="1.5" {...L} /><path d="M10.5 3v10M4 8h4M6.25 6.25 8 8l-1.75 1.75" {...L} /></>),
+  // HU-168 · Estados: la forma basta para distinguirlos sin color
+  statePending: () => svg(<circle cx="8" cy="8" r="6.25" {...L} strokeDasharray="2.2 2.2" />),
+  stateRunning: () => svg(<><circle cx="8" cy="8" r="6.25" {...L} /><path d="M8 4.75A3.25 3.25 0 0 1 11.25 8" {...L} /></>),
+  stateDone: () => svg(<><circle cx="8" cy="8" r="6.25" {...L} /><path d="M5 8.3l2 2 4-4.5" {...L} /></>),
+  stateError: () => svg(<><circle cx="8" cy="8" r="6.25" {...L} /><path d="M5.75 5.75l4.5 4.5M10.25 5.75l-4.5 4.5" {...L} /></>),
+  stateBlocked: () => svg(<><circle cx="8" cy="8" r="6.25" {...L} /><path d="M3.6 12.4l8.8-8.8" {...L} /></>)
 };
+
+/** HU-168 · Estados comunes del Portal. Siempre se comunican con icono y texto, nunca solo con color. */
+export type PortalState = 'pending' | 'running' | 'done' | 'error' | 'blocked';
+export const STATE_LABEL: Record<PortalState, string> = {
+  pending: 'Pendiente',
+  running: 'En curso',
+  done: 'Completado',
+  error: 'Error',
+  blocked: 'Bloqueado'
+};
+const STATE_ICON: Record<PortalState, () => ReactNode> = {
+  pending: Icon.statePending,
+  running: Icon.stateRunning,
+  done: Icon.stateDone,
+  error: Icon.stateError,
+  blocked: Icon.stateBlocked
+};
+
+/** Icono del estado con su texto. Si se oculta el texto visible, queda en un .sr-only para lectores de pantalla. */
+export function StatusIcon({ state, label, showLabel = true }: { state: PortalState; label?: string; showLabel?: boolean }) {
+  const text = label ?? STATE_LABEL[state];
+  return <span className={`status-ic status-ic-${state}`} data-state={state}>
+    {STATE_ICON[state]()}
+    {showLabel ? <span className="status-ic-text">{text}</span> : <span className="sr-only">{text}</span>}
+  </span>;
+}
 
 export function Wordmark({ provisional }: { provisional?: boolean }) {
   return <div className="wordmark"><span className="mark" aria-hidden="true" /><span>Portal IA</span>{provisional && <span className="chip chip-soon chip-xs">nombre provisional</span>}</div>;
