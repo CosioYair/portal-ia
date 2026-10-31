@@ -20,7 +20,7 @@ export function AssistantDock() {
     {open && <div className={`dock${wide ? ' dock-wide' : ''}`} role="dialog" aria-label="Asistente de Empresa">
       <div className="dock-h"><div><div className="h3" style={{ fontSize: 14 }}>{info?.name ?? 'Asistente de Empresa'}</div><div className="small muted">Siempre disponible · {info ? <span className="mono">{info.model}</span> : '…'}</div></div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-          <button className="btn btn-ghost btn-sm" onClick={() => setWide(v => !v)} title={wide ? 'Panel estrecho' : 'Panel ancho'} aria-label={wide ? 'Panel estrecho' : 'Panel ancho'}>{wide ? '⇥ estrecho' : '⇤ ancho'}</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => setWide(v => !v)} title={wide ? 'Panel estrecho' : 'Panel ancho'} aria-label={wide ? 'Panel estrecho' : 'Panel ancho'} aria-pressed={wide}>{wide ? Icon.panelNarrow() : Icon.panelWide()}</button>
           <button className="xbtn" onClick={() => setOpen(false)} aria-label="Cerrar asistente">{Icon.x(16)}</button>
         </div></div>
       <AssistantChat compact onInfo={setInfo} onPending={setPending} />
