@@ -118,7 +118,10 @@ export function ProviderSetup() {
                   <label className="label" htmlFor="ws-id">ID del workspace de Anthropic <span className="muted" style={{ fontWeight: 400 }}>· opcional</span></label>
                   <input id="ws-id" className="input mono" value={workspaceId} onChange={e => setWorkspaceId(e.target.value)} placeholder="wrkspc_…" autoComplete="off" spellCheck={false} />
                   {workspaceId.trim() && !/^wrkspc_/.test(workspaceId.trim()) && <div className="help" style={{ color: '#7A4A00' }}>Ese valor no parece un ID de workspace: debe empezar por <span className="mono">wrkspc_</span>. El identificador con guiones de la URL de la consola no sirve.</div>}
-                  <div className="help">Solo necesario si tu clave no está asociada a un workspace (por ejemplo, claves de usuario <span className="mono">sk-ant-usr-…</span>). Lo encuentras en console.anthropic.com → Settings → Workspaces. Las claves creadas dentro de un workspace (<span className="mono">sk-ant-api03-…</span>) no lo necesitan.</div>
+                  <div className="help">Solo si tu clave no pertenece a un workspace.</div>
+                  <Disclosure title="Más información">
+                    <div className="help">Hace falta, por ejemplo, con las claves de usuario <span className="mono">sk-ant-usr-…</span>. Lo encuentras en console.anthropic.com → Settings → Workspaces. Las claves creadas dentro de un workspace (<span className="mono">sk-ant-api03-…</span>) no lo necesitan.</div>
+                  </Disclosure>
                 </div>
               )}
               <Disclosure title="Más información">
