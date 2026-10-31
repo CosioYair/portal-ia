@@ -312,6 +312,7 @@ test('revisión del plan sin progreso y con un bloqueante: se pausa ANTES de imp
   // Decides tú: «Seguir con este plan» lo implementa tal cual, sin repetir el plan ni su revisión (ya pagados).
   const flow = await flowOf(p.id);
   const accept = flow.actions.find((a: any) => a.id === 'accept_plan'); assert.ok(accept, JSON.stringify(flow.actions.map((a: any) => a.id)));
+  assert.equal(flow.issue?.title, 'La revisión independiente del plan dejó una brecha bloqueante: decides tú', 'el título dice el motivo real (no «por partes»)');
   const plans = byRule(R.plan).length; const reviews = byRule(R.review).length;
   // Con otro proceso en marcha, no: como al continuar.
   const blocker = processesRepo(S).create({ projectId: project.id, kind: 'story_execution', title: 'otro en marcha', estimatedUsd: 0, steps: [] }); processesRepo(S).authorize(blocker.id, 1);
