@@ -78,9 +78,7 @@ export function Archive() {
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="rs-title" style={{ width: 'min(620px, 100%)' }}>
             <div className="modal-h"><div><div className="h3" id="rs-title">Restaurar {restoring.storyId} · {restoring.title}</div><div className="small muted">Vuelve al backlog activo con su estado ({BACKLOG_STATUS[restoring.status]?.label ?? restoring.status}) y sus procesos. No consume IA ni ejecuta nada.</div></div><button className="xbtn" onClick={() => setRestoring(null)} aria-label="Cerrar">{Icon.x(16)}</button></div>
             <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <Disclosure title="Más información">
-                <Notice kind="info">Revisa si sigue teniendo sentido: el código actual pudo cambiar desde entonces. Si prefieres, crea una historia nueva con lo que necesites.</Notice>
-              </Disclosure>
+              <Notice kind="info">Revisa si sigue teniendo sentido: el código actual pudo cambiar desde entonces. Si prefieres, crea una historia nueva con lo que necesites.</Notice>
               <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo devolver <strong>{restoring.storyId}</strong> al backlog activo.</span></label>
             </div>
             <div className="modal-f"><span /><div style={{ display: 'flex', gap: 10 }}><button className="btn btn-ghost" onClick={() => setRestoring(null)} disabled={busy}>Cancelar</button><button className="btn btn-primary" onClick={restore} disabled={!auth || busy}>Restaurar</button></div></div>
