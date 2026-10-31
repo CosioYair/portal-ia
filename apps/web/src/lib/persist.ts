@@ -58,41 +58,43 @@ const isPlain = (x: unknown): x is Record<string, unknown> => !!x && typeof x ==
 
 /**
  * Borrador de un formulario. Se guarda solo (sin peticiones al servidor) poco después de cada cambio y se restaura al
- * volver. `base` identifica la versión del dato que se edita (p. ej. su fecha de actualización): si el dato cambió en el
- * servidor desde que se guardó el borrador, NO se aplica solo; se ofrece en `stale` para recuperarlo o descartarlo.
- * `clear()` lo borra (tras enviar el formulario o al descartarlo).
+ * volver. `base` identifica la versión del dato que se edita (p. ej. su fecha de actualización) y se fija al EMPEZAR el
+ * borrador: si el dato cambia después en el servidor, el borrador sigue marcado con la versión de la que partió y, al
+ * volver, NO se aplica solo; se ofrece en `stale` para recuperarlo o descartarlo. `clear()` lo borra (tras enviar el
+ * formulario o al descartarlo).
  */
 export function useDraft<T>(key: string | null, initial: T, opts: { base?: string | null; delayMs?: number; revive?: (stored: T) => T } = {}) {
   const base = opts.base ?? null; const delay = opts.delayMs ?? 400;
   // Un borrador de una versión anterior de la interfaz recibe los campos nuevos con su valor inicial.
   const merge = (stored: T): T => opts.revive ? opts.revive(stored) : isPlain(initial) && isPlain(stored) ? { ...initial, ...stored } as T : stored;
   const load = (k: string | null) => k ? readStored<StoredDraft<T> | null>(k, null) : null;
-  const [state, setState] = useState(() => {
-    const s = load(key); const fresh = !!s && s.base === base;
-    return { key, value: fresh ? merge(s!.v) : initial, status: (fresh ? 'restored' : 'idle') as DraftStatus, stale: s && !fresh ? s : null, dirty: false };
-  });
+  // `from`: versión del dato de la que parte el borrador (undefined: aún no hay borrador; se fija con el primer cambio).
+  const fromStorage = (k: string | null) => {
+    const s = load(k); const fresh = !!s && s.base === base;
+    return { key: k, value: fresh ? merge(s!.v) : initial, status: (fresh ? 'restored' : 'idle') as DraftStatus, stale: s && !fresh ? s : null, dirty: false, from: fresh ? s!.base : undefined as string | null | undefined };
+  };
+  const [state, setState] = useState(() => fromStorage(key));
   // Otro ámbito (otra empresa, proyecto o elemento): se carga SU borrador; nunca se guarda uno con la clave del otro.
-  if (state.key !== key) {
-    const s = load(key); const fresh = !!s && s.base === base;
-    setState({ key, value: fresh ? merge(s!.v) : initial, status: fresh ? 'restored' : 'idle', stale: s && !fresh ? s : null, dirty: false });
-  }
+  if (state.key !== key) setState(fromStorage(key));
+  const baseNow = useRef(base); baseNow.current = base;
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!state.dirty || !key) return;
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => {
-      const ok = writeStored(key, { v: state.value, at: Date.now(), base } satisfies StoredDraft<T>);
+      const ok = writeStored(key, { v: state.value, at: Date.now(), base: state.from ?? null } satisfies StoredDraft<T>);
       setState(s => s.key === key ? { ...s, status: ok ? 'saved' : 'error', dirty: false } : s);
     }, delay);
     return () => { if (timer.current) clearTimeout(timer.current); };
-  }, [state.value, state.dirty, key, base, delay]);
+  }, [state.value, state.dirty, state.from, key, delay]);
   const set = useCallback((v: T | ((prev: T) => T)) => setState(s => {
     const value = typeof v === 'function' ? (v as (p: T) => T)(s.value) : v;
-    return { ...s, value, dirty: true, status: 'unsaved' };
+    return { ...s, value, dirty: true, status: 'unsaved', from: s.from === undefined ? baseNow.current : s.from };
   }), []);
-  const clear = useCallback(() => { if (key) writeStored(key, undefined); setState(s => ({ ...s, value: initial, status: 'idle', stale: null, dirty: false })); // eslint-disable-next-line react-hooks/exhaustive-deps
+  const clear = useCallback(() => { if (key) writeStored(key, undefined); setState(s => ({ ...s, value: initial, status: 'idle', stale: null, dirty: false, from: undefined })); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
-  const recover = useCallback(() => setState(s => s.stale ? { ...s, value: merge(s.stale.v), stale: null, status: 'unsaved', dirty: true } : s), // eslint-disable-next-line react-hooks/exhaustive-deps
+  // Recuperar un borrador desfasado es decisión del propietario: desde ese momento parte de la versión actual.
+  const recover = useCallback(() => setState(s => s.stale ? { ...s, value: merge(s.stale.v), stale: null, status: 'unsaved', dirty: true, from: baseNow.current } : s), // eslint-disable-next-line react-hooks/exhaustive-deps
   []);
   return { value: state.value, set, status: state.status, clear, stale: state.stale ? { at: state.stale.at, recover, discard: clear } : null };
 }

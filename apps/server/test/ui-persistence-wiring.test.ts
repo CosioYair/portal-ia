@@ -47,7 +47,30 @@ test('una pantalla por elemento: autorizaciones y ediciones no pasan de una hist
 
 test('navegación: el enlace directo manda sobre la selección guardada y conserva su #pestaña y sus ?parámetros', () => {
   const app = read('App.tsx');
-  assert.match(app, /useState<Selection \| null>\(\(\) => urlSel\(\) \?\? readSel\(\)\)/);
+  assert.match(app, /useState<Selection \| null>\(\(\) => urlSel\(\) \?\? histSel\(\) \?\? readSel\(\)\)/);
+  assert.match(app, /<SelectionHistory sel=\{sel\}/, 'Atrás/Adelante vuelven a la empresa de cada entrada del historial');
   assert.match(app, /navigate\('\/' \+ \(rest \|\| 'panel'\) \+ search \+ hash/);
   assert.match(read('screens/StoryWorkspace.tsx'), /navigate\(`\/backlog\?ejecutar=\$\{it\.id\}`\)/, 'el enlace «Ejecutar» de la historia abre su diálogo');
+});
+
+// Ronda 3 (impugnación de la persistencia): lo recuperado nunca actúa por su cuenta ni pisa datos más nuevos.
+test('ronda 3: la versión del borrador se fija al empezar y lo recuperado solo se usa donde sigue valiendo', () => {
+  const persist = read('lib/persist.ts');
+  assert.match(persist, /base: state\.from \?\? null/, 'se guarda la versión de la que partió el borrador, no la actual');
+  assert.match(persist, /from: s\.from === undefined \? baseNow\.current : s\.from/, 'la versión se fija con el primer cambio');
+  const story = read('screens/StoryWorkspace.tsx');
+  assert.match(story, /setEdit\(\{ \.\.\.f, orig: f \}\)/, 'la edición recuerda los campos de los que partió');
+  assert.match(story, /Mientras editabas cambió en la historia/, 'si cambió el mismo campo, se avisa antes de sobrescribirlo');
+  const agent = read('screens/AgentDetail.tsx');
+  assert.match(agent, /useDraft<\{ cfg: AgentConfig; orig: AgentConfig \} \| null>\(draftKey\('agente\.config'/);
+  assert.match(agent, /const cfg: AgentConfig \| null = agent \? \{ \.\.\.agent\.config, \.\.\.mine \}/, 'solo tus campos, sobre la configuración actual');
+  // «Aceptar» un encargo no envía el texto escrito para pedir cambios (ni uno recuperado) como nota de aceptación.
+  assert.match(read('components/ConversationPanel.tsx'), /api\.acceptAssignment\(slug, a\.id, null\)/);
+  const batches = read('screens/Batches.tsx');
+  assert.match(batches, /const open = mode === 'retry' \? \(canRetry \? mode : null\) : mode === 'iterate' \? \(canIterate \? mode : null\)/, 'un formulario recuperado solo si la acción sigue siendo posible');
+  assert.doesNotMatch(batches, /\{mode === 'retry' &&|\{mode && mode !== 'retry' &&/, 'nada se abre por el modo guardado sin comprobarlo');
+  assert.match(batches, /\{restored && \(g\.merge/, 'el aviso de opciones con permisos no depende de no haber tocado nada');
+  const chat = read('components/AssistantChat.tsx');
+  assert.match(chat, /if \(!loaded \|\| !initialText/, 'el texto propuesto se aplica cuando ya se sabe la conversación');
+  assert.match(read('screens/Knowledge.tsx'), /q\.set\('doc', docId\)/, 'el documento abierto vive en la URL');
 });

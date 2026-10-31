@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate, useNavigationType, useParams } from 'react-router-dom';
 import type { Project, ProviderView, Workspace } from '@portal-ia/domain';
 import { api, type BootstrapStatus } from './lib/api.ts';
@@ -29,6 +29,32 @@ const readSel = (): Selection | null => { try { const v = localStorage.getItem(S
 const writeSel = (s: Selection) => { try { localStorage.setItem(SEL_KEY, JSON.stringify(s)); } catch { /* sin almacenamiento */ } };
 /** Selección de un enlace directo (/empresa/:slug[/proyecto/:pid]/…): manda sobre la guardada desde el primer momento. */
 const urlSel = (): Selection | null => { const m = window.location.pathname.match(/^\/empresa\/([^/]+)(?:\/proyecto\/([^/]+))?/); return m ? { ws: decodeURIComponent(m[1]), project: m[2] ? decodeURIComponent(m[2]) : null } : null; };
+// Empresa y proyecto con los que se abrió cada entrada del historial de esta pestaña (por la clave de la entrada).
+const HIST_KEY = 'portal-ia.seleccion.historial';
+const readHist = (): Record<string, Selection> => { try { return JSON.parse(sessionStorage.getItem(HIST_KEY) ?? '{}'); } catch { return {}; } };
+/** Al volver con Atrás/Adelante a una entrada de otra página (o recargarla), su selección; no la última elegida. */
+const histSel = (): Selection | null => { const k = (window.history.state as { key?: string } | null)?.key; return k ? readHist()[k] ?? null : null; };
+
+/**
+ * Atrás/Adelante vuelven a la empresa y al proyecto con los que se abrió esa pantalla (antes mostraban la pantalla
+ * anterior con la empresa de la última). Se anota al LLEGAR a cada entrada: cambiar de empresa navega a otra.
+ */
+function SelectionHistory({ sel, workspaces, select }: { sel: Selection | null; workspaces: Workspace[]; select: (ws: string, pid?: string | null) => Promise<void> }) {
+  const { key } = useLocation(); const type = useNavigationType();
+  const current = useRef(sel); current.current = sel;
+  useEffect(() => {
+    if (key === 'default') return; // la primera entrada de la pestaña no tiene clave propia
+    const h = readHist(); const saved = h[key]; const cur = current.current;
+    if (type === 'POP' && saved) {
+      if (cur && (saved.ws !== cur.ws || saved.project !== cur.project) && workspaces.some(w => w.slug === saved.ws)) void select(saved.ws, saved.project);
+      return;
+    }
+    if (!cur) return;
+    h[key] = cur; const keys = Object.keys(h); for (const k of keys.slice(0, Math.max(0, keys.length - 300))) delete h[k];
+    try { sessionStorage.setItem(HIST_KEY, JSON.stringify(h)); } catch { /* sin almacenamiento */ }
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  return null;
+}
 
 /**
  * Posición del desplazamiento por pantalla (en esta pestaña del navegador): al recargar o con Atrás/Adelante se vuelve
@@ -67,8 +93,9 @@ export default function App() {
   const [providers, setProviders] = useState<ProviderView[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  // Un enlace directo se aplica al arrancar; si no, la última selección guardada (antes, la carga inicial podía pisar el enlace).
-  const [sel, setSel] = useState<Selection | null>(() => urlSel() ?? readSel());
+  // Un enlace directo se aplica al arrancar; si no, la de esa entrada del historial y, si no, la última selección guardada
+  // (antes, la carga inicial podía pisar el enlace).
+  const [sel, setSel] = useState<Selection | null>(() => urlSel() ?? histSel() ?? readSel());
   const [offline, setOffline] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
   const navigate = useNavigate();
@@ -131,6 +158,7 @@ export default function App() {
         {toast && <div className="toast" role="status">{toast.tone === 'ok' ? Icon.okc() : Icon.alert()} {toast.message}</div>}
         {ready && <InboxLauncher />}
         <ScrollMemory />
+        <SelectionHistory sel={sel} workspaces={workspaces} select={select} />
         <Routes>
           <Route path="/" element={ready ? <Navigate to="/panel" replace /> : <Welcome />} />
           <Route path="/configuracion/proveedor" element={<ProviderSetup />} />

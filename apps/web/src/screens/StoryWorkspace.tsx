@@ -87,16 +87,25 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
   const [note, setNote] = useState(''); const [iterBusy, setIterBusy] = useState(false); // el borrador de la nota lo guarda IterationComposer
 
   // Contexto editable (PATCH existente; el servidor registra el cambio en el historial si la historia ya se ejecutó).
-  // El borrador lleva la huella de los campos que editaba: si cambiaron en el servidor, se ofrece pero no se aplica solo.
-  type Edit = { title: string; criterion: string; description: string };
-  const editDraft = useDraft<Edit | null>(draftKey('historia.edicion', slug, ctx ? storyId : null), null, { base: ctx ? fingerprint([ctx.item.title, ctx.item.criterion, ctx.item.description]) : null });
+  // El borrador lleva la huella de los campos de los que partió: si cambiaron en el servidor, se ofrece pero no se aplica
+  // solo. Al guardar se envía solo lo que TÚ cambiaste respecto de ese punto de partida (`orig`): lo que otro cambió
+  // mientras tanto en los demás campos se conserva, y si cambió el mismo campo se avisa antes de sobrescribirlo.
+  type Fields = { title: string; criterion: string; description: string };
+  type Edit = Fields & { orig: Fields };
+  const fieldsOf = (i: Fields): Fields => ({ title: i.title, criterion: i.criterion, description: i.description });
+  const editDraft = useDraft<Edit | null>(draftKey('historia.edicion', slug, ctx ? storyId : null), null, { base: ctx ? fingerprint(Object.values(fieldsOf(ctx.item))) : null });
   const edit = editDraft.value; const setEdit = (v: Edit | null) => { if (v) editDraft.set(v); else editDraft.clear(); };
   const [editBusy, setEditBusy] = useState(false); const [editErr, setEditErr] = useState<string | null>(null);
-  const startEdit = () => { if (ctx) { setEdit({ title: ctx.item.title, criterion: ctx.item.criterion, description: ctx.item.description }); setEditErr(null); } };
+  const startEdit = () => { if (ctx) { const f = fieldsOf(ctx.item); setEdit({ ...f, orig: f }); setEditErr(null); } };
   const saveEdit = async () => {
-    if (!ctx || !edit) return; setEditBusy(true); setEditErr(null);
-    const patch = { title: edit.title.trim(), criterion: edit.criterion.trim(), description: edit.description };
-    const changed = Object.fromEntries(Object.entries(patch).filter(([k, v]) => v !== (ctx.item as any)[k]));
+    if (!ctx || !edit) return; setEditErr(null);
+    const orig = edit.orig ?? fieldsOf(ctx.item); const now = fieldsOf(ctx.item);
+    const changed: Partial<Fields> = Object.fromEntries((['title', 'criterion', 'description'] as const)
+      .map(k => [k, k === 'description' ? edit[k] : edit[k].trim()] as const).filter(([k, v]) => v !== orig[k] && v !== now[k]));
+    const LABEL: Record<keyof Fields, string> = { title: 'Título', criterion: 'Criterio de aceptación', description: 'Descripción' };
+    const clash = (Object.keys(changed) as (keyof Fields)[]).filter(k => now[k] !== orig[k]);
+    if (clash.length) { setEdit({ ...edit, orig: { ...orig, ...Object.fromEntries(clash.map(k => [k, now[k]])) } }); setEditErr(`Mientras editabas cambió en la historia: ${clash.map(k => `«${LABEL[k]}»`).join(', ')} (ahora: ${clash.map(k => `«${now[k].slice(0, 120)}»`).join(', ')}). Revísalo; si vuelves a pulsar Guardar se sustituye por tu versión.`); return; }
+    setEditBusy(true);
     try { if (Object.keys(changed).length) await api.patchBacklogItem(slug, ctx.item.id, changed); setEdit(null); flash(Object.keys(changed).length ? 'Contexto de la historia actualizado' : 'Sin cambios'); await load(); }
     catch (e: any) { setEditErr(e.message); } finally { setEditBusy(false); }
   };

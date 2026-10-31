@@ -82,6 +82,11 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
   // empresa y este proyecto; la casilla de autorización NO: un borrador recuperado nunca autoriza nada.
   const draft = useDraft(draftKey('lote', ws.slug, projectId), { sel: [] as string[], custom: false, req: NEW_BATCH }, { revive: d => ({ sel: Array.isArray(d.sel) ? d.sel : [], custom: !!d.custom, req: { ...NEW_BATCH, ...d.req } }) });
   const { sel, custom, req } = draft.value;
+  // Si el borrador vino guardado, el aviso de opciones con permisos sigue mientras estén marcadas (antes desaparecía al
+  // tocar cualquier otra cosa, p. ej. elegir una historia, aunque siguieran marcadas).
+  const [restoredFor, setRestoredFor] = useState<string | null>(draft.status === 'restored' ? `${ws.slug}/${projectId}` : null);
+  if (draft.status === 'restored' && restoredFor !== `${ws.slug}/${projectId}`) setRestoredFor(`${ws.slug}/${projectId}`);
+  const restored = restoredFor === `${ws.slug}/${projectId}` && draft.status !== 'idle';
   const setSel = (f: string[] | ((s: string[]) => string[])) => draft.set(d => ({ ...d, sel: typeof f === 'function' ? f(d.sel) : f }));
   const setCustom = (c: boolean) => draft.set(d => ({ ...d, custom: c }));
   const setReq = (f: (r: typeof req) => typeof req) => draft.set(d => ({ ...d, req: f(d.req) }));
@@ -139,7 +144,7 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
       <div className="card-h"><div className="h3">Nuevo lote</div><button className="xbtn" onClick={onClose} aria-label="Cerrar">{Icon.x(16)}</button></div>
       <div className="card-b">
         <DraftNote status={draft.status} onDiscard={draft.clear} />
-        {draft.status === 'restored' && (g.merge || g.publish || g.activate || req.backends?.includes('api') || req.apiFallback || req.allowInstall) && <Notice kind="warn">El borrador recuperado tiene marcado: {[g.merge && 'integrar en main', g.activate && 'reconstruir y reiniciar', g.publish && 'publicar en GitHub', req.backends?.includes('api') && 'la API (facturable)', req.apiFallback && 'ceder a la API', req.allowInstall && 'instalar con red'].filter(Boolean).join(', ')}. Son preferencias guardadas, no permisos: revísalas; nada se hace hasta que marques la casilla de autorización.</Notice>}
+        {restored && (g.merge || g.publish || g.activate || req.backends?.includes('api') || req.apiFallback || req.allowInstall) && <Notice kind="warn">El borrador recuperado tiene marcado: {[g.merge && 'integrar en main', g.activate && 'reconstruir y reiniciar', g.publish && 'publicar en GitHub', req.backends?.includes('api') && 'la API (facturable)', req.apiFallback && 'ceder a la API', req.allowInstall && 'instalar con red'].filter(Boolean).join(', ')}. Son preferencias guardadas, no permisos: revísalas; nada se hace hasta que marques la casilla de autorización.</Notice>}
         <div className="bw-layout">
           <div className="bw-main">
             <div className="bw-section">
@@ -364,6 +369,8 @@ function ItemCard({ slug, b, it, picked, onPick, checks, onChecks, onChange, bus
   const canIterate = ['rejected', 'needs_owner', 'failed', 'awaiting_acceptance', 'awaiting_integration'].includes(it.state) && b.status !== 'cancelled' && b.status !== 'revoked';
   // Sin trabajo que conservar (no llegó a empezar o su proceso falló): se puede reintentar con los límites del lote.
   const canRetry = (it.state === 'needs_owner' || it.state === 'failed') && (!p || p.status === 'cancelled' || p.status === 'failed') && b.status !== 'cancelled' && b.status !== 'revoked';
+  // Un formulario recuperado del borrador solo se abre si la acción sigue siendo posible (la historia pudo avanzar).
+  const open = mode === 'retry' ? (canRetry ? mode : null) : mode === 'iterate' ? (canIterate ? mode : null) : mode === 'reject' ? (it.state === 'awaiting_acceptance' || it.state === 'accepted' ? mode : null) : null;
   return (
     <div style={{ border: '1px solid #E4E2DC', borderRadius: 10, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }} data-testid={`batch-item-${it.storyId}`}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -392,18 +399,18 @@ function ItemCard({ slug, b, it, picked, onPick, checks, onChecks, onChange, bus
         {canIterate && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setMode('iterate')}>Iterar solo esta…</button>}
         {['queued', 'waiting_dependency', 'running', 'needs_owner', 'blocked'].includes(it.state) && b.status !== 'cancelled' && b.status !== 'revoked' && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(() => api.cancelBatchItem(slug, b.id, it.itemId), `${it.storyId} cancelada`)}>Cancelar esta</button>}
       </div>
-      {mode === 'retry' && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      {open === 'retry' && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <label className="ck small"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo reintentarla con los límites de este lote: vuelve a la cola y se comprueban otra vez su equipo y sus orígenes{b.status === 'running' ? '' : ' (empezará al reanudar el lote)'}. No tenía trabajo que conservar.</span></label>
         <div style={{ display: 'flex', gap: 8 }}><button className="btn btn-primary btn-sm" disabled={!auth} onClick={() => run(() => api.retryBatchItem(slug, b.id, it.itemId), `${it.storyId}: de nuevo en la cola`)}>Reintentar</button><button className="btn btn-ghost btn-sm" onClick={() => setMode(null)}>Cancelar</button></div>
       </div>}
-      {mode && mode !== 'retry' && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <textarea className="input" placeholder={mode === 'reject' ? 'Qué no cumple (se registra en la historia)' : 'Qué debe cambiar en la nueva iteración'} value={text} onChange={e => setText(e.target.value)} />
-        {mode === 'reject' && steps.some((_, i) => !c[i]) && <div className="small muted">Se crearán tareas con los pasos sin marcar: {steps.filter((_, i) => !c[i]).map((s, i) => <span key={i}>«{s}» </span>)}</div>}
-        {mode === 'iterate' && <label className="ck small"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo una iteración de esta historia dentro de los límites del lote (las demás no se repiten).</span></label>}
+      {open && open !== 'retry' && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <textarea className="input" placeholder={open === 'reject' ? 'Qué no cumple (se registra en la historia)' : 'Qué debe cambiar en la nueva iteración'} value={text} onChange={e => setText(e.target.value)} />
+        {open === 'reject' && steps.some((_, i) => !c[i]) && <div className="small muted">Se crearán tareas con los pasos sin marcar: {steps.filter((_, i) => !c[i]).map((s, i) => <span key={i}>«{s}» </span>)}</div>}
+        {open === 'iterate' && <label className="ck small"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo una iteración de esta historia dentro de los límites del lote (las demás no se repiten).</span></label>}
         <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn btn-primary btn-sm" disabled={text.trim().length < 3 || (mode === 'iterate' && !auth)} onClick={() => mode === 'reject'
+          <button className="btn btn-primary btn-sm" disabled={text.trim().length < 3 || (open === 'iterate' && !auth)} onClick={() => open === 'reject'
             ? run(() => api.rejectBatchItem(slug, b.id, it.itemId, text.trim(), steps.filter((_, i) => !c[i])), `${it.storyId}: no aceptada`)
-            : run(() => api.iterateBatchItem(slug, b.id, it.itemId, text.trim()), `${it.storyId}: iteración en cola`)}>{mode === 'reject' ? 'Registrar no aceptación' : 'Iterar'}</button>
+            : run(() => api.iterateBatchItem(slug, b.id, it.itemId, text.trim()), `${it.storyId}: iteración en cola`)}>{open === 'reject' ? 'Registrar no aceptación' : 'Iterar'}</button>
           <button className="btn btn-ghost btn-sm" onClick={() => setMode(null)}>Cancelar</button>
         </div>
       </div>}

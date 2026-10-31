@@ -253,7 +253,7 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
       </div>}
       {a.status === 'ready_for_review' && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void act(() => api.acceptAssignment(slug, a.id, note.trim() || null), `${a.code} aceptado`)}>Aceptar</button>
+          <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void act(() => api.acceptAssignment(slug, a.id, null), `${a.code} aceptado`)}>Aceptar</button>
           <label className="sr" htmlFor={`en-${a.id}`}>Qué cambiar</label>
           <input id={`en-${a.id}`} className="input" style={{ flex: 1, minWidth: 180, height: 30 }} value={note} onChange={e => setNote(e.target.value)} placeholder="Qué cambiar (para pedir cambios)" />
           <button type="button" className="btn btn-ghost btn-sm" disabled={busy || note.trim().length < 3 || !discard} onClick={() => void act(() => api.requestAssignmentChanges(slug, a.id, note.trim(), discard), 'Cambios pedidos: autoriza la siguiente iteración')}>Pedir cambios</button>

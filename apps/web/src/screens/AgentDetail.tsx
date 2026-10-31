@@ -6,14 +6,14 @@ import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS, KNOWLEDGE_LABELS, TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
-import { Avatar, Chip, Icon, KV, Notice } from '../components/ui.tsx';
+import { Avatar, Chip, DraftNote, Icon, KV, Notice } from '../components/ui.tsx';
+import { draftKey, fingerprint, useDraft } from '../lib/persist.ts';
 
 export function AgentDetail() {
   const { agentId } = useParams();
   const { status, providers, flash, navigate } = useApp();
   const ws = status.workspace!;
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [draft, setDraft] = useState<AgentConfig | null>(null);
   const [newResp, setNewResp] = useState('');
   const [saving, setSaving] = useState(false);
   const [cc, setCc] = useState<ClaudeCodeStatusView | null>(null);
@@ -26,7 +26,7 @@ export function AgentDetail() {
   const load = () => api.agents(ws.slug).then(list => setAgents(list.filter(a => a.scope === 'workspace' || a.projectId === status.project?.id)));
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.slug]);
-  useEffect(() => { setDraft(null); setNewResp(''); }, [agentId]);
+  useEffect(() => { setNewResp(''); }, [agentId]);
   const [stats, setStats] = useState<{ steps: number; done: number; failed: number; costUsd: number; byRole: Record<string, number>; lastAt: string | null } | null>(null);
   useEffect(() => { if (agentId) api.agentStats(ws.slug, agentId).then(setStats).catch(() => setStats(null)); }, [agentId, ws.slug]);
   const [tpl, setTpl] = useState<Awaited<ReturnType<typeof api.agentTemplate>> | null>(null);
@@ -38,9 +38,16 @@ export function AgentDetail() {
   const changeVersion = async (v: string) => { if (!agentId) return; setTplBusy(true); try { await api.setAgentTemplateVersion(ws.slug, agentId, v); flash(`Agente ahora sigue ${v}`); setTplTo(''); loadTpl(); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setTplBusy(false); } };
 
   const agent = agents.find(a => a.id === agentId);
-  const cfg = draft ?? agent?.config ?? null;
-  const dirty = !!draft && !!agent && JSON.stringify(draft) !== JSON.stringify(agent.config);
-  const edit = (patch: Partial<AgentConfig>) => cfg && setDraft({ ...cfg, ...patch });
+  // Los cambios sin guardar sobreviven a recargar (por empresa y agente) y recuerdan de qué configuración partieron
+  // (`orig`): se muestran y se guardan SOLO los campos que cambiaste, sobre la configuración actual; lo que cambió
+  // mientras tanto (p. ej. el backend o la versión de plantilla) no se pisa.
+  const cfgDraft = useDraft<{ cfg: AgentConfig; orig: AgentConfig } | null>(draftKey('agente.config', ws.slug, agent ? agentId : null), null, { base: agent ? fingerprint(agent.config) : null });
+  const mine: Partial<AgentConfig> = cfgDraft.value ? Object.fromEntries((Object.keys(cfgDraft.value.cfg) as (keyof AgentConfig)[])
+    .filter(k => JSON.stringify(cfgDraft.value!.cfg[k]) !== JSON.stringify(cfgDraft.value!.orig[k])).map(k => [k, cfgDraft.value!.cfg[k]])) : {};
+  const cfg: AgentConfig | null = agent ? { ...agent.config, ...mine } : null;
+  const dirty = !!agent && JSON.stringify(cfg) !== JSON.stringify(agent.config);
+  const edit = (patch: Partial<AgentConfig>) => { if (agent) cfgDraft.set(d => ({ cfg: { ...(d?.cfg ?? agent.config), ...patch }, orig: d?.orig ?? agent.config })); };
+  const discardDraft = cfgDraft.clear;
 
   const prov = useMemo(() => providers.find(p => p.id === cfg?.provider), [providers, cfg?.provider]);
   const model = prov?.models.find(m => m.id === cfg?.model);
@@ -52,9 +59,9 @@ export function AgentDetail() {
   const wsScope = agent.scope === 'workspace';
 
   const save = async () => {
-    if (!dirty || !draft) return;
+    if (!dirty || !cfg) return;
     setSaving(true);
-    try { await api.updateAgentConfig(ws.slug, agent.id, draft); await load(); setDraft(null); flash(`Configuración de ${draft.name} guardada`); }
+    try { await api.updateAgentConfig(ws.slug, agent.id, cfg); await load(); discardDraft(); flash(`Configuración de ${cfg.name} guardada`); }
     catch (e: any) { flash(e.message, 'err'); } finally { setSaving(false); }
   };
   const applyBackend = async () => {
@@ -95,10 +102,11 @@ export function AgentDetail() {
             </div>
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
               {agent.templateId === 'tpl.custom@1' && <button className="btn btn-ghost" style={{ color: '#B3261E' }} disabled={saving} onClick={async () => { if (!confirm(`¿Eliminar el agente «${agent.config.name}»? Esta acción no se puede deshacer.`)) return; try { await api.deleteAgent(ws.slug, agent.id); flash('Agente eliminado'); navigate('/equipo'); } catch (e: any) { flash(e.message, 'err'); } }}>Eliminar</button>}
-              <button className="btn btn-ghost" onClick={() => setDraft(null)} disabled={!dirty || saving}>Descartar</button>
+              <button className="btn btn-ghost" onClick={discardDraft} disabled={!dirty || saving}>Descartar</button>
               <button className="btn btn-primary" onClick={save} disabled={!dirty || saving}>{saving ? 'Guardando…' : 'Guardar cambios'}</button>
             </div>
           </div>
+          <DraftNote status={dirty ? cfgDraft.status : 'idle'} stale={cfgDraft.stale} />
           {dirty && <Notice kind="warn">Hay cambios sin guardar. Al guardar se actualiza la configuración del agente en la base local del espacio; no se activa ni realiza ninguna llamada a modelos.</Notice>}
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(420px, 100%), 1fr))', gap: 20, alignItems: 'start' }}>

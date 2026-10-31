@@ -13,9 +13,14 @@ export function Knowledge() {
   const [docs, setDocs] = useState<KnowledgeDoc[] | null>(null);
   const [sel, setSel] = useState<string | null>(null);
   const [tab, setTab] = useState<'docs' | 'lessons'>(() => location.hash === '#lecciones' ? 'lessons' : 'docs');
-  // La pestaña vive en el hash: recargar o Atrás/Adelante la conservan.
-  const openTab = (t: 'docs' | 'lessons') => { setTab(t); window.history.replaceState(window.history.state, '', `${location.pathname}${location.search}${t === 'lessons' ? '#lecciones' : ''}`); };
-  useEffect(() => { api.knowledge(slug, projectId).then(d => { setDocs(d); setSel(d[0]?.id ?? null); }).catch(() => setDocs([])); }, [slug, projectId]);
+  // La pestaña (#lecciones) y el documento abierto (?doc=) viven en la URL: recargar o Atrás/Adelante los conservan.
+  const syncUrl = (t: 'docs' | 'lessons', docId: string | null) => {
+    const q = new URLSearchParams(location.search); if (docId) q.set('doc', docId); else q.delete('doc'); const qs = q.toString();
+    window.history.replaceState(window.history.state, '', `${location.pathname}${qs ? `?${qs}` : ''}${t === 'lessons' ? '#lecciones' : ''}`);
+  };
+  const openTab = (t: 'docs' | 'lessons') => { setTab(t); syncUrl(t, sel); };
+  const openDoc = (id: string) => { setSel(id); syncUrl(tab, id); };
+  useEffect(() => { api.knowledge(slug, projectId).then(d => { const want = new URLSearchParams(location.search).get('doc'); setDocs(d); setSel(d.some(x => x.id === want) ? want : d[0]?.id ?? null); }).catch(() => setDocs([])); }, [slug, projectId]);
   const doc = docs?.find(d => d.id === sel) ?? null;
 
   return (
@@ -30,7 +35,7 @@ export function Knowledge() {
         <aside style={{ flex: '1 1 280px', maxWidth: 340, borderRight: '1px solid #E5E3DC', padding: '16px 12px 24px', background: '#FAF9F6', display: 'flex', flexDirection: 'column', gap: 2 }}>
           <div className="side-sec">Documentos del proyecto · {docs?.length ?? 0}</div>
           {docs && docs.length === 0 && <Empty icon={Icon.book()} title="Sin documentos" hint="Los agentes guardarán aquí sus análisis y decisiones cuando ejecuten procesos autorizados." style={{ padding: '32px 8px' }} />}
-          {docs?.map(d => <button key={d.id} className={`rail-i ${d.id === sel ? 'is-active' : ''}`} onClick={() => setSel(d.id)} aria-pressed={d.id === sel}>
+          {docs?.map(d => <button key={d.id} className={`rail-i ${d.id === sel ? 'is-active' : ''}`} onClick={() => openDoc(d.id)} aria-pressed={d.id === sel}>
             <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}><span style={{ fontWeight: 500, fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{d.title}</span><span className="small muted">{d.authorAgentName ?? 'sistema'} · {new Date(d.createdAt).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}</span></span></button>)}
         </aside>
         <div className="page" style={{ flex: '999 1 560px', minWidth: 0, maxWidth: 'none' }}>

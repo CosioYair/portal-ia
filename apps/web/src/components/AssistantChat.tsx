@@ -136,16 +136,19 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
   // Los adjuntos no se guardan (pueden ser grandes o privados).
   const msgDraft = useDraft(draftKey('asistente.mensaje', convId ?? 'nueva'), '');
   const text = msgDraft.value; const setText = msgDraft.set;
-  // Un texto propuesto por otra pantalla se aplica una vez y sin pisar lo que ya escribiste.
-  useEffect(() => { if (initialText && !msgDraft.value.trim()) setText(initialText); // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialText]);
   const load = async (id: string | null = convId) => {
     const r = await api.assistant(id).catch(e => { if (id && e?.status === 404) return api.assistant(null); throw e; });
     setInfo(r.info); onInfo?.(r.info); setMsgs(r.messages); setConversations(r.conversations); setConvId(r.conversationId); setDetail(r.detail);
   };
 
-  useEffect(() => { load().catch(e => setError(e.message)); // eslint-disable-next-line react-hooks/exhaustive-deps
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => { load().catch(e => setError(e.message)).finally(() => setLoaded(true)); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // Un texto propuesto por otra pantalla se aplica una vez y sin pisar lo que ya escribiste, cuando ya se sabe en qué
+  // conversación (y en qué borrador) va: antes se aplicaba al borrador «nueva» y se perdía al cargar la conversación.
+  const appliedText = useRef<string | null>(null);
+  useEffect(() => { if (!loaded || !initialText || appliedText.current === initialText) return; appliedText.current = initialText; if (!msgDraft.value.trim()) setText(initialText); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, initialText]);
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [msgs.length, busy]);
   const unsettled = msgs.some(m => m.actions.some(a => a.live && !a.live.settled)) || !!detail?.artifacts.some(a => a.status === 'running');
   useEffect(() => { if (!unsettled) return; const t = setInterval(() => { load().catch(() => null); }, 10_000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
