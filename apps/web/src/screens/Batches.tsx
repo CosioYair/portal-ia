@@ -8,7 +8,8 @@ import { fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
 import { GAUNTLET_MODE } from '../components/Gauntlet.tsx';
 import { BatchStoryPicker, STATUS_LABEL } from '../components/BatchStoryPicker.tsx';
-import { Chip, Icon, Notice } from '../components/ui.tsx';
+import { Chip, DraftNote, Icon, Notice } from '../components/ui.tsx';
+import { draftKey, useDraft, usePersistentState } from '../lib/persist.ts';
 
 const STATUS: Record<BatchView['status'], { label: string; tone: '' | 'ok' | 'warn' | 'err' | 'accent' }> = {
   running: { label: 'en marcha', tone: 'accent' }, paused: { label: 'en pausa', tone: 'warn' }, completed: { label: 'terminado', tone: 'ok' }, cancelled: { label: 'cancelado', tone: '' }, revoked: { label: 'autorización revocada', tone: 'err' }
@@ -31,7 +32,9 @@ const when = (iso: string) => new Date(iso).toLocaleString('es-ES', { dateStyle:
 export function Batches() {
   const { status } = useApp();
   const ws = status.workspace!; const projectId = status.project!.id;
-  const [list, setList] = useState<BatchView[] | null>(null); const [creating, setCreating] = useState(false);
+  const [list, setList] = useState<BatchView[] | null>(null);
+  // El asistente abierto (y su borrador) sobreviven a recargar o ir a otra pantalla y volver.
+  const [creating, setCreating] = usePersistentState(`portal-ia.lotes.asistente.${ws.slug}.${projectId}`, false);
   const load = () => api.batches(ws.slug, projectId).then(setList).catch(() => setList([]));
   useEffect(() => { void load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [ws.slug, projectId]);
   const active = list?.find(b => b.status === 'running' || b.status === 'paused');
@@ -61,6 +64,9 @@ const ROLE: Record<string, string> = { planner: 'plan', consultant: 'consulta', 
 const range = (r: { min: number; max: number }) => r.min === r.max ? `${r.min}` : `${r.min}–${r.max}`;
 const minutes = (m: number) => m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`;
 
+/** Valores de un lote nuevo: nada facturable, ni integrar, activar, publicar ni ceder a la API. */
+const NEW_BATCH: Omit<BatchRequest, 'itemIds'> = { totalBudgetUsd: 5, perStoryBudgetUsd: 1.5, maxCorrections: 3, maxDurationMin: 240, maxSubscriptionCalls: 60, concurrency: 1, gauntlet: normalizeGauntlet({ mode: 'auto' }), backends: ['claude_code'], apiFallback: false, commands: ['typecheck', 'test', 'build'], allowInstall: false, git: { merge: false, activate: false, publish: false } };
+
 /**
  * Asistente del lote: historias (búsqueda, filtros y selección masiva para cientos), equipo y orígenes por agente,
  * límites, Gauntlet y operaciones git; a la derecha, un resumen persistente con la vista previa sin IA (se actualiza
@@ -71,9 +77,14 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const ws = status.workspace!; const projectId = status.project!.id;
   const internal = ws.slug === INTERNAL_WORKSPACE.slug;
   const [all, setAll] = useState<BacklogItem[] | null>(null);
-  const [sel, setSel] = useState<string[]>([]); const [custom, setCustom] = useState(false);
   // Valores seguros en CADA lote nuevo: la API (facturable), integrar, activar, publicar y ceder a la API, desmarcados.
-  const [req, setReq] = useState<Omit<BatchRequest, 'itemIds'>>({ totalBudgetUsd: 5, perStoryBudgetUsd: 1.5, maxCorrections: 3, maxDurationMin: 240, maxSubscriptionCalls: 60, concurrency: 1, gauntlet: normalizeGauntlet({ mode: 'auto' }), backends: ['claude_code'], apiFallback: false, commands: ['typecheck', 'test', 'build'], allowInstall: false, git: { merge: false, activate: false, publish: false } });
+  // El borrador (historias, orden, límites, Gauntlet, orígenes y preferencias git) se guarda en este navegador para esta
+  // empresa y este proyecto; la casilla de autorización NO: un borrador recuperado nunca autoriza nada.
+  const draft = useDraft(draftKey('lote', ws.slug, projectId), { sel: [] as string[], custom: false, req: NEW_BATCH }, { revive: d => ({ sel: Array.isArray(d.sel) ? d.sel : [], custom: !!d.custom, req: { ...NEW_BATCH, ...d.req } }) });
+  const { sel, custom, req } = draft.value;
+  const setSel = (f: string[] | ((s: string[]) => string[])) => draft.set(d => ({ ...d, sel: typeof f === 'function' ? f(d.sel) : f }));
+  const setCustom = (c: boolean) => draft.set(d => ({ ...d, custom: c }));
+  const setReq = (f: (r: typeof req) => typeof req) => draft.set(d => ({ ...d, req: f(d.req) }));
   const [preview, setPreview] = useState<BatchPreview | null>(null); const [fresh, setFresh] = useState(false);
   const [ok, setOk] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
   const [editDep, setEditDep] = useState<{ id: string; value: string } | null>(null);
@@ -106,7 +117,11 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
     }, 350);
     return () => clearTimeout(t);
   }, [sel, req, ws.slug, projectId]);
-  const authorize = async () => { setBusy(true); setErr(null); try { const b = await api.createBatch(ws.slug, projectId, { ...req, itemIds: sel }); flash(`Lote autorizado: ${b.items.length} historia(s)`); onCreated(); navigate(`/lotes/${b.id}`); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
+  // Un borrador recuperado puede nombrar historias que ya no se pueden elegir (terminadas, en curso…): se retiran.
+  useEffect(() => { if (all) { const ok0 = new Set(all.filter(i => !['in_progress', 'review', 'done', 'discarded'].includes(i.status)).map(i => i.id)); if (sel.some(id => !ok0.has(id))) setSel(s => s.filter(id => ok0.has(id))); } // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [all]);
+  // Autorizado: el borrador cumplió su función y se borra (el siguiente lote empieza con los valores seguros).
+  const authorize = async () => { setBusy(true); setErr(null); try { const b = await api.createBatch(ws.slug, projectId, { ...req, itemIds: sel }); draft.clear(); flash(`Lote autorizado: ${b.items.length} historia(s)`); onCreated(); navigate(`/lotes/${b.id}`); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
   const num = (k: 'totalBudgetUsd' | 'perStoryBudgetUsd' | 'maxCorrections' | 'maxDurationMin' | 'maxSubscriptionCalls' | 'concurrency', label: string, min: number, max: number, step = 1) =>
     <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>{label}<input className="input mono" type="number" min={min} max={max} step={step} value={req[k] as number} onChange={e => set({ [k]: Math.max(min, Math.min(max, Number(e.target.value) || min)) } as any)} style={{ height: 32 }} /></label>;
   const g = req.git ?? {};
@@ -123,12 +138,14 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
     <section className="card" data-testid="batch-wizard">
       <div className="card-h"><div className="h3">Nuevo lote</div><button className="xbtn" onClick={onClose} aria-label="Cerrar">{Icon.x(16)}</button></div>
       <div className="card-b">
+        <DraftNote status={draft.status} onDiscard={draft.clear} />
+        {draft.status === 'restored' && (g.merge || g.publish || g.activate || req.backends?.includes('api') || req.apiFallback || req.allowInstall) && <Notice kind="warn">El borrador recuperado tiene marcado: {[g.merge && 'integrar en main', g.activate && 'reconstruir y reiniciar', g.publish && 'publicar en GitHub', req.backends?.includes('api') && 'la API (facturable)', req.apiFallback && 'ceder a la API', req.allowInstall && 'instalar con red'].filter(Boolean).join(', ')}. Son preferencias guardadas, no permisos: revísalas; nada se hace hasta que marques la casilla de autorización.</Notice>}
         <div className="bw-layout">
           <div className="bw-main">
             <div className="bw-section">
               <div className="eyebrow">1 · Historias</div>
               {!all ? <span className="spin" /> : !items.some(i => i.status === 'pending' || i.status === 'blocked') ? <div className="small muted">No hay historias pendientes en el backlog.</div> :
-                <BatchStoryPicker items={items} owners={owners} selected={sel} onAdd={add} onRemove={remove} onClear={() => setSel([])} />}
+                <BatchStoryPicker items={items} owners={owners} selected={sel} onAdd={add} onRemove={remove} onClear={() => setSel([])} persistKey={`portal-ia.lote.filtros.${ws.slug}.${projectId}`} />}
               {sel.length > 0 && <details open={sel.length <= 12} data-testid="batch-order">
                 <summary className="small" style={{ cursor: 'pointer' }}><strong>Orden de la selección ({sel.length})</strong> · {custom ? 'orden manual' : 'orden del backlog (su prioridad)'}; el plan pone siempre las dependencias antes</summary>
                 <div className="small muted" style={{ display: 'flex', gap: 8, margin: '6px 0', alignItems: 'center', flexWrap: 'wrap' }}>{custom && <button type="button" className="btn btn-ghost btn-sm" onClick={resetOrder}>Volver al orden del backlog</button>}<span>Cambiar «depende de» se guarda en la historia del backlog (también para lotes futuros), aunque no autorices este lote.</span></div>
@@ -258,12 +275,20 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
 
 /** Monitor del lote y revisión de aceptación (una o varias), con pausa, reanudación, cancelación y revocación. */
 export function BatchDetail() {
+  const { batchId } = useParams();
+  // Una pantalla por lote: confirmaciones, selección para aceptar y comprobaciones nunca pasan de un lote a otro.
+  return <BatchDetailOf key={batchId} batchId={batchId!} />;
+}
+
+function BatchDetailOf({ batchId }: { batchId: string }) {
   const { status, flash } = useApp();
-  const ws = status.workspace!; const { batchId } = useParams();
+  const ws = status.workspace!;
   const [b, setB] = useState<BatchView | null>(null); const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false); const [addBudget, setAddBudget] = useState('0'); const [addCalls, setAddCalls] = useState('0'); const [resumeOk, setResumeOk] = useState(false);
   const [revoking, setRevoking] = useState(false); const [revokeReason, setRevokeReason] = useState(''); const [cancelling, setCancelling] = useState(false);
-  const [picked, setPicked] = useState<string[]>([]); const [checks, setChecks] = useState<Record<string, boolean[]>>({}); const [note, setNote] = useState('');
+  const [picked, setPicked] = useState<string[]>([]); const [checks, setChecks] = useState<Record<string, boolean[]>>({});
+  // La nota de aceptación a medias se conserva (por lote); lo que marcas para aceptar, no: es una comprobación tuya, no un borrador.
+  const noteDraft = useDraft(draftKey('lote.aceptacion', ws.slug, batchId), ''); const note = noteDraft.value; const setNote = noteDraft.set;
   const load = () => api.batch(ws.slug, batchId!).then(x => { setB(x); setErr(null); }).catch(e => setErr(e.message));
   useEffect(() => { void load(); const t = setInterval(load, 3000); return () => clearInterval(t); }, [ws.slug, batchId]);
   const act = async (fn: () => Promise<BatchView>, ok: string) => { setBusy(true); try { setB(await fn()); flash(ok); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
@@ -312,7 +337,7 @@ export function BatchDetail() {
             <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {gr.states.includes('awaiting_acceptance') && <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                 <input className="input" placeholder="Nota de aceptación (opcional)" value={note} onChange={e => setNote(e.target.value)} style={{ flex: '1 1 260px', height: 32 }} />
-                <button className="btn btn-primary btn-sm" disabled={!picked.length || busy} onClick={() => { const ids = picked; setPicked([]); void act(() => api.acceptBatchItems(ws.slug, b.id, ids, note, Object.fromEntries(ids.filter(id => checks[id]).map(id => [id, checks[id]]))), `${ids.length} historia(s) aceptada(s)`); }}>{Icon.check()}Aceptar seleccionadas ({picked.length})</button>
+                <button className="btn btn-primary btn-sm" disabled={!picked.length || busy} onClick={() => { const ids = picked; setPicked([]); void act(async () => { const r = await api.acceptBatchItems(ws.slug, b.id, ids, note, Object.fromEntries(ids.filter(id => checks[id]).map(id => [id, checks[id]]))); noteDraft.clear(); return r; }, `${ids.length} historia(s) aceptada(s)`); }}>{Icon.check()}Aceptar seleccionadas ({picked.length})</button>
               </div>}
               {its.map(it => <ItemCard key={it.itemId} slug={ws.slug} b={b} it={it} picked={picked.includes(it.itemId)} onPick={v => setPicked(p => v ? [...p, it.itemId] : p.filter(x => x !== it.itemId))} checks={checks[it.itemId]} onChecks={c => setChecks(x => ({ ...x, [it.itemId]: c }))} onChange={setB} busy={busy} />)}
             </div>
@@ -330,9 +355,12 @@ export function BatchDetail() {
 
 function ItemCard({ slug, b, it, picked, onPick, checks, onChecks, onChange, busy }: { slug: string; b: BatchView; it: BatchItemView; picked: boolean; onPick: (v: boolean) => void; checks?: boolean[]; onChecks: (c: boolean[]) => void; onChange: (b: BatchView) => void; busy: boolean }) {
   const { flash } = useApp();
-  const [mode, setMode] = useState<'reject' | 'iterate' | 'retry' | null>(null); const [text, setText] = useState(''); const [auth, setAuth] = useState(false);
+  // El formulario abierto (no aceptar, iterar, reintentar) y su texto se conservan por historia; la casilla «Autorizo…» no.
+  const itemDraft = useDraft(draftKey('lote.historia', slug, b.id, it.itemId), { mode: null as 'reject' | 'iterate' | 'retry' | null, text: '' });
+  const { mode, text } = itemDraft.value; const setMode = (m: typeof mode) => itemDraft.set(d => ({ ...d, mode: m })); const setText = (t: string) => itemDraft.set(d => ({ ...d, text: t }));
+  const [auth, setAuth] = useState(false);
   const p = it.process; const steps = p?.manualTest?.steps ?? []; const c = checks ?? steps.map(() => false);
-  const run = async (fn: () => Promise<BatchView>, ok: string) => { try { onChange(await fn()); flash(ok); setMode(null); setText(''); setAuth(false); } catch (e: any) { flash(e.message, 'err'); } };
+  const run = async (fn: () => Promise<BatchView>, ok: string) => { try { onChange(await fn()); flash(ok); itemDraft.clear(); setAuth(false); } catch (e: any) { flash(e.message, 'err'); } };
   const canIterate = ['rejected', 'needs_owner', 'failed', 'awaiting_acceptance', 'awaiting_integration'].includes(it.state) && b.status !== 'cancelled' && b.status !== 'revoked';
   // Sin trabajo que conservar (no llegó a empezar o su proceso falló): se puede reintentar con los límites del lote.
   const canRetry = (it.state === 'needs_owner' || it.state === 'failed') && (!p || p.status === 'cancelled' || p.status === 'failed') && b.status !== 'cancelled' && b.status !== 'revoked';

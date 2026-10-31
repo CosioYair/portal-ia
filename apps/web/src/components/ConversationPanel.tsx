@@ -4,7 +4,8 @@ import { STAGE_LABEL, type AssistantConversation, type ConversationDecision, typ
 import { api, type AssignmentAuthPreview, type AssignmentView, type AssistantAction, type AssistantMessage, type ConversationArtifactView, type ConversationDetailView, type UsageGateView } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
-import { Chip, Icon, Notice } from './ui.tsx';
+import { Chip, DraftNote, Icon, Notice } from './ui.tsx';
+import { draftKey, fingerprint, useDraft } from '../lib/persist.ts';
 import { Markdown } from './Markdown.tsx';
 
 /**
@@ -131,10 +132,12 @@ function ArtifactCard({ conversationId, a, onChanged }: { conversationId: string
 
 function DecisionRow({ conversationId, d, onChanged }: { conversationId: string; d: ConversationDecision; onChanged: () => void }) {
   const { flash } = useApp();
-  const [answer, setAnswer] = useState(d.answer ?? d.recommendation ?? '');
+  // Respuesta a medias: borrador por conversación y decisión mientras está abierta; si la decisión cambió, se ofrece sin aplicarlo.
+  const answerDraft = useDraft(draftKey('decision', conversationId, d.status === 'open' ? d.id : null), d.answer ?? d.recommendation ?? '', { base: fingerprint([d.status, d.answer]) });
+  const answer = answerDraft.value; const setAnswer = answerDraft.set;
   const [editing, setEditing] = useState(false); const [busy, setBusy] = useState(false);
   const run = async (action: 'approve' | 'reject' | 'defer' | 'revise' | 'reopen', body: { answer?: string | null; note?: string | null } = {}) => {
-    setBusy(true); try { await api.decideDecision(conversationId, d.id, action, body); setEditing(false); onChanged(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); }
+    setBusy(true); try { await api.decideDecision(conversationId, d.id, action, body); setEditing(false); answerDraft.clear(); onChanged(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); }
   };
   return <div className="card" style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }} data-testid={`decision-${d.seq}`}>
     <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', justifyContent: 'space-between' }}>
@@ -204,17 +207,23 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
   const { flash } = useApp();
   const [a, setA] = useState<AssignmentView | null>(initial ?? null);
   const [pre, setPre] = useState<AssignmentAuthPreview | null>(null);
-  const [budget, setBudget] = useState(''); const [calls, setCalls] = useState(''); const [mode, setMode] = useState<'' | 'off' | 'standard' | 'deep'>(''); // '' = lo que resuelve el Portal (la vista previa)
-  const [ok, setOk] = useState(false); const [note, setNote] = useState(''); const [discard, setDiscard] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
+  // Borrador de la tarjeta (solo lo que TÚ escribes: límites, Gauntlet y la nota para pedir cambios). Sin valor propio se
+  // muestra lo que sugiere el Portal. Las casillas «Autorizo…» y «descarto…» nunca se guardan.
+  const cardDraft = useDraft(draftKey('encargo', slug, assignmentId), { budget: '', calls: '', mode: '' as '' | 'off' | 'standard' | 'deep', note: '' });
+  const { mode, note } = cardDraft.value; // mode '' = lo que resuelve el Portal (la vista previa)
+  const budget = cardDraft.value.budget || (pre ? pre.suggestedBudgetUsd.toFixed(2) : ''); const calls = cardDraft.value.calls || (pre ? String(pre.suggestedSubscriptionCalls) : '');
+  const setBudget = (v: string) => cardDraft.set(d => ({ ...d, budget: v })); const setCalls = (v: string) => cardDraft.set(d => ({ ...d, calls: v }));
+  const setMode = (v: '' | 'off' | 'standard' | 'deep') => cardDraft.set(d => ({ ...d, mode: v })); const setNote = (v: string) => cardDraft.set(d => ({ ...d, note: v }));
+  const [ok, setOk] = useState(false); const [discard, setDiscard] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
   const load = () => api.assignment(slug, assignmentId).then(setA).catch(e => setErr(e.message));
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, assignmentId]);
   const authorizable = !!a && ['draft', 'changes_requested', 'needs_owner', 'failed'].includes(a.status);
-  useEffect(() => { if (!authorizable || pre) return; api.assignmentAuthorization(slug, assignmentId).then(p => { setPre(p); setBudget(p.suggestedBudgetUsd.toFixed(2)); setCalls(String(p.suggestedSubscriptionCalls)); }).catch(e => setErr(e.message)); }, [authorizable, pre, slug, assignmentId]);
+  useEffect(() => { if (!authorizable || pre) return; api.assignmentAuthorization(slug, assignmentId).then(p => { setPre(p); }).catch(e => setErr(e.message)); }, [authorizable, pre, slug, assignmentId]);
   useEffect(() => { if (a?.status !== 'running') return; const t = setInterval(() => void load(), 8000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [a?.status]);
   if (!a) return err ? <Notice kind="err">{err}</Notice> : null;
-  const act = async (fn: () => Promise<unknown>, msg: string) => { setBusy(true); setErr(null); try { await fn(); flash(msg); setOk(false); setNote(''); setDiscard(false); setPre(null); await load(); onChanged?.(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
+  const act = async (fn: () => Promise<unknown>, msg: string) => { setBusy(true); setErr(null); try { await fn(); flash(msg); setOk(false); cardDraft.clear(); setDiscard(false); setPre(null); await load(); onChanged?.(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
   const link = a.process ? `/empresa/${slug}/procesos/${a.process.id}` : null;
   return <div className="card" style={{ borderColor: authorizable ? '#F0C66B' : undefined }} data-testid={`assignment-${a.code}`}>
     <div className="card-h" style={{ alignItems: 'flex-start', gap: 8 }}>

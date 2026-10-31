@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { usePersistentState } from '../lib/persist.ts';
 import type { BacklogItem, BacklogStatus } from '@portal-ia/domain';
 import { BATCH_LIMITS } from '@portal-ia/domain';
 import { Chip } from './ui.tsx';
@@ -21,7 +22,7 @@ type DepFilter = 'all' | 'with' | 'without' | 'missing';
 type Sort = 'backlog' | 'id' | 'size';
 const SIZE_RANK: Record<string, number> = { S: 0, M: 1, L: 2 };
 
-export function BatchStoryPicker({ items, owners, selected, onAdd, onRemove, onClear }: {
+export function BatchStoryPicker({ items, owners, selected, onAdd, onRemove, onClear, persistKey }: {
   /** Historias activas del proyecto, en el orden del backlog (su prioridad). */
   items: BacklogItem[];
   /** Nombre del responsable por su clave (agente), para el filtro. */
@@ -30,10 +31,14 @@ export function BatchStoryPicker({ items, owners, selected, onAdd, onRemove, onC
   onAdd: (ids: string[]) => void;
   onRemove: (ids: string[]) => void;
   onClear: () => void;
+  /** Clave (por empresa y proyecto) para conservar búsqueda, filtros y orden entre recargas. */
+  persistKey?: string;
 }) {
-  const [q, setQ] = useState(''); const [status, setStatus] = useState<StatusFilter>('eligible');
-  const [size, setSize] = useState<SizeFilter>('all'); const [dep, setDep] = useState<DepFilter>('all'); const [onlySel, setOnlySel] = useState(false);
-  const [owner, setOwner] = useState('all'); const [sort, setSort] = useState<Sort>('backlog');
+  const [f, setF] = usePersistentState(persistKey ?? 'portal-ia.lote.filtros', { q: '', status: 'eligible' as StatusFilter, size: 'all' as SizeFilter, dep: 'all' as DepFilter, onlySel: false, owner: 'all', sort: 'backlog' as Sort });
+  const { q, status, size, dep, onlySel, owner, sort } = f;
+  const setQ = (v: string) => setF(x => ({ ...x, q: v })); const setStatus = (v: StatusFilter) => setF(x => ({ ...x, status: v }));
+  const setSize = (v: SizeFilter) => setF(x => ({ ...x, size: v })); const setDep = (v: DepFilter) => setF(x => ({ ...x, dep: v })); const setOnlySel = (v: boolean) => setF(x => ({ ...x, onlySel: v }));
+  const setOwner = (v: string) => setF(x => ({ ...x, owner: v })); const setSort = (v: Sort) => setF(x => ({ ...x, sort: v }));
   const [page, setPage] = useState(0); const anchor = useRef<string | null>(null); const [note, setNote] = useState<string | null>(null);
   const sel = useMemo(() => new Set(selected), [selected]);
   const byStory = useMemo(() => new Map(items.map(i => [i.storyId, i])), [items]);

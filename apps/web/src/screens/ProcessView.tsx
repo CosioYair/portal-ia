@@ -36,6 +36,11 @@ function procLabel(p: Process) {
 
 export function ProcessView() {
   const { processId } = useParams();
+  // Una pantalla por proceso: al pasar a otro, ni la autorización ni el presupuesto marcados se arrastran.
+  return <ProcessViewOf key={processId} processId={processId!} />;
+}
+
+function ProcessViewOf({ processId }: { processId: string }) {
   const { status, flash, navigate } = useApp();
   const slug = status.workspace!.slug;
   const [proc, setProc] = useState<Process | null>(null);

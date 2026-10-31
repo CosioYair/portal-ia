@@ -73,6 +73,8 @@ export function ManualTestStepList({ steps, checks, initialFeedback, onSave, onC
     for (const k of Array.from(dirty.current)) { dirty.current.delete(k); void persist(k, draftsRef.current[k] ?? EMPTY); }
     await Promise.all(Array.from(inflight.current));
   }, [persist]);
+  // Un comentario a medio escribir se guarda también al salir de la pantalla o al recargar (no solo al perder el foco).
+  useEffect(() => { const h = () => { void flush(); }; window.addEventListener('pagehide', h); return () => { window.removeEventListener('pagehide', h); void flush(); }; }, [flush]);
 
   const pick = (stepKey: string, value: ManualTestResult) => {
     const cur = drafts[stepKey] ?? EMPTY;

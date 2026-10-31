@@ -6,7 +6,8 @@ import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS, KNOWLEDGE_LABELS, TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
-import { Chip, Icon, Notice } from '../components/ui.tsx';
+import { Chip, DraftNote, Icon, Notice } from '../components/ui.tsx';
+import { draftKey, useDraft } from '../lib/persist.ts';
 
 /** Alta de un agente especializado. Manual, o con propuesta del Agente de Onboarding (1 llamada real autorizada). */
 export function AgentCreate() {
@@ -17,23 +18,25 @@ export function AgentCreate() {
   useEffect(() => { api.agents(ws.slug).then(list => setAgents(list.filter(a => a.scope === 'workspace' || a.projectId === status.project?.id))); }, [ws.slug, status.project?.id]);
 
   const defaultProvider = connected[0];
-  const [scope, setScope] = useState<Scope>('project');
-  const [name, setName] = useState('');
-  const [role, setRole] = useState('');
-  const [reportsTo, setReportsTo] = useState<string>('pj-coordinador');
-  const [collab, setCollab] = useState<string[]>([]);
-  const [evaluation, setEvaluation] = useState<string[]>(['', '', '']);
-  const [cfg, setCfg] = useState<AgentConfig>({
-    name: '', specialization: '', responsibilities: [], provider: (defaultProvider?.id ?? 'anthropic') as ProviderId,
-    model: defaultProvider?.defaultModel ?? defaultProvider?.models[0]?.id ?? '', fallbacks: [], effort: 'medium', tools: { delegate: true }, knowledge: { objectives: true, context: true }, capabilities: ['consultar'],
-    monthlyLimitUsd: 20, perTaskAuthUsd: 2
+  // Borrador del agente nuevo (por empresa y proyecto): sobrevive a recargar. La autorización de la propuesta con IA, no.
+  const formDraft = useDraft(draftKey('agente.nuevo', ws.slug, project.id), {
+    scope: 'project' as Scope, name: '', role: '', reportsTo: 'pj-coordinador', collab: [] as string[], evaluation: ['', '', ''], desc: '',
+    cfg: {
+      name: '', specialization: '', responsibilities: [], provider: (defaultProvider?.id ?? 'anthropic') as ProviderId,
+      model: defaultProvider?.defaultModel ?? defaultProvider?.models[0]?.id ?? '', fallbacks: [], effort: 'medium', tools: { delegate: true }, knowledge: { objectives: true, context: true }, capabilities: ['consultar'],
+      monthlyLimitUsd: 20, perTaskAuthUsd: 2
+    } as AgentConfig
   });
+  type Form = typeof formDraft.value;
+  const field = <K extends keyof Form>(k: K) => (v: Form[K] | ((p: Form[K]) => Form[K])) => formDraft.set(d => ({ ...d, [k]: typeof v === 'function' ? (v as (p: Form[K]) => Form[K])(d[k]) : v }));
+  const { scope, name, role, reportsTo, collab, evaluation, cfg, desc } = formDraft.value;
+  const setScope = field('scope'); const setName = field('name'); const setRole = field('role'); const setReportsTo = field('reportsTo');
+  const setCollab = field('collab'); const setEvaluation = field('evaluation'); const setCfg = field('cfg'); const setDesc = field('desc');
   const [newResp, setNewResp] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Propuesta con IA
-  const [desc, setDesc] = useState('');
   const [est, setEst] = useState<{ model: string; byAgent: string; estimatedUsd: number } | null>(null);
   const [auth, setAuth] = useState(false);
   const [drafting, setDrafting] = useState(false);
@@ -70,7 +73,7 @@ export function AgentCreate() {
         scope, projectId: scope === 'project' ? project.id : null, name: name.trim(), role: role.trim(), reportsTo, collaborates: collab,
         evaluation: evaluation.map(e => e.trim()).filter(Boolean), config: { ...cfg, name: name.trim(), responsibilities: cfg.responsibilities.filter(Boolean) }
       });
-      flash(`Agente «${a.config.name}» creado · inactivo`); navigate(`/equipo/${a.id}`);
+      formDraft.clear(); flash(`Agente «${a.config.name}» creado · inactivo`); navigate(`/equipo/${a.id}`);
     } catch (e: any) { setError(e.message); } finally { setSaving(false); }
   };
 
@@ -79,6 +82,7 @@ export function AgentCreate() {
   return (
     <Shell crumb={<>Equipo de IA / Nuevo agente</>}>
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <DraftNote status={formDraft.status === 'restored' || formDraft.status === 'error' ? formDraft.status : 'idle'} onDiscard={formDraft.clear} />
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <Link className="lnk sm13" to="/equipo">← Equipo de IA</Link>

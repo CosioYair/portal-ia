@@ -13,6 +13,8 @@ export function Knowledge() {
   const [docs, setDocs] = useState<KnowledgeDoc[] | null>(null);
   const [sel, setSel] = useState<string | null>(null);
   const [tab, setTab] = useState<'docs' | 'lessons'>(() => location.hash === '#lecciones' ? 'lessons' : 'docs');
+  // La pestaña vive en el hash: recargar o Atrás/Adelante la conservan.
+  const openTab = (t: 'docs' | 'lessons') => { setTab(t); window.history.replaceState(window.history.state, '', `${location.pathname}${location.search}${t === 'lessons' ? '#lecciones' : ''}`); };
   useEffect(() => { api.knowledge(slug, projectId).then(d => { setDocs(d); setSel(d[0]?.id ?? null); }).catch(() => setDocs([])); }, [slug, projectId]);
   const doc = docs?.find(d => d.id === sel) ?? null;
 
@@ -20,8 +22,8 @@ export function Knowledge() {
     <Shell crumb="Conocimiento">
       <main style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
         <div style={{ display: 'flex', gap: 6, padding: '12px 24px 0', borderBottom: '1px solid #E5E3DC' }}>
-          <button className={`btn btn-sm ${tab === 'docs' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setTab('docs')}>Documentos</button>
-          <button className={`btn btn-sm ${tab === 'lessons' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setTab('lessons')}>Lecciones de la organización</button>
+          <button className={`btn btn-sm ${tab === 'docs' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => openTab('docs')}>Documentos</button>
+          <button className={`btn btn-sm ${tab === 'lessons' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => openTab('lessons')}>Lecciones de la organización</button>
         </div>
         {tab === 'lessons' && <div className="page" style={{ maxWidth: 'none' }}><LessonsPanel projectId={projectId} /></div>}
         {tab === 'docs' && <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'stretch', flex: 1 }}>

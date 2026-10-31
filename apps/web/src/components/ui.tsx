@@ -46,6 +46,17 @@ export function Notice({ kind, children }: { kind: 'info' | 'ok' | 'warn' | 'err
   return <div className={`notice notice-${kind}`} role={kind === 'err' ? 'alert' : undefined}>{icon}<div>{children}</div></div>;
 }
 
+/**
+ * Estado del borrador de un formulario, discreto: nunca dice «guardado» si no se pudo guardar. Un borrador recuperado
+ * se puede descartar; uno de una versión anterior del dato se ofrece sin aplicarlo.
+ */
+export function DraftNote({ status, onDiscard, stale }: { status: 'idle' | 'restored' | 'unsaved' | 'saved' | 'error'; onDiscard?: () => void; stale?: { at: number; recover: () => void; discard: () => void } | null }) {
+  if (stale) return <div className="small muted" data-testid="draft-stale" role="status">Hay un borrador tuyo de una versión anterior ({new Date(stale.at).toLocaleString()}). <button type="button" className="lnk small" onClick={stale.recover}>Recuperarlo</button> · <button type="button" className="lnk small" onClick={stale.discard}>Descartarlo</button></div>;
+  const text = status === 'restored' ? 'Borrador recuperado' : status === 'saved' ? 'Borrador guardado' : status === 'unsaved' ? 'Cambios sin guardar' : status === 'error' ? 'No se pudo guardar; tus cambios siguen en esta pantalla' : null;
+  if (!text) return null;
+  return <div className="small muted" data-testid="draft-status" role="status" style={{ color: status === 'error' ? 'var(--err, #B42318)' : undefined }}>{text}{status === 'restored' && onDiscard ? <> · <button type="button" className="lnk small" onClick={onDiscard}>Descartar borrador</button></> : null}</div>;
+}
+
 export function Stepper({ s1, s2, s3 }: { s1: string; s2: string; s3: string }) {
   return <nav className="stepper" aria-label="Progreso de la configuración">
     <div className={`step ${s1}`}><span className="step-n mono">1</span><span>Proveedor de IA</span></div>

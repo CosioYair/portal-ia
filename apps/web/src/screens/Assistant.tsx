@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import type { AssistantInfo } from '../lib/api.ts';
 import { fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
@@ -10,7 +10,11 @@ import { AssistantChat } from '../components/AssistantChat.tsx';
 export function Assistant() {
   const [info, setInfo] = useState<AssistantInfo | null>(null);
   const [pending, setPending] = useState(0);
-  const draft = (useLocation().state as { draft?: string } | null)?.draft;
+  // El texto que otra pantalla propone se toma UNA vez y se retira del historial: recargar no vuelve a pisar lo escrito.
+  const loc = useLocation(); const navigate = useNavigate();
+  const [draft] = useState(() => (loc.state as { draft?: string } | null)?.draft);
+  useEffect(() => { if ((loc.state as { draft?: string } | null)?.draft) navigate(`${loc.pathname}${loc.search}${loc.hash}`, { replace: true, state: null }); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const pct = info ? Math.min(100, Math.round((info.spentThisMonthUsd / Math.max(0.01, info.monthlyLimitUsd)) * 100)) : 0;
   return (
     <Shell crumb="Asistente">

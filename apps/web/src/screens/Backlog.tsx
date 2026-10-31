@@ -9,6 +9,7 @@ import { useApp } from '../lib/store.ts';
 import { BACKLOG_STATUS, fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Chip, Icon, Notice } from '../components/ui.tsx';
+import { draftKey, useDraft, usePersistentState } from '../lib/persist.ts';
 import { TeamReady } from '../components/TeamReady.tsx';
 
 const DECISION_CTA: Record<PendingDecisionKind, string> = {
@@ -41,20 +42,26 @@ export function Backlog() {
   const [auth, setAuth] = useState(false);
   const [pipeline, setPipeline] = useState<PipelineConfig>(DEFAULT_PIPELINE);
   const [busy, setBusy] = useState(false);
-  const [newTitle, setNewTitle] = useState('');
-  const [newCrit, setNewCrit] = useState('');
+  // Borradores (por empresa y proyecto): la solicitud nueva y el análisis pedido al equipo sobreviven a recargar.
+  const newDraft = useDraft(draftKey('backlog.nueva', ws.slug, projectId), { title: '', crit: '' });
+  const newTitle = newDraft.value.title; const newCrit = newDraft.value.crit;
+  const setNewTitle = (v: string) => newDraft.set(d => ({ ...d, title: v })); const setNewCrit = (v: string) => newDraft.set(d => ({ ...d, crit: v }));
   const [aiOffer, setAiOffer] = useState<{ source: string; model: string | null; byAgent: string | null; estimatedUsd: number } | null>(null);
   const [skipQa, setSkipQa] = useState(false);
   const [teamAdd, setTeamAdd] = useState<string[]>([]);
   const [teamRemove, setTeamRemove] = useState<string[]>([]);
-  const [q, setQ] = useState('');
-  const [filter, setFilter] = useState<'open' | 'all' | 'done' | 'discarded'>('open');
-  const [openSec, setOpenSec] = useState<Record<string, boolean>>(() => { try { return JSON.parse(localStorage.getItem('portal-ia.backlog.sec') ?? '{}'); } catch { return {}; } });
-  const toggleSec = (k: string) => setOpenSec(o => { const n = { ...o, [k]: !(o[k] ?? true) }; try { localStorage.setItem('portal-ia.backlog.sec', JSON.stringify(n)); } catch { /* sin almacenamiento */ } return n; });
+  // Búsqueda, filtro y secciones abiertas: por proyecto (antes las secciones eran comunes a todos los proyectos).
+  const [q, setQ] = usePersistentState(`portal-ia.backlog.busqueda.${ws.slug}.${projectId}`, '');
+  const [filter, setFilter] = usePersistentState<'open' | 'all' | 'done' | 'discarded'>(`portal-ia.backlog.filtro.${ws.slug}.${projectId}`, 'open');
+  const [openSec, setOpenSec] = usePersistentState<Record<string, boolean>>(`portal-ia.backlog.sec.${ws.slug}.${projectId}`, {});
+  const toggleSec = (k: string) => setOpenSec(o => ({ ...o, [k]: !(o[k] ?? true) }));
 
   const load = async () => {
     const [b, a, p, ps, ph] = await Promise.all([api.backlog(ws.slug, projectId), api.agents(ws.slug), api.processes(ws.slug, projectId), api.projects(ws.slug), api.phase(ws.slug, projectId).catch(() => null)]);
     setItems(b); setAgents(a); setProcs(p); setProject(ps[0] ?? null); setPhase(ph?.current ?? null);
+    // Enlace directo «/backlog?ejecutar=<id>» (p. ej. desde la historia): abre su diálogo, que sigue pidiendo tu autorización.
+    const want = new URLSearchParams(location.search).get('ejecutar'); const target = want ? b.find(i => i.id === want && (i.status === 'pending' || i.status === 'blocked')) : null;
+    if (want) { navigate(`${location.pathname}${location.hash}`, { replace: true }); if (target) setSel(target); }
     void api.inbox(ws.slug).then(d => { setInbox(d); setInboxErr(null); }).catch((e: any) => setInboxErr(e.message));
   };
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -77,15 +84,15 @@ export function Backlog() {
       await load();
     } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); }
   };
-  const addItem = async () => { if (newTitle.trim().length < 3) return; setBusy(true); try { await api.addBacklogItem(ws.slug, projectId, { title: newTitle.trim(), criterion: newCrit.trim() || undefined }); setNewTitle(''); setNewCrit(''); flash('Solicitud añadida al backlog'); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
+  const addItem = async () => { if (newTitle.trim().length < 3) return; setBusy(true); try { await api.addBacklogItem(ws.slug, projectId, { title: newTitle.trim(), criterion: newCrit.trim() || undefined }); newDraft.clear(); flash('Solicitud añadida al backlog'); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   const execute = async () => {
     if (!sel || !auth) return; setBusy(true); setExecError(null);
     try { const p = await api.executeStory(ws.slug, projectId, sel.id, skipQa, { add: teamAdd, remove: teamRemove }); const a = await api.authorizeProcess(ws.slug, p.id, Number(budget), pipeline); flash(`Historia ${sel.storyId} en ejecución · presupuesto ${fmtUsd(a.budgetUsd)}`); navigate(`/procesos/${a.id}`); }
     catch (e: any) { setExecError(e.message); flash(e.message, 'err'); } finally { setBusy(false); }
   };
 
-  const [delegText, setDelegText] = useState('');
-  const delegate = async () => { if (delegText.trim().length < 8) return; setBusy(true); try { const p = await api.createDelegation(ws.slug, { projectId, request: delegText.trim() }); setDelegText(''); flash('Encargo creado: autorízalo con un presupuesto'); navigate(`/procesos/${p.id}`); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
+  const delegDraft = useDraft(draftKey('backlog.analisis', ws.slug, projectId), ''); const delegText = delegDraft.value; const setDelegText = delegDraft.set;
+  const delegate = async () => { if (delegText.trim().length < 8) return; setBusy(true); try { const p = await api.createDelegation(ws.slug, { projectId, request: delegText.trim() }); delegDraft.clear(); flash('Encargo creado: autorízalo con un presupuesto'); navigate(`/procesos/${p.id}`); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   const resetItem = async (it: BacklogItem) => { const reason = prompt(`Devolver ${it.storyId} a pendiente (su diff pendiente queda rechazado). Motivo:`, 'alcance replanteado'); if (reason === null) return; setBusy(true); try { await api.resetStory(ws.slug, it.id, reason.trim() || undefined); flash(`${it.storyId} devuelta a pendiente`); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   const closeStory = async (it: BacklogItem, force: boolean) => {
     if (force) { const reason = prompt(`Cerrar ${it.storyId} como resuelta fuera del flujo (sin ejecutarla ni integrar cambios). Indica brevemente por qué:`); if (reason === null) return; setBusy(true); try { await api.markStoryDone(ws.slug, it.id, { force: true, reason: reason.trim() || 'resuelta fuera del flujo' }); flash(`${it.storyId} cerrada`); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } return; }
@@ -235,9 +242,9 @@ export function Backlog() {
               </div>
             </section>
             <section className="card">
-              <div className="card-h"><div className="h3">Encargo al equipo</div><Chip tone="warn" xs>consume IA · autorizas después</Chip></div>
+              <div className="card-h"><div className="h3">Análisis del equipo</div><Chip tone="warn" xs>consume IA · autorizas después</Chip></div>
               <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <textarea className="input" value={delegText} onChange={e => setDelegText(e.target.value)} placeholder="Ej.: Revisa y replantea el backlog según el flujo actual: fusiona lo solapado, descarta lo resuelto y repriotiza." aria-label="Encargo al equipo" style={{ minHeight: 80 }} />
+                <textarea className="input" value={delegText} onChange={e => setDelegText(e.target.value)} placeholder="Ej.: Revisa y replantea el backlog según el flujo actual: fusiona lo solapado, descarta lo resuelto y repriotiza." aria-label="Análisis del equipo" style={{ minHeight: 80 }} />
                 <button className="btn btn-secondary" onClick={delegate} disabled={busy || delegText.trim().length < 8}>{busy ? <span className="spin" /> : Icon.users()}Encargar al Coordinador del Proyecto</button>
                 <div className="help">El Coordinador valida el encargo, consulta a los agentes a su cargo si hace falta y entrega el resultado con propuestas al backlog que tú apruebas. Se crea pendiente de tu autorización (presupuesto).</div>
               </div>

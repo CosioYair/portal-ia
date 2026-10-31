@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { StoryIterationState } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
-import { Icon, Notice } from './ui.tsx';
+import { DraftNote, Icon, Notice } from './ui.tsx';
+import { draftKey, useDraft } from '../lib/persist.ts';
 
 interface Props {
   slug: string;
@@ -23,7 +24,10 @@ interface Props {
  * (reabrir la historia, confirmar el descarte del worktree y la rama).
  */
 export function IterationComposer({ slug, itemId, iteration, nextNumber, initialNote = '', placeholder, beforeSubmit, onCreated }: Props) {
-  const [note, setNote] = useState(initialNote);
+  // La nota a medias se conserva por historia e iteración (también al recargar); una propuesta aplicada la sustituye.
+  const noteDraft = useDraft(draftKey('iteracion', slug, itemId, String(nextNumber)), initialNote); const note = noteDraft.value; const setNote = noteDraft.set;
+  useEffect(() => { if (initialNote) setNote(initialNote); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialNote]);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -34,13 +38,14 @@ export function IterationComposer({ slug, itemId, iteration, nextNumber, initial
     try {
       await beforeSubmit?.();
       const r = await api.storyIterate(slug, itemId, note.trim() || null, { reopen: iteration.needsReopen, discardApplied: iteration.needsDiscardConfirmation && confirmDiscard });
-      setNote(''); setConfirmDiscard(false);
+      noteDraft.clear(); setConfirmDiscard(false);
       onCreated({ processId: r.process.id, actions: r.actions });
     } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
   return (
     <div className="iter-composer" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <p className="small muted" style={{ margin: 0 }}>{iteration.summary}</p>
+      {noteDraft.status === 'restored' && <DraftNote status="restored" onDiscard={noteDraft.clear} />}
       <textarea className="input" style={{ minHeight: 60 }} value={note} onChange={e => setNote(e.target.value)} aria-label="Nota para el equipo"
         placeholder={placeholder ?? 'Nota para el equipo (qué corregir o completar). Se añaden solos los pasos con falla y sus comentarios, las tareas abiertas, el criterio vigente y la conversación reciente.'} />
       {iteration.needsDiscardConfirmation && <label className="ck"><input className="cb" type="checkbox" checked={confirmDiscard} onChange={e => setConfirmDiscard(e.target.checked)} />

@@ -9,7 +9,8 @@ import { AssignmentCard, CardBoundary, ConversationBar, ConversationPanel, Local
 import { PendingDecisionCard } from './PendingDecisionCard.tsx';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
-import { Chip, Icon, KV, Notice } from './ui.tsx';
+import { Chip, DraftNote, Icon, KV, Notice } from './ui.tsx';
+import { draftKey, useDraft } from '../lib/persist.ts';
 import { Markdown } from './Markdown.tsx';
 
 const MAX_IMAGES = 4;
@@ -66,7 +67,7 @@ function ProposalCard({ msgId, action, onResolved }: { msgId: string; action: As
       if (isExec) {
         const p = await api.authorizeProcess(action.workspaceSlug, action.processId, Number(budget), action.type === 'propose_execution' ? DEFAULT_PIPELINE : undefined);
         const r = await api.resolveAssistantProposal(msgId, action.processId, 'done', `En ejecución con presupuesto ${fmtUsd(p.budgetUsd)}. Sigue el avance en el proceso.`);
-        onResolved(r.message); flash(isDeleg ? `Encargo en curso · presupuesto ${fmtUsd(p.budgetUsd)}` : `Historia ${action.storyId ?? ''} en ejecución · presupuesto ${fmtUsd(p.budgetUsd)}`);
+        onResolved(r.message); flash(isDeleg ? `Análisis en curso · presupuesto ${fmtUsd(p.budgetUsd)}` : `Historia ${action.storyId ?? ''} en ejecución · presupuesto ${fmtUsd(p.budgetUsd)}`);
       } else {
         const p = await api.applyChanges(action.workspaceSlug, action.processId);
         const ap = p.result?.applied;
@@ -92,11 +93,11 @@ function ProposalCard({ msgId, action, onResolved }: { msgId: string; action: As
         </div>}
         <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>{isExec
           ? (isDeleg
-            ? <>Autorizo este <strong>encargo</strong> al agente responsable y a los agentes a su cargo, hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. El resultado quedará en Conocimiento; los cambios al backlog que proponga los aplicaré yo desde el proceso.</>
+            ? <>Autorizo este <strong>análisis</strong> al agente responsable y a los agentes a su cargo, hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. Entrega un documento en Conocimiento y no cambia código; los cambios al backlog que proponga los aplicaré yo desde el proceso.</>
             : <>Autorizo que el equipo del proyecto trabaje en <strong>{action.storyId}</strong> hasta <strong>{fmtUsd(Number(budget) || 0)}</strong> de API: aplica los cambios en un <strong>worktree aislado</strong> (rama propia), los verifica en el sandbox y QA los evalúa. No integra en main ni publica: eso lo decides después. Con Claude Code consume tu suscripción en lugar de API (hasta 60 llamadas, ampliable al continuar).</>)
           : <>Autorizo aplicar <strong>{action.changes ?? 0} cambio(s)</strong> en una rama <span className="mono">portal-ia/hu-xxx</span> del repositorio (con commit). La rama no se integra en <span className="mono">main</span> sin mi intervención.</>}</span></label>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-          <button className="btn btn-primary btn-sm" onClick={run} disabled={!auth || busy || (isExec && !(Number(budget) > 0))}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}{busy ? (isExec ? 'Autorizando…' : 'Aplicando…') : (isDeleg ? 'Autorizar el encargo' : isExec ? 'Autorizar y ejecutar' : 'Aplicar cambios')}</button>
+          <button className="btn btn-primary btn-sm" onClick={run} disabled={!auth || busy || (isExec && !(Number(budget) > 0))}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}{busy ? (isExec ? 'Autorizando…' : 'Aplicando…') : (isDeleg ? 'Autorizar el análisis' : isExec ? 'Autorizar y ejecutar' : 'Aplicar cambios')}</button>
           {link && <Link className="btn btn-ghost btn-sm" to={link}>{isExec ? 'Ver detalle del proceso' : 'Revisar el diff antes'}</Link>}
         </div>
       </div>
@@ -119,7 +120,6 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
   const { flash, refreshStructure } = useApp();
   const [info, setInfo] = useState<AssistantInfo | null>(null);
   const [msgs, setMsgs] = useState<AssistantMessage[]>([]);
-  const [text, setText] = useState(initialText ?? '');
   const [images, setImages] = useState<Pending[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -132,6 +132,13 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
   const [conversations, setConversations] = useState<AssistantConversation[]>([]);
   const [detail, setDetail] = useState<ConversationDetailView | null>(null);
   useEffect(() => { try { if (convId) localStorage.setItem('portal-ia.conversation', convId); else localStorage.removeItem('portal-ia.conversation'); } catch { /* sin almacenamiento */ } }, [convId]);
+  // Borrador del mensaje, por conversación: sobrevive a recargar y a cambiar de pantalla (el dock se monta en cada una).
+  // Los adjuntos no se guardan (pueden ser grandes o privados).
+  const msgDraft = useDraft(draftKey('asistente.mensaje', convId ?? 'nueva'), '');
+  const text = msgDraft.value; const setText = msgDraft.set;
+  // Un texto propuesto por otra pantalla se aplica una vez y sin pisar lo que ya escribiste.
+  useEffect(() => { if (initialText && !msgDraft.value.trim()) setText(initialText); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialText]);
   const load = async (id: string | null = convId) => {
     const r = await api.assistant(id).catch(e => { if (id && e?.status === 404) return api.assistant(null); throw e; });
     setInfo(r.info); onInfo?.(r.info); setMsgs(r.messages); setConversations(r.conversations); setConvId(r.conversationId); setDetail(r.detail);
@@ -223,15 +230,15 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
     // Los archivos de texto viajan dentro del mensaje, delimitados, para que el modelo los lea íntegros.
     const content = base + texts.map(f => `\n\n--- Adjunto «${f.name}» ---\n${f.text}\n--- Fin de «${f.name}» ---`).join('');
     const all = images;
-    setBusy(true); setError(null); setText(''); setImages([]);
+    setBusy(true); setError(null); msgDraft.clear(); setImages([]);
     setMsgs(m => [...m, { id: 'tmp', role: 'user', content, actions: [], attachments: all.map(i => ({ name: i.name ?? 'adjunto', mediaType: i.mediaType, bytes: i.bytes })), tokensIn: 0, tokensOut: 0, costUsd: 0, model: null, createdAt: new Date().toISOString() }]);
     try {
       const r = await api.sendAssistant(content, imgs.map(({ mediaType, data, name }) => ({ mediaType, data, name })), texts.map(f => ({ name: f.name, mediaType: f.mediaType, bytes: f.bytes })), convId);
       setMsgs(m => [...m.filter(x => x.id !== 'tmp'), r.user, r.assistant]); setInfo(r.info); onInfo?.(r.info);
       await load(r.conversationId).catch(() => null); // decisiones, etapa y siguiente acción al día
       if (r.assistant.actions.some(a => a.status === 'done' && (a.type === 'create_company' || a.type === 'create_project'))) await refreshStructure();
-      const done = r.assistant.actions.filter(a => a.status === 'done' && a.type !== 'info').length; const pend = r.assistant.actions.filter(a => a.status === 'pending').length;
-      if (done || pend) flash([done ? `${done} acción(es) realizadas` : '', pend ? `${pend} propuesta(s) esperan tu autorización` : ''].filter(Boolean).join(' · '));
+      const opened = r.assistant.actions.filter(a => a.type === 'open_decision' && a.status === 'done').length; const pend = r.assistant.actions.filter(a => a.status === 'pending').length; // al responder nada queda hecho: solo se abre o se propone
+      if (opened || pend) flash([opened ? `${opened} decisión(es) abierta(s)` : '', pend ? `${pend} propuesta(s) esperan tu autorización` : ''].filter(Boolean).join(' · '));
     } catch (e: any) { setError(e.message); setMsgs(m => m.filter(x => x.id !== 'tmp')); setText(t); setImages(all); }
     finally { setBusy(false); }
   };
@@ -268,7 +275,7 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
               ? <OperationCard key={`${m.id}-${i}`} msgId={m.id} action={a} onResolved={replaceMsg} />
               : a.type === 'propose_local' && a.status === 'pending'
               ? <CardBoundary key={`${m.id}-${i}`}><LocalChangeCard msgId={m.id} index={i} action={a} onResolved={replaceMsg} /></CardBoundary>
-              : a.type === 'propose_assignment' && a.assignmentId && a.workspaceSlug && a.status !== 'failed'
+              : a.type === 'propose_assignment' && a.assignmentId && a.workspaceSlug
               ? <CardBoundary key={`${m.id}-${i}`}><AssignmentCard slug={a.workspaceSlug} assignmentId={a.assignmentId} onChanged={() => { load().catch(() => null); }} /></CardBoundary>
               : isProposal(a) && a.processId && superseded[a.processId]
               ? <SupersededProposalCard key={`${m.id}-${i}`} action={a} info={superseded[a.processId]} onRestore={restoreSuperseded} />
@@ -295,6 +302,7 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
           <textarea className="input" value={text} onChange={e => setText(e.target.value)} onPaste={onPaste} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} placeholder={compact ? 'Pídele algo al asistente… (arrastra o pega archivos)' : 'Escribe tu petición, pega una captura o arrastra un archivo .md/.txt… (Enter envía · Shift+Enter salto de línea)'} aria-label="Mensaje para el asistente" style={{ minHeight: 48, height: 48, flex: 1 }} disabled={busy} />
           <button className="btn btn-primary" type="submit" disabled={busy || (!text.trim() && !images.length)}>{Icon.arrow()}{compact ? '' : 'Enviar'}</button>
         </div>
+        {(msgDraft.status === 'restored' || msgDraft.status === 'error') && !!text && <DraftNote status={msgDraft.status} onDiscard={msgDraft.clear} />}
         {compact && info && <div className="small muted" style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>{info.backendLabel} · {info.billing === 'subscription' ? 'sin cargo a la API' : `≈ ${fmtUsd(info.estimatedPerMessageUsd)} por mensaje · mes ${fmtUsd(info.spentThisMonthUsd)} de ${fmtUsd(info.monthlyLimitUsd)}`}{!info.available && info.unavailableReason ? ` · ⚠ ${info.unavailableReason}` : ''}</span>{convId && <button type="button" className="lnk" onClick={() => void archive()} title="Se conserva todo; puedes reactivarla">archivar</button>}</div>}
       </form>
       </div>

@@ -8,7 +8,8 @@ import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
-import { Chip, Icon, KV, Notice } from '../components/ui.tsx';
+import { Chip, DraftNote, Icon, KV, Notice } from '../components/ui.tsx';
+import { draftKey, fingerprint, useDraft } from '../lib/persist.ts';
 import { Markdown } from '../components/Markdown.tsx';
 import { StoryResult } from '../components/StoryResult.tsx';
 import { IterationComposer } from '../components/IterationComposer.tsx';
@@ -32,11 +33,16 @@ const STATUS: Record<string, { label: string; tone: '' | 'ok' | 'warn' | 'err' |
  */
 export function StoryWorkspace() {
   const { storyId } = useParams();
+  // Una pantalla por historia: al pasar a otra, nada (autorización, presupuesto, edición) se arrastra de la anterior.
+  return <StoryWorkspaceOf key={storyId} storyId={storyId!} />;
+}
+
+function StoryWorkspaceOf({ storyId }: { storyId: string }) {
   const { status, flash, navigate } = useApp();
   const slug = status.workspace!.slug;
   const [ctx, setCtx] = useState<StoryContext | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const { hash, state: navState } = useLocation();
+  const { hash, state: navState, pathname, search } = useLocation();
   const [tab, setTab] = useState<Tab>(() => tabFromHash(hash) ?? 'estado');
   // Un fallo al leer no borra la pantalla si ya hay datos (la cabecera avisa de la conexión) y el sondeo sigue intentando.
   const loaded = useRef(false);
@@ -56,28 +62,35 @@ export function StoryWorkspace() {
   }, [hash]);
 
   // Chat (también llega una pregunta preparada desde el recorrido: «Preguntar al equipo sobre este problema»)
-  const [text, setText] = useState(''); const [ask, setAsk] = useState(true); const [auth, setAuth] = useState(false); const [agentId, setAgentId] = useState<string>(''); const [est, setEst] = useState<{ agentName: string; estimatedUsd: number } | null>(null); const [sending, setSending] = useState(false);
-  useEffect(() => { const q = (navState as any)?.ask; if (typeof q === 'string' && q) { setText(q); setAsk(true); } }, [navState]);
+  // Borradores de esta historia (chat, tarea nueva, nota de iteración y edición del contexto): sobreviven a recargar.
+  const chatDraft = useDraft(draftKey('historia.chat', slug, storyId), ''); const text = chatDraft.value; const setText = chatDraft.set;
+  const [ask, setAsk] = useState(true); const [auth, setAuth] = useState(false); const [agentId, setAgentId] = useState<string>(''); const [est, setEst] = useState<{ agentName: string; estimatedUsd: number } | null>(null); const [sending, setSending] = useState(false);
+  // La pregunta preparada desde otra pantalla se toma UNA vez y se retira del historial (recargar no pisa lo escrito).
+  useEffect(() => { const q = (navState as any)?.ask; if (typeof q === 'string' && q) { setText(q); setAsk(true); navigate(`${pathname}${search}${hash}`, { replace: true, state: null }); } // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navState]);
   useEffect(() => { if (ctx) api.storyAskEstimate(slug, ctx.item.id, agentId || null).then(setEst).catch(() => setEst(null)); }, [slug, ctx?.item.id, agentId]);
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [ctx?.messages.length, tab]);
   const send = async () => {
     if (!ctx || text.trim().length < 1 || (ask && !auth)) return; setSending(true);
-    try { await api.storyMessage(slug, ctx.item.id, text.trim(), ask ? { maxUsd: Math.max(0.1, (est?.estimatedUsd ?? 0.1) * 3), agentId: agentId || null } : undefined); setText(''); setAuth(false); await load(); }
+    try { await api.storyMessage(slug, ctx.item.id, text.trim(), ask ? { maxUsd: Math.max(0.1, (est?.estimatedUsd ?? 0.1) * 3), agentId: agentId || null } : undefined); chatDraft.clear(); setAuth(false); await load(); }
     catch (e: any) { flash(e.message, 'err'); } finally { setSending(false); }
   };
   const applyProposal = async (messageId: string, what: { tasks?: boolean; criterion?: boolean }) => { if (!ctx) return; try { const c = await api.storyApplyProposals(slug, ctx.item.id, messageId, what); setCtx(c); flash('Propuesta aplicada'); } catch (e: any) { flash(e.message, 'err'); } };
 
   // Tareas
-  const [newTask, setNewTask] = useState('');
-  const addTask = async () => { if (!ctx || newTask.trim().length < 2) return; try { await api.storyAddTask(slug, ctx.item.id, newTask.trim()); setNewTask(''); await load(); } catch (e: any) { flash(e.message, 'err'); } };
+  const taskDraft = useDraft(draftKey('historia.tarea', slug, storyId), ''); const newTask = taskDraft.value; const setNewTask = taskDraft.set;
+  const addTask = async () => { if (!ctx || newTask.trim().length < 2) return; try { await api.storyAddTask(slug, ctx.item.id, newTask.trim()); taskDraft.clear(); await load(); } catch (e: any) { flash(e.message, 'err'); } };
   const fromFeedback = async () => { if (!ctx) return; try { const t = await api.storyTasksFromFeedback(slug, ctx.item.id); flash(t.length ? `${t.length} tarea(s) creadas desde la prueba` : 'No hay pasos con falla u observación nuevos'); await load(); } catch (e: any) { flash(e.message, 'err'); } };
 
   // Iteraciones
-  const [note, setNote] = useState(''); const [iterBusy, setIterBusy] = useState(false);
+  const [note, setNote] = useState(''); const [iterBusy, setIterBusy] = useState(false); // el borrador de la nota lo guarda IterationComposer
 
-  // Contexto editable (PATCH existente; el servidor registra el cambio en el historial si la historia ya se ejecutó)
-  const [edit, setEdit] = useState<{ title: string; criterion: string; description: string } | null>(null);
+  // Contexto editable (PATCH existente; el servidor registra el cambio en el historial si la historia ya se ejecutó).
+  // El borrador lleva la huella de los campos que editaba: si cambiaron en el servidor, se ofrece pero no se aplica solo.
+  type Edit = { title: string; criterion: string; description: string };
+  const editDraft = useDraft<Edit | null>(draftKey('historia.edicion', slug, ctx ? storyId : null), null, { base: ctx ? fingerprint([ctx.item.title, ctx.item.criterion, ctx.item.description]) : null });
+  const edit = editDraft.value; const setEdit = (v: Edit | null) => { if (v) editDraft.set(v); else editDraft.clear(); };
   const [editBusy, setEditBusy] = useState(false); const [editErr, setEditErr] = useState<string | null>(null);
   const startEdit = () => { if (ctx) { setEdit({ title: ctx.item.title, criterion: ctx.item.criterion, description: ctx.item.description }); setEditErr(null); } };
   const saveEdit = async () => {
@@ -120,7 +133,7 @@ export function StoryWorkspace() {
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}><Chip tone={st.tone}>{st.label}</Chip>{it.estimate && <Chip xs>{it.estimate}</Chip>}{openTasks > 0 && <Chip tone="warn" xs>{openTasks} tarea(s) abiertas</Chip>}{fails > 0 && <Chip tone="err" xs>{fails} paso(s) con falla</Chip>}</div>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {!last && it.status === 'pending' && !it.archivedAt && <button className="btn btn-primary btn-sm" onClick={() => navigate('/backlog#ejecutar')}>{Icon.arrow()}Ejecutar desde Backlog</button>}
+            {!last && it.status === 'pending' && !it.archivedAt && <button className="btn btn-primary btn-sm" onClick={() => navigate(`/backlog?ejecutar=${it.id}`)}>{Icon.arrow()}Ejecutar desde Backlog</button>}
           </div>
         </header>
         {currentDecision && !it.archivedAt && <Notice kind="warn"><div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', flex: 1 }}>
@@ -221,6 +234,7 @@ export function StoryWorkspace() {
 
           <aside style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <section className="card" aria-label="Contexto"><div className="card-h"><div className="h3">Contexto</div>{!edit && !it.archivedAt && <button className="btn btn-ghost btn-sm" onClick={startEdit}>Editar</button>}</div><div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <DraftNote status={edit ? editDraft.status : 'idle'} stale={editDraft.stale} />
               {edit ? <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <label className="label" htmlFor="ctx-title" style={{ margin: 0 }}>Título</label>
                 <input id="ctx-title" className="input" style={{ height: 34 }} value={edit.title} maxLength={200} onChange={e => setEdit({ ...edit, title: e.target.value })} />

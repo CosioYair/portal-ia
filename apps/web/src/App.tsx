@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
-import { Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation, useNavigate, useNavigationType, useParams } from 'react-router-dom';
 import type { Project, ProviderView, Workspace } from '@portal-ia/domain';
 import { api, type BootstrapStatus } from './lib/api.ts';
 import { AppContext, type Toast } from './lib/store.ts';
@@ -27,12 +27,37 @@ const SEL_KEY = 'portal-ia.seleccion';
 type Selection = { ws: string; project: string | null };
 const readSel = (): Selection | null => { try { const v = localStorage.getItem(SEL_KEY); return v ? JSON.parse(v) : null; } catch { return null; } };
 const writeSel = (s: Selection) => { try { localStorage.setItem(SEL_KEY, JSON.stringify(s)); } catch { /* sin almacenamiento */ } };
+/** Selección de un enlace directo (/empresa/:slug[/proyecto/:pid]/…): manda sobre la guardada desde el primer momento. */
+const urlSel = (): Selection | null => { const m = window.location.pathname.match(/^\/empresa\/([^/]+)(?:\/proyecto\/([^/]+))?/); return m ? { ws: decodeURIComponent(m[1]), project: m[2] ? decodeURIComponent(m[2]) : null } : null; };
+
+/**
+ * Posición del desplazamiento por pantalla (en esta pestaña del navegador): al recargar o con Atrás/Adelante se vuelve
+ * donde estabas, esperando a que la pantalla cargue su contenido; una navegación nueva empieza arriba (o en su #ancla).
+ */
+function ScrollMemory() {
+  const { pathname, search, hash } = useLocation(); const type = useNavigationType();
+  useEffect(() => {
+    const key = `portal-ia.scroll.${pathname}${search}`;
+    let saved = 0; try { saved = Number(sessionStorage.getItem(key) ?? 0); } catch { /* sin almacenamiento */ }
+    let tries = 0; let timer: ReturnType<typeof setTimeout> | undefined;
+    const restore = () => { if (window.scrollY >= saved - 2 || ++tries > 20) return; window.scrollTo(0, saved); timer = setTimeout(restore, 100); };
+    if (type === 'POP' && saved > 0) timer = setTimeout(restore, 50); else if (type !== 'POP' && !hash) window.scrollTo(0, 0);
+    // Se guarda la posición del momento del desplazamiento (al salir, la pantalla nueva ya ha cambiado la altura).
+    let pending: number | null = null; let st: ReturnType<typeof setTimeout> | undefined;
+    const write = () => { if (pending === null) return; try { sessionStorage.setItem(key, String(pending)); } catch { /* sin almacenamiento */ } pending = null; };
+    const save = () => { pending = Math.round(window.scrollY); clearTimeout(st); st = setTimeout(write, 150); };
+    window.addEventListener('scroll', save, { passive: true });
+    return () => { clearTimeout(timer); clearTimeout(st); write(); window.removeEventListener('scroll', save); };
+  }, [pathname, search, hash, type]);
+  return null;
+}
 
 /** Ruta profunda /empresa/:slug/proyecto/:pid/<destino>: fija la selección y redirige a la pantalla. */
 function SelectRoute({ select }: { select: (ws: string, pid?: string | null) => Promise<void> }) {
   const { slug, pid, '*': rest } = useParams();
-  const navigate = useNavigate();
-  useEffect(() => { select(slug!, pid ?? null).then(() => navigate('/' + (rest || 'panel'), { replace: true })); // eslint-disable-next-line react-hooks/exhaustive-deps
+  const navigate = useNavigate(); const { search, hash } = useLocation();
+  // El enlace directo manda sobre la selección guardada; se conservan su pestaña (#…) y sus parámetros (?…).
+  useEffect(() => { select(slug!, pid ?? null).then(() => navigate('/' + (rest || 'panel') + search + hash, { replace: true })); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, pid]);
   return <div className="app" style={{ display: 'grid', placeItems: 'center' }}><Spinner /></div>;
 }
@@ -42,7 +67,8 @@ export default function App() {
   const [providers, setProviders] = useState<ProviderView[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [sel, setSel] = useState<Selection | null>(readSel);
+  // Un enlace directo se aplica al arrancar; si no, la última selección guardada (antes, la carga inicial podía pisar el enlace).
+  const [sel, setSel] = useState<Selection | null>(() => urlSel() ?? readSel());
   const [offline, setOffline] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
   const navigate = useNavigate();
@@ -104,6 +130,7 @@ export default function App() {
       <div className="app">
         {toast && <div className="toast" role="status">{toast.tone === 'ok' ? Icon.okc() : Icon.alert()} {toast.message}</div>}
         {ready && <InboxLauncher />}
+        <ScrollMemory />
         <Routes>
           <Route path="/" element={ready ? <Navigate to="/panel" replace /> : <Welcome />} />
           <Route path="/configuracion/proveedor" element={<ProviderSetup />} />
