@@ -305,6 +305,8 @@ export const api = {
   batch: (slug: string, id: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}`),
   previewBatch: (slug: string, projectId: string, body: BatchRequest) => request<BatchPreview>(`/api/workspaces/${slug}/projects/${projectId}/batches/preview`, { method: 'POST', body: JSON.stringify(body) }),
   createBatch: (slug: string, projectId: string, body: BatchRequest) => request<BatchView>(`/api/workspaces/${slug}/projects/${projectId}/batches`, { method: 'POST', body: JSON.stringify({ ...body, authorized: true }) }),
+  /** Cierre manual de un lote en pausa con motivo obligatorio (sin costo de IA). 409 si el lote no está en pausa. */
+  closeBatch: (slug: string, projectId: string, id: string, reason: string) => request<BatchView>(`/api/workspaces/${slug}/projects/${projectId}/batches/${id}/close`, { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) }),
   batchControl: (slug: string, id: string, action: 'pause' | 'resume' | 'cancel' | 'revoke', body: Record<string, unknown> = {}) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/${action}`, { method: 'POST', body: JSON.stringify(action === 'resume' ? { ...body, authorized: true } : body) }),
   acceptBatchItems: (slug: string, id: string, itemIds: string[], note?: string, checks?: Record<string, boolean[]>) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/accept`, { method: 'POST', body: JSON.stringify({ itemIds, note: note?.trim() || undefined, checks }) }),
   rejectBatchItem: (slug: string, id: string, itemId: string, note: string, failedSteps: string[]) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/reject`, { method: 'POST', body: JSON.stringify({ note, failedSteps }) }),

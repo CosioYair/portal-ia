@@ -18,9 +18,70 @@ export function attachApp(app: FastifyInstance) { appRef = app; }
 
 export const VERSION = '0.12.1';
 const startedAt = new Date().toISOString();
+const startedMs = Date.now();
+
+/** Resultado de detectar el repositorio git del Portal. `isGit: false` con `error: null` = rev-parse confirma que no hay repositorio. */
+export interface RepoInfo { isGit: boolean; top: string | null; head: string | null; error: string | null }
+/** Sonda del repositorio; `before` (ISO) pide el commit que había en HEAD en ese momento (arranque), si la detección llega tarde. */
+export type RepoProbe = (root: string, before: string | null) => Promise<RepoInfo>;
+
+/** Traduce un fallo de git a su causa real (nunca «no es un repositorio» si la causa es otra). */
+function gitCause(e: any): { notRepo: boolean; message: string } {
+  const m = String(e?.stderr || e?.message || e || '').trim();
+  if (e?.code === 'ENOENT' || /ENOENT|not recognized|no se reconoce|command not found|spawn git/i.test(m)) return { notRepo: false, message: 'git no está en el PATH del servidor: no se encontró el ejecutable «git».' };
+  if (/dubious ownership|safe\.directory/i.test(m)) return { notRepo: false, message: `git considera la carpeta ${REPO_ROOT} de otro propietario (dubious ownership). Si confías en ella, ejecuta tú: git config --global --add safe.directory "${REPO_ROOT.replace(/\\/g, '/')}"` };
+  if (/not a git repository/i.test(m)) return { notRepo: true, message: 'El Portal no corre desde un repositorio git.' };
+  return { notRepo: false, message: `git falló al leer el repositorio del Portal: ${m.slice(0, 300) || 'error desconocido'}` };
+}
+
+/** Sonda real: «git rev-parse --show-toplevel» (vale también si .git es un archivo, como en un worktree) y el commit de arranque. */
+export const gitRepoProbe: RepoProbe = async (root, before) => {
+  let top: string;
+  try { top = String(await git(root, ['rev-parse', '--show-toplevel'])).trim(); }
+  catch (e) { const c = gitCause(e); return { isGit: false, top: null, head: null, error: c.notRepo ? null : c.message }; }
+  let head: string | null = null;
+  if (before) {
+    const full = String(await git(root, ['rev-list', '-1', `--before=${before}`, 'HEAD']).catch(() => '')).trim();
+    if (full) head = String(await git(root, ['rev-parse', '--short', full]).catch(() => '')).trim() || null;
+  }
+  if (!head) head = String(await git(root, ['rev-parse', '--short', 'HEAD']).catch(() => '')).trim() || null;
+  return { isGit: true, top, head, error: head ? null : 'El repositorio del Portal no tiene ningún commit todavía.' };
+};
+
+let probe: RepoProbe = gitRepoProbe;
+let retryMs = 30_000;
+let generation = 0;
+let cached: { info: RepoInfo; at: number } | null = null;
+let inflight: Promise<RepoInfo> | null = null;
 let startCommit: string | null = null;
-const isGit = fs.existsSync(path.join(REPO_ROOT, '.git'));
-if (isGit) git(REPO_ROOT, ['rev-parse', '--short', 'HEAD']).then(c => { startCommit = c; }).catch(() => { startCommit = null; });
+
+/** Detección perezosa con caché: un éxito se conserva; un fallo se reintenta pasados unos 30 s. */
+export function ensureRepo(): Promise<RepoInfo> {
+  if (cached && ((cached.info.isGit && cached.info.head) || Date.now() - cached.at < retryMs)) return Promise.resolve(cached.info);
+  if (inflight) return inflight;
+  const g = generation;
+  const late = Date.now() - startedMs > 15_000;
+  const p = probe(REPO_ROOT, late ? startedAt : null)
+    .catch((e): RepoInfo => { const c = gitCause(e); return { isGit: false, top: null, head: null, error: c.notRepo ? null : c.message }; })
+    .then(info => {
+      if (g === generation) {
+        cached = { info, at: Date.now() }; inflight = null;
+        if (info.isGit && info.head && !startCommit) startCommit = info.head;
+      }
+      return info;
+    });
+  inflight = p;
+  return p;
+}
+/** Commit con que arrancó el servidor (espera a la detección; null si no hay git o falló). */
+export async function ensureStartCommit(): Promise<string | null> { await ensureRepo(); return startCommit; }
+/** Solo pruebas: sustituye la sonda (null = la real) y reinicia la caché; `retryMs` acorta la espera de reintento. */
+export function __setRepoProbeForTests(fn: RepoProbe | null, opts: { retryMs?: number } = {}) {
+  probe = fn ?? gitRepoProbe; retryMs = opts.retryMs ?? 30_000;
+  generation++; cached = null; inflight = null; startCommit = null;
+}
+// Al arrancar se lanza ya la detección para fijar el commit de arranque; quien lo necesite la espera.
+void ensureRepo();
 
 let update: NonNullable<SystemStatus['update']> | null = null;
 /** Última reconstrucción del Portal (para explicar una activación fallida en el recorrido de la historia). */
@@ -65,7 +126,8 @@ export async function isAncestor(commit: string, inCommit: string): Promise<bool
  */
 export async function activationOf(mergeCommit: string, mergedAt: string): Promise<ActivationState> {
   const b = buildInfo();
-  if (!isGit || !startCommit) return { active: false, runningCommit: startCommit, buildCommit: b.buildCommit, buildAt: b.buildAt, reason: 'El Portal no corre desde un repositorio git.' };
+  const info = await ensureRepo();
+  if (!info.isGit || !startCommit) return { active: false, runningCommit: startCommit, buildCommit: b.buildCommit, buildAt: b.buildAt, reason: info.error ?? 'El Portal no corre desde un repositorio git.' };
   const inRunning = await isAncestor(mergeCommit, startCommit);
   if (!inRunning) return { active: false, runningCommit: startCommit, buildCommit: b.buildCommit, buildAt: b.buildAt, reason: `El servidor en marcha arrancó con ${startCommit}, que no contiene este merge: reconstruye y reinicia.` };
   const webOk = b.buildCommit ? await isAncestor(mergeCommit, b.buildCommit) : !!b.buildAt && new Date(b.buildAt).getTime() >= new Date(mergedAt).getTime();
@@ -75,6 +137,7 @@ export async function activationOf(mergeCommit: string, mergedAt: string): Promi
 
 export async function systemStatus(): Promise<SystemStatus> {
   const b = buildInfo(); const sb = await detectSandbox().catch(() => null);
+  const isGit = (await ensureRepo()).isGit;
   const base: SystemStatus = { version: VERSION, startedAt, repoRoot: REPO_ROOT, isGit, startCommit, headCommit: null, branch: null, changedFiles: [], action: 'none', stories: [], update, buildCommit: b.buildCommit, buildAt: b.buildAt, sandbox: sb ? { available: sb.available, detail: sb.detail } : null };
   if (!isGit) return base;
   const headCommit = await git(REPO_ROOT, ['rev-parse', '--short', 'HEAD']).catch(() => null);

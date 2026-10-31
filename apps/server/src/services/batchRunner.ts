@@ -18,7 +18,7 @@ import { prepareIntegration, verifyCandidate } from './storyIntegration.ts';
 import { mergeStory } from './storyMerge.ts';
 import { newPipeline, resumeStory } from './storyPipeline.ts';
 import { iterateStory, threadRepo } from './storyThread.ts';
-import { activationOf, startUpdate, systemStatus } from './system.ts';
+import { activationOf, isAncestor, startUpdate, systemStatus } from './system.ts';
 
 /**
  * Coordinador del lote (determinista, sin IA): ver packages/domain/src/batch.ts. Reutiliza el pipeline de cada
@@ -387,7 +387,7 @@ function setItem(slug: string, id: string, itemId: string, patch: Partial<BatchI
     if (event) b.events.push({ at: now(), kind, itemId, message: `${it.storyId}: ${event}` });
   });
 }
-function setStatus(slug: string, id: string, status: Batch['status'], reason: string | null, kind: 'pause' | 'resume' | 'cancel' | 'revoke' | 'completed' | 'budget', fix: { label: string; href: string } | null = null) {
+function setStatus(slug: string, id: string, status: Batch['status'], reason: string | null, kind: 'pause' | 'resume' | 'cancel' | 'revoke' | 'completed' | 'budget' | 'close', fix: { label: string; href: string } | null = null) {
   batchesRepo(slug).update(id, b => {
     b.status = status; b.reason = reason; b.reasonFix = fix;
     if (status === 'completed' || status === 'cancelled' || status === 'revoked') b.finishedAt = now();
@@ -687,6 +687,117 @@ function maybeComplete(slug: string, id: string) {
 
 const controllable = (b: Batch) => { if (b.status === 'cancelled' || b.status === 'revoked') throw fail(409, `El lote está ${b.status === 'cancelled' ? 'cancelado' : 'revocado'}.`, 'closed'); };
 export function getBatch(slug: string, id: string): Batch { const b = batchesRepo(slug).get(id); if (!b) throw fail(404, 'Lote no encontrado.', 'not_found'); return b; }
+
+// ---------------------------------------------------------------- Reconciliación y cierre manual (EN-002, sin IA)
+
+type IntegrationCheck = { ok: boolean; why: string | null; merged: Map<string, { commit: string; active: boolean }> };
+/**
+ * ¿Están todas las historias del lote integradas en main (y activas, si es el Portal)? Solo lee procesos y git: no
+ * escribe nada ni llama a la IA. En un proyecto de empresa basta con «integrado en main» (merge registrado); en el
+ * Portal, además, el merge debe estar en su rama y activo en el servidor y la interfaz en marcha.
+ */
+async function integrationCheck(slug: string, b: Batch): Promise<IntegrationCheck> {
+  const procs = processesRepo(slug); const internal = slug === INTERNAL_WORKSPACE.slug;
+  const merged: IntegrationCheck['merged'] = new Map();
+  if (!b.items.length) return { ok: false, why: 'El lote no tiene historias.', merged };
+  for (const it of b.items) {
+    if (it.state === 'failed' || it.state === 'blocked' || it.state === 'cancelled' || it.state === 'rejected') return { ok: false, why: `${it.storyId} está ${ITEM_LABEL[it.state]}.`, merged };
+    const ps = it.processIds.map(pid => procs.get(pid)).filter(Boolean) as Process[];
+    if (ps.some(p => isActiveJob(p.id))) return { ok: false, why: `${it.storyId} sigue en ejecución.`, merged };
+    const m = [...ps].reverse().find(p => p.result?.merged?.commit)?.result?.merged ?? null;
+    if (!m?.commit) return { ok: false, why: `${it.storyId} no está integrada en main.`, merged };
+    let active = !!it.activated;
+    if (internal) {
+      if (!(await isAncestor(m.commit, m.into || 'main'))) return { ok: false, why: `El merge de ${it.storyId} (${m.commit}) no está en ${m.into || 'main'}.`, merged };
+      const st = await batchDeps.activation(m.commit, m.mergedAt);
+      if (!st.active) return { ok: false, why: `${it.storyId} está integrada pero no activa: ${st.reason}`, merged };
+      active = true;
+    }
+    merged.set(it.itemId, { commit: m.commit, active });
+  }
+  return { ok: true, why: null, merged };
+}
+
+/** Cada historia integrada que aún no tiene estado final queda pendiente de tu aceptación (las aceptadas se conservan). */
+function applyIntegrated(slug: string, id: string, merged: IntegrationCheck['merged']) {
+  const t = now();
+  batchesRepo(slug).update(id, x => {
+    for (const it of x.items) {
+      const m = merged.get(it.itemId); if (!m) continue;
+      it.mergedCommit = m.commit; it.activated = m.active || !!it.activated;
+      if (it.state === 'accepted') continue;
+      it.state = 'awaiting_acceptance'; it.reason = null; it.failureClass = null;
+      it.resumeProcessId = null; it.nextProcessId = null; it.finishedAt = it.finishedAt ?? t;
+    }
+  });
+}
+
+/** Asegura fecha de fin y el evento (sin duplicarlo si setStatus ya lo registró), y aplica cambios extra. */
+function finishWithEvent(slug: string, id: string, kind: 'completed' | 'close', message: string, extra?: (x: Batch) => void) {
+  batchesRepo(slug).update(id, x => {
+    const t = now();
+    x.finishedAt = x.finishedAt ?? t; x.reasonFix = null;
+    const last = x.events[x.events.length - 1];
+    if (!last || last.kind !== kind || last.message !== message) x.events.push({ at: t, kind, message });
+    extra?.(x);
+  });
+}
+
+/**
+ * Reconciliación sin IA: un lote en pausa o en marcha cuyas historias están todas integradas en main (y activas, si es
+ * el Portal) pasa a «completado». Si alguna no lo está, el lote queda como estaba y no se escribe nada.
+ */
+export async function reconcileBatch(slug: string, id: string): Promise<Batch> {
+  const b = getBatch(slug, id);
+  if (b.status !== 'paused' && b.status !== 'running') return b;
+  if (b.activation?.state === 'requested') return b;
+  const c = await integrationCheck(slug, b);
+  if (!c.ok) return b;
+  const cur = getBatch(slug, id);
+  if (cur.status !== 'paused' && cur.status !== 'running') return cur;
+  const internal = slug === INTERNAL_WORKSPACE.slug;
+  const message = internal
+    ? 'Lote completado: todas sus historias están integradas en main y activas en el Portal. Falta tu aceptación de cada una (no se ha usado IA).'
+    : 'Lote completado: todas sus historias están integradas en main. Falta tu aceptación de cada una (no se ha usado IA).';
+  applyIntegrated(slug, id, c.merged);
+  setStatus(slug, id, 'completed', message, 'completed');
+  finishWithEvent(slug, id, 'completed', message);
+  logger({ batchId: id }, 'lote reconciliado: completado sin IA');
+  return getBatch(slug, id);
+}
+
+/**
+ * Cierre manual de un lote EN PAUSA, con un motivo obligatorio. Queda «completado» si todo está integrado (y activo,
+ * si es el Portal); si no, «cancelado», y las historias sin estado final se cancelan dentro del lote (sus procesos
+ * siguen disponibles). El motivo y la fecha quedan en sus eventos y en `closed`. No usa la IA ni registra coste.
+ */
+export async function closeBatch(slug: string, id: string, reason: string): Promise<Batch> {
+  const r = String(reason ?? '').trim();
+  if (r.length < 3) throw fail(400, 'Indica el motivo del cierre (al menos 3 caracteres).', 'reason_required');
+  if (r.length > 500) throw fail(400, 'El motivo del cierre admite hasta 500 caracteres.', 'reason_too_long');
+  const b = getBatch(slug, id);
+  if (b.status !== 'paused') throw fail(409, `Solo se puede cerrar a mano un lote en pausa (este está «${b.status}»).`, 'invalid_status');
+  const c = await integrationCheck(slug, b);
+  const cur = getBatch(slug, id);
+  if (cur.status !== 'paused') throw fail(409, `Solo se puede cerrar a mano un lote en pausa (este está «${cur.status}»).`, 'invalid_status');
+  const outcome: 'completed' | 'cancelled' = c.ok ? 'completed' : 'cancelled';
+  if (c.ok) applyIntegrated(slug, id, c.merged);
+  else {
+    const t = now();
+    batchesRepo(slug).update(id, x => {
+      for (const it of x.items) {
+        if (it.state === 'accepted' || it.state === 'awaiting_acceptance' || it.state === 'rejected' || it.state === 'failed' || it.state === 'blocked' || it.state === 'cancelled') continue;
+        it.state = 'cancelled'; it.reason = 'Lote cerrado manualmente por el propietario.';
+        it.resumeProcessId = null; it.nextProcessId = null; it.finishedAt = it.finishedAt ?? t;
+      }
+    });
+  }
+  const message = `Cerrado manualmente por el propietario: ${r}`;
+  setStatus(slug, id, outcome, message, 'close');
+  finishWithEvent(slug, id, 'close', message, x => { x.closed = { at: now(), reason: r, outcome }; });
+  logger({ batchId: id, outcome }, 'lote cerrado manualmente (sin IA)');
+  return getBatch(slug, id);
+}
 
 export function pauseBatch(slug: string, id: string): Batch {
   const b = getBatch(slug, id); controllable(b);
