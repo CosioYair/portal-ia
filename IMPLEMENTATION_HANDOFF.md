@@ -13,23 +13,22 @@ publicar**.
 tope por llamada), `80f66b3` (Gauntlet en la planificación y diagnóstico), `4dec7a0` (iteraciones de encargos y
 recorrido completo) y `79d4521` (tercera revisión), más la documentación.
 
-**Estado (31 de octubre de 2026): NO está listo para activar.** Falta la verificación con Docker real. El motor de
-Docker Desktop no arranca desde que se reinició (con tu autorización): el panel abrió un diálogo de error y el
-servicio no levantó. Antes de eso, cualquier montaje de carpetas de `C:` fallaba con «input/output error».
+**Estado (30 de octubre de 2026, tras reiniciar Windows): verificado con Docker real; listo para que decidas la
+integración.** Docker Desktop volvió a funcionar con el reinicio. La verificación pendiente pasó y lo que reveló está
+corregido (detalle en la sección H de `docs/handoffs/RESTART_CHECKPOINT_2026-10-30.md`).
 
-**Verificación (última ejecución, `79d4521`):**
+**Verificación del código final:**
 - `npm run typecheck` y `npm run build`: exit 0.
-- `npm test`: 439 pruebas; 428 en verde, 10 omitidas y 1 fallida.
-  - **Las 7 pruebas con Docker real NO se ejecutaron** (omitidas al no haber motor): no están verificadas.
-  - El recorrido completo del Asistente (`assistant-journey.test.ts`) falla porque exige Docker. Su lógica se validó
-    con el sandbox simulado en una copia temporal (pasa).
-- Recorrido en Chromium sin interfaz sobre una instancia aislada: 12/12 (escritorio y móvil, versión `2f54d3d`).
+- `PORTAL_REQUIRE_DOCKER=1 npm test` (Windows): 441 pruebas; 439 en verde, 0 fallidas, 2 omitidas por plataforma. Las 7
+  pruebas con Docker real y el recorrido completo del Asistente, en verde.
+- Suite completa dentro del sandbox (`--cpus 2 --memory 2g`): 2 de 2 ejecuciones con 441 pruebas: 430 en verde, 0 fallidas, 11 omitidas (las que necesitan Docker o ejecutar en `/tmp`, y las de sandbox anidado). La corrección de las pruebas inestables queda
+  confirmada: 6 ejecuciones sin fallos aleatorios (antes, 5 de 5 fallaban una prueba distinta).
+- Navegador (Chromium sin interfaz, instancia aislada, Docker real): las 12 comprobaciones de siempre y 26 nuevas (escritorio y móvil), todas en verde y sin errores en la consola.
 - Cuatro revisiones independientes. Los detalles están en el documento (fases D y «Puerta de estabilización»).
 
-**Para dar el visto bueno** (con Docker funcionando), en la rama:
-1. `PORTAL_REQUIRE_DOCKER=1 npm test`. Deben pasar las 7 pruebas con Docker real y el recorrido completo.
-2. Confirmar en el sandbox la corrección de las pruebas inestables: varias ejecuciones de la suite dentro del sandbox,
-   sin fallos.
+**Corregido en esta verificación:** dos pruebas nuevas fallaban siempre dentro del sandbox (habrían hecho fallar
+`test` en cada historia del proyecto del Portal); «Seguir con este plan» no hacía nada en la interfaz; su confirmación
+no decía que paga la implementación; y el título de esa pausa no decía el motivo real.
 
 **Qué cambia para ti:**
 - **Conversaciones** en el Asistente, cada una con su empresa y proyecto, que sobreviven a recargar y reiniciar.
@@ -54,9 +53,8 @@ servicio no levantó. Antes de eso, cualquier montaje de carpetas de `C:` fallab
 `mejora/lotes-autorizacion-seleccion`), `npm run build` y reiniciar el Portal. Migraciones aditivas: tablas nuevas,
 columnas `assignment_id` y `conversation_id`; los mensajes antiguos pasan una vez a «Historial anterior».
 
-**Antes, en tu equipo:** Docker Desktop no monta carpetas de `C:` («input/output error») desde las 12:58. Reinícialo y
-ejecuta `PORTAL_REQUIRE_DOCKER=1 npm test` en la rama: las 7 pruebas con Docker real deben pasar, y conviene confirmar en
-el sandbox la corrección de las pruebas inestables (ver el documento).
+**En tu equipo:** Docker Desktop funciona desde el reinicio (monta carpetas de `C:` sin errores); no hace falta nada más
+antes de integrar. El Portal no está arrancado: tras integrar, arráncalo tú (`npm start`).
 
 **Prueba manual en tu Portal** (tras activarlo). Los pasos marcados con 💳 hacen UNA llamada real del Asistente (con
 Claude Code, de tu suscripción); los marcados con 🔒 piden tu autorización con presupuesto y no se hacen solos:

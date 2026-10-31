@@ -141,8 +141,12 @@ otra concreta (se le dice cuántas hay). Los USD que muestran las pruebas y las 
   `C:` (reproducido con un `docker run` mínimo, sin código del Portal); con el mismo código de servidor pasaron antes.
 - Sandbox Docker: antes de la corrección, 5 de 5 ejecuciones fallaban una prueba distinta. Tras la corrección del reloj
   y la evidencia por commit, dos ejecuciones fallaron la MISMA prueba (HU-159, «pruebas solo canceladas»), cuyo
-  dato de prueba se corrigió en el mismo commit `2389017`; **esa versión final no se ha vuelto a ejecutar en el sandbox**
-  (Docker no monta carpetas). Pendiente de confirmar cuando Docker funcione.
+  dato de prueba se corrigió en el mismo commit `2389017`.
+- **Tras reiniciar Windows (Docker de nuevo en marcha):** las 7 pruebas con Docker real y el recorrido completo, en
+  verde; `PORTAL_REQUIRE_DOCKER=1 npm test` sin fallos. Dentro del sandbox, 6 ejecuciones completas sin fallos
+  aleatorios: la corrección `2389017` queda confirmada. La verificación encontró dos pruebas que fallaban siempre dentro
+  del sandbox y un botón («Seguir con este plan») que no hacía nada; corregidos (ver la sección H de
+  `docs/handoffs/RESTART_CHECKPOINT_2026-10-30.md`).
 - Recorrido en navegador sobre una instancia aislada (proveedor simulado): idea → decisiones → recargar → propuesta con
   cuestionamiento → aprobación → borradores → historias creadas con su dependencia; encargo `EN-001` autorizado (pasó a
   «espera tu decisión» con el motivo); cambio local confirmado. Script `ui-assist-verify.mjs`: 12/12 en escritorio y
@@ -203,8 +207,9 @@ igual que con las historias.
   saldo ni lo estima. El tope de llamadas se comprueba por paso, no por reintento.
 - **Sin validación con modelos reales:** todo se verificó con proveedor y CLI simulados; la calidad real de
   propuestas, cuestionamientos e historias depende del modelo y no se ha medido.
-- **Docker:** la versión final de la corrección de pruebas inestables no se ha ejecutado aún en el sandbox (ver
-  Verificación).
+- **Pruebas dentro del sandbox:** el recorrido completo (necesita Docker) y la prueba de hooks (el `/tmp` del sandbox es
+  `noexec`) se omiten ahí y lo dicen; se ejecutan en el equipo, y `PORTAL_REQUIRE_DOCKER=1` hace fallar el recorrido si
+  falta Docker.
 
 ## Puerta de estabilización (31 de octubre de 2026)
 

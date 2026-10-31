@@ -4,6 +4,9 @@ El propietario reinicia Windows porque el motor de Docker Desktop no arranca. Es
 exactamente donde quedó, sin repetir lo hecho. Todo el trabajo está **confirmado en git** (rama
 `mejora/asistente-encargos`): no depende de carpetas temporales ni de la conversación de Claude Code.
 
+> **Actualización tras el reinicio:** el plan F se completó (pasos 1–8). Resultados, correcciones y lo que queda para
+> el propietario: sección **H**, al final.
+
 ## A · Objetivo
 
 Que Portal IA sea el entorno principal de desarrollo con IA del propietario, con capacidades cercanas a Claude Code en
@@ -158,3 +161,74 @@ del pipeline. Mientras no se integre esta rama, conviene desactivar la lectura d
 - Nunca reiniciar ni borrar volúmenes de Docker ni distribuciones de WSL automáticamente.
 - No debilitar el aislamiento de Docker ni dar a los agentes un shell del equipo.
 - Antes de cada commit: typecheck, test y build en verde. Commits pequeños, en español.
+
+## H · Reanudación tras el reinicio (30 de octubre de 2026, noche)
+
+**Estado recuperado:** la rama seguía en `35aae36`, con el worktree temporal intacto y limpio; `main` en `e9fcbbc` y el
+checkout principal limpio. Tras el reinicio el Portal en marcha **no** estaba arrancado (nada escucha en 4310); no se
+arrancó.
+
+**Docker Desktop: sano** (pasos F.1–F.4). Docker Desktop 4.97.0, motor 29.9.2, `docker desktop status` → `running`.
+La imagen `portal-ia-sandbox:1` y los volúmenes de dependencias siguen ahí. El montaje mínimo desde `C:` (sin red, solo
+lectura) lee el archivo y rechaza escribir: ya no hay «input/output error». No se reinició ni se borró nada de Docker ni
+de WSL.
+
+**Pruebas antes bloqueadas, con Docker real (paso F.5, en `35aae36`):**
+
+| Prueba | Resultado |
+|---|---|
+| `sandbox-docker.test.ts` («un script malicioso…») | en verde (12/12 del archivo) |
+| `autonomous-pipeline.test.ts` C, D, E y E2 | en verde (17 de 18; la omitida es la puerta que solo se exige con `PORTAL_REQUIRE_DOCKER=1`) |
+| `incremental-delivery.test.ts` R | en verde (41/41) |
+| `claude-code-execution.test.ts` 23 | en verde (29/29) |
+| `assistant-journey.test.ts` (recorrido completo) | en verde |
+| `PORTAL_REQUIRE_DOCKER=1 npm test` (Windows) | 439 pruebas: 437 en verde, 0 fallidas, 2 omitidas (SIGTERM en Windows; `linux-ns` porque hay Docker) |
+
+**Lo que reveló la verificación y se corrigió:**
+1. **Dentro del sandbox, dos pruebas nuevas de esta rama fallaban SIEMPRE** (el Portal ejecuta esta suite en el
+   sandbox para verificar cada historia de su propio proyecto: tras integrar, cada historia habría fallado `test` y
+   abierto correcciones pagadas):
+   - `assistant-journey.test.ts` exigía Docker sin condición, y dentro del sandbox no hay Docker. Ahora, como C, D y E:
+     sin Docker se omite y lo dice; con `PORTAL_REQUIRE_DOCKER=1` **falla**. Comprobado con una imagen inexistente
+     (se omite; con la obligación, falla) y con Docker (pasa).
+   - `security-paths.test.ts`: el control positivo del hook no puede pasar en el sandbox porque `/tmp` es un tmpfs
+     `noexec` (medido: `Permission denied`; git: «hook was ignored»). La prueba de hooks va aparte y se omite, diciéndolo,
+     solo si el directorio temporal no permite ejecutar; en Windows (donde el Portal hace sus commits) se ejecuta con su
+     control. La de enlaces se ejecuta siempre.
+2. **«Seguir con este plan» no hacía nada en la interfaz**: `accept_plan` no estaba en `HANDLED` de `StoryFlowPanel`,
+   así que el botón solo decía «recarga la página». Las pruebas del servidor llamaban a la ruta directamente. Corregido,
+   con una prueba estática nueva: cada `FlowActionId` debe estar en `HANDLED` (sobre el código anterior detecta
+   `accept_plan`).
+3. **Su confirmación no decía que paga la implementación**: usaba el texto genérico «Autorizo esta acción en el
+   sandbox…» y no ofrecía presupuesto adicional. Ahora dice qué se autoriza y con qué (lo que queda del presupuesto, el
+   adicional si lo pones, Claude Code si el equipo lo usa) y muestra el campo de presupuesto.
+4. **El título de esa pausa engañaba**: «Detenido: el plan no se puede ejecutar por partes» (pensado para un plan
+   demasiado grande). Con la revisión del plan en pausa ahora dice «La revisión independiente del plan dejó una brecha
+   bloqueante: decides tú». Prueba en `gauntlet.test.ts`; el caso antiguo conserva su título.
+
+**Pruebas inestables del sandbox (paso F.6):** con la corrección `2389017`, 6 ejecuciones completas de la suite
+dentro del sandbox (`--cpus 2 --memory 2g`, los mismos argumentos de `buildDockerRunArgs`) **sin ningún fallo
+aleatorio**; antes, 5 de 5 fallaban una prueba distinta. La primera ejecución solo falló las dos pruebas del punto 1.
+
+**Código final (paso F.7):**
+- `npm run typecheck` y `npm run build`: exit 0.
+- `PORTAL_REQUIRE_DOCKER=1 npm test`: 441 pruebas; 439 en verde, 0 fallidas, 2 omitidas (las de plataforma).
+- Dentro del sandbox: 2 de 2 ejecuciones con 441 pruebas: 430 en verde, 0 fallidas, 11 omitidas (las que necesitan Docker o ejecutar en `/tmp`, y las de sandbox anidado).
+- Navegador (Chromium sin interfaz, instancia aislada, proveedor simulado, Docker real): las 12 comprobaciones de siempre y 26 nuevas (escritorio y móvil), todas en verde y sin errores en la consola.
+
+**Cómo se reprodujo** (scripts fuera del repositorio, en la carpeta temporal de la sesión de Claude Code, que puede
+desaparecer):
+- Suite dentro del sandbox: los argumentos de `buildDockerRunArgs` y `depsVolumeName` de `sandbox.ts`, sobre una
+  exportación limpia de la rama (`git archive`), sin red y con un `PORTAL_DATA_DIR` temporal.
+- Navegador: `ux-assist.mjs` (instancia aislada) con `ui-assist-verify.mjs` (las 12 comprobaciones de siempre) y
+  `ui-new-controls.mjs` (nuevo: tarjeta del encargo con «Pedir cambios» y descarte; pausa del plan con «Seguir con este
+  plan», en escritorio y móvil, aceptándolo de punta a punta con Docker real).
+
+**Siguen abiertos** (sin cambios en esta sesión; ver E): el diagnóstico fallido que vuelve a pagar la evaluación, la
+cita del revisor del plan sin comprobar, los enlaces duros, el coste del planificador por llamada y la iteración
+FALLIDA no superada. Cosmético visto en el móvil: los botones flotantes «Autorizaciones» y «Asistente» tapan el borde
+inferior de la pantalla (el contenido se desplaza por debajo).
+
+**Para el propietario (paso F.9, requiere autorización):** integrar en `main` primero
+`mejora/lotes-autorizacion-seleccion` y luego `mejora/asistente-encargos`, `npm run build` y reiniciar el Portal. Nada
+de eso se ha hecho.
