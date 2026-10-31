@@ -403,3 +403,41 @@ test('Ronda B · B4: con una pregunta pendiente del equipo, «Iterar» prepara u
   assert.equal(it2.items[0].resumeProcessId ?? null, null);
   await close(b0.id);
 });
+
+// ---------- Ronda D (Gauntlet final): «¿qué escenario demostraría que no puede terminar un lote e integrar con seguridad?» ----------
+test('Ronda D · no aceptas una historia cuando las demás ya están listas y otra depende de ella: la independiente se integra, la dependiente se bloquea con su motivo, el lote no se da por terminado; al iterar la rechazada todo se retoma y termina', async () => {
+  fs.writeFileSync(path.join(repo, 'src/xray.ts'), 'export const x = 0;\n'); fs.writeFileSync(path.join(repo, 'src/zulu.ts'), 'export const z = 0;\n');
+  execSync('git add -A && git -c user.email=t@t -c user.name=t commit -qm "Base ronda D"', { cwd: repo });
+  const X = story('Historia XRAY'); const Y = story('Historia YANKEE'); const Z = story('Historia ZULU');
+  backlogRepo(S).update(Y.id, { dependsOn: X.storyId });
+  setScript([
+    { match: 'XRAY.*Corrige la implementación', text: patch('src/xray.ts', 'export const x = 1;', 'export const x = 10;') },
+    { match: 'XRAY.*Elabora el plan técnico', text: plan('src/xray.ts') }, { match: 'XRAY.*Implementa la historia', text: patch('src/xray.ts', 'export const x = 0;', 'export const x = 1;') },
+    { match: 'YANKEE.*Elabora el plan técnico', text: plan('src/yankee.ts') }, { match: 'YANKEE.*Implementa la historia', text: create('src/yankee.ts', "import { x } from './xray.ts';\nexport const y = x + 1;") },
+    { match: 'ZULU.*Elabora el plan técnico', text: plan('src/zulu.ts') }, { match: 'ZULU.*Implementa la historia', text: patch('src/zulu.ts', 'export const z = 0;', 'export const z = 3;') }
+  ]);
+  const b0 = await authorize({ itemIds: [X.id, Y.id, Z.id], title: 'Lote RONDA D', concurrency: 2 });
+  const r = await waitFor(() => get(b0.id), x => item(x, 'XRAY').state === 'ready' && item(x, 'ZULU').state === 'ready' && !!item(x, 'XRAY').freshness && !!item(x, 'ZULU').freshness, 'X y Z listas', 60_000);
+  assert.equal(item(r, 'YANKEE').state, 'waiting_dependency'); assert.match(item(r, 'YANKEE').reason, /aceptes e integres HU-\d+/);
+  // No aceptas X: Y se bloquea (necesita su código), Z sigue intacta y se integra al aceptarla.
+  await post(`/batches/${b0.id}/items/${item(r, 'XRAY').itemId}/reject`, { note: 'El valor de x debe ser 10.' });
+  const rj = await waitFor(() => get(b0.id), x => item(x, 'YANKEE').state === 'blocked', 'Y bloqueada por su dependencia');
+  assert.match(item(rj, 'YANKEE').reason, /no aceptaste/);
+  await post(`/batches/${b0.id}/accept`, { itemIds: [item(rj, 'ZULU').itemId] });
+  const zA = await waitFor(() => get(b0.id), x => item(x, 'ZULU').state === 'accepted', 'Z integrada');
+  assert.equal(mainFile('src/zulu.ts'), 'export const z = 3;\n'); assert.match(mainFile('src/xray.ts'), /x = 0;/, 'nada de la rechazada en main');
+  await new Promise(res => setTimeout(res, 300));
+  assert.notEqual((await get(b0.id)).status, 'completed', 'con una historia bloqueada sin resolver, el lote no se da por terminado');
+  void zA;
+  // Iteras la rechazada (sobre su rama): Y vuelve a esperarla; al aceptar X, Y se ejecuta y queda lista; al aceptarla, el lote termina.
+  await post(`/batches/${b0.id}/items/${item(rj, 'XRAY').itemId}/iterate`, { authorized: true, note: 'El valor de x debe ser 10.' });
+  const it2 = await get(b0.id); assert.equal(item(it2, 'YANKEE').state, 'waiting_dependency', 'la dependiente vuelve a esperarla');
+  await waitFor(() => get(b0.id), x => item(x, 'XRAY').state === 'ready' && !!item(x, 'XRAY').freshness, 'X lista con los cambios', 60_000);
+  await post(`/batches/${b0.id}/accept`, { itemIds: [item(it2, 'XRAY').itemId] });
+  await waitFor(() => get(b0.id), x => item(x, 'XRAY').state === 'accepted', 'X integrada', 60_000);
+  assert.match(mainFile('src/xray.ts'), /x = 10;/);
+  const yR = await waitFor(() => get(b0.id), x => item(x, 'YANKEE').state === 'ready' && !!item(x, 'YANKEE').freshness, 'Y ejecutada sobre main con X', 60_000);
+  await post(`/batches/${b0.id}/accept`, { itemIds: [item(yR, 'YANKEE').itemId] });
+  const done = await waitFor(() => get(b0.id), x => x.status === 'completed', 'lote RONDA D terminado', 60_000);
+  assert.equal(done.lifecycle.counts.accepted, 3); assert.match(mainFile('src/yankee.ts'), /x \+ 1/);
+});

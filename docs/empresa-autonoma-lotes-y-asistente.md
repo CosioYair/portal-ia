@@ -182,7 +182,8 @@ La navegación y los listados se midieron en la rama anterior (`docs/rendimiento
 |---|---|---|
 | A · diseño | Revisión independiente | 12 hallazgos (2 críticos) corregidos antes de implementar |
 | B · implementación | Revisión independiente del diff | 11 hallazgos (2 críticos: re-programación en bucle que podía colgar el servidor; reintentos automáticos de llamadas pausadas) corregidos con pruebas de regresión |
-| C · punta a punta | Navegador real, Docker y git reales | `e2e-lote-aceptar` 14/14 |
+| C · punta a punta | Navegador real, Docker y git reales | `e2e-lote-aceptar` 15/15 (con medidas) y suites anteriores del navegador en verde |
+| D · final | «¿Qué escenario demostraría que no puede terminar un lote e integrar con seguridad?» | No aceptas una historia cuando las demás ya están listas y otra depende de ella: la independiente se integra, la dependiente se bloquea con su motivo y el lote no se da por terminado; al iterar la rechazada se retoma todo y termina (prueba «Ronda D») |
 
 Tabla completa de hallazgos y correcciones:
 
@@ -218,12 +219,12 @@ Todas usan el proveedor simulado o la CLI simulada: ninguna llamada real.
 
 | Archivo | Pruebas | Escenarios |
 |---|---|---|
-| `lote-integracion-al-aceptar.test.ts` | 10 | 12; 12.1; 12.2 (conflictos reales y anulación de la aceptación); nunca sin aceptación; 12.4 (reinicio en mitad); recuperación del lote real; huella; ronda B |
+| `lote-integracion-al-aceptar.test.ts` | 11 | 12; 12.1; 12.2 (conflictos reales y anulación de la aceptación); nunca sin aceptación; 12.4 (reinicio en mitad); recuperación del lote real; huella; ronda B; ronda D |
 | `asistente-capacidad.test.ts` | 3 | Lectura del código sin `.env`; carril propio; encargo directo |
 | `incorporacion-proyectos.test.ts` | 2 | Descubrimiento; sin falso verde |
 | Actualizadas | — | `assignments.test.ts` y `assistant-journey.test.ts` (Docker real): pedir cambios sobre la rama; `concurrencia-tiempo-real.test.ts` (C2): la iteración sobre su rama, seguida sin repetir |
 
-Navegador real, Docker y git reales: `e2e-lote-aceptar.mjs`, 14/14.
+Navegador real, Docker y git reales: `e2e-lote-aceptar.mjs`, 15/15.
 - El lote listo con main intacto.
 - El orden explicado y la vigencia.
 - Pedir cambios sobre la rama.
