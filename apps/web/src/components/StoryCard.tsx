@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { Link } from 'react-router-dom';
 import type { BacklogItem } from '@portal-ia/domain';
 import { Icon } from './ui.tsx';
 
@@ -33,12 +34,24 @@ export function StoryCard({ item, ownerName, status, primary, secondary, highlig
   note?: string | null;
 }) {
   const cls = `story-card${highlight ? ` story-card--${highlight}` : ''}`;
+  // «Más acciones» se cierra con Escape (el foco vuelve a su resumen) o al pulsar fuera; los listeners solo existen mientras está abierto.
+  const moreRef = useRef<HTMLDetailsElement>(null);
+  const summaryRef = useRef<HTMLElement>(null);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => { const d = moreRef.current; if (d && !d.contains(e.target as Node)) { d.open = false; setOpen(false); } };
+    const onKey = (e: KeyboardEvent) => { if (e.key !== 'Escape') return; const d = moreRef.current; if (!d) return; e.preventDefault(); d.open = false; setOpen(false); summaryRef.current?.focus(); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [open]);
   return (
     <article className={cls} aria-label={`${item.storyId} · ${item.title}`}>
       <div className="story-card-main">
         <div className="story-card-head">
           <span className="mono story-card-id">{item.storyId}</span>
-          <span className="story-card-title">{item.title}</span>
+          <Link to={`/historias/${item.id}`} className="story-card-title lnk" title="Abrir el espacio de la historia: detalle, edición y conversación">{item.title}</Link>
           {highlight === 'next' && <span className="chip chip-warn chip-xs">Siguiente</span>}
         </div>
         {item.criterion && <p className="story-card-crit small muted">{item.criterion}</p>}
@@ -56,8 +69,8 @@ export function StoryCard({ item, ownerName, status, primary, secondary, highlig
         {note && <span className="small muted story-card-note">{note}</span>}
         {(primary || secondary.length > 0) && <div className="story-card-actions">
           {primary && <button type="button" className={`btn btn-sm ${primary.variant === 'secondary' ? 'btn-secondary' : 'btn-primary'}`} title={primary.title} onClick={primary.onClick} disabled={primary.disabled}>{primary.label}</button>}
-          {secondary.length > 0 && <details className="story-card-more">
-            <summary className="btn btn-ghost btn-sm">Más acciones</summary>
+          {secondary.length > 0 && <details className="story-card-more" ref={moreRef} onToggle={e => setOpen(e.currentTarget.open)}>
+            <summary className="btn btn-ghost btn-sm" ref={summaryRef}>Más acciones</summary>
             <div className="story-card-menu">
               {secondary.map(a => <button key={a.label} type="button" className="btn btn-ghost btn-sm" title={a.title} onClick={a.onClick} disabled={a.disabled}>{a.label}</button>)}
             </div>
