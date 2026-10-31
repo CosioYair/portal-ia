@@ -292,7 +292,7 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
   const [busy, setBusy] = useState(false); const [addBudget, setAddBudget] = useState('0'); const [addCalls, setAddCalls] = useState('0'); const [resumeOk, setResumeOk] = useState(false);
   const [revoking, setRevoking] = useState(false); const [revokeReason, setRevokeReason] = useState(''); const [cancelling, setCancelling] = useState(false);
   const [closing, setClosing] = useState(false); const [closeReason, setCloseReason] = useState('');
-  const closeEvent = [...b.events].reverse().find(e => e.message.startsWith('Cerrado manualmente por el propietario'));
+  const closeEvent = b ? [...b.events].reverse().find(e => e.message.startsWith('Cerrado manualmente por el propietario')) : undefined;
   const [picked, setPicked] = useState<string[]>([]); const [checks, setChecks] = useState<Record<string, boolean[]>>({});
   // La nota de aceptación a medias se conserva (por lote); lo que marcas para aceptar, no: es una comprobación tuya, no un borrador.
   const noteDraft = useDraft(draftKey('lote.aceptacion', ws.slug, batchId), ''); const note = noteDraft.value; const setNote = noteDraft.set;
