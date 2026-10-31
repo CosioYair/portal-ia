@@ -105,13 +105,19 @@ export function preflightRepo(slug: string, repoPath: string) {
   if (a !== b) throw Object.assign(new Error(`El repositorio registrado del proyecto interno (${repoPath}) no es la carpeta desde la que corre este Portal (${REPO_ROOT}). Las mejoras del Portal deben hacerse sobre su propio código: en el Panel, pulsa «Usar la carpeta de esta instalación» y vuelve a intentarlo.`), { statusCode: 409, code: 'foreign_repo' });
 }
 
-export function estimateStory(slug: string, projectId: string, itemId: string, opts: StoryOptions = {}): AssessmentEstimate {
-  const item = backlogRepo(slug).get(itemId);
-  if (!item || item.projectId !== projectId) throw Object.assign(new Error('Historia no encontrada'), { statusCode: 404 });
+/** Tamaño del contexto del repositorio que recibe cada paso (igual para todas las historias del proyecto). */
+export function repoContextChars(slug: string, projectId: string): number {
   const repo = projectsRepo(slug).repository(projectId);
   if (!repo) throw Object.assign(new Error('Registra el repositorio del proyecto antes de ejecutar historias.'), { statusCode: 409 });
   preflightRepo(slug, repo.path);
-  const ctxChars = buildRepoContext(repo.path, 60_000).totalChars;
+  return buildRepoContext(repo.path, 60_000).totalChars;
+}
+
+/** `ctxChars`: el de repoContextChars ya calculado (la vista previa de un lote lo calcula una vez para todas). */
+export function estimateStory(slug: string, projectId: string, itemId: string, opts: StoryOptions = {}, ctxChars0?: number): AssessmentEstimate {
+  const item = backlogRepo(slug).get(itemId);
+  if (!item || item.projectId !== projectId) throw Object.assign(new Error('Historia no encontrada'), { statusCode: 404 });
+  const ctxChars = ctxChars0 ?? repoContextChars(slug, projectId);
   const agents = agentsRepo(slug).list();
   const { steps: plan, team } = stepPlanFor(agents, projectId, item, opts);
   const steps = plan.map(s => {

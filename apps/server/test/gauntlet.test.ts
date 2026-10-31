@@ -301,6 +301,7 @@ test('R · una brecha con evidencia queda «detectada» y no se inyecta; validad
   // Con la lección presente vuelve la misma clase de brecha: se mide como reincidencia (candidata a obsoleta), sin tocar al agente.
   setScript([GAPS, PASS]);
   ({ p } = await authorize('R validada con reincidencia', { gauntlet: { mode: 'standard' } }));
+  assert.equal(p.result?.pipeline?.state, 'verified', `${p.status} · ${p.result?.pipeline?.pauseKind} · ${p.result?.pipeline?.reason ?? p.error}`);
   assert.equal(p.result!.gauntlet!.status, 'passed');
   l = lessonsRepo(S).get(fixed.id)!;
   const usedHere = p.steps.filter(s => s.lessonsUsed?.includes(fixed.id));

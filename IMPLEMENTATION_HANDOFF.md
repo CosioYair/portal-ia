@@ -1,3 +1,61 @@
+# Portal IA · Revisión Gauntlet de la ejecución continua (autorización por agente y selección escalable)
+
+Fecha: 30 de octubre de 2026. Detalle (estándar, causa raíz, rondas, rendimiento y limitaciones):
+`docs/ejecucion-continua-revision-gauntlet.md`. Todo con proveedor y CLI de Claude Code simulados, datos e instancias
+temporales, **sin abrir `data/`, sin llamadas reales, sin reiniciar el Portal en marcha, sin integrar ni publicar**.
+
+**Rama `mejora/lotes-autorizacion-seleccion`** (sobre `main` = `e9fcbbc`, sin publicar; `main` no cambió):
+
+| Commit | Contenido |
+|---|---|
+| `37ab4db` | Autorización por agente: causa raíz del «claude-code — no autorizado», misma comprobación en la vista previa y al ejecutar, alternativa por API solo si el lote la autoriza |
+| `c7b17b4` | Selección escalable y resumen persistente del lote |
+| `3f3a853` | Pruebas T y R explican su fallo en el sandbox (la corrección de I + J quedó, por error de agrupación, en el commit siguiente) |
+| `72e32b1` | Lo que la vista previa bloquea no se autoriza; perder un permiso pausa el lote una vez; cuántas caben con los límites; I + J sin depender del orden |
+| `abe75fd` | Interfaz: cuántas caben, dependientes sin integrar, ordenar y filtrar por responsable |
+| `2127631` | El origen autorizado se respeta en cada llamada; «caben» con duración máxima y concurrencia |
+| `ff3bb62` | Aviso de duración y documentación de las rondas 5 y 6 |
+| `9f4e5c1` | Tras la tercera revisión: solo el origen no autorizado pausa todo el lote (no la petición de permiso de una historia); «caben» sin falsos avisos con concurrencia |
+
+**Verificación:**
+- `npm run typecheck`: exit 0.
+- `PORTAL_REQUIRE_DOCKER=1 npm test`: 414 pruebas, 412 superadas, 0 fallidas, 2 omitidas por plataforma.
+- `npm run build`: exit 0.
+- Recorrido en Chromium en una instancia aislada con 500 historias: 40/40.
+- Tres revisiones independientes (máximo acordado):
+  - la segunda confirmó en ejecución los 8 hallazgos corregidos de la primera;
+  - la tercera, los 4 de la segunda, con el veredicto «listo, con detalles menores»;
+  - sus 3 detalles se corrigieron después, verificados solo con pruebas.
+
+**Para activarlo** (requiere tu autorización):
+1. Integrar la rama en `main`.
+2. `npm run build`.
+3. Reiniciar el Portal.
+
+No cambia el esquema: los lotes antiguos se leen igual. Un lote antiguo sin `apiFallback` queda sin alternativa por API,
+que es lo más restrictivo.
+
+**Prueba en tu Portal** (sin gastar: no autorices el lote):
+1. Ejecución continua → Nuevo lote. Comprueba los valores por defecto:
+   - Claude Code marcado y API sin marcar;
+   - integrar, reiniciar y publicar desmarcados.
+2. Marca HU-164 y HU-165. En «Equipo y orígenes», cada agente debe decir «Claude Code — Suscripción» y «sí», sin ningún
+   «no autorizado». El resumen debe decir «Pueden empezar 2».
+3. Filtra por tamaño o busca un texto, pulsa «Seleccionar las filtradas» y cambia los filtros: el contador conserva la
+   selección y dice cuántas no se ven.
+4. Revisa en el resumen:
+   - llamadas y suscripción frente al tope;
+   - USD de API;
+   - «Hará sin preguntarte» y «Seguirá siendo decisión tuya».
+5. Desmarca Claude Code: debe pedir un origen. Vuelve a marcarlo.
+6. Cierra el asistente sin autorizar.
+
+**Pendiente (preexistente, también en `main`):** en el sandbox Docker (2 CPU), la suite completa del Portal falla una
+prueba distinta en cada ejecución (5 de 5). Propuesta: una historia para estabilizarla, porque el Portal la usa para
+verificar sus propias historias.
+
+---
+
 # Portal IA · Gauntlet, ejecución continua del backlog, comunicación y aprendizaje
 
 Fecha: 30 de octubre de 2026. Diseño, flujo y limitaciones: `docs/gauntlet-y-ejecucion-continua.md`. Todo con

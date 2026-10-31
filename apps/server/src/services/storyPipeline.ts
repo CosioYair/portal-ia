@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { backendLabel, promptSections } from '@portal-ia/domain';
+import { backendLabel, batchSourceOf, promptSections } from '@portal-ia/domain';
 import type { Agent, AgentBlocker, AgentFailureKind, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError, reasoningHeadroom } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -46,7 +46,7 @@ import { getClaudeCodeSettings } from './claudeCode/settings.ts';
 const now = () => new Date().toISOString();
 export const isTruncatedStop = (stop: string | null | undefined) => stop === 'max_tokens' || stop === 'length';
 
-export class PipelinePause extends Error { constructor(public kind: PipelinePauseKind, message: string) { super(message); } }
+export class PipelinePause extends Error { constructor(public kind: PipelinePauseKind, message: string, public providerCode: string | null = null) { super(message); } }
 export class StoryFailure extends Error { constructor(public failure: ProcessFailure) { super(failure.detail); } }
 
 // ---------------------------------------------------------------- Llamadas a agentes
@@ -86,6 +86,24 @@ function stepSystem(slug: string, proc: Process, stepId: string, agent: Agent, s
   return injected.get(stepId)!;
 }
 
+/** ¿El agente usa un origen que el lote de este proceso no autoriza? (p. ej. lo cambiaron a la API a mitad de la historia). */
+export function originBlocked(proc: Process, agent: Agent): string | null {
+  const allowed = proc.result?.pipeline?.config.backends;
+  if (!allowed?.length || allowed.includes(batchSourceOf(agentBackend(agent)))) return null;
+  return `«${agent.config.name}» usa ahora ${backendLabel(agentBackend(agent), null, agent.config.provider)} y el lote de esta historia no autoriza ese origen: no se ha hecho la llamada. Devuelve el agente a su origen anterior y continúa la historia desde su proceso.`;
+}
+const originFailure = (msg: string) => Object.assign(new Error(msg), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'origin_not_allowed', detail: msg } satisfies ProcessFailure });
+
+/**
+ * ¿Puede Claude Code ceder a la API en este proceso? Solo si el propietario lo autorizó en el conector, el proveedor
+ * está conectado y el proceso no lo prohíbe (un lote que no autoriza la API fija `apiFallback: false`).
+ */
+export function apiFallbackFor(proc: Process, agent: Agent): boolean {
+  const providerId = agent.config.provider as ProviderId;
+  return getClaudeCodeSettings().fallback === 'api' && proc.result?.pipeline?.config.apiFallback !== false
+    && !!providersRepo.credential(providerId) && providersRepo.get(providerId)?.status === 'connected';
+}
+
 /**
  * Lo máximo que una llamada del paso puede descontar del presupuesto antes de enviarla: con el sistema que recibirá de
  * verdad (lecciones incluidas) y, si Claude Code puede ceder a la API (alternativa autorizada en el conector), al precio
@@ -94,9 +112,7 @@ function stepSystem(slug: string, proc: Process, stepId: string, agent: Agent, s
 export function worstCaseCallUsd(slug: string, processId: string, stepId: string, system0: string, user: string, maxTokens: number, injected: Map<string, string>): number {
   const proc = processesRepo(slug).get(processId)!; const agent = agentsRepo(slug).get(proc.steps.find(s => s.id === stepId)!.agentId)!;
   const system = stepSystem(slug, proc, stepId, agent, system0, injected);
-  const providerId = agent.config.provider as ProviderId;
-  const apiFallback = getClaudeCodeSettings().fallback === 'api' && !!providersRepo.credential(providerId) && providersRepo.get(providerId)?.status === 'connected';
-  return estimateCallUsd(agent, system, user, maxTokens, usesClaudeCode(agent) && !apiFallback ? 'claude-code' : 'api');
+  return estimateCallUsd(agent, system, user, maxTokens, usesClaudeCode(agent) && !apiFallbackFor(proc, agent) ? 'claude-code' : 'api');
 }
 
 export interface CallOptions {
@@ -124,6 +140,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   const enteredAt = Date.now();
   const procs = processesRepo(slug); const proc = procs.get(processId)!;
   const step = proc.steps.find(s => s.id === stepId)!; const agent = agentsRepo(slug).get(step.agentId)!;
+  const blocked = originBlocked(proc, agent); if (blocked) throw originFailure(blocked);
   const system = stepSystem(slug, proc, stepId, agent, system0, opts.injected);
   const providerId = agent.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
@@ -132,7 +149,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   // Claude Code si el propietario lo autorizó en los ajustes del conector, y entonces con su presupuesto de siempre.
   let route: 'api' | 'claude-code' = usesClaudeCode(agent) ? 'claude-code' : 'api';
   let fallbackReason: string | null = null;
-  const apiFallbackAllowed = () => getClaudeCodeSettings().fallback === 'api' && apiConnected;
+  const apiFallbackAllowed = () => apiConnected && apiFallbackFor(processesRepo(slug).get(processId)!, agent);
   if (route === 'claude-code') {
     const g = claudeCodeGate(slug, agent, proc.projectId);
     if (!g.ok && apiFallbackAllowed()) { route = 'api'; fallbackReason = g.reason; }
@@ -305,11 +322,11 @@ export async function stepCall(ctx: StoryRunCtx, agent: Agent, role: TeamRole, t
   if (!b.ok) throw new PipelinePause('budget', `La siguiente llamada («${title}», ≈ ${b.needed.toFixed(2)} USD) superaría el presupuesto autorizado: quedan ${Math.max(0, b.remaining).toFixed(2)} USD. No se ha llamado a la IA; lo hecho se conserva.`);
   // Claude Code no disponible (proyecto sin autorizar, consola desconectada…): se pausa ANTES de crear el paso, como con el
   // presupuesto. Antes quedaba un paso «pendiente» huérfano por cada «Continuar» (HU-159, pasos 21 y 22).
+  if (!reuseStepId) { const blocked = originBlocked(processesRepo(ctx.slug).get(ctx.processId)!, agent); if (blocked) throw originFailure(blocked); }
   if (!reuseStepId && usesClaudeCode(agent)) {
-    const g = claudeCodeGate(ctx.slug, agent, processesRepo(ctx.slug).get(ctx.processId)!.projectId);
-    const prov = providersRepo.get(agent.config.provider as ProviderId);
-    const apiFallback = getClaudeCodeSettings().fallback === 'api' && !!providersRepo.credential(agent.config.provider as ProviderId) && prov?.status === 'connected';
-    if (!g.ok && !apiFallback) throw Object.assign(new Error(g.reason), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'backend_unavailable', detail: g.reason } satisfies ProcessFailure });
+    const proc = processesRepo(ctx.slug).get(ctx.processId)!;
+    const g = claudeCodeGate(ctx.slug, agent, proc.projectId);
+    if (!g.ok && !apiFallbackFor(proc, agent)) throw Object.assign(new Error(g.reason), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'backend_unavailable', detail: g.reason } satisfies ProcessFailure });
   }
   const stepId = reuseStepId ?? processesRepo(ctx.slug).addStep(ctx.processId, { agentId: agent.id, agentName: agent.config.name, title, model: agent.config.model, role, reason }).id;
   const cfg = processesRepo(ctx.slug).get(ctx.processId)?.result?.pipeline?.config;
@@ -896,7 +913,8 @@ export function providerPause(e: any): PipelinePause | null {
   // Conector Claude Code: nunca se cambia solo a un origen facturable; se pausa con el motivo y lo hecho se conserva.
   if (f.providerCode === 'usage_limit') return new PipelinePause('subscription_limit', `${f.detail} Lo hecho se conserva y no se ha cambiado a otro proveedor facturable. «Continuar» cuando se renueve el límite, o asigna otro backend al agente.`);
   if (f.providerCode === 'max_turns') return new PipelinePause('max_turns', `${f.detail} Lo hecho se conserva (commits, salidas y verificaciones). No se repite el mismo encargo: el siguiente intento es acotado o decides tú.`);
-  if (f.providerCode === 'backend_unavailable') return new PipelinePause('permission', `Claude Code no está disponible para este paso: ${f.detail} Lo hecho se conserva y no se ha cambiado a otro proveedor facturable. Corrígelo y pulsa «Continuar».`);
+  if (f.providerCode === 'origin_not_allowed') return new PipelinePause('permission', `${f.detail} Lo hecho se conserva.`, f.providerCode);
+  if (f.providerCode === 'backend_unavailable') return new PipelinePause('permission', `Claude Code no está disponible para este paso: ${f.detail} Lo hecho se conserva y no se ha cambiado a otro proveedor facturable. Corrígelo y pulsa «Continuar».`, f.providerCode);
   if (f.class === 'PROVIDER_TIMEOUT') return new PipelinePause('provider_timeout', `El proveedor no respondió a tiempo: ${f.detail} No se reintenta solo (la llamada pudo facturarse); lo hecho se conserva y «Continuar» repite solo esta llamada.`);
   if (f.class === 'PROVIDER_CONNECTION_ERROR') return new PipelinePause('provider_error', `No se pudo completar la llamada al proveedor tras los reintentos permitidos: ${f.detail} Lo hecho se conserva; «Continuar» la repite.`);
   if (f.class === 'PERMISSION_REQUIRED' && f.providerCode) return new PipelinePause('permission', `El proveedor rechazó la credencial o el permiso (${f.providerCode}): ${f.detail} Revisa el proveedor en Proveedores y continúa.`);
@@ -908,7 +926,7 @@ export function pausePipeline(ctx: StoryRunCtx, pause: PipelinePause) {
   const stopped = ['repeated_failure', 'limit', 'qa', 'no_changes', 'refusal', 'provider_refusal', 'unsupported', 'unknown', 'plan', 'disagreement', 'gauntlet'].includes(pause.kind);
   const CLASS: Partial<Record<PipelinePauseKind, AgentFailureKind>> = { budget: 'BUDGET_EXHAUSTED', network: 'PERMISSION_REQUIRED', environment: 'ENVIRONMENT_FAILURE', limit: 'RECOVERABLE_IMPLEMENTATION_ERROR', repeated_failure: 'RECOVERABLE_IMPLEMENTATION_ERROR', missing_information: 'MISSING_INFORMATION', permission: 'PERMISSION_REQUIRED', unsupported: 'UNSUPPORTED_CAPABILITY', provider_refusal: 'PROVIDER_REFUSAL', provider_timeout: 'PROVIDER_TIMEOUT', provider_error: 'PROVIDER_CONNECTION_ERROR', max_turns: 'CLAUDE_CODE_MAX_TURNS_EXHAUSTED', interrupted: 'UNKNOWN_FAILURE', unknown: 'UNKNOWN_FAILURE', too_large: 'INCOMPLETE_OUTPUT', incomplete: 'RECOVERABLE_IMPLEMENTATION_ERROR' };
   const cur = pipelineOf(ctx.slug, ctx.processId);
-  updatePipeline(ctx.slug, ctx.processId, { state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, reason: pause.message, phase: 'finished', finishedAt: now(), failureClass: cur.failureClass && ['missing_information', 'permission', 'unsupported', 'provider_refusal'].includes(pause.kind) ? cur.failureClass : CLASS[pause.kind] ?? cur.failureClass ?? null }, { kind: 'pause', message: pause.message });
+  updatePipeline(ctx.slug, ctx.processId, { state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, providerCode: pause.providerCode, reason: pause.message, phase: 'finished', finishedAt: now(), failureClass: cur.failureClass && ['missing_information', 'permission', 'unsupported', 'provider_refusal'].includes(pause.kind) ? cur.failureClass : CLASS[pause.kind] ?? cur.failureClass ?? null }, { kind: 'pause', message: pause.message });
 }
 
 // ---------------------------------------------------------------- Reanudar (sin repetir lo hecho)

@@ -1,3 +1,4 @@
+import type { ExecutionBackend } from './claude-code.ts';
 import type { GauntletConfig } from './gauntlet.ts';
 import type { BacklogStatus, PipelinePauseKind } from './types.ts';
 
@@ -32,6 +33,16 @@ export type BatchItemState =
   | 'blocked'
   | 'cancelled';
 
+/**
+ * Origen de ejecución que autoriza un lote: la API del proveedor (facturable, en USD) o la suscripción de Claude Code.
+ * El origen es de cada AGENTE, no de la historia: un equipo puede mezclar orígenes y cada agente se comprueba aparte.
+ */
+export type BatchSource = 'api' | 'claude_code';
+/** Backend del agente → origen que lo autoriza en un lote (Claude Code gestionado y la consola usan la suscripción). */
+export function batchSourceOf(backend: ExecutionBackend | null | undefined): BatchSource {
+  return !backend || backend === 'api' ? 'api' : 'claude_code';
+}
+
 export type BatchFailureClass = 'owner_decision' | 'environment' | 'budget' | 'subscription' | 'failure' | 'dependency' | 'integration';
 
 export interface BatchGitAuthorization {
@@ -47,8 +58,13 @@ export interface BatchAuthorization {
   projectId: string;
   /** Historias en el orden que propuso el propietario (el plan respeta dependencias y, a igualdad, este orden). */
   itemIds: string[];
-  /** Orígenes de ejecución permitidos para el equipo de cada historia: nunca se cambia a otro facturable. */
-  backends: ('api' | 'claude_code')[];
+  /** Orígenes de ejecución permitidos para los agentes de cada historia: nunca se cambia a otro facturable. */
+  backends: BatchSource[];
+  /**
+   * Si Claude Code no está disponible, ceder a la API (facturable). Solo con la API también autorizada en el lote Y la
+   * alternativa activada en el conector; desactivado por defecto (lotes anteriores sin el campo: desactivado).
+   */
+  apiFallback?: boolean;
   totalBudgetUsd: number;
   perStoryBudgetUsd: number;
   maxCorrections: number;
@@ -88,6 +104,8 @@ export interface BatchItem {
   /** Proceso de iteración preparado (pendiente de autorizar) que el lote adopta al reanudar el elemento. */
   nextProcessId?: string | null;
   autoResumes: number;
+  /** No llegó a empezar (equipo sin permiso u origen no autorizado): reanudar o reintentar la vuelve a comprobar. */
+  notStarted?: boolean;
   startedAt: string | null;
   finishedAt: string | null;
   mergedCommit?: string | null;
@@ -122,13 +140,15 @@ export interface Batch {
   items: BatchItem[];
   events: BatchEvent[];
   activation: BatchActivation | null;
+  /** Dónde se corrige el motivo de la pausa (p. ej. Proveedores → Claude Code), si lo hay. */
+  reasonFix?: { label: string; href: string } | null;
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
   revokedAt: string | null;
 }
 
-export const BATCH_LIMITS = { maxItems: 30, maxConcurrency: 3, maxTotalUsd: 500, maxPerStoryUsd: 50, maxDurationMin: 24 * 60, maxCorrections: 6, maxSubscriptionCalls: 400, maxAutoResumes: 1 } as const;
+export const BATCH_LIMITS = { maxItems: 200, maxConcurrency: 3, maxTotalUsd: 500, maxPerStoryUsd: 50, maxDurationMin: 24 * 60, maxCorrections: 6, maxSubscriptionCalls: 5000, maxAutoResumes: 1 } as const;
 
 // ---------------------------------------------------------------- Planificación determinista
 
@@ -177,14 +197,23 @@ export function planBatch(selected: PlanInput[], backlog: PlanInput[]): PlannedI
 /**
  * Cómo afecta al lote que el pipeline de una historia se detenga: `batchWide` pausa TODO el lote (el mismo motivo
  * detendría a las demás: límite de la suscripción, sandbox caído); si no, solo esa historia espera tu decisión y las
- * independientes siguen.
+ * independientes siguen. `providerCode` es el del fallo del proceso (un fallo del proveedor antes de que el Desarrollador
+ * entregue termina el proceso en lugar de pausarlo; después, va en la pausa): el límite de la suscripción, Claude Code
+ * no disponible o un origen no autorizado en el lote también detendrían a las demás. Una petición de permiso del propio
+ * agente para SU historia (`permission`) solo detiene esa historia.
  */
-export function classifyStop(pauseKind: PipelinePauseKind | null | undefined, processStatus: string): { cls: BatchFailureClass; batchWide: boolean } {
+export function classifyStop(pauseKind: PipelinePauseKind | null | undefined, processStatus: string, providerCode?: string | null): { cls: BatchFailureClass; batchWide: boolean } {
+  if (providerCode === 'usage_limit') return { cls: 'subscription', batchWide: true };
+  if (providerCode === 'backend_unavailable') return { cls: 'environment', batchWide: true };
+  // Un agente pasó a un origen que el lote no autoriza: les pasaría lo mismo a las demás que lo usan.
+  if (providerCode === 'origin_not_allowed') return { cls: 'owner_decision', batchWide: true };
   if (processStatus === 'failed') return { cls: 'failure', batchWide: false };
   if (processStatus === 'cancelled' || pauseKind === 'cancelled') return { cls: 'owner_decision', batchWide: false };
   switch (pauseKind) {
     case 'subscription_limit': return { cls: 'subscription', batchWide: true };
     case 'environment': return { cls: 'environment', batchWide: true };
+    // Faltan dependencias en el sandbox y no se autorizó instalar con red: les pasaría lo mismo a todas.
+    case 'network': return { cls: 'environment', batchWide: true };
     case 'budget': return { cls: 'budget', batchWide: false };
     case 'provider_timeout': case 'provider_error': case 'interrupted': case 'max_turns': return { cls: 'environment', batchWide: false };
     case 'integration': case 'integration_conflict': return { cls: 'integration', batchWide: false };
@@ -213,6 +242,21 @@ export function batchBudget(auth: Pick<BatchAuthorization, 'totalBudgetUsd' | 'p
 }
 const round = (n: number) => Math.round(n * 1e6) / 1e6;
 
+/**
+ * ¿Avanza algo sin ti? En marcha, en cola, integrándose, o esperando a una dependencia que sí avanza. Una historia que
+ * espera a otra pendiente de TU decisión (p. ej. integrar a mano) no cuenta: el lote espera tu decisión.
+ */
+export function batchMoving(items: Pick<BatchItem, 'storyId' | 'state' | 'dependsOn' | 'dependsInBatch'>[]): boolean {
+  const by = new Map(items.map(i => [i.storyId, i]));
+  const moving = (i: (typeof items)[number], seen: Set<string>): boolean => {
+    if (i.state === 'running' || i.state === 'queued' || i.state === 'integrating') return true;
+    if (i.state !== 'waiting_dependency' || !i.dependsInBatch || !i.dependsOn || seen.has(i.storyId)) return false;
+    seen.add(i.storyId); const d = by.get(i.dependsOn);
+    return !!d && moving(d, seen);
+  };
+  return items.some(i => moving(i, new Set()));
+}
+
 /** Resumen por estado para el monitor (cuántas completas, bloqueadas, pendientes de aceptación…). */
 export function batchSummary(items: Pick<BatchItem, 'state'>[]): Record<BatchItemState, number> {
   const out = { queued: 0, waiting_dependency: 0, running: 0, integrating: 0, needs_owner: 0, awaiting_integration: 0, awaiting_acceptance: 0, accepted: 0, rejected: 0, failed: 0, blocked: 0, cancelled: 0 } as Record<BatchItemState, number>;
@@ -238,10 +282,82 @@ export interface BatchView extends Omit<Batch, 'items'> {
   budget: { spent: number; reserved: number; remaining: number; canStart: boolean };
   subscriptionCalls: number;
 }
+/** Comprobación de un agente del equipo (la MISMA en la vista previa y al empezar cada historia). */
+export interface BatchAgentCheck {
+  agentId: string;
+  name: string;
+  roles: string[];
+  backend: ExecutionBackend;
+  source: BatchSource;
+  /** Etiqueta visible del origen (p. ej. «Claude Code — Suscripción»). */
+  label: string;
+  /** El lote autoriza su origen. */
+  allowed: boolean;
+  /** Puede ejecutar: origen autorizado y conector, proyecto, suscripción, consola o proveedor disponibles. */
+  ready: boolean;
+  /** Por qué no puede (o el aviso, si cede a la API autorizada). */
+  problem: string | null;
+  /** Dónde se corrige (ruta de la interfaz). */
+  fix: { label: string; href: string } | null;
+  /** Ejecutará con la API como alternativa autorizada en el lote (facturable). */
+  viaFallback: boolean;
+}
+
+/** Rango de llamadas a los modelos: `min` sin correcciones; `max` con las correcciones autorizadas (no es un tope). */
+export interface CallRange { min: number; max: number }
+
+export interface BatchPreviewStory extends PlannedItem {
+  /** USD de la API (agentes en la API, o en Claude Code con la alternativa autorizada); la suscripción no se cobra por llamada. */
+  estimatedUsd: number | null;
+  /** Con las correcciones autorizadas (mismo criterio que `calls.max`). */
+  estimatedUsdMax: number | null;
+  calls: CallRange;
+  subscriptionCalls: CallRange;
+  team: BatchAgentCheck[];
+  backends: BatchSource[];
+  disallowedBackends: BatchSource[];
+  /** Empezará: no está bloqueada, su equipo puede ejecutar y se pudo estimar. */
+  executable: boolean;
+  /** Motivos concretos por los que no empezará. */
+  problems: string[];
+  error: string | null;
+}
+
 export interface BatchPreview {
   auth: BatchAuthorization;
-  plan: (PlannedItem & { estimatedUsd: number | null; backends: ('api' | 'claude_code')[]; disallowedBackends: ('api' | 'claude_code')[]; error: string | null })[];
+  plan: BatchPreviewStory[];
   estimateUsd: number;
   gauntletOverheadPerStory: { evaluations: { min: number; max: number }; corrections: { min: number; max: number } };
   warnings: string[];
+  summary: {
+    selected: number;
+    executable: number;
+    /** Bloqueadas por dependencias (ciclo o dependencia fuera del lote sin terminar). */
+    blockedByDependency: number;
+    /** Su equipo no puede ejecutar con lo autorizado (origen, conector, proyecto, consola, proveedor). */
+    blockedByPermission: number;
+    calls: CallRange;
+    subscriptionCalls: CallRange;
+    /** USD de API de las que empezarán: sin correcciones y con las autorizadas. */
+    apiUsd: { min: number; max: number };
+    /** Si Claude Code cede a la API (alternativa autorizada), con las correcciones autorizadas. */
+    worstCaseUsd: number;
+    /**
+     * Cuántas de las que pueden empezar caben antes de que el tope de llamadas a la suscripción, el presupuesto o la
+     * duración máxima pausen el lote (en el orden del plan y con la concurrencia): `max` si gastan lo mínimo (y la
+     * duración es la mediana del historial), `min` si gastan lo máximo autorizado (y la duración es el p75).
+     */
+    fits: { min: number; max: number; limitedBy: ('subscription' | 'budget' | 'duration')[] };
+    /** Dependen de otra del lote y, sin «Integrar en main», esperarán a que la integres tú. */
+    waitForManualIntegration: string[];
+    /** Oleadas: las de una misma oleada no dependen entre sí (pueden ir a la vez si la concurrencia lo permite). */
+    waves: string[][];
+    /** Dependencias de las elegidas que NO están en el lote ni terminadas: no se añaden solas. */
+    missingDependencies: { itemId: string | null; storyId: string; title: string | null; status: BacklogStatus | null; eligible: boolean; requiredBy: string[] }[];
+    /** Duración orientativa a partir del historial real del proyecto (null si no hay datos suficientes). */
+    duration: { minutes: number; perStoryMinutes: number; p25: number; p75: number; samples: number } | null;
+    /** Equipo del lote (agentes únicos) con su comprobación y cuántas historias usan cada uno. */
+    agents: (BatchAgentCheck & { stories: number })[];
+    connector: { enabled: boolean; subscriptionVerified: boolean; fallback: 'none' | 'api' };
+  };
 }

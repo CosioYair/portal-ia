@@ -38,6 +38,8 @@ export interface ProviderView {
 }
 
 export type ProviderErrorCode = 'invalid_key' | 'forbidden' | 'rate_limited' | 'network' | 'provider_error' | 'no_credential' | 'workspace_required'
+  /** El agente usa un origen que el lote de su proceso no autoriza (no se hizo la llamada). */
+  | 'origin_not_allowed'
   /** El proveedor no respondió dentro del plazo de la llamada (se abortó). */
   | 'timeout'
   /** La llamada se abortó por decisión del propietario (cancelar). */
@@ -656,6 +658,16 @@ export interface PipelineConfig {
   maxContinuations?: number;
   /** Evaluación Gauntlet (constructor ≠ crítico): modo y rondas máximas de corrección dirigida. Sin él, «off». */
   gauntlet?: GauntletConfig;
+  /**
+   * false = Claude Code nunca cede a la API en este proceso, aunque el conector lo permita (lo fija un lote que no la
+   * autoriza). Sin valor: lo que digan los ajustes del conector, como siempre.
+   */
+  apiFallback?: boolean;
+  /**
+   * Orígenes permitidos en TODA la ejecución (los fija un lote): si un agente pasa a otro origen a mitad de la historia,
+   * su llamada no se hace y el pipeline se pausa. Sin valor: cualquier origen del agente, como siempre.
+   */
+  backends?: ('api' | 'claude_code')[];
 }
 export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'verify' | 'environment' | 'qa' | 'correction' | 'pause' | 'done' | 'error'
   /** Entrega incremental: unidad de trabajo, continuación de una respuesta cortada y comprobación determinista previa a QA. */
@@ -687,6 +699,8 @@ export type PipelinePauseKind = 'budget' | 'network' | 'environment' | 'limit' |
 export type PipelinePhase = 'implementing' | 'recovering' | 'repairing' | 'applying' | 'verifying' | 'installing' | 'qa' | 'correcting' | 'finished';
 export interface PipelineStatus {
   config: PipelineConfig;
+  /** Código del proveedor que causó la pausa, si la causó una llamada (p. ej. origen no autorizado en el lote). */
+  providerCode?: string | null;
   state: PipelineState;
   phase: PipelinePhase;
   /** Motivo de la pausa o de la parada (para el propietario). */
