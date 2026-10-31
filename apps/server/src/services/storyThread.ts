@@ -20,13 +20,14 @@ import { activationOf } from './system.ts';
 import { phaseContext } from './operationalPhase.ts';
 import { REPO_ROOT } from '../config.ts';
 import path from 'node:path';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * Espacio de la historia (M6): un solo lugar por historia con contexto, equipo, iteraciones (procesos), prueba manual
  * unificada (marcas + feedback por paso), chat con los agentes implicados (una llamada autorizada por pregunta),
  * tareas y cierre. Nada aquí llama a la IA salvo `askTeam` con autorización explícita.
  */
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 function ensure(slug: string) {
   const db = workspaceDb(slug);
   db.exec(`CREATE TABLE IF NOT EXISTS story_threads (id TEXT PRIMARY KEY, backlog_item_id TEXT NOT NULL, role TEXT NOT NULL, agent_id TEXT, agent_name TEXT, content TEXT NOT NULL, process_id TEXT, cost_usd REAL NOT NULL DEFAULT 0, tokens INTEGER NOT NULL DEFAULT 0, proposals TEXT, created_at TEXT NOT NULL);

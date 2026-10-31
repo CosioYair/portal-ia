@@ -82,7 +82,7 @@ export async function systemStatus(): Promise<SystemStatus> {
   const files = new Set<string>(); const stories = new Set<string>();
   if (startCommit && headCommit && startCommit !== headCommit) {
     (await git(REPO_ROOT, ['diff', '--name-only', `${startCommit}..HEAD`]).catch(() => '')).split('\n').filter(Boolean).forEach(f => files.add(f));
-    (await git(REPO_ROOT, ['log', '--format=%s', `${startCommit}..HEAD`]).catch(() => '')).match(/HU-\d+/gi)?.forEach(h => stories.add(h.toUpperCase()));
+    (await git(REPO_ROOT, ['log', '--format=%s', `${startCommit}..HEAD`]).catch(() => '')).match(/(?:HU|EN)-\d+/gi)?.forEach(h => stories.add(h.toUpperCase()));
   }
   // La interfaz servida se construyó con un commit concreto: si HEAD cambió archivos de la web después, hay que reconstruir aunque el servidor ya corra HEAD.
   if (b.buildCommit && headCommit && b.buildCommit !== headCommit) {

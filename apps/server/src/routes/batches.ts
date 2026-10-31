@@ -15,7 +15,7 @@ const BATCH_INPUT = z.object({
   maxCorrections: z.number().int().min(0).max(BATCH_LIMITS.maxCorrections).optional(),
   maxDurationMin: z.number().int().min(5).max(BATCH_LIMITS.maxDurationMin).optional(),
   maxSubscriptionCalls: z.number().int().min(0).max(BATCH_LIMITS.maxSubscriptionCalls).optional(),
-  gauntlet: z.object({ mode: z.enum(['off', 'standard', 'deep']), maxRounds: z.number().int().min(0).max(3).optional() }).optional(),
+  gauntlet: z.object({ mode: z.enum(['off', 'standard', 'deep', 'auto']), maxRounds: z.number().int().min(0).max(6).optional() }).optional(),
   concurrency: z.number().int().min(1).max(BATCH_LIMITS.maxConcurrency).optional(),
   commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(),
   allowInstall: z.boolean().optional(),

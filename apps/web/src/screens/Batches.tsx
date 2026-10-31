@@ -73,7 +73,7 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const [all, setAll] = useState<BacklogItem[] | null>(null);
   const [sel, setSel] = useState<string[]>([]); const [custom, setCustom] = useState(false);
   // Valores seguros en CADA lote nuevo: la API (facturable), integrar, activar, publicar y ceder a la API, desmarcados.
-  const [req, setReq] = useState<Omit<BatchRequest, 'itemIds'>>({ totalBudgetUsd: 5, perStoryBudgetUsd: 1.5, maxCorrections: 3, maxDurationMin: 240, maxSubscriptionCalls: 60, concurrency: 1, gauntlet: normalizeGauntlet(null), backends: ['claude_code'], apiFallback: false, commands: ['typecheck', 'test', 'build'], allowInstall: false, git: { merge: false, activate: false, publish: false } });
+  const [req, setReq] = useState<Omit<BatchRequest, 'itemIds'>>({ totalBudgetUsd: 5, perStoryBudgetUsd: 1.5, maxCorrections: 3, maxDurationMin: 240, maxSubscriptionCalls: 60, concurrency: 1, gauntlet: normalizeGauntlet({ mode: 'auto' }), backends: ['claude_code'], apiFallback: false, commands: ['typecheck', 'test', 'build'], allowInstall: false, git: { merge: false, activate: false, publish: false } });
   const [preview, setPreview] = useState<BatchPreview | null>(null); const [fresh, setFresh] = useState(false);
   const [ok, setOk] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
   const [editDep, setEditDep] = useState<{ id: string; value: string } | null>(null);
@@ -117,7 +117,7 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const notReady = (preview?.plan ?? []).filter(p => !p.blockedReason && !p.executable).map(p => p.id);
   const autoCount = sum ? sum.executable - sum.waitForManualIntegration.length : 0;
   const blockReason = !sel.length ? null : !req.backends?.length ? 'Marca al menos un origen de ejecución (sección 2).' : !fresh ? 'Actualizando la vista previa…' : !sum ? 'Sin vista previa.' : sum.blockedByPermission ? `Hay ${sum.blockedByPermission} historia(s) cuyo equipo no puede ejecutar con lo autorizado: corrígelo (sección 2) o quítalas.` : !sum.executable ? 'Ninguna historia puede empezar.' : !ok ? 'Marca la casilla de autorización.' : null;
-  const autonomous = sum ? [`Ejecutar ${autoCount} historia(s) con su equipo: plan, implementación en un worktree aislado, verificación en el sandbox y QA`, req.gauntlet!.mode !== 'off' ? `Evaluación Gauntlet ${GAUNTLET_MODE[req.gauntlet!.mode].label.toLowerCase()}` : null, `Hasta ${req.maxCorrections} corrección(es) por historia`, g.merge ? 'Integrar en main cada historia terminada (de una en una, con las mismas verificaciones)' : null, internal && g.activate ? 'Reconstruir y reiniciar el Portal tras integrar (sin nada en marcha)' : null, g.publish ? 'Publicar en GitHub tras integrar' : null, fallbackOn ? 'Ceder a la API (facturable) si Claude Code no está disponible' : null].filter(Boolean) as string[] : [];
+  const autonomous = sum ? [`Ejecutar ${autoCount} historia(s) con su equipo: plan, implementación en un worktree aislado, verificación en el sandbox y QA`, req.gauntlet!.mode === 'auto' ? 'Gauntlet automático: cada historia con la intensidad que le corresponde (en el plan detallado, con el motivo)' : req.gauntlet!.mode !== 'off' ? `Evaluación Gauntlet ${GAUNTLET_MODE[req.gauntlet!.mode].label.toLowerCase()}` : null, `Hasta ${req.maxCorrections} corrección(es) por historia`, g.merge ? 'Integrar en main cada historia terminada (de una en una, con las mismas verificaciones)' : null, internal && g.activate ? 'Reconstruir y reiniciar el Portal tras integrar (sin nada en marcha)' : null, g.publish ? 'Publicar en GitHub tras integrar' : null, fallbackOn ? 'Ceder a la API (facturable) si Claude Code no está disponible' : null].filter(Boolean) as string[] : [];
   const yours = [!g.merge ? 'Integrar en main' : null, internal && !g.activate ? 'Reconstruir y reiniciar el Portal' : null, !g.publish ? 'Publicar en GitHub' : null, 'Aceptar (o no) cada historia: es distinto de QA', 'Ampliar presupuesto, tope de llamadas o duración', 'Lo que se detenga: conflictos, fallos o límites'].filter(Boolean) as string[];
   return (
     <section className="card" data-testid="batch-wizard">
@@ -191,7 +191,7 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
             <div className="bw-section">
               <div className="eyebrow">4 · Evaluación Gauntlet</div>
               <div role="radiogroup" aria-label="Modo Gauntlet del lote" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                {(['off', 'standard', 'deep'] as const).map(m => <label key={m} className="ck" style={{ gap: 6 }}><input type="radio" name="batch-gauntlet" checked={req.gauntlet!.mode === m} onChange={() => set({ gauntlet: normalizeGauntlet({ mode: m }) as GauntletConfig })} /><span><strong>{GAUNTLET_MODE[m].label}</strong> <span className="small muted">{GAUNTLET_MODE[m].help}</span></span></label>)}
+                {(['auto', 'off', 'standard', 'deep'] as const).map(m => <label key={m} className="ck" style={{ gap: 6 }}><input type="radio" name="batch-gauntlet" checked={req.gauntlet!.mode === m} onChange={() => set({ gauntlet: normalizeGauntlet({ mode: m }) as GauntletConfig })} /><span><strong>{GAUNTLET_MODE[m].label}</strong> <span className="small muted">{GAUNTLET_MODE[m].help}</span></span></label>)}
               </div>
             </div>
 
@@ -204,8 +204,8 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
 
             {preview && fresh && <details data-testid="batch-preview">
               <summary className="small" style={{ cursor: 'pointer' }}><strong>Plan detallado ({preview.plan.length} historia(s))</strong> · orden, oleadas, llamadas y motivo de cada una</summary>
-              <div className="bw-table-wrap" style={{ marginTop: 8 }}><table className="tbl"><thead><tr><th>#</th><th>Historia</th><th>Oleada</th><th>Llamadas</th><th>API</th><th>Estado</th></tr></thead><tbody>
-                {preview.plan.map(p => <tr key={p.id}><td className="mono">{p.order + 1}</td><td className="small"><span className="mono">{p.storyId}</span> {p.title}{p.dependsOn ? <span className="muted"> · tras {p.dependsOn}{p.dependsInBatch ? '' : ' (fuera del lote)'}</span> : null}</td><td className="mono">{p.wave + 1}</td><td className="mono small">{range(p.calls)}</td><td className="mono small">{p.estimatedUsd == null ? '—' : fmtUsd(p.estimatedUsd)}</td>
+              <div className="bw-table-wrap" style={{ marginTop: 8 }}><table className="tbl"><thead><tr><th>#</th><th>Historia</th><th>Oleada</th><th>Gauntlet</th><th>Llamadas</th><th>API</th><th>Estado</th></tr></thead><tbody>
+                {preview.plan.map(p => <tr key={p.id}><td className="mono">{p.order + 1}</td><td className="small"><span className="mono">{p.storyId}</span> {p.title}{p.dependsOn ? <span className="muted"> · tras {p.dependsOn}{p.dependsInBatch ? '' : ' (fuera del lote)'}</span> : null}</td><td className="mono">{p.wave + 1}</td><td className="small" title={p.gauntlet?.reason ?? undefined}>{p.gauntlet ? GAUNTLET_MODE[p.gauntlet.mode].label : '—'}</td><td className="mono small">{range(p.calls)}</td><td className="mono small">{p.estimatedUsd == null ? '—' : fmtUsd(p.estimatedUsd)}</td>
                   <td className="small">{p.executable ? 'se ejecutará' : <><Chip xs tone="err">{p.blockedReason ? 'bloqueada' : 'no empezará'}</Chip> {p.problems.join(' ')}</>}</td></tr>)}
               </tbody></table></div>
             </details>}

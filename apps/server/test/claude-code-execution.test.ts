@@ -25,7 +25,8 @@ const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-fakeccx-'));
 const FAKE = path.join(fakeDir, 'claude.mjs');
 fs.copyFileSync(path.join(here, 'fixtures', 'fake-claude.mjs'), FAKE);
 const ccLog = path.join(fakeDir, 'fake-claude.log.jsonl');
-const scenario = (s: Record<string, unknown>) => { fs.writeFileSync(path.join(fakeDir, 'fake-claude.scenario.json'), JSON.stringify(s)); try { fs.unlinkSync(ccLog); } catch { /* vacío */ } };
+// Volver a un escenario sin límite simula que la suscripción se renovó: el propietario lo confirma (el último informe deja de impedir empezar).
+const scenario = (s: Record<string, unknown>) => { fs.writeFileSync(path.join(fakeDir, 'fake-claude.scenario.json'), JSON.stringify(s)); try { fs.unlinkSync(ccLog); } catch { /* vacío */ } if (s.behavior !== 'limit') void import('../src/services/claudeCode/usage.ts').then(m => m.acknowledgeUsageReport()); };
 const ccRuns = () => fs.existsSync(ccLog) ? fs.readFileSync(ccLog, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)).filter((e: any) => e.kind === 'run') : [];
 scenario({});
 
@@ -211,7 +212,7 @@ test('8 · tarea autorizada de punta a punta: Desarrollador y QA en Claude Code;
   for (const r of runs) { assert.ok(!r.cwd.startsWith(repo) && !r.cwd.includes('worktrees'), 'la CLI no corre en el repositorio ni en el worktree'); }
   // Lectura por el puente MCP: solo lectura, ruta protegida denegada, solo herramientas de ejecución
   const dev = runs.find((r: any) => r.rule === R.dev)!;
-  assert.deepEqual(dev.mcp.tools.sort(), ['portal_knowledge', 'portal_list_files', 'portal_read_file', 'portal_report_progress', 'portal_task_context']);
+  assert.deepEqual(dev.mcp.tools.sort(), ['portal_diff', 'portal_knowledge', 'portal_list_files', 'portal_read_file', 'portal_report_progress', 'portal_search', 'portal_task_context'], 'solo lectura y avance: nada de consola');
   assert.equal(dev.mcp.results[0].isError, false); assert.match(dev.mcp.results[0].text, /export const a = 1/);
   assert.equal(dev.mcp.results[1].isError, true); assert.match(dev.mcp.results[1].text, /protegida/);
   // 24 · QA recibe la evidencia real de la verificación (resultado estructurado nativo de la CLI)
@@ -259,6 +260,91 @@ test('17-18 · límite de la suscripción en el pipeline: pausa con explicación
   const flow = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow;
   assert.equal(flow.issue.title, 'Pausado: la suscripción de Claude alcanzó su límite de uso');
   assert.ok(flow.actions.some((a: any) => a.label === 'Continuar cuando se renueve el límite' && !a.requires.includes('ai_budget')), 'continuar no pide presupuesto de API');
+});
+
+test('tras un límite, ningún trabajo NUEVO con la suscripción empieza (ni se llama a la CLI) hasta que se renueve o lo reconozcas', async () => {
+  useFakeSandbox(); apiScript(); scenario({ auth: 'subscription', behavior: 'limit' });
+  const { p: first } = await storyWith('CC · agota el límite');
+  await run(first.id); // la CLI informa «rejected» con la renovación en el futuro
+  // La CLI volvería a responder con normalidad, pero el último informe sigue diciendo «límite» y no lo has reconocido.
+  fs.writeFileSync(path.join(fakeDir, 'fake-claude.scenario.json'), JSON.stringify({ auth: 'subscription' })); try { fs.unlinkSync(ccLog); } catch { /* vacío */ }
+  const it = addManualItem(S, project.id, { title: 'CC · después del límite', criterion: 'a vale 2 (número)' });
+  const pending = createStoryProcess(S, project.id, it.id);
+  const r = await inject('POST', `${W}/processes/${pending.id}/authorize`, { budgetUsd: 2, authorized: true, pipeline: DEFAULT_PIPELINE });
+  assert.equal(r.statusCode, 409, r.body); assert.equal(r.json().code, 'subscription_limit'); assert.match(r.json().error, /alcanzó su límite/);
+  assert.equal(processesRepo(S).get(pending.id)!.status, 'pending_authorization', 'sigue esperando tu autorización: nada empezó');
+  // Un proceso que ya estaba autorizado (p. ej. de un lote) tampoco llama: la comprobación se repite antes de cada llamada.
+  const { p: inFlight } = await storyWith('CC · ya autorizada');
+  const paused = await run(inFlight.id);
+  assert.equal(paused.result!.pipeline!.pauseKind, 'subscription_limit');
+  assert.equal(ccRuns().length, 0, 'ninguna ejecución de la CLI mientras el informe dice «límite»');
+  // Reconocerlo (tú, con autorización explícita) vuelve a permitir empezar.
+  assert.equal((await inject('POST', '/api/claude-code/usage/acknowledge', { authorized: true })).json().ok, true);
+  const ok = await inject('POST', `${W}/processes/${pending.id}/authorize`, { budgetUsd: 2, authorized: true, pipeline: DEFAULT_PIPELINE });
+  assert.equal(ok.statusCode, 200, ok.body);
+  assert.equal(processesRepo(S).get(pending.id)!.result!.pipeline!.config.maxSubscriptionCalls, 60, 'sin tope indicado, el de un lote: con la suscripción el USD no limita');
+  for (let i = 0; i < 400 && processesRepo(S).get(pending.id)!.status === 'running'; i++) await new Promise(res => setTimeout(res, 50));
+  assert.ok(ccRuns().length >= 1, 'tras reconocerlo, la CLI vuelve a usarse');
+});
+
+test('uso adicional («overage») en plena llamada: se para en el acto y nada nuevo empieza hasta que lo reconozcas, aunque lleguen informes normales', async () => {
+  useFakeSandbox(); apiScript();
+  const usage = await import('../src/services/claudeCode/usage.ts'); usage.acknowledgeUsageReport();
+  fs.writeFileSync(path.join(fakeDir, 'fake-claude.scenario.json'), JSON.stringify({ auth: 'subscription', behavior: 'overage' })); try { fs.unlinkSync(ccLog); } catch { /* vacío */ }
+  const { p } = await storyWith('CC · overage');
+  const done = await run(p.id);
+  assert.equal(done.result!.pipeline!.pauseKind, 'subscription_limit', done.result!.pipeline!.reason ?? '');
+  assert.match(done.result!.pipeline!.reason!, /overage/);
+  assert.equal(ccRuns().length, 1, 'la primera llamada se paró y no hubo otra');
+  assert.equal(usage.subscriptionGate().ok, false);
+  usage.saveUsageReport({ status: 'allowed', resetsAt: null, utilization: 0.1, errorCode: null, rateLimitType: 'five_hour', windows: [], overage: false }, 'prueba');
+  assert.equal(usage.subscriptionGate().ok, false, 'un informe posterior sin la marca no levanta el bloqueo');
+  assert.equal((await inject('POST', '/api/claude-code/usage/acknowledge', { authorized: true })).json().ok, true, 'solo tu reconocimiento lo levanta');
+});
+
+test('tope de llamadas a la suscripción de un proceso: al alcanzarlo se pausa sin llamar más', async () => {
+  useFakeSandbox(); apiScript(); scenario({ auth: 'subscription' });
+  const { p } = await storyWith('CC · tope de llamadas', 'claude-code', 2, { maxSubscriptionCalls: 1 });
+  const done = await run(p.id);
+  assert.ok(['paused', 'stopped'].includes(done.result!.pipeline!.state), done.result!.pipeline!.state);
+  assert.match(done.result!.pipeline!.reason!, /tope 1/); assert.match(done.result!.pipeline!.reason!, /Concede más llamadas al continuar/);
+  assert.equal(ccRuns().length, 1, 'una sola llamada a la CLI: la siguiente no se hizo');
+  // La pausa ofrece ampliar el tope (llamadas, no USD) y continuar lo amplía.
+  const flow = (await inject('GET', `${W}/processes/${p.id}`)).json().guidance.flow;
+  const more = flow.actions.find((a: any) => a.addSubscriptionCalls);
+  assert.ok(more, JSON.stringify(flow.actions.map((a: any) => a.label))); assert.equal(more.addSubscriptionCalls, 1); assert.ok(!more.requires.includes('ai_budget'), 'no pide USD');
+  const c = await inject('POST', `${W}/processes/${p.id}/continue`, { authorized: true, addSubscriptionCalls: 2 });
+  assert.equal(c.statusCode, 200, c.body); assert.equal(c.json().result.pipeline.config.maxSubscriptionCalls, 3);
+  for (let i = 0; i < 400 && processesRepo(S).get(p.id)!.status === 'running'; i++) await new Promise(res => setTimeout(res, 50));
+});
+
+test('tope comprobado en CADA ejecución: concurrentes sin carreras, reintentos del mismo paso y encargos de análisis', async () => {
+  useFakeSandbox(); apiScript(); scenario({ auth: 'subscription', slowMs: 150 });
+  const { claudeCodeComplete } = await import('../src/services/claudeCode/backend.ts');
+  const { agentsRepo: agents, claudeCodeRunsRepo: runsRepo } = await import('../src/db/workspace.ts');
+  const { p, devId } = await storyWith('CC · tope en cada llamada', 'claude-code', 2, { maxSubscriptionCalls: 2 });
+  const agent = agents(S).get(devId)!;
+  const req = (i: number) => ({ model: agent.config.model, system: 'sistema', user: `llamada ${i}`, maxTokens: 200 }) as any;
+  const target = { slug: S, projectId: project.id, processId: p.id, stepId: p.steps.find(st => st.role === 'implementer')!.id, agent, role: 'implementer', title: 'tope' };
+  const code = (e: any) => e?.error?.code ?? e?.code;
+  // Cinco llamadas A LA VEZ para el mismo proceso con tope 2: exactamente 2 ejecuciones de la CLI.
+  const results = await Promise.allSettled([0, 1, 2, 3, 4].map(i => claudeCodeComplete(target, req(i), new AbortController().signal, () => {})));
+  assert.equal(results.filter(r => r.status === 'rejected' && code(r.reason) === 'call_cap').length, 3, JSON.stringify(results.map(r => r.status === 'rejected' ? code(r.reason) : 'ok')));
+  assert.equal(runsRepo(S).countForProcesses([p.id]), 2); assert.equal(ccRuns().length, 2, 'la CLI se ejecutó exactamente 2 veces');
+  // Un reintento del mismo paso es otra ejecución: también se rechaza sin llamar.
+  await assert.rejects(claudeCodeComplete(target, req(99), new AbortController().signal, () => {}), (e: any) => code(e) === 'call_cap');
+  assert.equal(ccRuns().length, 2);
+  // Encargo de análisis (sin pipeline): por el MISMO camino que usan los encargos, evaluaciones y pruebas manuales
+  // (agentCaller con el proceso); su tope vive en el proceso y se cuenta igual.
+  const { agentCaller } = await import('../src/services/claudeCode/backend.ts');
+  const d = processesRepo(S).create({ projectId: project.id, kind: 'delegated_task', title: 'análisis con tope', estimatedUsd: 0, steps: [] });
+  processesRepo(S).setCallCap(d.id, 1); processesRepo(S).authorize(d.id, 1);
+  const cc = agentCaller(S, agent, project.id, 'Encargo', d.id)!;
+  await cc.complete(req(10));
+  await assert.rejects(cc.complete(req(11)), (e: any) => code(e) === 'call_cap' && /tope 1/.test(e.message ?? e.error?.message));
+  assert.equal(runsRepo(S).countForProcesses([d.id]), 1, 'la ejecución queda ligada al proceso del encargo');
+  assert.equal(ccRuns().length, 3, 'solo la primera del análisis se ejecutó');
+  processesRepo(S).finish(d.id, 'done'); processesRepo(S).finish(p.id, 'cancelled', 'fin de la prueba');
 });
 
 test('alternativa por API SOLO si el propietario la autorizó: se usa con su presupuesto y queda señalada', async () => {

@@ -152,6 +152,7 @@ test('f · genérico: otra empresa con su propio proyecto evalúa la empresa y e
   const wsEv = await waitFinished(app, beta.slug, r1.json().id);
   assert.equal(wsEv.status, 'done', wsEv.error ?? ''); assert.equal(wsEv.scopeKind, 'workspace'); assert.equal(wsEv.projectId, null);
   assert.equal(wsEv.anchorProjectId, shop.id); assert.equal(wsEv.process.steps.length, 1);
+  assert.ok((processesRepo(beta.slug).get(wsEv.processId)!.maxSubscriptionCalls ?? 0) >= 6, 'la evaluación tiene tope de llamadas a la suscripción');
   assert.equal(knowledgeRepo(beta.slug).get(wsEv.knowledgeDocId)!.projectId, shop.id);
   const r2 = await app.inject({ method: 'POST', url: `/api/workspaces/${beta.slug}/org-evaluations`, payload: { projectId: shop.id, budgetUsd: 5, authorized: true, ...NO_BRIEF } });
   const pjEv = await waitFinished(app, beta.slug, r2.json().id);

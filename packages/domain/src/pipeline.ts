@@ -23,7 +23,7 @@ export const DEFAULT_PIPELINE: PipelineConfig = {
 };
 
 /** Límites duros: ni la interfaz ni la API pueden autorizar más que esto en un solo proceso. */
-export const PIPELINE_LIMITS = { maxOutputRepairs: 3, maxCorrections: 5, maxIdenticalFailures: 3, maxDurationMin: 180, maxConsultations: 3, maxProviderRetries: 3, providerTimeoutSec: 900, maxContinuations: 12 } as const;
+export const PIPELINE_LIMITS = { maxSubscriptionCalls: 2000, maxOutputRepairs: 3, maxCorrections: 5, maxIdenticalFailures: 3, maxDurationMin: 180, maxConsultations: 3, maxProviderRetries: 3, providerTimeoutSec: 900, maxContinuations: 12 } as const;
 
 /** Normaliza una configuración recibida (valores fuera de rango se acotan; comandos desconocidos se descartan). */
 export function normalizePipeline(input: (Partial<Omit<PipelineConfig, 'gauntlet'>> & { gauntlet?: Partial<GauntletConfig> | null }) | null | undefined): PipelineConfig {
@@ -47,6 +47,7 @@ export function normalizePipeline(input: (Partial<Omit<PipelineConfig, 'gauntlet
     maxContinuations: int(c.maxContinuations, 0, PIPELINE_LIMITS.maxContinuations, DEFAULT_PIPELINE.maxContinuations!),
     gauntlet: normalizeGauntlet(c.gauntlet),
     ...(c.apiFallback === false ? { apiFallback: false } : {}),
+    ...(c.maxSubscriptionCalls != null && Number(c.maxSubscriptionCalls) > 0 ? { maxSubscriptionCalls: int(c.maxSubscriptionCalls, 1, PIPELINE_LIMITS.maxSubscriptionCalls, 60) } : {}),
     ...(Array.isArray(c.backends) && c.backends.length ? { backends: c.backends.filter(b => b === 'api' || b === 'claude_code') } : {})
   };
 }

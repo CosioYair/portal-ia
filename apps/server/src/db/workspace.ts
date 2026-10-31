@@ -5,16 +5,21 @@ import crypto from 'node:crypto';
 import { config } from '../config.ts';
 import { defaultCapabilitiesFor } from '@portal-ia/domain';
 import type { ClaudeCodeRun, ClaudeCodeRunStatus, ClaudeCodeUsage, DelegationResult, Agent, AgentConfig, AgentStatus, AgentTemplate, BacklogItem, BacklogStatus, ContextItem, ExecutionResult, KnowledgeDoc, Objective, Process, ProcessStatus, ProcessStep, Project, Repository, Scope, StepStatus, UsageToday } from '@portal-ia/domain';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * Una base SQLite por espacio de trabajo: data/workspaces/<slug>/<slug>.sqlite
  * Aislamiento total entre el espacio interno y las futuras empresas.
  */
 const open = new Map<string, DatabaseSync>();
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 const uuid = () => crypto.randomUUID();
 
-export function workspaceDbPath(slug: string) { return path.join(config.dataDir, 'workspaces', slug, `${slug}.sqlite`); }
+/** Un identificador de espacio es siempre [a-z0-9-]: cualquier otra cosa (p. ej. «../x») nunca abre ni crea una base. */
+export function workspaceDbPath(slug: string) {
+  if (!/^[a-z0-9][a-z0-9-]{0,79}$/.test(slug)) throw Object.assign(new Error('Identificador de empresa no válido.'), { statusCode: 400 });
+  return path.join(config.dataDir, 'workspaces', slug, `${slug}.sqlite`);
+}
 
 /**
  * HU-161 · ¿La fila de un proceso espera todavía una decisión del propietario? Reproduce las reglas de
@@ -127,6 +132,10 @@ export function workspaceDb(slug: string): DatabaseSync {
   if (!pcols.includes('result_json')) db.exec(`ALTER TABLE processes ADD COLUMN result_json TEXT`);
   if (!pcols.includes('delegation_json')) db.exec(`ALTER TABLE processes ADD COLUMN delegation_json TEXT`);
   if (!pcols.includes('backlog_item_id')) db.exec(`ALTER TABLE processes ADD COLUMN backlog_item_id TEXT`);
+  // v0.16 · Encargos de desarrollo del propietario (sin historia): el proceso lleva su encargo.
+  if (!pcols.includes('assignment_id')) db.exec(`ALTER TABLE processes ADD COLUMN assignment_id TEXT`);
+  // Tope de llamadas a la suscripción autorizado para procesos sin pipeline (encargos de análisis, evaluaciones).
+  if (!pcols.includes('max_subscription_calls')) db.exec(`ALTER TABLE processes ADD COLUMN max_subscription_calls INTEGER`);
   // M3/M4: papel y motivo de cada paso; lecciones inyectadas.
   const scols = (db.prepare(`PRAGMA table_info(process_steps)`).all() as any[]).map(c => c.name);
   if (!scols.includes('role')) db.exec(`ALTER TABLE process_steps ADD COLUMN role TEXT`);
@@ -283,11 +292,15 @@ export function knowledgeRepo(slug: string) {
   };
 }
 
+const finishListeners: ((slug: string, processId: string) => void)[] = [];
+/** Avisa cuando un proceso termina (p. ej. para poner al día el encargo al que pertenece). */
+export function onProcessFinish(fn: (slug: string, processId: string) => void) { finishListeners.push(fn); }
+
 export function processesRepo(slug: string) {
   const db = workspaceDb(slug);
   const mapStep = (r: any): ProcessStep => ({ id: r.id, processId: r.process_id, position: r.position, agentId: r.agent_id, agentName: r.agent_name, title: r.title, status: r.status, model: r.model, inputTokens: r.tokens_in, outputTokens: r.tokens_out, costUsd: r.cost_usd, outputMd: r.output_md, error: r.error, startedAt: r.started_at, finishedAt: r.finished_at, role: r.role ?? null, reason: r.reason ?? null, lessonsUsed: r.lessons_used ? JSON.parse(r.lessons_used) : [], live: r.live_json ? JSON.parse(r.live_json) : null, unconfirmedUsd: r.unconfirmed_usd ?? 0, backend: r.backend ?? null });
   const mapProc = (r: any): Process => ({ id: r.id, projectId: r.project_id, kind: r.kind, title: r.title, status: r.status, budgetUsd: r.budget_usd, estimatedUsd: r.estimated_usd, spentUsd: r.spent_usd, inputTokens: r.tokens_in, outputTokens: r.tokens_out, createdAt: r.created_at, authorizedAt: r.authorized_at, startedAt: r.started_at, finishedAt: r.finished_at, error: r.error,
-    result: r.result_json ? JSON.parse(r.result_json) : null, delegation: r.delegation_json ? JSON.parse(r.delegation_json) : null, backlogItemId: r.backlog_item_id ?? null, unconfirmedUsd: r.unconfirmed_usd ?? 0,
+    result: r.result_json ? JSON.parse(r.result_json) : null, delegation: r.delegation_json ? JSON.parse(r.delegation_json) : null, backlogItemId: r.backlog_item_id ?? null, assignmentId: r.assignment_id ?? null, maxSubscriptionCalls: r.max_subscription_calls ?? null, unconfirmedUsd: r.unconfirmed_usd ?? 0,
     archivedAt: r.archived_at ?? null, archiveId: r.archive_id ?? null, supersededBy: r.superseded_by ?? null, supersededAt: r.superseded_at ?? null,
     steps: (db.prepare(`SELECT * FROM process_steps WHERE process_id = ? ORDER BY position`).all(r.id) as any[]).map(mapStep) });
   return {
@@ -297,9 +310,9 @@ export function processesRepo(slug: string) {
     listArchived(projectId: string): Process[] { return (db.prepare(`SELECT * FROM processes WHERE project_id = ? AND archived_at IS NOT NULL ORDER BY created_at DESC`).all(projectId) as any[]).map(mapProc); },
     get(id: string): Process | undefined { const r = db.prepare(`SELECT * FROM processes WHERE id = ?`).get(id); return r ? mapProc(r) : undefined; },
     running(): Process[] { return (db.prepare(`SELECT * FROM processes WHERE status = 'running'`).all() as any[]).map(mapProc); },
-    create(p: { projectId: string; kind: string; title: string; estimatedUsd: number; backlogItemId?: string | null; steps: { agentId: string; agentName: string; title: string; model: string; role?: string | null; reason?: string | null }[] }): Process {
+    create(p: { projectId: string; kind: string; title: string; estimatedUsd: number; backlogItemId?: string | null; assignmentId?: string | null; steps: { agentId: string; agentName: string; title: string; model: string; role?: string | null; reason?: string | null }[] }): Process {
       const id = uuid();
-      db.prepare(`INSERT INTO processes (id, project_id, kind, title, status, estimated_usd, created_at, backlog_item_id) VALUES (?, ?, ?, ?, 'pending_authorization', ?, ?, ?)`).run(id, p.projectId, p.kind, p.title, p.estimatedUsd, now(), p.backlogItemId ?? null);
+      db.prepare(`INSERT INTO processes (id, project_id, kind, title, status, estimated_usd, created_at, backlog_item_id, assignment_id) VALUES (?, ?, ?, ?, 'pending_authorization', ?, ?, ?, ?)`).run(id, p.projectId, p.kind, p.title, p.estimatedUsd, now(), p.backlogItemId ?? null, p.assignmentId ?? null);
       const ins = db.prepare(`INSERT INTO process_steps (id, process_id, position, agent_id, agent_name, title, model, role, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       p.steps.forEach((s, i) => ins.run(uuid(), id, i, s.agentId, s.agentName, s.title, s.model, s.role ?? null, s.reason ?? null));
       return this.get(id)!;
@@ -329,6 +342,7 @@ export function processesRepo(slug: string) {
     setResult(id: string, result: ExecutionResult) { db.prepare(`UPDATE processes SET result_json = ? WHERE id = ?`).run(JSON.stringify(result), id); },
     setDelegation(id: string, d: DelegationResult) { db.prepare(`UPDATE processes SET delegation_json = ? WHERE id = ?`).run(JSON.stringify(d), id); },
     /** HU-161 · Todos los procesos de una historia (activos y archivados), de la iteración más antigua a la más reciente. */
+    listByAssignment(assignmentId: string): Process[] { return (db.prepare(`SELECT * FROM processes WHERE assignment_id = ? ORDER BY created_at, id`).all(assignmentId) as any[]).map(mapProc); },
     listByBacklogItem(itemId: string): Process[] { return (db.prepare(`SELECT * FROM processes WHERE backlog_item_id = ? ORDER BY created_at, id`).all(itemId) as any[]).map(mapProc); },
     /** HU-161 · Marca la decisión de un proceso como superada por otra iteración. No cambia su estado ni borra nada. */
     markSuperseded(id: string, byId: string): boolean {
@@ -339,15 +353,19 @@ export function processesRepo(slug: string) {
      * HU-161 · Restaura una autorización superada (reversible). Para que la historia siga teniendo una sola vigente,
      * las demás iteraciones con decisión pendiente pasan a superadas por la restaurada. Todo en una transacción.
      */
+    setCallCap(id: string, n: number | null) { db.prepare(`UPDATE processes SET max_subscription_calls = ? WHERE id = ?`).run(n, id); },
+    /** Deshace las marcas puestas por un proceso que nunca empezó (se canceló al no poder autorizarse). */
+    unsupersedeBy(byId: string): number { return Number(db.prepare(`UPDATE processes SET superseded_by = NULL, superseded_at = NULL WHERE superseded_by = ?`).run(byId).changes); },
     restoreSuperseded(id: string): { restored: string; superseded: string[] } | null {
-      const r = db.prepare(`SELECT id, backlog_item_id, superseded_by FROM processes WHERE id = ?`).get(id) as any;
+      const r = db.prepare(`SELECT id, backlog_item_id, assignment_id, superseded_by FROM processes WHERE id = ?`).get(id) as any;
       if (!r || r.superseded_by == null) return null;
       const ts = now(); const superseded: string[] = [];
       db.exec('BEGIN');
       try {
         db.prepare(`UPDATE processes SET superseded_by = NULL, superseded_at = ? WHERE id = ?`).run(ts, id);
-        if (r.backlog_item_id) {
-          const others = db.prepare(`SELECT id, status, result_json FROM processes WHERE backlog_item_id = ? AND kind = 'story_execution' AND archived_at IS NULL AND superseded_by IS NULL AND id <> ?`).all(r.backlog_item_id, id) as any[];
+        if (r.backlog_item_id || r.assignment_id) {
+          const col = r.backlog_item_id ? 'backlog_item_id' : 'assignment_id';
+          const others = db.prepare(`SELECT id, status, result_json FROM processes WHERE ${col} = ? AND kind = 'story_execution' AND archived_at IS NULL AND superseded_by IS NULL AND id <> ?`).all(r.backlog_item_id ?? r.assignment_id, id) as any[];
           const mark = db.prepare(`UPDATE processes SET superseded_by = ?, superseded_at = ? WHERE id = ?`);
           for (const o of others) if (hasOpenDecisionRow(o)) { mark.run(id, ts, o.id); superseded.push(o.id); }
         }
@@ -357,6 +375,7 @@ export function processesRepo(slug: string) {
     },
     finish(id: string, status: ProcessStatus, error: string | null = null) {
       db.prepare(`UPDATE processes SET status = ?, finished_at = ?, error = ? WHERE id = ?`).run(status, now(), error, id);
+      for (const fn of finishListeners) { try { fn(slug, id); } catch { /* un oyente no impide terminar */ } }
     },
     /** Estado real de la llamada en curso de un paso (null al terminar). */
     setStepLive(stepId: string, live: unknown | null) { db.prepare(`UPDATE process_steps SET live_json = ? WHERE id = ?`).run(live ? JSON.stringify(live) : null, stepId); },
@@ -436,6 +455,8 @@ export function claudeCodeRunsRepo(slug: string) {
         .run(status, now(), d.durationMs ?? null, d.numTurns ?? null, d.tokensIn ?? null, d.tokensOut ?? null, d.apiEquivalentUsd ?? null, d.error ?? null, d.rateLimit ? JSON.stringify(d.rateLimit) : null, id);
     },
     get(id: string): ClaudeCodeRun | undefined { const r = db.prepare(`SELECT * FROM claude_code_runs WHERE id = ?`).get(id); return r ? map(r) : undefined; },
+    /** Ejecuciones de la CLI registradas (TODAS: en curso, terminadas, fallidas, interrumpidas) de estos procesos. */
+    countForProcesses(ids: string[]): number { if (!ids.length) return 0; return Number((db.prepare(`SELECT COUNT(*) AS n FROM claude_code_runs WHERE process_id IN (${ids.map(() => '?').join(',')})`).get(...ids) as any).n); },
     recent(limit = 20): ClaudeCodeRun[] { return (db.prepare(`SELECT * FROM claude_code_runs ORDER BY started_at DESC LIMIT ?`).all(limit) as any[]).map(map); },
     byStep(stepId: string): ClaudeCodeRun[] { return (db.prepare(`SELECT * FROM claude_code_runs WHERE step_id = ? ORDER BY started_at`).all(stepId) as any[]).map(map); },
     byAgent(agentId: string, limit = 10): ClaudeCodeRun[] { return (db.prepare(`SELECT * FROM claude_code_runs WHERE agent_id = ? ORDER BY started_at DESC LIMIT ?`).all(agentId, limit) as any[]).map(map); },

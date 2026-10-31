@@ -61,7 +61,7 @@ export function decisionsFromProcess(slug: string, p: Process): PendingDecision[
         estimatedCost: null,
         impact: `${ok.length} archivo${ok.length === 1 ? '' : 's'} · +${lines.added} −${lines.removed} líneas${bad ? ` · ${bad} cambio${bad === 1 ? '' : 's'} con problemas que no se aplicarán` : ''}.`,
         approveEffect: 'Se aplican los cambios en una rama nueva del repositorio, sin tocar la rama principal.',
-        denyEffect: 'Se rechaza el diff: no se aplica y la historia vuelve a pendiente.'
+        denyEffect: p.assignmentId ? 'Se rechaza el diff: no se aplica y el encargo queda esperando tu decisión.' : 'Se rechaza el diff: no se aplica y la historia vuelve a pendiente.'
       })];
     }
     if (r.applied && !r.merged) {
@@ -98,7 +98,8 @@ export function decisionsFromProcess(slug: string, p: Process): PendingDecision[
 }
 
 // ---- HU-161 · Una autorización vigente por historia ----
-const storyKey = (p: Process): string | null => (p.kind === 'story_execution' && p.backlogItemId ? p.backlogItemId : null);
+/** Elemento de trabajo de un proceso de ejecución (historia o encargo): las iteraciones se agrupan por él. */
+const storyKey = (p: Process): string | null => (p.kind === 'story_execution' ? p.backlogItemId ?? p.assignmentId ?? null : null);
 const byAge = (a: Process, b: Process) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id);
 
 /** Número de iteración (1..N por fecha de creación) de cada proceso de historia. */
@@ -185,7 +186,7 @@ export function unmarkedDuplicates(slug: string, processes: Process[]): number {
 function supersededMessage(slug: string, p: Process): string | null {
   const key = storyKey(p);
   if (!key) return null;
-  const all = processesRepo(slug).listByBacklogItem(key);
+  const all = p.assignmentId ? processesRepo(slug).listByAssignment(p.assignmentId) : processesRepo(slug).listByBacklogItem(key);
   const self = all.find(x => x.id === p.id) ?? p;
   const { stories, iters } = storyGroups(slug, all.filter(x => !x.archivedAt), all);
   const g = stories.get(key);

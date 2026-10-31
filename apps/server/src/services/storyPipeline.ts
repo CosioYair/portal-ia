@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { backendLabel, batchSourceOf, promptSections } from '@portal-ia/domain';
+import { backendLabel, batchSourceOf, promptSections, verificationsForApplied } from '@portal-ia/domain';
 import type { Agent, AgentBlocker, AgentFailureKind, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError, reasoningHeadroom } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -26,6 +26,8 @@ import { driftMessage, worktreeDrift } from './worktreeDrift.ts';
 import { agentBackend, claudeCodeComplete, claudeCodeGate, usesClaudeCode } from './claudeCode/backend.ts';
 import { lastDetection } from './claudeCode/detect.ts';
 import { getClaudeCodeSettings } from './claudeCode/settings.ts';
+import { monotonicNow } from '../clock.ts';
+import { setWorkStatus, workItemOf, type WorkItem } from './workItems.ts';
 
 /**
  * Pipeline autónomo autorizado de una historia (sin supervisión del propietario entre pasos rutinarios).
@@ -43,7 +45,7 @@ import { getClaudeCodeSettings } from './claudeCode/settings.ts';
  * Antes de cada llamada a la IA se comprueba que el presupuesto restante alcanza; si no, se pausa SIN llamar.
  * Todo queda registrado: cada intento es un paso con su modelo, tokens y costo, y un evento legible.
  */
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 export const isTruncatedStop = (stop: string | null | undefined) => stop === 'max_tokens' || stop === 'length';
 
 export class PipelinePause extends Error { constructor(public kind: PipelinePauseKind, message: string, public providerCode: string | null = null) { super(message); } }
@@ -160,6 +162,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
     const b = budgetCheck(slug, processId, agent, system, user, maxTokens, 'api');
     if (!b.ok) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${proc.spentUsd.toFixed(2)} de ${proc.budgetUsd.toFixed(2)} USD${proc.unconfirmedUsd ? ` + ${proc.unconfirmedUsd.toFixed(2)} sin confirmar` : ''}; esta llamada necesita ≈ ${b.needed.toFixed(2)} USD).`), { budget: true, needed: b.needed, remaining: b.remaining, failure: { kind: 'budget', class: 'BUDGET_EXHAUSTED', detail: 'Presupuesto insuficiente para la siguiente llamada.' } satisfies ProcessFailure });
   };
+  // El tope de llamadas a la suscripción se comprueba antes de CADA ejecución de la CLI (claudeCode/callCap.ts).
   if (route === 'api') requireApi();
   const models: ModelInfo[] = (() => { try { return JSON.parse(prow.models_json); } catch { return []; } })();
   // El plazo cuenta la salida que la llamada puede facturar de verdad: texto pedido + margen del razonamiento oculto.
@@ -227,6 +230,13 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       return { text: res.text, stopReason: res.stopReason, inputTokens: res.inputTokens, outputTokens: res.outputTokens, costUsd: cost, refusal: res.refusal ?? null };
     } catch (e) {
       const err = e instanceof ProviderRequestError ? e.error : null;
+      // Tope de llamadas a la suscripción: NO se llamó. Se detiene como un presupuesto agotado (nunca cede a la API ni reintenta).
+      if (err?.code === 'call_cap') {
+        unregisterCall(processId, ctrl);
+        const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
+        procs.stepFinish(step.id, 'failed', { tokensIn: prev.inputTokens, tokensOut: prev.outputTokens, cost: prev.costUsd, outputMd: prev.outputMd, error: err.message });
+        throw Object.assign(new Error(err.message), { budget: true, failure: { kind: 'budget', class: 'BUDGET_EXHAUSTED', detail: err.message } satisfies ProcessFailure });
+      }
       // Claude Code no disponible o límite de la suscripción: la API solo si el propietario la autorizó como alternativa.
       if (route === 'claude-code' && (err?.code === 'usage_limit' || err?.code === 'backend_unavailable') && apiFallbackAllowed()) {
         unregisterCall(processId, ctrl);
@@ -299,7 +309,7 @@ export function emit(ctx: StoryRunCtx, kind: PipelineEventKind, message: string,
 // ---------------------------------------------------------------- Contexto de una ejecución
 
 export interface StoryRunCtx {
-  slug: string; processId: string; item: BacklogItem; project: { id: string; name: string; description: string };
+  slug: string; processId: string; item: WorkItem; project: { id: string; name: string; description: string };
   repoPath: string; plan: StoryPlan | null; consultText: string; iterText: string;
   dev: Agent; qa: Agent | null;
   /** Equipo AUTORIZADO del proceso (los agentes de sus pasos): los únicos a los que se puede consultar. */
@@ -662,9 +672,7 @@ async function applyInWorktree(ctx: StoryRunCtx) {
  * ejecución anterior NO vale para el commit nuevo.
  */
 export function sinceApplied(r: ExecutionResult): VerificationRun[] {
-  if (!r.applied) return [];
-  const after = new Date(r.applied.appliedAt).getTime();
-  return (r.verifications ?? []).filter(v => new Date(v.startedAt).getTime() >= after);
+  return verificationsForApplied(r);
 }
 
 /** Verifica los comandos autorizados; resuelve el entorno sin IA. Devuelve la primera ejecución que falla por el código, o null. */
@@ -938,7 +946,7 @@ export function pausePipeline(ctx: StoryRunCtx, pause: PipelinePause) {
 /** Contexto de ejecución de un proceso de historia ya creado (para reanudarlo o verificarlo sin repetir lo hecho). */
 export function storyRunContext(slug: string, processId: string, log: (o: any, m: string) => void, isCancelled: () => boolean): { ctx: StoryRunCtx; involved: string[]; repoPath: string } {
   const procs = processesRepo(slug); const agents = agentsRepo(slug); const backlog = backlogRepo(slug);
-  const proc = procs.get(processId)!; const item = backlog.get(proc.backlogItemId!)!;
+  const proc = procs.get(processId)!; const item = workItemOf(slug, proc)!;
   const project = projectsRepo(slug).get(proc.projectId)!; const repo = projectsRepo(slug).repository(project.id)!;
   const devStep = proc.steps.find(s => s.role === 'implementer') ?? proc.steps[1]; const qaStep = proc.steps.find(s => s.role === 'reviewer');
   const dev = agents.get(devStep.agentId)!; const qa = qaStep ? agents.get(qaStep.agentId) ?? null : null;
@@ -954,7 +962,7 @@ export async function resumeStory(slug: string, processId: string, log: (o: any,
   const { ctx, involved, repoPath } = storyRunContext(slug, processId, log, isCancelled);
   const item = ctx.item; const repo = { path: repoPath };
   involved.forEach(id => agents.setStatus(id, 'active'));
-  backlog.setStatus(item.id, 'in_progress', processId);
+  setWorkStatus(slug, item, 'in_progress', processId);
   let status: Process['status'] = 'done'; let error: string | null = null;
   try {
     updatePipeline(slug, processId, { state: 'running', reason: null, pauseKind: null, finishedAt: null }, { kind: 'info', message: 'El propietario autorizó continuar. El equipo retoma donde lo dejó.' });
@@ -984,7 +992,7 @@ export async function resumeStory(slug: string, processId: string, log: (o: any,
   } finally {
     involved.forEach(id => agents.setStatus(id, 'inactive'));
     const fin = procs.get(processId)!.result!;
-    backlog.setStatus(item.id, fin.applied || fin.changes.some(c => !c.error) ? 'review' : 'pending', processId);
+    setWorkStatus(slug, item, fin.applied || fin.changes.some(c => !c.error) ? 'review' : 'pending', processId);
     procs.finish(processId, status, error);
     log({ processId, state: fin.pipeline?.state, spent: procs.get(processId)?.spentUsd.toFixed(4) }, 'pipeline de la historia detenido');
     // Detección determinista (sin IA) también al reanudar: bloqueos, negativas, plazos, verificaciones fallidas.

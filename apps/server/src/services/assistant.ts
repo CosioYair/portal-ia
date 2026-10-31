@@ -22,7 +22,12 @@ import { phaseContext } from './operationalPhase.ts';
 import { CAPABILITIES, type CapabilityPreview, type CapabilityResult } from './capabilities.ts';
 import { agentBackend, agentCaller, claudeCodeGate } from './claudeCode/backend.ts';
 import { lastDetection } from './claudeCode/detect.ts';
-import { backendLabel } from '@portal-ia/domain';
+import { ASSIGNMENT_STATUS_LABEL, backendLabel, STAGE_LABEL } from '@portal-ia/domain';
+import { monotonicNow } from '../clock.ts';
+import { conversationsRepo } from '../db/conversations.ts';
+import { createConversation, getConversation, ledgerForPrompt, proposeDecisions, recomputeStage } from './conversations.ts';
+import { createAssignment } from './assignments.ts';
+import { assignmentsRepo } from '../db/assignments.ts';
 
 /**
  * Asistente global (lo encarna el «Asistente de Empresa» del espacio interno).
@@ -36,15 +41,22 @@ platform.exec(`CREATE TABLE IF NOT EXISTS assistant_messages (
   id TEXT PRIMARY KEY, role TEXT NOT NULL, content TEXT NOT NULL, actions_json TEXT, tokens_in INTEGER NOT NULL DEFAULT 0, tokens_out INTEGER NOT NULL DEFAULT 0,
   cost_usd REAL NOT NULL DEFAULT 0, model TEXT, created_at TEXT NOT NULL
 )`);
-{ const cols = (platform.prepare(`PRAGMA table_info(assistant_messages)`).all() as any[]).map(c => c.name); if (!cols.includes('attachments_json')) platform.exec(`ALTER TABLE assistant_messages ADD COLUMN attachments_json TEXT`); }
+{ const cols = (platform.prepare(`PRAGMA table_info(assistant_messages)`).all() as any[]).map(c => c.name); if (!cols.includes('attachments_json')) platform.exec(`ALTER TABLE assistant_messages ADD COLUMN attachments_json TEXT`); if (!cols.includes('conversation_id')) platform.exec(`ALTER TABLE assistant_messages ADD COLUMN conversation_id TEXT`); }
+conversationsRepo.migrateOrphans();
 
-export type AssistantActionType = 'create_company' | 'create_project' | 'add_backlog_item' | 'propose_execution' | 'propose_apply' | 'propose_delegation' | 'propose_operation' | 'info';
+export type AssistantActionType = 'create_company' | 'create_project' | 'add_backlog_item' | 'propose_execution' | 'propose_apply' | 'propose_delegation' | 'propose_operation' | 'propose_local' | 'open_decision' | 'propose_assignment' | 'info';
+/** Cambios locales que el modelo PROPONE y el propietario confirma con un clic (v0.16: ya no se hacen al instante). */
+export type LocalOp = 'add_backlog_item' | 'update_backlog_item' | 'reset_story' | 'create_company' | 'create_project';
 export interface AssistantAction {
   type: AssistantActionType; status: 'done' | 'failed' | 'pending' | 'running' | 'rejected'; label: string; detail?: string; link?: string;
   /** propose_operation: operación del catálogo (capabilities.ts), su vista previa calculada en el servidor y su resultado real. */
   operation?: { id: string; capability: string; params: Record<string, unknown>; preview: CapabilityPreview; result?: CapabilityResult | null; decidedAt?: string | null };
   /** Estado real del proceso asociado, calculado al leer (no se persiste). */
   live?: { status: string; phase: string; next: string; tone: 'info' | 'warn' | 'ok' | 'err'; settled: boolean };
+  /** propose_local: el cambio propuesto y, tras confirmarlo, su resultado. */
+  local?: { op: LocalOp; params: Record<string, unknown>; result?: string | null };
+  /** open_decision / propose_assignment */
+  decisionId?: string; assignmentId?: string;
   /** propose_execution / propose_apply */
   processId?: string; workspaceSlug?: string; projectId?: string; storyId?: string; estimatedUsd?: number; suggestedBudgetUsd?: number; changes?: number;
 }
@@ -54,10 +66,20 @@ export interface AssistantMessage { id: string; role: 'user' | 'assistant'; cont
 const mapMsg = (r: any): AssistantMessage => ({ id: r.id, role: r.role, content: r.content, actions: r.actions_json ? JSON.parse(r.actions_json) : [], attachments: r.attachments_json ? JSON.parse(r.attachments_json) : [], tokensIn: r.tokens_in, tokensOut: r.tokens_out, costUsd: r.cost_usd, model: r.model, createdAt: r.created_at });
 
 export const assistantRepo = {
-  list(limit = 80): AssistantMessage[] { return (platform.prepare(`SELECT * FROM (SELECT * FROM assistant_messages ORDER BY created_at DESC LIMIT ?) ORDER BY created_at`).all(limit) as any[]).map(mapMsg); },
+  list(limit = 80, conversationId: string | null = null): AssistantMessage[] {
+    const rows = conversationId ? platform.prepare(`SELECT * FROM (SELECT * FROM assistant_messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?) ORDER BY created_at`).all(conversationId, limit) : platform.prepare(`SELECT * FROM (SELECT * FROM assistant_messages ORDER BY created_at DESC LIMIT ?) ORDER BY created_at`).all(limit);
+    return (rows as any[]).map(mapMsg);
+  },
   /** Mensajes con el estado real de los procesos que crearon sus acciones (para que el chat no diga «en ejecución» cuando ya terminó). */
-  listLive(limit = 80): AssistantMessage[] {
-    return this.list(limit).map(m => m.actions.some(a => a.processId && a.workspaceSlug) ? { ...m, actions: m.actions.map(a => {
+  listLive(limit = 80, conversationId: string | null = null): AssistantMessage[] {
+    return this.list(limit, conversationId).map(m => m.actions.some(a => (a.processId || a.assignmentId) && a.workspaceSlug) ? { ...m, actions: m.actions.map(a => {
+      // Encargo propuesto: su estado real (al leer; el mensaje no se modifica). Pendiente solo mientras sea borrador.
+      if (a.assignmentId && a.workspaceSlug) {
+        try { const x = assignmentsRepo(a.workspaceSlug).get(a.assignmentId); if (!x || a.status === 'failed') return a;
+          const settled = x.status === 'accepted' || x.status === 'cancelled';
+          return { ...a, status: x.status === 'draft' ? a.status : x.status === 'cancelled' ? 'rejected' as const : 'done' as const, live: { status: x.status, phase: `Encargo ${ASSIGNMENT_STATUS_LABEL[x.status]}`, next: x.status === 'ready_for_review' ? 'Revisa la evidencia y acéptalo o pide cambios.' : x.status === 'running' ? 'Se está ejecutando: sigue el progreso en su tarjeta.' : settled ? 'No requiere ninguna acción.' : 'Decide en su tarjeta.', tone: x.status === 'failed' ? 'err' as const : x.status === 'ready_for_review' || x.status === 'needs_owner' ? 'warn' as const : settled ? 'ok' as const : 'info' as const, settled } };
+        } catch { return a; }
+      }
       if (!a.processId || !a.workspaceSlug) return a;
       try { const p = processesRepo(a.workspaceSlug).get(a.processId); if (!p) return a;
         // Propuesta de un proceso archivado: ya no se autoriza desde el chat (solo se muestra; el mensaje no se modifica).
@@ -65,14 +87,17 @@ export const assistantRepo = {
         const g = describeProcess(p, { isPortalRepo: a.workspaceSlug === INTERNAL_WORKSPACE.slug }); return { ...a, live: { status: p.status, ...g } }; } catch { return a; }
     }) } : m);
   },
-  add(m: Omit<AssistantMessage, 'id' | 'createdAt'>): AssistantMessage {
-    const id = crypto.randomUUID(); const ts = new Date().toISOString();
-    platform.prepare(`INSERT INTO assistant_messages (id, role, content, actions_json, attachments_json, tokens_in, tokens_out, cost_usd, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, m.role, m.content, JSON.stringify(m.actions), JSON.stringify(m.attachments), m.tokensIn, m.tokensOut, m.costUsd, m.model, ts);
+  add(m: Omit<AssistantMessage, 'id' | 'createdAt'>, conversationId: string | null = null): AssistantMessage {
+    const id = crypto.randomUUID(); const ts = monotonicNow();
+    // Todo mensaje pertenece a una conversación: sin indicarla, va a la activa más reciente (o a una nueva).
+    conversationId ??= conversationsRepo.list().find(c => c.status === 'active')?.id ?? conversationsRepo.create('Conversación', null, null).id;
+    platform.prepare(`INSERT INTO assistant_messages (id, role, content, actions_json, attachments_json, tokens_in, tokens_out, cost_usd, model, created_at, conversation_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, m.role, m.content, JSON.stringify(m.actions), JSON.stringify(m.attachments), m.tokensIn, m.tokensOut, m.costUsd, m.model, ts, conversationId);
     return { ...m, id, createdAt: ts };
   },
   updateActions(id: string, actions: AssistantAction[]) { platform.prepare(`UPDATE assistant_messages SET actions_json = ? WHERE id = ?`).run(JSON.stringify(actions), id); },
   get(id: string): AssistantMessage | undefined { const r = platform.prepare(`SELECT * FROM assistant_messages WHERE id = ?`).get(id); return r ? mapMsg(r) : undefined; },
-  clear() { platform.exec(`DELETE FROM assistant_messages`); }
+  /** «Limpiar» archiva conversaciones; nunca borra mensajes ni decisiones (el registro es duradero). */
+  clear() { platform.exec(`UPDATE assistant_conversations SET status = 'archived' WHERE status = 'active'`); }
 };
 
 function assistantAgent() {
@@ -113,7 +138,8 @@ const SCREEN_MAP = `# Pantallas del Portal (menú izquierdo salvo que se indique
 - Seguridad (M1): los cambios se escriben en worktrees aislados (la carpeta del Portal no cambia de rama); las verificaciones corren en sandbox (Docker/WSL2) o quedan bloqueadas (fail-closed); toda operación pasa por la política de ejecución del backend.
 Herramientas y MCP, Organización, Configuración: marcadas «próx.», aún no existen.`;
 
-async function platformSnapshot(): Promise<string> {
+/** Estado real para el prompt. Con alcance (conversación de un proyecto), solo ese proyecto en detalle y el resto en una línea; el backlog abierto, acotado. */
+async function platformSnapshot(scope: { workspaceSlug: string | null; projectId: string | null } = { workspaceSlug: null, projectId: null }): Promise<string> {
   const lines: string[] = [];
   // Estado del propio Portal en marcha
   try {
@@ -121,10 +147,12 @@ async function platformSnapshot(): Promise<string> {
     lines.push(`# Portal en marcha: versión ${sys.version}, arrancado ${sys.startedAt} con el commit ${sys.startCommit ?? '?'}; interfaz construida con ${sys.buildCommit ?? '?'}; HEAD actual de la carpeta: ${sys.headCommit ?? '?'} (rama ${sys.branch ?? '?'}). Sandbox: ${sys.sandbox?.available ?? '?'}${sys.sandbox?.available === 'unavailable' ? ' (⚠ sin sandbox: test/build bloqueados y el Portal no se integra; ver docs/sandbox.md)' : ''}. ${sys.action === 'none' ? 'El código en marcha es el actual.' : `⚠ Hay código integrado que NO está activo (${sys.changedFiles.length} archivos${sys.stories.length ? `, historias ${sys.stories.join(', ')}` : ''}): el propietario debe pulsar «Reconstruir y reiniciar» en la barra amarilla; hasta entonces esas mejoras no se ven aunque estén en main.`}`);
   } catch { /* sin git */ }
   for (const ws of workspacesRepo.list()) {
+    if (scope.workspaceSlug && ws.slug !== scope.workspaceSlug) { lines.push(`\n# Empresa «${ws.name}» (slug: ${ws.slug}): fuera del alcance de esta conversación (${projectsRepo(ws.slug).list().length} proyecto(s)).`); continue; }
     lines.push(`\n# Empresa «${ws.name}» (slug: ${ws.slug}${ws.kind === 'internal' ? ', espacio interno: aquí vive el propio Portal IA' : ''})`);
     const projects = projectsRepo(ws.slug); const agents = activeAgents(ws.slug);
     lines.push(`Agentes de espacio: ${agents.filter(a => a.scope === 'workspace').map(a => `${a.config.name} (${a.key})`).join(', ') || 'ninguno'}`);
     for (const p of projects.list()) {
+      if (scope.projectId && p.id !== scope.projectId) { lines.push(`## Proyecto «${p.name}» (slug: ${p.slug}): fuera del alcance de esta conversación.`); continue; }
       const bl = backlogRepo(ws.slug).list(p.id); const procs = processesRepo(ws.slug).list(p.id); const allProcs = processesRepo(ws.slug).listAll(p.id); const repo = projects.repository(p.id);
       const foreign = repo && ws.kind === 'internal' && path.resolve(expandHome(repo.path)).toLowerCase() !== path.resolve(REPO_ROOT).toLowerCase();
       let repoLine = repo ? `${repo.path}${foreign ? ` ⚠ NO es la carpeta desde la que corre este Portal (${REPO_ROOT}): historias detenidas hasta pulsar «Usar la carpeta de esta instalación» en el Panel` : ws.kind === 'internal' ? ' ✓ carpeta de este Portal (automejora real)' : ''}` : 'NO registrado (sin él no se pueden ejecutar historias)';
@@ -134,7 +162,9 @@ async function platformSnapshot(): Promise<string> {
       const lastProc = (b: { id: string; lastProcessId: string | null }) => (b.lastProcessId ? procs.find(x => x.id === b.lastProcessId) : undefined) ?? procs.find(x => x.backlogItemId === b.id && x.kind === 'story_execution');
       const open = bl.filter(b => b.status !== 'done' && b.status !== 'discarded');
       lines.push(`Backlog activo abierto (${open.length} de ${bl.length}), en orden de prioridad:${bl.length === 0 ? ' (vacío: el equipo está listo para la primera historia de la etapa)' : ''}`);
-      for (const b of open) {
+      const OPEN_MAX = 40;
+      if (open.length > OPEN_MAX) lines.push(`(Se muestran ${OPEN_MAX} de ${open.length}; pregunta por una historia concreta si necesitas más.)`);
+      for (const b of open.slice(0, OPEN_MAX)) {
         const lp = lastProc(b); const g = lp ? describeProcess(lp, { isPortalRepo: ws.kind === 'internal', storyStatus: b.status }) : null; const mt = lp?.result?.manualTest;
         lines.push(`- ${b.storyId} [${b.status}] ${b.title}${b.criterion ? ` — criterio: ${b.criterion.slice(0, 160)}` : ''}${g ? ` — proceso ${lp!.id}: ${g.phase}. Siguiente: ${g.next}` : ''}${mt ? ` Prueba manual: ${mt.checks.filter(Boolean).length}/${mt.steps.length} pasos.` : ''}`);
       }
@@ -158,7 +188,7 @@ Escribe tu respuesta en markdown breve y, si procede, termina con UN bloque:
 \`\`\`actions
 [ ...acciones JSON... ]
 \`\`\`
-Acciones locales (gratis, se ejecutan al instante):
+Cambios locales (gratis; los PROPONES y el propietario los confirma con un clic en la tarjeta):
 - {"type":"create_company","name":string}
 - {"type":"create_project","company":slug,"name":string,"description":string,"objectives":string[]}
 - {"type":"add_backlog_item","company":slug,"project":slug,"title":string,"criterion":string,"description":string}
@@ -172,6 +202,17 @@ Operaciones del Portal (las ejecuta el Portal, con el MISMO servicio que el bot�
 - {"type":"request_operation","capability":"publish_main","company":slug,"project":slug} → publicar la rama principal del repositorio autorizado del proyecto en su remoto (git push sin forzar; solo main, nunca otras ramas). El Portal calcula y muestra qué commits se publican y qué queda fuera.
 Si el propietario pide algo que está en esta lista, NO le mandes a otra pantalla ni digas que no puedes: propón la operación (la tarjeta muestra exactamente qué se hará y pide su autorización). Si pide algo que no está en ninguna lista, dilo y propón convertirlo en historia; nunca inventes operaciones ni órdenes de shell.
 Cómo elegir: NO todo es una historia de desarrollo. Si el propietario pide implementar/corregir/añadir una funcionalidad concreta en el código → add_backlog_item (+ execute_story si pide hacerlo ya). Si pide revisar, replantear, repriorizar, analizar, evaluar, proponer, organizar, redactar, planificar, auditar o decidir algo (p. ej. «revisa y replantea el backlog», «propón la organización de la nueva empresa», «evalúa si conviene X», «redacta la política de Y») → delegate_task al agente responsable del ámbito: asuntos de un proyecto (backlog, arquitectura, calidad, diseño) → su Coordinador del Proyecto (pj-coordinador); organización de la empresa, varias áreas o nuevos equipos → Gestor Organizacional (ws-gestor); creación o configuración de agentes → Agente de Onboarding (ws-onboarding); o el agente especializado que el propietario nombre. Escribe "request" completo y claro con lo que el propietario quiere. Cuando el propietario pida "ejecuta", "haz", "implementa" una historia que no existe, añádela y propón ejecutarla en la misma respuesta. El equipo SÍ puede modificar el código del propio Portal IA; así se construye el producto.`;
+
+const CONVERSATION_GUIDE = `# Cómo trabajar en esta conversación (intención → acción)
+- Pregunta informativa («explica», «por qué falló», «cómo funciona»): responde y ya está; distingue hechos verificados (del estado real), interpretaciones, supuestos y recomendaciones. No propongas ejecutar nada.
+- «Investiga esta idea», «ayúdame a decidir»: explica alternativas, ventajas, inconvenientes e incertidumbres y abre las decisiones que haya que cerrar, UNA por acción:
+  {"type":"open_decision","question":string,"context":string,"options":[{"label":string,"pros":string,"cons":string}],"recommendation":string,"risks":string[],"dependsOn":number[] (números de decisiones D previas)}
+  Tú NO apruebas decisiones: las aprueba, rechaza, revisa o aplaza el propietario en el registro. No inventes fuentes externas: si hace falta investigar fuera, dilo.
+- Con las decisiones cerradas: el propietario pulsa «Preparar propuesta» (el equipo la redacta y otro especialista la cuestiona); «Consultar al equipo» la revisa; con la propuesta aprobada, «Preparar historias» (y luego «Crear historias»). Sugiérelo; no lo hagas tú.
+- «Implementa», «arregla», «déjalo listo para revisar» (cambio de código directo y acotado): propón un ENCARGO de desarrollo (sin historia), con criterios comprobables y tamaño:
+  {"type":"propose_assignment","title":string,"request":string (la petición tal cual),"objective":string,"criteria":string[],"outOfScope":string[],"size":"S"|"M"|"L"}
+  Queda como borrador: el propietario lo revisa y lo autoriza (presupuesto, llamadas a la suscripción); hasta entonces no se ejecuta nada.
+- Crear o editar historias, reiniciar una, crear empresa o proyecto: proponlo (add_backlog_item, update_backlog_item, reset_story, create_company, create_project); el propietario lo confirma con un clic.`;
 
 export function parseResponse(text: string): { reply: string; actions: any[] } {
   const m = text.match(/```actions\s*([\s\S]*?)```\s*$/i) ?? text.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```\s*$/i);
@@ -197,15 +238,81 @@ const norm = (t: string) => t.toLowerCase().normalize('NFD').replace(/[\u0300-\u
 function resolveStory(slug: string, projectId: string, ref: any, exclude: Set<string> = new Set()) {
   const list = backlogRepo(slug).list(projectId).filter(b => !exclude.has(b.id)); const r = String(ref ?? '').trim().toLowerCase();
   const num = r.match(/(\d+)\s*$/)?.[1]; const n = num ? parseInt(num, 10) : NaN;
+  // El número solo vale sin prefijo o con el de historia: «EN-3» (un encargo) nunca resuelve a HU-003.
+  const pre = r.match(/^([a-z]+)-\d+$/)?.[1]; const byNumber = Number.isFinite(n) && (!pre || pre === 'hu');
   const it = list.find(b => b.storyId.toLowerCase() === r)
-    ?? (Number.isFinite(n) ? list.find(b => parseInt(b.storyId.replace(/\D+/g, ''), 10) === n) : undefined)
+    ?? (byNumber ? list.find(b => parseInt(b.storyId.replace(/\D+/g, ''), 10) === n) : undefined)
     ?? list.find(b => norm(b.title) === norm(r))
     ?? (r.length > 6 ? list.find(b => norm(b.title).includes(norm(r)) || norm(r).includes(norm(b.title))) : undefined);
   if (!it) throw new Error(`Historia no encontrada en el backlog: ${ref}`); return it;
 }
 
-/** Ejecuta acciones locales y construye propuestas para las que requieren autorización. */
-export function performActions(actionsReq: any[]): AssistantAction[] {
+export interface ActionScope { conversationId: string | null; workspaceSlug: string | null; projectId: string | null }
+const NO_SCOPE: ActionScope = { conversationId: null, workspaceSlug: null, projectId: null };
+const LOCAL_OPS: LocalOp[] = ['add_backlog_item', 'update_backlog_item', 'reset_story', 'create_company', 'create_project'];
+
+/**
+ * Lo que el modelo pide en su respuesta. Nada cambia por lenguaje natural ambiguo:
+ * - crear o editar historias, reiniciar una, crear empresa o proyecto → TARJETA que el propietario confirma;
+ * - decisiones → se abren en el registro (solo el propietario las aprueba);
+ * - encargo de desarrollo → BORRADOR sin proceso (se autoriza aparte);
+ * - ejecutar historia, aplicar, encargo de análisis y operaciones → propuestas que se autorizan, como siempre.
+ * El alcance de la conversación lo pone el servidor: una acción no puede salirse de su empresa ni de su proyecto.
+ */
+export function performActions(actionsReq: any[], scope: ActionScope = NO_SCOPE): AssistantAction[] {
+  const out: AssistantAction[] = [];
+  for (const act0 of actionsReq.slice(0, 8)) {
+    const act = { ...act0 };
+    try {
+      if (scope.workspaceSlug) {
+        if (act.company && resolveCompany(act.company).slug !== scope.workspaceSlug) throw new Error('Fuera del alcance de esta conversación (otra empresa): no se hace nada.');
+        act.company = scope.workspaceSlug;
+        if (scope.projectId && act.type !== 'create_project') {
+          if (act.project && resolveProject(scope.workspaceSlug, act.project).id !== scope.projectId) throw new Error('Fuera del alcance de esta conversación (otro proyecto): no se hace nada.');
+          act.project = scope.projectId;
+        }
+      }
+      if (LOCAL_OPS.includes(act.type)) {
+        const { type, ...params } = act;
+        const what = type === 'add_backlog_item' ? `Crear la historia «${String(params.title ?? '').slice(0, 80)}»` : type === 'update_backlog_item' ? `Editar ${params.story}` : type === 'reset_story' ? `Devolver ${params.story} a pendiente (descarta su diff pendiente)` : type === 'create_company' ? `Crear la empresa «${params.name}»` : `Crear el proyecto «${params.name}»`;
+        let detail = 'Confírmalo para hacerlo: el Asistente solo lo propone.';
+        if (type === 'update_backlog_item' || type === 'reset_story') {
+          const ws = resolveCompany(params.company); const pr = resolveProject(ws.slug, params.project); const st = resolveStory(ws.slug, pr.id, params.story) as any;
+          if (type === 'update_backlog_item') {
+            const changes = [params.title ? `título → «${String(params.title).slice(0, 120)}»` : '', params.criterion ? `criterio → «${String(params.criterion).slice(0, 200)}»` : '', params.description !== undefined ? (params.description ? 'descripción nueva' : 'descripción vacía') : '', params.estimate ? `tamaño → ${params.estimate}` : '', params.dependsOn !== undefined ? `depende de → ${params.dependsOn ?? 'nada'}` : ''].filter(Boolean);
+            const resets = (params.title || params.criterion) && st && (st.status === 'review' || st.status === 'blocked');
+            detail = `${changes.length ? `Cambios: ${changes.join(' · ')}.` : 'Sin cambios concretos.'}${resets ? ` Atención: ${st.storyId} está ${st.status === 'review' ? 'en revisión' : 'bloqueada'}; cambiar el título o el criterio la devuelve a pendiente y descarta su diff pendiente.` : ''} Confírmalo para hacerlo.`;
+          }
+        }
+        out.push({ type: 'propose_local', status: 'pending', label: what, detail, local: { op: type, params } });
+      } else if (act.type === 'open_decision') {
+        if (!scope.conversationId) throw new Error('Las decisiones viven en una conversación.');
+        const [d] = proposeDecisions(scope.conversationId, null, [act]);
+        if (d) out.push({ type: 'open_decision', status: 'done', label: `Decisión D${d.seq} abierta: ${d.question}`, detail: d.recommendation ? `Recomendación: ${d.recommendation}. Decides tú.` : 'Decides tú.', decisionId: d.id });
+      } else if (act.type === 'propose_assignment') {
+        const ws = resolveCompany(act.company); const pr = resolveProject(ws.slug, act.project);
+        const a = createAssignment(ws.slug, pr.id, { request: String(act.request ?? act.objective ?? ''), title: String(act.title ?? ''), objective: String(act.objective ?? ''), criteria: Array.isArray(act.criteria) ? act.criteria.map(String) : [], outOfScope: Array.isArray(act.outOfScope) ? act.outOfScope.map(String) : [], size: ['S', 'M', 'L'].includes(act.size) ? act.size : null, conversationId: scope.conversationId });
+        out.push({ type: 'propose_assignment', status: 'pending', label: `Encargo ${a.code}: ${a.title}`, detail: 'Borrador de encargo de desarrollo (sin historia). Revísalo y autorízalo: hasta entonces no se ejecuta nada.', assignmentId: a.id, workspaceSlug: ws.slug, projectId: pr.id });
+      } else out.push(...executeActions([act]));
+    } catch (e: any) { out.push({ type: LOCAL_OPS.includes(act.type) ? 'propose_local' : act.type === 'propose_assignment' ? 'propose_assignment' : act.type === 'open_decision' ? 'open_decision' : 'info', status: 'failed', label: `No se pudo: ${act.type}`, detail: e.message }); }
+  }
+  return out;
+}
+
+/** Confirmar (hacer) o descartar un cambio local que el Asistente propuso. Una sola vez. */
+export function decideLocal(messageId: string, index: number, decision: 'approve' | 'reject'): AssistantMessage {
+  const m = assistantRepo.get(messageId); const a = m?.actions[index];
+  if (!m || !a || a.type !== 'propose_local' || !a.local) throw Object.assign(new Error('Propuesta no encontrada.'), { statusCode: 404 });
+  if (a.status !== 'pending') throw Object.assign(new Error(`Esta propuesta ya está «${a.status}»: no se repite.`), { statusCode: 409 });
+  let next: AssistantAction;
+  if (decision === 'reject') next = { ...a, status: 'rejected', detail: 'Descartada por el propietario: no se hizo nada.' };
+  else { const [r] = executeActions([{ type: a.local.op, ...a.local.params }]); next = { ...a, status: r.status === 'done' ? 'done' : 'failed', detail: r.detail ?? r.label, link: r.link, local: { ...a.local, result: r.label } }; }
+  assistantRepo.updateActions(messageId, m.actions.map((x, i) => i === index ? next : x));
+  return assistantRepo.get(messageId)!;
+}
+
+/** Ejecuta acciones al instante (solo tras la confirmación del propietario para las locales) y prepara propuestas. */
+export function executeActions(actionsReq: any[]): AssistantAction[] {
   const actions: AssistantAction[] = [];
   for (const act of actionsReq.slice(0, 8)) {
     try {
@@ -264,7 +371,7 @@ export function performActions(actionsReq: any[]): AssistantAction[] {
   return actions;
 }
 
-export async function chat(userText: string, images: { mediaType: string; data: string; name?: string }[] = [], files: AssistantAttachment[] = []): Promise<{ user: AssistantMessage; assistant: AssistantMessage }> {
+export async function chat(userText: string, images: { mediaType: string; data: string; name?: string }[] = [], files: AssistantAttachment[] = [], conversationId: string | null = null): Promise<{ user: AssistantMessage; assistant: AssistantMessage; conversationId: string }> {
   const a = assistantAgent();
   const info = assistantInfo();
   if (info.billing === 'api' && info.spentThisMonthUsd >= info.monthlyLimitUsd) throw Object.assign(new Error(`El Asistente alcanzó su límite mensual (${info.monthlyLimitUsd.toFixed(2)} USD). Puedes ampliarlo en su ficha de Equipo de IA.`), { statusCode: 409 });
@@ -274,8 +381,10 @@ export async function chat(userText: string, images: { mediaType: string; data: 
   if (info.backend === 'api' && (!cred || prow.status !== 'connected')) throw Object.assign(new Error('El proveedor del Asistente no está conectado.'), { statusCode: 409 });
   const models: ModelInfo[] = (() => { try { return JSON.parse(prow.models_json); } catch { return []; } })();
   const attachments: AssistantAttachment[] = [...images.map((im, i) => ({ name: im.name ?? `imagen-${i + 1}`, mediaType: im.mediaType, bytes: Math.round(im.data.length * 0.75) })), ...files];
-  const user = assistantRepo.add({ role: 'user', content: userText, actions: [], attachments, tokensIn: 0, tokensOut: 0, costUsd: 0, model: null });
-  const history = assistantRepo.list(16).filter(m => m.id !== user.id).slice(-12).map(m => `${m.role === 'user' ? 'Propietario' : 'Asistente'}: ${m.content.slice(0, 1200)}${m.actions.length ? ` [acciones: ${m.actions.map(x => `${x.type}:${x.status}`).join(', ')}]` : ''}`).join('\n');
+  const conv = conversationId ? getConversation(conversationId) : (conversationsRepo.list().find(c => c.status === 'active') ?? createConversation(userText.slice(0, 60), null, null));
+  if (conv.title === 'Nueva conversación' && !assistantRepo.list(1, conv.id).length) conversationsRepo.update(conv.id, { title: userText.replace(/\s+/g, ' ').trim().slice(0, 60) || conv.title });
+  const user = assistantRepo.add({ role: 'user', content: userText, actions: [], attachments, tokensIn: 0, tokensOut: 0, costUsd: 0, model: null }, conv.id);
+  const history = assistantRepo.list(16, conv.id).filter(m => m.id !== user.id).slice(-12).map(m => `${m.role === 'user' ? 'Propietario' : 'Asistente'}: ${m.content.slice(0, 1200)}${m.actions.length ? ` [acciones: ${m.actions.map(x => `${x.type}:${x.status}`).join(', ')}]` : ''}`).join('\n');
   const system = `Eres «${a.config.name}», ${a.template.role.toLowerCase()} de Portal IA, una plataforma local para gestionar empresas operadas por agentes de IA. Hablas con el propietario.
 ${a.config.specialization}
 Qué es Portal IA: su primer cliente es él mismo; el proyecto «Desarrollo del Portal» del espacio interno tiene registrado el repositorio del propio Portal, y su equipo (Coordinador, Arquitecto, Desarrollador, Diseñador, QA) implementa mejoras ejecutando historias del backlog: producen un diff que el propietario aprueba y se aplica en una rama git. Por tanto, cualquier mejora del Portal (incluido este chat) se consigue añadiendo la historia y ejecutándola.
@@ -283,9 +392,13 @@ Principios: nunca inventes datos: usa solo el estado real de abajo (tienes visib
 Formato de respuesta: claro y aireado. Empieza con una frase de respuesta directa; luego, si hace falta, 2-4 apartados cortos con título en negrita, viñetas de una línea y pasos numerados cuando haya un orden; sin párrafos largos; máximo ~200 palabras salvo que pidan detalle.
 ${SCREEN_MAP}
 ${ACTION_SCHEMA}
+${CONVERSATION_GUIDE}
+
+# Esta conversación: «${conv.title}» · etapa ${STAGE_LABEL[conv.stage]}${conv.workspaceSlug ? ` · alcance: ${conv.workspaceSlug}${conv.projectId ? ` / ${projectsRepo(conv.workspaceSlug).get(conv.projectId)?.name ?? conv.projectId}` : ''}` : ' · sin alcance fijado'}
+${ledgerForPrompt(conv.id) || '(sin decisiones todavía)'}
 
 # Estado real de la plataforma
-${await platformSnapshot()}`;
+${await platformSnapshot({ workspaceSlug: conv.workspaceSlug, projectId: conv.projectId })}`;
   const prompt = `${history ? `# Conversación reciente\n${history}\n\n` : ''}Propietario: ${userText}${images.length ? `\n(adjunta ${images.length} imagen(es))` : ''}`;
   const startedAt = new Date().toISOString();
   try {
@@ -294,19 +407,21 @@ ${await platformSnapshot()}`;
     // Backend del Asistente: con Claude Code, la suscripción (sin cargo a la API); si no está disponible, se dice y NO se usa la API.
     const caller = agentCaller(INTERNAL_WORKSPACE.slug, a, null, 'Asistente');
     const res = caller
-      ? await caller.complete({ ...req, images: undefined, user: images.length ? `${prompt}\n(Las imágenes adjuntas no llegan por Claude Code gestionado: pide al propietario que las describa si hacen falta.)` : prompt })
+      ? await caller.complete({ ...req, images: images.length ? images : undefined, user: prompt })
       : await getAdapter(providerId)!.complete(decryptSecret(cred!.ciphertext), { workspaceId: prow.workspace_id }, req);
     const cost = caller ? 0 : costUsd(providerId, a.config.model, res.inputTokens, res.outputTokens);
     processesRepo(INTERNAL_WORKSPACE.slug).logExecution({ projectId: '', agentId: a.id, kind: 'assistant_chat', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
     const { reply, actions: actionsReq } = parseResponse(res.text);
-    const actions = [...performActions(actionsReq.filter(x => x?.type !== 'request_operation')), ...(await prepareOperations(actionsReq.filter(x => x?.type === 'request_operation')))];
-    const assistant = assistantRepo.add({ role: 'assistant', content: reply, actions, attachments: [], tokensIn: res.inputTokens, tokensOut: res.outputTokens, costUsd: cost, model: a.config.model });
-    return { user, assistant };
+    const actions = [...performActions(actionsReq.filter(x => x?.type !== 'request_operation'), { conversationId: conv.id, workspaceSlug: conv.workspaceSlug, projectId: conv.projectId }), ...(await prepareOperations(actionsReq.filter(x => x?.type === 'request_operation')))];
+    const assistant = assistantRepo.add({ role: 'assistant', content: reply, actions, attachments: [], tokensIn: res.inputTokens, tokensOut: res.outputTokens, costUsd: cost, model: a.config.model }, conv.id);
+    conversationsRepo.touch(conv.id); recomputeStage(conv.id);
+    return { user, assistant, conversationId: conv.id };
   } catch (e) {
     processesRepo(INTERNAL_WORKSPACE.slug).logExecution({ projectId: '', agentId: a.id, kind: 'assistant_chat', status: 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });
     const msg = e instanceof ProviderRequestError ? e.error.message : (e as Error).message;
-    const assistant = assistantRepo.add({ role: 'assistant', content: `No pude responder: ${msg}`, actions: [], attachments: [], tokensIn: 0, tokensOut: 0, costUsd: 0, model: a.config.model });
-    return { user, assistant };
+    // Un fallo del proveedor no congela la conversación: queda el error y se puede seguir escribiendo.
+    const assistant = assistantRepo.add({ role: 'assistant', content: `No pude responder: ${msg}`, actions: [], attachments: [], tokensIn: 0, tokensOut: 0, costUsd: 0, model: a.config.model }, conv.id);
+    return { user, assistant, conversationId: conv.id };
   }
 }
 

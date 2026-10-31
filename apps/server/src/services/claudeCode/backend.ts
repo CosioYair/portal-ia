@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { callCapCheck } from './callCap.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { getAdapter, type CompletionRequest, type CompletionResult } from '@portal-ia/ai-adapters';
@@ -13,6 +14,7 @@ import { BRIDGE_SCRIPT, ccError, runCliTask, type CliEvent, type CliFailedUsage 
 export { BRIDGE_SCRIPT };
 import { cliCommandFor, findCli, lastDetection, verifiedDetection } from './detect.ts';
 import { getClaudeCodeSettings, projectAuthorized } from './settings.ts';
+import { overageAccepted, saveUsageReport, subscriptionGate } from './usage.ts';
 
 /**
  * Backend de ejecución «Claude Code» para los pasos de un proceso autorizado. El agente del Portal conserva su identidad,
@@ -24,7 +26,7 @@ export const agentBackend = (a: Agent): ExecutionBackend => a.config.backend ?? 
 export const usesClaudeCode = (a: Agent) => agentBackend(a) !== 'api';
 
 /** Herramientas del puente que puede usar una ejecución gestionada (solo lectura y progreso). */
-export const JOB_TOOLS = ['portal_task_context', 'portal_list_files', 'portal_read_file', 'portal_knowledge', 'portal_report_progress'];
+export const JOB_TOOLS = ['portal_task_context', 'portal_list_files', 'portal_read_file', 'portal_search', 'portal_diff', 'portal_knowledge', 'portal_report_progress'];
 let bridgeUrl = `http://${config.host}:${config.port}`;
 /** Dirección real en la que escucha el servidor (la fija index.ts al arrancar; las pruebas, la de su servidor). */
 export function setBridgeUrl(url: string) { bridgeUrl = url.replace(/\/+$/, ''); }
@@ -109,7 +111,7 @@ export function completeWith(cc: ReturnType<typeof agentCaller>, providerId: Pro
  * no está disponible, se dice por qué y NO se usa la API en su lugar (la alternativa por API es solo de los pasos de
  * procesos autorizados y la decide el propietario en los ajustes del conector).
  */
-export function agentCaller(slug: string, agent: Agent, projectId: string | null, title: string): { backend: ExecutionBackend; label: string; subscription: boolean; complete: (req: CompletionRequest, signal?: AbortSignal) => Promise<CompletionResult> } | null {
+export function agentCaller(slug: string, agent: Agent, projectId: string | null, title: string, processId: string | null = null): { backend: ExecutionBackend; label: string; subscription: boolean; complete: (req: CompletionRequest, signal?: AbortSignal) => Promise<CompletionResult> } | null {
   const b = agentBackend(agent);
   if (b === 'api') return null;
   if (b === 'claude-code-terminal') throw Object.assign(new Error(`«${agent.config.name}» usa tu consola de Claude Code, que atiende tareas de procesos y no respuestas inmediatas. Cambia su backend a «Claude Code (gestionado)» o a la API para esto. No se ha usado la API.`), { statusCode: 409 });
@@ -117,7 +119,8 @@ export function agentCaller(slug: string, agent: Agent, projectId: string | null
   if (!g.ok) throw Object.assign(new Error(`${g.reason} No se ha usado la API en su lugar.`), { statusCode: 409 });
   return {
     backend: b, label: backendLabel(b, lastDetection()?.billing), subscription: true,
-    complete: (req, signal) => claudeCodeComplete({ slug, projectId: projectId ?? '', processId: null, stepId: null, agent, role: null, title }, req, signal ?? new AbortController().signal, () => undefined)
+    // Con el proceso: cada llamada cuenta para su tope de llamadas a la suscripción (y su ejecución queda ligada a él).
+    complete: (req, signal) => claudeCodeComplete({ slug, projectId: projectId ?? '', processId, stepId: null, agent, role: null, title }, req, signal ?? new AbortController().signal, () => undefined)
   };
 }
 
@@ -157,8 +160,9 @@ export interface ClaudeCodeCompletion extends CompletionResult { backendLabel: s
 const READ_HINT = `
 
 # Herramientas del Portal (solo lectura)
-Si el contexto de arriba no basta, puedes consultar la carpeta de trabajo del proceso con portal_list_files y portal_read_file,
-el conocimiento aprobado del proyecto con portal_knowledge e informar de tu avance con portal_report_progress.
+Si el contexto de arriba no basta, puedes consultar la carpeta de trabajo del proceso con portal_list_files, portal_read_file,
+portal_search (texto literal) y portal_diff (cambios sin confirmar o de la rama), el conocimiento aprobado del proyecto con
+portal_knowledge e informar de tu avance con portal_report_progress.
 No puedes escribir archivos ni ejecutar órdenes: entrega los cambios en el formato pedido; el Portal los valida y los aplica.`;
 
 /** Una llamada del agente a través de Claude Code (CLI gestionada o consola del propietario). */
@@ -173,6 +177,7 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
 
   if (backend === 'claude-code-terminal') {
     const label = backendLabel(backend);
+    const cap = callCapCheck(t.slug, t.processId); if (!cap.ok) throw ccError('call_cap', cap.detail);
     const run = runs.start({ mode: 'terminal', projectId: t.projectId, processId: t.processId, stepId: t.stepId, agentId: t.agent.id, agentName: t.agent.config.name, model: req.model, billing: 'unverified', authMethod: null, subscriptionType: null });
     const started = Date.now();
     try {
@@ -188,6 +193,8 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
     } finally { liveListeners.delete(run.id); }
   }
 
+  // Límite confirmado (sin renovar) u «overage» sin reconocer en el último informe del CLI: no se hace la llamada.
+  const gate = subscriptionGate(); if (!gate.ok) throw ccError('usage_limit', gate.reason);
   // CLI gestionada: la suscripción se comprueba ANTES de cada ejecución (no basta con la del día de la conexión).
   say('Comprobando la sesión de Claude Code (sin llamar al modelo)', 'preparing');
   const det = await verifiedDetection(s);
@@ -201,6 +208,8 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
   runningKeys.add(key);
   try {
     await acquireSlot(s.maxConcurrent, signal, n => say(`En cola: ${n} ejecución(es) de Claude Code en curso (máximo ${s.maxConcurrent})`, 'preparing'));
+    // Tope de llamadas: comprobado y registrado en el mismo tramo síncrono (sin «await» entre medias): sin carreras.
+    const cap = callCapCheck(t.slug, t.processId); if (!cap.ok) { releaseSlot(); throw ccError('call_cap', cap.detail); }
     const run = runs.start({ mode: 'cli', projectId: t.projectId, processId: t.processId, stepId: t.stepId, agentId: t.agent.id, agentName: t.agent.config.name, model: req.model, billing: det.billing, authMethod: det.authMethod, subscriptionType: det.subscriptionType });
     const job = s.repoRead && readRoot ? registerJobTask({ ...base, mode: 'cli', system: '', prompt: '', schema: null, readRoot, runId: run.id }) : null;
     liveListeners.set(run.id, m => say(m));
@@ -209,13 +218,14 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
       if (e.kind === 'init') say(`Claude Code iniciado (${e.model ?? req.model}) · ${label}`, 'waiting');
       else if (e.kind === 'turn') { const m = `Claude Code: turno ${e.turn}${e.tools.length ? ` · ${e.tools.join(', ')}` : ''}`; say(m, 'receiving'); try { runs.progress(run.id, m); } catch { /* sin registro */ } }
       else if (e.kind === 'retry') say(`Claude Code reintenta la llamada (${e.error ?? 'error temporal'}, intento ${e.attempt})`, 'retrying');
-      else if (e.kind === 'rate_limit' && e.info.status === 'allowed_warning') say(`Aviso de Claude Code: cerca del límite de uso${e.info.utilization != null ? ` (${Math.round(e.info.utilization * 100)} %)` : ''}`);
+      // Cada informe de límites del CLI se guarda (también si la llamada falla después): es de la cuenta, no del espacio.
+      else if (e.kind === 'rate_limit') { try { saveUsageReport(e.info, label); } catch { /* sin base */ } if (e.info.status === 'allowed_warning') say(`Aviso de Claude Code: cerca del límite de uso${e.info.utilization != null ? ` (${Math.round(e.info.utilization * 100)} %)` : ''}`); }
     };
     try {
       say(`Enviando el encargo a Claude Code · ${label}`, 'sending');
       const r = await runCliTask({
-        cli, detection: det, model: req.model, system: job ? req.system + READ_HINT : req.system, prompt: req.user, history: req.history,
-        schema: req.responseSchema ?? null, maxTurns: s.maxTurns, timeoutMs, signal, onEvent,
+        cli, detection: det, model: req.model, system: job ? req.system + READ_HINT : req.system, prompt: req.user, history: req.history, images: req.images,
+        schema: req.responseSchema ?? null, maxTurns: s.maxTurns, timeoutMs, signal, onEvent, overageAccepted,
         mcp: job ? { command: process.execPath, args: [BRIDGE_SCRIPT], env: { PORTAL_URL: bridgeUrl, PORTAL_BRIDGE_TOKEN: job.token, PORTAL_BRIDGE_MODE: 'job' }, tools: JOB_TOOLS.map(n => `mcp__portal__${n}`) } : null
       });
       runs.finish(run.id, 'done', { durationMs: r.durationMs, numTurns: r.numTurns, tokensIn: r.inputTokens, tokensOut: r.outputTokens, apiEquivalentUsd: r.apiEquivalentUsd, rateLimit: r.rateLimit });

@@ -4,7 +4,8 @@ import type { PipelineConfig, PhaseTransition, PhaseTransitionPreview, ProjectAr
 import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
 import type { BatchPreview, BatchView, GauntletAdvice, GauntletConfig, GauntletProjectInfo } from '@portal-ia/domain';
 import type { OrgApplication, OrgBriefAttachment, OrgChange, OrgDecision, OrgEvaluation, OrgEvaluationBrief, OrgProposal, OrgProposalSpec } from '@portal-ia/domain';
-import type { ClaudeCodeRun, ClaudeCodeStatusView, ClaudeCodeUsage, ClaudeCodeWorkerView, ClaudeCodeWorkspaceView, ExecutionBackend } from '@portal-ia/domain';
+import type { ClaudeCodeRun, ClaudeCodeStatusView, ClaudeCodeUsage, ClaudeCodeUsageReport, ClaudeCodeWorkerView, ClaudeCodeWorkspaceView, ExecutionBackend } from '@portal-ia/domain';
+import type { Assignment, AssistantConversation, ConversationArtifact, ConversationDecision, ConversationStage } from '@portal-ia/domain';
 import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
 
 export class ApiError extends Error {
@@ -33,11 +34,13 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 export interface AssistantInfo { agentId: string; name: string; model: string; provider: string; monthlyLimitUsd: number; spentThisMonthUsd: number; estimatedPerMessageUsd: number;
   /** Backend del Asistente y su origen de facturación (se muestran antes de enviar). */
   backend: ExecutionBackend; backendLabel: string; billing: 'api' | 'subscription'; available: boolean; unavailableReason: string | null }
-export type AssistantActionType = 'create_company' | 'create_project' | 'add_backlog_item' | 'propose_execution' | 'propose_apply' | 'propose_delegation' | 'propose_operation' | 'info';
+export type AssistantActionType = 'create_company' | 'create_project' | 'add_backlog_item' | 'propose_execution' | 'propose_apply' | 'propose_delegation' | 'propose_operation' | 'propose_local' | 'open_decision' | 'propose_assignment' | 'info';
 export interface AssistantAction {
   type: AssistantActionType; status: 'done' | 'failed' | 'pending' | 'running' | 'rejected'; label: string; detail?: string; link?: string;
   operation?: { id: string; capability: string; params: Record<string, unknown>; preview: { ok: boolean; title: string; details: string[]; blockers: string[]; excluded: string[] }; result?: { summary: string; details: string[] } | null; decidedAt?: string | null };
   processId?: string; workspaceSlug?: string; projectId?: string; storyId?: string; estimatedUsd?: number; suggestedBudgetUsd?: number; changes?: number;
+  /** propose_local: cambio que el propietario confirma; open_decision / propose_assignment: a qué apuntan. */
+  local?: { op: string; params: Record<string, unknown>; result?: string | null }; decisionId?: string; assignmentId?: string;
   live?: { status: string; phase: string; next: string; tone: 'info' | 'warn' | 'ok' | 'err'; settled: boolean };
 }
 export interface ProcessBackends { processId: string; projectId: string; projectName: string | null; connectorEnabled: boolean; subscriptionVerified: boolean; projectAuthorized: boolean; fallback: 'none' | 'api'; ready: boolean;
@@ -48,6 +51,20 @@ export interface ProcessBackends { processId: string; projectId: string; project
   /** Solo en la respuesta de «autorizar»: comprobado contra la configuración guardada. */
   verified?: boolean }
 export interface AssistantAttachment { name: string; mediaType: string; bytes: number }
+/** Artefacto de una conversación con el estado real de su proceso (propuesta, revisión del equipo, borradores). */
+export type ConversationArtifactView = ConversationArtifact & {
+  process: { id: string; status: string; spentUsd: number; budgetUsd: number | null; estimatedUsd: number | null; steps: { title: string; agentName: string; status: string }[] } | null;
+  deliverable: string | null; challenge: { agentName: string; text: string } | null; consulted: { agentName: string; question: string; answer: string }[];
+  backlogOps: { op: string; title?: string; criterion?: string; estimate?: string | null; dependsOn?: string | null }[]; opsApplied: { summary: string[] } | null;
+};
+export type AssignmentView = Assignment & { statusLabel: string; process: { id: string; status: string; spentUsd: number; budgetUsd: number | null; estimatedUsd: number | null; steps: number; pipeline: { state: string; phase: string | null; reason: string | null; corrections: number } | null } | null };
+export interface ConversationDetailView { conversation: AssistantConversation; stage: ConversationStage; decisions: ConversationDecision[]; artifacts: ConversationArtifactView[]; assignments: AssignmentView[]; next: string }
+export interface UsageGateView { report: ClaudeCodeUsageReport | null; ok: boolean; reason: string | null; warning: string | null }
+export interface AssignmentAuthPreview {
+  /** Lo que falta para autorizar (o null si está listo). */
+  missing: string | null; estimatedUsd: number; suggestedBudgetUsd: number; steps: number; agents: { name: string; role: string | null; model: string | null }[];
+  gauntlet: GauntletConfig; suggestedSubscriptionCalls: number; subscription: { ok: boolean; reason?: string; warning?: string | null; report: ClaudeCodeUsageReport | null };
+}
 export interface AssistantImage { mediaType: string; data: string; name?: string }
 export interface AssistantMessage { id: string; role: 'user' | 'assistant'; content: string; actions: AssistantAction[]; attachments: AssistantAttachment[]; tokensIn: number; tokensOut: number; costUsd: number; model: string | null; createdAt: string }
 export type ProjectFull = Project & { objectives: Objective[]; context: ContextItem[]; repository: Repository | null; knowledgeCount: number };
@@ -123,7 +140,7 @@ export const api = {
   /** Autoriza un proceso. En historias, `pipeline` incluye en ESTA autorización aplicar, verificar, QA con evidencia y correcciones acotadas. */
   authorizeProcess: (slug: string, id: string, budgetUsd: number, pipeline?: PipelineConfig) => request<Process>(`/api/workspaces/${slug}/processes/${id}/authorize`, { method: 'POST', body: JSON.stringify({ budgetUsd, authorized: true, ...(pipeline ? { pipeline } : {}) }) }),
   /** Continuar de forma autónoma (pipeline pausado/detenido, proceso sin pipeline o entrega a reparar). Autorizado por el propietario. Si el equipo preguntó algo, `answer` es obligatoria y llega una vez al agente que lo pidió. */
-  continueProcess: (slug: string, id: string, body: { addBudgetUsd?: number; pipeline?: Partial<PipelineConfig>; answer?: string }) => request<Process>(`/api/workspaces/${slug}/processes/${id}/continue`, { method: 'POST', body: JSON.stringify({ authorized: true, ...body }) }),
+  continueProcess: (slug: string, id: string, body: { addBudgetUsd?: number; addSubscriptionCalls?: number; pipeline?: Partial<PipelineConfig>; answer?: string }) => request<Process>(`/api/workspaces/${slug}/processes/${id}/continue`, { method: 'POST', body: JSON.stringify({ authorized: true, ...body }) }),
   integrationPrepare: (slug: string, id: string) => request<Process & { note?: string }>(`/api/workspaces/${slug}/processes/${id}/integration/prepare`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   integrationResolve: (slug: string, id: string, addBudgetUsd?: number) => request<Process>(`/api/workspaces/${slug}/processes/${id}/integration/resolve`, { method: 'POST', body: JSON.stringify({ authorized: true, ...(addBudgetUsd ? { addBudgetUsd } : {}) }) }),
   registerExternalCorrection: (slug: string, id: string, body: { commit: string; note: string }) => request<Process>(`/api/workspaces/${slug}/processes/${id}/external-correction`, { method: 'POST', body: JSON.stringify({ authorized: true, ...body }) }),
@@ -174,8 +191,23 @@ export const api = {
   importEstimate: (slug: string, projectId: string) => request<{ model: string | null; byAgent: string | null; estimatedUsd: number }>(`/api/workspaces/${slug}/projects/${projectId}/backlog/import/estimate`),
   createWorkspace: (name: string) => request<Workspace>('/api/workspaces', { method: 'POST', body: JSON.stringify({ name }) }),
   createProject: (slug: string, name: string, description?: string) => request<Project>(`/api/workspaces/${slug}/projects`, { method: 'POST', body: JSON.stringify({ name, description }) }),
-  assistant: () => request<{ info: AssistantInfo; messages: AssistantMessage[] }>('/api/assistant'),
-  sendAssistant: (text: string, images: AssistantImage[] = [], files: AssistantAttachment[] = []) => request<{ user: AssistantMessage; assistant: AssistantMessage; info: AssistantInfo }>('/api/assistant/messages', { method: 'POST', body: JSON.stringify({ text, images: images.length ? images : undefined, files: files.length ? files : undefined }) }),
+  assistant: (conversationId?: string | null) => request<{ info: AssistantInfo; conversations: AssistantConversation[]; conversationId: string | null; messages: AssistantMessage[]; detail: ConversationDetailView | null }>(`/api/assistant${conversationId ? `?conversationId=${encodeURIComponent(conversationId)}` : ''}`),
+  createConversation: (body: { title?: string; workspaceSlug?: string | null; projectId?: string | null }) => request<AssistantConversation>('/api/assistant/conversations', { method: 'POST', body: JSON.stringify(body) }),
+  updateConversation: (id: string, body: { title?: string; workspaceSlug?: string | null; projectId?: string | null; status?: 'active' | 'archived' }) => request<AssistantConversation>(`/api/assistant/conversations/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  decideDecision: (conversationId: string, decisionId: string, action: 'approve' | 'reject' | 'defer' | 'revise' | 'reopen', body: { answer?: string | null; note?: string | null } = {}) => request<ConversationDecision>(`/api/assistant/conversations/${conversationId}/decisions/${decisionId}/${action}`, { method: 'POST', body: JSON.stringify(body) }),
+  startArtifact: (conversationId: string, kind: 'proposal' | 'team_review' | 'stories') => request<{ artifact: ConversationArtifact; estimatedUsd: number; suggestedBudgetUsd: number }>(`/api/assistant/conversations/${conversationId}/artifacts`, { method: 'POST', body: JSON.stringify({ kind }) }),
+  decideArtifact: (conversationId: string, artifactId: string, decision: 'approve' | 'reject', note?: string) => request<ConversationArtifact>(`/api/assistant/conversations/${conversationId}/artifacts/${artifactId}/${decision}`, { method: 'POST', body: JSON.stringify(note ? { note } : {}) }),
+  createStoriesFromArtifact: (conversationId: string, artifactId: string) => request<{ summary: string[] }>(`/api/assistant/conversations/${conversationId}/artifacts/${artifactId}/create-stories`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
+  decideLocal: (messageId: string, index: number, decision: 'approve' | 'reject') => request<{ message: AssistantMessage }>(`/api/assistant/messages/${messageId}/local/${index}/${decision}`, { method: 'POST', body: JSON.stringify(decision === 'approve' ? { authorized: true } : {}) }),
+  assignment: (slug: string, id: string) => request<AssignmentView>(`/api/workspaces/${slug}/assignments/${id}`),
+  assignmentAuthorization: (slug: string, id: string) => request<AssignmentAuthPreview>(`/api/workspaces/${slug}/assignments/${id}/authorization`),
+  authorizeAssignment: (slug: string, id: string, body: { budgetUsd: number; maxSubscriptionCalls?: number; gauntlet?: { mode: 'auto' | 'off' | 'standard' | 'deep' } }) => request<{ assignment: Assignment }>(`/api/workspaces/${slug}/assignments/${id}/authorize`, { method: 'POST', body: JSON.stringify({ ...body, authorized: true }) }),
+  acceptAssignment: (slug: string, id: string, note: string | null) => request<Assignment>(`/api/workspaces/${slug}/assignments/${id}/accept`, { method: 'POST', body: JSON.stringify(note ? { note } : {}) }),
+  requestAssignmentChanges: (slug: string, id: string, note: string, discardApplied = false) => request<Assignment>(`/api/workspaces/${slug}/assignments/${id}/changes`, { method: 'POST', body: JSON.stringify({ note, discardApplied }) }),
+  cancelAssignment: (slug: string, id: string) => request<Assignment>(`/api/workspaces/${slug}/assignments/${id}/cancel`, { method: 'POST', body: JSON.stringify({}) }),
+  claudeCodeUsage: () => request<UsageGateView>('/api/claude-code/usage'),
+  acknowledgeUsage: () => request<UsageGateView>('/api/claude-code/usage/acknowledge', { method: 'POST', body: JSON.stringify({ authorized: true }) }),
+  sendAssistant: (text: string, images: AssistantImage[] = [], files: AssistantAttachment[] = [], conversationId: string | null = null) => request<{ user: AssistantMessage; assistant: AssistantMessage; info: AssistantInfo; conversationId: string }>('/api/assistant/messages', { method: 'POST', body: JSON.stringify({ conversationId, text, images: images.length ? images : undefined, files: files.length ? files : undefined }) }),
   resolveAssistantProposal: (messageId: string, processId: string, status: 'done' | 'failed', detail?: string) => request<{ message: AssistantMessage }>(`/api/assistant/messages/${messageId}/resolve`, { method: 'POST', body: JSON.stringify({ processId, status, detail }) }),
   clearAssistant: () => request<{ ok: boolean }>('/api/assistant/messages', { method: 'DELETE' }),
   addBacklogItem: (slug: string, projectId: string, input: { title: string; description?: string; criterion?: string; ownerKey?: string | null; estimate?: 'S' | 'M' | 'L' | null }) => request<BacklogItem>(`/api/workspaces/${slug}/projects/${projectId}/backlog`, { method: 'POST', body: JSON.stringify(input) }),
@@ -201,6 +233,7 @@ export const api = {
   rejectProcess: (slug: string, processId: string, reason?: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   resetStory: (slug: string, id: string, reason?: string) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/reset`, { method: 'POST', body: JSON.stringify({ reason }) }),
   recoverProcess: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/recover`, { method: 'POST' }),
+  acceptPlan: (slug: string, processId: string, addBudgetUsd = 0) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/accept-plan`, { method: 'POST', body: JSON.stringify({ authorized: true, addBudgetUsd }) }),
   retryProcess: (slug: string, processId: string, skipQa = false) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/retry`, { method: 'POST', body: JSON.stringify({ skipQa }) }),
   mergeProcess: (slug: string, processId: string, skipVerification = false) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/merge`, { method: 'POST', body: JSON.stringify({ authorized: true, skipVerification }) }),
   publishProcess: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/publish`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),

@@ -2,6 +2,7 @@ import type { Agent, AgentTemplateVersion, Capability, TeamRole } from '@portal-
 import { AGENT_TEMPLATES, PROPOSED_TEMPLATES } from '@portal-ia/domain';
 import { agentsRepo, workspaceDb } from '../db/workspace.ts';
 import { lessonsRepo } from './lessons.ts';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * Plantillas de agente versionadas (M5). Cada espacio guarda sus versiones: la v1 es la plantilla aprobada del código;
@@ -10,7 +11,7 @@ import { lessonsRepo } from './lessons.ts';
  * Las prácticas se inyectan en el prompt como «Prácticas de la organización» y se registran en `lessons_used`
  * como `practice:<key>@<v>:<lessonId>`.
  */
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 const ROLE_TEMPLATE: Record<TeamRole, string> = { planner: 'pj-coordinador', implementer: 'pj-dev', reviewer: 'pj-qa', consultant: 'pj-arquitecto', evaluator: 'pj-gauntlet' };
 const CAP_TEMPLATE: Partial<Record<Capability, string>> = { planificar: 'pj-coordinador', implementar: 'pj-dev', revisar_calidad: 'pj-qa', generar_pruebas: 'pj-qa', consultar_arquitectura: 'pj-arquitecto', consultar_ux: 'pj-ux', revisar_seguridad: 'pj-arquitecto', consultar: 'pj-arquitecto', documentar: 'pj-arquitecto', evaluar_gauntlet: 'pj-gauntlet' };
 

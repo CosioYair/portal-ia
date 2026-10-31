@@ -19,6 +19,7 @@ import { callAgentStep, implementerOutputs, isTruncatedStop, newPipeline, pauseP
 export { parseFileBlocks, parseRuntimeChecks } from './devOutput.ts';
 import path from 'node:path';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
+import { setWorkStatus, workItemOf, type WorkItem } from './workItems.ts';
 import { REPO_ROOT } from '../config.ts';
 import { expandHome } from '../routes/fs.ts';
 
@@ -117,6 +118,11 @@ export function repoContextChars(slug: string, projectId: string): number {
 export function estimateStory(slug: string, projectId: string, itemId: string, opts: StoryOptions = {}, ctxChars0?: number): AssessmentEstimate {
   const item = backlogRepo(slug).get(itemId);
   if (!item || item.projectId !== projectId) throw Object.assign(new Error('Historia no encontrada'), { statusCode: 404 });
+  return estimateWork(slug, projectId, item, opts, ctxChars0);
+}
+
+/** Estimación de un elemento de trabajo (historia o encargo): equipo por capacidades, pasos y USD si todo fuera por la API. */
+export function estimateWork(slug: string, projectId: string, item: StoryText, opts: StoryOptions = {}, ctxChars0?: number): AssessmentEstimate {
   const ctxChars = ctxChars0 ?? repoContextChars(slug, projectId);
   const agents = agentsRepo(slug).list();
   const { steps: plan, team } = stepPlanFor(agents, projectId, item, opts);
@@ -131,21 +137,28 @@ export function estimateStory(slug: string, projectId: string, itemId: string, o
 }
 
 export function createStoryProcess(slug: string, projectId: string, itemId: string, opts: StoryOptions = {}): Process {
-  const item = backlogRepo(slug).get(itemId)!;
-  const procs = processesRepo(slug);
-  const pending = procs.list(projectId).find(p => p.backlogItemId === itemId && (p.status === 'pending_authorization' || p.status === 'running'));
+  return createWorkProcess(slug, projectId, { ...backlogRepo(slug).get(itemId)!, source: 'story' }, opts);
+}
+
+/**
+ * Proceso de ejecución de un elemento de trabajo: una historia (backlog_item_id) o un encargo del propietario
+ * (assignment_id). Mismo motor, mismo equipo por capacidades, misma autorización.
+ */
+export function createWorkProcess(slug: string, projectId: string, item: WorkItem, opts: StoryOptions = {}, link: { assignmentId?: string } = {}): Process {
+  const procs = processesRepo(slug); const itemId = item.id; const isStory = item.source === 'story';
+  const pending = procs.list(projectId).find(p => (isStory ? p.backlogItemId === itemId : p.assignmentId === itemId) && (p.status === 'pending_authorization' || p.status === 'running'));
   if (pending) return pending;
-  const est = estimateStory(slug, projectId, itemId, opts);
+  const est = estimateWork(slug, projectId, item, opts);
   // HU-161 · Crear el proceso y superar las autorizaciones pendientes de las iteraciones anteriores en la MISMA
   // transacción, venga de donde venga (Backlog, asistente, pipeline, reintento o nueva iteración). Se usa un
   // SAVEPOINT para que también funcione anidado dentro de la transacción de iterateStory.
   const db = workspaceDb(slug);
   db.exec('SAVEPOINT create_story_process');
   try {
-    const proc = procs.create({ projectId, kind: 'story_execution', title: `${item.storyId} · ${item.title}`, estimatedUsd: est.estimatedUsd, backlogItemId: itemId, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model, role: s.role, reason: s.reason })) });
+    const proc = procs.create({ projectId, kind: 'story_execution', title: `${item.storyId} · ${item.title}`, estimatedUsd: est.estimatedUsd, backlogItemId: isStory ? itemId : null, assignmentId: isStory ? null : (link.assignmentId ?? itemId), steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model, role: s.role, reason: s.reason })) });
     // El equipo (con motivos y anulaciones) queda registrado desde el principio; runStory lo conserva.
     procs.setResult(proc.id, { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: est.team ?? null, iterationContext: opts.iterationContext ?? null });
-    supersedePreviousIterations(slug, itemId, proc.id);
+    supersedePreviousIterations(slug, itemId, proc.id, isStory ? 'story' : 'assignment');
     db.exec('RELEASE create_story_process');
     return procs.get(proc.id)!;
   } catch (e) {
@@ -159,9 +172,9 @@ export function createStoryProcess(slug: string, projectId: string, itemId: stri
  * todavía esperan una decisión del propietario quedan marcadas como superadas por `currentId`. No cambia su estado
  * ni borra nada; se puede deshacer con «Restaurar» desde el historial. Devuelve los procesos marcados.
  */
-export function supersedePreviousIterations(slug: string, itemId: string, currentId: string): string[] {
+export function supersedePreviousIterations(slug: string, itemId: string, currentId: string, kind: 'story' | 'assignment' = 'story'): string[] {
   const repo = processesRepo(slug); const out: string[] = [];
-  for (const p of repo.listByBacklogItem(itemId)) {
+  for (const p of kind === 'story' ? repo.listByBacklogItem(itemId) : repo.listByAssignment(itemId)) {
     if (p.id === currentId || p.kind !== 'story_execution' || p.archivedAt || p.supersededBy) continue;
     if (decisionsFromProcess(slug, p).length === 0) continue;
     if (repo.markSuperseded(p.id, currentId)) out.push(p.id);
@@ -172,7 +185,7 @@ export function supersedePreviousIterations(slug: string, itemId: string, curren
 export async function runStory(slug: string, processId: string, log: (o: any, m: string) => void, isCancelled: () => boolean) {
   const procs = processesRepo(slug); const agents = agentsRepo(slug); const backlog = backlogRepo(slug); const knowledge = knowledgeRepo(slug);
   const proc = procs.get(processId)!;
-  const item = backlog.get(proc.backlogItemId!)!;
+  const item = workItemOf(slug, proc)!;
   const project = projectsRepo(slug).get(proc.projectId)!;
   const repo = projectsRepo(slug).repository(project.id)!;
   const ctx = buildRepoContext(repo.path, 60_000);
@@ -184,12 +197,14 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   const direction = phase ? `${phaseContext(slug, project.id, 16000)}${synthesis ? `\n\n${synthesis}` : ''}` : synthesis;
   // Pipeline autorizado (si el propietario lo incluyó al autorizar): aplicar, verificar, QA con evidencia y correcciones acotadas.
   const config = proc.result?.pipeline?.config ?? null;
-  const result: ExecutionResult = { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: proc.result?.team ?? null, consultations: [], iterationContext: proc.result?.iterationContext ?? null, pipeline: config ? newPipeline(config) : null, failure: null };
+  // Plan aceptado por el propietario tras una pausa de la revisión: se reutiliza (ni otro plan ni otra revisión).
+  const accepted = proc.result?.gauntlet?.planReview?.ownerAccepted && proc.result.plan ? proc.result.plan : null;
+  const result: ExecutionResult = { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: proc.result?.team ?? null, consultations: [], iterationContext: proc.result?.iterationContext ?? null, pipeline: config ? (accepted && proc.result?.pipeline ? { ...newPipeline(config), events: proc.result.pipeline.events } : newPipeline(config)) : null, failure: null, ...(accepted ? { gauntlet: proc.result!.gauntlet } : {}) };
   const iterText = result.iterationContext ? `\n# Contexto de iteración (feedback del propietario y estado anterior; OBLIGATORIO tenerlo en cuenta)\n${result.iterationContext}\n` : '';
   const involved = Array.from(new Set(proc.steps.map(s => s.agentId)));
   const roleStep = (role: TeamRole) => { const st = stepByRole(proc, role); if (!st) throw new Error(`El proceso no tiene paso de ${role}.`); return st; };
   involved.forEach(id => agents.setStatus(id, 'active'));
-  backlog.setStatus(item.id, 'in_progress', processId);
+  setWorkStatus(slug, item, 'in_progress', processId);
   procs.setResult(processId, result);
   let finalStatus: Process['status'] = 'done'; let finalError: string | null = null;
   let handedOff = false; // desde la entrega del Desarrollador, el resultado se actualiza en la base (no con el objeto local)
@@ -197,7 +212,8 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   // Plazo y reintentos del proceso (si el propietario los fijó al autorizar) también para el plan y la implementación.
   const call = (stepId: string, system0: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[], operation?: string) => callAgentStep(slug, processId, stepId, system0, user, maxTokens, { history, injected, log, timeoutSec: config?.providerTimeoutSec ?? null, retries: config?.maxProviderRetries ?? null, operation });
   // Antes de la entrega el resultado vive en este objeto: al guardarlo se conservan los reintentos que la llamada anotó en la base.
-  const save = () => { const saved = procs.get(processId)?.result?.pipeline; if (result.pipeline && saved?.providerRetries) result.pipeline = { ...result.pipeline, providerRetries: saved.providerRetries }; procs.setResult(processId, result); };
+  // Lo que otras etapas guardan directamente (registro Gauntlet, revisión del plan, eventos) no se pisa con el objeto local.
+  const save = () => { const cur = procs.get(processId)?.result; const saved = cur?.pipeline; if (cur?.gauntlet) result.gauntlet = cur.gauntlet; if (result.pipeline && saved && (saved.events?.length ?? 0) > (result.pipeline.events?.length ?? 0)) result.pipeline = { ...result.pipeline, events: saved.events }; if (result.pipeline && saved?.providerRetries) result.pipeline = { ...result.pipeline, providerRetries: saved.providerRetries }; procs.setResult(processId, result); };
   const cancelled = () => { if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true }); };
   let runCtx: StoryRunCtx | null = null;
 
@@ -205,14 +221,14 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
     // 1 · Plan técnico
     cancelled();
     const planStep = roleStep('planner'); const coord = agents.get(planStep.agentId)!;
-    const planRes = await call(planStep.id, sys(coord, project, item),
+    const planRes = accepted ? { text: JSON.stringify(accepted), stopReason: 'end_turn' } as any : await call(planStep.id, sys(coord, project, item),
       `Elabora el plan técnico para implementar esta historia en el repositorio. Sé concreto: qué archivos hay que leer, qué archivos hay que crear o modificar y qué tareas en orden. Mantén el alcance mínimo que cumpla el criterio de aceptación.
 ${direction ? `\n# Dirección del proyecto (${phase ? 'etapa vigente y línea base' : 'síntesis previa'})\n${direction}\n` : ''}${iterText}
 ${treeText}
 
 El equipo implementará por partes (unidades que caben en una respuesta), así que indica también, por cada archivo a crear o modificar, su propósito, tipo y tamaño previsto en líneas.
 Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": string[] (rutas existentes relativas al repo, máx 8), "filesToChange": string[] (rutas a crear/modificar, máx 10), "deliverables": [{"path": string, "purpose": string (una frase), "kind": "code"|"test"|"docs"|"config", "estimatedLines": number}] (uno por cada ruta de filesToChange, en orden de dependencia), "acceptance": string[], "risks": string[]}`, 4000);
-    let plan: StoryPlan = planFrom(extractJson(planRes.text), planRes.text.slice(0, 500));
+    let plan: StoryPlan = accepted ?? planFrom(extractJson(planRes.text), planRes.text.slice(0, 500));
     // Entrega incremental: un plan sin entregables legibles (JSON cortado o mal formado) se pide UNA vez más, compacto y en
     // el mismo paso; nunca se convierte en una respuesta enorme del Desarrollador con la historia entera.
     if (config?.autoApply && !planHasFiles(plan)) {
@@ -228,8 +244,27 @@ Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": st
       const team0 = involved.map(id => agents.get(id)).filter(Boolean) as Agent[];
       const implStep0 = roleStep('implementer'); const qaStep0 = stepByRole(proc, 'reviewer');
       runCtx = { slug, processId, item, project, repoPath: repo.path, plan, consultText: '', iterText, dev: agents.get(implStep0.agentId)!, qa: qaStep0 ? agents.get(qaStep0.agentId)! : null, team: team0, log, isCancelled, injected };
-      const problem = (await import('./storyUnits.ts')).planProblem(plan);
+      const { planProblem } = await import('./storyUnits.ts');
+      const problem = planProblem(plan);
       if (problem) { handedOff = true; throw new PipelinePause('plan', problem); }
+      // Gauntlet en la planificación: revisión independiente del plan ANTES de pagar consultas e implementación.
+      try {
+        if (!accepted) plan = await (await import('./gauntlet.ts')).planReviewStage(runCtx, config, plan, async gaps => {
+          const res = await call(planStep.id, sys(coord, project, item), `Revisa tu plan técnico con las brechas que señaló el revisor independiente (cada una con su evidencia). Corrige SOLO lo necesario para cubrir todos los criterios de aceptación; no amplíes el alcance.
+# Brechas
+${gaps.map((g, i) => `${i + 1}. [${g.severity}] ${g.text}${g.evidence ? ` · evidencia: ${g.evidence}` : ''}${g.fix ? ` · propuesta: ${g.fix}` : ''}`).join('\n')}
+# Tu plan actual
+${JSON.stringify(plan, null, 2)}
+Responde SOLO con el JSON del plan completo, en el mismo formato.`, MAX_TOKENS.planner);
+          const next = planFrom(extractJson(res.text), plan.summary);
+          if (!next.acceptance.length) next.acceptance = plan.acceptance;
+          return planHasFiles(next) ? next : plan;
+        });
+      } catch (e) { if (e instanceof PipelinePause) handedOff = true; throw e; }
+      // La revisión guardó su registro en el resultado: se conserva al guardar el plan (el objeto local no lo tenía).
+      result.gauntlet = procs.get(processId)!.result?.gauntlet ?? result.gauntlet; result.plan = plan; save(); runCtx.plan = plan;
+      const problem2 = planProblem(plan);
+      if (problem2) { handedOff = true; throw new PipelinePause('plan', problem2); }
       runCtx = null;
     }
 
@@ -281,7 +316,7 @@ ${treeText}`;
       await runPipelineStages(rc);
       const fin = procs.get(processId)!.result!;
       knowledge.add({ projectId: project.id, title: `${item.storyId} · Plan e implementación incremental — ${item.title}`, body: `# Plan\n${plan.summary}\n\n${plan.tasks.map(t => '- ' + t).join('\n')}\n\n# Entregables\n${(fin.manifest?.deliverables ?? []).map(d => `- [${d.status}] ${d.path}${d.note ? ` — ${d.note}` : ''}`).join('\n')}\n\n# Implementación\n${fin.implementationSummary ?? ''}\n\n# Revisión QA\n${fin.review ? `${fin.review.verdict ?? (fin.review.approve ? 'approved' : 'rejected')} — ${fin.review.summary}` : 'sin revisión'}${fin.pipeline ? `\n\n# Pipeline\n${fin.pipeline.events.map(e => `- ${e.message}`).join('\n')}` : ''}`, authorAgentId: coord.id, authorAgentName: coord.config.name, processId });
-      backlog.setStatus(item.id, 'review', processId);
+      setWorkStatus(slug, item, 'review', processId);
       return;
     }
     // Contexto acotado: archivos del plan, cada uno hasta 30 000 caracteres y 120 000 en total (lo demás, el modelo lo parchea a ciegas con contexto suficiente o lo pide en NOTAS).
@@ -344,7 +379,7 @@ Responde SOLO con JSON: {"approve": boolean, "summary": string, "issues": string
     }
     const fin = procs.get(processId)!.result!;
     knowledge.add({ projectId: project.id, title: `${item.storyId} · Plan e implementación propuesta — ${item.title}`, body: `# Plan\n${plan.summary}\n\n${plan.tasks.map(t => '- ' + t).join('\n')}\n\n# Implementación\n${fin.implementationSummary}\n\nArchivos: ${fin.changes.map(c => `${c.action} ${c.path}`).join(', ')}\n\n# Revisión QA\n${fin.review ? `${fin.review.approve ? 'Aprobada' : 'Con observaciones'} — ${fin.review.summary}\n${fin.review.issues.map(i => '- ' + i).join('\n')}` : 'Omitida por el propietario'}${fin.pipeline ? `\n\n# Pipeline\n${fin.pipeline.events.map(e => `- ${e.message}`).join('\n')}` : ''}`, authorAgentId: coord.id, authorAgentName: coord.config.name, processId });
-    backlog.setStatus(item.id, 'review', processId);
+    setWorkStatus(slug, item, 'review', processId);
   } catch (e: any) {
     // Fallo del proveedor tras la entrega del Desarrollador (con pipeline): pausa, no fallo; lo hecho se conserva.
     const pp = runCtx && config && !(e instanceof PipelinePause) ? providerPause(e) : null;
@@ -353,7 +388,7 @@ Responde SOLO con JSON: {"approve": boolean, "summary": string, "issues": string
       // Pausa o parada del pipeline: el proceso termina «done» con lo hecho conservado y el motivo; «Continuar» lo retoma.
       pausePipeline(runCtx, e instanceof PipelinePause ? e : pp!);
       const fin = procs.get(processId)!.result!;
-      backlog.setStatus(item.id, fin.applied || fin.changes.some(c => !c.error) ? 'review' : 'pending', processId);
+      setWorkStatus(slug, item, fin.applied || fin.changes.some(c => !c.error) ? 'review' : 'pending', processId);
     } else {
       if (e?.cancelled) { finalStatus = 'cancelled'; } else if (e?.budget) { finalStatus = 'budget_exceeded'; finalError = e.message; } else { finalStatus = 'failed'; finalError = e.message; }
       const failure = e instanceof StoryFailure ? e.failure : e?.cancelled ? { kind: 'cancelled' as const, detail: 'Cancelado por el propietario.' } : e?.budget ? { kind: 'budget' as const, detail: e.message } : e?.failure ?? { kind: 'internal' as const, detail: e?.message ?? String(e) };
@@ -361,7 +396,7 @@ Responde SOLO con JSON: {"approve": boolean, "summary": string, "issues": string
       else { result.failure = failure; save(); }
       for (const s of procs.get(processId)!.steps) if (s.status === 'pending') procs.stepFinish(s.id, 'skipped', { error: finalStatus === 'cancelled' ? 'cancelado por el usuario' : null });
       const fin = procs.get(processId)!.result!;
-      backlog.setStatus(item.id, fin.applied ? 'review' : 'pending', processId);
+      setWorkStatus(slug, item, fin.applied ? 'review' : 'pending', processId);
     }
   } finally {
     involved.forEach(id => agents.setStatus(id, 'inactive'));
@@ -430,7 +465,7 @@ export async function recoverStory(slug: string, processId: string): Promise<Pro
   };
   procs.setResult(processId, result);
   procs.finish(processId, 'done', null);
-  if (proc.backlogItemId) backlogRepo(slug).setStatus(proc.backlogItemId, 'review', processId);
+  { const wi = workItemOf(slug, proc); if (wi) setWorkStatus(slug, wi, 'review', processId); }
   return procs.get(processId)!;
 }
 
@@ -467,7 +502,7 @@ export async function generateManualTest(slug: string, processId: string, log: (
   const est = estimateManualTest(slug, processId);
   const agent = agentsRepo(slug).get(est.agentId)!;
   const project = projectsRepo(slug).get(proc.projectId)!;
-  const item = proc.backlogItemId ? backlogRepo(slug).get(proc.backlogItemId) : undefined;
+  const item = workItemOf(slug, proc) ?? undefined;
   const providerId = agent.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
   const cc = agentCaller(slug, agent, proc.projectId, 'Prueba manual');

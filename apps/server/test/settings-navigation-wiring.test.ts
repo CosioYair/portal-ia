@@ -42,6 +42,16 @@ test('historia bloqueada por Claude Code: tarjeta con el estado real, autorizar 
   assert.match(sfp, /code === 'backend_not_ready'/);
 });
 
+test('cada acción del flujo que puede enviar el servidor la ejecuta la interfaz (ninguna queda como botón muerto)', () => {
+  // «Seguir con este plan» (accept_plan) llegó a la interfaz sin estar en HANDLED: el botón solo decía «recarga la página».
+  const types = fs.readFileSync(fileURLToPath(new URL('../../../packages/domain/src/types.ts', import.meta.url)), 'utf8');
+  const union = types.slice(types.indexOf('export type FlowActionId ='), types.indexOf('export interface FlowAction {'));
+  const ids = [...union.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/'([a-z_]+)'/g)].map(m => m[1]);
+  const handled = read('components/StoryFlowPanel.tsx').match(/const HANDLED = new Set<FlowActionId>\(\[([^\]]*)\]\)/)![1];
+  assert.ok(ids.length >= 30 && ids.includes('accept_plan'), `${ids.length} acciones leídas`);
+  assert.deepEqual(ids.filter(id => !handled.includes(`'${id}'`)), []);
+});
+
 test('historial: un evento repetido se muestra una vez (×N y la última hora); el registro técnico los conserva todos', () => {
   const sfp = read('components/StoryFlowPanel.tsx');
   assert.match(sfp, /grouped\.delete\(k\); grouped\.set\(k, \{ e, n: \(g\?\.n \?\? 0\) \+ 1 \}\)/);

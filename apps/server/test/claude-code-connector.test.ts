@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -363,5 +363,76 @@ test('peticiones malformadas u hostiles al puente: ni otra tarea, ni rutas codif
     assert.match((await mcp.tool('portal_read_file', { path: 'src/a.ts' })).text, /export const a = 1/);
     assert.deepEqual((await mcp.rpc('ping')).result, {});
     await mcp.close();
+  } finally { job.done(); }
+});
+
+test('portal_search y portal_diff: solo lectura, literal, con las mismas protecciones que leer; ambos rangos de cambios', async () => {
+  // Búsqueda en una carpeta SIN git: recorrido acotado, nada protegido, archivos con secretos omitidos (y dichos).
+  const plain = { id: 't', slug: S, projectId: project.id, readRoot: repo } as any;
+  const found = bridge.searchTaskFiles(plain, 'export const') as any;
+  assert.ok(!bridge.isDenied(found));
+  assert.ok(found.matches.some((m: any) => m.path === 'src/a.ts' && m.line === 1 && m.text === 'export const a = 1;'));
+  assert.ok(!found.matches.some((m: any) => /^\.env$|^data\/|config\.ts|sk-ant/.test(m.path + m.text)), 'nada protegido ni secreto en los resultados');
+  assert.ok(found.skipped.some((x: any) => x.path === 'src/config.ts'), 'el archivo con un secreto se omite y se dice');
+  assert.equal((bridge.searchTaskFiles(plain, 'sk-ant') as any).matches.length, 0, 'buscar el secreto no lo revela');
+  assert.ok(bridge.isDenied(bridge.searchTaskFiles(plain, 'x')), 'demasiado corta');
+  assert.equal((bridge.searchTaskFiles(plain, '(a+)+$') as any).matches.length, 0, 'el texto es literal: nunca una expresión');
+  assert.ok(bridge.isDenied(bridge.searchTaskFiles(plain, 'export', { dir: '.git' })));
+  assert.ok(bridge.isDenied(bridge.taskDiff(plain)), 'sin git no hay diferencias');
+
+  // Repositorio con rama: base en main, la rama cambia a.ts y deja cambios sin confirmar (uno nuevo, uno protegido, uno con secreto).
+  const g = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-cc-diff-'));
+  const run = (...a: string[]) => execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'core.autocrlf=false', ...a], { cwd: g, windowsHide: true }).toString();
+  fs.mkdirSync(path.join(g, 'src'));
+  fs.writeFileSync(path.join(g, 'src/a.ts'), 'export const a = 1;\n'); fs.writeFileSync(path.join(g, 'src/b.ts'), 'export const b = 1;\n');
+  run('init', '-q', '-b', 'main'); run('add', '-A'); run('commit', '-qm', 'Base');
+  run('checkout', '-qb', 'portal-ia/hu-1');
+  fs.writeFileSync(path.join(g, 'src/a.ts'), 'export const a = 2;\n'); run('commit', '-qam', 'Cambia a');
+  fs.writeFileSync(path.join(g, 'src/b.ts'), 'export const b = 2;\n');
+  fs.writeFileSync(path.join(g, 'src/nuevo.ts'), 'export const n = 1;\n');
+  fs.writeFileSync(path.join(g, '.env'), 'ANTHROPIC_API_KEY=sk-ant-no-debe-salir\n');
+  fs.writeFileSync(path.join(g, 'src/fuga.ts'), `export const k = "sk-ant-${'y'.repeat(30)}";\n`);
+  const t = { id: 't2', slug: S, projectId: project.id, readRoot: g } as any;
+  const w = bridge.taskDiff(t, 'working') as any;
+  assert.ok(!bridge.isDenied(w), JSON.stringify(w));
+  assert.deepEqual(w.files.map((f: any) => f.path).sort(), ['src/b.ts', 'src/fuga.ts', 'src/nuevo.ts']);
+  assert.match(w.diff, /\+export const b = 2;/); assert.match(w.diff, /\+export const n = 1;/);
+  assert.ok(!/sk-ant/.test(w.diff), 'ningún secreto en la diferencia');
+  assert.ok(w.omitted.some((o: any) => o.path === '.env') && w.omitted.some((o: any) => o.path === 'src/fuga.ts'), 'lo omitido se dice');
+  const b = bridge.taskDiff(t, 'branch') as any;
+  assert.deepEqual(b.files, [{ path: 'src/a.ts', status: 'M' }]);
+  assert.match(b.diff, /-export const a = 1;/); assert.match(b.diff, /\+export const a = 2;/);
+  assert.equal(b.base, run('rev-parse', 'main').trim(), 'desde el punto de partida de la rama');
+  assert.equal(run('status', '--porcelain').split('\n').filter(Boolean).length, 4, 'leer no cambia nada en el repositorio');
+  // Un nombre con caracteres de patrón no alcanza otro archivo: «[.]npmrc» nunca trae el «.npmrc» protegido.
+  fs.writeFileSync(path.join(g, '.npmrc'), '//registry.npmjs.org/:_authToken=npm_secreto_de_prueba_123\n'); fs.writeFileSync(path.join(g, '[.]npmrc'), 'inofensivo\n');
+  run('--literal-pathspecs', 'add', '--', '.npmrc', '[.]npmrc'); run('commit', '-qm', 'npmrc');
+  fs.writeFileSync(path.join(g, '.npmrc'), '//registry.npmjs.org/:_authToken=npm_otro_secreto_456\n'); fs.writeFileSync(path.join(g, '[.]npmrc'), 'cambiado\n');
+  const lit = bridge.taskDiff(t, 'working') as any;
+  assert.ok(!/authToken|secreto/.test(lit.diff), 'ni el token ni el archivo protegido');
+  assert.match(lit.diff, /\+cambiado/); assert.ok(lit.omitted.some((o: any) => o.path === '.npmrc'));
+  // Windows no distingue mayúsculas: «.GIT/config» o «DATA/x.txt» son las mismas rutas protegidas.
+  for (const p of ['.GIT/config', 'DATA/x.txt', 'Node_Modules/x/index.js']) assert.ok(bridge.isDenied(bridge.readTaskFile(plain, p)), `${p} debía denegarse`);
+  // Nombres cortos de Windows (8.3): «ENV~1» es otro nombre de .env; nunca valen para leer ni para escribir.
+  for (const p of ['ENV~1', 'GIT~1/config', 'NODE_M~1/x/index.js', 'src/CONFIG~1.TS']) assert.ok(bridge.isDenied(bridge.readTaskFile(plain, p)), `${p} debía denegarse`);
+  const { safeRelPath, scanSecrets } = await import('../src/services/repoWrite.ts');
+  assert.throws(() => safeRelPath('GIT~1/hooks/pre-commit'), /nombre corto/);
+  // Un marcador de variable no es un secreto; un token literal sí.
+  assert.equal(scanSecrets('//registry.npmjs.org/:_authToken=${NPM_TOKEN}'), null);
+  assert.match(scanSecrets('//registry.npmjs.org/:_authToken=npm_abcdef123456') ?? '', /token de registro npm/);
+
+  // De punta a punta por MCP con un token de ejecución.
+  const job = bridge.registerJobTask({ slug: S, projectId: project.id, processId: null, stepId: null, agentId: qa.id, agentName: qa.config.name, role: 'reviewer', title: 'diff', mode: 'cli', system: '', prompt: '', schema: null, readRoot: g, runId: 'r-diff' });
+  try {
+    const mcp = mcpClient(job.token, 'job');
+    const tools = (await mcp.rpc('tools/list')).result.tools;
+    for (const n of ['portal_search', 'portal_diff']) assert.equal(tools.find((x: any) => x.name === n)?.annotations?.readOnlyHint, true, `${n} es de solo lectura`);
+    const sr = await mcp.tool('portal_search', { query: 'export const n' });
+    assert.equal(sr.isError, false); assert.equal(sr.json.matches[0].path, 'src/nuevo.ts');
+    const dr = await mcp.tool('portal_diff', { range: 'branch' });
+    assert.equal(dr.isError, false); assert.ok(dr.json.files.some((f: any) => f.path === 'src/a.ts' && f.status === 'M')); assert.ok(!dr.json.files.some((f: any) => f.path === '.npmrc'), 'lo protegido no se lista');
+    assert.equal((await mcp.tool('portal_search', { query: { toString: 'x' } })).isError, true, 'argumentos de tipo incorrecto no buscan nada');
+    await mcp.close();
+    assert.equal((await inject('GET', '/api/bridge/v1/tasks/current/diff?range=todo', undefined, { authorization: `Bearer ${job.token}` })).statusCode, 400);
   } finally { job.done(); }
 });

@@ -1,4 +1,4 @@
-import { decideGauntlet, GAUNTLET_SCHEMA, GAUNTLET_TEMPLATE, gauntletOverhead, isRetired, normalizeGauntlet, recommendGauntlet, type Agent, type GauntletConfig, type GauntletFinding, type GauntletRound, type GauntletState, type IssueSeverity, type PipelineConfig, type Process } from '@portal-ia/domain';
+import { DEFAULT_GAUNTLET, decideGauntlet, decidePlanReview, gauntletSignature, parsePlanReview, planReviewWanted, resolveGauntlet, GAUNTLET_SCHEMA, GAUNTLET_TEMPLATE, gauntletOverhead, isRetired, normalizeGauntlet, recommendGauntlet, type Agent, type GauntletConfig, type GauntletFinding, type GauntletRound, type GauntletState, type IssueSeverity, type PipelineConfig, type PlanReviewGap, type PlanReviewRound, type PlanReviewState, type Process, type StoryPlan } from '@portal-ia/domain';
 import { settingsRepo, providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { buildAgentConfig } from '../routes/bootstrap.ts';
@@ -7,6 +7,8 @@ import { clip } from './devOutput.ts';
 import { testsEvidence, verificationEvidence } from './qaGate.ts';
 import { sys } from './storyPrompts.ts';
 import { emit, PipelinePause, pipelineOf, sinceApplied, stepCall, updateResult, type StoryRunCtx } from './storyPipeline.ts';
+import { monotonicNow } from '../clock.ts';
+import { workItemOf } from './workItems.ts';
 
 /**
  * Evaluación Gauntlet en el pipeline existente (ver packages/domain/src/gauntlet.ts para el método y la relación con
@@ -15,15 +17,16 @@ import { emit, PipelinePause, pipelineOf, sinceApplied, stepCall, updateResult, 
  */
 
 const fail = (statusCode: number, message: string, code: string) => Object.assign(new Error(message), { statusCode, code });
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 /** Versión del encargo del Evaluador (plantilla de prompt versionada: cambia si cambia su contrato). */
 export const GAUNTLET_PROMPT_VERSION = 'gauntlet-eval@1';
 
 // ---------------------------------------------------------------- Modo por proyecto (predeterminado) y por tarea
 
 const KEY = (slug: string, projectId: string) => `gauntlet:${slug}:${projectId}`;
+/** Modo del proyecto; sin configurar, `auto` (v0.16): la intensidad la decide el Portal en cada tarea, con sus motivos. */
 export function projectGauntlet(slug: string, projectId: string): GauntletConfig {
-  try { return normalizeGauntlet(JSON.parse(settingsRepo.get(KEY(slug, projectId)) ?? 'null')); } catch { return normalizeGauntlet(null); }
+  try { const raw = settingsRepo.get(KEY(slug, projectId)); return raw ? normalizeGauntlet(JSON.parse(raw)) : { ...DEFAULT_GAUNTLET }; } catch { return { ...DEFAULT_GAUNTLET }; }
 }
 export function setProjectGauntlet(slug: string, projectId: string, g: Partial<GauntletConfig>): GauntletConfig {
   const n = normalizeGauntlet(g); settingsRepo.set(KEY(slug, projectId), JSON.stringify(n)); return n;
@@ -34,6 +37,17 @@ export function projectEvaluator(slug: string, projectId: string): Agent | null 
   return agentsRepo(slug).list().find(a => a.projectId === projectId && !isRetired(a.template) && (a.config.capabilities ?? []).includes('evaluar_gauntlet') && !!a.config.tools?.read_repo) ?? null;
 }
 
+/**
+ * Resuelve el modo `auto` para un proceso (historia o encargo) con la recomendación sin IA: tamaño, riesgo, iteraciones
+ * ANTERIORES (no cuenta la actual), rechazos previos de QA y si hay Evaluador. Otros modos se respetan.
+ */
+export function resolveGauntletFor(slug: string, proc: Pick<Process, 'id' | 'projectId' | 'backlogItemId' | 'assignmentId'>, cfg: GauntletConfig): GauntletConfig {
+  if (cfg.mode !== 'auto') return cfg;
+  const item = workItemOf(slug, proc);
+  const prev = processesRepo(slug).listAll(proc.projectId).filter(p => p.kind === 'story_execution' && p.id !== proc.id && ((proc.backlogItemId && p.backlogItemId === proc.backlogItemId) || (proc.assignmentId && p.assignmentId === proc.assignmentId)));
+  return resolveGauntlet(cfg, { hasEvaluator: !!projectEvaluator(slug, proc.projectId), estimate: item?.estimate ?? null, text: item ? `${item.title} ${item.criterion ?? ''} ${item.description ?? ''}` : '', iterations: prev.length + 1, qaRejections: prev.filter(p => p.result?.review?.verdict === 'rejected').length });
+}
+
 /** Recomendación (sin IA) y sobrecoste del modo para una historia, para mostrarlos ANTES de autorizar. */
 export function gauntletAdvice(slug: string, projectId: string, itemId: string) {
   const item = backlogRepo(slug).get(itemId);
@@ -41,7 +55,7 @@ export function gauntletAdvice(slug: string, projectId: string, itemId: string) 
   const procs = processesRepo(slug).listAll(projectId).filter(p => p.backlogItemId === itemId && p.kind === 'story_execution');
   const qaRejections = procs.filter(p => p.result?.review?.verdict === 'rejected').length;
   const evaluator = projectEvaluator(slug, projectId);
-  const rec = recommendGauntlet({ hasEvaluator: !!evaluator, estimate: item.estimate ?? null, text: `${item.title} ${item.criterion ?? ''} ${item.description ?? ''}`, iterations: procs.length, qaRejections });
+  const rec = recommendGauntlet({ hasEvaluator: !!evaluator, estimate: item.estimate ?? null, text: `${item.title} ${item.criterion ?? ''} ${item.description ?? ''}`, iterations: procs.length + 1, qaRejections });
   const def = projectGauntlet(slug, projectId);
   return { projectDefault: def, recommended: rec, evaluator: evaluator ? { id: evaluator.id, name: evaluator.config.name, model: evaluator.config.model } : null, overhead: { standard: gauntletOverhead(normalizeGauntlet({ mode: 'standard' })), deep: gauntletOverhead(normalizeGauntlet({ mode: 'deep' })) } };
 }
@@ -142,7 +156,81 @@ export function gauntletSystem(ev: Agent, ctx: StoryRunCtx): string {
 Eres un crítico independiente: no implementas lo que evalúas y no te fías de explicaciones; juzgas el resultado real contra el estándar acordado (criterios de aceptación) con evidencia. Señala la brecha más importante primero.`;
 }
 
-// ---------------------------------------------------------------- Puerta de evidencia (determinista)
+/** Quien diagnostica una brecha repetida: un especialista del equipo que no la construyó ni la evaluó (Arquitecto, o QA). */
+function pickDiagnostician(ctx: StoryRunCtx, ev: Agent): Agent | null {
+  const pool = ctx.team.filter(a => a.id !== ctx.dev.id && a.id !== ev.id);
+  return pool.find(a => a.key === 'pj-arquitecto' || /arquitect/i.test(a.template.role)) ?? (ctx.qa && ctx.qa.id !== ctx.dev.id && ctx.qa.id !== ev.id ? ctx.qa : null) ?? pool[0] ?? null;
+}
+function diagnosisPrompt(ctx: StoryRunCtx, proc: Process, toFix: GauntletFinding[], previous: GauntletRound[]): string {
+  const r = proc.result!;
+  const diff = r.changes.filter(c => !c.error).map(c => `## ${c.path}\n\`\`\`diff\n${clip(c.diff ?? '', 4000)}\n\`\`\``).join('\n\n');
+  return `DIAGNÓSTICO de una brecha que se repite (Gauntlet). Una corrección dirigida no la resolvió: el Evaluador independiente vuelve a señalar lo mismo, con evidencia. No implementes nada. Explica la CAUSA más probable de que la corrección no funcionara y una ESTRATEGIA concreta y distinta para resolverla (archivos y enfoque), en 12 líneas como máximo, sin inventar datos.
+# Objetivo
+${ctx.item.storyId} · ${ctx.item.title}
+# Criterios de aceptación
+${Array.from(new Set([...(ctx.plan?.acceptance ?? []), ...(ctx.item.criterion ? [ctx.item.criterion] : [])])).map((c, i) => `${i + 1}. ${c}`).join('\n') || '(sin criterios explícitos)'}
+# Brecha que se repite (con evidencia)
+${toFix.map(f => `- [${f.severity}] ${f.text}${f.file ? ` (${f.file})` : ''}${f.evidence ? ` · evidencia: ${clip(f.evidence, 600)}` : ''}${f.expected ? ` · esperado: ${clip(f.expected, 300)}` : ''}`).join('\n')}
+# Rondas anteriores
+${previous.map(p => `- Ronda ${p.round}: ${p.largestGap ?? '—'} · ${p.reason}`).join('\n') || '(ninguna)'}
+# Lo que cambió el código hasta ahora
+${clip(diff, 16_000) || '(sin cambios)'}`;
+}
+
+// ---------------------------------------------------------------- Gauntlet en la planificación
+
+function planReviewSystem(ev: Agent, ctx: StoryRunCtx): string {
+  return `Eres ${ev.config.name}, revisor independiente de planes técnicos del proyecto «${ctx.project.name}» (Gauntlet en la planificación). No escribiste este plan y no lo implementarás. Compruebas, citando el propio plan, si cubre CADA criterio de aceptación con pasos y archivos concretos, sin huecos ni alcance de más, antes de que se pague la implementación. Sin cita concreta no hay brecha. Responde solo con el JSON pedido.`;
+}
+function planReviewPrompt(ctx: StoryRunCtx, plan: StoryPlan, previous: PlanReviewRound[]): string {
+  const criteria = Array.from(new Set([...plan.acceptance, ...(ctx.item.criterion ? [ctx.item.criterion] : [])].map(c => c.trim()).filter(Boolean)));
+  return `REVISIÓN DEL PLAN antes de implementar (Gauntlet).
+# Objetivo
+${ctx.item.storyId} · ${ctx.item.title}
+${ctx.item.description ? `${clip(ctx.item.description, 1500)}\n` : ''}# Criterios de aceptación (revisa la cobertura de CADA uno)
+${criteria.map((c, i) => `${i + 1}. ${c}`).join('\n') || '(sin criterios explícitos: dilo como brecha)'}
+# Plan propuesto (lo único que juzgas)
+${clip(JSON.stringify({ summary: plan.summary, tasks: plan.tasks, filesToRead: plan.filesToRead, filesToChange: plan.filesToChange, deliverables: (plan as any).deliverables ?? undefined, acceptance: plan.acceptance, risks: plan.risks }, null, 2), 12_000)}
+${previous.length ? `# Revisiones anteriores de este plan\n${previous.map(p => `- Ronda ${p.round}: ${p.gaps.filter(g => !g.unsupported && g.severity !== 'minor').map(g => g.text).join(' · ') || 'sin brechas graves'}`).join('\n')}\n` : ''}
+# Responde SOLO con JSON
+{"verdict": "approve" | "revise" | "cannot_review", "coverage": [{"criterion": string, "covered": "yes" | "partial" | "no", "evidence": string (la tarea o el archivo del plan que lo cubre, o qué falta)}], "gaps": [{"severity": "blocking" | "major" | "minor", "criterion": string | null, "text": string, "evidence": string (cita del plan o del criterio), "fix": string}]}
+- blocking: un criterio quedaría sin cumplir con este plan; major: se cumpliría a medias o falta un paso relevante; minor: mejora.
+- No rediseñes ni amplíes el alcance; si el plan basta, verdict "approve" sin brechas.`;
+}
+
+/**
+ * Gauntlet en la planificación: con el mismo Evaluador independiente del proyecto y la misma puerta de evidencia, revisa
+ * el plan ANTES de pagar consultas e implementación (adaptativo: ver `planReviewWanted`). Las brechas con evidencia las
+ * corrige el planificador (`revise`); sin progreso no se insiste; con una brecha bloqueante pendiente se pausa y decides tú.
+ */
+export async function planReviewStage(ctx: StoryRunCtx, cfg: PipelineConfig, plan: StoryPlan, revise: (gaps: PlanReviewGap[]) => Promise<StoryPlan>): Promise<StoryPlan> {
+  const g = normalizeGauntlet(cfg.gauntlet);
+  if (!planReviewWanted(g, plan)) return plan;
+  const procs = processesRepo(ctx.slug); const proc = procs.get(ctx.processId)!;
+  const save = (s: PlanReviewState) => updateResult(ctx.slug, ctx.processId, x => ({ ...x, gauntlet: { ...(x.gauntlet ?? { mode: g.mode, maxRounds: g.maxRounds, rounds: [], status: 'pending' as const, reason: null }), planReview: s } }));
+  const evStep = proc.steps.find(s => s.role === 'evaluator');
+  const ev = evStep ? agentsRepo(ctx.slug).get(evStep.agentId) ?? null : null;
+  const planner = proc.steps.find(s => s.role === 'planner')?.agentId;
+  if (!ev || ev.id === ctx.dev.id || ev.id === planner) {
+    save({ rounds: [], status: 'skipped', reason: !ev ? 'Sin Evaluador Gauntlet en el equipo autorizado: el plan no se revisa aparte.' : 'El Evaluador es quien planifica o implementa: no se revisa a sí mismo.' });
+    return plan;
+  }
+  const rounds: PlanReviewRound[] = proc.result?.gauntlet?.planReview?.rounds ?? [];
+  for (;;) {
+    const n = rounds.length + 1;
+    emit(ctx, 'gauntlet', `${ev.config.name} revisa el plan de forma independiente (Gauntlet ${g.mode}, ronda ${n}) antes de implementar.`, { aiCall: true });
+    const res = await stepCall(ctx, ev, 'evaluator', `Revisión del plan (Gauntlet, ronda ${n})`, `Gauntlet ${g.mode}: el plan se revisa antes de pagar la implementación`, planReviewSystem(ev, ctx), planReviewPrompt(ctx, plan, rounds), 3000);
+    const parsed = parsePlanReview(res.text);
+    const round: PlanReviewRound = { round: n, at: now(), reviewerId: ev.id, reviewerName: ev.config.name, stepId: res.stepId, ...parsed, decision: 'proceed', reason: '' };
+    const d = decidePlanReview(g, [...rounds, round]); // la decisión de la ronda nueva aún no cuenta: se decide aquí
+    round.decision = d.decision; round.reason = d.reason; rounds.push(round);
+    save({ rounds: [...rounds], status: d.status, reason: d.reason });
+    emit(ctx, 'gauntlet', `Revisión del plan ${n}: ${parsed.gaps.filter(x => !x.unsupported && x.severity !== 'minor').length} brecha(s) grave(s) con evidencia. ${d.reason}`, {});
+    if (d.decision === 'pause') throw new PipelinePause('plan', `Revisión independiente del plan: ${d.reason} Lo hecho se conserva; no se ha pagado la implementación.`);
+    if (d.decision === 'proceed') return plan;
+    plan = await revise(parsed.gaps.filter(x => !x.unsupported && x.severity !== 'minor'));
+  }
+}
 
 const SEV: Record<string, GauntletFinding['severity']> = { blocking: 'blocking', major: 'major', minor: 'minor' };
 /** Interpreta la salida del Evaluador y aplica la puerta: un hallazgo sin evidencia concreta no motiva correcciones. */
@@ -214,8 +302,21 @@ export async function gauntletStage(ctx: StoryRunCtx, cfg: PipelineConfig): Prom
   const parsed = parseGauntlet(res.text);
   const p = pipelineOf(ctx.slug, ctx.processId);
   const rr: GauntletRound = { round, commit, at: now(), evaluatorId: ev.id, evaluatorName: ev.config.name, stepId: res.stepId, ...parsed, decision: 'pass', reason: '', costUsd: res.costUsd, tokensIn: res.inputTokens };
-  const d = decideGauntlet(g, [...state.rounds, rr], cfg.maxCorrections - p.corrections);
-  rr.decision = d.decision; rr.reason = d.reason;
+  let d = decideGauntlet(g, [...state.rounds, rr], cfg.maxCorrections - p.corrections, { diagnosed: state.rounds.flatMap(x => x.diagnosis ? [x.diagnosis.signature] : []) });
+  if (d.decision === 'diagnose') {
+    // La misma brecha sin progreso: otro especialista (ni el constructor ni el Evaluador) diagnostica la causa con la
+    // evidencia; la corrección siguiente lleva su diagnóstico. Una vez por brecha: si tampoco progresa, se detiene.
+    const diag = pickDiagnostician(ctx, ev);
+    if (!diag) d = decideGauntlet(g, [...state.rounds, rr], cfg.maxCorrections - p.corrections, { diagnosed: [gauntletSignature(rr.findings)] });
+    else {
+      emit(ctx, 'gauntlet', `${diag.config.name} diagnostica por qué la brecha se repite (sin implementar): ${d.toFix[0]?.text ?? ''}`, { phase: 'qa', aiCall: true });
+      const dres = await stepCall(ctx, diag, 'consultant', 'Diagnóstico independiente de la brecha repetida', `Gauntlet: la misma brecha sin progreso; diagnóstico de ${diag.config.name}`, sys(diag, ctx.project, ctx.item), diagnosisPrompt(ctx, procs.get(ctx.processId)!, d.toFix, state.rounds), 2500);
+      const text = dres.text.trim().slice(0, 2000);
+      rr.diagnosis = { agentId: diag.id, agentName: diag.config.name, signature: gauntletSignature(rr.findings), text, stepId: dres.stepId };
+      d = { ...d, decision: 'correct', reason: `${d.reason} Diagnóstico de ${diag.config.name}: ${clip(text, 300)}`, toFix: d.toFix.map((f, i) => i === 0 ? { ...f, expected: `${f.expected ? `${f.expected}\n` : ''}Diagnóstico independiente (${diag.config.name}): ${text}` } : f) };
+    }
+  }
+  rr.decision = d.decision === 'diagnose' ? 'stop' : d.decision; rr.reason = d.reason;
   const next: GauntletState = { ...state, mode: g.mode, maxRounds: g.maxRounds, rounds: [...state.rounds, rr], status: d.decision === 'correct' ? 'pending' : d.status, reason: d.reason, pendingReeval: d.decision === 'correct' };
   save(next);
   const met = rr.criteria.filter(c => c.status === 'met').length;

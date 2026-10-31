@@ -1,3 +1,4 @@
+import '../gitSafety.ts';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -13,12 +14,24 @@ const execFileP = promisify(execFile);
  * (herramientas de riesgo `auth`). Las escrituras van a una rama de trabajo propia y se confirman en git para que
  * todo cambio sea revisable y reversible. Nunca se toca `.git`, `data/`, `node_modules/`, ni archivos con secretos.
  */
-const FORBIDDEN = [/^\.git(\/|$)/, /^data(\/|$)/, /^node_modules(\/|$)/, /(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?$/i, /\.(key|pem|p12|pfx)$/i, /(^|\/)\.master\.key$/];
+const FORBIDDEN = [/^\.git(\/|$)/i, /^data(\/|$)/i, /^node_modules(\/|$)/i, /(^|\/)\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?$/i, /\.(key|pem|p12|pfx)$/i, /(^|\/)\.master\.key$/i];
+/**
+ * Credenciales y configuración local: nunca se leen ni las ESCRIBE un agente (podría redirigir el registro de paquetes o
+ * colar una clave). Las acciones del propio propietario (su corrección externa, resolver un conflicto) no se bloquean aquí.
+ */
+const AGENT_WRITE_FORBIDDEN = [/(^|\/)\.git(\/|$)/i, /(^|\/)\.npmrc$/i, /(^|\/)\.(ssh|aws|claude)(\/|$)/i, /(^|\/)secrets?(\/|$)/i, /(^|\/)\.credentials\.json$/i,
+  /(^|\/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i, /(^|\/)\.(netrc|git-credentials|pypirc|envrc)$/i, /(^|\/)\.env[-_](?!example$|sample$|template$|dist$)[^/]*$/i];
+/** Ruta que un AGENTE puede proponer cambiar: segura y fuera de credenciales y configuración local. */
+export function agentRelPath(p: string): string {
+  const norm = safeRelPath(p);
+  if (AGENT_WRITE_FORBIDDEN.some(r => r.test(norm))) throw Object.assign(new Error(`Ruta protegida (credenciales o configuración local): ${p}`), { statusCode: 400 });
+  return norm;
+}
 
 /** Patrones de secretos que no deben entrar en un repositorio (aviso, no bloqueo: el propietario decide). */
 const SECRET_PATTERNS: [RegExp, string][] = [
   [/sk-ant-[A-Za-z0-9_-]{20,}/, 'clave de API de Anthropic'], [/\bsk-[A-Za-z0-9]{32,}\b/, 'clave de API (sk-…)'], [/\bAKIA[0-9A-Z]{16}\b/, 'clave de acceso AWS'],
-  [/\bgh[pousr]_[A-Za-z0-9]{30,}\b/, 'token de GitHub'], [/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/, 'clave privada'], [/\b(password|passwd|contraseña|secret|api[_-]?key)\s*[:=]\s*['"][^'"\s]{8,}['"]/i, 'credencial literal']
+  [/\bgh[pousr]_[A-Za-z0-9]{30,}\b/, 'token de GitHub'], [/-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----/, 'clave privada'], [/_authToken\s*=\s*(?!["']?\$\{)[^\s"'$]{8,}/i, 'token de registro npm'], [/\b(password|passwd|contraseña|secret|api[_-]?key)\s*[:=]\s*['"][^'"\s]{8,}['"]/i, 'credencial literal']
 ];
 export function scanSecrets(text: string): string | null {
   for (const [re, label] of SECRET_PATTERNS) if (re.test(text)) return `Posible ${label} en el contenido: revísalo antes de aplicar o publicar.`;
@@ -50,6 +63,11 @@ export function applyPatch(original: string, edits: { search: string; replace: s
 export function safeRelPath(p: string): string {
   const norm = p.replace(/\\/g, '/').replace(/^\.\//, '');
   if (!norm || norm.startsWith('/') || /^[A-Za-z]:/.test(norm) || norm.split('/').some(seg => seg === '..' || seg === '')) throw Object.assign(new Error(`Ruta no permitida: ${p}`), { statusCode: 400 });
+  // Nombre corto de Windows (8.3: «ENV~1», «GIT~1»): es otro nombre de un archivo existente y burlaría las rutas protegidas.
+  if (norm.split('/').some(seg => /~\d/.test(seg))) throw Object.assign(new Error(`Ruta no permitida (nombre corto de Windows): ${p}`), { statusCode: 400 });
+  // Otras formas de nombrar el mismo archivo en Windows: flujos alternativos («.env::$DATA», «a.ts:oculto») y segmentos
+  // con punto o espacio final («.env.», «.env »), que el sistema recorta. Tampoco caracteres de control o comodines.
+  if (/[:*?"<>|\u0000-\u001f]/.test(norm) || norm.split('/').some(seg => /[. ]$/.test(seg))) throw Object.assign(new Error(`Ruta no permitida: ${p}`), { statusCode: 400 });
   if (FORBIDDEN.some(r => r.test(norm))) throw Object.assign(new Error(`Ruta protegida: ${p}`), { statusCode: 400 });
   return norm;
 }
@@ -78,8 +96,59 @@ export function unifiedDiff(before: string, after: string, file: string, maxLine
 
 export function repoRoot(repoPath: string): string { return path.resolve(expandHome(repoPath)); }
 
+/**
+ * Lo que NUNCA se lee ni se envía a un modelo (puente MCP, contexto del pipeline, búsqueda, diferencias): lo prohibido para
+ * escribir y, además, credenciales y configuración local. Sin distinguir mayúsculas (Windows).
+ */
+const READ_PROTECTED = [...FORBIDDEN, ...AGENT_WRITE_FORBIDDEN, /(^|\/)node_modules(\/|$)/i, /(^|\/)\.git(\/|$)/i, /(^|\/)\.claude(\/|$)/i, /(^|\/)\.ssh(\/|$)/i, /(^|\/)\.aws(\/|$)/i,
+  /(^|\/)\.npmrc$/i, /(^|\/)\.credentials\.json$/i, /(^|\/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i, /(^|\/)secrets?(\/|$)/i, /\.(keystore|jks|kdbx)$/i];
+export function readProtectedReason(rel: string): string | null {
+  let norm: string;
+  try { norm = safeRelPath(rel); } catch (e: any) { return e.message; }
+  return READ_PROTECTED.some(r => r.test(norm)) ? `Ruta protegida: ${rel}` : null;
+}
+/**
+ * Resuelve una lectura dentro de `root` con TODAS las comprobaciones: ruta segura, no protegida, y la ruta REAL según el
+ * sistema (enlaces, uniones, nombres cortos y mayúsculas resueltos) sigue dentro de `root` y tampoco está protegida.
+ */
+export function resolveReadable(root: string, rel: string): { abs: string; norm: string } | { status: number; error: string } {
+  const why = readProtectedReason(rel); if (why) return { status: 403, error: why };
+  const norm = safeRelPath(rel);
+  let realRoot: string; let abs: string;
+  try { realRoot = fs.realpathSync.native(root); abs = fs.realpathSync.native(path.join(realRoot, norm)); } catch { return { status: 404, error: `No existe: ${rel}` }; }
+  const realRel = path.relative(realRoot, abs);
+  if (!realRel || realRel.startsWith('..') || path.isAbsolute(realRel)) return { status: 403, error: `Ruta fuera de la carpeta de trabajo: ${rel}` };
+  const realNorm = realRel.replace(/\\/g, '/');
+  if (READ_PROTECTED.some(r => r.test(realNorm))) return { status: 403, error: `Ruta protegida: ${rel}` };
+  return { abs, norm };
+}
+
 export function readRepoFile(repoPath: string, rel: string, maxChars = 60_000): string | null {
-  try { const c = fs.readFileSync(path.join(repoRoot(repoPath), safeRelPath(rel)), 'utf8'); return c.length > maxChars ? c.slice(0, maxChars) + '\n… (truncado)' : c; } catch { return null; }
+  // Lo que el plan o una unidad nombran pasa por las mismas comprobaciones que el puente: nada protegido llega a un modelo.
+  try { const r = resolveReadable(repoRoot(repoPath), rel); if (!('abs' in r) || !fs.statSync(r.abs).isFile()) return null; const c = fs.readFileSync(r.abs, 'utf8'); return c.length > maxChars ? c.slice(0, maxChars) + '\n… (truncado)' : c; } catch { return null; }
+}
+
+/**
+ * Ruta de ESCRITURA (o borrado) dentro de `root`: segura (safeRelPath) y sin enlaces simbólicos ni uniones en ningún tramo
+ * existente, con el ancestro existente más profundo dentro de la carpeta según el sistema. Un enlace creado dentro del
+ * worktree (p. ej. por código del agente durante la verificación) nunca saca una escritura ni un borrado de la carpeta.
+ */
+export function writablePath(root: string, rel: string, opts: { agent?: boolean } = {}): string {
+  // Por defecto, una escritura del agente (lo más estricto); `agent: false` solo para acciones del propietario.
+  const norm = opts.agent === false ? safeRelPath(rel) : agentRelPath(rel);
+  const realRoot = fs.realpathSync.native(root);
+  const deny = (why: string) => Object.assign(new Error(`Ruta no permitida (${why}): ${rel}`), { statusCode: 400 });
+  let cur = realRoot;
+  for (const seg of norm.split('/')) {
+    cur = path.join(cur, seg);
+    let st: fs.Stats; try { st = fs.lstatSync(cur); } catch { break; } // lo que aún no existe se crea dentro
+    if (st.isSymbolicLink()) throw deny('enlace o unión');
+  }
+  const abs = path.join(realRoot, norm);
+  let anc = abs; while (!fs.existsSync(anc) && anc !== realRoot) anc = path.dirname(anc);
+  const inside = path.relative(realRoot, fs.realpathSync.native(anc));
+  if (inside.startsWith('..') || path.isAbsolute(inside)) throw deny('fuera de la carpeta');
+  return abs;
 }
 
 export interface RawChange { path: string; action: 'create' | 'modify' | 'delete' | 'patch'; content: string | null; edits?: { search: string; replace: string }[] }
@@ -122,7 +191,7 @@ export function annotateChanges(repoPath: string, changes: RawChange[]): Propose
   return changes.map(c => {
     const relDisplay = c.path.replace(/\\/g, '/');
     let rel: string;
-    try { rel = safeRelPath(c.path); } catch (e: any) { return { path: relDisplay, action: c.action === 'delete' ? 'delete' : 'modify', content: null, diff: '', before: 0, after: 0, error: e.message } as ProposedChange; }
+    try { rel = agentRelPath(c.path); } catch (e: any) { return { path: relDisplay, action: c.action === 'delete' ? 'delete' : 'modify', content: null, diff: '', before: 0, after: 0, error: e.message } as ProposedChange; }
     const existingRaw = readRepoFile(repoPath, rel, 400_000);
     const existing = existingRaw === null ? null : existingRaw.replace(/\r\n/g, '\n'); // comparar siempre en LF (Windows suele guardar CRLF)
     const before = existing ?? '';
@@ -181,7 +250,7 @@ export async function applyChanges(repoPath: string, branch: string, changes: Pr
   try {
     for (const c of changes) {
       if (c.error) continue; // cambios inválidos: se muestran en la revisión pero no se escriben
-      const abs = path.join(wt, safeRelPath(c.path));
+      const abs = writablePath(wt, c.path);
       if (c.action === 'delete') { if (fs.existsSync(abs)) fs.rmSync(abs); }
       else {
         fs.mkdirSync(path.dirname(abs), { recursive: true });
@@ -212,7 +281,7 @@ export async function commitInWorktree(wt: string, changes: ProposedChange[], me
   const files: string[] = [];
   for (const c of changes) {
     if (c.error) continue;
-    const abs = path.join(wt, safeRelPath(c.path));
+    const abs = writablePath(wt, c.path);
     if (c.action === 'delete') { if (fs.existsSync(abs)) fs.rmSync(abs); }
     else {
       fs.mkdirSync(path.dirname(abs), { recursive: true });

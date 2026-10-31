@@ -307,6 +307,8 @@ export interface BatchAgentCheck {
 export interface CallRange { min: number; max: number }
 
 export interface BatchPreviewStory extends PlannedItem {
+  /** Gauntlet de ESTA historia (con «automático», ya resuelto según su tamaño, riesgo e historial) y por qué. */
+  gauntlet?: { mode: 'off' | 'standard' | 'deep'; maxRounds: number; reason: string | null };
   /** USD de la API (agentes en la API, o en Claude Code con la alternativa autorizada); la suscripción no se cobra por llamada. */
   estimatedUsd: number | null;
   /** Con las correcciones autorizadas (mismo criterio que `calls.max`). */

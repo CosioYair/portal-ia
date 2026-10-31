@@ -150,6 +150,7 @@ export function createOrgEvaluation(slug: string, projectId: string | null, budg
   const proc = procs.create({ projectId: anchor.id, kind: 'delegated_task', title: `Evaluación organizativa · ${label}`, estimatedUsd: est.estimatedUsd, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model })) });
   const d: DelegationResult = { request: `Evaluar si la organización (${label}) tiene los agentes y departamentos adecuados según el contenido real.${b.direction ? ` Dirección del propietario: ${b.direction.slice(0, 300)}` : b.skipped && briefIsEmpty(b) ? ' Sin indicaciones del propietario.' : ''}`, leadAgentId: gestor.id, leadAgentName: gestor.config.name, triage: null, consulted: [], deliverable: null, knowledgeDocId: null, backlogOps: [], opsApplied: null };
   procs.setDelegation(proc.id, d);
+  procs.setCallCap(proc.id, Math.max(6, proc.steps.length * 3)); // tope de llamadas a la suscripción, como cualquier encargo
   procs.authorize(proc.id, budgetUsd);
   const evaluation = evals.create({ scopeKind: project ? 'project' : 'workspace', projectId: project?.id ?? null, anchorProjectId: anchor.id, processId: proc.id, status: 'running', brief: b });
   return { evaluation, process: procs.get(proc.id)! };
@@ -211,7 +212,7 @@ export async function runOrgEvaluation(slug: string, processId: string, log: (o:
     const step = proc.steps[stepIdx]; const agent = agents.get(step.agentId)!;
     const providerId = agent.config.provider as ProviderId;
     const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-    const cc = agentCaller(slug, agent, proc.projectId, 'Evaluación organizativa');
+    const cc = agentCaller(slug, agent, proc.projectId, 'Evaluación organizativa', proc.id);
     if (!cc && (!cred || prow.status !== 'connected')) throw new Error(`El proveedor ${providerId} no está conectado.`);
     const models: ModelInfo[] = JSON.parse(prow.models_json);
     const cur = procs.get(processId)!; const p = estimatePricing(providerId, agent.config.model);
@@ -236,7 +237,7 @@ export async function runOrgEvaluation(slug: string, processId: string, log: (o:
       if (billed) msg += ` Posible costo NO confirmado por el proveedor: ≈ ${estCost.toFixed(4)} USD (estimación de la entrada enviada).`;
       procs.stepFinish(step.id, 'failed', { error: msg }); if (billed) procs.addUnconfirmed(processId, step.id, estCost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'org_evaluation_step', status: 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });
-      throw Object.assign(new Error(msg), { cancelled: err?.code === 'cancelled' });
+      throw Object.assign(new Error(msg), { cancelled: err?.code === 'cancelled', budget: err?.code === 'call_cap' });
     } finally { unregisterCall(processId, ctrl); }
   };
 

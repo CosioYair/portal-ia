@@ -34,6 +34,8 @@ export interface CliTaskOptions {
   system: string;
   prompt: string;
   history?: { role: 'user' | 'assistant'; content: string }[];
+  /** Imágenes del encargo: van como bloques de imagen (base64) en el mensaje de `stream-json`, como las admite el CLI. */
+  images?: { mediaType: string; data: string }[];
   schema?: { name: string; description?: string; schema: Record<string, unknown> } | null;
   maxTurns: number;
   timeoutMs: number;
@@ -41,6 +43,8 @@ export interface CliTaskOptions {
   /** Servidor MCP del Portal para esta ejecución (token de UN solo uso, ligado a la tarea) y herramientas permitidas. */
   mcp?: { command: string; args: string[]; env: Record<string, string>; tools: string[] } | null;
   onEvent?: (e: CliEvent) => void;
+  /** ¿Se acepta el uso adicional («overage») que informe la llamada? Sin esto, se para en el acto. */
+  overageAccepted?: () => boolean;
 }
 export type CliEvent =
   | { kind: 'init'; model: string | null; apiKeySource: string | null; mcp: { name: string; status: string }[] }
@@ -82,7 +86,7 @@ export function allowedSessionTool(name: string, structured: boolean): boolean {
 }
 
 /** Error del conector con el código del Portal (los reintentos automáticos solo existen para errores de red de la API). */
-export const ccError = (code: 'usage_limit' | 'backend_unavailable' | 'timeout' | 'cancelled' | 'provider_error' | 'invalid_key' | 'max_turns', message: string) => new ProviderRequestError({ code, message });
+export const ccError = (code: 'usage_limit' | 'call_cap' | 'backend_unavailable' | 'timeout' | 'cancelled' | 'provider_error' | 'invalid_key' | 'max_turns', message: string) => new ProviderRequestError({ code, message });
 /** Uso de una ejecución que terminó sin respuesta útil (p. ej. turnos agotados): se registra igual (consumió la suscripción). */
 export interface CliFailedUsage { inputTokens: number; outputTokens: number; numTurns: number | null; apiEquivalentUsd: number | null; durationMs: number; tools: Record<string, number>; maxTurns: number | null }
 
@@ -150,7 +154,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
       const timer = setTimeout(() => stop(ccError('timeout', `Claude Code no terminó dentro del plazo de la ejecución (${Math.round(o.timeoutMs / 1000)} s) y se detuvo. Lo hecho en el proceso se conserva.`)), o.timeoutMs);
       const onAbort = () => stop(ccError('cancelled', 'Ejecución de Claude Code cancelada por el propietario.'));
       o.signal.addEventListener('abort', onAbort, { once: true });
-      const send = (content: string) => child.stdin!.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`);
+      const send = (content: string | unknown[]) => child.stdin!.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`);
 
       const handle = (j: any) => {
         if (j.type === 'system' && j.subtype === 'init') {
@@ -167,10 +171,12 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
           if (['authentication_failed', 'oauth_org_not_allowed', 'account_on_hold', 'billing_error'].includes(j.error)) stop(ccError('backend_unavailable', `Claude Code no pudo autenticarse con la suscripción (${j.error}). Revisa la sesión con «claude auth status».`));
         } else if (j.type === 'rate_limit_event' && j.rate_limit_info) {
           const i = j.rate_limit_info;
-          rateLimit = { status: String(i.status ?? ''), resetsAt: typeof i.resetsAt === 'number' ? i.resetsAt : null, utilization: typeof i.utilization === 'number' ? i.utilization : null, errorCode: typeof i.errorCode === 'string' ? i.errorCode : null };
+          rateLimit = parseRateLimit(i);
           o.onEvent?.({ kind: 'rate_limit', info: rateLimit });
           // Límite alcanzado: se para sin esperar (ni comprar créditos ni cambiar de origen de facturación).
           if (i.status === 'rejected') stop(limitError(rateLimit));
+          // Uso adicional («overage»): podría facturarse aparte. Se para en el acto; seguir exige tu reconocimiento.
+          else if (rateLimit.overage && !o.overageAccepted?.()) stop(ccError('usage_limit', 'Claude Code informa uso adicional («overage»), que podría facturarse aparte según tu cuenta. Se ha parado sin continuar; reconócelo en el Asistente o en Proveedores si quieres seguir.'));
         } else if (j.type === 'assistant') {
           turns++;
           const tools = (j.message?.content ?? []).filter((c: any) => c?.type === 'tool_use').map((c: any) => String(c.name ?? '').replace(/^mcp__portal__/, ''));
@@ -182,7 +188,7 @@ export async function runCliTask(o: CliTaskOptions): Promise<CliTaskResult> {
           const untouched = (Number(j.num_turns) || 0) === 0 && !(Number(j.usage?.input_tokens) || 0) && !(Number(j.usage?.output_tokens) || 0);
           if (!gateOk || !untouched) { stop(ccError('backend_unavailable', !gateOk ? 'Claude Code no informó de su configuración (init) antes de la primera respuesta. Se detuvo sin enviar el encargo.' : 'La comprobación previa de Claude Code no se comportó como está documentado (el mensaje en blanco no debía llegar al modelo). Se detuvo sin enviar el encargo.')); return; }
           phase = 'run';
-          send(promptWithHistory(o.prompt, o.history));
+          send(o.images?.length ? [...o.images.map(im => ({ type: 'image', source: { type: 'base64', media_type: im.mediaType, data: im.data } })), { type: 'text', text: promptWithHistory(o.prompt, o.history) }] : promptWithHistory(o.prompt, o.history));
         } else if (j.type === 'result') {
           result = j;
           try { child.stdin!.end(); } catch { /* cerrada */ }
@@ -282,6 +288,16 @@ export function initProblem(j: any, o: { structured: boolean; mcp: boolean }): s
     if (!portal || portal.status !== 'connected') return `El puente del Portal no se conectó a Claude Code (${portal?.status ?? 'ausente'}).`;
   }
   return null;
+}
+
+/** `rate_limit_info` del CLI oficial → informe del Portal (campos desconocidos se ignoran; nunca se inventan). */
+export function parseRateLimit(i: any): NonNullable<CliTaskResult['rateLimit']> {
+  const num = (v: unknown) => typeof v === 'number' && Number.isFinite(v) ? v : null;
+  const uw = i?.unifiedWindows && typeof i.unifiedWindows === 'object' ? i.unifiedWindows : null;
+  const windows = uw ? Object.entries(uw).filter(([, w]) => w && typeof w === 'object').map(([name, w]: [string, any]) => ({ name, utilization: num(w.utilization), resetsAt: num(w.resetsAt), status: typeof w.status === 'string' ? w.status : null })) : [];
+  const type = typeof i?.rateLimitType === 'string' ? i.rateLimitType : null;
+  const overage = type === 'overage' || i?.isUsingOverage === true;
+  return { status: String(i?.status ?? ''), resetsAt: num(i?.resetsAt), utilization: num(i?.utilization), errorCode: typeof i?.errorCode === 'string' ? i.errorCode : null, rateLimitType: type, windows, overage };
 }
 
 function limitError(rl: CliTaskResult['rateLimit'], detail?: string): ProviderRequestError {

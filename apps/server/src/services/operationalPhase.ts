@@ -14,6 +14,7 @@ import { lessonsRepo } from './lessons.ts';
 import { repoStatus } from './repoStatus.ts';
 import { VERSION } from './system.ts';
 import { runGit } from './worktree.ts';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * Etapas operativas: empezar de cero el trabajo ACTIVO sin perder el conocimiento de la organización.
@@ -31,7 +32,7 @@ import { runGit } from './worktree.ts';
  */
 export const DEFAULT_PHASE_NAME = 'Portal IA — Inicio de operación organizada';
 const BASELINE_PREFIX = 'Línea base';
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 
 export const isBaselineDoc = (d: Pick<KnowledgeDoc, 'title'>) => d.title.startsWith(BASELINE_PREFIX);
 

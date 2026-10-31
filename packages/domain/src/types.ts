@@ -40,6 +40,8 @@ export interface ProviderView {
 export type ProviderErrorCode = 'invalid_key' | 'forbidden' | 'rate_limited' | 'network' | 'provider_error' | 'no_credential' | 'workspace_required'
   /** El agente usa un origen que el lote de su proceso no autoriza (no se hizo la llamada). */
   | 'origin_not_allowed'
+  /** Se alcanzó el tope de llamadas a la suscripción autorizado (del proceso o del lote): no se hizo la llamada. */
+  | 'call_cap'
   /** El proveedor no respondió dentro del plazo de la llamada (se abortó). */
   | 'timeout'
   /** La llamada se abortó por decisión del propietario (cancelar). */
@@ -286,6 +288,10 @@ export interface Process {
   /** Resultado de un encargo delegado (kind = delegated_task). */
   delegation: DelegationResult | null;
   backlogItemId: string | null;
+  /** Encargo de desarrollo del propietario al que pertenece (en lugar de una historia del backlog). */
+  assignmentId?: string | null;
+  /** Tope de llamadas a la suscripción de Claude autorizado (procesos sin pipeline; los de historia lo llevan en su pipeline). */
+  maxSubscriptionCalls?: number | null;
   /** Suma de costos posiblemente facturados y no confirmados (estimación; el gasto confirmado es spentUsd). */
   unconfirmedUsd?: number;
   /** Archivado al iniciar una etapa: histórico, sin acciones. null = activo. */
@@ -361,7 +367,7 @@ export interface FlowIssue {
 export type FlowActionId =
   | 'authorize' | 'cancel' | 'review_diff' | 'apply' | 'reject' | 'install_and_retry' | 'verify' | 'retry_verification'
   | 'sandbox_help' | 'refresh_sandbox' | 'request_fix' | 'ask_team' | 'tasks_from_issue' | 'merge' | 'rebuild'
-  | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'retry_process' | 'recover' | 'new_iteration'
+  | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'accept_plan' | 'retry_process' | 'recover' | 'new_iteration'
   | 'pipeline_resume' | 'repair_output'
   /** Conector Claude Code: autorizar el proyecto o pasar a «gestionado» los agentes sin consola, y continuar (sin repetir lo hecho). */
   | 'claude_code_fix'
@@ -386,6 +392,8 @@ export interface FlowAction {
   /** La acción exige responder antes a esta pregunta del equipo (información, permiso o decisión). */
   answer?: { question: string; why: string; options: string[] } | null;
   suggestedBudgetUsd?: number;
+  /** pipeline_resume tras el tope de llamadas a la suscripción: cuántas se conceden de más al continuar. */
+  addSubscriptionCalls?: number;
   /** register_external: commit del worktree que se registraría, el último registrado y los archivos que cambian. */
   external?: { commit: string; recorded: string; files: string[] } | null;
   /** claude_code_fix: lo que se autoriza antes de continuar (el proyecto del proceso y/o agentes que pasan a «gestionado»). */
@@ -668,6 +676,12 @@ export interface PipelineConfig {
    * su llamada no se hace y el pipeline se pausa. Sin valor: cualquier origen del agente, como siempre.
    */
   backends?: ('api' | 'claude_code')[];
+  /**
+   * Tope de llamadas a la suscripción de Claude Code autorizadas para ESTE proceso (también las fallidas). Con la
+   * suscripción el presupuesto en USD no limita nada (cada llamada cuesta 0 USD de API): este es su límite de recursos.
+   * Al alcanzarlo, el pipeline se pausa y decides si concedes más. Sin valor: sin tope propio (como antes).
+   */
+  maxSubscriptionCalls?: number;
 }
 export type PipelineEventKind = 'info' | 'recovery' | 'repair' | 'apply' | 'verify' | 'environment' | 'qa' | 'correction' | 'pause' | 'done' | 'error'
   /** Entrega incremental: unidad de trabajo, continuación de una respuesta cortada y comprobación determinista previa a QA. */
@@ -876,7 +890,17 @@ export interface ProcessFailure { kind: 'output_contract' | 'provider' | 'budget
   /** Lo que se pide al propietario para seguir (procesos sin pipeline). */
   request?: OwnerRequest | null }
 export type Isolation = 'docker' | 'wsl' | 'linux-ns' | 'host-min' | 'unavailable';
-export interface VerificationRun { command: string; exitCode: number | null; output: string; startedAt: string; finishedAt: string; durationMs: number; /** Dónde se ejecutó: sandbox real (docker/wsl), verificación mínima en el equipo (solo tsc) o no disponible. */ isolation?: Isolation; }
+export interface VerificationRun { command: string; exitCode: number | null; output: string; startedAt: string; finishedAt: string; durationMs: number; /** Dónde se ejecutó: sandbox real (docker/wsl), verificación mínima en el equipo (solo tsc) o no disponible. */ isolation?: Isolation;  /** Commit del worktree verificado: identifica a qué versión del código corresponde (no la hora). */ commit?: string | null; }
+/**
+ * Verificaciones que corresponden a la versión aplicada ahora. Con el commit registrado (desde v0.16), por identidad
+ * del commit: la hora no sirve (el reloj puede retroceder, p. ej. en la VM de Docker, y una verificación válida pasaría
+ * por antigua). Las antiguas, sin commit, por la hora como antes (`toleranceMs` antes del aplicado).
+ */
+export function verificationsForApplied(r: Pick<ExecutionResult, 'applied' | 'verifications'>, toleranceMs = 0): VerificationRun[] {
+  if (!r.applied) return [];
+  const after = new Date(r.applied.appliedAt).getTime() - toleranceMs;
+  return (r.verifications ?? []).filter(v => v.commit && r.applied!.commit ? v.commit === r.applied!.commit : new Date(v.startedAt).getTime() >= after);
+}
 export interface ExecutionResult {
   plan: StoryPlan | null;
   implementationSummary: string | null;
@@ -1005,6 +1029,14 @@ export interface DelegationResult {
   knowledgeDocId: string | null;
   backlogOps: BacklogOp[];
   opsApplied: { at: string; summary: string[] } | null;
+  /**
+   * Para qué es (v0.16): análisis libre (por defecto), propuesta de una conversación (con cuestionamiento independiente
+   * antes de presentarla), revisión del equipo de una propuesta, o historias de una propuesta aprobada (solo «add»).
+   */
+  purpose?: 'analysis' | 'proposal' | 'team_review' | 'stories';
+  conversationId?: string | null;
+  /** Cuestionamiento independiente de la propuesta (otro especialista, contexto nuevo, sin el razonamiento del redactor). */
+  challenge?: { agentId: string; agentName: string; text: string } | null;
 }
 
 // ---- HU-143 · Integrar siempre contra la rama principal ----

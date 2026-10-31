@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { useEffect, useState } from 'react';
-import { NavLink, Link } from 'react-router-dom';
+import { NavLink, Link, useLocation } from 'react-router-dom';
 import type { UsageToday } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { onBundleChange, staleInterface } from '../lib/liveStatus.ts';
@@ -49,12 +49,16 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
   const connected = providers.filter(p => p.status === 'connected');
   // Pestaña abierta con una interfaz anterior a la que sirve ahora el Portal (reconstruido y reiniciado): sus acciones
   // pueden no existir o comportarse distinto. Se pide recargar en vez de seguir con botones obsoletos.
+  // Móvil: el menú lateral se pliega (solo la empresa y «Menú») y se cierra al navegar.
+  const [menu, setMenu] = useState(false);
+  const path = useLocation().pathname;
+  useEffect(() => { setMenu(false); }, [path]);
   const [stale, setStale] = useState(staleInterface());
   useEffect(() => onBundleChange(() => setStale(staleInterface())), []);
 
   return (
     <div className="screen shell">
-      <aside className="side">
+      <aside className={`side${menu ? ' side-open' : ''}`}>
         <label className="sr" htmlFor="ws-select">Empresa</label>
         <div className="ws-btn" style={{ padding: '6px 8px 6px 10px', gap: 8 }}>
           <span className="mark" />
@@ -63,6 +67,7 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
             <option value="__new">＋ Nueva empresa…</option>
           </select>
         </div>
+        <button type="button" className="btn btn-ghost btn-sm side-toggle" aria-expanded={menu} onClick={() => setMenu(v => !v)}>{menu ? 'Cerrar menú' : 'Menú'}</button>
         <div className="side-sec">Proyecto</div>
         <label className="sr" htmlFor="pj-select">Proyecto</label>
         <select id="pj-select" className="input" style={{ height: 36, fontSize: 13.5, fontWeight: 500, background: 'transparent', borderColor: 'transparent' }} value={project?.id ?? ''} onChange={e => { if (e.target.value === '__new') { setDialog('project'); return; } void select(ws.slug, e.target.value).then(() => navigate('/panel')); }}>

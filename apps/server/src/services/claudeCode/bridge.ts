@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import type { ClaudeCodeWorkerView } from '@portal-ia/domain';
 import { claudeCodeWorkersRepo, workspacesRepo, type ClaudeCodeWorkerRow } from '../../db/platform.ts';
 import { agentsRepo, knowledgeRepo, projectsRepo } from '../../db/workspace.ts';
-import { safeRelPath, scanSecrets } from '../repoWrite.ts';
+import { readProtectedReason, resolveReadable, scanSecrets } from '../repoWrite.ts';
 import { ccError } from './cli.ts';
 import { getClaudeCodeSettings, projectAuthorized } from './settings.ts';
 
@@ -206,31 +206,25 @@ export function reportBlocker(scope: BridgeScope, id: string, reason: string): {
 
 // ---------------------------------------------------------------- Lectura acotada (contexto, archivos, conocimiento)
 
-/** Rutas que nunca se leen por el puente, además de las prohibidas para escribir (.git, data/, node_modules/, .env, claves). */
-const PROTECTED_READ = [/(^|\/)node_modules(\/|$)/, /(^|\/)\.git(\/|$)/, /(^|\/)\.claude(\/|$)/, /(^|\/)\.ssh(\/|$)/, /(^|\/)\.aws(\/|$)/, /(^|\/)\.npmrc$/i,
-  /(^|\/)\.credentials\.json$/i, /(^|\/)id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i, /(^|\/)secrets?(\/|$)/i, /\.(keystore|jks|kdbx)$/i];
-export function protectedReason(rel: string): string | null {
-  let norm: string;
-  try { norm = safeRelPath(rel); } catch (e: any) { return e.message; }
-  if (PROTECTED_READ.some(r => r.test(norm))) return `Ruta protegida: ${rel}`;
-  return null;
-}
+/** Rutas que nunca se leen por el puente: las mismas que en todo el Portal (ver `resolveReadable`). */
+export function protectedReason(rel: string): string | null { return readProtectedReason(rel); }
 
 const MAX_FILE = 200_000;
-export function readTaskFile(task: BridgeTask, rel: string): { path: string; content: string; truncated: boolean } | Denied {
-  if (!task.readRoot) return deny(404, 'Esta tarea no tiene carpeta de trabajo que leer.');
-  const why = protectedReason(rel); if (why) return deny(403, why);
-  const norm = safeRelPath(rel);
-  let root: string; let full: string;
-  try { root = fs.realpathSync(task.readRoot); full = fs.realpathSync(path.join(root, norm)); } catch { return deny(404, `No existe: ${rel}`); }
-  // Un enlace simbólico no puede sacar la lectura de la carpeta de trabajo.
-  if (full !== root && !full.startsWith(root + path.sep)) return deny(403, `Ruta fuera de la carpeta de trabajo: ${rel}`);
+/** Lee un archivo de la carpeta de trabajo con TODAS las comprobaciones (ruta protegida, ruta real, binario, secretos). */
+function readInside(readRoot: string, rel: string): { path: string; content: string; truncated: boolean } | Denied {
+  const r = resolveReadable(readRoot, rel);
+  if (!('abs' in r)) return deny(r.status, r.error);
+  const norm = r.norm; const full = r.abs;
   const st = fs.statSync(full); if (!st.isFile()) return deny(400, `No es un archivo: ${rel}`);
   const fd = fs.openSync(full, 'r'); const buf = Buffer.alloc(Math.min(st.size, MAX_FILE)); fs.readSync(fd, buf, 0, buf.length, 0); fs.closeSync(fd);
   if (buf.subarray(0, 8000).includes(0)) return deny(415, `Archivo binario: ${rel}`);
   const content = buf.toString('utf8');
   const secret = scanSecrets(content); if (secret) return deny(403, `${secret} No se entrega por el puente.`);
   return { path: norm, content, truncated: st.size > MAX_FILE };
+}
+export function readTaskFile(task: BridgeTask, rel: string): { path: string; content: string; truncated: boolean } | Denied {
+  if (!task.readRoot) return deny(404, 'Esta tarea no tiene carpeta de trabajo que leer.');
+  return readInside(task.readRoot, rel);
 }
 
 /** Sin git: recorrido acotado que no entra en carpetas protegidas. */
@@ -248,15 +242,98 @@ function walk(root: string, max = 5000): string[] {
   return out;
 }
 
-export function listTaskFiles(task: BridgeTask, dir = ''): { files: string[]; truncated: boolean } | Denied {
-  if (!task.readRoot) return deny(404, 'Esta tarea no tiene carpeta de trabajo que leer.');
+/** git sin efectos: sin fsmonitor ni diff/textconv externos, sin bloquear el índice ni paginador, y rutas LITERALES (un nombre
+ * de archivo como «[.]npmrc» nunca es un patrón que alcance otro). Nunca un shell. */
+const GIT_SAFE = ['-c', 'core.fsmonitor=false', '-c', 'core.quotepath=off', '-c', 'diff.external=', '--no-pager', '--literal-pathspecs'];
+const git = (cwd: string, args: string[], maxBuffer = 32 * 1024 * 1024) =>
+  execFileSync('git', [...GIT_SAFE, ...args], { cwd, maxBuffer, windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' } }).toString('utf8');
+
+function allTaskFiles(readRoot: string, dir: string): string[] | Denied {
   const prefix = dir.replace(/\\/g, '/').replace(/^\.?\/+/, '').replace(/\/+$/, '');
   if (prefix && protectedReason(`${prefix}/x`)) return deny(403, `Ruta protegida: ${dir}`);
   let all: string[];
-  try { all = execFileSync('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], { cwd: task.readRoot, maxBuffer: 32 * 1024 * 1024, windowsHide: true }).toString('utf8').split('\0').filter(Boolean); }
-  catch { all = walk(task.readRoot); }
-  const files = all.filter(f => (!prefix || f === prefix || f.startsWith(prefix + '/')) && !protectedReason(f));
+  try { all = git(readRoot, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']).split('\0').filter(Boolean); }
+  catch { all = walk(readRoot); }
+  return all.filter(f => (!prefix || f === prefix || f.startsWith(prefix + '/')) && !protectedReason(f));
+}
+
+export function listTaskFiles(task: BridgeTask, dir = ''): { files: string[]; truncated: boolean } | Denied {
+  if (!task.readRoot) return deny(404, 'Esta tarea no tiene carpeta de trabajo que leer.');
+  const files = allTaskFiles(task.readRoot, dir); if (isDenied(files)) return files;
   return { files: files.slice(0, 500), truncated: files.length > 500 };
+}
+
+/**
+ * Búsqueda LITERAL (nunca una expresión del modelo: sin ReDoS) en los archivos legibles de la tarea, con las mismas
+ * reglas que leer: rutas protegidas fuera, enlaces que salen de la carpeta fuera, binarios y archivos con secretos se
+ * omiten (y se dice cuáles). Acotada en archivos, bytes y coincidencias.
+ */
+const SEARCH = { maxFiles: 4000, maxBytes: 24 * 1024 * 1024, maxMatches: 200, lineChars: 300 } as const;
+export function searchTaskFiles(task: BridgeTask, query: string, opts: { dir?: string; caseSensitive?: boolean } = {}) {
+  if (!task.readRoot) return deny(404, 'Esta tarea no tiene carpeta de trabajo que leer.');
+  const q = String(query ?? ''); if (q.trim().length < 2 || q.length > 200) return deny(400, 'La búsqueda debe tener entre 2 y 200 caracteres.');
+  const files = allTaskFiles(task.readRoot, opts.dir ?? ''); if (isDenied(files)) return files;
+  const needle = opts.caseSensitive ? q : q.toLowerCase();
+  const matches: { path: string; line: number; text: string }[] = []; const skipped: { path: string; reason: string }[] = [];
+  let bytes = 0; let scanned = 0; let truncated = files.length > SEARCH.maxFiles;
+  for (const f of files.slice(0, SEARCH.maxFiles)) {
+    if (matches.length >= SEARCH.maxMatches || bytes >= SEARCH.maxBytes) { truncated = true; break; }
+    const r = readInside(task.readRoot, f);
+    if (isDenied(r)) { if (r.status === 403) skipped.push({ path: f, reason: r.error }); continue; }
+    scanned++; bytes += r.content.length;
+    if (!(opts.caseSensitive ? r.content : r.content.toLowerCase()).includes(needle)) continue;
+    const lines = r.content.split(/\r?\n/);
+    for (let i = 0; i < lines.length && matches.length < SEARCH.maxMatches; i++) {
+      if ((opts.caseSensitive ? lines[i] : lines[i].toLowerCase()).includes(needle)) matches.push({ path: f, line: i + 1, text: lines[i].trim().slice(0, SEARCH.lineChars) });
+    }
+    if (r.truncated) skipped.push({ path: f, reason: `Solo se buscó en los primeros ${MAX_FILE} bytes.` });
+  }
+  return { query: q, matches, filesScanned: scanned, skipped: skipped.slice(0, 50), truncated };
+}
+
+/**
+ * Cambios de la carpeta de trabajo, en solo lectura: `working` = lo que aún no está confirmado (incluidos archivos nuevos);
+ * `branch` = lo que esta rama añade sobre la base del proyecto (desde su punto de partida). Rutas protegidas y diferencias
+ * con secretos se omiten (y se dice cuáles). Acotado en tamaño.
+ */
+const MAX_DIFF = 150_000;
+export function taskDiff(task: BridgeTask, range: 'working' | 'branch' = 'working') {
+  if (!task.readRoot) return deny(404, 'Esta tarea no tiene carpeta de trabajo que leer.');
+  const cwd = task.readRoot;
+  try { if (git(cwd, ['rev-parse', '--is-inside-work-tree']).trim() !== 'true') return deny(409, 'La carpeta de trabajo no es un repositorio git.'); }
+  catch { return deny(409, 'La carpeta de trabajo no es un repositorio git.'); }
+  let base: string; let entries: { path: string; status: string }[];
+  try {
+    if (range === 'branch') {
+      const branch = projectsRepo(task.slug).repository(task.projectId)?.branch || 'main';
+      if (!/^[A-Za-z0-9._\/-]{1,120}$/.test(branch) || branch.startsWith('-')) return deny(409, 'Rama base no válida.');
+      base = git(cwd, ['merge-base', 'HEAD', branch]).trim();
+      const raw = git(cwd, ['diff', '--name-status', '-z', '--no-renames', base, 'HEAD']).split('\0').filter(Boolean);
+      entries = []; for (let i = 0; i + 1 < raw.length; i += 2) entries.push({ status: raw[i], path: raw[i + 1] });
+    } else {
+      base = 'HEAD';
+      const raw = git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--no-renames']).split('\0').filter(Boolean);
+      entries = raw.map(l => ({ status: l.slice(0, 2).trim() || 'M', path: l.slice(3) }));
+    }
+  } catch (e: any) { return deny(409, `No se pudo calcular la diferencia: ${String(e?.message ?? e).split('\n')[0].slice(0, 200)}`); }
+  const omitted: { path: string; reason: string }[] = []; const parts: string[] = []; let size = 0; let truncated = false;
+  const files = entries.filter(e => { const why = protectedReason(e.path); if (why) omitted.push({ path: e.path, reason: why }); return !why; });
+  for (const e of files) {
+    if (size >= MAX_DIFF) { truncated = true; break; }
+    let d: string;
+    if (e.status === '??') {
+      const r = readInside(cwd, e.path);
+      if (isDenied(r)) { omitted.push({ path: e.path, reason: r.error }); continue; }
+      d = `diff --git a/${e.path} b/${e.path}\nnew file (sin seguimiento)\n--- /dev/null\n+++ b/${e.path}\n${r.content.split(/\r?\n/).map(l => `+${l}`).join('\n')}\n`;
+    } else {
+      try { d = git(cwd, range === 'branch' ? ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', base, 'HEAD', '--', e.path] : ['diff', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', 'HEAD', '--', e.path], 8 * 1024 * 1024); }
+      catch { omitted.push({ path: e.path, reason: 'No se pudo leer su diferencia.' }); continue; }
+      const secret = scanSecrets(d); if (secret) { omitted.push({ path: e.path, reason: `${secret} No se entrega por el puente.` }); continue; }
+    }
+    if (size + d.length > MAX_DIFF) { d = `${d.slice(0, MAX_DIFF - size)}\n… (recortado)\n`; truncated = true; }
+    parts.push(d); size += d.length;
+  }
+  return { range, base, files: files.map(e => ({ path: e.path, status: e.status })), diff: parts.join(''), omitted, truncated };
 }
 
 export function taskContext(task: BridgeTask) {

@@ -10,6 +10,7 @@ import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, workspaceDb } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
+import { monotonicNow } from '../clock.ts';
 
 /**
  * Aprendizaje organizacional validado (M4).
@@ -20,7 +21,7 @@ import { requirePolicy } from './executionPolicy.ts';
  *  5. REINCIDENCIA: si el mismo detector vuelve a saltar en un paso que ya tenía la lección inyectada, se cuenta y la
  *     lección pasa a «candidata a obsoleta» (reincidencias > 0) para que el propietario la revise.
  */
-const now = () => new Date().toISOString();
+const now = monotonicNow;
 
 export function ensureLessonsTable(slug: string) {
   const db = workspaceDb(slug);
