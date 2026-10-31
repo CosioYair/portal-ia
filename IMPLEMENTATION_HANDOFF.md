@@ -1,3 +1,56 @@
+# Portal IA · Autonomía con la suscripción, Asistente que ejecuta y estado persistente (30 de octubre de 2026)
+
+**Estado: implementado y verificado en `main`.** Encargo del propietario tras la primera prueba real: un lote solo con
+la suscripción (HU-164/HU-165) se pausó por un presupuesto en USD ficticio y dijo «Lo automático terminó»; el Asistente
+convirtió una orden directa en historias; un especialista agotó sus turnos buscando; la interfaz perdía lo escrito.
+Metodología Gauntlet completa (ronda 0 a ronda 5) en `docs/autonomia-suscripcion-y-persistencia.md`.
+
+## Commits (sobre `3ba6edf`)
+
+| Commit | Qué es |
+|---|---|
+| `62133de` | Interfaz: borradores y navegación persistentes (`apps/web/src/lib/persist.ts`); guardado ≠ autorización |
+| `ab11296` | Asistente: orden directa → encargo EN-n; historias solo si se piden; estados reales; `portal-capabilities@1` |
+| `ef4247b` | Especialistas: paquete de evidencia, reglas de turnos, UNA recuperación sin herramientas, pausa «turnos agotados» |
+| `f529a8d` | Suscripción ≠ USD: solo la API gasta y comprueba USD; pausa `call_cap` reanudable; estados del lote verdaderos |
+| `3302a75` | Ronda 3 (servidor): reanudar sin repetir el plan ni superar el total; publicar solo lo que mostró la tarjeta; ningún secreto en la evidencia |
+| `9ccb95b` | Ronda 3 (interfaz): la versión del borrador se fija al empezar; solo tus campos; Atrás/Adelante por empresa |
+| `81e12a7` | Ronda 4: «Reanudar» no pide USD a una historia solo de suscripción (el lote real HU-164/HU-165 puede seguir); el plan reutilizado sigue a la historia; nada se publica dos veces |
+| `d910597` | Ronda 5: volver a empezar una iteración conserva la nota del propietario y su plan |
+| este commit | Documentación |
+
+## Qué cambia para el propietario
+
+- **Lotes con la suscripción**: 0 USD de API es válido si todo el equipo va por Claude Code; solo el tope de llamadas y
+  el estado de la suscripción los limitan. Las cifras en USD de ese trabajo son «equivalente API», orientativas.
+- **Estados verdaderos**: el lote nunca dice «terminó» con algo que puede seguir; en pausa dice por qué y cómo seguir
+  («Reanudar» concediendo más llamadas o USD); retoma donde quedó, sin repetir el plan ni superar el total autorizado.
+- **Asistente**: «arréglalo» → encargo EN-n con su tarjeta de autorización; «publica main» → tarjeta tipada que se
+  autoriza aparte (si el main cambió desde la tarjeta, no se ejecuta). Conoce el Gauntlet y el resto del Portal.
+- **Borradores**: lo escrito sobrevive a recargar, navegar, reiniciar el navegador y el Portal; nunca una autorización.
+
+## Activación
+
+El esquema de datos no cambia (sigue en 0.16): no hay migraciones ni copia nueva de `data/`. El lote real `b41c1d78`
+(HU-164/HU-165, «en marcha» con las dos esperando) NO se retoma al arrancar: pasa a «En pausa» con «Reanudar»
+(prueba «activación sobre un lote heredado» en `batch-execution.test.ts`). Para seguir con él: «Reanudar» en
+Ejecución continua, decidiendo tú el tope de llamadas.
+
+Procedimiento seguido (autorizado por el propietario para esta entrega): `main` avanzado solo con `--ff-only` al commit
+verificado, publicado con un `git push` normal (sin forzar, solo `main`), y activado con el mecanismo del propio Portal
+(`POST /api/system/update`, que construye la interfaz aparte y la sustituye solo si el build termina, y se reinicia con
+su supervisor) tras comprobar: nada en ejecución (procesos, lotes, llamadas), modo «restarting» (supervisado) y ningún
+cambio de esquema. Ninguna llamada a modelos ni lote iniciado. Resultado: ver el informe de la entrega y
+`/api/system/status` (`startCommit` y `buildCommit`).
+
+## Pendientes
+
+- Los de la integración anterior (más abajo) siguen como estaban.
+- Para seguir con HU-164/HU-165: «Reanudar» en Ejecución continua concediendo el tope de llamadas que decidas (0 USD de
+  API si todo el equipo va por la suscripción). Es la primera prueba real de esta versión con el proveedor real.
+- Limitación conocida: si el Portal se detiene de golpe mientras ejecuta una operación autorizada desde el Asistente, la
+  tarjeta queda «Ejecutando…» (ver `docs/autonomia-suscripcion-y-persistencia.md`, «Limitaciones»).
+
 # Portal IA · Integración final en main (31 de octubre de 2026)
 
 **Estado: `main` integrado y verificado, y ya activo.** Durante la verificación, el Portal en marcha se reconstruyó y
