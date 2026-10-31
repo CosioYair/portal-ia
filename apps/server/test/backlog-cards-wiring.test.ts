@@ -94,3 +94,32 @@ test('ninguna acción con costo se lanza desde la tarjeta ni desde el bloque des
   assert.ok(bl.indexOf('onClick={execute}') > bl.indexOf('role="dialog"'), 'execute solo se invoca desde el modal de autorización');
   assert.match(bl, /disabled=\{!auth \|\| busy/, 'el botón del modal exige la casilla de autorización');
 });
+
+test('iteración 2: título enlazado, espacio de la historia siempre, «Cancelar historia» solo en secundarias y cierre de «Más acciones»', () => {
+  const sc = read('components/StoryCard.tsx');
+  // El título abre /historias/:id en 1 clic y es un enlace (no suma botones visibles).
+  assert.match(sc, /<Link to=\{`\/historias\/\$\{item\.id\}`\} className="story-card-title/);
+  assert.ok(!/<button[^>]*story-card-title/.test(sc), 'el título no puede ser un <button>');
+  assert.equal(count(sc, '<button'), 2, 'siguen siendo 2 botones como máximo');
+  // «Más acciones» se cierra con Escape (el foco vuelve al resumen) y al pulsar fuera; los listeners se retiran.
+  for (const s of ["addEventListener('mousedown'", "addEventListener('keydown'", "removeEventListener('mousedown'", "removeEventListener('keydown'", "e.key !== 'Escape'", 'summaryRef.current?.focus()', '!d.contains(e.target as Node)']) {
+    assert.ok(sc.includes(s), `falta «${s}» en StoryCard`);
+  }
+  const bl = read('screens/Backlog.tsx');
+  const fn = bl.indexOf('const storyActions =');
+  const push = bl.indexOf('secondary.push(storySpace);', fn);
+  assert.ok(fn > 0 && push > fn, '«Espacio de la historia» debe añadirse en storyActions');
+  assert.ok(!bl.slice(fn, push).includes('if ('), '«Espacio de la historia» se añade sin condiciones');
+  assert.equal(count(bl, 'secondary.push(storySpace)'), 1, 'sin duplicar «Espacio de la historia»');
+  assert.match(bl, /secondary\.push\(\{ label: 'Cancelar historia'/);
+  assert.ok(!/primary = \{ label: 'Cancelar historia'/.test(bl), '«Cancelar historia» nunca es la acción principal');
+  const cond = bl.indexOf("if (it.status !== 'done' && it.status !== 'in_progress' && it.status !== 'discarded')", fn);
+  const cancel = bl.indexOf("label: 'Cancelar historia'", fn);
+  assert.ok(cond > 0 && cancel > cond, '«Cancelar historia» solo si no está en curso, completada ni descartada');
+  assert.match(bl, /secondary\.push\(\{ label: 'Cerrar sin ejecutar'/, 'se conserva «Cerrar sin ejecutar»');
+  const cs = bl.indexOf('const cancelStory = async');
+  const body = bl.slice(cs, bl.indexOf('const decisions =', cs));
+  assert.ok(cs > 0 && body.includes('confirm(') && body.includes('prompt(') && body.includes('api.discardStory('), 'cancelar pide confirmación y motivo y llama a discardStory');
+  const sw = read('screens/StoryWorkspace.tsx');
+  assert.ok(sw.includes('Cancelar historia') && sw.includes('api.discardStory('), '«Cancelar historia» también en el espacio de la historia');
+});
