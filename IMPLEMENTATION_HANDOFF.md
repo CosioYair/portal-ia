@@ -1,3 +1,41 @@
+# Portal IA · Rendimiento, navegación, concurrencia y tiempo real (31 de octubre de 2026)
+
+**Estado: implementado y verificado en la rama `mejora/concurrencia-tiempo-real` (sobre `1eb9a7c`). NO integrado en
+`main`, NO publicado y NO activado: integrar, publicar y reiniciar el Portal requieren tu autorización.** Detalle completo
+(causas raíz, arquitectura, medidas antes/después, rondas Gauntlet A–C, pruebas, limitaciones) en
+`docs/rendimiento-concurrencia-tiempo-real.md`.
+
+## Commits (rama `mejora/concurrencia-tiempo-real`)
+
+| Commit | Qué es |
+|---|---|
+| `a8ae69e` | Varias historias a la vez (exclusión por historia, carril del repositorio, base fijada), capacidad compartida, lotes, tiempo real (SSE), rendimiento, QA por commit, HU-175, HU-173, «Atrás» y pestañas desactualizadas; 36 pruebas nuevas |
+| `6ec78a3` | «Atrás» en móvil: solo el icono y sin hacer más alta la cabecera (regresión detectada por la suite del Asistente) |
+| este commit | Documentación |
+
+## Qué cambia para el propietario
+
+- **Rápido**: la bandeja pasa de ~13,6 s a ~0,04 s y el listado de la interfaz de 37,8 MB a 0,9 MB en la instancia de
+  prueba (150 historias, 66 procesos); navegar entre pantallas pasa de 11–45 s (o no terminar) a 14–216 ms.
+- **Varias historias a la vez**: autorizar o iterar una historia mientras otra (o un lote) trabaja; solo se impide un
+  segundo proceso de la MISMA historia. Integrar en main sigue siendo de uno en uno; sin hueco de Claude Code, «En cola».
+- **En tiempo real**: los cambios (también de otra pestaña, del lote o del Asistente) aparecen sin recargar; si se
+  pierde la conexión se avisa y al volver se recupera todo.
+- **«Atrás» global** que vuelve a la pantalla anterior del Portal con su búsqueda, filtros y desplazamiento.
+- **Estados por commit**: «QA aprobó X; el candidato Y solo añade main» en vez de mensajes contradictorios; una historia
+  integrada ya no muestra la pausa vieja.
+- **HU-175**: «Convertir en encargo de análisis» (sin IA hasta autorizarlo); repetirla igual se rechaza.
+- **HU-173**: la equivalencia de estilos (sin IA) llega a QA y la decisión pendiente se dice con acciones concretas.
+- **Reconstruir y reiniciar** con procesos en marcha pide confirmar que se interrumpen.
+
+## Activación (pendiente de tu autorización)
+
+No hay migraciones de datos: solo índices nuevos (aditivos, se crean al abrir cada base, sin tocar filas) y campos JSON
+opcionales. Pasos cuando lo autorices: integrar la rama en `main` (hoy es un avance rápido: `main` sigue en `1eb9a7c`),
+publicar si quieres y «Reconstruir y reiniciar» sin procesos en marcha. El lote real `568c60cb` no se retoma solo.
+
+---
+
 # Portal IA · Autonomía con la suscripción, Asistente que ejecuta y estado persistente (30 de octubre de 2026)
 
 **Estado: implementado y verificado en `main`.** Encargo del propietario tras la primera prueba real: un lote solo con
