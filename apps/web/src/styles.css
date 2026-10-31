@@ -357,6 +357,24 @@ a.story-card-title:focus-visible{outline:2px solid var(--color-accent,#0F6E6A);o
 .backlog-highlight-empty{display:flex;gap:10px;align-items:center;color:var(--color-text-med,#4F5259);font-size:13px}
 @media (max-width:720px){.story-card-side{align-items:flex-start}.story-card-actions{justify-content:flex-start}.story-card-note{text-align:left}.story-card-menu{left:0;right:auto}}
 
+/* HU-171 · Conocimiento: búsqueda, filtros y versiones agrupadas */
+.kn-filters{display:flex;flex-direction:column;gap:6px;padding:0 4px 8px;margin-bottom:4px;border-bottom:1px solid var(--color-divider,#EEECE6)}
+.kn-selects{display:flex;gap:6px;flex-wrap:wrap}
+.kn-selects .kn-input{flex:1 1 120px;min-width:0}
+.kn-input{height:32px;font-size:13px}
+.kn-count{display:flex;justify-content:space-between;align-items:center;gap:8px;font-variant-numeric:tabular-nums;padding-top:2px}
+.kn-empty{display:flex;flex-direction:column;align-items:center;gap:8px;padding-bottom:12px}
+.kn-chip{align-self:flex-start;display:inline-flex;align-items:center;height:18px;padding:0 7px;margin-top:2px;border-radius:999px;font-size:11px;font-weight:500;background:var(--color-accent-bg,#E3F1EF);border:1px solid #C6E2DE;color:var(--color-accent-hover,#0B5652);white-space:nowrap}
+.kn-versions{border:1px solid var(--color-divider,#EEECE6);border-radius:8px;background:#FAF9F6}
+.kn-versions>summary{cursor:pointer;padding:8px 12px;font-size:13px;font-weight:500;color:var(--color-text-med,#4F5259)}
+.kn-versions>summary:focus-visible{outline:2px solid #0F6E6A;outline-offset:2px;border-radius:8px}
+.kn-ver-list{list-style:none;padding:0 6px 6px;margin:0;display:flex;flex-direction:column;gap:2px}
+.kn-ver{appearance:none;border:1px solid transparent;background:transparent;font:inherit;display:flex;gap:10px;align-items:center;flex-wrap:wrap;width:100%;padding:6px 8px;border-radius:6px;cursor:pointer;text-align:left;color:#1A1B1E}
+.kn-ver:hover{background:#F0EEE8}
+.kn-ver.is-active{background:#fff;border-color:#E5E3DC}
+.kn-ver:focus-visible{outline:2px solid #0F6E6A;outline-offset:1px}
+.kn-ver-n{font-size:12px;color:#686B72;min-width:28px}
+
 /* HU-168 · Estado con icono y texto (StatusIcon): la forma del icono y el texto lo comunican aunque no se vea el color */
 .status-ic{display:inline-flex;align-items:center;gap:4px;vertical-align:middle;line-height:1;flex:none}
 .status-ic svg{flex:none}
