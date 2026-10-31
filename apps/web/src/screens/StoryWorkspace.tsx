@@ -96,6 +96,18 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
   const editDraft = useDraft<Edit | null>(draftKey('historia.edicion', slug, ctx ? storyId : null), null, { base: ctx ? fingerprint(Object.values(fieldsOf(ctx.item))) : null });
   const edit = editDraft.value; const setEdit = (v: Edit | null) => { if (v) editDraft.set(v); else editDraft.clear(); };
   const [editBusy, setEditBusy] = useState(false); const [editErr, setEditErr] = useState<string | null>(null);
+  // HU-165 · Cancelar historia: confirmación y motivo; queda en «Descartada» (no completada). No consume IA.
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const cancelStory = async () => {
+    if (!ctx) return; const item = ctx.item;
+    if (!confirm(`¿Cancelar ${item.storyId} · ${item.title}?\n\nNo se hará: la historia queda en «Descartadas», no en Completadas.\nSi ya está resuelta por otra vía, ciérrala con «Cerrar sin ejecutar» desde el Backlog.`)) return;
+    const reason = prompt(`Motivo para cancelar ${item.storyId} (mínimo 3 caracteres):`);
+    if (reason === null) return;
+    if (reason.trim().length < 3) { flash('Indica un motivo de al menos 3 caracteres para cancelar la historia', 'err'); return; }
+    setCancelBusy(true);
+    try { await api.discardStory(slug, item.id, reason); flash(`${item.storyId} cancelada · queda en Descartadas`); await load(); }
+    catch (e: any) { flash(e.message, 'err'); } finally { setCancelBusy(false); }
+  };
   const startEdit = () => { if (ctx) { const f = fieldsOf(ctx.item); setEdit({ ...f, orig: f }); setEditErr(null); } };
   const saveEdit = async () => {
     if (!ctx || !edit) return; setEditErr(null);
@@ -143,6 +155,7 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {!last && it.status === 'pending' && !it.archivedAt && <button className="btn btn-primary btn-sm" onClick={() => navigate(`/backlog?ejecutar=${it.id}`)}>{Icon.arrow()}Ejecutar desde Backlog</button>}
+            {it.status !== 'in_progress' && it.status !== 'done' && it.status !== 'discarded' && !it.archivedAt && <button className="btn btn-ghost btn-sm" title="No se hará: la historia queda en Descartadas (pide confirmación y motivo)" onClick={cancelStory} disabled={cancelBusy}>{cancelBusy ? <span className="spin" /> : Icon.x(14)}Cancelar historia</button>}
           </div>
         </header>
         {currentDecision && !it.archivedAt && <Notice kind="warn"><div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', flex: 1 }}>

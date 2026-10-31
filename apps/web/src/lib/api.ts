@@ -246,6 +246,8 @@ export const api = {
   systemSandbox: (force = false) => request<{ available: 'docker' | 'wsl' | 'host-min' | 'unavailable'; docker: boolean; wsl: boolean; detail: string; checkedAt: string }>(`/api/system/sandbox${force ? '?force=1' : ''}`),
   systemPolicy: () => request<{ op: string; level: 'local' | 'auth' | 'external'; tool: string | null; label: string }[]>('/api/system/policy'),
   markStoryDone: (slug: string, id: string, opts?: { force: boolean; reason?: string }) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/done`, { method: 'POST', body: opts ? JSON.stringify(opts) : undefined }),
+  /** HU-165 · Cancelar historia: queda en «Descartadas» con su motivo (sin IA). 409 si está en curso, completada o descartada. */
+  discardStory: (slug: string, id: string, reason: string) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/discard`, { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) }),
   // M6 · espacio de la historia
   story: (slug: string, id: string) => request<StoryContext>(`/api/workspaces/${slug}/stories/${id}`),
   storyAskEstimate: (slug: string, id: string, agentId?: string | null) => request<{ agentId: string; agentName: string; model: string; estimatedUsd: number }>(`/api/workspaces/${slug}/stories/${id}/ask/estimate${agentId ? `?agentId=${encodeURIComponent(agentId)}` : ''}`),
