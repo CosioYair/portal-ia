@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { SystemStatus } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
-import { Icon, Notice } from './ui.tsx';
+import { Icon } from './ui.tsx';
 
 /**
  * Aviso de sincronización del propio Portal: si el código del repositorio cambió desde que arrancó (historias integradas),
@@ -14,6 +14,9 @@ export function SystemBar() {
   const [outcome, setOutcome] = useState<SystemStatus['update'] extends infer U ? (U extends { outcome?: infer O } ? O : never) : never>(null);
   const [log, setLog] = useState('');
   const [showLog, setShowLog] = useState(false);
+  // HU-164: la barra es una sola línea; los detalles y la confirmación se abren debajo, de uno en uno.
+  const [open, setOpen] = useState<'none' | 'details' | 'confirm'>('none');
+  const authRef = useRef<HTMLInputElement | null>(null);
   const startedRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -27,6 +30,9 @@ export function SystemBar() {
     return () => { alive = false; window.removeEventListener('focus', onFocus); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
+
+  // Al abrir la confirmación con «Actualizar», el foco pasa a la casilla obligatoria.
+  useEffect(() => { if (open === 'confirm') authRef.current?.focus(); }, [open]);
 
   const update = async () => {
     setPhase('updating'); setLog(''); setShowLog(true);
@@ -50,26 +56,41 @@ export function SystemBar() {
 
   if (!st || (st.action === 'none' && phase === 'idle')) return null;
   const restart = st.action === 'restart';
+  const toggle = (p: 'details' | 'confirm') => setOpen(o => (o === p ? 'none' : p));
+  const busy = phase === 'updating' || phase === 'restarting';
   return (
-    <div style={{ padding: '10px 24px 0' }}>
-      <Notice kind={phase === 'failed' ? 'err' : 'warn'}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
-          <div>
-            <strong>{st.startCommit === st.headCommit ? 'La interfaz servida se construyó con un commit anterior' : 'El código del Portal cambió desde que arrancó'}</strong> ({st.changedFiles.length} archivo(s){st.stories.length ? ` · ${st.stories.join(', ')}` : ''}; servidor {st.startCommit} · interfaz {st.buildCommit ?? '?'} · repositorio {st.headCommit}).{' '}
-            {restart ? 'Hace falta reconstruir y reiniciar para que los cambios entren en funcionamiento (hasta entonces las historias integradas no están activas).' : 'Basta reconstruir la interfaz y recargar el navegador.'}
-          </div>
-          {phase === 'idle' && <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo ejecutar <span className="mono">npm install</span> (si cambiaron dependencias), <span className="mono">npm run build</span>{restart ? ' y reiniciar el servidor del Portal' : ''} en la carpeta de esta instalación.</span></label>}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            {phase === 'idle' && <button className="btn btn-primary btn-sm" onClick={update} disabled={!auth}>{Icon.arrow()}{restart ? 'Reconstruir y reiniciar el Portal' : 'Reconstruir y recargar'}</button>}
-            {phase === 'updating' && <span className="sm13" style={{ display: 'flex', gap: 8, alignItems: 'center' }}><span className="spin" /> Reconstruyendo… (puede tardar un par de minutos)</span>}
-            {phase === 'restarting' && <span className="sm13" style={{ display: 'flex', gap: 8, alignItems: 'center' }}><span className="spin" /> Reiniciando el Portal… la página se recargará sola.</span>}
-            {phase === 'stopped' && <div className="sm13" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><span><strong>El Portal se ha reconstruido y apagado</strong> (no corre bajo el supervisor, así que no puede relanzarse solo). Arráncalo desde la carpeta <span className="mono">{outcome?.cwd}</span> con:</span><pre className="mono" style={{ margin: 0, padding: 8, background: '#1A1B1E', color: '#E5E3DC', borderRadius: 8 }}>{(outcome?.commands ?? ['npm start']).join('\n')}</pre><span className="muted">Con <span className="mono">npm start</span> (supervisor incluido desde v0.10) el próximo reinicio será automático.</span></div>}
-            {phase === 'failed' && <><span className="sm13">La actualización falló. Revisa el registro y, si hace falta, ejecuta <span className="mono">npm run build</span> a mano.</span><button className="btn btn-ghost btn-sm" onClick={() => setPhase('idle')}>Reintentar</button></>}
-            {log && <button className="lnk sm13" onClick={() => setShowLog(v => !v)}>{showLog ? 'ocultar registro' : 'ver registro'}</button>}
-          </div>
-          {showLog && log && <pre className="mono" style={{ margin: 0, padding: 10, background: '#1A1B1E', color: '#E5E3DC', borderRadius: 8, fontSize: 11.5, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{log.slice(-6000)}</pre>}
+    <div className="sysbar">
+      <div className={`sysbar-line${phase === 'failed' ? ' sysbar-err' : ''}`} role="status" aria-label="Cambios sin activar">
+        {busy ? <span className="spin" aria-hidden="true" /> : Icon.warn()}
+        <span className="sysbar-text">
+          {phase === 'idle' && <strong>Hay cambios sin activar</strong>}
+          {phase === 'updating' && 'Reconstruyendo… (puede tardar un par de minutos)'}
+          {phase === 'restarting' && 'Reiniciando el Portal… la página se recargará sola.'}
+          {phase === 'stopped' && <><strong>El Portal se ha reconstruido y apagado</strong>: arráncalo a mano (comandos en Detalles)</>}
+          {phase === 'failed' && <><strong>La actualización falló</strong>: revisa el registro en Detalles</>}
+        </span>
+        <span className="sysbar-sep" aria-hidden="true">·</span>
+        <button className="btn btn-ghost btn-sm" aria-expanded={open === 'details'} onClick={() => toggle('details')}>Detalles</button>
+        {phase === 'idle' && <><span className="sysbar-sep" aria-hidden="true">·</span><button className="btn btn-primary btn-sm" aria-expanded={open === 'confirm'} onClick={() => toggle('confirm')}>Actualizar</button></>}
+        {phase === 'failed' && <><span className="sysbar-sep" aria-hidden="true">·</span><button className="btn btn-ghost btn-sm" onClick={() => { setAuth(false); setPhase('idle'); setOpen('confirm'); }}>Reintentar</button></>}
+      </div>
+      {open === 'details' && <div className="sysbar-panel" id="sysbar-details">
+        <div>
+          <strong>{st.startCommit === st.headCommit ? 'La interfaz servida se construyó con un commit anterior' : 'El código del Portal cambió desde que arrancó'}</strong> ({st.changedFiles.length} archivo(s){st.stories.length ? ` · ${st.stories.join(', ')}` : ''}; servidor {st.startCommit} · interfaz {st.buildCommit ?? '?'} · repositorio {st.headCommit}).{' '}
+          {restart ? 'Hace falta reconstruir y reiniciar para que los cambios entren en funcionamiento (hasta entonces las historias integradas no están activas).' : 'Basta reconstruir la interfaz y recargar el navegador.'}
         </div>
-      </Notice>
+        {phase === 'failed' && <span>La actualización falló. Revisa el registro y, si hace falta, ejecuta <span className="mono">npm run build</span> a mano.</span>}
+        {phase === 'stopped' && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><span><strong>El Portal se ha reconstruido y apagado</strong> (no corre bajo el supervisor, así que no puede relanzarse solo). Arráncalo desde la carpeta <span className="mono">{outcome?.cwd}</span> con:</span><pre className="mono" style={{ margin: 0, padding: 8, background: '#1A1B1E', color: '#E5E3DC', borderRadius: 8 }}>{(outcome?.commands ?? ['npm start']).join('\n')}</pre><span className="muted">Con <span className="mono">npm start</span> (supervisor incluido desde v0.10) el próximo reinicio será automático.</span></div>}
+        {log && <div className="sysbar-actions"><button className="lnk sm13" aria-expanded={showLog} onClick={() => setShowLog(v => !v)}>{showLog ? 'ocultar registro' : 'ver registro'}</button></div>}
+        {showLog && log && <pre className="mono" style={{ margin: 0, padding: 10, background: '#1A1B1E', color: '#E5E3DC', borderRadius: 8, fontSize: 11.5, maxHeight: 220, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{log.slice(-6000)}</pre>}
+      </div>}
+      {open === 'confirm' && phase === 'idle' && <div className="sysbar-panel" id="sysbar-confirm">
+        <label className="ck"><input ref={authRef} className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo ejecutar <span className="mono">npm install</span> (si cambiaron dependencias), <span className="mono">npm run build</span>{restart ? ' y reiniciar el servidor del Portal' : ''} en la carpeta de esta instalación.</span></label>
+        <div className="sysbar-actions">
+          <button className="btn btn-primary btn-sm" onClick={update} disabled={!auth}>{Icon.arrow()}{restart ? 'Reconstruir y reiniciar el Portal' : 'Reconstruir y recargar'}</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => setOpen('none')}>Cancelar</button>
+        </div>
+      </div>}
     </div>
   );
 }
