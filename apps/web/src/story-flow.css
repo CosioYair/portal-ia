@@ -30,6 +30,10 @@
 .sf-evidence { margin: 0; padding: 8px 10px; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; background: #fff; border: 1px solid #EEECE6; border-radius: 8px; }
 .sf-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .sf-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid #E5E3DC; border-radius: 10px; background: #FAF9F6; }
+/* HU-166 · autorización de la iteración en la cabecera, bajo las acciones (mismo aspecto que .sf-confirm) */
+.sf-authorize { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid #E5E3DC; border-radius: 10px; background: #FAF9F6; scroll-margin-top: 16px; min-width: 0; }
+.sf-authorize-head { display: flex; flex-direction: column; gap: 2px; }
+.sf-authorize-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .sf-req { display: inline-flex; gap: 4px; flex-wrap: wrap; }
 .sf-agents { display: flex; flex-direction: column; gap: 6px; }
 .sf-agent { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 8px; align-items: center; font-size: 13px; }

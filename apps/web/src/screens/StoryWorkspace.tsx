@@ -122,6 +122,8 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
     catch (e: any) { setEditErr(e.message); } finally { setEditBusy(false); }
   };
   const [budget, setBudget] = useState(''); const [authIter, setAuthIter] = useState(false);
+  // HU-166 · el formulario de autorización se abre en la cabecera (StoryFlowPanel), sin cambiar de pestaña ni de hash.
+  const [authOpen, setAuthOpen] = useState(false);
   const [pipeline, setPipeline] = useState<PipelineConfig>(DEFAULT_PIPELINE);
   const dec = decisions?.storyId === storyId ? decisions : null;
   const currentDecision = dec?.current ?? null;
@@ -135,7 +137,14 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
     await load();
   };
   useEffect(() => { if (pending && !budget) setBudget(Math.max(0.5, Math.ceil(pending.estimatedUsd * 2 * 2) / 2).toFixed(2)); }, [pending, budget]);
-  const authorize = async () => { if (!pending) return; setIterBusy(true); try { await api.authorizeProcess(slug, pending.id, Number(budget), pipeline); flash(`Iteración autorizada con ${fmtUsd(Number(budget))}`); setAuthIter(false); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setIterBusy(false); } };
+  const authorize = async () => { if (!pending) return; setIterBusy(true); try { await api.authorizeProcess(slug, pending.id, Number(budget), pipeline); flash(`Iteración autorizada con ${fmtUsd(Number(budget))}`); setAuthIter(false); setAuthOpen(false); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setIterBusy(false); } };
+  // Otra iteración vigente: el formulario y la casilla no se arrastran (HU-161).
+  useEffect(() => { setAuthOpen(false); setAuthIter(false); }, [pending?.id]);
+  const openAuthorize = () => {
+    if (!pending) { openTab('iteraciones'); return; } // solo si no hay iteración vigente que autorizar: se revisa el historial
+    setAuthOpen(true);
+    setTimeout(() => document.getElementById('sec-authorize-story')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+  };
 
   if (err) return <Shell crumb="Historia"><main className="page"><Notice kind="err">{err}</Notice></main></Shell>;
   if (!ctx) return <Shell crumb="Historia"><main className="page"><span className="spin" aria-label="Cargando" /></main></Shell>;
@@ -143,6 +152,14 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
   const onProcChange = (p: Process) => setCtx(c => c ? { ...c, lastProcess: c.lastProcess?.id === p.id ? { ...p } : c.lastProcess, processes: c.processes.map(x => x.id === p.id ? p : x) } : c);
   const openTasks = ctx.tasks.filter(t => t.status === 'open').length;
   const fails = ctx.feedback.items.filter(i => i.result === 'fail').length;
+  // HU-166 · Formulario de autorización en la cabecera: presupuesto, casilla explícita, pipeline y Gauntlet.
+  const authForm = pending && authOpen ? <div id="sec-authorize-story" className="sf-authorize" aria-label="Autorizar la iteración">
+    <div className="sf-authorize-head"><strong className="sm13">Autorizar la iteración {iterOf(pending) ?? '—'}</strong><span className="small muted">estimación ≈ {fmtUsd(pending.estimatedUsd)} · {pending.steps.length} pasos ({pending.steps.map(s => s.agentName).join(', ')})</span></div>
+    <div className="sf-authorize-row"><label className="label" htmlFor="it-budget" style={{ margin: 0 }}>Presupuesto (USD)</label><input id="it-budget" className="input mono" style={{ width: 120, height: 34 }} type="number" min={0.1} step={0.5} value={budget} onChange={e => setBudget(e.target.value)} /><label className="ck"><input className="cb" type="checkbox" checked={authIter} onChange={e => setAuthIter(e.target.checked)} /><span>Autorizo al equipo a trabajar hasta ese importe</span></label></div>
+    <PipelineOptions compact value={pipeline} onChange={setPipeline} />
+    <GauntletOptions slug={slug} projectId={ctx.item.projectId} itemId={ctx.item.id} value={pipeline.gauntlet} onChange={g => setPipeline(p => ({ ...p, gauntlet: g }))} />
+    <div className="sf-authorize-row"><button className="btn btn-primary btn-sm" onClick={authorize} disabled={!authIter || iterBusy || !(Number(budget) > 0)}>{iterBusy ? <span className="spin spin-light" /> : Icon.arrow()}Autorizar iteración</button><button className="btn btn-ghost btn-sm" onClick={() => setAuthOpen(false)} disabled={iterBusy}>Cancelar</button></div>
+  </div> : null;
 
   return (
     <Shell crumb={<><Link to="/backlog" className="lnk">Backlog</Link> / {it.storyId}</>}>
@@ -155,6 +172,7 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {!last && it.status === 'pending' && !it.archivedAt && <button className="btn btn-primary btn-sm" onClick={() => navigate(`/backlog?ejecutar=${it.id}`)}>{Icon.arrow()}Ejecutar desde Backlog</button>}
+            {it.archivedAt && <Link className="btn btn-primary btn-sm" to="/archivo">{Icon.arrow()}Restaurar desde el archivo</Link>}
             {it.status !== 'in_progress' && it.status !== 'done' && it.status !== 'discarded' && !it.archivedAt && <button className="btn btn-ghost btn-sm" title="No se hará: la historia queda en Descartadas (pide confirmación y motivo)" onClick={cancelStory} disabled={cancelBusy}>{cancelBusy ? <span className="spin" /> : Icon.x(14)}Cancelar historia</button>}
           </div>
         </header>
@@ -165,7 +183,7 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
           {currentDecision.supersededCount > 0 && <button className="lnk small" onClick={() => openTab('iteraciones')}>{currentDecision.supersededCount === 1 ? '1 autorización anterior superada' : `${currentDecision.supersededCount} autorizaciones anteriores superadas`} · ver historial</button>}
           <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
             {currentDecision.kind === 'process_authorization'
-              ? <button className="btn btn-primary btn-sm" onClick={() => openTab('iteraciones')}>Autorizar iteración</button>
+              ? <button className="btn btn-secondary btn-sm" onClick={openAuthorize}>Abrir la autorización</button>
               : <Link className="btn btn-secondary btn-sm" to={`/procesos/${currentDecision.processId}`}>Decidir en el proceso</Link>}
             <Link className="btn btn-ghost btn-sm" to="/autorizaciones">Autorizaciones</Link>
           </span>
@@ -173,8 +191,9 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
         {it.archivedAt && <Notice kind="info"><strong>Historia archivada</strong> con la etapa anterior ({new Date(it.archivedAt).toLocaleDateString('es-MX')}). Es histórica: puedes consultarla, pero no admite acciones. Para retomarla, restáurala desde el <Link className="lnk" to="/archivo">archivo histórico</Link>.</Notice>}
         <fieldset disabled={!!it.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
         {last?.guidance?.flow ? <StoryFlowPanel proc={last} story={{ id: it.id, storyId: it.storyId, title: it.title }} variant="story" onChange={onProcChange}
-          onAsk={q => { setText(q); setAsk(true); openTab('chat'); }} onOpenIterations={() => openTab('iteraciones')} />
-          : last?.guidance && <Notice kind={last.guidance.tone === 'err' ? 'err' : last.guidance.tone === 'ok' ? 'ok' : last.guidance.tone === 'warn' ? 'warn' : 'info'}><div><strong>Siguiente paso:</strong> {last.guidance.next}</div></Notice>}
+          onAsk={q => { setText(q); setAsk(true); openTab('chat'); }} onOpenIterations={() => openTab('iteraciones')}
+          onAuthorize={openAuthorize} authorizeSlot={authForm} readOnly={!!it.archivedAt} />
+          : last && <><Notice kind={last.guidance?.tone === 'err' ? 'err' : last.guidance?.tone === 'ok' ? 'ok' : last.guidance?.tone === 'warn' ? 'warn' : 'info'}><div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', flex: 1 }}><span><strong>Siguiente paso:</strong> {last.guidance?.next ?? 'abre el proceso para ver en qué punto está.'}</span><Link className={`btn ${it.archivedAt ? 'btn-secondary' : 'btn-primary'} btn-sm`} style={{ marginLeft: 'auto' }} to={`/procesos/${last.id}`}>Ver el proceso</Link></div></Notice>{authForm}</>}
         </fieldset>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 320px)', gap: 16, alignItems: 'start', marginTop: 14 }}>
@@ -183,7 +202,7 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
               {(['estado', 'chat', 'tareas', 'iteraciones'] as const).map(t => <button key={t} className={`btn btn-sm ${tab === t ? 'btn-primary' : 'btn-ghost'}`} onClick={() => openTab(t)}>{t === 'estado' ? 'Estado y prueba' : t === 'chat' ? `Chat con el equipo${ctx.messages.length ? ` (${ctx.messages.length})` : ''}` : t === 'tareas' ? `Tareas${openTasks ? ` (${openTasks})` : ''}` : `Iteraciones (${ctx.iterations})`}</button>)}
             </div>
             <fieldset disabled={!!it.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {tab === 'estado' && (last ? (last.status === 'done' || (last.result?.changes.length ?? 0) > 0 ? <StoryResult proc={last} onChange={onProcChange} /> : <section className="card card-b"><p className="sm13">La iteración actual está <strong>{last.status === 'running' ? 'en ejecución' : last.status === 'pending_authorization' ? 'pendiente de autorización' : last.status}</strong>. {last.status === 'pending_authorization' ? (supOf(last) ? `Está superada por la iteración ${supOf(last)!.byIteration ?? 'más reciente'}: decide sobre la vigente o restáurala desde el historial.` : 'Autorízala en la pestaña Iteraciones.') : ''}<Link className="lnk" to={`/procesos/${last.id}`}> Ver el proceso</Link>.</p></section>) : <section className="card card-b"><p className="sm13 muted">Esta historia aún no se ha ejecutado. Hazlo desde Backlog («Ejecutar») para que el equipo proponga el diff; después todo el seguimiento ocurre aquí.</p></section>)}
+            {tab === 'estado' && (last ? (last.status === 'done' || (last.result?.changes.length ?? 0) > 0 ? <StoryResult proc={last} onChange={onProcChange} /> : <section className="card card-b"><p className="sm13">La iteración actual está <strong>{last.status === 'running' ? 'en ejecución' : last.status === 'pending_authorization' ? 'pendiente de autorización' : last.status}</strong>. {last.status === 'pending_authorization' ? (supOf(last) ? `Está superada por la iteración ${supOf(last)!.byIteration ?? 'más reciente'}: decide sobre la vigente o restáurala desde el historial.` : 'Autorízala con el botón de la cabecera.') : ''}<Link className="lnk" to={`/procesos/${last.id}`}> Ver el proceso</Link>.</p></section>) : <section className="card card-b"><p className="sm13 muted">Esta historia aún no se ha ejecutado. Hazlo desde Backlog («Ejecutar») para que el equipo proponga el diff; después todo el seguimiento ocurre aquí.</p></section>)}
 
             {tab === 'chat' && <section className="card">
               <div className="card-h"><div><div className="h3">Chat con los agentes de la historia</div><div className="small muted">El agente elegido responde con todo el contexto (criterio, diff, QA, prueba, tareas). Cada pregunta es una llamada autorizada; las notas sin IA son gratis.</div></div></div>
@@ -231,9 +250,9 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
                 {ctx.processes.some(supOf) && <span className="small muted">Las iteraciones con la autorización superada solo aparecen en el historial de abajo.</span>}
                 {ctx.processes.map((p, i) => ({ p, n: iterOf(p) ?? ctx.processes.length - i })).filter(x => !supOf(x.p)).map(({ p, n }) => <div key={p.id} className="rrow" style={{ alignItems: 'flex-start' }}><span className="mono small muted">Iteración {n}</span><span style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2 }}><span style={{ fontWeight: 500 }}>{p.guidance?.phase ?? p.status}{p.id === ctx.processes.find(x => !supOf(x))?.id && <> <Chip tone="accent" xs>vigente</Chip></>}</span><span className="small muted">{new Date(p.createdAt).toLocaleString()} · {p.steps.length} pasos · gastado {fmtUsd(p.spentUsd)} de {fmtUsd(p.budgetUsd)}{p.result?.iterationContext ? ' · con contexto de iteración' : ''}</span></span><Link className="btn btn-ghost btn-sm" to={`/procesos/${p.id}`}>Abrir</Link></div>)}
                 {pending ? <Notice kind="warn"><div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  <div><strong>Iteración {iterOf(pending) ?? '—'} pendiente de autorización</strong> · estimación ≈ {fmtUsd(pending.estimatedUsd)} · {pending.steps.length} pasos ({pending.steps.map(s => s.agentName).join(', ')})</div>
+                  <div><strong>Iteración {iterOf(pending) ?? '—'} pendiente de autorización</strong> · se autoriza en la cabecera · estimación ≈ {fmtUsd(pending.estimatedUsd)} · {pending.steps.length} pasos ({pending.steps.map(s => s.agentName).join(', ')})</div>
                   {pending.result?.iterationContext && <details><summary className="small muted" style={{ cursor: 'pointer' }}>Contexto que recibirá el equipo</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap', fontSize: 12, background: '#FAF9F6', padding: 8, borderRadius: 8 }}>{pending.result.iterationContext}</pre></details>}
-                  <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}><label className="label" htmlFor="it-budget" style={{ margin: 0 }}>Presupuesto (USD)</label><input id="it-budget" className="input mono" style={{ width: 120, height: 34 }} type="number" min={0.1} step={0.5} value={budget} onChange={e => setBudget(e.target.value)} /><label className="ck"><input className="cb" type="checkbox" checked={authIter} onChange={e => setAuthIter(e.target.checked)} /><span>Autorizo al equipo a trabajar hasta ese importe</span></label></div><PipelineOptions compact value={pipeline} onChange={setPipeline} /><GauntletOptions slug={slug} projectId={ctx.item.projectId} itemId={ctx.item.id} value={pipeline.gauntlet} onChange={g => setPipeline(p => ({ ...p, gauntlet: g }))} /><div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}><button className="btn btn-primary btn-sm" onClick={authorize} disabled={!authIter || iterBusy || !(Number(budget) > 0)}>{iterBusy ? <span className="spin spin-light" /> : Icon.arrow()}Autorizar iteración</button></div>
+                  <div><button className="btn btn-secondary btn-sm" onClick={openAuthorize}>{Icon.arrow()}Abrir la autorización en la cabecera</button></div>
                 </div></Notice> : ctx.iteration.state !== 'in_progress' && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <div className="eyebrow">{ctx.iteration.needsReopen ? 'Reabrir la historia y crear una nueva iteración' : 'Nueva iteración'}</div>
                   <IterationComposer key={`${ctx.iterations}:${note}`} slug={slug} itemId={it.id} iteration={ctx.iteration} nextNumber={ctx.iterations + 1} initialNote={note}
