@@ -1,5 +1,6 @@
 import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import type { Agent, AssessmentEstimate, BacklogItem, BacklogOp, DelegationResult, ModelInfo, Process, ProviderId } from '@portal-ia/domain';
+import { PORTAL_CAPABILITIES } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
@@ -114,7 +115,7 @@ function sys(agent: Agent, slug: string): string {
   return `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} en la empresa «${ws.name}» dentro de Portal IA (plataforma local donde empresas son operadas por equipos de agentes de IA bajo la autoridad del propietario).
 Especialización: ${agent.config.specialization}
 Responsabilidades: ${agent.config.responsibilities.map(r => '- ' + r).join('\n')}
-Trabajas en español, con criterio profesional y sin inventar datos: usa solo el estado real que se te da. Si algo no procede o falta información, dilo con claridad.`;
+Trabajas en español, con criterio profesional y sin inventar datos: usa solo el estado real que se te da. Si algo no procede o falta información, dilo con claridad.${ws.kind === 'internal' ? `\n${PORTAL_CAPABILITIES}` : ''}`;
 }
 
 function extractJson(text: string): any | null {
@@ -155,7 +156,7 @@ export function createDelegation(slug: string, projectId: string | null, agentRe
   const est = estimateDelegation(slug, projectId, agentRef, req, opts.purpose ?? 'analysis');
   const lead = agentsRepo(slug).get(est.leadAgentId)!;
   const pid = projectId ?? projectsRepo(slug).list()[0]?.id ?? '';
-  const proc = processesRepo(slug).create({ projectId: pid, kind: 'delegated_task', title: `Encargo a ${lead.config.name}: ${req.slice(0, 90)}${req.length > 90 ? '…' : ''}`, estimatedUsd: est.estimatedUsd, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model })) });
+  const proc = processesRepo(slug).create({ projectId: pid, kind: 'delegated_task', title: `Análisis de ${lead.config.name}: ${req.slice(0, 90)}${req.length > 90 ? '…' : ''}`, estimatedUsd: est.estimatedUsd, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model })) });
   const d: DelegationResult = { request: req, leadAgentId: lead.id, leadAgentName: lead.config.name, triage: null, consulted: [], deliverable: null, knowledgeDocId: null, backlogOps: [], opsApplied: null, purpose: opts.purpose ?? 'analysis', conversationId: opts.conversationId ?? null, challenge: null };
   processesRepo(slug).setDelegation(proc.id, d);
   return processesRepo(slug).get(proc.id)!;
@@ -293,7 +294,7 @@ Busca omisiones, supuestos sin respaldo, contradicciones con las decisiones apro
         d.challenge = { agentId: ch.id, agentName: ch.config.name, text: chRes.text.trim() };
         procs.setDelegation(processId, d);
       }
-      const doc = knowledge.add({ projectId: proc.projectId, title: `${d.purpose === 'proposal' ? 'Propuesta' : d.purpose === 'team_review' ? 'Revisión del equipo' : d.purpose === 'stories' ? 'Historias propuestas' : 'Encargo'} · ${d.request.split('\n')[0].slice(0, 70)}`, body: `# Encargo\n${d.request}\n\n# Responsable\n${lead.config.name}\n\n${d.consulted.length ? `# Consultas al equipo\n${d.consulted.map(c => `## ${c.agentName}\n**Pregunta:** ${c.question}\n\n${c.answer}`).join('\n\n')}\n\n` : ''}# Entregable\n${d.deliverable}${d.challenge ? `\n\n# Cuestionamiento independiente (${d.challenge.agentName})\n${d.challenge.text}` : ''}${ops.length ? `\n\n# Propuestas al backlog (${ops.length})\n${ops.map(o => '- ' + JSON.stringify(o)).join('\n')}` : ''}`, authorAgentId: lead.id, authorAgentName: lead.config.name, processId });
+      const doc = knowledge.add({ projectId: proc.projectId, title: `${d.purpose === 'proposal' ? 'Propuesta' : d.purpose === 'team_review' ? 'Revisión del equipo' : d.purpose === 'stories' ? 'Historias propuestas' : 'Análisis'} · ${d.request.split('\n')[0].slice(0, 70)}`, body: `# Encargo\n${d.request}\n\n# Responsable\n${lead.config.name}\n\n${d.consulted.length ? `# Consultas al equipo\n${d.consulted.map(c => `## ${c.agentName}\n**Pregunta:** ${c.question}\n\n${c.answer}`).join('\n\n')}\n\n` : ''}# Entregable\n${d.deliverable}${d.challenge ? `\n\n# Cuestionamiento independiente (${d.challenge.agentName})\n${d.challenge.text}` : ''}${ops.length ? `\n\n# Propuestas al backlog (${ops.length})\n${ops.map(o => '- ' + JSON.stringify(o)).join('\n')}` : ''}`, authorAgentId: lead.id, authorAgentName: lead.config.name, processId });
       d.knowledgeDocId = doc.id;
       procs.setDelegation(processId, d);
     }

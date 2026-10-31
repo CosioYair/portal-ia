@@ -11,6 +11,7 @@ export * from './gauntlet.ts';
 export * from './batch.ts';
 export * from './assignment.ts';
 export * from './conversation.ts';
+export * from './portal-capabilities.ts';
 
 export const PROVIDER_META = {
   anthropic: { id: 'anthropic', name: 'Anthropic', consoleHost: 'console.anthropic.com', keyHint: 'sk-ant-…' },

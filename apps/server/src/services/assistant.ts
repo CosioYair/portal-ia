@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { REPO_ROOT } from '../config.ts';
 import { expandHome } from '../routes/fs.ts';
-import type { ModelInfo, ProviderId } from '@portal-ia/domain';
+import type { AssignmentStatus, ModelInfo, PipelinePhase, Process, ProviderId } from '@portal-ia/domain';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { platform, providersRepo, workspacesRepo } from '../db/platform.ts';
@@ -22,10 +22,10 @@ import { phaseContext } from './operationalPhase.ts';
 import { CAPABILITIES, type CapabilityPreview, type CapabilityResult } from './capabilities.ts';
 import { agentBackend, agentCaller, claudeCodeGate } from './claudeCode/backend.ts';
 import { lastDetection } from './claudeCode/detect.ts';
-import { ASSIGNMENT_STATUS_LABEL, backendLabel, STAGE_LABEL } from '@portal-ia/domain';
+import { ASSIGNMENT_OPEN, ASSIGNMENT_STATUS_LABEL, backendLabel, PORTAL_CAPABILITIES, STAGE_LABEL } from '@portal-ia/domain';
 import { monotonicNow } from '../clock.ts';
 import { conversationsRepo } from '../db/conversations.ts';
-import { createConversation, getConversation, ledgerForPrompt, proposeDecisions, recomputeStage } from './conversations.ts';
+import { createConversation, getConversation, ledgerForPrompt, proposeDecisions, recomputeStage, updateConversation } from './conversations.ts';
 import { createAssignment } from './assignments.ts';
 import { assignmentsRepo } from '../db/assignments.ts';
 
@@ -72,20 +72,7 @@ export const assistantRepo = {
   },
   /** Mensajes con el estado real de los procesos que crearon sus acciones (para que el chat no diga «en ejecución» cuando ya terminó). */
   listLive(limit = 80, conversationId: string | null = null): AssistantMessage[] {
-    return this.list(limit, conversationId).map(m => m.actions.some(a => (a.processId || a.assignmentId) && a.workspaceSlug) ? { ...m, actions: m.actions.map(a => {
-      // Encargo propuesto: su estado real (al leer; el mensaje no se modifica). Pendiente solo mientras sea borrador.
-      if (a.assignmentId && a.workspaceSlug) {
-        try { const x = assignmentsRepo(a.workspaceSlug).get(a.assignmentId); if (!x || a.status === 'failed') return a;
-          const settled = x.status === 'accepted' || x.status === 'cancelled';
-          return { ...a, status: x.status === 'draft' ? a.status : x.status === 'cancelled' ? 'rejected' as const : 'done' as const, live: { status: x.status, phase: `Encargo ${ASSIGNMENT_STATUS_LABEL[x.status]}`, next: x.status === 'ready_for_review' ? 'Revisa la evidencia y acéptalo o pide cambios.' : x.status === 'running' ? 'Se está ejecutando: sigue el progreso en su tarjeta.' : settled ? 'No requiere ninguna acción.' : 'Decide en su tarjeta.', tone: x.status === 'failed' ? 'err' as const : x.status === 'ready_for_review' || x.status === 'needs_owner' ? 'warn' as const : settled ? 'ok' as const : 'info' as const, settled } };
-        } catch { return a; }
-      }
-      if (!a.processId || !a.workspaceSlug) return a;
-      try { const p = processesRepo(a.workspaceSlug).get(a.processId); if (!p) return a;
-        // Propuesta de un proceso archivado: ya no se autoriza desde el chat (solo se muestra; el mensaje no se modifica).
-        if (p.archivedAt) return { ...a, status: a.status === 'pending' ? 'done' as const : a.status, live: { status: p.status, phase: 'Archivado con la etapa anterior', next: 'Es histórico: consúltalo en el archivo; no requiere ninguna acción.', tone: 'info' as const, settled: true } };
-        const g = describeProcess(p, { isPortalRepo: a.workspaceSlug === INTERNAL_WORKSPACE.slug }); return { ...a, live: { status: p.status, ...g } }; } catch { return a; }
-    }) } : m);
+    return this.list(limit, conversationId).map(m => m.actions.some(a => (a.processId || a.assignmentId) && a.workspaceSlug) ? { ...m, actions: m.actions.map(liveAction) } : m);
   },
   add(m: Omit<AssistantMessage, 'id' | 'createdAt'>, conversationId: string | null = null): AssistantMessage {
     const id = crypto.randomUUID(); const ts = monotonicNow();
@@ -99,6 +86,34 @@ export const assistantRepo = {
   /** «Limpiar» archiva conversaciones; nunca borra mensajes ni decisiones (el registro es duradero). */
   clear() { platform.exec(`UPDATE assistant_conversations SET status = 'archived' WHERE status = 'active'`); }
 };
+
+/** Estado de la acción según el estado REAL del encargo: «done» solo cuando el propietario lo aceptó. */
+const ASSIGNMENT_ACTION: Record<AssignmentStatus, AssistantAction['status']> = { draft: 'pending', pending_authorization: 'pending', running: 'running', needs_owner: 'pending', ready_for_review: 'pending', changes_requested: 'pending', accepted: 'done', cancelled: 'rejected', failed: 'failed' };
+/** Una propuesta ya autorizada desde el chat (se guardó «done» al AUTORIZAR) toma el estado real de su proceso. */
+const processAction = (p: Process): AssistantAction['status'] => p.status === 'done' ? 'done' : p.status === 'running' || p.status === 'pending_authorization' ? 'running' : p.status === 'cancelled' ? 'rejected' : 'failed';
+
+/** Acción con su estado real (al leer; el mensaje no se modifica). Nunca «hecha» si lo que propuso no ha terminado. */
+function liveAction(a: AssistantAction): AssistantAction {
+  // Mensajes anteriores: el análisis delegado se llamaba «Encargo a …» (encargo es solo EN-n).
+  if (a.type === 'propose_delegation') a = { ...a, label: a.label.replace(/^Encargo a /, 'Análisis de ') };
+  if (a.assignmentId && a.workspaceSlug) {
+    try { const x = assignmentsRepo(a.workspaceSlug).get(a.assignmentId); if (!x || a.status === 'failed') return a;
+      const settled = x.status === 'accepted' || x.status === 'cancelled';
+      return { ...a, status: ASSIGNMENT_ACTION[x.status], live: { status: x.status, phase: `Encargo ${ASSIGNMENT_STATUS_LABEL[x.status]}`, next: x.status === 'ready_for_review' ? 'Revisa la evidencia y acéptalo o pide cambios (aceptar no integra en main).' : x.status === 'running' ? 'Se está ejecutando: sigue el progreso en su tarjeta.' : settled ? 'No requiere ninguna acción.' : 'Decide en su tarjeta.', tone: x.status === 'failed' ? 'err' as const : x.status === 'ready_for_review' || x.status === 'needs_owner' ? 'warn' as const : settled ? 'ok' as const : 'info' as const, settled } };
+    } catch { return a; }
+  }
+  if (!a.processId || !a.workspaceSlug) return a;
+  try { const p = processesRepo(a.workspaceSlug).get(a.processId); if (!p) return a;
+    const status = a.status === 'done' && (a.type === 'propose_execution' || a.type === 'propose_delegation') ? processAction(p) : a.status;
+    // Propuesta de un proceso archivado: ya no se autoriza desde el chat (solo se muestra; el mensaje no se modifica).
+    if (p.archivedAt) return { ...a, status: status === 'pending' ? 'rejected' as const : status, live: { status: p.status, phase: 'Archivado con la etapa anterior', next: 'Es histórico: consúltalo en el archivo; no requiere ninguna acción.', tone: 'info' as const, settled: true } };
+    const g = describeProcess(p, { isPortalRepo: a.workspaceSlug === INTERNAL_WORKSPACE.slug }); return { ...a, status, live: { status: p.status, ...g } }; } catch { return a; }
+}
+
+/** Una acción tal como la ve el modelo en el historial: qué es y en qué punto REAL está (nunca un «done» sin contexto). */
+const STATE_TEXT: Record<AssistantAction['status'], string> = { pending: 'espera al propietario', running: 'en marcha', done: 'hecho', failed: 'no se pudo', rejected: 'descartado' };
+const PHASE_TEXT: Partial<Record<PipelinePhase, string>> = { implementing: 'implementación', recovering: 'recuperación', repairing: 'reparación', applying: 'aplicación en el worktree', verifying: 'verificación', installing: 'instalación', qa: 'QA', correcting: 'corrección', finished: 'terminado' };
+const actionForPrompt = (a: AssistantAction) => `${a.label.slice(0, 90)} → ${a.live ? `${a.live.phase}${a.live.settled ? '' : ` (${a.live.next.slice(0, 120)})`}` : a.type === 'open_decision' ? 'abierta: decide el propietario' : `${STATE_TEXT[a.status]}${a.status === 'failed' && a.detail ? `: ${a.detail.slice(0, 160)}` : ''}`}`;
 
 function assistantAgent() {
   const a = activeAgents(INTERNAL_WORKSPACE.slug).find(x => x.key === 'ws-asistente');
@@ -125,11 +140,12 @@ const SCREEN_MAP = `# Pantallas del Portal (menú izquierdo salvo que se indique
 - Asistente (/asistente): este chat a pantalla completa; también como panel flotante «Asistente» abajo a la derecha en todas las pantallas.
 - Panel (/panel): contexto del proyecto, dirección, tarjeta Repositorio (estado git, crear main, remoto, publicar main, «Usar la carpeta de esta instalación»), backlog resumido, equipo.
 - Equipo de IA (/equipo): agentes, organigrama, crear agente especializado, configurar cada agente (modelo, límites).
-- Backlog (/backlog): historias por secciones (en curso/para revisar, pendientes por prioridad, completadas, descartadas), buscar/filtrar, «Ejecutar», «Devolver a pendiente», «Cerrar», aviso «Pendientes de tu decisión», «Nueva solicitud», «Encargo al equipo».
+- Backlog (/backlog): historias por secciones (en curso/para revisar, pendientes por prioridad, completadas, descartadas), buscar/filtrar, «Ejecutar», «Devolver a pendiente», «Cerrar», aviso «Pendientes de tu decisión», «Nueva solicitud», «Encargo al equipo» (pide un análisis delegado: documento, no código).
+- Lotes (/lotes): ejecución continua de varias historias con una sola autorización; /lotes/<id> muestra el estado de cada una.
 - Actividad (/actividad): lista de procesos; cada proceso (/procesos/<id>) muestra pasos, costo, orientación «Siguiente paso», y para historias: Resumen (qué cambia y dónde, orden de cierre, prueba manual paso a paso), diff por archivo, revisión QA, Aplicar, Verificar, Integrar, Publicar, Rechazar, Recuperar/Volver a ejecutar.
-- Conocimiento (/conocimiento): documentos generados (evaluación, planes, encargos) y pestaña «Lecciones de la organización» (M4: lecciones detectadas sin IA → proponer con IA (autorizado) → validar → se inyectan en los prompts por papel → promover a práctica de plantilla (M5)).
+- Conocimiento (/conocimiento): documentos generados (evaluación, planes, análisis, registros de encargos EN-n) y pestaña «Lecciones de la organización» (M4: lecciones detectadas sin IA → proponer con IA (autorizado) → validar → se inyectan en los prompts por papel → promover a práctica de plantilla (M5)).
 - Espacio de la historia (/historias/<id>): todo lo de una historia en un solo lugar: contexto, equipo, orden de cierre, prueba paso a paso con feedback, chat con los agentes implicados, tareas e iteraciones.
-- Pipeline autorizado: al autorizar una historia (Backlog → Ejecutar, la tarjeta del chat o la bandeja), el equipo aplica en un worktree aislado, verifica en el sandbox, QA valida con evidencia y corrige errores rutinarios dentro del presupuesto, hasta «Implementación verificada por QA — lista para revisión del propietario». Si se pausa (presupuesto, red, entorno, límite), la cabecera de la historia explica por qué y ofrece «Continuar». Nunca integra, reinicia ni publica solo. Si el Desarrollador entrega un formato no reconocible, primero se recupera sin IA y después, si está autorizado, se repara sin repetir el plan.
+- Pipeline autorizado (historia desde Backlog → Ejecutar, la tarjeta del chat o la bandeja; encargo EN-n desde su tarjeta): ver «Qué hace hoy el Portal». Si se pausa (presupuesto, red, entorno, límite), la cabecera de la historia o la tarjeta del encargo explica por qué y cómo seguir. Si el Desarrollador entrega un formato no reconocible, primero se recupera sin IA y después, si está autorizado, se repara sin repetir el plan.
 - Etapas (/etapa, botón «Nueva etapa» en Backlog): el propietario inicia una etapa nueva; el trabajo activo (historias, procesos, decisiones) se ARCHIVA de forma reversible y se guarda en Conocimiento una «Línea base» (qué existe y está verificado). Archivo histórico (/archivo): lo archivado, consultable y de solo lectura; una historia se puede restaurar con autorización. Lo archivado no es trabajo pendiente: no lo propongas para ejecutar.
 - Autorizaciones (/autorizaciones, lanzador «Autorizaciones» abajo a la izquierda; HU-009): bandeja de decisiones pendientes.
 - Presupuestos (/presupuestos): presupuesto mensual de la empresa y del proyecto (límite, gasto registrado, reservas, saldo; fijarlo pide confirmación); explica que el gasto de cada historia lo limita el presupuesto que se autoriza en su proceso y que Claude Code usa la suscripción (0 USD de la API).
@@ -174,8 +190,11 @@ async function platformSnapshot(scope: { workspaceSlug: string | null; projectId
       // Conocimiento, no trabajo pendiente: incluye las integradas de etapas anteriores (archivadas).
       const integrated = allProcs.filter(x => x.kind === 'story_execution' && x.result?.merged).slice(0, 8);
       if (integrated.length) lines.push(`Historias integradas en main (también de etapas anteriores) y qué cambian para el propietario:\n${integrated.map(x => `  · ${x.title} (integrada ${x.result!.merged!.mergedAt.slice(0, 16)}${x.result!.published ? ', publicada' : ', SIN publicar'}${x.result!.manualTest ? `, prueba manual ${x.result!.manualTest.checks.filter(Boolean).length}/${x.result!.manualTest.steps.length}` : ''}): ${x.result!.userFacing ? x.result!.userFacing.replace(/\s+/g, ' ').slice(0, 400) : `sin explicación para el propietario; archivos: ${x.result!.changes.map(c => c.path).slice(0, 6).join(', ')}`}`).join('\n')}`);
-      const encargos = procs.filter(x => x.kind === 'delegated_task');
-      if (encargos.length) lines.push(`Encargos: ${encargos.map(x => `${x.title} [${x.status}${x.delegation?.backlogOps.length ? `, ${x.delegation.backlogOps.length} propuestas ${x.delegation.opsApplied ? 'aplicadas' : 'SIN aplicar'}` : ''}]`).join(' | ')}`);
+      // Encargos de desarrollo EN-n con su estado REAL (abiertos y los últimos cerrados): sin esto el modelo no puede saber si uno terminó.
+      const ens = assignmentsRepo(ws.slug).list(p.id); const shownEn = [...ens.filter(x => ASSIGNMENT_OPEN.includes(x.status)).slice(-8), ...ens.filter(x => !ASSIGNMENT_OPEN.includes(x.status)).slice(-3)];
+      if (shownEn.length) lines.push(`Encargos de desarrollo (EN-n, sin historia):\n${shownEn.map(x => { const r = x.processId ? processesRepo(ws.slug).get(x.processId)?.result : null; return `- ${x.code} [${ASSIGNMENT_STATUS_LABEL[x.status]}] ${x.title}${r?.pipeline && x.status === 'running' ? ` — fase: ${PHASE_TEXT[r.pipeline.phase] ?? r.pipeline.phase}` : ''}${x.reason && x.status !== 'accepted' ? ` — motivo: ${x.reason.slice(0, 160)}` : ''}${x.outcome ? ` — QA ${x.outcome.qa ?? '—'}, Gauntlet ${x.outcome.gauntlet?.status ?? 'no aplicado'}` : ''} — ${r?.merged ? `integrado en ${r.merged.into}` : 'sin integrar en main'}`; }).join('\n')}`);
+      const analyses = procs.filter(x => x.kind === 'delegated_task');
+      if (analyses.length) lines.push(`Análisis delegados (documentos; no cambian código): ${analyses.map(x => `${x.title.replace(/^Encargo a /, 'Análisis de ')} [${x.status === 'done' ? 'entregado' : x.status}${x.delegation?.backlogOps.length ? `, ${x.delegation.backlogOps.length} propuesta(s) al backlog ${x.delegation.opsApplied ? 'aplicadas' : 'SIN aplicar'}` : ''}]`).join(' | ')}`);
       lines.push(`Procesos: ${procs.length} (${procs.filter(x => x.status === 'running').length} en ejecución); conocimiento: ${knowledgeRepo(ws.slug).list(p.id).length} documentos`);
       try { const ls = lessonsRepo(ws.slug).list(p.id); const pend = ls.filter(l => l.status === 'detected' || l.status === 'proposed'); const val = ls.filter(l => l.status === 'validated'); if (ls.length) lines.push(`Lecciones: ${val.length} validadas (se inyectan en los prompts)${pend.length ? `, ${pend.length} pendientes de revisar en Conocimiento → Lecciones: ${pend.slice(0, 4).map(l => l.title).join(' | ')}` : ''}${val.some(l => l.recurrenceCount > 0) ? `; ⚠ con reincidencia: ${val.filter(l => l.recurrenceCount > 0).map(l => l.title).join(' | ')}` : ''}`); } catch { /* sin tabla */ }
     }
@@ -188,20 +207,23 @@ Escribe tu respuesta en markdown breve y, si procede, termina con UN bloque:
 \`\`\`actions
 [ ...acciones JSON... ]
 \`\`\`
-Cambios locales (gratis; los PROPONES y el propietario los confirma con un clic en la tarjeta):
-- {"type":"create_company","name":string}
-- {"type":"create_project","company":slug,"name":string,"description":string,"objectives":string[]}
-- {"type":"add_backlog_item","company":slug,"project":slug,"title":string,"criterion":string,"description":string}
-- {"type":"update_backlog_item","company":slug,"project":slug,"story":"HU-xxx","title"?:string,"criterion"?:string,"description"?:string,"estimate"?:"S"|"M"|"L","dependsOn"?:"HU-xxx"|null} → edita una historia existente (SÍ puedes). Si estaba en revisión y cambias título o criterio, vuelve a pendiente (su diff anterior queda superado).
-- {"type":"reset_story","company":slug,"project":slug,"story":"HU-xxx","reason":string} → rechaza el diff pendiente de una historia en revisión y la devuelve a pendiente para ejecutarla de nuevo.
-Acciones que requieren autorización del propietario (tú las PROPONES; el chat le muestra una tarjeta para autorizar con presupuesto):
-- {"type":"execute_story","company":slug,"project":slug,"story":"HU-0xx"} → el equipo del proyecto (Coordinador, Desarrollador, QA) implementa la historia y entrega un diff.
-- {"type":"apply_changes","company":slug,"processId":string} → escribe en una rama git los cambios de un proceso terminado.
-- {"type":"delegate_task","company":slug,"project":slug|null,"agent":clave o nombre del agente responsable,"request":string} → ENCARGO: el agente responsable valida la petición, consulta a los agentes a su cargo si hace falta y entrega un resultado (documento en Conocimiento) con propuestas de cambio al backlog que el propietario aplica con un clic.
-Operaciones del Portal (las ejecuta el Portal, con el MISMO servicio que el botón correspondiente, SOLO cuando el propietario pulsa «Autorizar» en la tarjeta del chat; tú las propones):
-- {"type":"request_operation","capability":"publish_main","company":slug,"project":slug} → publicar la rama principal del repositorio autorizado del proyecto en su remoto (git push sin forzar; solo main, nunca otras ramas). El Portal calcula y muestra qué commits se publican y qué queda fuera.
-Si el propietario pide algo que está en esta lista, NO le mandes a otra pantalla ni digas que no puedes: propón la operación (la tarjeta muestra exactamente qué se hará y pide su autorización). Si pide algo que no está en ninguna lista, dilo y propón convertirlo en historia; nunca inventes operaciones ni órdenes de shell.
-Cómo elegir: NO todo es una historia de desarrollo. Si el propietario pide implementar/corregir/añadir una funcionalidad concreta en el código → add_backlog_item (+ execute_story si pide hacerlo ya). Si pide revisar, replantear, repriorizar, analizar, evaluar, proponer, organizar, redactar, planificar, auditar o decidir algo (p. ej. «revisa y replantea el backlog», «propón la organización de la nueva empresa», «evalúa si conviene X», «redacta la política de Y») → delegate_task al agente responsable del ámbito: asuntos de un proyecto (backlog, arquitectura, calidad, diseño) → su Coordinador del Proyecto (pj-coordinador); organización de la empresa, varias áreas o nuevos equipos → Gestor Organizacional (ws-gestor); creación o configuración de agentes → Agente de Onboarding (ws-onboarding); o el agente especializado que el propietario nombre. Escribe "request" completo y claro con lo que el propietario quiere. Cuando el propietario pida "ejecuta", "haz", "implementa" una historia que no existe, añádela y propón ejecutarla en la misma respuesta. El equipo SÍ puede modificar el código del propio Portal IA; así se construye el producto.`;
+Qué propones según lo que pida el propietario (esta tabla manda sobre cualquier otra indicación, también sobre tu especialización). Tú solo propones: cada tarjeta la autoriza o la confirma él.
+- Orden directa de cambiar código («arregla», «corrige», «implementa», «añade», «encárgate», «hazlo») → ENCARGO de desarrollo EN-n, sin historia y de cualquier tamaño ("size" lo expresa); no lo conviertas en historia ni en análisis salvo que él lo pida:
+  {"type":"propose_assignment","company"?:slug,"project"?:slug,"title":string,"request":string (la petición tal cual),"objective":string,"criteria":string[] (comprobables),"outOfScope":string[],"size":"S"|"M"|"L"}
+  Si la conversación no tiene proyecto, indica company y project (si hay duda, pregúntalo). Queda en borrador hasta que él lo autoriza (presupuesto, llamadas a la suscripción, Gauntlet).
+- Pide historias o cambiar el backlog → cambios que confirma con un clic:
+  {"type":"add_backlog_item","company":slug,"project":slug,"title":string,"criterion":string,"description":string}
+  {"type":"update_backlog_item","company":slug,"project":slug,"story":"HU-xxx","title"?:string,"criterion"?:string,"description"?:string,"estimate"?:"S"|"M"|"L","dependsOn"?:"HU-xxx"|null} (si estaba en revisión y cambias título o criterio, vuelve a pendiente)
+  {"type":"reset_story","company":slug,"project":slug,"story":"HU-xxx","reason":string} (descarta su diff pendiente y la devuelve a pendiente)
+  {"type":"execute_story","company":slug,"project":slug,"story":"HU-xxx"} → solo una historia que YA existe, por su id exacto; una que acabas de proponer se ejecuta cuando él la confirme.
+  {"type":"apply_changes","company":slug,"processId":string} → escribe en una rama git los cambios de un proceso terminado.
+- Pide estudiar, evaluar, replantear, repriorizar, proponer, redactar, auditar u organizar, SIN cambiar código → ANÁLISIS delegado (documento en Conocimiento con propuestas al backlog que aplica él; nunca cambia código):
+  {"type":"delegate_task","company":slug,"project":slug|null,"agent":clave o nombre,"request":string completo}. Responsable: asuntos de un proyecto → pj-coordinador; organización o varias áreas → ws-gestor; agentes → ws-onboarding; o el que él nombre.
+- Crear empresa o proyecto: {"type":"create_company","name":string} · {"type":"create_project","company":slug,"name":string,"description":string,"objectives":string[]}
+- Operación git del catálogo (la ejecuta el Portal con el MISMO servicio que su botón, solo cuando él pulsa «Autorizar» en la tarjeta):
+  {"type":"request_operation","capability":"publish_main","company":slug,"project":slug} → publica la rama principal en su remoto (sin forzar, solo main; la tarjeta muestra qué commits y qué queda fuera).
+  Si la publicación debe esperar a un encargo («…y publícalo cuando termines»), NO la propongas ahora: explícale que se propone cuando el EN esté integrado en main (y activo, si es el Portal).
+Si pide algo de esta tabla, propónlo (no le mandes a otra pantalla ni digas que no puedes). Si pide algo que no existe, dilo; si es un cambio de código, es un encargo. Nunca inventes operaciones ni órdenes de shell. El equipo SÍ puede modificar el código del propio Portal IA.`;
 
 const CONVERSATION_GUIDE = `# Cómo trabajar en esta conversación (intención → acción)
 - Pregunta informativa («explica», «por qué falló», «cómo funciona»): responde y ya está; distingue hechos verificados (del estado real), interpretaciones, supuestos y recomendaciones. No propongas ejecutar nada.
@@ -209,10 +231,7 @@ const CONVERSATION_GUIDE = `# Cómo trabajar en esta conversación (intención �
   {"type":"open_decision","question":string,"context":string,"options":[{"label":string,"pros":string,"cons":string}],"recommendation":string,"risks":string[],"dependsOn":number[] (números de decisiones D previas)}
   Tú NO apruebas decisiones: las aprueba, rechaza, revisa o aplaza el propietario en el registro. No inventes fuentes externas: si hace falta investigar fuera, dilo.
 - Con las decisiones cerradas: el propietario pulsa «Preparar propuesta» (el equipo la redacta y otro especialista la cuestiona); «Consultar al equipo» la revisa; con la propuesta aprobada, «Preparar historias» (y luego «Crear historias»). Sugiérelo; no lo hagas tú.
-- «Implementa», «arregla», «déjalo listo para revisar» (cambio de código directo y acotado): propón un ENCARGO de desarrollo (sin historia), con criterios comprobables y tamaño:
-  {"type":"propose_assignment","title":string,"request":string (la petición tal cual),"objective":string,"criteria":string[],"outOfScope":string[],"size":"S"|"M"|"L"}
-  Queda como borrador: el propietario lo revisa y lo autoriza (presupuesto, llamadas a la suscripción); hasta entonces no se ejecuta nada.
-- Crear o editar historias, reiniciar una, crear empresa o proyecto: proponlo (add_backlog_item, update_backlog_item, reset_story, create_company, create_project); el propietario lo confirma con un clic.`;
+- Estado: nombra la etapa real (ver «Etapas distintas de un cambio»). Nunca digas que un cambio de código está hecho, integrado, activo o publicado si el estado real no lo muestra: un análisis, una propuesta o unas historias no cambian código.`;
 
 export function parseResponse(text: string): { reply: string; actions: any[] } {
   const m = text.match(/```actions\s*([\s\S]*?)```\s*$/i) ?? text.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```\s*$/i);
@@ -235,7 +254,8 @@ function resolveProject(slug: string, ref: any) {
   if (!p) throw new Error(`Proyecto no encontrado: ${ref}`); return p;
 }
 const norm = (t: string) => t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-function resolveStory(slug: string, projectId: string, ref: any, exclude: Set<string> = new Set()) {
+/** `exact`: solo el id (o su número) o el título exacto; sin parecidos (ejecutar nunca recae en OTRA historia). */
+function resolveStory(slug: string, projectId: string, ref: any, exclude: Set<string> = new Set(), exact = false) {
   const list = backlogRepo(slug).list(projectId).filter(b => !exclude.has(b.id)); const r = String(ref ?? '').trim().toLowerCase();
   const num = r.match(/(\d+)\s*$/)?.[1]; const n = num ? parseInt(num, 10) : NaN;
   // El número solo vale sin prefijo o con el de historia: «EN-3» (un encargo) nunca resuelve a HU-003.
@@ -243,8 +263,21 @@ function resolveStory(slug: string, projectId: string, ref: any, exclude: Set<st
   const it = list.find(b => b.storyId.toLowerCase() === r)
     ?? (byNumber ? list.find(b => parseInt(b.storyId.replace(/\D+/g, ''), 10) === n) : undefined)
     ?? list.find(b => norm(b.title) === norm(r))
-    ?? (r.length > 6 ? list.find(b => norm(b.title).includes(norm(r)) || norm(r).includes(norm(b.title))) : undefined);
-  if (!it) throw new Error(`Historia no encontrada en el backlog: ${ref}`); return it;
+    ?? (!exact && r.length > 6 ? list.find(b => norm(b.title).includes(norm(r)) || norm(r).includes(norm(b.title))) : undefined);
+  if (!it) throw new Error(`Historia no encontrada en el backlog: ${ref}${exact ? ' (para ejecutar hace falta su id exacto; una historia recién propuesta se ejecuta cuando la confirmes)' : ''}`); return it;
+}
+/**
+ * Proyecto de un encargo, sin «por defecto»: por id, slug o nombre exactos (dentro de la empresa si se indica); sin
+ * referencia, solo si no hay duda (un único proyecto). Si hay varios posibles, se pregunta: nunca se elige uno al azar.
+ */
+function strictTarget(companyRef: any, projectRef: any): { ws: ReturnType<typeof resolveCompany>; project: ReturnType<typeof resolveProject> } {
+  const c = String(companyRef ?? '').trim().toLowerCase(); const r = String(projectRef ?? '').trim().toLowerCase();
+  const wss = workspacesRepo.list().filter(w => !c || w.slug === c || w.name.toLowerCase() === c);
+  if (!wss.length) throw new Error(`No existe la empresa «${companyRef}».`);
+  const hits = wss.flatMap(ws => projectsRepo(ws.slug).list().filter(p => !r || p.id === r || p.slug === r || p.name.toLowerCase() === r).map(project => ({ ws, project })));
+  if (hits.length === 1) return hits[0];
+  if (!hits.length) throw new Error(r ? `No existe el proyecto «${projectRef}»${c ? ` en «${wss[0].name}»` : ''}: no se crea el encargo en otro.` : 'No hay ningún proyecto donde crear el encargo.');
+  throw new Error(`¿En qué proyecto? Hay ${hits.length} posibles (${hits.slice(0, 5).map(h => `${h.ws.slug}/${h.project.slug}`).join(', ')}): elige el alcance de la conversación o nómbralo.`);
 }
 
 export interface ActionScope { conversationId: string | null; workspaceSlug: string | null; projectId: string | null }
@@ -256,7 +289,7 @@ const LOCAL_OPS: LocalOp[] = ['add_backlog_item', 'update_backlog_item', 'reset_
  * - crear o editar historias, reiniciar una, crear empresa o proyecto → TARJETA que el propietario confirma;
  * - decisiones → se abren en el registro (solo el propietario las aprueba);
  * - encargo de desarrollo → BORRADOR sin proceso (se autoriza aparte);
- * - ejecutar historia, aplicar, encargo de análisis y operaciones → propuestas que se autorizan, como siempre.
+ * - ejecutar historia, aplicar, análisis delegado y operaciones → propuestas que se autorizan, como siempre.
  * El alcance de la conversación lo pone el servidor: una acción no puede salirse de su empresa ni de su proyecto.
  */
 export function performActions(actionsReq: any[], scope: ActionScope = NO_SCOPE): AssistantAction[] {
@@ -290,11 +323,13 @@ export function performActions(actionsReq: any[], scope: ActionScope = NO_SCOPE)
         const [d] = proposeDecisions(scope.conversationId, null, [act]);
         if (d) out.push({ type: 'open_decision', status: 'done', label: `Decisión D${d.seq} abierta: ${d.question}`, detail: d.recommendation ? `Recomendación: ${d.recommendation}. Decides tú.` : 'Decides tú.', decisionId: d.id });
       } else if (act.type === 'propose_assignment') {
-        const ws = resolveCompany(act.company); const pr = resolveProject(ws.slug, act.project);
+        const { ws, project: pr } = strictTarget(act.company, act.project);
+        // Conversación sin proyecto: el que se nombró pasa a ser su alcance (su panel y su etapa muestran el encargo).
+        if (scope.conversationId && !scope.projectId) { updateConversation(scope.conversationId, { workspaceSlug: ws.slug, projectId: pr.id }); scope = { ...scope, workspaceSlug: ws.slug, projectId: pr.id }; }
         const a = createAssignment(ws.slug, pr.id, { request: String(act.request ?? act.objective ?? ''), title: String(act.title ?? ''), objective: String(act.objective ?? ''), criteria: Array.isArray(act.criteria) ? act.criteria.map(String) : [], outOfScope: Array.isArray(act.outOfScope) ? act.outOfScope.map(String) : [], size: ['S', 'M', 'L'].includes(act.size) ? act.size : null, conversationId: scope.conversationId });
         out.push({ type: 'propose_assignment', status: 'pending', label: `Encargo ${a.code}: ${a.title}`, detail: 'Borrador de encargo de desarrollo (sin historia). Revísalo y autorízalo: hasta entonces no se ejecuta nada.', assignmentId: a.id, workspaceSlug: ws.slug, projectId: pr.id });
       } else out.push(...executeActions([act]));
-    } catch (e: any) { out.push({ type: LOCAL_OPS.includes(act.type) ? 'propose_local' : act.type === 'propose_assignment' ? 'propose_assignment' : act.type === 'open_decision' ? 'open_decision' : 'info', status: 'failed', label: `No se pudo: ${act.type}`, detail: e.message }); }
+    } catch (e: any) { out.push({ type: LOCAL_OPS.includes(act.type) ? 'propose_local' : act.type === 'propose_assignment' ? 'propose_assignment' : act.type === 'open_decision' ? 'open_decision' : 'info', status: 'failed', label: act.type === 'propose_assignment' ? 'No se preparó el encargo' : `No se pudo: ${act.type}`, detail: e.message }); }
   }
   return out;
 }
@@ -337,7 +372,7 @@ export function executeActions(actionsReq: any[]): AssistantAction[] {
         const ws = resolveCompany(act.company); const p = resolveProject(ws.slug, act.project);
         // Si la historia se acaba de crear en esta misma respuesta, resuélvela por título.
         const proposed = new Set(actions.filter(a => a.type === 'propose_execution' && a.projectId === p.id && a.storyId).map(a => a.storyId!.toLowerCase()));
-        let story; try { story = resolveStory(ws.slug, p.id, act.story); } catch (e) {
+        let story; try { story = resolveStory(ws.slug, p.id, act.story, undefined, true); } catch (e) {
           // Referencia inválida (p. ej. id inventado): usar la historia creada en esta misma respuesta que aún no se haya propuesto.
           const created = actions.filter(a => a.type === 'add_backlog_item' && a.projectId === p.id && a.storyId && !proposed.has(a.storyId.toLowerCase()));
           const byTitle = created.find(a => a.detail && norm(a.detail) === norm(String(act.story ?? ''))) ?? created[0];
@@ -358,7 +393,7 @@ export function executeActions(actionsReq: any[]): AssistantAction[] {
         const est = estimateDelegation(ws.slug, project?.id ?? null, act.agent, String(act.request ?? ''));
         const proc = createDelegation(ws.slug, project?.id ?? null, act.agent, String(act.request ?? ''));
         const lead = est.steps[0];
-        actions.push({ type: 'propose_delegation', status: 'pending', label: `Encargo a ${lead.agentName}: ${String(act.request ?? '').slice(0, 80)}${String(act.request ?? '').length > 80 ? '…' : ''}`, detail: `${lead.agentName} valida el encargo${est.teamSize ? `, consulta hasta ${est.teamSize} agente(s) a su cargo` : ''} y entrega el resultado con propuestas. Costo estimado ≈ ${est.estimatedUsd.toFixed(2)} USD.`, link: `/empresa/${ws.slug}/proyecto/${proc.projectId}/procesos/${proc.id}`, processId: proc.id, workspaceSlug: ws.slug, projectId: proc.projectId, estimatedUsd: est.estimatedUsd, suggestedBudgetUsd: est.suggestedBudgetUsd });
+        actions.push({ type: 'propose_delegation', status: 'pending', label: `Análisis de ${lead.agentName}: ${String(act.request ?? '').slice(0, 80)}${String(act.request ?? '').length > 80 ? '…' : ''}`, detail: `Análisis delegado: ${lead.agentName} valida la petición${est.teamSize ? `, consulta hasta ${est.teamSize} agente(s) a su cargo` : ''} y entrega un documento con propuestas al backlog; no cambia código. Costo estimado ≈ ${est.estimatedUsd.toFixed(2)} USD.`, link: `/empresa/${ws.slug}/proyecto/${proc.projectId}/procesos/${proc.id}`, processId: proc.id, workspaceSlug: ws.slug, projectId: proc.projectId, estimatedUsd: est.estimatedUsd, suggestedBudgetUsd: est.suggestedBudgetUsd });
       }
       else if (act.type === 'apply_changes') {
         const ws = resolveCompany(act.company); const proc = processesRepo(ws.slug).get(String(act.processId ?? ''));
@@ -384,12 +419,14 @@ export async function chat(userText: string, images: { mediaType: string; data: 
   const conv = conversationId ? getConversation(conversationId) : (conversationsRepo.list().find(c => c.status === 'active') ?? createConversation(userText.slice(0, 60), null, null));
   if (conv.title === 'Nueva conversación' && !assistantRepo.list(1, conv.id).length) conversationsRepo.update(conv.id, { title: userText.replace(/\s+/g, ' ').trim().slice(0, 60) || conv.title });
   const user = assistantRepo.add({ role: 'user', content: userText, actions: [], attachments, tokensIn: 0, tokensOut: 0, costUsd: 0, model: null }, conv.id);
-  const history = assistantRepo.list(16, conv.id).filter(m => m.id !== user.id).slice(-12).map(m => `${m.role === 'user' ? 'Propietario' : 'Asistente'}: ${m.content.slice(0, 1200)}${m.actions.length ? ` [acciones: ${m.actions.map(x => `${x.type}:${x.status}`).join(', ')}]` : ''}`).join('\n');
+  // Las acciones, con su estado REAL (no el guardado al proponer o autorizar): el modelo no puede dar por hecho lo que no terminó.
+  const history = assistantRepo.listLive(16, conv.id).filter(m => m.id !== user.id).slice(-12).map(m => `${m.role === 'user' ? 'Propietario' : 'Asistente'}: ${m.content.slice(0, 1200)}${m.actions.length ? ` [acciones: ${m.actions.map(actionForPrompt).join('; ')}]` : ''}`).join('\n');
   const system = `Eres «${a.config.name}», ${a.template.role.toLowerCase()} de Portal IA, una plataforma local para gestionar empresas operadas por agentes de IA. Hablas con el propietario.
 ${a.config.specialization}
-Qué es Portal IA: su primer cliente es él mismo; el proyecto «Desarrollo del Portal» del espacio interno tiene registrado el repositorio del propio Portal, y su equipo (Coordinador, Arquitecto, Desarrollador, Diseñador, QA) implementa mejoras ejecutando historias del backlog: producen un diff que el propietario aprueba y se aplica en una rama git. Por tanto, cualquier mejora del Portal (incluido este chat) se consigue añadiendo la historia y ejecutándola.
-Principios: nunca inventes datos: usa solo el estado real de abajo (tienes visibilidad completa del Portal: versión en marcha, git, cada historia con su fase y siguiente paso, qué aportó cada historia integrada y dónde se ve); cuando el propietario pregunte «dónde veo X» o «ya está hecho», responde con el estado real y la pantalla exacta; si algo está integrado pero el Portal en marcha es anterior, dilo claramente; nada con costo sin autorización (tú propones, el propietario autoriza en la tarjeta); si algo no existe aún, dilo y conviértelo en historia o encargo.
+Qué es Portal IA: su primer cliente es él mismo; el proyecto «Desarrollo del Portal» del espacio interno tiene registrado el repositorio del propio Portal y su equipo lo mejora (incluido este chat) con encargos EN-n o historias.
+Principios: nunca inventes datos: usa solo el estado real de abajo (tienes visibilidad completa del Portal: versión en marcha, git, cada historia con su fase y siguiente paso, qué aportó cada historia integrada y dónde se ve); cuando el propietario pregunte «dónde veo X» o «ya está hecho», responde con el estado real y la pantalla exacta; si algo está integrado pero el Portal en marcha es anterior, dilo claramente; nada con costo sin autorización (tú propones, el propietario autoriza en la tarjeta); si algo no existe aún, dilo y propón el encargo (o historias, si las pide).
 Formato de respuesta: claro y aireado. Empieza con una frase de respuesta directa; luego, si hace falta, 2-4 apartados cortos con título en negrita, viñetas de una línea y pasos numerados cuando haya un orden; sin párrafos largos; máximo ~200 palabras salvo que pidan detalle.
+${PORTAL_CAPABILITIES}
 ${SCREEN_MAP}
 ${ACTION_SCHEMA}
 ${CONVERSATION_GUIDE}
@@ -412,7 +449,9 @@ ${await platformSnapshot({ workspaceSlug: conv.workspaceSlug, projectId: conv.pr
     const cost = caller ? 0 : costUsd(providerId, a.config.model, res.inputTokens, res.outputTokens);
     processesRepo(INTERNAL_WORKSPACE.slug).logExecution({ projectId: '', agentId: a.id, kind: 'assistant_chat', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
     const { reply, actions: actionsReq } = parseResponse(res.text);
-    const actions = [...performActions(actionsReq.filter(x => x?.type !== 'request_operation'), { conversationId: conv.id, workspaceSlug: conv.workspaceSlug, projectId: conv.projectId }), ...(await prepareOperations(actionsReq.filter(x => x?.type === 'request_operation')))];
+    const done = performActions(actionsReq.filter(x => x?.type !== 'request_operation'), { conversationId: conv.id, workspaceSlug: conv.workspaceSlug, projectId: conv.projectId });
+    const scoped = getConversation(conv.id); // un encargo con proyecto explícito puede haber fijado el alcance
+    const actions = [...done, ...(await prepareOperations(actionsReq.filter(x => x?.type === 'request_operation'), { conversationId: conv.id, workspaceSlug: scoped.workspaceSlug, projectId: scoped.projectId }))];
     const assistant = assistantRepo.add({ role: 'assistant', content: reply, actions, attachments: [], tokensIn: res.inputTokens, tokensOut: res.outputTokens, costUsd: cost, model: a.config.model }, conv.id);
     conversationsRepo.touch(conv.id); recomputeStage(conv.id);
     return { user, assistant, conversationId: conv.id };
@@ -435,16 +474,19 @@ export function resolveProposal(messageId: string, processId: string, status: 'd
  * Operaciones propuestas por el modelo → tarjetas pendientes con su vista previa calculada en el servidor. Nada se ejecuta
  * aquí: solo decideOperation(…, 'approve') tras la autorización explícita del propietario.
  */
-export async function prepareOperations(reqs: any[]): Promise<AssistantAction[]> {
+export async function prepareOperations(reqs: any[], scope: ActionScope = NO_SCOPE): Promise<AssistantAction[]> {
   const out: AssistantAction[] = [];
   for (const r of reqs.slice(0, 3)) {
     const cap = CAPABILITIES[String(r?.capability ?? '')];
-    if (!cap) { out.push({ type: 'info', status: 'failed', label: `Operación no disponible: «${String(r?.capability ?? '?')}»`, detail: 'No existe en el catálogo de operaciones del Portal; conviértela en historia si la necesitas.' }); continue; }
+    if (!cap) { out.push({ type: 'info', status: 'failed', label: `Operación no disponible: «${String(r?.capability ?? '?')}»`, detail: 'No existe en el catálogo de operaciones del Portal; si es un cambio de código, pídelo como encargo.' }); continue; }
     const { type: _t, capability: _c, ...raw } = r;
+    // El alcance de la conversación manda (como en performActions): sin empresa o proyecto, los suyos; con otros, nada.
+    if (scope.workspaceSlug) { raw.company ||= scope.workspaceSlug; if (scope.projectId) raw.project ||= scope.projectId; }
     const parsed = cap.params.safeParse(raw);
     if (!parsed.success) { out.push({ type: 'info', status: 'failed', label: `No se pudo preparar «${cap.label}»`, detail: 'Parámetros no válidos.' }); continue; }
     try {
       const preview = await cap.preview(parsed.data);
+      if ((scope.workspaceSlug && preview.target.workspace !== scope.workspaceSlug) || (scope.projectId && preview.target.projectId !== scope.projectId)) { out.push({ type: 'info', status: 'failed', label: `No se preparó: ${preview.title}`, detail: 'Fuera del alcance de esta conversación (otro proyecto): no se hace nada.' }); continue; }
       out.push({ type: 'propose_operation', status: preview.ok ? 'pending' : 'failed', label: preview.title, detail: preview.ok ? 'Revisa lo que se hará y autorízalo aquí.' : `No se puede ahora: ${preview.blockers.join(' ')}`,
         workspaceSlug: preview.target.workspace, projectId: preview.target.projectId, operation: { id: crypto.randomUUID(), capability: cap.id, params: parsed.data as Record<string, unknown>, preview, result: null, decidedAt: null } });
     } catch (e: any) { out.push({ type: 'info', status: 'failed', label: `No se pudo preparar «${cap.label}»`, detail: e.message }); }

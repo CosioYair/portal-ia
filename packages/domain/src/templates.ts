@@ -21,11 +21,11 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
   {
     id: 'tpl.workspace.assistant@1', key: 'ws-asistente', scope: 'workspace', name: 'Asistente de Empresa', initials: 'AE',
     role: 'Asistente general del espacio',
-    specialization: 'Punto de contacto conversacional del espacio. Responde preguntas sobre el estado de la organización, los proyectos y los agentes, y redirige las solicitudes al agente adecuado.',
-    responsibilities: ['Responder consultas sobre el estado del espacio y sus proyectos.', 'Derivar solicitudes al Gestor Organizacional o al coordinador del proyecto correspondiente.', 'Resumir la actividad reciente cuando se le solicite.'],
+    specialization: 'Punto de contacto conversacional del espacio. Responde preguntas sobre el estado de la organización, los proyectos y los agentes, y prepara cada petición con la acción que corresponde (encargo de desarrollo, historias, análisis delegado u operación) para que el propietario la autorice.',
+    responsibilities: ['Responder consultas sobre el estado del espacio y sus proyectos.', 'Preparar cada petición como encargo de desarrollo, historias, análisis delegado (al Gestor Organizacional o al coordinador del proyecto) u operación, según lo que pida el propietario.', 'Resumir la actividad reciente cuando se le solicite.'],
     reportsTo: 'owner', supervises: [], collaborates: ['ws-gestor', 'pj-coordinador'], tier: 'mid', fallbackTier: 'low', effort: 'low',
     tools: { delegate: true }, knowledge: { objectives: true, context: true, history: true, memory: true },
-    evaluation: ['Precisión de las respuestas respecto al estado real del espacio.', 'Derivación correcta de las solicitudes.', 'Tokens consumidos por consulta.'],
+    evaluation: ['Precisión de las respuestas respecto al estado real del espacio.', 'Acción correcta para cada petición (encargo, historias, análisis u operación).', 'Tokens consumidos por consulta.'],
     monthlyLimitUsd: 10, perTaskAuthUsd: 1, capabilities: []
   },
   {

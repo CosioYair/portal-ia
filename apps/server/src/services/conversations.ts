@@ -172,7 +172,7 @@ export function createStoriesFrom(conversationId: string, artifactId: string) {
   if (based?.status !== 'approved') throw fail(409, 'La propuesta de la que salen estas historias ya no está aprobada.', 'proposal_not_approved');
   const r = applyBacklogOps(a.content.workspaceSlug!, a.content.processId!);
   const out = artifactsRepo.update(artifactId, x => { x.status = 'applied'; x.decidedAt = monotonicNow(); });
-  note(conversationId, `**Historias creadas** por el propietario a partir de la propuesta v${based.version}: ${r.opsApplied!.summary.join(' · ')}`);
+  note(conversationId, `**Historias creadas** por el propietario a partir de la propuesta v${based.version} (en el backlog; aún sin cambios de código): ${r.opsApplied!.summary.join(' · ')}`);
   recomputeStage(conversationId);
   return { artifact: out, summary: r.opsApplied!.summary };
 }

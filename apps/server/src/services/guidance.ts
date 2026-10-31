@@ -46,9 +46,10 @@ function describePhase(p: Process, opts: GuidanceOptions): ProcessGuidance {
   if (p.kind === 'initial_assessment') return { phase: 'Evaluación completada', next: 'Importa las historias de la síntesis en Backlog y ejecuta la primera.', tone: 'ok', settled: true };
   if (p.kind === 'delegated_task') {
     const d = p.delegation;
-    if (d?.triage && !d.triage.accepted) return { phase: 'Encargo no aceptado por el responsable', next: d.triage.rejectionReason ?? 'Reformula el encargo o encárgalo a otro agente.', tone: 'warn', settled: true };
-    if (d?.backlogOps.length && !d.opsApplied) return { phase: `Entregado · ${d.backlogOps.length} propuesta(s) al backlog esperan tu aprobación`, next: 'Revisa las propuestas y pulsa «Aplicar propuestas al backlog» si estás de acuerdo.', tone: 'warn', settled: false };
-    return { phase: 'Encargo entregado', next: d?.opsApplied ? 'Propuestas aplicadas. El entregable está en Conocimiento.' : 'El entregable está en Conocimiento; no propuso cambios al backlog.', tone: 'ok', settled: true };
+    // Un análisis delegado entrega un documento: nunca se presenta como un cambio de código hecho (eso es un encargo EN-n o una historia).
+    if (d?.triage && !d.triage.accepted) return { phase: 'Análisis no aceptado por el responsable', next: d.triage.rejectionReason ?? 'Reformula la petición o pídesela a otro agente.', tone: 'warn', settled: true };
+    if (d?.backlogOps.length && !d.opsApplied) return { phase: `Análisis entregado (sin cambios de código) · ${d.backlogOps.length} propuesta(s) al backlog esperan tu aprobación`, next: 'Revisa las propuestas y pulsa «Aplicar propuestas al backlog» si estás de acuerdo.', tone: 'warn', settled: false };
+    return { phase: 'Análisis entregado (sin cambios de código)', next: d?.opsApplied ? 'Sus propuestas ya están en el backlog (historias, no código). El documento está en Conocimiento; para cambiar código, ejecuta esas historias o pide un encargo de desarrollo.' : 'El documento está en Conocimiento; no propuso cambios al backlog.', tone: 'ok', settled: true };
   }
   const r = p.result;
   if (!r) return { phase: 'Terminado', next: '—', tone: 'ok', settled: true };
