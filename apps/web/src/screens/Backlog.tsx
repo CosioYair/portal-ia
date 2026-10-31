@@ -11,6 +11,8 @@ import { Shell } from '../components/Shell.tsx';
 import { Chip, Icon, Notice } from '../components/ui.tsx';
 import { draftKey, useDraft, usePersistentState } from '../lib/persist.ts';
 import { TeamReady } from '../components/TeamReady.tsx';
+import { StoryCard, STATUS_ICON, type StoryCardAction } from '../components/StoryCard.tsx';
+import { Disclosure } from '../components/Disclosure.tsx';
 
 const DECISION_CTA: Record<PendingDecisionKind, string> = {
   process_authorization: 'Autorizar',
@@ -124,6 +126,34 @@ export function Backlog() {
     { key: 'discarded', title: 'Descartadas y fusionadas', hint: 'Conservadas como historial', rows: all.filter(i => i.status === 'discarded'), defaultOpen: false }
   ].filter(sec => filter === 'all' || (filter === 'open' && (sec.key === 'active' || sec.key === 'pending')) || (filter === 'done' && sec.key === 'done') || (filter === 'discarded' && sec.key === 'discarded'));
   const isOpen = (sec: { key: string; defaultOpen: boolean }) => openSec[sec.key] ?? sec.defaultOpen;
+  const waitingDep = pending.filter(i => i.status === 'pending' && !depOk(i)).length;
+  // HU-165 · Acciones de cada historia: una principal y el resto en «Más acciones», con las mismas condiciones y llamadas que la tabla anterior.
+  // «Ejecutar» solo abre el diálogo de autorización (setSel): la tarjeta no lanza nada con costo.
+  const storyActions = (it: BacklogItem): { primary?: StoryCardAction; secondary: StoryCardAction[] } => {
+    const lp = lastProc(it); const secondary: StoryCardAction[] = []; let primary: StoryCardAction | undefined;
+    const toStory = () => navigate(`/historias/${it.id}`);
+    const storySpace: StoryCardAction = { label: 'Espacio de la historia', onClick: toStory };
+    if (it.status === 'review') {
+      const diffLabel = lp?.result?.applied ? 'Continuar' : 'Revisar diff';
+      if (lp?.result?.merged && /Listo para cerrar/.test(lp.guidance?.phase ?? '')) {
+        primary = { label: 'Cerrar historia', onClick: () => closeStory(it, false), disabled: busy };
+        secondary.push({ label: diffLabel, onClick: toStory });
+      } else if (lp) primary = { label: diffLabel, onClick: toStory };
+      else secondary.push(storySpace);
+      if (lp && !lp.result?.applied) secondary.push({ label: 'Devolver a pendiente', title: 'Rechaza el diff pendiente y deja la historia lista para ejecutarse de nuevo', onClick: () => resetItem(it), disabled: busy });
+    } else if (it.status === 'in_progress') {
+      if (lp) primary = { label: 'Ver proceso', variant: 'secondary', onClick: () => navigate(`/procesos/${lp.id}`) };
+      secondary.push(storySpace);
+    } else if (it.status === 'pending' || it.status === 'blocked') {
+      if (it.status === 'blocked' || depOk(it)) primary = { label: 'Ejecutar', onClick: () => setSel(it), disabled: !!running || !project?.repository };
+      if (lp || it.status !== 'pending') secondary.push(storySpace);
+    } else {
+      if (lp) primary = { label: 'Ver', variant: 'secondary', onClick: () => navigate(`/procesos/${lp.id}`) };
+      secondary.push(storySpace);
+    }
+    if (it.status !== 'done' && it.status !== 'in_progress' && it.status !== 'discarded') secondary.push({ label: 'Cerrar sin ejecutar', title: 'Cerrar sin ejecutar: la historia ya está resuelta por otra vía', onClick: () => closeStory(it, true), disabled: busy });
+    return { primary, secondary };
+  };
 
   return (
     <Shell crumb="Backlog">
@@ -138,24 +168,36 @@ export function Backlog() {
             {!phase && <button className="btn btn-secondary" onClick={() => importPlan(false)} disabled={busy}>{Icon.book()}Importar historias de la síntesis</button>}
             <Link className="btn btn-ghost" to="/archivo">Archivo histórico</Link>
             <Link className="btn btn-ghost" to="/etapa">Nueva etapa</Link>
-            {next && <button className="btn btn-primary" onClick={() => setSel(next)} disabled={!!running}>{Icon.arrow()}Ejecutar siguiente: {next.storyId}</button>}
           </div>
         </div>
 
         {aiOffer && <Notice kind="warn"><strong>No encontré historias estructuradas en «{aiOffer.source}».</strong> El {aiOffer.byAgent ?? 'Coordinador del Proyecto'} puede extraerlas con una llamada ({aiOffer.model && <span className="mono">{aiOffer.model}</span>}, costo estimado <strong>≈ {fmtUsd(aiOffer.estimatedUsd)}</strong>). <button className="btn btn-primary btn-sm" style={{ marginLeft: 8 }} onClick={() => importPlan(true)} disabled={busy}>{busy ? 'Extrayendo…' : 'Autorizar y extraer con IA'}</button></Notice>}
         {!project?.repository && <Notice kind="warn">Para ejecutar historias hace falta el repositorio registrado (los agentes leen el código y proponen cambios sobre él). <Link className="lnk" to="/panel">Registrarlo desde el panel</Link>.</Notice>}
         {inboxErr && <Notice kind="err"><strong>No se pudieron cargar las autorizaciones pendientes.</strong> {inboxErr} <Link className="lnk" to="/autorizaciones">Abrir Autorizaciones</Link></Notice>}
-        {decisions.length > 0 && <Notice kind="warn"><div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}><strong>Pendientes de tu decisión ({decisions.length})</strong>
-          {decisions.map(d => <div key={d.storyId ?? d.id} style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span>{d.title}{d.iteration != null && <> <Chip tone="accent" xs>Iteración {d.iteration}</Chip></>}: {d.impact}{d.supersededCount > 0 ? ` · ${supersededNote(d.supersededCount)}` : ''}</span>
-            <button className="btn btn-primary btn-sm" onClick={() => navigate(decisionTarget(d))}>{DECISION_CTA[d.kind]}</button>
-          </div>)}
-          <div><Link className="lnk small" to="/autorizaciones">Ver todas en Autorizaciones</Link></div>
-        </div></Notice>}
+
         {running && <Notice kind="info">Hay un proceso en ejecución: <button className="lnk" onClick={() => navigate(`/procesos/${running.id}`)}>{running.title}</button>. Las historias se ejecutan de una en una.</Notice>}
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
           <div style={{ flex: '999 1 560px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
+            <section className="card backlog-highlight" aria-label="Lo siguiente">
+              <div className="card-b backlog-highlight-body">
+                {next && <div className="backlog-highlight-next">
+                  <div className="backlog-highlight-next-text"><div className="eyebrow">Siguiente: {next.storyId}</div><div style={{ fontWeight: 600 }}>{next.title}</div></div>
+                  <button className="btn btn-primary" onClick={() => setSel(next)} disabled={!!running || !project?.repository}>{Icon.arrow()}Ejecutar siguiente</button>
+                </div>}
+                {decisions.length > 0 && <div className="backlog-highlight-decisions">
+                  <div className="h3">Pendientes de tu decisión ({decisions.length})</div>
+                  <ul className="backlog-decisions">{decisions.map(d => <li key={d.storyId ?? d.id} className="backlog-decision">
+                    <span className="sm13" style={{ flex: '1 1 260px', minWidth: 0 }}>{d.title}{d.iteration != null && <> <Chip tone="accent" xs>Iteración {d.iteration}</Chip></>}: {d.impact}{d.supersededCount > 0 ? ` · ${supersededNote(d.supersededCount)}` : ''}</span>
+                    <button className="btn btn-primary btn-sm" onClick={() => navigate(decisionTarget(d))}>{DECISION_CTA[d.kind]}</button>
+                  </li>)}</ul>
+                  <div><Link className="lnk small" to="/autorizaciones">Ver todas en Autorizaciones</Link></div>
+                </div>}
+                {!next && decisions.length === 0 && <div className="backlog-highlight-empty">
+                  {inbox === null && !inboxErr ? <><span className="spin" aria-hidden="true" /><span>Cargando decisiones pendientes…</span></> : <span>Nada urgente: no hay decisiones pendientes{waitingDep > 0 ? ` · sin historias ejecutables: ${waitingDep} esperan una dependencia` : ''}.</span>}
+                </div>}
+              </div>
+            </section>
             <section className="card">
               <div className="card-h" style={{ gap: 12, flexWrap: 'wrap' }}><div className="h3">Historias</div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -170,25 +212,14 @@ export function Backlog() {
                   {sec.hint && <span className="small muted">{sec.hint}</span>}
                 </button>
                 {isOpen(sec) && sec.rows.length === 0 && <div className="small muted" style={{ padding: '8px 18px 12px' }}>Nada aquí{q ? ' con ese filtro' : ''}.</div>}
-                {isOpen(sec) && sec.rows.length > 0 && <div style={{ overflowX: 'auto' }}><table className="tbl">
-                  <thead><tr><th style={{ width: 70 }}>ID</th><th>Historia</th><th style={{ width: 150 }}>Responsable</th><th style={{ width: 70 }}>Tam.</th><th style={{ width: 150 }}>Estado</th><th style={{ width: 280 }}></th></tr></thead>
-                  <tbody>{sec.rows.map(it => { const st = BACKLOG_STATUS[it.status]; const o = owner(it.ownerKey); const lp = lastProc(it); const blocked = !depOk(it); const g = lp?.guidance; return <tr key={it.id} style={sel?.id === it.id ? { background: '#F3FAF9' } : it.id === next?.id ? { background: '#FFFBF0' } : undefined}>
-                    <td className="mono" style={{ fontSize: 12, verticalAlign: 'top' }}>{it.storyId}</td>
-                    <td style={{ verticalAlign: 'top' }}><div style={{ fontWeight: 500 }}>{it.title}{it.id === next?.id && <Chip tone="warn" xs className="" >siguiente</Chip>}</div>{it.criterion && <div className="small muted" style={{ maxWidth: '70ch', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{it.criterion}</div>}{it.dependsOn && <div className="small muted mono">depende de {it.dependsOn}</div>}</td>
-                    <td className="med" style={{ verticalAlign: 'top', fontSize: 13 }}>{o?.config.name ?? it.ownerKey ?? '—'}</td>
-                    <td className="med" style={{ verticalAlign: 'top' }}>{it.estimate ?? '—'}</td>
-                    <td style={{ verticalAlign: 'top' }}><Chip tone={blocked && it.status === 'pending' ? 'err' : st.tone} xs dot={it.status === 'in_progress' ? 'pulse' : undefined}>{blocked && it.status === 'pending' ? `Espera ${it.dependsOn}` : st.label}</Chip>{it.status === 'review' && g && <div className="small muted" style={{ marginTop: 4, maxWidth: '24ch' }}>{g.phase}</div>}</td>
-                    <td style={{ whiteSpace: 'nowrap', verticalAlign: 'top' }}>
-                      {it.status === 'review' && lp?.result?.merged && /Listo para cerrar/.test(lp.guidance?.phase ?? '') && <button className="btn btn-primary btn-sm" onClick={() => closeStory(it, false)} disabled={busy}>Cerrar historia</button>}
-                      {it.status === 'review' && lp && <button className="btn btn-secondary btn-sm" style={{ marginLeft: 6 }} onClick={() => navigate(`/historias/${it.id}`)}>{lp.result?.applied ? 'Continuar' : 'Revisar diff'}</button>}
-                      {(lp || it.status !== 'pending') && it.status !== 'review' && <button className="btn btn-ghost btn-sm" style={{ marginLeft: 6 }} onClick={() => navigate(`/historias/${it.id}`)}>Espacio de la historia</button>}
-                      {it.status === 'review' && lp && !lp.result?.applied && <button className="btn btn-ghost btn-sm" style={{ marginLeft: 6 }} title="Rechaza el diff pendiente y deja la historia lista para ejecutarse de nuevo" onClick={() => resetItem(it)} disabled={busy}>Devolver a pendiente</button>}
-                      {it.status === 'in_progress' && lp && <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/procesos/${lp.id}`)}>Ver proceso</button>}
-                      {(it.status === 'pending' || it.status === 'blocked') && <button className="btn btn-primary btn-sm" onClick={() => setSel(it)} disabled={!!running || !project?.repository}>Ejecutar</button>}
-                      {(it.status === 'done' || it.status === 'discarded') && lp && <button className="btn btn-ghost btn-sm" onClick={() => navigate(`/procesos/${lp.id}`)}>Ver</button>}
-                      {it.status !== 'done' && it.status !== 'in_progress' && it.status !== 'discarded' && <button className="btn btn-ghost btn-sm" style={{ marginLeft: 6 }} title="Cerrar sin ejecutar: la historia ya está resuelta por otra vía" onClick={() => closeStory(it, true)} disabled={busy}>Cerrar</button>}
-                    </td></tr>; })}</tbody>
-                </table></div>}
+                {isOpen(sec) && sec.rows.length > 0 && <div className="story-cards">{sec.rows.map(it => {
+                  const st = BACKLOG_STATUS[it.status]; const waits = it.status === 'pending' && !depOk(it); const acts = storyActions(it);
+                  const g = it.status === 'review' ? lastProc(it)?.guidance : undefined;
+                  return <StoryCard key={it.id} item={it} ownerName={owner(it.ownerKey)?.config.name ?? it.ownerKey ?? null}
+                    status={waits ? { label: `Espera ${it.dependsOn}`, tone: 'err', icon: STATUS_ICON.blocked } : { label: st.label, tone: st.tone, icon: STATUS_ICON[it.status] }}
+                    primary={acts.primary} secondary={acts.secondary} note={g?.phase}
+                    highlight={sel?.id === it.id ? 'selected' : it.id === next?.id ? 'next' : undefined} />;
+                })}</div>}
               </div>)}
             </section>
 
@@ -249,9 +280,10 @@ export function Backlog() {
                 <div className="help">El Coordinador valida el encargo, consulta a los agentes a su cargo si hace falta y entrega el resultado con propuestas al backlog que tú apruebas. Se crea pendiente de tu autorización (presupuesto).</div>
               </div>
             </section>
-            <section className="card card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <div className="h3">Cómo funciona</div>
-              <p className="sm13 med" style={{ lineHeight: 1.5 }}>1 · Ejecutas una historia con presupuesto. 2 · Los agentes entregan un <strong>diff</strong> (y una revisión de QA si la incluyes). 3 · Lo revisas y, si apruebas, se aplica en una rama <span className="mono">portal-ia/hu-xxx</span>. 4 · Verificas (install / typecheck / test / build), <strong>integras en main</strong> y <strong>publicas</strong> desde el mismo proceso. 5 · Si es el propio Portal, la barra amarilla reconstruye y reinicia. 6 · Cierras la historia. Cada proceso te dice su «siguiente paso».</p>
+            <section className="card" style={{ padding: '2px 18px' }}>
+              <Disclosure title="Cómo funciona">
+                <p className="sm13 med" style={{ lineHeight: 1.5 }}>1 · Ejecutas una historia con presupuesto. 2 · Los agentes entregan un <strong>diff</strong> (y una revisión de QA si la incluyes). 3 · Lo revisas y, si apruebas, se aplica en una rama <span className="mono">portal-ia/hu-xxx</span>. 4 · Verificas (install / typecheck / test / build), <strong>integras en main</strong> y <strong>publicas</strong> desde el mismo proceso. 5 · Si el proyecto es el propio Portal, la barra amarilla reconstruye y reinicia. 6 · Cierras la historia. Cada proceso te dice su «siguiente paso».</p>
+              </Disclosure>
             </section>
           </aside>
         </div>
