@@ -73,7 +73,6 @@ test('el punto de proceso del Dashboard va con StatusIcon y texto accesible', ()
   assert.ok(line.includes('<StatusIcon state={procState(p.status)} label={PROC_LABEL[p.status] ?? p.status} showLabel={false} />'), 'el StatusIcon del proceso debe llevar el texto accesible de PROC_LABEL');
   assert.ok(line.includes('{PROC_LABEL[p.status] ?? p.status}</span>'), 'la fila del proceso debe mostrar también el texto del estado');
   assert.match(dash, /cancelled: 'cancelado'/);
-==== FIN
   assert.ok(!/className=\{?[`'"]dot\b/.test(line), 'la fila del proceso no debe usar un punto solo de color');
   assert.match(dash, /function procState\(status: string\): PortalState/);
 });
