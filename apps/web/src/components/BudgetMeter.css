@@ -25,3 +25,12 @@
 .budget-meter__row input[type='number'] { height: 36px; width: 150px; border-radius: 8px; border: 1px solid var(--line-strong, #CFCCC3); padding: 0 10px; font: inherit; }
 .budget-meter__confirm { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }
 .budget-meter__error { font-size: 13px; color: #7F1D16; background: #FBE7E5; border: 1px solid #F2C7C3; border-radius: 8px; padding: 8px 10px; margin: 0; }
+/* HU-170 · Saldo disponible como cifra principal y alertas con icono además del texto */
+.budget-meter__available { display: flex; flex-direction: column; gap: 2px; margin: 0; }
+.budget-meter__available-value { font-size: 28px; font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; color: var(--ink, #1A1B1E); }
+.budget-meter__available-label { font-size: 12px; color: var(--ink-3, #686B72); }
+.budget-meter__available--neg .budget-meter__available-value { color: #9A1F18; }
+.budget-meter__alert { display: flex; align-items: flex-start; gap: 6px; font-size: 13px; border-radius: 8px; padding: 8px 10px; margin: 0; border: 1px solid transparent; }
+.budget-meter__alert-ic { display: inline-flex; flex: none; margin-top: 1px; }
+.budget-meter__alert--warn { background: #FBF0DC; border-color: #F0DCB0; color: #7A4A00; }
+.budget-meter__alert--err { background: #FBE7E5; border-color: #F2C7C3; color: #7F1D16; }
