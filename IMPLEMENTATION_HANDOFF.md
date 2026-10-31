@@ -1,3 +1,47 @@
+# Portal IA · Empresa autónoma: lotes terminados antes de tu aceptación, integración ordenada y Asistente (31 de octubre de 2026)
+
+**Estado: implementado y verificado en la rama `mejora/empresa-autonoma`.** La rama está sobre
+`mejora/concurrencia-tiempo-real`, que a su vez está sobre `1eb9a7c`; integrarla incluye las dos.
+**NO está integrada en `main`, NO está publicada y NO está activada:** las tres cosas requieren tu autorización.
+
+Detalle técnico (causas raíz, arquitectura, Gauntlet A–C, pruebas, recuperación del lote real, limitaciones):
+`docs/empresa-autonoma-lotes-y-asistente.md`. Visión: `docs/vision-producto.md`. Hoja de ruta: `docs/hoja-de-ruta-capacidades.md`.
+
+## Commits (rama `mejora/empresa-autonoma`)
+
+| Commit | Qué es |
+|---|---|
+| `9292593` | Código y pruebas: integración al aceptar con orden explicado, vigencia y puesta al día de candidatos, huella de la aceptación, pedir cambios sobre la misma rama, recuperación del lote real, reinicios idempotentes, Asistente (lectura del código, carril propio, encargo directo), encargos con «Continuar», descubrimiento de proyectos y sin falso verde en la verificación mínima |
+| (este) | Documentación: visión del producto, hoja de ruta de capacidades, detalle técnico de este encargo y este traspaso |
+
+## Qué cambia para el propietario
+
+- **Lotes con «integración al aceptar»** (opción recomendada al autorizar):
+  - el equipo termina técnicamente TODO el lote sin tocar main;
+  - revisas cada historia en un **orden de integración explicado**;
+  - «Aceptar e integrar» la mete en main;
+  - la siguiente se pone al día sola antes de que la revises.
+  - Nada entra en main sin tu aceptación.
+- **«Pedir cambios» trabaja sobre la misma rama:** no se pierde ni se repite lo verificado. También en los encargos del
+  chat.
+- **El Asistente lee el código del proyecto** y no espera detrás de un lote. Las mejoras se proponen como encargo directo.
+- **Lote real `568c60cb`:**
+  - acepta las 6 integradas;
+  - «Reanudar»: QA revisa HU-169 y repite HU-173 una vez, dentro de su autorización;
+  - HU-175: «Convertir en encargo de análisis».
+
+## Activación (pendiente de tu autorización)
+
+No hay migraciones de datos. Los campos nuevos de los lotes son opcionales y los índices ya venían de la rama anterior.
+Pasos cuando lo autorices:
+1. Integrar en `main` por avance rápido. Incluye `mejora/concurrencia-tiempo-real`.
+2. `npm run build`.
+3. «Reconstruir y reiniciar» sin procesos en marcha.
+
+Al arrancar no se ejecuta nada solo: el lote real espera a que pulses «Reanudar».
+
+---
+
 # Portal IA · Rendimiento, navegación, concurrencia y tiempo real (31 de octubre de 2026)
 
 **Estado: implementado y verificado en la rama `mejora/concurrencia-tiempo-real` (sobre `1eb9a7c`). NO integrado en
