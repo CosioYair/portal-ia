@@ -64,6 +64,7 @@ test('ronda 3: la versión del borrador se fija al empezar y lo recuperado solo 
   assert.match(story, /Mientras editabas cambió en la historia/, 'si cambió el mismo campo, se avisa antes de sobrescribirlo');
   const agent = read('screens/AgentDetail.tsx');
   assert.match(agent, /useDraft<\{ mine: Partial<AgentConfig> \} \| null>\(draftKey\('agente\.config'/, 'el borrador guarda solo los campos que tocaste');
+  assert.match(agent, /if \(JSON\.stringify\(next\[k\]\) === JSON\.stringify\(agent\.config\[k\]\)\) delete next\[k\]/, 'un campo igual al del servidor deja de ser tuyo');
   assert.match(agent, /const cfg: AgentConfig \| null = agent \? \{ \.\.\.agent\.config, \.\.\.mine \}/, 'solo tus campos, sobre la configuración actual');
   // «Aceptar» un encargo no envía el texto escrito para pedir cambios (ni uno recuperado) como nota de aceptación.
   assert.match(read('components/ConversationPanel.tsx'), /api\.acceptAssignment\(slug, a\.id, null\)/);

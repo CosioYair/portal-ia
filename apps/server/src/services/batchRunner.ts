@@ -642,15 +642,17 @@ function startItem(slug: string, id: string, itemId: string, prep: Prepared) {
     trackJob(p.id, run).catch(e => logger({ err: e?.message, processId: p.id }, 'lote: fallo inesperado al retomar'));
     return;
   }
+  // Volver a empezar una iteración (p. ej. tras una pausa antes de implementar) conserva su contexto: la nota del propietario.
+  const prevP = !reuse && it.processId ? procs.get(it.processId) : undefined; const prevContext = prevP?.result?.iterationContext ?? null;
   let p: Process;
-  try { p = reuse ?? createStoryProcess(slug, b.projectId, itemId, {}); }
+  try { p = reuse ?? createStoryProcess(slug, b.projectId, itemId, prevContext ? { iterationContext: prevContext } : {}); }
   catch (e: any) { return needsOwner(`No se pudo preparar la historia: ${e?.message ?? e}`); }
   // Claude Code solo cede a la API si el lote lo autoriza (y el conector lo permite): si no, se pausa como siempre.
   const cfg = normalizePipeline({ autoApply: true, autoVerify: true, commands: b.auth.commands, allowInstall: b.auth.allowInstall, maxCorrections: b.auth.maxCorrections, gauntlet, backends: b.auth.backends, ...(b.auth.apiFallback && b.auth.backends.includes('api') ? {} : { apiFallback: false }) });
   // «Reanudar» tras una pausa ANTES de implementar (p. ej. el tope de llamadas en la revisión del plan): el plan ya pagado
   // pasa a esta ejecución y no se vuelve a pedir; su revisión, si quedó pendiente, sí se hace. Solo si la historia (y el
   // contexto de iteración) siguen siendo los mismos con que se hizo: si la editaste mientras tanto, se planifica de nuevo.
-  const prevP = !reuse && it.processId ? procs.get(it.processId) : undefined; const story = backlogRepo(slug).get(itemId);
+  const story = backlogRepo(slug).get(itemId);
   const sameStory = !!story && !!prevP?.result?.planBasis && prevP.result.planBasis === storyBasis(story, procs.get(p.id)!.result?.iterationContext ?? null);
   const carried = prevP?.result?.plan && sameStory && resumableInBatch(slug, prevP) === 'restart' ? { plan: prevP.result.plan, carriedPlan: true } : {};
   procs.setResult(p.id, { ...procs.get(p.id)!.result!, ...carried, pipeline: newPipeline(cfg) });

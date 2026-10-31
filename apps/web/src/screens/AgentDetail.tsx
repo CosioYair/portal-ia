@@ -40,12 +40,19 @@ export function AgentDetail() {
   const agent = agents.find(a => a.id === agentId);
   // Los cambios sin guardar sobreviven a recargar (por empresa y agente). El borrador guarda SOLO los campos que tocaste
   // (`mine`): se muestran y se guardan sobre la configuración actual, así lo que cambió mientras tanto (p. ej. el backend o
-  // la versión de plantilla) no se pisa, y volver un campo a su valor anterior también se guarda.
+  // la versión de plantilla) no se pisa, y volver un campo a su valor anterior también se guarda. Un campo que vuelve a
+  // ser igual al del servidor deja de ser tuyo (no pisaría un cambio posterior).
   const cfgDraft = useDraft<{ mine: Partial<AgentConfig> } | null>(draftKey('agente.config', ws.slug, agent ? agentId : null), null, { base: agent ? fingerprint(agent.config) : null });
   const mine: Partial<AgentConfig> = cfgDraft.value?.mine ?? {};
   const cfg: AgentConfig | null = agent ? { ...agent.config, ...mine } : null;
   const dirty = !!agent && JSON.stringify(cfg) !== JSON.stringify(agent.config);
-  const edit = (patch: Partial<AgentConfig>) => { if (agent) cfgDraft.set(d => ({ mine: { ...(d?.mine ?? {}), ...patch } })); };
+  const edit = (patch: Partial<AgentConfig>) => {
+    if (agent) cfgDraft.set(d => {
+      const next: Record<string, unknown> = { ...(d?.mine ?? {}), ...patch };
+      for (const k of Object.keys(patch) as (keyof AgentConfig)[]) if (JSON.stringify(next[k]) === JSON.stringify(agent.config[k])) delete next[k];
+      return { mine: next as Partial<AgentConfig> };
+    });
+  };
   const discardDraft = cfgDraft.clear;
 
   const prov = useMemo(() => providers.find(p => p.id === cfg?.provider), [providers, cfg?.provider]);

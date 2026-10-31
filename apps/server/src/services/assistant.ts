@@ -116,7 +116,7 @@ const PHASE_TEXT: Partial<Record<PipelinePhase, string>> = { implementing: 'impl
 const DECISION_STATE: Record<string, string> = { open: 'abierta: decide el propietario', approved: 'aprobada', rejected: 'rechazada', deferred: 'aplazada' };
 const decisionForPrompt = (a: AssistantAction) => { const d = a.decisionId ? decisionsRepo.get(a.decisionId) : null; return d ? `Decisión D${d.seq}: ${d.question.slice(0, 90)} → ${DECISION_STATE[d.status] ?? d.status}` : `${a.label.slice(0, 90)} → ver el registro de decisiones`; };
 // Un aviso (p. ej. «publicar main» aplazado) no es algo «hecho»: el modelo ve su texto, que dice qué queda pendiente.
-const actionForPrompt = (a: AssistantAction) => a.type === 'open_decision' ? decisionForPrompt(a) : a.type === 'info' ? `${a.label.slice(0, 90)} → ${(a.detail ?? 'aviso').slice(0, 220)}` : `${a.label.slice(0, 90)} → ${a.live ? `${a.live.phase}${a.live.settled ? '' : ` (${a.live.next.slice(0, 120)})`}` : `${STATE_TEXT[a.status]}${a.status === 'failed' && a.detail ? `: ${a.detail.slice(0, 160)}` : ''}`}`;
+const actionForPrompt = (a: AssistantAction) => a.type === 'open_decision' ? decisionForPrompt(a) : a.type === 'info' ? `${a.label.slice(0, 90)} → ${(a.detail ?? 'aviso').slice(0, 400)}` : `${a.label.slice(0, 90)} → ${a.live ? `${a.live.phase}${a.live.settled ? '' : ` (${a.live.next.slice(0, 120)})`}` : `${STATE_TEXT[a.status]}${a.status === 'failed' && a.detail ? `: ${a.detail.slice(0, 160)}` : ''}`}`;
 
 function assistantAgent() {
   const a = activeAgents(INTERNAL_WORKSPACE.slug).find(x => x.key === 'ws-asistente');
