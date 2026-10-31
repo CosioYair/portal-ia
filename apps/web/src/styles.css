@@ -13,6 +13,8 @@ h1,h2,h3,p,ul,ol{margin:0}
 .h1{font-size:32px;line-height:1.15;font-weight:600;letter-spacing:-.015em}
 .h3{font-size:15px;line-height:1.3;font-weight:600}
 .lede{font-size:16px;line-height:1.55;color:#4F5259;max-width:58ch}
+/* HU-170 · Introducciones de 2 líneas como máximo; el recorte es solo un respaldo, el texto ya es corto */
+.lede-2l{display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .muted{color:#686B72}.med{color:#4F5259}.small{font-size:12px;line-height:1.4}.sm13{font-size:13px}
 .card{background:#fff;border:1px solid #E5E3DC;border-radius:10px}
 .card-h{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid #EEECE6}
@@ -232,6 +234,16 @@ button.chip:hover{border-color:#B8B5AC}
 /* Bandeja de autorizaciones (HU-009) */
 .inbox-list{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:12px}
 .inbox-card[aria-busy="true"]{opacity:.8}
+/* HU-170 · Cifra primero: importe y riesgo en 28 px, con Aprobar y Denegar justo debajo */
+.inbox-card__figures{display:flex;gap:24px;flex-wrap:wrap;align-items:flex-end}
+.inbox-card__figure{display:flex;flex-direction:column;gap:2px;min-width:0}
+.inbox-card__amount,.inbox-card__risk{font-size:28px;line-height:1.1;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.01em;color:var(--color-text,#1A1B1E);overflow-wrap:anywhere}
+.inbox-card__risk{display:inline-flex;align-items:center;gap:8px}
+.inbox-card__risk svg{width:24px;height:24px;flex:none}
+.inbox-card__risk--alto{color:var(--color-err-text,#9A1F18)}
+.inbox-card__risk--medio{color:var(--color-warn-text,#7A4A00)}
+.inbox-card__risk--bajo{color:var(--color-ok-text,#166534)}
+.inbox-card__actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .inbox-fab{position:fixed;left:16px;bottom:16px;z-index:31;display:inline-flex;align-items:center;gap:8px;height:44px;padding:0 16px 0 12px;border-radius:999px;border:1px solid #CFCCC3;background:#fff;color:#1A1B1E;font:inherit;font-size:13.5px;font-weight:600;box-shadow:0 12px 32px rgba(26,27,30,.16);cursor:pointer}
 .inbox-fab:hover{background:#F7F6F2}
 .inbox-fab:focus-visible{outline:2px solid #0F6E6A;outline-offset:2px}

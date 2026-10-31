@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { DecisionVerdict, PendingDecision, PendingDecisionKind } from '@portal-ia/domain';
 import { api, ApiError } from '../lib/api.ts';
+import { Icon } from './ui.tsx';
 
 export const KIND_LABEL: Record<PendingDecisionKind, string> = {
   process_authorization: 'Autorizar proceso',
@@ -27,6 +28,25 @@ type CardState =
   | { phase: 'error'; message: string; stale: boolean };
 
 const money = (n: number) => `${n.toFixed(2).replace('.', ',')} USD`;
+
+export type DecisionRiskLevel = 'alto' | 'medio' | 'bajo';
+
+/**
+ * HU-170 · Riesgo de una decisión. Función pura y sin IA: depende solo del tipo y de si tiene costo de IA,
+ * sin umbrales en USD (cada empresa tiene su propio presupuesto).
+ * Alto: publicar e integrar. Medio: aplicar un diff o autorizar un proceso con costo. Bajo: propuesta al backlog o sin costo de IA.
+ */
+export function decisionRisk(d: Pick<PendingDecision, 'kind' | 'estimatedCost'>): { level: DecisionRiskLevel; label: string } {
+  if (d.kind === 'publish' || d.kind === 'integrate') return { level: 'alto', label: 'Riesgo alto' };
+  if (d.kind === 'apply_diff' || (d.kind === 'process_authorization' && d.estimatedCost)) return { level: 'medio', label: 'Riesgo medio' };
+  return { level: 'bajo', label: 'Riesgo bajo' };
+}
+
+const RISK_ICON: Record<DecisionRiskLevel, () => ReturnType<typeof Icon.warn>> = {
+  alto: Icon.warn,
+  medio: Icon.alert,
+  bajo: Icon.info
+};
 const when = (iso: string) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? iso : d.toLocaleString('es'); };
 
 type RestoreState = { phase: 'idle' } | { phase: 'sending' } | { phase: 'error'; message: string };
@@ -53,6 +73,7 @@ export function PendingDecisionCard({ decision, onResolved, superseded = null, o
   const history = decision.storyId ? `/historias/${decision.storyId}#iteraciones` : null;
   const byLabel = superseded ? `Superada por la iteración ${superseded.byIteration ?? 'más reciente'}` : null;
   const older = decision.supersededCount;
+  const risk = decisionRisk(decision);
 
   async function doRestore() {
     if (!onRestore) return;
@@ -87,45 +108,32 @@ export function PendingDecisionCard({ decision, onResolved, superseded = null, o
           <span className="chip chip-accent"><span aria-hidden="true" className="mono">{KIND_GLYPH[decision.kind]}</span> {KIND_LABEL[decision.kind]}</span>
           {decision.iteration != null && <span className="chip">Iteración {decision.iteration}</span>}
           {byLabel && <span className="chip">{byLabel}</span>}
-          {decision.estimatedCost
+          {superseded && (decision.estimatedCost
             ? <span className="chip chip-warn">Costo estimado · {money(decision.estimatedCost.usd)}</span>
-            : <span className="chip">Sin costo de IA</span>}
+            : <span className="chip">Sin costo de IA</span>)}
           <span className="small muted" style={{ marginLeft: 'auto' }}>{when(decision.createdAt)}</span>
         </div>
 
-        <div>
-          <div className="h3">{decision.title}</div>
-          <div className="small muted">Solicita: {decision.requestedBy} · Proceso <span className="mono">{decision.processId.slice(0, 8)}</span></div>
-          {!superseded && older > 0 && (
-            <div className="small muted">
-              {older === 1 ? '1 autorización anterior superada' : `${older} autorizaciones anteriores superadas`}
-              {history && <> · <Link className="lnk" to={history}>ver historial</Link></>}
+        {!superseded && (
+          <div className="inbox-card__figures">
+            <div className="inbox-card__figure">
+              <span className="small muted">Costo estimado</span>
+              <span className="inbox-card__amount">
+                {decision.estimatedCost ? money(decision.estimatedCost.usd) : '0,00 USD · Sin costo de IA'}
+              </span>
             </div>
-          )}
-        </div>
-
-        <p className="sm13 med"><strong>Impacto:</strong> {decision.impact}</p>
-
-        {superseded && (
-          <div className="notice notice-info" role="status">
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <div><strong>{byLabel}.</strong> Ya no se puede aprobar ni denegar: decide sobre la autorización vigente.{superseded.at ? ` Superada el ${when(superseded.at)}.` : ''}</div>
-              {onRestore && (
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void doRestore()}>
-                    {restore.phase === 'sending' ? <><span className="spin" aria-hidden="true" /> Restaurando…</> : 'Restaurar'}
-                  </button>
-                  <span className="small muted">Sin costo de IA. Vuelve a ser la vigente y la actual pasa a superada (reversible).</span>
-                </div>
-              )}
-              {!onRestore && history && <div><Link className="lnk" to={history}>Ver el historial de la historia</Link></div>}
-              {restore.phase === 'error' && <div role="alert"><strong>No se pudo restaurar.</strong> {restore.message}</div>}
+            <div className="inbox-card__figure">
+              <span className="small muted">Riesgo</span>
+              <span className={`inbox-card__risk inbox-card__risk--${risk.level}`} data-risk={risk.level}>
+                {RISK_ICON[risk.level]()}
+                <span>{risk.label}</span>
+              </span>
             </div>
           </div>
         )}
 
         {state.phase === 'ready' && !superseded && (
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div className="inbox-card__actions">
             <button className="btn btn-primary btn-sm" onClick={() => setState({ phase: 'confirming', verdict: 'approve' })}>Aprobar</button>
             {canDeny
               ? <button className="btn btn-secondary btn-sm" onClick={() => setState({ phase: 'confirming', verdict: 'deny' })}>Denegar</button>
@@ -168,6 +176,37 @@ export function PendingDecisionCard({ decision, onResolved, superseded = null, o
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <div><strong>{state.stale ? 'Esta decisión ya no está disponible.' : 'No se pudo registrar la decisión.'}</strong> {state.message}</div>
               {!state.stale && <div><button className="btn btn-secondary btn-sm" onClick={() => setState({ phase: 'ready' })}>Reintentar</button></div>}
+            </div>
+          </div>
+        )}
+
+        <div>
+          <div className="h3">{decision.title}</div>
+          <div className="small muted">Solicita: {decision.requestedBy} · Proceso <span className="mono">{decision.processId.slice(0, 8)}</span></div>
+          {!superseded && older > 0 && (
+            <div className="small muted">
+              {older === 1 ? '1 autorización anterior superada' : `${older} autorizaciones anteriores superadas`}
+              {history && <> · <Link className="lnk" to={history}>ver historial</Link></>}
+            </div>
+          )}
+        </div>
+
+        <p className="sm13 med"><strong>Impacto:</strong> {decision.impact}</p>
+
+        {superseded && (
+          <div className="notice notice-info" role="status">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div><strong>{byLabel}.</strong> Ya no se puede aprobar ni denegar: decide sobre la autorización vigente.{superseded.at ? ` Superada el ${when(superseded.at)}.` : ''}</div>
+              {onRestore && (
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void doRestore()}>
+                    {restore.phase === 'sending' ? <><span className="spin" aria-hidden="true" /> Restaurando…</> : 'Restaurar'}
+                  </button>
+                  <span className="small muted">Sin costo de IA. Vuelve a ser la vigente y la actual pasa a superada (reversible).</span>
+                </div>
+              )}
+              {!onRestore && history && <div><Link className="lnk" to={history}>Ver el historial de la historia</Link></div>}
+              {restore.phase === 'error' && <div role="alert"><strong>No se pudo restaurar.</strong> {restore.message}</div>}
             </div>
           </div>
         )}
