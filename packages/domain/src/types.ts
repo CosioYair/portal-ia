@@ -913,6 +913,8 @@ export interface ExecutionResult {
   plan: StoryPlan | null;
   /** El plan viene de una ejecución anterior que se detuvo antes de implementar (p. ej. por el tope de llamadas): no se vuelve a pedir. */
   carriedPlan?: boolean;
+  /** Huella de la historia (título, criterio, descripción) y del contexto de iteración con que se hizo el plan. */
+  planBasis?: string | null;
   implementationSummary: string | null;
   /** Explicación para el propietario, sin tecnicismos: qué verá tras integrar y reconstruir, y dónde (menú, botón, ruta). */
   userFacing?: string | null;

@@ -85,7 +85,7 @@ test('C · «arréglalo y publica main cuando termines»: sin tarjeta de publica
   ]));
   const a = await say(C, 'Arréglalo y publica main cuando termines');
   assert.deepEqual(a.actions.map((x: any) => [x.type, x.status]), [['propose_assignment', 'pending'], ['info', 'done']]);
-  assert.match(a.actions[1].detail, /cuando ese encargo esté integrado/);
+  assert.match(a.actions[1].detail, /Cuando ese encargo esté integrado en main .*pide «publica main».*no se propone sola/);
   // 2 · Una tarjeta pedida sola: si main recibe un commit que no mostraba, autorizarla NO publica nada (409).
   script(block('Lista para publicar.', [{ type: 'request_operation', capability: 'publish_main', company: S, project: site.slug }]));
   const b = await say(C, 'Publica main');

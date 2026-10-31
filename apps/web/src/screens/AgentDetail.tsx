@@ -38,15 +38,14 @@ export function AgentDetail() {
   const changeVersion = async (v: string) => { if (!agentId) return; setTplBusy(true); try { await api.setAgentTemplateVersion(ws.slug, agentId, v); flash(`Agente ahora sigue ${v}`); setTplTo(''); loadTpl(); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setTplBusy(false); } };
 
   const agent = agents.find(a => a.id === agentId);
-  // Los cambios sin guardar sobreviven a recargar (por empresa y agente) y recuerdan de qué configuración partieron
-  // (`orig`): se muestran y se guardan SOLO los campos que cambiaste, sobre la configuración actual; lo que cambió
-  // mientras tanto (p. ej. el backend o la versión de plantilla) no se pisa.
-  const cfgDraft = useDraft<{ cfg: AgentConfig; orig: AgentConfig } | null>(draftKey('agente.config', ws.slug, agent ? agentId : null), null, { base: agent ? fingerprint(agent.config) : null });
-  const mine: Partial<AgentConfig> = cfgDraft.value ? Object.fromEntries((Object.keys(cfgDraft.value.cfg) as (keyof AgentConfig)[])
-    .filter(k => JSON.stringify(cfgDraft.value!.cfg[k]) !== JSON.stringify(cfgDraft.value!.orig[k])).map(k => [k, cfgDraft.value!.cfg[k]])) : {};
+  // Los cambios sin guardar sobreviven a recargar (por empresa y agente). El borrador guarda SOLO los campos que tocaste
+  // (`mine`): se muestran y se guardan sobre la configuración actual, así lo que cambió mientras tanto (p. ej. el backend o
+  // la versión de plantilla) no se pisa, y volver un campo a su valor anterior también se guarda.
+  const cfgDraft = useDraft<{ mine: Partial<AgentConfig> } | null>(draftKey('agente.config', ws.slug, agent ? agentId : null), null, { base: agent ? fingerprint(agent.config) : null });
+  const mine: Partial<AgentConfig> = cfgDraft.value?.mine ?? {};
   const cfg: AgentConfig | null = agent ? { ...agent.config, ...mine } : null;
   const dirty = !!agent && JSON.stringify(cfg) !== JSON.stringify(agent.config);
-  const edit = (patch: Partial<AgentConfig>) => { if (agent) cfgDraft.set(d => ({ cfg: { ...(d?.cfg ?? agent.config), ...patch }, orig: d?.orig ?? agent.config })); };
+  const edit = (patch: Partial<AgentConfig>) => { if (agent) cfgDraft.set(d => ({ mine: { ...(d?.mine ?? {}), ...patch } })); };
   const discardDraft = cfgDraft.clear;
 
   const prov = useMemo(() => providers.find(p => p.id === cfg?.provider), [providers, cfg?.provider]);

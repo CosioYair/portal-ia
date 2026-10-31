@@ -49,6 +49,7 @@ test('navegación: el enlace directo manda sobre la selección guardada y conser
   const app = read('App.tsx');
   assert.match(app, /useState<Selection \| null>\(\(\) => urlSel\(\) \?\? histSel\(\) \?\? readSel\(\)\)/);
   assert.match(app, /<SelectionHistory sel=\{sel\}/, 'Atrás/Adelante vuelven a la empresa de cada entrada del historial');
+  assert.match(app, /if \(!st\?\.key\) window\.history\.replaceState/, 'también la primera entrada de la pestaña');
   assert.match(app, /navigate\('\/' \+ \(rest \|\| 'panel'\) \+ search \+ hash/);
   assert.match(read('screens/StoryWorkspace.tsx'), /navigate\(`\/backlog\?ejecutar=\$\{it\.id\}`\)/, 'el enlace «Ejecutar» de la historia abre su diálogo');
 });
@@ -62,7 +63,7 @@ test('ronda 3: la versión del borrador se fija al empezar y lo recuperado solo 
   assert.match(story, /setEdit\(\{ \.\.\.f, orig: f \}\)/, 'la edición recuerda los campos de los que partió');
   assert.match(story, /Mientras editabas cambió en la historia/, 'si cambió el mismo campo, se avisa antes de sobrescribirlo');
   const agent = read('screens/AgentDetail.tsx');
-  assert.match(agent, /useDraft<\{ cfg: AgentConfig; orig: AgentConfig \} \| null>\(draftKey\('agente\.config'/);
+  assert.match(agent, /useDraft<\{ mine: Partial<AgentConfig> \} \| null>\(draftKey\('agente\.config'/, 'el borrador guarda solo los campos que tocaste');
   assert.match(agent, /const cfg: AgentConfig \| null = agent \? \{ \.\.\.agent\.config, \.\.\.mine \}/, 'solo tus campos, sobre la configuración actual');
   // «Aceptar» un encargo no envía el texto escrito para pedir cambios (ni uno recuperado) como nota de aceptación.
   assert.match(read('components/ConversationPanel.tsx'), /api\.acceptAssignment\(slug, a\.id, null\)/);

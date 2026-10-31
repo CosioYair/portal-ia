@@ -17,6 +17,7 @@ import { DEV_MAX_TOKENS, FILE_FORMAT, sys } from './storyPrompts.ts';
 import { assessDeveloperOutput, failureClassOf, mergeChanges, type ParsedDevOutput } from './devOutput.ts';
 import { callAgentStep, CONSULT_EVIDENCE_CHARS, filesContext, implementerOutputs, isTruncatedStop, newPipeline, pausePipeline, PipelinePause, planFiles, providerPause, runPipelineStages, settleImplementation, StoryFailure, updateResult, worstCaseCallUsd, type StoryRunCtx } from './storyPipeline.ts';
 export { parseFileBlocks, parseRuntimeChecks } from './devOutput.ts';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { setWorkStatus, workItemOf, type WorkItem } from './workItems.ts';
@@ -50,6 +51,10 @@ function stepPlanFor(agents: Agent[], projectId: string, story: StoryText, opts:
   if (missing.length) throw Object.assign(new Error(`Faltan agentes con capacidad para ${missing.map(r => r === 'planner' ? 'planificar' : 'implementar (con herramienta write_repo)').join(' y ')} en este proyecto. ${team.excluded.map(e => `${e.agentName}: ${e.reason}`).join(' · ')}`), { statusCode: 409 });
   const steps = orderedMembers(team).map(m => ({ agent: byId.get(m.agentId)!, title: TITLES[m.role](m.agentName), maxTokens: MAX_TOKENS[m.role], role: m.role, reason: m.reason }));
   return { steps, team };
+}
+/** Huella de lo que el plan debe cumplir (historia y contexto de iteración): un plan solo se reutiliza si no ha cambiado. */
+export function storyBasis(item: { title: string; criterion: string | null; description: string | null }, iterationContext: string | null): string {
+  return createHash('sha256').update(JSON.stringify([item.title, item.criterion ?? '', item.description ?? '', iterationContext ?? ''])).digest('hex').slice(0, 16);
 }
 /** Paso por papel (procesos antiguos sin `role`: por posición). */
 export function stepByRole(proc: Process, role: TeamRole): ProcessStep | undefined {
@@ -241,7 +246,7 @@ Responde SOLO con JSON: {"summary": string, "tasks": string[], "filesToRead": st
     }
     // El criterio de la historia es obligatorio: si el plan no trae criterios, se usa el del propietario.
     if (!plan.acceptance.length && item.criterion?.trim()) plan.acceptance = [item.criterion.trim()];
-    result.plan = plan; save();
+    result.plan = plan; result.planBasis = storyBasis(item, result.iterationContext ?? null); save();
     if (config?.autoApply) {
       // Antes de pagar consultas: un plan sin entregables, con demasiados o con rutas no permitidas se explica y se pausa.
       const team0 = involved.map(id => agents.get(id)).filter(Boolean) as Agent[];

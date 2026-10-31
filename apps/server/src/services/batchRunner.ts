@@ -13,7 +13,7 @@ import { projectEvaluator, projectGauntlet, resolveGauntletFor, syncEvaluatorSte
 import { abortProcessCalls } from './providerCalls.ts';
 import { pushBranches } from './repoWrite.ts';
 import { defaultChecks, runRuntimeChecks } from './runtimeChecks.ts';
-import { createStoryProcess, estimateStory, repoContextChars, runStory } from './storyExecution.ts';
+import { createStoryProcess, estimateStory, repoContextChars, runStory, storyBasis } from './storyExecution.ts';
 import { prepareIntegration, verifyCandidate } from './storyIntegration.ts';
 import { mergeStory } from './storyMerge.ts';
 import { newPipeline, resumeStory } from './storyPipeline.ts';
@@ -629,11 +629,12 @@ function startItem(slug: string, id: string, itemId: string, prep: Prepared) {
     const p = prep.resume; const pl = p.result!.pipeline!;
     if (p.status === 'running') return setItem(slug, id, itemId, { state: 'running', resumeProcessId: null, reason: null, failureClass: null }, 'la retomaste desde el proceso; el lote la sigue.');
     if (resumableInBatch(slug, p) !== 'continue') return setItem(slug, id, itemId, { state: 'needs_owner', resumeProcessId: null, reason: 'Ya no está en una pausa que el lote pueda retomar: decide desde su proceso.' }, 'ya no está en una pausa reanudable: decides tú.');
-    // Tras una pausa por USD se concede otra vez el tope por historia, pero solo si cabe en lo que queda del lote: la parte
-    // no gastada de este proceso (pausado, no cuenta como reservada) más lo nuevo. Nunca se supera el total autorizado.
-    const grant = pl.pauseKind === 'budget' ? b.auth.perStoryBudgetUsd : 0;
+    // Solo una historia que puede gastar API reserva USD al seguir (como al empezar): la de solo suscripción no los necesita,
+    // aunque la versión anterior la pausara por «presupuesto». La que sí: lo no gastado de este proceso (pausado, no cuenta
+    // como reservado) y, tras una pausa por USD, otro tope por historia, solo si cabe en lo que queda del lote.
+    const grant = pl.pauseKind === 'budget' && prep.api ? b.auth.perStoryBudgetUsd : 0;
     const unspent = Math.max(0, (p.budgetUsd ?? 0) - p.spentUsd - (p.unconfirmedUsd ?? 0)); const left = budgetOf(slug, b).remaining;
-    if (grant && left + 1e-9 < unspent + grant) return setItem(slug, id, itemId, { state: 'needs_owner', resumeProcessId: null, failureClass: 'budget', reason: `Para seguir haría falta ${(unspent + grant).toFixed(2)} USD de API y al lote le quedan ${left.toFixed(2)}: reanuda concediendo más presupuesto al lote (no se supera el total autorizado).` }, 'sin USD de API suficientes en el lote para seguir: decides tú.');
+    if (prep.api && left + 1e-9 < unspent + grant) return setItem(slug, id, itemId, { state: 'needs_owner', resumeProcessId: null, failureClass: 'budget', reason: `Para seguir haría falta ${(unspent + grant).toFixed(2)} USD de API y al lote le quedan ${left.toFixed(2)}: reanuda concediendo más presupuesto al lote (no se supera el total autorizado).` }, 'sin USD de API suficientes en el lote para seguir: decides tú.');
     procs.resume(p.id, Math.max(p.budgetUsd ?? 0, p.spentUsd) + grant);
     procs.setResult(p.id, { ...p.result!, pipeline: { ...pl, failures: [], startedAt: now() } });
     setItem(slug, id, itemId, { state: 'running', resumeProcessId: null, usesApi: prep.api, reason: null, failureClass: null, notStarted: false, startedAt: now(), finishedAt: null }, `se retoma donde quedó (proceso ${p.id.slice(0, 8)}), sin repetir lo hecho.`, 'recovery');
@@ -647,9 +648,11 @@ function startItem(slug: string, id: string, itemId: string, prep: Prepared) {
   // Claude Code solo cede a la API si el lote lo autoriza (y el conector lo permite): si no, se pausa como siempre.
   const cfg = normalizePipeline({ autoApply: true, autoVerify: true, commands: b.auth.commands, allowInstall: b.auth.allowInstall, maxCorrections: b.auth.maxCorrections, gauntlet, backends: b.auth.backends, ...(b.auth.apiFallback && b.auth.backends.includes('api') ? {} : { apiFallback: false }) });
   // «Reanudar» tras una pausa ANTES de implementar (p. ej. el tope de llamadas en la revisión del plan): el plan ya pagado
-  // pasa a esta ejecución y no se vuelve a pedir; su revisión, si quedó pendiente, sí se hace.
-  const prevP = !reuse && it.processId ? procs.get(it.processId) : undefined;
-  const carried = prevP?.result?.plan && resumableInBatch(slug, prevP) === 'restart' ? { plan: prevP.result.plan, carriedPlan: true } : {};
+  // pasa a esta ejecución y no se vuelve a pedir; su revisión, si quedó pendiente, sí se hace. Solo si la historia (y el
+  // contexto de iteración) siguen siendo los mismos con que se hizo: si la editaste mientras tanto, se planifica de nuevo.
+  const prevP = !reuse && it.processId ? procs.get(it.processId) : undefined; const story = backlogRepo(slug).get(itemId);
+  const sameStory = !!story && !!prevP?.result?.planBasis && prevP.result.planBasis === storyBasis(story, procs.get(p.id)!.result?.iterationContext ?? null);
+  const carried = prevP?.result?.plan && sameStory && resumableInBatch(slug, prevP) === 'restart' ? { plan: prevP.result.plan, carriedPlan: true } : {};
   procs.setResult(p.id, { ...procs.get(p.id)!.result!, ...carried, pipeline: newPipeline(cfg) });
   syncEvaluatorStep(slug, p.id, cfg.gauntlet!);
   procs.authorize(p.id, b.auth.perStoryBudgetUsd);

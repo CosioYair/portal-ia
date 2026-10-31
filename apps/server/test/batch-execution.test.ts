@@ -444,3 +444,32 @@ test('«depende de» editable (lo usa el plan): otra historia del mismo proyecto
   assert.equal(ok.statusCode, 200, ok.body); assert.equal(ok.json().dependsOn, a.storyId);
   assert.equal((await app.inject({ method: 'PATCH', url: `${W}/backlog/${c.id}`, payload: { dependsOn: null } })).json().dependsOn, null);
 });
+
+test('activación sobre un lote heredado: «en marcha» con todo esperando tu decisión (como lo dejó la versión anterior) → al arrancar no se empieza ni se retoma nada', async () => {
+  const { batchesRepo } = await import('../src/db/batches.ts');
+  const a = story('Historia HEREDA1'); const c = story('Historia HEREDA2');
+  const realResume = batchDeps.resumeStory;
+  // La versión anterior: plan pagado y pausa por «presupuesto» antes de implementar (HU-164/HU-165 del lote real).
+  batchDeps.runStory = async (slug, pid) => {
+    const procs = processesRepo(slug); const p = procs.get(pid)!;
+    procs.setResult(pid, { ...p.result!, pipeline: { ...p.result!.pipeline!, state: 'paused', pauseKind: 'budget', reason: 'El plan necesita ≈ 0.40 USD solo para implementar sus 2 unidades y quedan 0.10 USD autorizados.', phase: 'finished', finishedAt: new Date().toISOString() } });
+    procs.finish(pid, 'done', null);
+  };
+  try {
+    const b = await authorize({ itemIds: [a.id, c.id], title: 'Lote heredado' });
+    await waitFor(() => get(b.id), x => x.items.every((i: any) => i.state === 'needs_owner'), 'las dos esperan');
+    // Estado exacto que dejó la versión anterior: lote «running», las dos esperando y el texto «Lo automático terminó».
+    batchesRepo(S).update(b.id, x => { x.status = 'running'; x.reason = 'Lo automático terminó; esperan tu decisión: HEREDA1, HEREDA2.'; for (const i of x.items) { i.state = 'needs_owner'; i.failureClass = 'budget'; i.resumeProcessId = null; } });
+    let calls = 0; batchDeps.runStory = async () => { calls++; }; batchDeps.resumeStory = async () => { calls++; };
+    const before = processesRepo(S).list(project.id).length;
+    assert.equal(await resumeBatches(() => undefined), 0, 'nada se retoma solo al arrancar');
+    await new Promise(r => setTimeout(r, 400));
+    const now = await get(b.id);
+    assert.equal(calls, 0, 'ninguna ejecución empezada ni retomada');
+    assert.equal(processesRepo(S).list(project.id).length, before, 'ningún proceso nuevo');
+    assert.deepEqual(now.items.map((i: any) => i.state), ['needs_owner', 'needs_owner']);
+    assert.equal(now.status, 'paused', 'el estado pasa a ser verdadero: en pausa');
+    assert.match(now.reason, /Reanudar/); assert.doesNotMatch(now.reason, /terminó/);
+    await app.inject({ method: 'POST', url: `${W}/batches/${b.id}/cancel` });
+  } finally { batchDeps.runStory = realRunStory; batchDeps.resumeStory = realResume; }
+});

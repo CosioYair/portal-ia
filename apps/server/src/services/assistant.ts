@@ -115,7 +115,8 @@ const STATE_TEXT: Record<AssistantAction['status'], string> = { pending: 'espera
 const PHASE_TEXT: Partial<Record<PipelinePhase, string>> = { implementing: 'implementación', recovering: 'recuperación', repairing: 'reparación', applying: 'aplicación en el worktree', verifying: 'verificación', installing: 'instalación', qa: 'QA', correcting: 'corrección', finished: 'terminado' };
 const DECISION_STATE: Record<string, string> = { open: 'abierta: decide el propietario', approved: 'aprobada', rejected: 'rechazada', deferred: 'aplazada' };
 const decisionForPrompt = (a: AssistantAction) => { const d = a.decisionId ? decisionsRepo.get(a.decisionId) : null; return d ? `Decisión D${d.seq}: ${d.question.slice(0, 90)} → ${DECISION_STATE[d.status] ?? d.status}` : `${a.label.slice(0, 90)} → ver el registro de decisiones`; };
-const actionForPrompt = (a: AssistantAction) => a.type === 'open_decision' ? decisionForPrompt(a) : `${a.label.slice(0, 90)} → ${a.live ? `${a.live.phase}${a.live.settled ? '' : ` (${a.live.next.slice(0, 120)})`}` : `${STATE_TEXT[a.status]}${a.status === 'failed' && a.detail ? `: ${a.detail.slice(0, 160)}` : ''}`}`;
+// Un aviso (p. ej. «publicar main» aplazado) no es algo «hecho»: el modelo ve su texto, que dice qué queda pendiente.
+const actionForPrompt = (a: AssistantAction) => a.type === 'open_decision' ? decisionForPrompt(a) : a.type === 'info' ? `${a.label.slice(0, 90)} → ${(a.detail ?? 'aviso').slice(0, 220)}` : `${a.label.slice(0, 90)} → ${a.live ? `${a.live.phase}${a.live.settled ? '' : ` (${a.live.next.slice(0, 120)})`}` : `${STATE_TEXT[a.status]}${a.status === 'failed' && a.detail ? `: ${a.detail.slice(0, 160)}` : ''}`}`;
 
 function assistantAgent() {
   const a = activeAgents(INTERNAL_WORKSPACE.slug).find(x => x.key === 'ws-asistente');
@@ -458,7 +459,7 @@ ${await platformSnapshot({ workspaceSlug: conv.workspaceSlug, projectId: conv.pr
     const opsReq = actionsReq.filter(x => x?.type === 'request_operation');
     const en = done.find(x => x.type === 'propose_assignment' && x.status === 'pending');
     const deferred = en ? opsReq.filter(x => x?.capability === 'publish_main') : [];
-    const later: AssistantAction[] = deferred.map(() => ({ type: 'info', status: 'done', label: 'Publicar main: cuando el encargo esté integrado', detail: `No se prepara ahora: publicaría el «main» actual, sin «${en!.label}». Se propone cuando ese encargo esté integrado en main (y activo, si es el Portal).` }));
+    const later: AssistantAction[] = deferred.map(() => ({ type: 'info', status: 'done', label: 'Publicar main: pendiente hasta que el encargo esté integrado', detail: `No se preparó la tarjeta: publicaría el «main» actual, sin «${en!.label}». Cuando ese encargo esté integrado en main (y activo, si es el Portal), pide «publica main» y se preparará con ese main; no se propone sola.` }));
     const actions = [...done, ...later, ...(await prepareOperations(opsReq.filter(x => !deferred.includes(x)), { conversationId: conv.id, workspaceSlug: scoped.workspaceSlug, projectId: scoped.projectId }))];
     const assistant = assistantRepo.add({ role: 'assistant', content: reply, actions, attachments: [], tokensIn: res.inputTokens, tokensOut: res.outputTokens, costUsd: cost, model: a.config.model }, conv.id);
     conversationsRepo.touch(conv.id); recomputeStage(conv.id);
@@ -513,6 +514,8 @@ export async function decideOperation(messageId: string, operationId: string, de
   if (decision === 'reject') { save({ status: 'rejected', detail: 'Rechazada por el propietario: no se ejecutó nada.', operation: { ...op, decidedAt } }); return assistantRepo.get(messageId)!; }
   const cap = CAPABILITIES[op.capability];
   if (!cap) throw Object.assign(new Error('La operación ya no existe en el catálogo.'), { statusCode: 409 });
+  // En marcha ANTES de cualquier espera: una segunda autorización simultánea (otra pestaña) ya no la encuentra pendiente.
+  save({ status: 'running', detail: 'Ejecutando con tu autorización…', operation: { ...op, decidedAt } });
   // Se autoriza lo que mostró la tarjeta: si el estado cambió desde la vista previa (p. ej. main tiene commits que no
   // mostraba), no se ejecuta y hay que pedirla de nuevo para verlo.
   if (op.preview.fingerprint) {
@@ -523,7 +526,6 @@ export async function decideOperation(messageId: string, operationId: string, de
       throw Object.assign(new Error(why), { statusCode: 409 });
     }
   }
-  save({ status: 'running', detail: 'Ejecutando con tu autorización…', operation: { ...op, decidedAt } });
   try {
     const result = await cap.execute(cap.params.parse(op.params));
     save({ status: 'done', detail: result.summary, operation: { ...op, decidedAt, result } });

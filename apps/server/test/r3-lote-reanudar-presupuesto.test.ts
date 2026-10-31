@@ -234,3 +234,26 @@ test('R3A-6 · tope de llamadas en la revisión del plan (antes de implementar):
     assert.equal(rules.filter((r: string) => r === R.plan).length, 1, 'el plan ya hecho no se repite');
   } finally { await close(b.id); }
 });
+
+test('R4 · lote heredado SOLO suscripción que la versión anterior pausó por «presupuesto» (HU-164/HU-165): «Reanudar» con más llamadas y sin USD sigue y termina con 0 USD, sin repetir el plan', async () => {
+  await setBackends('claude-code'); ccRules(); apiScript();
+  const a = story('Historia HEREDADA-SUB');
+  const b = await authorize([a.id], { totalBudgetUsd: 0.1, perStoryBudgetUsd: 0.1, concurrency: 1, gauntlet: { mode: 'off' }, maxSubscriptionCalls: 2 });
+  try {
+    const p = await waitFor(() => get(b.id), y => y.status === 'paused' && !y.items.some((i: any) => i.state === 'running'), 'pausa a mitad de la implementación');
+    const pid = p.items[0].processId; const pr = processesRepo(S).get(pid)!;
+    assert.ok(pr.result?.manifest, 'el plan y el manifiesto se conservan (como en HU-164/HU-165)');
+    // Exactamente como lo dejó la versión anterior: pausa por «presupuesto» (0,10 USD) en una historia solo de suscripción.
+    processesRepo(S).setResult(pid, { ...pr.result!, pipeline: { ...pr.result!.pipeline!, pauseKind: 'budget', reason: 'El plan necesita ≈ 0.40 USD solo para implementar sus 2 unidades y quedan 0.10 USD autorizados.' } });
+    batchesRepo(S).update(b.id, x => { x.status = 'running'; x.reason = 'Lo automático terminó; esperan tu decisión: HEREDADA-SUB.'; x.items[0].state = 'needs_owner'; x.items[0].failureClass = 'budget'; x.items[0].resumeProcessId = null; });
+    const plans = ccRuns().filter((e: any) => e.rule === R.plan).length; const apiBefore = apiCalls().length;
+    const r = await inject('POST', `${W}/batches/${b.id}/resume`, { authorized: true, addSubscriptionCalls: 100 });
+    assert.equal(r.statusCode, 200, r.body);
+    const x = await waitFor(() => get(b.id), y => settled(y) && !y.items.some((i: any) => i.state === 'running'), 'asentado tras reanudar', 60_000);
+    assert.equal(x.items[0].state, 'awaiting_integration', describeItems(x));
+    assert.equal(x.items[0].processIds.length, 1, 'se retoma el mismo proceso (donde quedó)');
+    assert.equal(ccRuns().filter((e: any) => e.rule === R.plan).length, plans, 'el plan no se vuelve a pedir');
+    assert.equal(apiCalls().length, apiBefore, 'ninguna llamada a la API');
+    assert.equal(processesRepo(S).get(pid)!.spentUsd, 0, '0 USD');
+  } finally { await close(b.id); }
+});

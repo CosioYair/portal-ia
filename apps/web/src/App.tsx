@@ -32,6 +32,9 @@ const urlSel = (): Selection | null => { const m = window.location.pathname.matc
 // Empresa y proyecto con los que se abrió cada entrada del historial de esta pestaña (por la clave de la entrada).
 const HIST_KEY = 'portal-ia.seleccion.historial';
 const readHist = (): Record<string, Selection> => { try { return JSON.parse(sessionStorage.getItem(HIST_KEY) ?? '{}'); } catch { return {}; } };
+// La primera entrada de la pestaña no trae clave propia: se le da una antes de que la lea el router, para que también
+// recuerde su empresa (abrir /panel directamente, cambiar de empresa y volver con Atrás).
+try { const st = window.history.state as { key?: string } | null; if (!st?.key) window.history.replaceState({ ...(st ?? {}), key: Math.random().toString(36).slice(2, 10) }, ''); } catch { /* sin historial */ }
 /** Al volver con Atrás/Adelante a una entrada de otra página (o recargarla), su selección; no la última elegida. */
 const histSel = (): Selection | null => { const k = (window.history.state as { key?: string } | null)?.key; return k ? readHist()[k] ?? null : null; };
 
@@ -43,7 +46,7 @@ function SelectionHistory({ sel, workspaces, select }: { sel: Selection | null; 
   const { key } = useLocation(); const type = useNavigationType();
   const current = useRef(sel); current.current = sel;
   useEffect(() => {
-    if (key === 'default') return; // la primera entrada de la pestaña no tiene clave propia
+    if (key === 'default') return; // sin clave (no debería ocurrir: la primera entrada recibe una al cargar)
     const h = readHist(); const saved = h[key]; const cur = current.current;
     if (type === 'POP' && saved) {
       if (cur && (saved.ws !== cur.ws || saved.project !== cur.project) && workspaces.some(w => w.slug === saved.ws)) void select(saved.ws, saved.project);

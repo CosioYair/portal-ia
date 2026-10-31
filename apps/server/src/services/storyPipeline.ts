@@ -450,7 +450,7 @@ export function filesContext(base: string, files: string[], budget: number, omit
   return Array.from(new Set(files)).map(f => {
     const c = readRepoFile(base, f, 30_000); if (c === null) return `## ${f}\n(no existe aún)`;
     // Lo mismo que el puente: un posible secreto literal no llega a ningún modelo.
-    if (scanSecrets(c)) return `## ${f}\n(omitido: posible credencial en el archivo)`;
+    if (scanSecrets(c)) return `## ${f}\n(omitido: posible credencial en el archivo${omittedHint ? `; no lo reescribas entero${omittedHint}` : ''})`;
     if (left <= 0) return `## ${f}\n(omitido por tamaño del contexto: ${c.length} caracteres${omittedHint})`;
     left -= c.length; return `## ${f}\n\`\`\`\n${c}\n\`\`\``;
   }).join('\n\n');
