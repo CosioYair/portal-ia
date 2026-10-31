@@ -10,13 +10,22 @@ import path from 'node:path';
  */
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-discard-'));
 process.env.PORTAL_SANDBOX = 'none';
+process.env.PORTAL_ALLOW_FOREIGN_REPO = '1';
+process.env.PORTAL_MOCK_PROVIDER = '1';
 
+const { encryptSecret } = await import('../src/security/crypto.ts');
+const { classifyModel } = await import('@portal-ia/domain');
+const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
 const { backlogRepo, workspaceDb } = await import('../src/db/workspace.ts');
 const { buildApp } = await import('../src/app.ts');
 const { createCompany, createProject } = await import('../src/services/companies.ts');
 const { addManualItem } = await import('../src/services/backlog.ts');
 
+// Como en las demás suites: un proveedor (simulado) conectado antes de inicializar el espacio interno; sin él,
+// runBootstrap lanza «Conecta y verifica un proveedor…» y el archivo entero falla antes de ejecutar sus pruebas.
+providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');
+providersRepo.setConnected('anthropic', ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5'].map(id => classifyModel('anthropic', id)));
 runBootstrap();
 const slug = createCompany('Descartes').slug;
 const project = createProject(slug, 'Producto', 'x', []);
