@@ -16,7 +16,7 @@ import { SummaryCard } from '../components/SummaryCard.tsx';
 import { Disclosure } from '../components/Disclosure.tsx';
 
 /** HU-168 · Traduce el estado de un proceso a un estado del Portal (icono + texto), para no depender solo del color. */
-function procState(status: Process['status']): PortalState {
+function procState(status: string): PortalState {
   switch (status) {
     case 'running': return 'running';
     case 'done': return 'done';
