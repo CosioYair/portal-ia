@@ -32,7 +32,7 @@ export function Budgets() {
         <section className="card" aria-label="Presupuesto de cada proceso">
           <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <strong className="sm13">2 · Presupuesto de cada proceso (historias y encargos)</strong>
-            <span className="small">Máximo de API que fijas al autorizar o continuar un proceso. Si no alcanza, el proceso se pausa y ofrece continuar con más.</span>
+            <span className="small">Máximo de API que fijas al autorizar un proceso; si no alcanza, se pausa. Un error de «presupuesto no positivo» en las pruebas se refiere a este.</span>
             <Link className="lnk small" to="/actividad">Ver los procesos y su gasto (Actividad)</Link>
           </div>
         </section>
