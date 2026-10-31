@@ -6,6 +6,7 @@ import { useApp } from '../lib/store.ts';
 import { BACKLOG_STATUS, fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Chip, Empty, Icon, Notice } from '../components/ui.tsx';
+import { Disclosure } from '../components/Disclosure.tsx';
 
 const PROC_STATUS: Record<string, string> = { running: 'en ejecución', done: 'completado', pending_authorization: 'pendiente de autorización', failed: 'con errores', cancelled: 'cancelado', budget_exceeded: 'presupuesto agotado' };
 
@@ -39,7 +40,10 @@ export function Archive() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div className="eyebrow">Archivo histórico</div>
             <h1 className="h1" style={{ fontSize: 26 }}>Trabajo de etapas anteriores</h1>
-            <p className="med" style={{ maxWidth: '78ch', lineHeight: 1.55 }}>Historias y procesos archivados al iniciar una etapa. Son registro histórico: no aparecen en el backlog, la actividad ni la bandeja, y no admiten acciones. Lo implementado está en la rama principal; esto describe lo que se planificó o se intentó.</p>
+            <p className="med lede-2l" style={{ maxWidth: '78ch', lineHeight: 1.55 }}>Historias y procesos archivados al iniciar una etapa. Es registro histórico; una historia puede volver al backlog.</p>
+            <Disclosure title="Más información">
+              <p className="sm13 med" style={{ lineHeight: 1.5, maxWidth: '78ch' }}>Lo archivado no aparece en el backlog, la actividad ni la bandeja, y no admite acciones. Lo implementado está en la rama principal; esto describe lo que se planificó o se intentó.</p>
+            </Disclosure>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip>{data?.stories.length ?? 0} historias</Chip><Chip>{data?.processes.length ?? 0} procesos</Chip>{data && data.transitions.length > 0 && <Chip tone="accent">{data.transitions.length} etapa(s) registrada(s)</Chip>}</div>
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}><Link className="btn btn-ghost" to="/etapa">Etapas</Link><Link className="btn btn-secondary" to="/backlog">Volver al backlog</Link></div>

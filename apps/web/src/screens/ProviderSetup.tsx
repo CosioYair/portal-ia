@@ -5,6 +5,7 @@ import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, KV, Notice, Stepper, Wordmark } from '../components/ui.tsx';
 import { ClaudeCodePanel } from '../components/ClaudeCodePanel.tsx';
+import { Disclosure } from '../components/Disclosure.tsx';
 
 const CONN: Record<ProviderView['status'], { label: string; tone: '' | 'warn' | 'ok' | 'err'; dot: '' | 'pulse' | 'ok' | 'err' }> = {
   not_configured: { label: 'Sin configurar', tone: '', dot: '' },
@@ -74,7 +75,7 @@ export function ProviderSetup() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div className="eyebrow">{setupDone ? 'Proveedores de IA' : 'Paso 1 de 3'}</div>
             <h1 className="h1" style={{ fontSize: 28 }}>Conecta un proveedor de IA</h1>
-            <p className="med">Portal IA necesita al menos un proveedor para que los agentes puedan trabajar. La conexión se verifica con una sola solicitud y no inicia ningún proceso.</p>
+            <p className="med lede-2l" style={{ maxWidth: '78ch' }}>Los agentes necesitan al menos un proveedor. La verificación hace una sola solicitud y no inicia ningún proceso.</p>
           </div>
 
           <section className="card">
@@ -111,17 +112,24 @@ export function ProviderSetup() {
                     placeholder={view.credentialHint ? `Guardada: ${view.credentialHint} · escribe otra para sustituirla` : view.keyHint} autoComplete="off" spellCheck={false} style={{ flex: 1 }} />
                   <button className="btn btn-secondary" onClick={() => setShowKey(s => !s)} aria-pressed={showKey}>{showKey ? 'Ocultar' : 'Mostrar'}</button>
                 </div>
-                <div className="help">Una suscripción de consumo (por ejemplo Claude.ai o ChatGPT) no incluye acceso a la API. Necesitas una clave creada en la consola de desarrolladores del proveedor; su uso se factura aparte.</div>
               </div>
               {providerId === 'anthropic' && (
                 <div>
                   <label className="label" htmlFor="ws-id">ID del workspace de Anthropic <span className="muted" style={{ fontWeight: 400 }}>· opcional</span></label>
                   <input id="ws-id" className="input mono" value={workspaceId} onChange={e => setWorkspaceId(e.target.value)} placeholder="wrkspc_…" autoComplete="off" spellCheck={false} />
                   {workspaceId.trim() && !/^wrkspc_/.test(workspaceId.trim()) && <div className="help" style={{ color: '#7A4A00' }}>Ese valor no parece un ID de workspace: debe empezar por <span className="mono">wrkspc_</span>. El identificador con guiones de la URL de la consola no sirve.</div>}
-                  <div className="help">Solo necesario si tu clave no está asociada a un workspace (por ejemplo, claves de usuario <span className="mono">sk-ant-usr-…</span>). Lo encuentras en console.anthropic.com → Settings → Workspaces. Las claves creadas dentro de un workspace (<span className="mono">sk-ant-api03-…</span>) no lo necesitan.</div>
+                  <div className="help">Solo si tu clave no pertenece a un workspace.</div>
+                  <Disclosure title="Más información">
+                    <div className="help">Hace falta, por ejemplo, con las claves de usuario <span className="mono">sk-ant-usr-…</span>. Lo encuentras en console.anthropic.com → Settings → Workspaces. Las claves creadas dentro de un workspace (<span className="mono">sk-ant-api03-…</span>) no lo necesitan.</div>
+                  </Disclosure>
                 </div>
               )}
-              <Notice kind="info"><strong>Almacenamiento seguro.</strong> La clave se cifra (AES-256-GCM) y se guarda únicamente en este equipo. Solo se envía al proveedor seleccionado para autenticar las solicitudes; nunca a terceros ni a servidores de Portal IA, y nunca vuelve a mostrarse completa.</Notice>
+              <Disclosure title="Más información">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <Notice kind="info"><strong>Almacenamiento seguro.</strong> La clave se cifra (AES-256-GCM) y se guarda únicamente en este equipo. Solo se envía al proveedor seleccionado para autenticar las solicitudes; nunca a terceros ni a servidores de Portal IA, y nunca vuelve a mostrarse completa.</Notice>
+                  <div className="help">Una suscripción de consumo (por ejemplo Claude.ai o ChatGPT) no incluye acceso a la API. Necesitas una clave creada en la consola de desarrolladores del proveedor; su uso se factura aparte.</div>
+                </div>
+              </Disclosure>
               {(localError || (view.status === 'failed' && view.lastError && busy !== 'verify')) && (
                 <Notice kind="err"><strong>No se pudo verificar la conexión.</strong> {localError ?? view.lastError!.message} {view.lastError?.code === 'invalid_key' && 'Comprueba la clave y vuelve a intentarlo.'}</Notice>
               )}

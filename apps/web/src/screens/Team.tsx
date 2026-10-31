@@ -5,9 +5,10 @@ import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
-import { Avatar, Chip, Icon, Notice } from '../components/ui.tsx';
+import { Avatar, Chip, Icon } from '../components/ui.tsx';
 import { OrgEvaluationPanel } from '../components/OrgEvaluationPanel.tsx';
 import { GauntletProposal } from '../components/Gauntlet.tsx';
+import { Disclosure } from '../components/Disclosure.tsx';
 
 export function Team() {
   const { status, providers, navigate } = useApp();
@@ -29,7 +30,9 @@ export function Team() {
   };
   const current = agents.filter(a => !isRetired(a));
   const retiredCount = agents.length - current.length;
-  const active = current.filter(a => a.status === 'active').length;
+  // «Trabajando ahora» refleja el estado del agente (status === 'active'), no los procesos en curso.
+  const activeAgents = current.filter(a => a.status === 'active');
+  const active = activeAgents.length;
 
   // Organigrama dinámico: se construye desde las relaciones reales «reporta a», así los agentes nuevos aparecen en su sitio.
   const childrenOf = (parentKey: string) => agents.filter(a => a.template.reportsTo === parentKey).sort((a, b) => (a.scope === b.scope ? 0 : a.scope === 'workspace' ? -1 : 1) || a.createdAt.localeCompare(b.createdAt));
@@ -57,12 +60,29 @@ export function Team() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div className="eyebrow">Equipo de IA</div>
             <h1 className="h1" style={{ fontSize: 26 }}>Organización del espacio y del proyecto</h1>
+            <p className="med lede-2l" style={{ maxWidth: '78ch' }}>Ningún agente consume créditos hasta que autorices su ejecución.</p>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone="accent">{agents.filter(a => a.scope === 'workspace').length} agentes del espacio</Chip><Chip>{agents.filter(a => a.scope === 'project').length} agentes del proyecto</Chip><Chip dot={active ? 'ok' : ''}>{active} activos · {current.length} configurados</Chip>{retiredCount > 0 && <Chip>{retiredCount} retirados</Chip>}</div>
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}><button className="btn btn-secondary" onClick={() => setEvalOpen(o => !o)} aria-expanded={evalOpen}>{Icon.org()}Evaluar organización</button><Link className="btn btn-secondary" to="/equipo/nuevo">{Icon.arrow()}Nuevo agente especializado</Link><button className="btn btn-primary" disabled title="Requiere autorización de ejecución y presupuesto aprobado">Activar equipo</button></div>
         </div>
         {evalOpen && <OrgEvaluationPanel slug={ws.slug} defaultProjectId={status.project?.id ?? null} onClose={() => setEvalOpen(false)} />}
-        <Notice kind="info">Todos los agentes están <strong>configurados pero inactivos</strong>. Ningún agente realiza llamadas a modelos ni consume créditos hasta que lo actives y autorices su ejecución. Selecciona un agente para revisar o editar su configuración.</Notice>
+        <Disclosure title="Más información">
+          <p className="sm13 med" style={{ lineHeight: 1.5, maxWidth: '78ch' }}>Ningún agente llama a modelos ni consume créditos hasta que lo actives y autorices su ejecución. Selecciona un agente para revisar o editar su configuración. Los agentes retirados se conservan y se pueden reactivar.</p>
+        </Disclosure>
+
+        <section className="card" aria-labelledby="team-now">
+          <div className="card-h"><div><div className="h3" id="team-now">Trabajando ahora</div><div className="small muted">Según el estado de cada agente</div></div><Chip xs dot={active ? 'ok' : ''}>{active} activos</Chip></div>
+          <div className="card-b">
+            {activeAgents.length > 0
+              ? <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>{activeAgents.map(a => (
+                <button key={a.id} className="btn btn-secondary" style={{ height: 'auto', padding: '6px 12px' }} onClick={() => navigate(`/equipo/${a.id}`)}>
+                  <Avatar initials={a.template.initials} ws={a.scope === 'workspace'} />
+                  <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}><span>{a.config.name}</span><span className="small muted">{a.template.role}</span></span>
+                  <span className="dot dot-ok" aria-hidden="true" />
+                </button>))}</div>
+              : <p className="sm13 muted">Ningún agente está activo ahora; todos están configurados pero inactivos.</p>}
+          </div>
+        </section>
 
         <section className="card">
           <div className="card-h"><div className="h3">Estructura organizativa</div><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone="accent" xs>Espacio</Chip><Chip xs>Proyecto</Chip><Chip xs dot="">Inactivo</Chip><Chip xs>Retirado</Chip></div></div>

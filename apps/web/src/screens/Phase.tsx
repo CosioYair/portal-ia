@@ -7,6 +7,7 @@ import { BACKLOG_STATUS, fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { Chip, Icon, KV, Notice } from '../components/ui.tsx';
+import { Disclosure } from '../components/Disclosure.tsx';
 
 const PROC_LABEL: Record<string, string> = { running: 'en ejecución', done: 'terminados', pending_authorization: 'pendientes de autorización', failed: 'con errores', cancelled: 'cancelados', budget_exceeded: 'presupuesto agotado' };
 const DECISION_LABEL: Record<string, string> = { process_authorization: 'autorizar proceso', apply_diff: 'revisar diff', integrate: 'integrar', publish: 'publicar', backlog_proposal: 'propuestas al backlog' };
@@ -57,7 +58,10 @@ export function Phase() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div className="eyebrow">Etapas del proyecto</div>
           <h1 className="h1" style={{ fontSize: 26 }}>Empezar una etapa nueva sin perder el conocimiento</h1>
-          <p className="med" style={{ maxWidth: '78ch', lineHeight: 1.55 }}>Archiva el trabajo activo (historias, procesos y decisiones pendientes) para que el backlog quede vacío, y registra en Conocimiento una <strong>línea base</strong> del proyecto. Nada se borra: agentes, conversaciones, lecciones, plantillas, costos y git quedan intactos, y lo archivado se puede consultar, restaurar o revertir. No consume IA.</p>
+          <p className="med lede-2l" style={{ maxWidth: '78ch', lineHeight: 1.55 }}>Archiva el trabajo activo y guarda una <strong>línea base</strong> en Conocimiento. Nada se borra, es reversible y no consume IA.</p>
+          <Disclosure title="Más información">
+            <p className="sm13 med" style={{ lineHeight: 1.5, maxWidth: '78ch' }}>Se archivan las historias, los procesos y las decisiones pendientes, y el backlog queda vacío. Agentes, conversaciones, lecciones, plantillas, costos y git quedan intactos. Lo archivado se puede consultar, restaurar o revertir.</p>
+          </Disclosure>
         </div>
         {error && <Notice kind="err">{error}</Notice>}
 
@@ -103,7 +107,9 @@ export function Phase() {
                 <div className="eyebrow">Repositorio (solo lectura: la etapa no toca git)</div>
                 <KV k="Rama y commit">{p.git.branch ?? '—'} · <span className="mono">{p.git.head?.slice(0, 7) ?? '—'}</span>{p.git.headSubject ? ` · ${p.git.headSubject}` : ''}</KV>
                 <KV k="Sin publicar">{p.git.aheadOfRemote === null ? '—' : `${p.git.aheadOfRemote} commit(s)`}{p.git.dirty ? ' · hay cambios sin confirmar' : ''}</KV>
-                {p.git.unmergedBranches.length > 0 && <Notice kind="info">Ramas de historia con commits fuera de la rama principal: {p.git.unmergedBranches.map(b => `${b.name} (+${b.ahead})`).join(', ')}. Se conservan tal cual: no se integran ni se borran.</Notice>}
+                {p.git.unmergedBranches.length > 0 && <Disclosure title="Más información" hint={`${p.git.unmergedBranches.length} rama(s) de historia sin integrar`}>
+                  <Notice kind="info">Ramas de historia con commits fuera de la rama principal: {p.git.unmergedBranches.map(b => `${b.name} (+${b.ahead})`).join(', ')}. Se conservan tal cual: no se integran ni se borran.</Notice>
+                </Disclosure>}
                 {p.git.worktrees.some(w => w.dirty) && <Notice kind="warn">Hay worktrees con cambios sin integrar: {p.git.worktrees.filter(w => w.dirty).map(w => w.path).join(', ')}. Se conservan tal cual.</Notice>}
               </div>
 
