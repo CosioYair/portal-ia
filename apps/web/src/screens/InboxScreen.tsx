@@ -39,7 +39,7 @@ export function InboxScreen() {
         <div>
           <div className="eyebrow">{ctx?.status.workspace?.name ?? 'Portal IA'}</div>
           <h1 id="inbox-title" className="h1">Autorizaciones</h1>
-          <p className="lede">Todo lo que espera tu decisión, en un solo lugar. Cada elemento se aprueba o se deniega por separado y tiene el mismo efecto que hacerlo desde el proceso.</p>
+          <p className="lede lede-2l">Lo que espera tu decisión. Aprobar o denegar aquí equivale a hacerlo desde el proceso.</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn btn-secondary" onClick={() => void refresh()} disabled={load.phase === 'loading'}>Actualizar</button>
