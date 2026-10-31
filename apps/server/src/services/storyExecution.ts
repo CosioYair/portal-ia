@@ -1,4 +1,4 @@
-import { agentCaller, completeWith } from './claudeCode/backend.ts';
+import { agentCaller, completeWith, RECOVERED_NOTE } from './claudeCode/backend.ts';
 import type { Agent, AssessmentEstimate, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, Process, ProcessStep, ProviderId, ReviewVerdict, RuntimeCheck, StoryPlan, TeamOverride, TeamRole } from '@portal-ia/domain';
 import { composeTeam, orderedMembers, type StoryText } from './teamComposer.ts';
 import { injectLessons, recordDetections } from './lessons.ts';
@@ -15,7 +15,7 @@ import { buildRepoContext } from './repoContext.ts';
 import { annotateChanges, fileChangedSince, readRepoFile, type RawChange } from './repoWrite.ts';
 import { DEV_MAX_TOKENS, FILE_FORMAT, sys } from './storyPrompts.ts';
 import { assessDeveloperOutput, failureClassOf, mergeChanges, type ParsedDevOutput } from './devOutput.ts';
-import { callAgentStep, implementerOutputs, isTruncatedStop, newPipeline, pausePipeline, PipelinePause, providerPause, runPipelineStages, settleImplementation, StoryFailure, updateResult, worstCaseCallUsd, type StoryRunCtx } from './storyPipeline.ts';
+import { callAgentStep, CONSULT_EVIDENCE_CHARS, filesContext, implementerOutputs, isTruncatedStop, newPipeline, pausePipeline, PipelinePause, planFiles, providerPause, runPipelineStages, settleImplementation, StoryFailure, updateResult, worstCaseCallUsd, type StoryRunCtx } from './storyPipeline.ts';
 export { parseFileBlocks, parseRuntimeChecks } from './devOutput.ts';
 import path from 'node:path';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
@@ -273,13 +273,21 @@ Responde SOLO con el JSON del plan completo, en el mismo formato.`, MAX_TOKENS.p
     const consultOne = async (cs: (typeof cSteps)[number]) => {
       const consultant = agents.get(cs.agentId)!;
       const cRes = await call(cs.id, sys(consultant, project, item), consultPrompt(consultant), MAX_TOKENS.consultant);
-      return { agentId: consultant.id, agentName: consultant.config.name, role: consultant.template.role, text: cRes.text.trim().slice(0, 8000) };
+      return { agentId: consultant.id, agentName: consultant.config.name, role: consultant.template.role, text: `${cRes.recovered ? RECOVERED_NOTE : ''}${cRes.text.trim()}`.slice(0, 8000) };
     };
+    // Paquete de evidencia: el contenido de los archivos que el plan ya conoce (sin él, el especialista los busca y agota turnos).
+    const evidence = filesContext(repo.path, planFiles(plan), CONSULT_EVIDENCE_CHARS);
     const consultPrompt = (consultant: Agent) => `Como ${consultant.template.role.toLowerCase()}, aporta recomendaciones concretas y accionables para esta historia desde tu especialidad, a partir del plan del Coordinador. Máximo 10 puntos, cada uno de una o dos líneas, en orden de importancia; indica archivos o pantallas cuando aplique. No escribas código completo.
 # Plan
 ${JSON.stringify(plan, null, 2)}
-
+${evidence ? `\n# Contenido actual de los archivos del plan (ya incluido: no hace falta buscarlo)\n${evidence}\n` : ''}
 ${treeText}`;
+    // Turnos agotados en una consulta (también tras su recuperación sin herramientas): pausa «max_turns» del pipeline con lo
+    // hecho conservado (plan y consultas terminadas), no un fallo de la historia ni una repetición a ciegas.
+    const asPause = (e: any) => {
+      if (config && e?.failure?.providerCode === 'max_turns') runCtx = { slug, processId, item, project, repoPath: repo.path, plan, consultText: '', iterText, dev: agents.get(roleStep('implementer').agentId)!, qa: null, team: involved.map(id => agents.get(id)).filter(Boolean) as Agent[], log, isCancelled, injected };
+      return e;
+    };
     cancelled();
     const room = (() => { const cur = procs.get(processId)!; return cur.budgetUsd - cur.spentUsd - (cur.unconfirmedUsd ?? 0); })();
     const estimates = cSteps.map(cs => { const c = agents.get(cs.agentId)!; return worstCaseCallUsd(slug, processId, cs.id, sys(c, project, item), consultPrompt(c), MAX_TOKENS.consultant, injected); });
@@ -291,10 +299,10 @@ ${treeText}`;
       for (const d of done) if (d.status === 'fulfilled') result.consultations!.push(d.value);
       save();
       const failed = done.find(d => d.status === 'rejected') as PromiseRejectedResult | undefined;
-      if (failed) throw failed.reason;
+      if (failed) throw asPause(failed.reason);
     } else for (const cs of cSteps) {
       cancelled();
-      result.consultations!.push(await consultOne(cs));
+      result.consultations!.push(await consultOne(cs).catch(e => { throw asPause(e); }));
       save();
     }
     const consultText = result.consultations!.length ? `\n# Aportaciones de especialistas (tenlas en cuenta)\n${result.consultations!.map(c => `## ${c.agentName} · ${c.role}\n${c.text}`).join('\n\n')}\n` : '';
@@ -320,12 +328,7 @@ ${treeText}`;
       return;
     }
     // Contexto acotado: archivos del plan, cada uno hasta 30 000 caracteres y 120 000 en total (lo demás, el modelo lo parchea a ciegas con contexto suficiente o lo pide en NOTAS).
-    let ctxBudget = 120_000;
-    const filesCtx = Array.from(new Set([...plan.filesToRead, ...plan.filesToChange])).map(f => {
-      const c = readRepoFile(repo.path, f, 30_000); if (c === null) return `## ${f}\n(no existe aún)`;
-      if (ctxBudget <= 0) return `## ${f}\n(omitido por tamaño del contexto: ${c.length} caracteres; si debes modificarlo usa patch con fragmentos que conozcas o crea un módulo nuevo)`;
-      ctxBudget -= c.length; return `## ${f}\n\`\`\`\n${c}\n\`\`\``;
-    }).join('\n\n');
+    const filesCtx = filesContext(repo.path, planFiles(plan), 120_000, '; si debes modificarlo usa patch con fragmentos que conozcas o crea un módulo nuevo');
     const implPrompt = `Implementa la historia siguiendo este plan del Coordinador:
 ${JSON.stringify(plan, null, 2)}
 ${iterText}${consultText}

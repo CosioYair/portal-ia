@@ -23,7 +23,7 @@ import { DEPS_MISSING_EXIT } from './sandbox.ts';
 import { DEV_MAX_TOKENS, FILE_FORMAT, PATCH_ONLY_FORMAT, sys } from './storyPrompts.ts';
 import { runVerification, sandboxDeps } from './verification.ts';
 import { driftMessage, worktreeDrift } from './worktreeDrift.ts';
-import { agentBackend, claudeCodeComplete, claudeCodeGate, usesClaudeCode } from './claudeCode/backend.ts';
+import { agentBackend, claudeCodeComplete, claudeCodeGate, RECOVERED_NOTE, usesClaudeCode } from './claudeCode/backend.ts';
 import { lastDetection } from './claudeCode/detect.ts';
 import { getClaudeCodeSettings } from './claudeCode/settings.ts';
 import { monotonicNow } from '../clock.ts';
@@ -53,7 +53,9 @@ export class StoryFailure extends Error { constructor(public failure: ProcessFai
 
 // ---------------------------------------------------------------- Llamadas a agentes
 
-export interface CallResult { text: string; stopReason: string | null; inputTokens: number; outputTokens: number; costUsd: number; refusal?: string | null }
+export interface CallResult { text: string; stopReason: string | null; inputTokens: number; outputTokens: number; costUsd: number; refusal?: string | null;
+  /** Respuesta de la recuperación sin herramientas tras agotar los turnos (motivo); null si respondió a la primera. */
+  recovered?: string | null }
 
 /** Razonamiento oculto que el modelo del agente puede facturar además del texto (Opus 5.5: siempre activo). */
 export function agentHeadroom(agent: Agent): number {
@@ -200,7 +202,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
     try {
       requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true });
       const request = { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history: opts.history, responseSchema: opts.schema, timeoutMs };
-      let res: { text: string; inputTokens: number; outputTokens: number; stopReason: string | null; refusal?: string | null; numTurns?: number | null; cacheReadTokens?: number; tools?: Record<string, number> };
+      let res: { text: string; inputTokens: number; outputTokens: number; stopReason: string | null; refusal?: string | null; numTurns?: number | null; cacheReadTokens?: number; tools?: Record<string, number>; recovered?: string | null };
       let cost: number; let backend: string | null = null;
       if (route === 'claude-code') {
         // Suscripción: 0 USD del presupuesto de API. El uso (tokens, turnos, duración, equivalente estimado) va al registro del conector.
@@ -227,7 +229,9 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'story_step', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
       opts.log({ ...who, attempt, ms: ms(), tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost: cost.toFixed(4), stop: res.stopReason, backend }, 'paso completado');
       metric('done', attempt, sentAt.getTime(), { tokensIn: res.inputTokens, tokensOut: res.outputTokens, cacheReadTokens: route === 'claude-code' ? res.cacheReadTokens ?? null : null, turns: res.numTurns ?? null, tools: res.tools ?? null, backend: backend ?? backendLabel('api', null, providerId) }, null);
-      return { text: res.text, stopReason: res.stopReason, inputTokens: res.inputTokens, outputTokens: res.outputTokens, costUsd: cost, refusal: res.refusal ?? null };
+      // Consulta recuperada sin herramientas tras agotar los turnos: el propietario lo ve en el registro del pipeline.
+      if (res.recovered) try { updatePipeline(slug, processId, {}, { kind: 'info', message: `${agent.config.name} agotó los turnos de Claude Code sin responder («${step.title.slice(0, 80)}»): se hizo UNA recuperación sin herramientas con lo que ya había leído; su respuesta va marcada como recuperada.`, detail: res.recovered.slice(0, 400) }); } catch { /* sin pipeline */ }
+      return { text: res.text, stopReason: res.stopReason, inputTokens: res.inputTokens, outputTokens: res.outputTokens, costUsd: cost, refusal: res.refusal ?? null, recovered: res.recovered ?? null };
     } catch (e) {
       const err = e instanceof ProviderRequestError ? e.error : null;
       // Tope de llamadas a la suscripción: NO se llamó. Se detiene como un presupuesto agotado (nunca cede a la API ni reintenta).
@@ -418,6 +422,23 @@ export function pickConsultant(team: Agent[], devId: string, blocker: AgentBlock
   return null;
 }
 
+/** Paquete de evidencia de una consulta: el contenido de los archivos que el plan ya conoce (≈ 10 000 tokens como mucho). */
+export const CONSULT_EVIDENCE_CHARS = 40_000;
+/**
+ * Contenido ACTUAL de unos archivos (los del plan: filesToRead + filesToChange; en un encargo, los que nombra), cada uno
+ * hasta 30 000 caracteres y `budget` en total: lo recibe la implementación y, acotado, cada consulta (así no explora el
+ * repositorio para encontrarlos).
+ */
+export const planFiles = (plan: StoryPlan | null) => [...(plan?.filesToRead ?? []), ...(plan?.filesToChange ?? [])];
+export function filesContext(base: string, files: string[], budget: number, omittedHint = ''): string {
+  let left = budget;
+  return Array.from(new Set(files)).map(f => {
+    const c = readRepoFile(base, f, 30_000); if (c === null) return `## ${f}\n(no existe aún)`;
+    if (left <= 0) return `## ${f}\n(omitido por tamaño del contexto: ${c.length} caracteres${omittedHint})`;
+    left -= c.length; return `## ${f}\n\`\`\`\n${c}\n\`\`\``;
+  }).join('\n\n');
+}
+
 /** Contexto que pidió el agente y que el equipo puede darle sin preguntar a nadie: archivos del repositorio. */
 function suppliedFiles(ctx: StoryRunCtx, files: string[]): string {
   let budget = 90_000;
@@ -494,8 +515,10 @@ ${blocker.question}
 # Lo que necesita
 ${blocker.need}
 # Plan del Coordinador
-${ctx.plan ? JSON.stringify(ctx.plan, null, 2) : '(sin plan)'}`, 2500);
-    const res = await stepCall(ctx, ctx.dev, 'implementer', `Implementación con la respuesta de ${consultant.config.name}`, `Consultó a ${consultant.config.name}`, system, continuationPrompt(ctx, blocker.need, `## Respuesta de ${consultant.config.name} (${consultant.template.role})\n${cRes.text.trim().slice(0, 8000)}`, previous), DEV_MAX_TOKENS);
+${ctx.plan ? JSON.stringify(ctx.plan, null, 2) : '(sin plan)'}
+# Contenido actual de los archivos del plan (ya incluido: no hace falta buscarlo)
+${filesContext(ctx.unit?.basePath ?? ctx.repoPath, planFiles(ctx.plan), CONSULT_EVIDENCE_CHARS)}`, 2500);
+    const res = await stepCall(ctx, ctx.dev, 'implementer', `Implementación con la respuesta de ${consultant.config.name}`, `Consultó a ${consultant.config.name}`, system, continuationPrompt(ctx, blocker.need, `## Respuesta de ${consultant.config.name} (${consultant.template.role})\n${`${cRes.recovered ? RECOVERED_NOTE : ''}${cRes.text.trim()}`.slice(0, 8000)}`, previous), DEV_MAX_TOKENS);
     return { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null, stepId: res.stepId };
   }
   return null;

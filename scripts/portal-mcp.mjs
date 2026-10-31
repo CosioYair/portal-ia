@@ -51,7 +51,7 @@ const TOOLS = [
     run: a => api('GET', `/api/bridge/v1/tasks/${enc(jobOnlyCurrent(a))}/files?dir=${enc(a?.dir ?? '')}`) },
   { name: 'portal_read_file', worker: false, readOnly: true, description: 'Lee un archivo de la carpeta de trabajo de la tarea (solo lectura; sin .env, claves, .git ni node_modules).', inputSchema: { type: 'object', properties: { ...(MODE === 'job' ? {} : taskArg), path: { type: 'string', description: 'Ruta relativa del archivo.' } }, required: MODE === 'job' ? ['path'] : ['task_id', 'path'] },
     run: a => api('GET', `/api/bridge/v1/tasks/${enc(jobOnlyCurrent(a))}/file?path=${enc(a?.path ?? '')}`) },
-  { name: 'portal_search', worker: false, readOnly: true, description: 'Busca un texto LITERAL en los archivos de la carpeta de trabajo de la tarea (solo lectura; rutas protegidas, binarios y archivos con secretos se omiten). Devuelve ruta, línea y texto.', inputSchema: { type: 'object', properties: { ...(MODE === 'job' ? {} : taskArg), query: { type: 'string', description: 'Texto a buscar (2–200 caracteres, literal).' }, dir: { type: 'string', description: 'Subcarpeta relativa (opcional).' }, case_sensitive: { type: 'boolean' } }, required: MODE === 'job' ? ['query'] : ['task_id', 'query'] },
+  { name: 'portal_search', worker: false, readOnly: true, description: 'Busca un texto LITERAL en los archivos de la carpeta de trabajo de la tarea (solo lectura; rutas protegidas, binarios y archivos con secretos se omiten). Devuelve ruta, línea y texto (el código antes que pruebas y documentación; como mucho 20 líneas por archivo, con el total por archivo). Si se recorta, acota con «dir» o una consulta más concreta.', inputSchema: { type: 'object', properties: { ...(MODE === 'job' ? {} : taskArg), query: { type: 'string', description: 'Texto a buscar (2–200 caracteres, literal).' }, dir: { type: 'string', description: 'Subcarpeta relativa (opcional).' }, case_sensitive: { type: 'boolean' } }, required: MODE === 'job' ? ['query'] : ['task_id', 'query'] },
     run: a => api('GET', `/api/bridge/v1/tasks/${enc(jobOnlyCurrent(a))}/search?q=${enc(typeof a?.query === 'string' ? a.query : '')}&dir=${enc(typeof a?.dir === 'string' ? a.dir : '')}&case=${a?.case_sensitive === true ? '1' : '0'}`) },
   { name: 'portal_diff', worker: false, readOnly: true, description: 'Cambios de la carpeta de trabajo de la tarea (solo lectura): «working» = sin confirmar (incluidos archivos nuevos); «branch» = lo que la rama añade sobre la base del proyecto. Rutas protegidas y diferencias con secretos se omiten.', inputSchema: { type: 'object', properties: { ...(MODE === 'job' ? {} : taskArg), range: { type: 'string', enum: ['working', 'branch'] } }, required: MODE === 'job' ? [] : ['task_id'] },
     run: a => api('GET', `/api/bridge/v1/tasks/${enc(jobOnlyCurrent(a))}/diff?range=${a?.range === 'branch' ? 'branch' : 'working'}`) },
@@ -96,7 +96,8 @@ async function handle(msg) {
       if (!tool) return out({ jsonrpc: '2.0', id, error: { code: -32602, message: `Herramienta desconocida: ${params?.name}` } });
       try {
         const r = await tool.run(params?.arguments ?? {});
-        return out({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(r, null, 2) }], isError: false } });
+        // JSON compacto: la sangría solo gastaba contexto (y turnos) del modelo.
+        return out({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(r) }], isError: false } });
       } catch (e) {
         return out({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: `Error: ${e?.message ?? e}` }], isError: true } });
       }

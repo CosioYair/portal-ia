@@ -8,8 +8,8 @@ import { backendLabel, type Agent, type ClaudeCodeBilling, type ExecutionBackend
 import { staleCorrectionUnits } from '../failureDiagnosis.ts';
 import { config, REPO_ROOT } from '../../config.ts';
 import { agentsRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } from '../../db/workspace.ts';
-import { repoRoot } from '../repoWrite.ts';
-import { connectedWorkersFor, registerJobTask, setProgressListener, submitTerminalTask } from './bridge.ts';
+import { readRepoFile, repoRoot } from '../repoWrite.ts';
+import { connectedWorkersFor, registerJobTask, setProgressListener, submitTerminalTask, type BridgeUse } from './bridge.ts';
 import { BRIDGE_SCRIPT, ccError, runCliTask, type CliEvent, type CliFailedUsage } from './cli.ts';
 export { BRIDGE_SCRIPT };
 import { cliCommandFor, findCli, lastDetection, verifiedDetection } from './detect.ts';
@@ -111,7 +111,7 @@ export function completeWith(cc: ReturnType<typeof agentCaller>, providerId: Pro
  * no está disponible, se dice por qué y NO se usa la API en su lugar (la alternativa por API es solo de los pasos de
  * procesos autorizados y la decide el propietario en los ajustes del conector).
  */
-export function agentCaller(slug: string, agent: Agent, projectId: string | null, title: string, processId: string | null = null): { backend: ExecutionBackend; label: string; subscription: boolean; complete: (req: CompletionRequest, signal?: AbortSignal) => Promise<CompletionResult> } | null {
+export function agentCaller(slug: string, agent: Agent, projectId: string | null, title: string, processId: string | null = null, role: string | null = null): { backend: ExecutionBackend; label: string; subscription: boolean; complete: (req: CompletionRequest, signal?: AbortSignal) => Promise<ClaudeCodeCompletion> } | null {
   const b = agentBackend(agent);
   if (b === 'api') return null;
   if (b === 'claude-code-terminal') throw Object.assign(new Error(`«${agent.config.name}» usa tu consola de Claude Code, que atiende tareas de procesos y no respuestas inmediatas. Cambia su backend a «Claude Code (gestionado)» o a la API para esto. No se ha usado la API.`), { statusCode: 409 });
@@ -120,7 +120,8 @@ export function agentCaller(slug: string, agent: Agent, projectId: string | null
   return {
     backend: b, label: backendLabel(b, lastDetection()?.billing), subscription: true,
     // Con el proceso: cada llamada cuenta para su tope de llamadas a la suscripción (y su ejecución queda ligada a él).
-    complete: (req, signal) => claudeCodeComplete({ slug, projectId: projectId ?? '', processId, stepId: null, agent, role: null, title }, req, signal ?? new AbortController().signal, () => undefined)
+    // El papel decide si una consulta que agota los turnos se recupera UNA vez sin herramientas (ver claudeCodeComplete).
+    complete: (req, signal) => claudeCodeComplete({ slug, projectId: projectId ?? '', processId, stepId: null, agent, role, title }, req, signal ?? new AbortController().signal, () => undefined)
   };
 }
 
@@ -155,18 +156,78 @@ export function readRootFor(slug: string, processId: string | null, projectId: s
 }
 
 export interface ExecutionTarget { slug: string; projectId: string; processId: string | null; stepId: string | null; agent: Agent; role: string | null; title: string }
-export interface ClaudeCodeCompletion extends CompletionResult { backendLabel: string; billing: ClaudeCodeBilling; apiEquivalentUsd: number | null; runId: string; numTurns?: number | null; cacheReadTokens?: number; tools?: Record<string, number> }
+export interface ClaudeCodeCompletion extends CompletionResult { backendLabel: string; billing: ClaudeCodeBilling; apiEquivalentUsd: number | null; runId: string; numTurns?: number | null; cacheReadTokens?: number; tools?: Record<string, number>;
+  /** Respuesta de la recuperación sin herramientas tras agotar los turnos (el motivo); su uso incluye el de la ejecución agotada. */
+  recovered?: string | null }
 
-const READ_HINT = `
+/** Presupuesto de llamadas a herramientas del puente por ejecución: deja turnos para responder (no sube el límite de turnos). */
+export const toolBudget = (maxTurns: number) => Math.max(4, 2 * (maxTurns - 2));
+/** Herramientas del puente con los límites REALES de la ejecución: cuántos turnos, cuántas llamadas y cuándo responder. */
+export const readHint = (maxTurns: number) => `
 
 # Herramientas del Portal (solo lectura)
-Si el contexto de arriba no basta, puedes consultar la carpeta de trabajo del proceso con portal_list_files, portal_read_file,
-portal_search (texto literal) y portal_diff (cambios sin confirmar o de la rama), el conocimiento aprobado del proyecto con
-portal_knowledge e informar de tu avance con portal_report_progress.
+El contexto de arriba ya trae lo que el equipo conoce (plan y archivos): úsalo primero. Solo si falta algo imprescindible,
+consulta la carpeta de trabajo del proceso con portal_list_files, portal_read_file, portal_search (texto literal; acota con
+«dir») y portal_diff (cambios sin confirmar o de la rama), el conocimiento aprobado del proyecto con portal_knowledge e
+informa de tu avance con portal_report_progress.
+Límites de esta ejecución: ${maxTurns} turnos en total y como máximo ${toolBudget(maxTurns)} llamadas a herramientas. Pide varias
+lecturas o búsquedas independientes a la vez, en el mismo turno. Responde antes de agotar los turnos (a más tardar en el
+turno ${Math.max(1, maxTurns - 1)}) con lo que tengas, marcando lo que no pudiste comprobar; si el Portal te dice «presupuesto
+agotado», responde ya.
 No puedes escribir archivos ni ejecutar órdenes: entrega los cambios en el formato pedido; el Portal los valida y los aplica.`;
 
-/** Una llamada del agente a través de Claude Code (CLI gestionada o consola del propietario). */
+/** Marca de una respuesta recuperada sin herramientas (la ven quien la recibe y el propietario). */
+export const RECOVERED_NOTE = '_(Respuesta recuperada sin herramientas tras agotar los turnos de Claude Code: puede tener puntos sin comprobar.)_\n';
+/** Turnos de la recuperación: sin herramientas solo puede responder (con salida estructurada, su herramienta de salida). */
+const RECOVERY_TURNS = 2;
+/** Consultas y análisis (no implementación: las unidades tienen su propio intento acotado con autorización). */
+const recoverable = (t: ExecutionTarget) => t.role === 'consultant';
+const addUsage = (a: CliFailedUsage | undefined, b: CliFailedUsage | undefined): CliFailedUsage | undefined => a && b ? { ...a, inputTokens: a.inputTokens + b.inputTokens, outputTokens: a.outputTokens + b.outputTokens, numTurns: (a.numTurns ?? 0) + (b.numTurns ?? 0), apiEquivalentUsd: a.apiEquivalentUsd !== null || b.apiEquivalentUsd !== null ? (a.apiEquivalentUsd ?? 0) + (b.apiEquivalentUsd ?? 0) : null, durationMs: a.durationMs + b.durationMs } : a ?? b;
+
+/** Encargo de la recuperación: el original + lo que ya leyó por el puente (releído, acotado) + responder ya. */
+function recoveryPrompt(readRoot: string | null, user: string, uses: BridgeUse[], maxTurns: number): string {
+  const searched = uses.filter(u => u.tool === 'portal_search' && u.ok).map(u => `- «${u.arg}»${u.hits ? `: ${u.hits}` : ''}`);
+  let left = 40_000;
+  const files = readRoot ? Array.from(new Set(uses.filter(u => u.tool === 'portal_read_file' && u.ok).map(u => u.arg))).map(f => {
+    const c = readRepoFile(readRoot, f, 30_000); if (c === null || left <= 0) return null;
+    const part = c.slice(0, Math.min(12_000, left)); left -= part.length; return `## ${f}\n\`\`\`\n${part}${part.length < c.length ? '\n… (recortado)' : ''}\n\`\`\``;
+  }).filter(Boolean) : [];
+  return `${user}
+
+# Lo que ya leíste (agotaste los ${maxTurns} turnos explorando sin responder)
+${searched.length ? `Búsquedas hechas:\n${searched.join('\n')}\n\n` : ''}${files.length ? files.join('\n\n') : '(ningún archivo leído que repetir: responde con el contexto de arriba)'}
+
+# Responde ya
+Ya NO tienes herramientas: responde YA, en el formato pedido, con el contexto de arriba y lo que ya leíste. Marca como
+«sin comprobar» lo que no hayas podido verificar; no pidas más lecturas.`;
+}
+
+/**
+ * Una llamada del agente a través de Claude Code (CLI gestionada o consola del propietario). Si una CONSULTA agota los
+ * turnos explorando, se recupera UNA vez sin herramientas (sin el puente y con pocos turnos) a partir de lo que ya leyó;
+ * las dos ejecuciones pasan por el tope de llamadas y quedan registradas, y el uso devuelto suma ambas. Si tampoco
+ * responde, el error sigue siendo «turnos agotados» (con el uso de las dos) y no se insiste.
+ */
 export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequest, signal: AbortSignal, onLive: (patch: Partial<LiveCall>) => void): Promise<ClaudeCodeCompletion> {
+  try { return await claudeCodeRun(t, req, signal, onLive, true); }
+  catch (e: any) {
+    if (e?.error?.code !== 'max_turns' || !recoverable(t)) throw e;
+    const first = e.usage as CliFailedUsage | undefined; const why = String(e.error?.message ?? e.message);
+    onLive({ state: 'retrying', lastEvent: 'Claude Code agotó los turnos sin responder: UNA recuperación sin herramientas con lo que ya leyó', lastEventAt: new Date().toISOString() });
+    const readRoot = t.projectId ? readRootFor(t.slug, t.processId, t.projectId) : null;
+    try {
+      const r = await claudeCodeRun(t, { ...req, user: recoveryPrompt(readRoot, req.user, e.evidence ?? [], getClaudeCodeSettings().maxTurns) }, signal, onLive, false);
+      return { ...r, inputTokens: r.inputTokens + (first?.inputTokens ?? 0), outputTokens: r.outputTokens + (first?.outputTokens ?? 0), recovered: why };
+    } catch (e2: any) {
+      const usage = addUsage(first, e2?.usage);
+      if (e2?.error?.code === 'max_turns') throw Object.assign(ccError('max_turns', `${why} Se hizo UNA recuperación sin herramientas con lo que ya había leído y tampoco entregó la respuesta. No se insiste.`), { usage });
+      throw Object.assign(e2, { usage });
+    }
+  }
+}
+
+/** Una ejecución: con el puente (`tools`) o, en la recuperación, sin herramientas y con pocos turnos. */
+async function claudeCodeRun(t: ExecutionTarget, req: CompletionRequest, signal: AbortSignal, onLive: (patch: Partial<LiveCall>) => void, tools: boolean): Promise<ClaudeCodeCompletion> {
   const s = getClaudeCodeSettings();
   const g = claudeCodeGate(t.slug, t.agent, t.projectId || null);
   if (!g.ok) throw ccError('backend_unavailable', g.reason);
@@ -211,7 +272,7 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
     // Tope de llamadas: comprobado y registrado en el mismo tramo síncrono (sin «await» entre medias): sin carreras.
     const cap = callCapCheck(t.slug, t.processId); if (!cap.ok) { releaseSlot(); throw ccError('call_cap', cap.detail); }
     const run = runs.start({ mode: 'cli', projectId: t.projectId, processId: t.processId, stepId: t.stepId, agentId: t.agent.id, agentName: t.agent.config.name, model: req.model, billing: det.billing, authMethod: det.authMethod, subscriptionType: det.subscriptionType });
-    const job = s.repoRead && readRoot ? registerJobTask({ ...base, mode: 'cli', system: '', prompt: '', schema: null, readRoot, runId: run.id }) : null;
+    const job = tools && s.repoRead && readRoot ? registerJobTask({ ...base, mode: 'cli', system: '', prompt: '', schema: null, readRoot, runId: run.id, toolBudget: toolBudget(s.maxTurns) }) : null;
     liveListeners.set(run.id, m => say(m));
     const started = Date.now();
     const onEvent = (e: CliEvent) => {
@@ -224,8 +285,8 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
     try {
       say(`Enviando el encargo a Claude Code · ${label}`, 'sending');
       const r = await runCliTask({
-        cli, detection: det, model: req.model, system: job ? req.system + READ_HINT : req.system, prompt: req.user, history: req.history, images: req.images,
-        schema: req.responseSchema ?? null, maxTurns: s.maxTurns, timeoutMs, signal, onEvent, overageAccepted,
+        cli, detection: det, model: req.model, system: job ? req.system + readHint(s.maxTurns) : req.system, prompt: req.user, history: req.history, images: req.images,
+        schema: req.responseSchema ?? null, maxTurns: tools ? s.maxTurns : RECOVERY_TURNS, timeoutMs, signal, onEvent, overageAccepted,
         mcp: job ? { command: process.execPath, args: [BRIDGE_SCRIPT], env: { PORTAL_URL: bridgeUrl, PORTAL_BRIDGE_TOKEN: job.token, PORTAL_BRIDGE_MODE: 'job' }, tools: JOB_TOOLS.map(n => `mcp__portal__${n}`) } : null
       });
       runs.finish(run.id, 'done', { durationMs: r.durationMs, numTurns: r.numTurns, tokensIn: r.inputTokens, tokensOut: r.outputTokens, apiEquivalentUsd: r.apiEquivalentUsd, rateLimit: r.rateLimit });
@@ -236,6 +297,8 @@ export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequ
       // Turnos agotados (u otra ejecución sin respuesta útil): el uso que consumió la suscripción también se registra.
       const u = e?.usage as CliFailedUsage | undefined;
       runs.finish(run.id, code === 'usage_limit' ? 'limit' : code === 'cancelled' ? 'cancelled' : 'failed', { durationMs: u?.durationMs ?? Date.now() - started, error: e?.message ?? String(e), ...(u ? { numTurns: u.numTurns, tokensIn: u.inputTokens, tokensOut: u.outputTokens, apiEquivalentUsd: u.apiEquivalentUsd } : {}) });
+      // Lo que consultó por el puente antes de agotar los turnos: el punto de partida de la recuperación sin herramientas.
+      if (code === 'max_turns' && job) Object.assign(e, { evidence: [...(job.task.uses ?? [])] });
       throw e;
     } finally { liveListeners.delete(run.id); job?.done(); releaseSlot(); }
   } finally { runningKeys.delete(key); }

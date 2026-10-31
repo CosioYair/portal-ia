@@ -25,7 +25,11 @@ export interface BridgeTask {
   /** Carpeta que se puede leer: el worktree del proceso o, si aún no existe, el repositorio autorizado del proyecto. */
   readRoot: string | null; runId: string; createdAt: string;
   status: 'pending' | 'claimed' | 'done' | 'failed' | 'cancelled'; claimedBy: string | null; progress: { at: string; message: string }[];
+  /** Presupuesto de llamadas a herramientas de lectura (ejecución gestionada) y lo consultado: si agota los turnos, la
+   *  recuperación sin herramientas parte de lo que ya leyó. */
+  toolBudget?: number | null; uses?: BridgeUse[];
 }
+export interface BridgeUse { tool: string; arg: string; ok: boolean; hits?: string }
 interface Pending { task: BridgeTask; resolve: (text: string) => void; reject: (e: Error) => void }
 
 export type BridgeScope = { kind: 'job'; slug: string; taskId: string } | { kind: 'worker'; slug: string; workerId: string; agentIds: string[] };
@@ -222,9 +226,20 @@ function readInside(readRoot: string, rel: string): { path: string; content: str
   const secret = scanSecrets(content); if (secret) return deny(403, `${secret} No se entrega por el puente.`);
   return { path: norm, content, truncated: st.size > MAX_FILE };
 }
+/**
+ * Gasta una llamada del presupuesto de herramientas de la tarea (ejecución gestionada) y la anota: lo leído es el punto de
+ * partida de la recuperación sin herramientas si agota los turnos. Agotado el presupuesto, el puente pide responder ya.
+ */
+function spend(task: BridgeTask, tool: string, arg: string): BridgeUse | Denied {
+  const uses = task.uses ??= [];
+  if (task.toolBudget && uses.length >= task.toolBudget) return deny(429, `Presupuesto de herramientas agotado (${task.toolBudget} llamadas en esta ejecución): responde ya con lo que tienes y marca lo que no pudiste comprobar.`);
+  const u: BridgeUse = { tool, arg: arg.slice(0, 300), ok: false }; uses.push(u); return u;
+}
 export function readTaskFile(task: BridgeTask, rel: string): { path: string; content: string; truncated: boolean } | Denied {
   if (!task.readRoot) return deny(404, 'Esta tarea no tiene carpeta de trabajo que leer.');
-  return readInside(task.readRoot, rel);
+  const u = spend(task, 'portal_read_file', rel); if (isDenied(u)) return u;
+  const r = readInside(task.readRoot, rel); if (!isDenied(r)) { u.ok = true; u.arg = r.path; }
+  return r;
 }
 
 /** Sin git: recorrido acotado que no entra en carpetas protegidas. */
@@ -260,21 +275,27 @@ function allTaskFiles(readRoot: string, dir: string): string[] | Denied {
 export function listTaskFiles(task: BridgeTask, dir = ''): { files: string[]; truncated: boolean } | Denied {
   if (!task.readRoot) return deny(404, 'Esta tarea no tiene carpeta de trabajo que leer.');
   const files = allTaskFiles(task.readRoot, dir); if (isDenied(files)) return files;
+  const u = spend(task, 'portal_list_files', dir); if (isDenied(u)) return u; u.ok = true;
   return { files: files.slice(0, 500), truncated: files.length > 500 };
 }
 
 /**
  * Búsqueda LITERAL (nunca una expresión del modelo: sin ReDoS) en los archivos legibles de la tarea, con las mismas
  * reglas que leer: rutas protegidas fuera, enlaces que salen de la carpeta fuera, binarios y archivos con secretos se
- * omiten (y se dice cuáles). Acotada en archivos, bytes y coincidencias.
+ * omiten (y se dice cuáles). Acotada en archivos, bytes y coincidencias. El código va antes que las pruebas y la
+ * documentación, cada archivo aporta como mucho `perFile` líneas (con su total en `files`) y un resultado recortado dice
+ * cómo acotar: un listado largo sin guía solo empuja a buscar otra vez.
  */
-const SEARCH = { maxFiles: 4000, maxBytes: 24 * 1024 * 1024, maxMatches: 200, lineChars: 300 } as const;
+const SEARCH = { maxFiles: 4000, maxBytes: 24 * 1024 * 1024, maxMatches: 200, perFile: 20, lineChars: 300 } as const;
+const searchRank = (f: string) => /(^|\/)(docs?|documentation)\//i.test(f) || /\.(md|mdx|txt|rst|adoc)$/i.test(f) ? 2 : /(^|\/)(tests?|__tests__|e2e|fixtures?)\//i.test(f) || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(f) ? 1 : 0;
 export function searchTaskFiles(task: BridgeTask, query: string, opts: { dir?: string; caseSensitive?: boolean } = {}) {
   if (!task.readRoot) return deny(404, 'Esta tarea no tiene carpeta de trabajo que leer.');
   const q = String(query ?? ''); if (q.trim().length < 2 || q.length > 200) return deny(400, 'La búsqueda debe tener entre 2 y 200 caracteres.');
-  const files = allTaskFiles(task.readRoot, opts.dir ?? ''); if (isDenied(files)) return files;
+  const all = allTaskFiles(task.readRoot, opts.dir ?? ''); if (isDenied(all)) return all;
+  const u = spend(task, 'portal_search', q); if (isDenied(u)) return u;
+  const files = all.map((f, i) => ({ f, i, k: searchRank(f) })).sort((a, b) => a.k - b.k || a.i - b.i).map(x => x.f);
   const needle = opts.caseSensitive ? q : q.toLowerCase();
-  const matches: { path: string; line: number; text: string }[] = []; const skipped: { path: string; reason: string }[] = [];
+  const matches: { path: string; line: number; text: string }[] = []; const skipped: { path: string; reason: string }[] = []; const counts: { path: string; matches: number }[] = [];
   let bytes = 0; let scanned = 0; let truncated = files.length > SEARCH.maxFiles;
   for (const f of files.slice(0, SEARCH.maxFiles)) {
     if (matches.length >= SEARCH.maxMatches || bytes >= SEARCH.maxBytes) { truncated = true; break; }
@@ -282,13 +303,17 @@ export function searchTaskFiles(task: BridgeTask, query: string, opts: { dir?: s
     if (isDenied(r)) { if (r.status === 403) skipped.push({ path: f, reason: r.error }); continue; }
     scanned++; bytes += r.content.length;
     if (!(opts.caseSensitive ? r.content : r.content.toLowerCase()).includes(needle)) continue;
-    const lines = r.content.split(/\r?\n/);
-    for (let i = 0; i < lines.length && matches.length < SEARCH.maxMatches; i++) {
-      if ((opts.caseSensitive ? lines[i] : lines[i].toLowerCase()).includes(needle)) matches.push({ path: f, line: i + 1, text: lines[i].trim().slice(0, SEARCH.lineChars) });
+    const lines = r.content.split(/\r?\n/); let n = 0;
+    for (let i = 0; i < lines.length; i++) {
+      if (!(opts.caseSensitive ? lines[i] : lines[i].toLowerCase()).includes(needle)) continue;
+      if (++n <= SEARCH.perFile && matches.length < SEARCH.maxMatches) matches.push({ path: f, line: i + 1, text: lines[i].trim().slice(0, SEARCH.lineChars) });
     }
+    counts.push({ path: f, matches: n }); if (n > SEARCH.perFile) truncated = true;
     if (r.truncated) skipped.push({ path: f, reason: `Solo se buscó en los primeros ${MAX_FILE} bytes.` });
   }
-  return { query: q, matches, filesScanned: scanned, skipped: skipped.slice(0, 50), truncated };
+  u.ok = true; u.hits = `${counts.reduce((s, c) => s + c.matches, 0)} coincidencia(s) en ${counts.slice(0, 5).map(c => c.path).join(', ') || 'ningún archivo'}${counts.length > 5 ? '…' : ''}`;
+  return { query: q, matches, files: counts.slice(0, 100), filesScanned: scanned, skipped: skipped.slice(0, 50), truncated,
+    ...(truncated ? { hint: `Resultado recortado: ${matches.length} línea(s) mostradas (como mucho ${SEARCH.perFile} por archivo; «files» da el total por archivo). Acota con «dir» (una subcarpeta) o una consulta más concreta en vez de repetir búsquedas amplias.` } : {}) };
 }
 
 /**
@@ -299,6 +324,7 @@ export function searchTaskFiles(task: BridgeTask, query: string, opts: { dir?: s
 const MAX_DIFF = 150_000;
 export function taskDiff(task: BridgeTask, range: 'working' | 'branch' = 'working') {
   if (!task.readRoot) return deny(404, 'Esta tarea no tiene carpeta de trabajo que leer.');
+  const u = spend(task, 'portal_diff', range); if (isDenied(u)) return u; u.ok = true;
   const cwd = task.readRoot;
   try { if (git(cwd, ['rev-parse', '--is-inside-work-tree']).trim() !== 'true') return deny(409, 'La carpeta de trabajo no es un repositorio git.'); }
   catch { return deny(409, 'La carpeta de trabajo no es un repositorio git.'); }

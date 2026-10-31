@@ -111,9 +111,14 @@ async function run(prompt) {
   out({ type: 'assistant', message: { content: [...(entry.mcp ? [{ type: 'tool_use', name: 'mcp__portal__portal_read_file', input: {} }] : []), { type: 'text', text: '…' }] }, session_id: 'sess-fake' });
   if (sc.slowMs) await new Promise(r => setTimeout(r, sc.slowMs));
   // Turnos agotados (como la CLI real con --max-turns): explora con herramientas y termina sin respuesta, con su uso.
-  if (rule?.maxTurns) {
+  // `onlyWithTools`: sin el puente MCP (ejecución sin herramientas) el modelo no puede explorar y responde con `text`.
+  // `tools`: herramientas (con su entrada) que usa en cada turno, en orden cíclico (p. ej. búsquedas sin fin).
+  if (rule?.maxTurns && !(rule.onlyWithTools && !mcpFile)) {
     const limit = Number(opt('--max-turns')) || 8;
-    for (let t = 0; t < limit; t++) out({ type: 'assistant', message: { content: [{ type: 'tool_use', name: t % 3 ? 'mcp__portal__portal_read_file' : 'mcp__portal__portal_list_files', input: {} }] }, session_id: 'sess-fake' });
+    for (let t = 0; t < limit; t++) {
+      const tool = Array.isArray(rule.tools) && rule.tools.length ? rule.tools[t % rule.tools.length] : null;
+      out({ type: 'assistant', message: { content: [tool ? { type: 'tool_use', name: `mcp__portal__${tool.name}`, input: tool.input ?? {} } : { type: 'tool_use', name: t % 3 ? 'mcp__portal__portal_read_file' : 'mcp__portal__portal_list_files', input: {} }] }, session_id: 'sess-fake' });
+    }
     out({ type: 'result', subtype: 'error_max_turns', is_error: true, num_turns: limit + 1, duration_ms: 4321, total_cost_usd: 0.31, session_id: 'sess-fake', usage: { input_tokens: 9000, cache_read_input_tokens: 21000, output_tokens: 700 }, permission_denials: [] });
     return;
   }

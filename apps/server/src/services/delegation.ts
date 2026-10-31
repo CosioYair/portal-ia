@@ -1,4 +1,7 @@
-import { agentCaller, completeWith } from './claudeCode/backend.ts';
+import { agentCaller, completeWith, RECOVERED_NOTE } from './claudeCode/backend.ts';
+import { filesIn } from './diagnostics.ts';
+import { readRepoFile } from './repoWrite.ts';
+import { CONSULT_EVIDENCE_CHARS, filesContext } from './storyPipeline.ts';
 import type { Agent, AssessmentEstimate, BacklogItem, BacklogOp, DelegationResult, ModelInfo, Process, ProviderId } from '@portal-ia/domain';
 import { PORTAL_CAPABILITIES } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
@@ -172,11 +175,12 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
   involved.forEach(id => agents.setStatus(id, 'active'));
   let finalStatus: Process['status'] = 'done'; let finalError: string | null = null;
 
-  const call = async (stepIdx: number, system: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[]) => {
+  const call = async (stepIdx: number, system: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[], role: string | null = null) => {
     const step = proc.steps[stepIdx]; const agent = agents.get(step.agentId)!;
     const providerId = agent.config.provider as ProviderId;
     const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
-    const cc = agentCaller(slug, agent, projectId, 'Encargo', processId);
+    // Una consulta («consultant») que agota los turnos se recupera UNA vez sin herramientas (claudeCode/backend.ts).
+    const cc = agentCaller(slug, agent, projectId, 'Encargo', processId, role);
     if (!cc && (!cred || prow.status !== 'connected')) throw new Error(`El proveedor ${providerId} no está conectado.`);
     const models: ModelInfo[] = JSON.parse(prow.models_json);
     const cur = procs.get(processId)!; const p = estimatePricing(providerId, agent.config.model);
@@ -196,15 +200,19 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
       procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'delegated_step', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
       log({ step: step.title, tokens: res.inputTokens + res.outputTokens, cost: cost.toFixed(4) }, 'paso completado');
-      return res;
+      return Object.assign(res, { recovered: (res as { recovered?: string | null }).recovered ?? null });
     } catch (e) {
       const err = e instanceof ProviderRequestError ? e.error : null; let msg = err ? err.message : (e as Error).message;
       // Lo que pudo facturarse sin confirmación del proveedor se guarda aparte del gasto confirmado (estimación de la entrada).
       const billed = !cc && maybeBilled(e); const estCost = billed ? costUsd(providerId, agent.config.model, estimateTokens(system + user), 0) : 0;
       if (billed) msg += ` Posible costo NO confirmado por el proveedor: ≈ ${estCost.toFixed(4)} USD (estimación de la entrada enviada; sin confirmación del proveedor).`;
-      procs.stepFinish(step.id, 'failed', { error: msg }); if (billed) procs.addUnconfirmed(processId, step.id, estCost);
-      procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'delegated_step', status: 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });
-      throw Object.assign(new Error(msg), { cancelled: err?.code === 'cancelled', budget: err?.code === 'call_cap' });
+      // Una ejecución de Claude Code sin respuesta útil (turnos agotados) consumió la suscripción: su uso se registra en el
+      // paso y en el proceso (0 USD de la API), como en el pipeline de historias.
+      const u = (e as { usage?: { inputTokens: number; outputTokens: number } })?.usage;
+      procs.stepFinish(step.id, 'failed', { tokensIn: u?.inputTokens ?? 0, tokensOut: u?.outputTokens ?? 0, error: msg }); if (billed) procs.addUnconfirmed(processId, step.id, estCost);
+      if (u) procs.addUsage(processId, u.inputTokens, u.outputTokens, 0);
+      procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'delegated_step', status: 'failed', tokensIn: u?.inputTokens ?? 0, tokensOut: u?.outputTokens ?? 0, cost: 0, startedAt });
+      throw Object.assign(new Error(msg), { cancelled: err?.code === 'cancelled', budget: err?.code === 'call_cap', maxTurns: err?.code === 'max_turns' });
     } finally { unregisterCall(processId, ctrl); }
   };
 
@@ -240,14 +248,26 @@ Responde SOLO con JSON: {"accepted": boolean, "rejectionReason": string|null, "u
         const q = wanted.find(w => String(w.agentKey).toLowerCase() === member.key.toLowerCase() || String(w.agentKey).toLowerCase() === member.config.name.toLowerCase());
         if (!q) { procs.stepFinish(step.id, 'skipped', {}); continue; }
         if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
-        const ans = await call(i + 1, sys(member, slug), `Tu responsable, ${lead.config.name}, trabaja en este encargo del propietario: «${d.request}».
+        // Paquete de evidencia: el contenido de los archivos del repositorio que nombran el encargo o la pregunta.
+        const repoPath = projectId ? projectsRepo(slug).repository(projectId)?.path ?? null : null;
+        const evidence = repoPath ? filesContext(repoPath, filesIn(`${d.request}\n${q.question}`).filter(f => readRepoFile(repoPath, f, 1) !== null), CONSULT_EVIDENCE_CHARS) : '';
+        let answer: string;
+        try {
+          const ans = await call(i + 1, sys(member, slug), `Tu responsable, ${lead.config.name}, trabaja en este encargo del propietario: «${d.request}».
 Te pregunta: ${q.question}
 
 # Estado real
 ${ctx}
-
-Responde en markdown breve y útil (máx. 500 palabras), con recomendaciones concretas y sin inventar datos.`, TOKENS.consult);
-        d.consulted.push({ agentId: member.id, agentName: member.config.name, question: q.question, answer: ans.text });
+${evidence ? `\n# Contenido actual de los archivos que se nombran (ya incluido: no hace falta buscarlo)\n${evidence}\n` : ''}
+Responde en markdown breve y útil (máx. 500 palabras), con recomendaciones concretas y sin inventar datos.`, TOKENS.consult, undefined, 'consultant');
+          answer = `${ans.recovered ? RECOVERED_NOTE : ''}${ans.text}`;
+        } catch (e: any) {
+          // Turnos agotados también en la recuperación sin herramientas: el encargo sigue sin esa aportación (y lo dice),
+          // en vez de fallar entero ni repetir la consulta.
+          if (!e?.maxTurns) throw e;
+          answer = `_(Sin respuesta de ${member.config.name}: ${e.message})_`;
+        }
+        d.consulted.push({ agentId: member.id, agentName: member.config.name, question: q.question, answer });
         procs.setDelegation(processId, d);
       }
       // 3 · Entregable y propuestas
