@@ -1,3 +1,111 @@
+# Portal IA · Integración final en main (31 de octubre de 2026)
+
+**Estado: `main` integrado y verificado, y ya activo.** Durante la verificación, el Portal en marcha se reconstruyó y
+reinició con su propio «Reconstruir y reiniciar» (que exige autorización en su interfaz; no lo lanzó esta sesión) y hoy
+ejecuta `05bfdac` con la interfaz construida desde `05bfdac` (ver «Activación»). Nada publicado en GitHub.
+
+## Qué contiene `main`
+
+| Commit | Qué es |
+|---|---|
+| `6f95432` | Integra `mejora/lotes-autorizacion-seleccion` (`9ea0ce9`, 9 commits): ejecución continua del backlog |
+| `f6abad9` | Integra `mejora/asistente-encargos` (`ad204b4`, 20 commits): Asistente, encargos, Gauntlet automático y en la planificación, seguridad |
+| `be0f494` | Esquema 0.16: copia de `data/` antes de las migraciones nuevas (ver «Revisión») |
+| `05bfdac` | Correcciones de la revisión Gauntlet de la integración (ver «Revisión») |
+| este commit | Esta documentación |
+
+- Integración normal (`git merge --no-ff`), sin conflictos: la historia era lineal (`e9fcbbc` ⊂ lotes ⊂ asistente) y el
+  árbol de cada merge es idéntico al de su rama ya verificada. Nada reescrito; las dos ramas siguen intactas.
+- `origin/main` sigue en `e9fcbbc`: **nada publicado**. Las ramas y worktrees temporales se conservan.
+- Antes de integrar se comprobó: checkout limpio, ninguna hook activa (ni `core.hooksPath` ni hooks en `.git/hooks`
+  ni en los árboles), el Portal en marcha sin procesos hijos (ninguna llamada a modelos, git ni Docker en curso).
+
+## Revisión Gauntlet de la integración
+
+Cuatro revisores independientes (ejecución continua, Asistente, Gauntlet y seguridad), con evidencia `ruta:línea`,
+pruebas y reproducciones. Corregido, cada uno con su prueba, que falla sobre el código anterior:
+
+| Gravedad | Hallazgo | Corrección |
+|---|---|---|
+| **crítica** (previa a esta integración: la tenían `e9fcbbc` y las ramas; corregida en `05bfdac`) | Lo ejecutado en el sandbox podía repuntar el `.git` del worktree a un gitdir propio, y el siguiente git del Portal ejecutaba su `core.fsmonitor` en tu equipo. **Comprobado con Docker real** (una marca inofensiva apareció fuera del sandbox) | `runInSandbox` compara el `.git` antes y después de cada ejecución, lo restaura y la verificación se pausa como incidente de seguridad; además `core.fsmonitor=false` en todo git del Portal. Prueba con Docker real en `sandbox-docker.test.ts` |
+| mayor (previa) | `git add -A` confirmaba archivos protegidos escritos en el sandbox (`.npmrc`, `.claude/settings.json`, `.env.local`), la revisión no los mostraba y un lote con «integrar» los llevaba a main | Los commits del Portal nunca incluyen rutas protegidas. Prueba en `security-paths.test.ts` |
+| mayor | Activar migraba `data/` (columnas y tablas nuevas, mensajes a «Historial anterior») **sin la copia previa**: la versión de esquema no subió | Esquema 0.16. Comprobado con datos sintéticos creados por la versión anterior: copia `antes-de-0.16` con el esquema antiguo, mensajes y historias intactos |
+| mayor | Encargo: «Autorizar y ejecutar» con una versión aplicada sin integrar pagaba una ejecución que fallaba al chocar con su rama | Exige confirmar el descarte ANTES de crear o pagar nada (casilla en la tarjeta); una autorización fallida ya no deja vigente la cancelada |
+| mayor | Gauntlet: con la revisión del plan en pausa (proveedor, presupuesto o tope de llamadas) se ofrecía «continuar», que la ruta rechaza sin nada entregado | Se ofrece volver a ejecutar (historia) o reautorizar (encargo) |
+| mayor | Lotes: tras un reinicio antes de la entrega, reintentar una historia dejaba sus dependientes bloqueadas para siempre | Vuelven a esperarla |
+
+**Pendientes (menores, documentados, sin corregir en esta integración):**
+- Asistente: en una conversación sin empresa ni proyecto, un encargo propuesto cae en el proyecto del Portal y la
+  tarjeta no nombra el proyecto; «revisar» una decisión rechazada la deja aprobada; la etapa y la siguiente acción no
+  siempre siguen a la realidad (p. ej. «Preparar historias» con un borrador listo); las autorizaciones de análisis
+  solo muestran USD (el tope de llamadas se fija sin mostrarse).
+- Gauntlet: la recomendación de un proceso ya preparado puede diferir del modo que se aplica; el modo del proyecto no
+  puede volver a «automático» una vez cambiado.
+- Lotes: la vista previa no tiene en cuenta un límite de la suscripción ya conocido (no gasta: el lote se pausa); una
+  historia parada por el tope de llamadas se continúa desde su proceso, no desde el lote.
+- Seguridad: con una unión YA presente en la carpeta, `portal_diff`, el contexto del repositorio y el borrado de un
+  worktree la siguen (no se encontró forma de que un agente la cree); las operaciones del Asistente no se limitan al
+  alcance de la conversación (piden tu confirmación y muestran el destino); una historia autorizada por API sin
+  `pipeline` no tiene tope de llamadas (la interfaz siempre lo envía).
+- Los ya conocidos (punto de control, secciones E y H): diagnóstico fallido que vuelve a pagar la evaluación, cita del
+  revisor del plan sin comprobar, enlaces duros, coste del planificador por llamada, iteración FALLIDA no superada, sin
+  validación con modelos reales, el Asistente ve 40 historias por proyecto, un reinicio antes de la entrega repite el
+  plan, y en el móvil los botones flotantes tapan el borde inferior.
+
+## Verificación del código final (en un worktree aparte, nunca en tu checkout: allí `data/` y `.env` son reales)
+
+- `npm run typecheck` y `npm run build`: exit 0. La interfaz construida dice `build-info.json` → `05bfdac` y contiene
+  búsqueda y filtros, selección múltiple que se conserva al filtrar, autorización de la suscripción de Claude Code,
+  alternativa por API desactivada, git seguro por defecto, vista previa, conversaciones, decisiones, encargos («Pedir
+  cambios», descarte), Gauntlet automático y «Seguir con este plan».
+- `PORTAL_REQUIRE_DOCKER=1 npm test`: 446 pruebas; 444 en verde, 0 fallidas, 2 omitidas por plataforma (SIGTERM en
+  Windows; `linux-ns` porque hay Docker). Las 7 con Docker real, el recorrido completo y la nueva del `.git` se
+  EJECUTARON (ninguna omitida).
+- Grupos (con Docker obligatorio, sobre la integración): aislamiento Docker 100/101 (la omitida, `linux-ns`), Asistente
+  15/15, ejecución continua 72/72, Gauntlet 27/27, seguridad 21/21.
+- Dentro del sandbox (`--cpus 2 --memory 2g`): 2 de 2 ejecuciones completas con 446 pruebas; 434 en verde, 0 fallidas,
+  12 omitidas (las que necesitan Docker o ejecutar en `/tmp`, y las de sandbox anidado). Ninguna de las 10 ejecuciones
+  dentro del sandbox desde la corrección `2389017` ha tenido fallos aleatorios.
+- Navegador (Chromium sin interfaz, instancias aisladas con datos sintéticos, proveedor simulado, Docker real), todo en
+  verde y sin errores en la consola:
+  - Asistente: las 12 comprobaciones de siempre y 26 de los controles nuevos (encargo con «Pedir cambios» y descarte;
+    pausa del plan con «Seguir con este plan», en escritorio y móvil, aceptado de punta a punta con Docker real).
+  - Ejecución continua: 40/40 con 500 historias sintéticas (valores seguros, alternativa por API desactivada, orígenes,
+    búsqueda, filtros, selección que se conserva, dependencias, vista previa sin IA, teclado y 390 px).
+  - Lote con Gauntlet de punta a punta: 18/18 (Evaluador aprobado, vista previa, integración de una en una, aceptación,
+    no aceptación con iteración dirigida, informe Gauntlet).
+- Actualización real simulada: datos creados por la versión anterior (`e9fcbbc`) abiertos con el código final → copia
+  previa `antes-de-0.16` con el esquema antiguo, migración aplicada, 4/4 mensajes en «Historial anterior», 3/3 historias.
+
+## Activación
+
+Antes de integrar, el Portal en marcha (127.0.0.1:4310) había arrancado con `e9fcbbc` y servía su interfaz: por eso se
+veía la anterior. Después de integrar, su «Reconstruir y reiniciar» se usó dos veces (consta en `apps/web/dist.prev` y
+`dist`): a las 18:53 construyó `be0f494`, y a las 19:18 construyó `05bfdac` y reinició el servidor. Su estado de solo
+lectura (`/api/system/status`) dice: arrancado con `05bfdac`, interfaz construida con `05bfdac`, sin cambios pendientes,
+sandbox Docker. Ninguna versión sin la corrección del esquema llegó a arrancar (el primer build fue `be0f494`), así que
+la migración de `data/` se hizo con la copia previa.
+
+Comprueba tú (esta sesión no abre `data/`):
+1. Que existe `data/backups/<fecha>_antes-de-0.16` (la copia previa a la migración).
+2. En el Asistente, tus mensajes anteriores en «Historial anterior»; en «Ejecución continua», búsqueda y filtros.
+
+Para futuras versiones, el mismo camino: la barra amarilla → «Reconstruir y reiniciar» (construye aparte en `dist.next`,
+sustituye solo si el build termina bien y reinicia). Alternativa manual: detén el Portal (Ctrl+C), `npm run build` y
+`npm start`. No hace falta `npm install` mientras no cambie el `package-lock`.
+
+## Primera prueba con proveedor real (recomendada)
+
+Empieza pequeño, con algo que puedas revisar entero. Cada paso con IA pide tu autorización con presupuesto y tope:
+1. En el Asistente, con empresa «Portal IA» y su proyecto, un **encargo** acotado («cambia este texto y déjalo listo
+   para revisar»): presupuesto ≈ 1 USD, tope ≈ 15 llamadas, Gauntlet automático. Revisa la evidencia (diff,
+   verificación en Docker, QA) y acéptalo o pide cambios. No integres hasta haberlo revisado.
+2. Después, un **lote de 2 historias pequeñas con dependencia**, sin «Integrar en main»: comprueba la vista previa
+   (orígenes, llamadas, Gauntlet por historia) contra lo que ocurre.
+3. Mira el informe de límites de la suscripción tras cada paso, antes de algo mayor.
+
+---
+
 # Portal IA · Asistente como interfaz de ejecución, encargos de desarrollo y Gauntlet automático
 
 > **Retomar tras reiniciar Windows:** empieza por `docs/handoffs/RESTART_CHECKPOINT_2026-10-30.md` (estado exacto de
