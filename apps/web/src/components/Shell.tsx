@@ -6,7 +6,7 @@ import { api } from '../lib/api.ts';
 import { onBundleChange, staleInterface } from '../lib/liveStatus.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
-import { Chip, Icon, Notice } from './ui.tsx';
+import { Chip, Icon, Notice, StatusIcon } from './ui.tsx';
 import { SystemBar } from './SystemBar.tsx';
 import { AssistantDock } from './AssistantDock.tsx';
 
@@ -82,16 +82,16 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/equipo">{Icon.users()}<span>Equipo de IA</span></NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/backlog">{Icon.inbox()}<span>Backlog</span></NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/lotes">{Icon.activity()}<span>Ejecución continua</span></NavLink>
-          <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/actividad">{Icon.activity()}<span>Actividad</span>{usage && usage.running > 0 && <span className="dot dot-warn dot-pulse" style={{ marginLeft: 'auto' }} />}</NavLink>
+          <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/actividad">{Icon.activity()}<span>Actividad</span>{usage && usage.running > 0 && <span style={{ marginLeft: 'auto', display: 'inline-flex' }}><StatusIcon state="running" label={`${usage.running} en ejecución`} showLabel={false} /></span>}</NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/conocimiento">{Icon.book()}<span>Conocimiento</span></NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/presupuestos">{Icon.wallet()}<span>Presupuestos</span></NavLink>
           {SOON.map(([label, icon]) => <button key={label} className="navi" disabled>{icon()}<span>{label}</span><span className="soon">próx.</span></button>)}
         </nav>
         <div style={{ flex: 1 }} />
         <div className="side-sec">Proveedores</div>
-        {connected.map(p => <Link key={p.id} className="navi" to="/configuracion/proveedor"><span className="dot dot-ok" /><span style={{ flex: 1 }}>{p.name}</span><span className="small muted">conectado</span></Link>)}
+        {connected.map(p => <Link key={p.id} className="navi" to="/configuracion/proveedor"><span className="dot dot-ok" aria-hidden="true" /><span style={{ flex: 1 }}>{p.name}</span><span className="small muted">conectado</span></Link>)}
         <Link className="navi" to="/configuracion/proveedor#claude-code">{Icon.plug()}<span style={{ flex: 1 }}>Claude Code — Local</span></Link>
-        <Link className="navi" to="/configuracion/proveedor"><span className="dot" /><span style={{ flex: 1 }}>Añadir proveedor</span></Link>
+        <Link className="navi" to="/configuracion/proveedor"><span className="dot" aria-hidden="true" /><span style={{ flex: 1 }}>Añadir proveedor</span></Link>
         <button className="navi" disabled>{Icon.gear()}<span>Configuración</span><span className="soon">próx.</span></button>
       </aside>
       <div className="content">
