@@ -28,6 +28,9 @@
 | Registro de decisiones en conversaciones | `conversations.ts` |
 | Evaluación organizativa con propuestas, auditoría y deshacer | `orgEvaluation.ts`, `orgProposalApply.ts` |
 | Descubrimiento de proyectos existentes en solo lectura (nuevo) | `projectDiscovery.ts`, `GET …/discovery` |
+| Cambio explícito y auditable de la política de un lote ya autorizado (solo restringe); «Reanudar» dice antes qué hará (puerta final) | `changePolicy`/`policyView` en `batchRunner.ts` |
+| Preparación apilada de dependientes sobre la versión verificada de su dependencia, sin integrarse antes que ella (puerta final; R5, primera versión) | `batchRunner.ts`, `stackedBranch.ts`, `ownBase` |
+| Vista previa aislada del candidato exacto (Docker sin red, IA simulada, proxy con CSP en 127.0.0.2) y decisiones ligadas al commit (puerta final; R4, primera versión) | `preview.ts`, `scripts/preview-*.mjs` |
 
 ### Parcial
 
@@ -42,8 +45,8 @@
 ### Falta
 
 - Perfil de proyecto (comandos, imagen, puerta de integración, rutas protegidas propias).
-- Ramas apiladas para historias dependientes.
-- Entorno de previsualización del candidato (probar la interfaz antes de aceptar).
+- Ramas apiladas de más de un nivel y trasplante sin IA cuando la dependencia se rehace desde cero (R5).
+- Vista previa con datos de prueba sembrados y perfiles de proyectos externos sin script «preview» (R4, R1).
 - Reuniones internas como entidad (objetivo, participantes, decisiones, acciones).
 - Gobierno del conocimiento.
 - Departamentos no técnicos.
@@ -78,13 +81,13 @@
 - Solo lo validado llega a prompts y al puente.
 - Se reutiliza el modelo de lecciones.
 
-**R4 · Entorno de previsualización del candidato**
+**R4 · Entorno de previsualización del candidato** — primera versión hecha (`docs/puerta-final-politica-apilado-vista-previa.md`); falta sembrar datos de prueba y perfiles sin script «preview».
 - Arrancar el Portal o el proyecto desde el worktree del candidato, aislado, con datos de prueba.
 - Así el propietario prueba la interfaz antes de «Aceptar e integrar».
 
 ### Después
 
-**R5 · Ramas apiladas para dependencias de un lote**
+**R5 · Ramas apiladas para dependencias de un lote** — primera versión hecha (un nivel; `docs/puerta-final-politica-apilado-vista-previa.md`); falta el trasplante sin IA y más niveles.
 - La dependiente parte de la rama de su dependencia (lectura y plan desde ella).
 - Se pone al día al integrarse esa dependencia, y se bloquea si se rechaza.
 - Diseño en `docs/empresa-autonoma-lotes-y-asistente.md` §6.

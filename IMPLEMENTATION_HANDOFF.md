@@ -1,3 +1,33 @@
+# Portal IA · Puerta final antes de activar: política del lote, dependientes preparadas y vista previa (1 de noviembre de 2026)
+
+**Estado: implementado y verificado en la rama `mejora/empresa-autonoma`** (encima de sus commits anteriores, que se conservan).
+**NO está integrado en `main`, NO está publicado y NO está activado:** las tres cosas requieren tu autorización.
+Detalle (causas, cambios, modelo de seguridad, rondas Gauntlet, pruebas, opciones para el lote real, limitaciones):
+`docs/puerta-final-politica-apilado-vista-previa.md`.
+
+## Qué cambia para el propietario
+
+- **Lote ya autorizado con integración automática (568c60cb):**
+  - antes de reanudar ves qué hará «Reanudar» con cada historia;
+  - puedes pasarlo EXPLÍCITAMENTE a «integrar al aceptar» (solo restringe; registrado; la autorización original queda intacta);
+  - lo ya integrado no se des-integra: «Reconocer y aceptar» lo cierra sin autorizar nada nuevo.
+- **Dependientes preparadas sobre la versión verificada de su dependencia** (opción por defecto con «al aceptar»):
+  - el equipo termina todo lo técnico antes de que revises;
+  - la dependiente nunca se integra antes que su dependencia;
+  - al integrarla se pone al día con su versión final (QA otra vez si cambió) sin reimplementarse.
+- **Vista previa aislada** de cada historia lista o preparada:
+  - el commit exacto + main, en `127.0.0.2`;
+  - sin red, con datos temporales e IA simulada;
+  - franja «NO es el Portal en marcha».
+  - Aceptar y pedir cambios quedan ligados al commit que probaste.
+- **El Portal en marcha rechaza** peticiones que cambian algo desde otras páginas, un `Host` ajeno y que lo incrusten; avisa si llegas a él desde otro sitio.
+
+## Activación (pendiente de tu autorización)
+
+Sin migraciones de datos. Pasos y efectos exactos en el informe final y en `docs/puerta-final-politica-apilado-vista-previa.md` §6.
+
+---
+
 # Portal IA · Empresa autónoma: lotes terminados antes de tu aceptación, integración ordenada y Asistente (31 de octubre de 2026)
 
 **Estado: implementado y verificado en la rama `mejora/empresa-autonoma`.** La rama está sobre
