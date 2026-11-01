@@ -155,8 +155,10 @@ setProgressListener((t, message) => {
 
 /** Carpeta legible de la tarea: el worktree del proceso si existe; si no, el repositorio autorizado del proyecto. */
 export function readRootFor(slug: string, processId: string | null, projectId: string): string | null {
-  const wt = processId ? processesRepo(slug).get(processId)?.result?.applied?.worktree : null;
-  if (wt && fs.existsSync(wt)) return wt;
+  const r = processId ? processesRepo(slug).get(processId)?.result : null;
+  // Una historia preparada sobre la versión provisional de su dependencia lee, antes de su primer commit, el worktree
+  // preparado (el mismo que su prompt): main no tiene el código de la dependencia.
+  for (const wt of [r?.applied?.worktree, r?.stack?.worktree]) if (wt && fs.existsSync(wt)) return wt;
   const repo = projectsRepo(slug).repository(projectId);
   return repo ? repoRoot(repo.path) : null;
 }

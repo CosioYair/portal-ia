@@ -17,6 +17,8 @@ try {
   // Lotes de ejecución continua: retoman tras el reinicio (sin reenviar llamadas con cobro incierto) y se revisan sin IA.
   // Va tras escuchar: la activación de un lote se comprueba contra el Portal ya en marcha.
   try { const { resumeBatches, startBatchScheduler } = await import('./services/batchRunner.ts'); startBatchScheduler((o, m) => app.log.info(o, m)); await resumeBatches((o, m) => app.log.info(o, m)); } catch (e) { app.log.warn({ err: (e as Error).message }, 'lotes: recuperación omitida'); }
+  // Vistas previas que dejó un arranque anterior de esta instancia: se retiran (no siguen sirviendo código sin aceptar).
+  void import('./services/preview.ts').then(m => m.cleanupPreviews((o, msg) => app.log.info(o, msg))).catch(e => app.log.warn({ err: (e as Error).message }, 'vistas previas: limpieza omitida'));
 } catch (err) {
   if ((err as NodeJS.ErrnoException).code === 'EADDRINUSE') {
     const pid = describePortHolder(config.port);

@@ -416,7 +416,9 @@ test('Ronda D · no aceptas una historia cuando las demás ya están listas y ot
     { match: 'YANKEE.*Elabora el plan técnico', text: plan('src/yankee.ts') }, { match: 'YANKEE.*Implementa la historia', text: create('src/yankee.ts', "import { x } from './xray.ts';\nexport const y = x + 1;") },
     { match: 'ZULU.*Elabora el plan técnico', text: plan('src/zulu.ts') }, { match: 'ZULU.*Implementa la historia', text: patch('src/zulu.ts', 'export const z = 0;', 'export const z = 3;') }
   ]);
-  const b0 = await authorize({ itemIds: [X.id, Y.id, Z.id], title: 'Lote RONDA D', concurrency: 2 });
+  // Sin preparación apilada (la dependiente espera a que su dependencia esté en main): el comportamiento que eliges al
+  // desmarcar «Preparar también las dependientes» (la apilada se prueba en puerta-final.test.ts).
+  const b0 = await authorize({ itemIds: [X.id, Y.id, Z.id], title: 'Lote RONDA D', concurrency: 2, git: { merge: true, integration: 'on_acceptance', prepareDependents: false } });
   const r = await waitFor(() => get(b0.id), x => item(x, 'XRAY').state === 'ready' && item(x, 'ZULU').state === 'ready' && !!item(x, 'XRAY').freshness && !!item(x, 'ZULU').freshness, 'X y Z listas', 60_000);
   assert.equal(item(r, 'YANKEE').state, 'waiting_dependency'); assert.match(item(r, 'YANKEE').reason, /aceptes e integres HU-\d+/);
   // No aceptas X: Y se bloquea (necesita su código), Z sigue intacta y se integra al aceptarla.

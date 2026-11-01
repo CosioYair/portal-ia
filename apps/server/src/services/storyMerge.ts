@@ -14,14 +14,20 @@ import { withRepoLock } from './repoLock.ts';
 export type MergeError = Error & { statusCode: number; code?: string; missing?: string[]; integration?: BranchIntegration; conflictFiles?: string[] };
 const fail = (statusCode: number, message: string, code?: string, extra: Record<string, unknown> = {}): MergeError => Object.assign(new Error(message), { statusCode, code, ...extra });
 
-export async function mergeStory(slug: string, id: string, opts: { into?: string; skipVerification?: boolean } = {}, log: (o: any, m: string) => void = () => undefined): Promise<Process> {
+/**
+ * `guard`: última comprobación de quien integra, evaluada DENTRO del carril del repositorio justo antes del merge (después
+ * de cualquier espera por el carril): si devuelve un motivo, no se integra (409 'integration_vetoed'). La usa el lote para
+ * que un cambio de política, una pausa o una aceptación anulada mientras esperaba el carril nunca acaben en main.
+ */
+export type MergeOpts = { into?: string; skipVerification?: boolean; guard?: () => string | null };
+export async function mergeStory(slug: string, id: string, opts: MergeOpts = {}, log: (o: any, m: string) => void = () => undefined): Promise<Process> {
   // Todo (leer el proceso, comprobar si main avanzó, combinar y registrar) en el carril del repositorio: dos integraciones
   // a la vez (lote y manual, o dos historias) se hacen una detrás de otra y la segunda ve el main que dejó la primera.
   const p0 = processesRepo(slug).get(id); const repo0 = p0 ? projectsRepo(slug).repository(p0.projectId) : null;
   if (!repo0) return mergeStoryLocked(slug, id, opts, log);
   return withRepoLock(repo0.path, () => mergeStoryLocked(slug, id, opts, log));
 }
-async function mergeStoryLocked(slug: string, id: string, opts: { into?: string; skipVerification?: boolean }, log: (o: any, m: string) => void): Promise<Process> {
+async function mergeStoryLocked(slug: string, id: string, opts: MergeOpts, log: (o: any, m: string) => void): Promise<Process> {
   const procs = processesRepo(slug); const proc = procs.get(id);
   if (!proc?.result?.applied) throw fail(409, 'Primero aplica los cambios en la rama.');
   if (proc.result.merged) throw fail(409, `Ya integrada en ${proc.result.merged.into}.`);
@@ -34,6 +40,10 @@ async function mergeStoryLocked(slug: string, id: string, opts: { into?: string;
     const head = await git(root, ['rev-parse', branch]).catch(() => '');
     const full = await git(root, ['rev-parse', `${verified}^{commit}`]).catch(() => '');
     if (head && full && head !== full) throw fail(409, `La rama ${branch} tiene commits sin registrar (${verified} → ${head.slice(0, 7)}): registra primero la corrección externa para integrar lo verificado.`, 'unregistered_commits');
+    // Preparada sobre la versión PROVISIONAL de su dependencia: su rama contiene commits de la dependencia. Solo se integra
+    // cuando ESA versión ya está en main (la aceptaste e integraste); nunca entra en main código de la dependencia sin aprobar.
+    const st = proc.result.stack;
+    if (st && !(await git(root, ['merge-base', '--is-ancestor', st.commit, target]).then(() => true).catch(() => false))) throw fail(409, `${branch} se preparó sobre una versión provisional de ${st.storyId} (${st.commit.slice(0, 7)}) que no está en ${target}: integra antes ${st.storyId} (y pon esta al día) o rehazla sobre ${target}. Integrarla metería en ${target} cambios de ${st.storyId} sin aprobar.`, 'stack_base_not_integrated');
     // Ya está en main (p. ej. un reinicio entre la integración y su registro): se registra la integración existente en vez
     // de crear otra (nunca dos merges de la misma historia).
     const inMain = full ? await git(root, ['merge-base', '--is-ancestor', full, target]).then(() => true).catch(() => false) : false;
@@ -70,6 +80,8 @@ async function mergeStoryLocked(slug: string, id: string, opts: { into?: string;
     throw fail(409, `Hay conflictos reales con ${integ.target} en ${files.join(', ')}: prepara el candidato de integración (se resuelven solo esos conflictos; no hace falta otra iteración).`, 'merge_conflict', { integration: integ });
   }
   if (integ && integ.behindCount > 0) throw fail(409, `${integ.target} avanzó ${integ.behindCount} commit(s) desde que nació la rama: prepara el candidato de integración (incorpora ${integ.target} en la rama sin IA y se vuelve a verificar) antes de integrar.`, 'integration_candidate_required', { integration: integ });
+  const veto = opts.guard?.();
+  if (veto) throw fail(409, veto, 'integration_vetoed');
   requirePolicy('git_merge', { slug, processId: id, projectId: proc.projectId, authorized: true });
   try {
     const m = await mergeBranch(repo.path, proc.result.applied.branch, opts.into, { affectedFiles: proc.result.changes.filter(c => !c.error).map(c => c.path), processId: id });

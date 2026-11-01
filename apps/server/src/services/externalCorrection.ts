@@ -45,7 +45,7 @@ export async function registerExternalCorrection(slug: string, processId: string
   if (target !== head) await git(wt, ['merge', '--ff-only', '-q', target]);
   const short = await git(wt, ['rev-parse', '--short', 'HEAD']);
   const repoPath = storyRunContext(slug, processId, () => undefined, () => false).repoPath;
-  const changes = await changesSinceBase(repoPath, wt);
+  const changes = await changesSinceBase(repoPath, wt, r.stack?.commit);
   const entry: ExternalCorrection = { at: now(), commit: short, previousCommit: r.applied.commit, files, note: input.note.trim(), by: 'owner' };
   updateResult(slug, processId, x => ({
     ...x, changes,

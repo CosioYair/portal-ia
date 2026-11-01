@@ -4,7 +4,7 @@ import { useLatest, useLive } from '../lib/live.ts';
 import { Link, useParams } from 'react-router-dom';
 import type { BacklogItem, BatchItemState, BatchItemView, BatchPreview, BatchView, GauntletConfig } from '@portal-ia/domain';
 import { BATCH_LIMITS, INTERNAL_WORKSPACE, batchMoving, normalizeGauntlet } from '@portal-ia/domain';
-import { api, type BatchRequest } from '../lib/api.ts';
+import { api, type BatchPolicyView, type BatchRequest } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
@@ -18,11 +18,12 @@ const STATUS: Record<BatchView['status'], { label: string; tone: '' | 'ok' | 'wa
 };
 const TONE: Record<BatchItemState, '' | 'ok' | 'warn' | 'err' | 'accent'> = {
   queued: '', waiting_dependency: '', running: 'accent', integrating: 'accent', needs_owner: 'warn', awaiting_integration: 'warn', awaiting_acceptance: 'warn', accepted: 'ok', rejected: 'err', failed: 'err', blocked: 'err', cancelled: '', external: 'accent',
-  ready: 'warn', revalidating: 'accent', postponed: ''
+  ready: 'warn', revalidating: 'accent', postponed: '', prepared: 'accent'
 };
 const GROUPS: { label: string; states: BatchItemState[] }[] = [
   { label: 'Listas para tu revisión (sin integrar), en el orden de integración', states: ['ready'] },
-  { label: 'Pendientes de tu aceptación', states: ['awaiting_acceptance'] },
+  { label: 'Preparadas sobre su dependencia (sin integrar): se revisan e integran después de ella', states: ['prepared'] },
+  { label: 'Ya integradas en main: pendientes de tu aceptación', states: ['awaiting_acceptance'] },
   { label: 'Aceptadas', states: ['accepted'] },
   { label: 'En curso o en cola', states: ['running', 'revalidating', 'integrating', 'queued', 'waiting_dependency'] },
   { label: 'Esperan tu decisión', states: ['needs_owner', 'awaiting_integration', 'rejected'] },
@@ -78,7 +79,11 @@ const range = (r: { min: number; max: number }) => r.min === r.max ? `${r.min}` 
 const minutes = (m: number) => m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ''}`;
 
 /** Con «Integrar en main», la política va siempre explícita: lo que muestra el asistente es lo que autoriza el servidor. */
-const explicitGit = <T extends { git?: BatchRequest['git'] }>(r: T): T => r.git?.merge ? { ...r, git: { ...r.git, integration: r.git.integration ?? 'on_acceptance' } } : r;
+const explicitGit = <T extends { git?: BatchRequest['git'] }>(r: T): T => {
+  if (!r.git?.merge) return r;
+  const integration = r.git.integration ?? 'on_acceptance';
+  return { ...r, git: { ...r.git, integration, ...(integration === 'on_acceptance' ? { prepareDependents: r.git.prepareDependents !== false } : { prepareDependents: undefined }) } };
+};
 /** Valores de un lote nuevo: nada facturable, ni integrar, activar, publicar ni ceder a la API. */
 const NEW_BATCH: Omit<BatchRequest, 'itemIds'> = { totalBudgetUsd: 5, perStoryBudgetUsd: 1.5, maxCorrections: 3, maxDurationMin: 240, maxSubscriptionCalls: 60, concurrency: 1, gauntlet: normalizeGauntlet({ mode: 'auto' }), backends: ['claude_code'], apiFallback: false, commands: ['typecheck', 'test', 'build'], allowInstall: false, git: { merge: false, activate: false, publish: false } };
 
@@ -152,7 +157,7 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const notReady = (preview?.plan ?? []).filter(p => !p.blockedReason && !p.executable).map(p => p.id);
   const autoCount = sum ? sum.executable - sum.waitForManualIntegration.length : 0;
   const blockReason = !sel.length ? null : !req.backends?.length ? 'Marca al menos un origen de ejecución (sección 2).' : !fresh ? 'Actualizando la vista previa…' : !sum ? 'Sin vista previa.' : sum.blockedByPermission ? `Hay ${sum.blockedByPermission} historia(s) cuyo equipo no puede ejecutar con lo autorizado: corrígelo (sección 2) o quítalas.` : !sum.executable ? 'Ninguna historia puede empezar.' : !ok ? 'Marca la casilla de autorización.' : null;
-  const autonomous = sum ? [`Ejecutar ${autoCount} historia(s) con su equipo: plan, implementación en un worktree aislado, verificación en el sandbox y QA`, req.gauntlet!.mode === 'auto' ? 'Gauntlet automático: cada historia con la intensidad que le corresponde (en el plan detallado, con el motivo)' : req.gauntlet!.mode !== 'off' ? `Evaluación Gauntlet ${GAUNTLET_MODE[req.gauntlet!.mode].label.toLowerCase()}` : null, `Hasta ${req.maxCorrections} corrección(es) por historia`, g.merge ? (g.integration === 'auto' ? 'Integrar en main cada historia terminada (de una en una, con las mismas verificaciones)' : 'Terminar técnicamente TODAS las historias; al aceptar cada una, integrarla en main en el orden de integración y poner al día las siguientes (git, sandbox y QA)') : null, internal && g.activate ? 'Reconstruir y reiniciar el Portal tras integrar (sin nada en marcha)' : null, g.publish ? 'Publicar en GitHub tras integrar' : null, fallbackOn ? 'Ceder a la API (facturable) si Claude Code no está disponible' : null].filter(Boolean) as string[] : [];
+  const autonomous = sum ? [`Ejecutar ${autoCount} historia(s) con su equipo: plan, implementación en un worktree aislado, verificación en el sandbox y QA`, req.gauntlet!.mode === 'auto' ? 'Gauntlet automático: cada historia con la intensidad que le corresponde (en el plan detallado, con el motivo)' : req.gauntlet!.mode !== 'off' ? `Evaluación Gauntlet ${GAUNTLET_MODE[req.gauntlet!.mode].label.toLowerCase()}` : null, `Hasta ${req.maxCorrections} corrección(es) por historia`, g.merge ? (g.integration === 'auto' ? 'Integrar en main cada historia terminada (de una en una, con las mismas verificaciones)' : 'Terminar técnicamente TODAS las historias; al aceptar cada una, integrarla en main en el orden de integración y poner al día las siguientes (git, sandbox y QA)') : null, g.merge && g.integration !== 'auto' && g.prepareDependents !== false ? 'Preparar las dependientes sobre la versión verificada de su dependencia (sin integrar), sin esperar a tu revisión' : null, internal && g.activate ? 'Reconstruir y reiniciar el Portal tras integrar (sin nada en marcha)' : null, g.publish ? 'Publicar en GitHub tras integrar' : null, fallbackOn ? 'Ceder a la API (facturable) si Claude Code no está disponible' : null].filter(Boolean) as string[] : [];
   const yours = [!g.merge ? 'Integrar en main' : g.integration !== 'auto' ? 'Aceptar cada historia antes de que entre en main (en el orden propuesto)' : null, internal && !g.activate ? 'Reconstruir y reiniciar el Portal' : null, !g.publish ? 'Publicar en GitHub' : null, 'Aceptar (o no) cada historia: es distinto de QA', 'Ampliar presupuesto, tope de llamadas o duración', 'Lo que se detenga: conflictos, fallos o límites'].filter(Boolean) as string[];
   return (
     <section className="card" data-testid="batch-wizard">
@@ -236,7 +241,8 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
               <div className="eyebrow">5 · Operaciones git (solo con tu marca, en cada lote)</div>
               <label className="ck"><input className="cb" type="checkbox" checked={!!g.merge} onChange={e => set({ git: e.target.checked ? { ...g, merge: true, integration: g.integration ?? 'on_acceptance' } : { merge: false, activate: false, publish: false } })} /><span><strong>Integrar en main</strong> de una en una y con las mismas verificaciones que la integración manual. Sin esto, integrar sigue siendo tuyo (y las dependientes esperan).</span></label>
               {g.merge && <div role="radiogroup" aria-label="Cuándo integrar" style={{ display: 'flex', flexDirection: 'column', gap: 6, marginLeft: 26 }} data-testid="batch-integration-policy">
-                <label className="ck" style={{ gap: 6 }}><input type="radio" name="batch-integration" checked={g.integration !== 'auto'} onChange={() => set({ git: { ...g, integration: 'on_acceptance' } })} /><span><strong>Al aceptar cada historia (recomendado)</strong> <span className="small muted">El equipo termina técnicamente todo el lote; tú revisas cada historia en el orden de integración y, al aceptarla, entra en main. Las siguientes se ponen al día con lo integrado antes de presentártelas.</span></span></label>
+                <label className="ck" style={{ gap: 6 }}><input type="radio" name="batch-integration" checked={g.integration !== 'auto'} onChange={() => set({ git: { ...g, integration: 'on_acceptance' } })} /><span><strong>Al aceptar cada historia (recomendado)</strong> <span className="small muted">El equipo termina técnicamente todo el lote; tú revisas cada historia en el orden de integración (con vista previa aislada) y, al aceptarla, entra en main. Las siguientes se ponen al día con lo integrado antes de presentártelas.</span></span></label>
+                {g.integration !== 'auto' && <label className="ck" style={{ gap: 6, marginLeft: 26 }} data-testid="batch-prepare-dependents"><input className="cb" type="checkbox" checked={g.prepareDependents !== false} onChange={e => set({ git: { ...g, prepareDependents: e.target.checked } })} /><span><strong>Preparar también las dependientes</strong> <span className="small muted">sobre la versión verificada y revisada de su dependencia, sin esperar a que la aceptes. Nunca se integran antes que ella; al integrarla se ponen al día con su versión final. Si no la aceptas o la rehaces desde cero, ese trabajo puede perderse.</span></span></label>}
                 <label className="ck" style={{ gap: 6 }}><input type="radio" name="batch-integration" checked={g.integration === 'auto'} onChange={() => set({ git: { ...g, integration: 'auto' } })} /><span><strong>Al terminar cada una</strong> <span className="small muted">Se integra{internal ? ' y activa' : ''} sin esperar tu revisión; la aceptas ya integrada (útil para probar la interfaz en el Portal en marcha).</span></span></label>
               </div>}
               {internal && <label className="ck"><input className="cb" type="checkbox" checked={!!g.activate} disabled={!g.merge} onChange={e => set({ git: { ...g, activate: e.target.checked } })} /><span><strong>Reconstruir y reiniciar el Portal</strong> cuando no haya nada en marcha, y comprobarlo en ejecución al volver.{!g.merge ? ' (exige integrar)' : ''}</span></label>}
@@ -373,11 +379,13 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
           {b.integrationPlan.overlaps.length > 0 && <div className="small muted">Comparten archivos: {b.integrationPlan.overlaps.slice(0, 8).map(o => `${b.items.find(i => i.itemId === o.a)?.storyId}↔${b.items.find(i => i.itemId === o.b)?.storyId} (${o.files.slice(0, 2).join(', ')}${o.files.length > 2 ? '…' : ''})`).join(' · ')}</div>}
         </details>}
         {b.reason && b.reason !== b.lifecycle.headline && <Notice kind={b.status === 'paused' || idle ? 'warn' : b.status === 'revoked' ? 'err' : 'info'}><span>{b.reason}{b.reasonFix ? <> <Link className="lnk" to={b.reasonFix.href}>{b.reasonFix.label}</Link></> : null}</span></Notice>}
+        {!closed && <PolicyCard b={b} onChange={setB} />}
+        {(b.status === 'paused' || b.status === 'completed' || idle) && !closed && b.items.some(i => ['queued', 'waiting_dependency', 'needs_owner', 'awaiting_integration'].includes(i.state)) && <ResumeEffects b={b} />}
         {(b.status === 'paused' || b.status === 'completed' || idle) && !closed && b.items.some(i => ['queued', 'waiting_dependency', 'needs_owner', 'awaiting_integration'].includes(i.state)) && <section className="card card-b" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
           <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>Añadir presupuesto (USD)<input className="input mono" type="number" min={0} step={0.5} value={addBudget} onChange={e => setAddBudget(e.target.value)} style={{ width: 120, height: 32 }} /></label>
           <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>Añadir llamadas a la suscripción<input className="input mono" type="number" min={0} value={addCalls} onChange={e => setAddCalls(e.target.value)} style={{ width: 120, height: 32 }} /></label>
           <label className="ck" style={{ flex: '1 1 260px' }}><input className="cb" type="checkbox" checked={resumeOk} onChange={e => setResumeOk(e.target.checked)} /><span>Autorizo reanudar con estos límites (la duración autorizada cuenta desde ahora).</span></label>
-          <button className="btn btn-primary btn-sm" disabled={!resumeOk || busy} onClick={() => { setResumeOk(false); void act(() => api.batchControl(ws.slug, b.id, 'resume', { addBudgetUsd: Number(addBudget) || 0, addSubscriptionCalls: Number(addCalls) || 0 }), 'Lote reanudado'); }}>Reanudar</button>
+          <button className="btn btn-primary btn-sm" data-testid="batch-resume" disabled={!resumeOk || busy} onClick={() => { setResumeOk(false); void act(() => api.batchControl(ws.slug, b.id, 'resume', { addBudgetUsd: Number(addBudget) || 0, addSubscriptionCalls: Number(addCalls) || 0, expectPolicy: b.lifecycle.policy }), 'Lote reanudado'); }}>Reanudar con «{POLICY[b.lifecycle.policy]}»</button>
         </section>}
         <section className="card card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{(Object.keys(b.summary) as BatchItemState[]).filter(k => b.summary[k]).map(k => <Chip key={k} xs tone={TONE[k]}>{b.summary[k]} {b.items.find(i => i.state === k)?.label}</Chip>)}</div>
@@ -390,7 +398,8 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
             <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               {gr.states.includes('awaiting_acceptance') && <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                 <input className="input" placeholder="Nota de aceptación (opcional)" value={note} onChange={e => setNote(e.target.value)} style={{ flex: '1 1 260px', height: 32 }} />
-                <button className="btn btn-primary btn-sm" disabled={!picked.length || busy} onClick={() => { const ids = picked; setPicked([]); void act(async () => { const r = await api.acceptBatchItems(ws.slug, b.id, ids, note, Object.fromEntries(ids.filter(id => checks[id]).map(id => [id, checks[id]]))); noteDraft.clear(); return r; }, `${ids.length} historia(s) aceptada(s)`); }}>{Icon.check()}Aceptar seleccionadas ({picked.length})</button>
+                <button className="btn btn-primary btn-sm" data-testid="acknowledge-selected" disabled={!picked.length || busy} onClick={() => { const ids = picked; setPicked([]); void act(async () => { const r = await api.acceptBatchItems(ws.slug, b.id, ids, note, Object.fromEntries(ids.filter(id => checks[id]).map(id => [id, checks[id]])), Object.fromEntries(ids.map(id => [id, b.items.find(i => i.itemId === id)?.evidence?.head ?? '']).filter(([, h]) => h))); noteDraft.clear(); return r; }, `${ids.length} historia(s) reconocida(s)`); }}>{Icon.check()}Reconocer y aceptar seleccionadas ({picked.length})</button>
+                <span className="small muted" style={{ flexBasis: '100%' }}>Ya están en main (se integraron antes de tu revisión): aceptarlas es reconocerlas; no autoriza ninguna integración nueva. Si alguna no te vale, «No aceptar» la devuelve al equipo (no se des-integra sola).</span>
               </div>}
               {its.map(it => <ItemCard key={it.itemId} slug={ws.slug} b={b} it={it} picked={picked.includes(it.itemId)} onPick={v => setPicked(p => v ? [...p, it.itemId] : p.filter(x => x !== it.itemId))} checks={checks[it.itemId]} onChecks={c => setChecks(x => ({ ...x, [it.itemId]: c }))} onChange={setB} busy={busy} />)}
             </div>
@@ -414,7 +423,7 @@ function ItemCard({ slug, b, it, picked, onPick, checks, onChecks, onChange, bus
   const [auth, setAuth] = useState(false);
   const p = it.process; const steps = p?.manualTest?.steps ?? []; const c = checks ?? steps.map(() => false);
   const run = async (fn: () => Promise<BatchView>, ok: string) => { try { onChange(await fn()); flash(ok); itemDraft.clear(); setAuth(false); } catch (e: any) { flash(e.message, 'err'); } };
-  const canIterate = ['rejected', 'needs_owner', 'failed', 'awaiting_acceptance', 'awaiting_integration', 'ready', 'postponed'].includes(it.state) && b.status !== 'cancelled' && b.status !== 'revoked';
+  const canIterate = ['rejected', 'needs_owner', 'failed', 'awaiting_acceptance', 'awaiting_integration', 'ready', 'postponed', 'prepared'].includes(it.state) && b.status !== 'cancelled' && b.status !== 'revoked';
   const live = b.status !== 'cancelled' && b.status !== 'revoked' && b.status !== 'completed';
   // Su dependencia del lote debe estar integrada antes (necesita su código en main).
   const dep = it.dependsInBatch && it.dependsOn ? b.items.find(i => i.storyId === it.dependsOn) : undefined;
@@ -423,7 +432,12 @@ function ItemCard({ slug, b, it, picked, onPick, checks, onChecks, onChange, bus
   // Sin trabajo que conservar (no llegó a empezar o su proceso falló): se puede reintentar con los límites del lote.
   const canRetry = (it.state === 'needs_owner' || it.state === 'failed') && (!p || p.status === 'cancelled' || p.status === 'failed') && b.status !== 'cancelled' && b.status !== 'revoked';
   // Un formulario recuperado del borrador solo se abre si la acción sigue siendo posible (la historia pudo avanzar).
-  const open = mode === 'retry' ? (canRetry ? mode : null) : mode === 'iterate' ? (canIterate ? mode : null) : mode === 'reject' ? (it.state === 'awaiting_acceptance' || it.state === 'accepted' || it.state === 'ready' ? mode : null) : null;
+  const open = mode === 'retry' ? (canRetry ? mode : null) : mode === 'iterate' ? (canIterate ? mode : null) : mode === 'reject' ? (it.state === 'awaiting_acceptance' || it.state === 'accepted' || it.state === 'ready' || it.state === 'prepared' ? mode : null) : null;
+  const onBranch = it.state === 'ready' || it.state === 'postponed' || it.state === 'prepared';
+  // Decides sobre lo que probaste: con una vista previa abierta, su commit; si el candidato ya es otro, primero vuelve a abrirla.
+  const pvOpen = !!it.preview?.live && (it.preview.status === 'ready' || it.preview.status === 'starting');
+  const pvOther = pvOpen && !!it.evidence?.head && it.preview!.commit.slice(0, 7) !== it.evidence.head.slice(0, 7);
+  const revision = pvOpen && !pvOther ? it.preview!.commit : it.evidence?.head ?? null;
   return (
     <div id={`item-${it.storyId}`} style={{ border: '1px solid #E4E2DC', borderRadius: 10, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }} data-testid={`batch-item-${it.storyId}`}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -440,20 +454,22 @@ function ItemCard({ slug, b, it, picked, onPick, checks, onChecks, onChange, bus
         <span>Gasto: <span className="mono">{fmtUsd(p.spentUsd)}{p.unconfirmedUsd ? ` (+${fmtUsd(p.unconfirmedUsd)} sin confirmar)` : ''}</span></span>
         {p.merged && <span>main: <span className="mono">{p.merged.commit}</span></span>}
       </div>}
+      {it.stackInfo && <div className="small" data-testid={`stack-${it.storyId}`}><Chip xs tone={it.stackInfo.invalid ? 'err' : it.stackInfo.moved ? 'warn' : 'accent'}>{it.stackInfo.invalid ? 'versión provisional anulada' : 'sobre versión provisional'}</Chip> Preparada sobre <span className="mono">{it.stackInfo.storyId}</span> <span className="mono">{it.stackInfo.commit.slice(0, 7)}</span> (verificada y revisada, sin integrar){it.stackInfo.moved && it.stackInfo.dependencyHead ? <> · {it.stackInfo.storyId} cambió desde entonces (<span className="mono">{it.stackInfo.dependencyHead.slice(0, 7)}</span>): se pondrá al día con su versión final y QA la revisará otra vez</> : null}{it.stackInfo.invalid ? <> · {it.stackInfo.invalid}</> : null}</div>}
       {it.state === 'ready' && fr && <div className="small" data-testid={`freshness-${it.storyId}`}><Chip xs tone={FRESH[fr.status].tone}>{FRESH[fr.status].label}</Chip> {fr.status === 'current' ? `con main ${fr.mainHead} (commit ${fr.head})` : fr.detail}{fr.conflicts?.length ? <span> · conflictos previstos: {fr.conflicts.slice(0, 4).join(', ')}</span> : null}</div>}
-      {(it.state === 'awaiting_acceptance' || it.state === 'ready') && <>
+      {(((it.state === 'ready' || it.state === 'prepared') && live) || it.preview?.live) && <PreviewPanel slug={slug} it={it} />}
+      {(it.state === 'awaiting_acceptance' || it.state === 'ready' || it.state === 'prepared') && <>
         {p?.userFacing && <div className="small" style={{ whiteSpace: 'pre-wrap' }}>{p.userFacing}</div>}
         {steps.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><div className="small muted">Prueba de aceptación (marca cada paso que comprobaste):</div>
           {steps.map((s, i) => <label key={i} className="ck small" style={{ gap: 6 }}><input className="cb" type="checkbox" checked={!!c[i]} onChange={e => { const n = [...c]; n[i] = e.target.checked; onChecks(n); }} /><span>{i + 1}. {s}</span></label>)}</div>}
       </>}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        {it.state === 'ready' && live && <button className="btn btn-primary btn-sm" disabled={busy || depPending} title={depPending ? `Acepta antes ${dep!.storyId}: esta necesita su código en main` : undefined} data-testid={`accept-${it.storyId}`} onClick={() => run(() => api.acceptBatchItems(slug, b.id, [it.itemId], '', steps.length && c.some(Boolean) ? { [it.itemId]: c } : {}), `${it.storyId}: aceptada; se integra en su turno`)}>{Icon.check()}Aceptar e integrar en main{fr && fr.status !== 'current' ? ' (se pone al día antes)' : ''}</button>}
-        {(it.state === 'awaiting_acceptance' || it.state === 'accepted' || it.state === 'ready') && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setMode('reject'); setText(''); }}>No aceptar…</button>}
-        {['ready', 'queued', 'waiting_dependency', 'needs_owner', 'failed', 'blocked', 'awaiting_integration'].includes(it.state) && live && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(() => api.postponeBatchItem(slug, b.id, it.itemId, ''), `${it.storyId}: aplazada`)}>Aplazar</button>}
+        {it.state === 'ready' && live && <button className="btn btn-primary btn-sm" disabled={busy || depPending || pvOther} title={depPending ? `Acepta antes ${dep!.storyId}: esta necesita su código en main` : pvOther ? 'La vista previa abierta es de otro commit: vuelve a abrirla (o detenla) antes de aceptar' : undefined} data-testid={`accept-${it.storyId}`} onClick={() => run(() => api.acceptBatchItems(slug, b.id, [it.itemId], '', steps.length && c.some(Boolean) ? { [it.itemId]: c } : {}, revision ? { [it.itemId]: revision } : {}), `${it.storyId}: aceptada; se integra en su turno`)}>{Icon.check()}Aceptar {revision ? <span className="mono">{revision.slice(0, 7)}</span> : null} e integrar en main{b.auth.git.publish ? ' (y publicar en GitHub)' : ''}{fr && fr.status !== 'current' ? ' (se pone al día antes)' : ''}</button>}
+        {(it.state === 'awaiting_acceptance' || it.state === 'accepted' || it.state === 'ready' || it.state === 'prepared') && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setMode('reject'); setText(''); }}>No aceptar…</button>}
+        {['ready', 'prepared', 'queued', 'waiting_dependency', 'needs_owner', 'failed', 'blocked', 'awaiting_integration'].includes(it.state) && live && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(() => api.postponeBatchItem(slug, b.id, it.itemId, ''), `${it.storyId}: aplazada`)}>Aplazar</button>}
         {it.state === 'postponed' && (live || b.status === 'completed') && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => run(() => api.restoreBatchItem(slug, b.id, it.itemId), `${it.storyId}: recuperada`)}>Recuperar</button>}
         {it.state === 'accepted' && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(() => api.reopenBatchItem(slug, b.id, it.itemId), `${it.storyId} reabierta`)}>Reabrir</button>}
         {canRetry && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => { setMode('retry'); setAuth(false); }}>Reintentar…</button>}
-        {canIterate && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setMode('iterate')}>{it.state === 'ready' || it.state === 'postponed' ? 'Pedir cambios…' : 'Iterar solo esta…'}</button>}
+        {canIterate && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setMode('iterate')}>{onBranch ? 'Pedir cambios…' : 'Iterar solo esta…'}</button>}
         {['queued', 'waiting_dependency', 'running', 'needs_owner', 'blocked'].includes(it.state) && b.status !== 'cancelled' && b.status !== 'revoked' && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => run(() => api.cancelBatchItem(slug, b.id, it.itemId), `${it.storyId} cancelada`)}>Cancelar esta</button>}
       </div>
       {open === 'retry' && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -461,16 +477,99 @@ function ItemCard({ slug, b, it, picked, onPick, checks, onChecks, onChange, bus
         <div style={{ display: 'flex', gap: 8 }}><button className="btn btn-primary btn-sm" disabled={!auth} onClick={() => run(() => api.retryBatchItem(slug, b.id, it.itemId), `${it.storyId}: de nuevo en la cola`)}>Reintentar</button><button className="btn btn-ghost btn-sm" onClick={() => setMode(null)}>Cancelar</button></div>
       </div>}
       {open && open !== 'retry' && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <textarea className="input" placeholder={open === 'reject' ? 'Qué no cumple (se registra en la historia)' : it.state === 'ready' || it.state === 'postponed' ? 'Qué cambiar (se aplica sobre su rama, sin rehacerla)' : 'Qué debe cambiar en la nueva iteración'} value={text} onChange={e => setText(e.target.value)} />
+        <textarea className="input" placeholder={open === 'reject' ? 'Qué no cumple (se registra en la historia)' : onBranch ? `Qué cambiar${it.evidence?.head ? ` (sobre el commit ${it.evidence.head} que revisaste)` : ''}: se aplica sobre su rama, sin rehacerla` : 'Qué debe cambiar en la nueva iteración'} value={text} onChange={e => setText(e.target.value)} />
         {open === 'reject' && steps.some((_, i) => !c[i]) && <div className="small muted">Se crearán tareas con los pasos sin marcar: {steps.filter((_, i) => !c[i]).map((s, i) => <span key={i}>«{s}» </span>)}</div>}
-        {open === 'iterate' && <label className="ck small"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>{it.state === 'ready' || it.state === 'postponed' ? 'Autorizo estos cambios sobre su rama dentro de los límites del lote (una corrección más; se repiten verificación, QA y Gauntlet; las demás no se repiten).' : 'Autorizo una iteración de esta historia dentro de los límites del lote (las demás no se repiten).'}</span></label>}
+        {open === 'iterate' && <label className="ck small"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>{onBranch ? 'Autorizo estos cambios sobre su rama dentro de los límites del lote (una corrección más; se repiten verificación, QA y Gauntlet; las demás no se repiten).' : 'Autorizo una iteración de esta historia dentro de los límites del lote (las demás no se repiten).'}</span></label>}
         <div style={{ display: 'flex', gap: 8 }}>
           <button className="btn btn-primary btn-sm" disabled={text.trim().length < 3 || (open === 'iterate' && !auth)} onClick={() => open === 'reject'
             ? run(() => api.rejectBatchItem(slug, b.id, it.itemId, text.trim(), steps.filter((_, i) => !c[i])), `${it.storyId}: no aceptada`)
-            : run(() => api.iterateBatchItem(slug, b.id, it.itemId, text.trim()), `${it.storyId}: iteración en cola`)}>{open === 'reject' ? 'Registrar no aceptación' : it.state === 'ready' || it.state === 'postponed' ? 'Pedir cambios' : 'Iterar'}</button>
+            : run(() => api.iterateBatchItem(slug, b.id, it.itemId, text.trim(), onBranch ? revision : null), `${it.storyId}: iteración en cola`)}>{open === 'reject' ? 'Registrar no aceptación' : onBranch ? 'Pedir cambios' : 'Iterar'}</button>
           <button className="btn btn-ghost btn-sm" onClick={() => setMode(null)}>Cancelar</button>
         </div>
       </div>}
+    </div>
+  );
+}
+
+const POLICY: Record<string, string> = { auto: 'integrar al terminar cada historia', on_acceptance: 'integrar al aceptar cada historia', manual: 'sin integrar (manual)' };
+
+/**
+ * Política de integración del lote. Un lote autorizado con integración automática se puede pasar EXPLÍCITAMENTE a «integrar
+ * al aceptar» (solo restringe): se ve antes qué ya está en main (no se des-integra), qué pasa a esperar tu revisión y qué
+ * hará «Reanudar» con la nueva política; publicar y activar se pueden mantener o quitar, nunca añadir.
+ */
+function PolicyCard({ b, onChange }: { b: BatchView; onChange: (b: BatchView) => void }) {
+  const { status, flash } = useApp(); const slug = status.workspace!.slug; const internal = slug === INTERNAL_WORKSPACE.slug;
+  const [open, setOpen] = useState(false); const [view, setView] = useState<BatchPolicyView | null>(null);
+  const [publish, setPublish] = useState(!!b.auth.git.publish); const [activate, setActivate] = useState(!!b.auth.git.activate);
+  const [note, setNote] = useState(''); const [ok, setOk] = useState(false); const [busy, setBusy] = useState(false);
+  useEffect(() => { if (open) api.batchPolicy(slug, b.id).then(setView).catch(e => flash(e.message, 'err')); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, b.updatedAt]);
+  const last = b.policyHistory?.at(-1);
+  if (b.lifecycle.policy !== 'auto') return last ? <Notice kind="info"><span data-testid="batch-policy-changed">Política cambiada por ti el {when(last.at)}: ahora <strong>integra al aceptar cada historia</strong>{last.to.publish ? ' y publica en GitHub al integrarla' : ', sin publicar en GitHub'}{internal ? (last.to.activate ? ', con activación en el Portal' : ', sin activar el Portal') : ''}. Ya estaban en main y no se des-integraron: {last.alreadyIntegrated.map(a => a.storyId).join(', ') || 'ninguna'}.</span></Notice> : null;
+  const g = b.auth.git;
+  const submit = async () => { setBusy(true); try { onChange(await api.changeBatchPolicy(slug, b.id, { publish, activate, note })); setOpen(false); setOk(false); flash('Política cambiada: nada entra en main sin tu aceptación'); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
+  return (
+    <section className="card card-b" data-testid="batch-policy" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div className="sm13"><Chip xs tone="warn">integra al terminar</Chip> <strong>Este lote se autorizó para integrar cada historia en main en cuanto termina</strong>{g.publish ? ', publicarla en GitHub' : ''}{internal && g.activate ? ' y activarla en el Portal (reconstruir y reiniciar)' : ''}, sin esperar tu revisión.</div>
+      {!open && <div><button className="btn btn-secondary btn-sm" data-testid="policy-open" onClick={() => setOpen(true)}>Cambiar a «integrar al aceptar»…</button> <span className="small muted">Decisión explícita y registrada; no cambia nada hasta que la confirmes.</span></div>}
+      {open && !view && <span className="spin" />}
+      {open && view && <div className="small" style={{ display: 'flex', flexDirection: 'column', gap: 6 }} data-testid="policy-dialog">
+        {view.blockedBy && <Notice kind="warn">{view.blockedBy}</Notice>}
+        <div><strong>Ya están en main</strong> (se integraron con la política anterior; no se pueden des-integrar; aceptarlas será <em>reconocerlas</em>): {view.alreadyIntegrated.length ? view.alreadyIntegrated.map(a => `${a.storyId} (${a.commit}${a.accepted ? ', ya aceptada' : ''}${internal ? (a.activated ? ', activa' : ', sin activar') : ''})`).join(', ') : 'ninguna'}.</div>
+        {view.willBecomeReady.length > 0 && <div><strong>Pasan a esperar tu revisión sin integrar:</strong> {view.willBecomeReady.map(w => w.storyId).join(', ')}.</div>}
+        <div><strong>Con la nueva política, «Reanudar» hará:</strong>{view.resumeAfter.length ? <ul className="bw-list">{view.resumeAfter.map(r => <li key={r.itemId}><span className="mono">{r.storyId}</span>: {r.effect}</li>)}</ul> : ' nada técnico pendiente.'}</div>
+        <label className="ck"><input className="cb" type="checkbox" checked={publish} disabled={!g.publish} onChange={e => setPublish(e.target.checked)} /><span>Mantener «publicar en GitHub» al integrar cada historia que aceptes{!g.publish ? ' (no estaba autorizado: no se puede añadir aquí)' : ''}</span></label>
+        {internal && <label className="ck"><input className="cb" type="checkbox" checked={activate} disabled={!g.activate} onChange={e => setActivate(e.target.checked)} /><span>Mantener «reconstruir y reiniciar el Portal» al integrar cada historia que aceptes{!g.activate ? ' (no estaba autorizado)' : ''}</span></label>}
+        <input className="input" placeholder="Nota (opcional; queda en el registro)" value={note} onChange={e => setNote(e.target.value)} style={{ height: 32 }} />
+        <label className="ck"><input className="cb" type="checkbox" checked={ok} onChange={e => setOk(e.target.checked)} data-testid="policy-confirm" /><span>Entiendo: a partir de ahora ninguna historia de este lote entra en main sin mi aceptación; lo ya integrado no se deshace y la autorización original queda en el registro.</span></label>
+        <div style={{ display: 'flex', gap: 8 }}><button className="btn btn-primary btn-sm" data-testid="policy-submit" disabled={!ok || busy || !view.canChange} onClick={() => void submit()}>Cambiar la política</button><button className="btn btn-ghost btn-sm" onClick={() => setOpen(false)}>Cancelar</button></div>
+      </div>}
+    </section>
+  );
+}
+
+/** Qué hará «Reanudar» con cada historia, con la política ACTUAL, antes de pulsarlo (sin IA ni git). */
+function ResumeEffects({ b }: { b: BatchView }) {
+  const { status } = useApp(); const slug = status.workspace!.slug;
+  const [view, setView] = useState<BatchPolicyView | null>(null);
+  useEffect(() => { api.batchPolicy(slug, b.id).then(setView).catch(() => setView(null)); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slug, b.id, b.updatedAt]);
+  if (!view || !view.resumeNow.length) return null;
+  const integrates = view.policy === 'auto';
+  return <section className="card card-b small" data-testid="resume-effects" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+    <div><strong>Al reanudar, con «{POLICY[view.policy]}»:</strong></div>
+    <ul className="bw-list">{view.resumeNow.map(r => <li key={r.itemId}><span className="mono">{r.storyId}</span>: {r.effect}</li>)}</ul>
+    {integrates && <Notice kind="warn">Con esta política, lo que apruebe QA entra en main{b.auth.git.publish ? ', se publica en GitHub' : ''}{b.auth.git.activate ? ' y se activa' : ''} sin tu revisión. Si prefieres revisarlo antes, cambia la política arriba antes de reanudar.</Notice>}
+  </section>;
+}
+
+/**
+ * Vista previa aislada del candidato EXACTO (commit + main) y la evidencia de ese commit, para probarlo antes de decidir.
+ * Ni la vista previa ni QA sustituyen tu prueba: lo que aceptes o pidas queda ligado a ese commit.
+ */
+function PreviewPanel({ slug, it }: { slug: string; it: BatchItemView }) {
+  const { flash } = useApp(); const p = it.process; const pv = it.preview; const ev = it.evidence;
+  const [busy, setBusy] = useState(false);
+  if (!p || !ev) return null;
+  const running = !!pv && pv.live && (pv.status === 'starting' || pv.status === 'ready');
+  const start = async () => { setBusy(true); try { await api.startPreview(slug, p.id); flash(`${it.storyId}: preparando la vista previa (aislada, sin IA)`); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
+  const stop = async () => { if (!pv) return; setBusy(true); try { await api.stopPreview(slug, p.id, pv.id); flash('Vista previa detenida'); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
+  return (
+    <div className="small" data-testid={`preview-${it.storyId}`} style={{ border: '1px dashed #D8D4CA', borderRadius: 8, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div><strong>Revisión que decides:</strong> commit <span className="mono" data-testid={`head-${it.storyId}`}>{ev.head}</span> · verificación {ev.commands.map(c => `${c.command} ${c.ok ? '✓' : '✗'}`).join(' · ')}{ev.commands.some(c => c.isolation === 'docker') ? ' (sandbox Docker)' : ''} · QA: {ev.qa?.why ?? 'sin revisión'}</div>
+      {running && pv ? <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        {pv.status === 'ready' && pv.url ? <><Chip xs tone="ok">vista previa lista</Chip><a className="lnk" href={pv.url} target="_blank" rel="noopener noreferrer" data-testid={`preview-open-${it.storyId}`}>Abrir vista previa ↗</a></> : <><span className="spin" /> preparándose: compila y arranca el candidato sin red ni IA…</>}
+        <span>commit <span className="mono">{pv.commit}</span>{pv.combined ? <> + main <span className="mono">{pv.mainHead}</span></> : ' (rama sola: choca con main)'}</span>
+        {pv.includesProvisional && <span>· incluye la versión provisional de {pv.includesProvisional.storyId} ({pv.includesProvisional.commit})</span>}
+        {pv.outdated && <Chip xs tone="warn">desactualizada: el candidato cambió</Chip>}
+        <span className="muted">· caduca {when(pv.expiresAt)}</span>
+        <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void stop()} data-testid={`preview-stop-${it.storyId}`}>Detener</button>
+      </div> : <div>
+        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void start()} data-testid={`preview-start-${it.storyId}`}>Vista previa aislada</button> <span className="muted">Prueba esta versión exacta en tu navegador: se ejecuta aparte del Portal en marcha, en un contenedor sin red, con datos temporales e IA simulada. Es código aún no aceptado: no escribas en ella claves ni datos reales.</span>
+        {pv && <div className="muted" data-testid={`preview-last-${it.storyId}`}>Última: commit {pv.commit} · {pv.status === 'failed' ? 'no arrancó' : 'detenida'}{pv.reason ? ` (${pv.reason})` : ''}{pv.outdated ? ' · era de otro commit' : ''}</div>}
+      </div>}
+      <div className="muted">Ni la vista previa ni QA sustituyen tu prueba: lo que aceptes o pidas queda ligado al commit {ev.head}.</div>
     </div>
   );
 }

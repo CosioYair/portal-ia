@@ -19,6 +19,8 @@ import { createStoryProcess, estimateStory, repoContextChars, runStory, storyBas
 import { prepareIntegration, resolveIntegrationConflicts, verifyCandidate } from './storyIntegration.ts';
 import { abortPendingMerge, computeIntegrationPlan, freshnessOf, isAncestorIn, planSignature, storyPatchId } from './batchIntegration.ts';
 import { ownerRoundPossible, prepareOwnerRound } from './storyUnits.ts';
+import { prepareStackedBase } from './stackedBranch.ts';
+import { previewLive } from './preview.ts';
 import { mergeStory } from './storyMerge.ts';
 import { newPipeline, resumeStory, updatePipeline } from './storyPipeline.ts';
 import { iterateStory, threadRepo } from './storyThread.ts';
@@ -52,7 +54,8 @@ export const ITEM_LABEL: Record<BatchItemState, string> = {
   queued: 'en cola', waiting_dependency: 'esperando su dependencia', running: 'en ejecución', integrating: 'integrándose',
   needs_owner: 'esperando tu decisión', awaiting_integration: 'pendiente de integrar (decides tú)', awaiting_acceptance: 'pendiente de tu aceptación',
   accepted: 'aceptada', rejected: 'no aceptada', failed: 'fallida', blocked: 'bloqueada', cancelled: 'cancelada', external: 'sigue fuera del lote',
-  ready: 'lista para tu revisión (sin integrar)', revalidating: 'poniéndose al día con main', postponed: 'aplazada'
+  ready: 'lista para tu revisión (sin integrar)', revalidating: 'poniéndose al día con main', postponed: 'aplazada',
+  prepared: 'preparada sobre su dependencia (sin integrar)'
 };
 /** Integración al aceptar (el lote termina todo lo técnico y cada historia entra en main cuando la aceptas). */
 const onAcceptance = (b: Pick<Batch, 'auth'>) => integrationPolicy(b.auth) === 'on_acceptance';
@@ -75,7 +78,7 @@ export interface BatchInput {
   gauntlet?: { mode: 'off' | 'standard' | 'deep' | 'auto'; maxRounds?: number };
   concurrency?: number;
   commands?: ('typecheck' | 'test' | 'build')[]; allowInstall?: boolean;
-  git?: { merge?: boolean; activate?: boolean; publish?: boolean; integration?: 'auto' | 'on_acceptance' };
+  git?: { merge?: boolean; activate?: boolean; publish?: boolean; integration?: 'auto' | 'on_acceptance'; prepareDependents?: boolean };
   autoResume?: boolean;
   title?: string;
 }
@@ -109,7 +112,12 @@ export function normalizeAuth(projectId: string, input: BatchInput, projectDefau
     concurrency: Math.floor(clamp(input.concurrency, 1, BATCH_LIMITS.maxConcurrency, 1)),
     commands: order.filter(c => (input.commands ?? order).includes(c)),
     allowInstall: !!input.allowInstall,
-    git: { merge, activate: merge && !!input.git?.activate, publish: merge && !!input.git?.publish, ...(merge ? { integration: input.git?.integration === 'on_acceptance' ? 'on_acceptance' as const : 'auto' as const } : {}) },
+    git: {
+      merge, activate: merge && !!input.git?.activate, publish: merge && !!input.git?.publish,
+      ...(merge ? { integration: input.git?.integration === 'on_acceptance' ? 'on_acceptance' as const : 'auto' as const } : {}),
+      // Al aceptar: las dependientes se preparan sobre la versión verificada de su dependencia salvo que lo desmarques.
+      ...(merge && input.git?.integration === 'on_acceptance' ? { prepareDependents: input.git?.prepareDependents !== false } : {})
+    },
     autoResume: input.autoResume !== false
   };
 }
@@ -202,6 +210,7 @@ function stepRange(steps: Step[], auth: BatchAuthorization, evaluatorId: string 
   return { min, max };
 }
 const addRange = (a: CallRange, b: CallRange): CallRange => ({ min: a.min + b.min, max: a.max + b.max });
+const range = (r: CallRange) => r.min === r.max ? `${r.min}` : `${r.min}–${r.max}`;
 const usd = (n: number) => Number(n.toFixed(4));
 
 type Limit = 'subscription' | 'budget' | 'duration';
@@ -306,8 +315,12 @@ export function previewBatch(slug: string, projectId: string, input: BatchInput)
   if (auth.git.activate && slug !== INTERNAL_WORKSPACE.slug) warnings.push('La activación (reconstruir y reiniciar) solo aplica al propio Portal: se ignora en este proyecto.');
   if (auth.concurrency > 1) warnings.push('Con historias en paralelo, la integración y la activación siguen siendo de una en una; las que tocan los mismos archivos pueden necesitar resolver conflictos.');
   if (auth.git.integration === 'on_acceptance') {
-    const dependents = runnable.filter(s => s.dependsInBatch).map(s => s.storyId);
-    if (dependents.length) warnings.push(`Integración al aceptar: ${dependents.length} historia(s) dependen de otra del lote y empezarán cuando aceptes e integres su dependencia (necesitan su código en main): ${dependents.slice(0, 8).join(', ')}${dependents.length > 8 ? '…' : ''}.`);
+    const deps = runnable.filter(s => s.dependsInBatch); const dependents = deps.map(s => s.storyId);
+    const list = `${dependents.slice(0, 8).join(', ')}${dependents.length > 8 ? '…' : ''}`;
+    const depCalls = deps.reduce((a, s) => addRange(a, s.subscriptionCalls), { min: 0, max: 0 });
+    if (dependents.length) warnings.push(auth.git.prepareDependents
+      ? `Integración al aceptar con preparación apilada: ${dependents.length} historia(s) dependen de otra del lote y se prepararán SOBRE la versión verificada y revisada por QA de su dependencia (sin integrar), sin esperar a tu revisión: ${list}. Nunca se integran antes que su dependencia; al integrarla, se ponen al día con su versión final (git, sandbox y QA si cambió). Si no aceptas la dependencia o la rehaces desde cero, ese trabajo (≈ ${range(depCalls)} llamadas a la suscripción) puede perderse.`
+      : `Integración al aceptar: ${dependents.length} historia(s) dependen de otra del lote y empezarán cuando aceptes e integres su dependencia (necesitan su código en main): ${list}.`);
     warnings.push('Integración al aceptar: cada historia que comparta archivos con otra ya integrada se pone al día antes de integrarse (git y sandbox sin IA; una revisión de QA más, y una llamada si hay conflictos reales). Esas llamadas cuentan en el tope del lote y no están en la estimación.');
     if (auth.git.activate) warnings.push('Integración al aceptar en el Portal: no puedes probar la interfaz en el Portal en marcha antes de aceptarla; revisas la evidencia (diff, QA, Gauntlet y pruebas) y, al aceptarla, se integra, se activa y se comprueba en ejecución.');
   }
@@ -342,7 +355,7 @@ export function createBatch(slug: string, projectId: string, input: BatchInput):
     processId: null, processIds: [], nextProcessId: null, autoResumes: 0, startedAt: null, finishedAt: null
   }));
   const at = now();
-  const scope = `${items.length} historia(s) · ${auth.totalBudgetUsd} USD en total (máx. ${auth.perStoryBudgetUsd} por historia) · ${auth.maxCorrections} corrección(es) · Gauntlet ${auth.gauntlet.mode} · ${auth.concurrency} a la vez · ${auth.maxDurationMin} min · orígenes ${auth.backends.join(', ')} · integrar ${auth.git.merge ? (auth.git.integration === 'on_acceptance' ? 'al aceptar cada historia, en orden' : 'sí, al terminar cada una') : 'no'} · activar ${auth.git.activate ? 'sí' : 'no'} · publicar ${auth.git.publish ? 'sí' : 'no'}`;
+  const scope = `${items.length} historia(s) · ${auth.totalBudgetUsd} USD en total (máx. ${auth.perStoryBudgetUsd} por historia) · ${auth.maxCorrections} corrección(es) · Gauntlet ${auth.gauntlet.mode} · ${auth.concurrency} a la vez · ${auth.maxDurationMin} min · orígenes ${auth.backends.join(', ')} · integrar ${auth.git.merge ? (auth.git.integration === 'on_acceptance' ? `al aceptar cada historia, en orden (dependientes ${auth.git.prepareDependents ? 'preparadas sobre la versión verificada de su dependencia' : 'tras integrar su dependencia'})` : 'sí, al terminar cada una') : 'no'} · activar ${auth.git.activate ? 'sí' : 'no'} · publicar ${auth.git.publish ? 'sí' : 'no'}`;
   const b = repo.create({
     projectId, title: input.title?.trim() || `Lote del ${at.slice(0, 10)} (${items.length} historias)`, status: 'running', reason: null, auth, items,
     events: [{ at, kind: 'authorized', message: `Autorizado por el propietario: ${scope}.` }, { at, kind: 'planned', message: `Plan sin IA: ${items.map(i => `${i.storyId}${i.dependsInBatch ? ` (tras ${i.dependsOn})` : ''}${i.state === 'blocked' ? ' · bloqueada' : ''}`).join(' → ')}.` }],
@@ -381,7 +394,7 @@ async function tick(slug: string, id: string) {
   // pausado o revocado, en el orden de integración.
   for (const it of integrationQueue(slug, repo.get(id)!)) {
     if (repo.get(id)!.status !== 'running') return;
-    await (onAcceptance(b) ? integrateAccepted(slug, id, it.itemId) : integrate(slug, id, it.itemId));
+    await (onAcceptance(repo.get(id)!) ? integrateAccepted(slug, id, it.itemId) : integrate(slug, id, it.itemId));
     resolveDependencies(slug, id);
   }
   if (await maybeActivate(slug, id)) return;
@@ -430,9 +443,12 @@ async function refreshIntegrationState(slug: string, id: string) {
   for (const it of batchesRepo(slug).get(id)!.items.filter(i => i.state === 'ready')) {
     const p = procs.get(currentProcessId(it)!); if (!p) continue;
     try {
-      const f = await freshnessOf(slug, p);
+      const f = await freshnessOf(slug, p, { dependencyHead: dependencyChangeHead(slug, batchesRepo(slug).get(id)!, it) });
       const cur = batchesRepo(slug).get(id)!.items.find(i => i.itemId === it.itemId)!;
       if (cur.state !== 'ready') continue;
+      // Su versión provisional de la dependencia no acabó en main (la dependencia se rehízo): nunca se pone al día ni se
+      // integra con esos commits; decides tú (iterarla la rehace sobre main).
+      if (f.stackInvalid) { setItem(slug, id, it.itemId, { state: 'needs_owner', failureClass: 'dependency', freshness: f, acceptance: null, stack: cur.stack ? { ...cur.stack, invalid: f.detail } : cur.stack, reason: `${f.detail}` }, `su versión provisional de la dependencia ya no vale: ${f.detail}`, 'integration'); continue; }
       const prev = cur.freshness;
       if (!prev || prev.status !== f.status || prev.mainHead !== f.mainHead || prev.head !== f.head) {
         setItem(slug, id, it.itemId, { freshness: f, reason: readyReason(f) }, prev && prev.status !== f.status && f.status === 'stale' ? `su evidencia dejó de estar vigente: ${f.detail}` : undefined, 'integration');
@@ -529,6 +545,32 @@ const finishing = new Set<string>();
  * incorporó está en la rama, el commit actual está verificado en el sandbox y QA lo cubre. Si un paso se interrumpió, se
  * rehace desde git (nunca se da por vigente el commit viejo); si falta QA o corregir, vuelve a la cola en su turno.
  */
+/** Commit actual de la dependencia de una historia apilada (la versión que se integró o la que se está revisando). */
+function dependencyHead(slug: string, b: Batch, it: BatchItem): string | null {
+  if (!it.stack) return null;
+  const dep = b.items.find(i => i.storyId === it.stack!.storyId); if (!dep) return null;
+  const procs = processesRepo(slug);
+  const merged = [...dep.processIds].reverse().map(pid => procs.get(pid)).find(p => p?.result?.merged)?.result?.applied?.commit;
+  const pid = currentProcessId(dep);
+  return merged ?? (pid ? procs.get(pid)?.result?.applied?.commit ?? null : null);
+}
+const same7 = (a: string | null | undefined, b: string | null | undefined) => !!a && !!b && a.slice(0, 7) === b.slice(0, 7);
+/**
+ * Como dependencyHead, pero solo si la dependencia cambió su código PROPIO desde la versión sobre la que se preparó (huella
+ * distinta de la que aceptaste): si solo incorporó main, la puesta al día con main basta y QA no repite por ella.
+ */
+function dependencyChangeHead(slug: string, b: Batch, it: BatchItem): string | null {
+  const dh = dependencyHead(slug, b, it); if (!dh || !it.stack) return dh;
+  const dep = b.items.find(i => i.storyId === it.stack!.storyId);
+  return it.stack.patchId && dep?.acceptance?.patchId && it.stack.patchId === dep.acceptance.patchId ? null : dh;
+}
+/** ¿Falta que QA revise una historia apilada tras cambiar su dependencia? (su último commit revisado no contiene la versión final). */
+async function dependencyQaPending(slug: string, b: Batch, it: BatchItem, p: Process): Promise<boolean> {
+  const st = p.result?.stack; const dep = dependencyChangeHead(slug, b, it);
+  if (!st || !dep || same7(dep, st.commit)) return false;
+  const repo = projectsRepo(slug).repository(p.projectId); const qa = revisionStatus(p)?.qa.commit ?? null;
+  return !repo || !qa || !(await isAncestorIn(repo.path, dep, qa));
+}
 async function finishRevalidation(slug: string, id: string, itemId: string, _p?: Process) {
   const key = `${slug}:${id}:${itemId}`; if (finishing.has(key)) return; finishing.add(key);
   try { await finishRevalidationNow(slug, id, itemId); } finally { finishing.delete(key); }
@@ -562,7 +604,10 @@ async function finishRevalidationNow(slug: string, id: string, itemId: string) {
     return setItem(slug, id, itemId, { state: it.acceptance ? 'integrating' : 'ready', revalidation: null, freshness: null, reason: 'La puesta al día no terminó (se interrumpió o no se aplicó): se rehace desde git en su turno; la evidencia anterior no se da por vigente.' }, 'puesta al día incompleta: se rehace desde git (no se da por vigente).', 'recovery');
   }
   const what = `puesta al día con main${causes.length ? ` tras ${causes.join(', ')}` : ''}`;
-  if (rev?.verifiedHead && rev.qa.coversHead) {
+  // Preparada sobre una versión provisional de su dependencia que cambió después (p. ej. pediste cambios): una combinación
+  // limpia no basta; QA revisa el commit nuevo aunque git no vea conflictos (puede romperse el significado).
+  const depQa = await dependencyQaPending(slug, b0, it, p);
+  if (rev?.verifiedHead && rev.qa.coversHead && !depQa) {
     if (it.acceptance) {
       const patch = repo && branch ? await storyPatchId(repo.path, branch) : null;
       if (patch && it.acceptance.patchId && patch === it.acceptance.patchId) return setItem(slug, id, itemId, { state: 'integrating', revalidation: null, freshness: null, reason: `Aceptada: ${what}; ${rev.qa.why} Sus cambios son los mismos que aceptaste: se integra en su turno.` }, `${what}; sus cambios no cambiaron desde tu aceptación: sigue a integrarse.`, 'integration');
@@ -576,12 +621,12 @@ async function finishRevalidationNow(slug: string, id: string, itemId: string) {
   const failing = !!p.result && verificationsForApplied(p.result).some(v => v.exitCode !== 0);
   const cfg = pl?.config;
   if (cfg && pl && pl.corrections >= cfg.maxCorrections) updatePipeline(slug, pid, { config: { ...cfg, maxCorrections: pl.corrections + 1 } }, { kind: 'info', message: 'Una corrección autorizada más para ponerla al día con main (el lote la cuenta en su tope de llamadas).' });
-  setItem(slug, id, itemId, { state: 'queued', resumeProcessId: pid, revalidation: { ...(rv ?? { at: now(), mainHead: null, causes }), step: 'qa' }, reason: rev?.verifiedHead ? `Puesta al día: ${rev.qa.why} QA revisa el commit nuevo en su turno.` : failing ? 'Puesta al día: el candidato no supera la verificación con el main actual; el equipo lo corrige en su turno (dentro de las correcciones autorizadas).' : 'Puesta al día: el candidato aún no está verificado (la verificación no terminó); se verifica en su turno antes de QA.' }, rev?.verifiedHead ? 'candidato verificado; QA revisará el commit nuevo (lo que cambió con main).' : failing ? 'el candidato falla con el main actual: el equipo lo corregirá en su turno.' : 'el candidato aún no está verificado: se verifica en su turno (sin darlo por vigente).', 'integration');
+  setItem(slug, id, itemId, { state: 'queued', resumeProcessId: pid, revalidation: { ...(rv ?? { at: now(), mainHead: null, causes }), step: 'qa', forceQa: depQa }, reason: depQa && rev?.verifiedHead ? `Puesta al día con la versión final de ${it.stack!.storyId} (cambió desde que se preparó): verificada en el sandbox; QA revisa el commit nuevo en su turno.` : rev?.verifiedHead ? `Puesta al día: ${rev.qa.why} QA revisa el commit nuevo en su turno.` : failing ? 'Puesta al día: el candidato no supera la verificación con el main actual; el equipo lo corrige en su turno (dentro de las correcciones autorizadas).' : 'Puesta al día: el candidato aún no está verificado (la verificación no terminó); se verifica en su turno antes de QA.' }, rev?.verifiedHead ? 'candidato verificado; QA revisará el commit nuevo (lo que cambió con main).' : failing ? 'el candidato falla con el main actual: el equipo lo corregirá en su turno.' : 'el candidato aún no está verificado: se verifica en su turno (sin darlo por vigente).', 'integration');
 }
 
 const integratingNow = new Set<string>();
 /** Tras un reinicio real no queda ninguna tarea del coordinador en memoria (las pruebas lo simulan con esto). */
-export function forgetBatchJobs() { revalidating.clear(); integratingNow.clear(); planSig.clear(); forgetLeases(); }
+export function forgetBatchJobs() { revalidating.clear(); integratingNow.clear(); finishing.clear(); planSig.clear(); forgetLeases(); }
 /**
  * Integración al aceptar, en segundo plano (el coordinador no espera minutos): de una en una por lote. Solo con TU
  * aceptación; si su evidencia no está al día se pone al día antes; se integra solo si sus cambios son los mismos que
@@ -606,8 +651,8 @@ async function integrateAcceptedNow(slug: string, id: string, itemId: string) {
   if (p.result?.merged) return afterMerge(slug, id, itemId, p);
   if (p.status === 'running' || p.status === 'pending_authorization') return;
   if (await alreadyInMain(slug, p)) { const m = await mergeStory(slug, pid, {}, logger); return afterMerge(slug, id, itemId, m); }
-  const f = await freshnessOf(slug, p);
-  if (f.status === 'unknown') return setItem(slug, id, itemId, { state: 'needs_owner', failureClass: 'integration', reason: `No se integra: ${f.detail}` }, `no se integra: ${f.detail}`, 'integration');
+  const f = await freshnessOf(slug, p, { dependencyHead: dependencyChangeHead(slug, b, it) });
+  if (f.status === 'unknown') return setItem(slug, id, itemId, { state: 'needs_owner', failureClass: f.stackInvalid ? 'dependency' : 'integration', ...(f.stackInvalid && it.stack ? { stack: { ...it.stack, invalid: f.detail }, acceptance: null } : {}), reason: `No se integra: ${f.detail}` }, `no se integra: ${f.detail}`, 'integration');
   if (f.status !== 'current') { setItem(slug, id, itemId, { freshness: f }); return revalidate(slug, id, itemId); }
   const repo = projectsRepo(slug).repository(b.projectId)!; const branch = p.result!.applied!.branch;
   const patch = await storyPatchId(repo.path, branch);
@@ -616,21 +661,31 @@ async function integrateAcceptedNow(slug: string, id: string, itemId: string) {
   if ('conflict' in lease) { const reason = `Aceptada; espera para integrarse: ${lease.conflict}`; if (it.reason !== reason) setItem(slug, id, itemId, { reason }); return; }
   try {
     if (getBatch(slug, id).status !== 'running') return;
-    const m = await mergeStory(slug, pid, {}, logger);
-    if (b.auth.git.publish) {
-      requirePolicy('git_push', { slug, processId: pid, projectId: b.projectId, authorized: true });
-      const pushed = await pushBranches(repo.path, [m.result!.applied!.branch, m.result!.merged!.into]);
-      procs.setResult(pid, { ...procs.get(pid)!.result!, published: { ...pushed, pushedAt: now() } });
-      setItem(slug, id, itemId, {}, `publicada en ${pushed.remote} (pre-autorizado en el lote).`, 'integration');
-    }
+    // Se comprueba otra vez DENTRO del carril, justo antes del merge: una pausa o una aceptación anulada mientras esperaba no integran.
+    const guard = () => { const cur = batchesRepo(slug).get(id); const x = cur?.items.find(i => i.itemId === itemId); return !cur || cur.status !== 'running' ? 'el lote ya no está en marcha' : !x?.acceptance ? 'sin tu aceptación no se integra' : null; };
+    const m = await mergeStory(slug, pid, { guard }, logger);
+    await publishIfAuthorized(slug, id, itemId, pid, repo.path, m);
     setItem(slug, id, itemId, { integrationRetries: 0 });
     afterMerge(slug, id, itemId, procs.get(pid)!);
   } catch (e: any) {
+    if (e?.code === 'integration_vetoed') return setItem(slug, id, itemId, { reason: `No se integró: ${e.message}. main no cambió.` }, `no se integró (${e.message}); main no cambió.`, 'integration');
     // main avanzó entre la comprobación y el carril (otra integración): se vuelve a evaluar en la siguiente vuelta.
     const n = (getBatch(slug, id).items.find(i => i.itemId === itemId)?.integrationRetries ?? 0) + 1;
     if ((e?.code === 'integration_candidate_required' || e?.code === 'merge_conflict') && n <= 3) return setItem(slug, id, itemId, { integrationRetries: n, freshness: null, reason: `main avanzó mientras se integraba: se pone al día otra vez (intento ${n} de 3).` }, `main avanzó al integrar; se pone al día otra vez (intento ${n} de 3).`, 'integration');
     setItem(slug, id, itemId, { state: 'needs_owner', failureClass: 'integration', reason: `No se integró: ${e?.message ?? e}` }, `no se integró (main no cambió): ${String(e?.message ?? e).slice(0, 300)}`, 'integration');
   } finally { lease.release(); }
+}
+
+/**
+ * Publicar en GitHub tras integrar, solo si el lote lo autoriza EN ESTE MOMENTO (se lee al publicar: un cambio de política
+ * que quitó «publicar» se respeta aunque la integración empezara antes).
+ */
+async function publishIfAuthorized(slug: string, id: string, itemId: string, pid: string, repoPath: string, m: Process) {
+  const b = getBatch(slug, id); if (!b.auth.git.publish) return;
+  requirePolicy('git_push', { slug, processId: pid, projectId: b.projectId, authorized: true });
+  const pushed = await pushBranches(repoPath, [m.result!.applied!.branch, m.result!.merged!.into]);
+  const procs = processesRepo(slug); procs.setResult(pid, { ...procs.get(pid)!.result!, published: { ...pushed, pushedAt: now() } });
+  setItem(slug, id, itemId, {}, `publicada en ${pushed.remote} (pre-autorizado en el lote).`, 'integration');
 }
 
 /** Cierre de una historia que aceptaste y ya está en main (y activa y comprobada, si es el Portal): una sola aceptación. */
@@ -665,7 +720,7 @@ function setStatus(slug: string, id: string, status: Batch['status'], reason: st
 }
 
 /** Estados en los que una iteración que autorizas desde la historia pasa a «sigue fuera del lote». */
-const ADOPTABLE: BatchItemState[] = ['queued', 'needs_owner', 'failed', 'rejected', 'awaiting_integration', 'awaiting_acceptance', 'ready', 'postponed'];
+const ADOPTABLE: BatchItemState[] = ['queued', 'needs_owner', 'failed', 'rejected', 'awaiting_integration', 'awaiting_acceptance', 'ready', 'postponed', 'prepared'];
 
 /**
  * ¿Hay una iteración de esta historia creada FUERA del lote después de que el lote la empezara (o se autorizara)? Las del
@@ -714,15 +769,15 @@ function syncItems(slug: string, id: string) {
       onFinished(slug, id, it, p);
     } else if (it.state === 'needs_owner' || it.state === 'failed') {
       // Lo retomaste desde el proceso: el lote vuelve a seguirlo.
-      if (p.status === 'running') setItem(slug, id, it.itemId, { state: 'running', reason: null, failureClass: null }, 'la retomaste desde el proceso; el lote la sigue.');
+      if (p.status === 'running') { if (!isCancelled(p.id) && !it.stack?.invalid) setItem(slug, id, it.itemId, { state: 'running', reason: null, failureClass: null }, 'la retomaste desde el proceso; el lote la sigue.'); }
       else if (p.result?.merged) { if (it.acceptance) setItem(slug, id, it.itemId, { acceptance: null }); afterMerge(slug, id, it.itemId, p); }
-      else if (p.status === 'done' && p.result?.pipeline?.state === 'verified' && it.failureClass !== 'integration') technicalDone(slug, id, it.itemId, p);
+      else if (p.status === 'done' && p.result?.pipeline?.state === 'verified' && it.failureClass !== 'integration' && it.failureClass !== 'dependency' && !it.stack?.invalid) technicalDone(slug, id, it.itemId, p);
     } else if (it.state === 'awaiting_integration') {
       if (p.result?.merged) afterMerge(slug, id, it.itemId, p);
-    } else if (it.state === 'ready' || it.state === 'postponed') {
+    } else if (it.state === 'ready' || it.state === 'postponed' || it.state === 'prepared') {
       // Lo hiciste desde el proceso: integrarla a mano (queda pendiente de tu aceptación) o continuarla (el lote la sigue).
       if (p.result?.merged) { if (it.acceptance) setItem(slug, id, it.itemId, { acceptance: null }); afterMerge(slug, id, it.itemId, p); }
-      else if (p.status === 'running' && it.state === 'ready') setItem(slug, id, it.itemId, { state: 'running', reason: null, failureClass: null, freshness: null }, 'la retomaste desde el proceso; el lote la sigue.');
+      else if (p.status === 'running' && (it.state === 'ready' || it.state === 'prepared')) setItem(slug, id, it.itemId, { state: 'running', reason: null, failureClass: null, freshness: null }, 'la retomaste desde el proceso; el lote la sigue.');
     } else if (it.state === 'revalidating') {
       // Sin la tarea en memoria (p. ej. tras un reinicio): se decide con hechos de git, sin dar nada por vigente.
       if (p.status !== 'running' && !revalidating.has(`${slug}:${id}:${it.itemId}`)) void finishRevalidation(slug, id, it.itemId).then(() => scheduleTick(slug, id)).catch(e => logger({ batchId: id, err: e?.message }, 'lote: no se pudo cerrar la puesta al día'));
@@ -754,6 +809,7 @@ function technicalDone(slug: string, id: string, itemId: string, p: Process) {
   if (onAcceptance(b)) {
     const it = b.items.find(i => i.itemId === itemId)!;
     if (it.revalidation) return void finishRevalidation(slug, id, itemId, p).then(() => scheduleTick(slug, id)).catch(e => logger({ batchId: id, itemId, err: e?.message }, 'lote: no se pudo cerrar la puesta al día'));
+    if (p.result?.stack && !dependencyIntegrated(b, it)) return setItem(slug, id, itemId, { state: 'prepared', freshness: null, failureClass: null, finishedAt: now(), reason: `Preparada sobre ${p.result.stack.storyId} (${p.result.stack.commit.slice(0, 7)}, su versión verificada y revisada, sin integrar): verificación, QA y Gauntlet según el modo. No se integra antes que ${p.result.stack.storyId}: cuando la aceptes e integres, se pone al día con su versión final y pasa a lista.` }, `terminada técnicamente sobre la versión provisional de ${p.result.stack.storyId}: preparada (no lista para integrar).`);
     // La habías aceptado y volvió a trabajar (p. ej. la retomaste): se integra solo si sus cambios son los que aceptaste.
     if (it.acceptance) return setItem(slug, id, itemId, { state: 'integrating', failureClass: null, finishedAt: now(), reason: 'Aceptada: antes de integrarla se comprueba que sus cambios son los que aceptaste y que su evidencia está al día.' }, 'terminada otra vez; aceptada: se comprueba antes de integrarla.');
     return setItem(slug, id, itemId, { state: 'ready', freshness: null, failureClass: null, finishedAt: now(), reason: 'Terminada técnicamente (verificación, QA y Gauntlet según el modo): lista para tu revisión, sin integrar.' }, 'terminada técnicamente; lista para tu revisión (no se integra sin tu aceptación).');
@@ -762,11 +818,35 @@ function technicalDone(slug: string, id: string, itemId: string, p: Process) {
   else setItem(slug, id, itemId, { state: 'awaiting_integration', reason: b.auth.git.merge ? 'Terminada técnicamente; el lote no está en marcha: intégrala desde el proceso o reanuda el lote.' : 'Terminada técnicamente. Integrar en main no estaba pre-autorizado en el lote: hazlo desde el proceso.', failureClass: null, finishedAt: now() }, 'terminada técnicamente; integrar es decisión tuya.');
 }
 
+/** ¿La dependencia del lote de una historia ya está en main? (aceptada o integrada). */
+function dependencyIntegrated(b: Batch, it: BatchItem): boolean {
+  const storyId = it.stack?.storyId ?? (it.dependsInBatch ? it.dependsOn : null); if (!storyId) return true;
+  const dep = b.items.find(i => i.storyId === storyId);
+  return !dep || DEPENDENCY_SATISFIED.includes(dep.state) || !!dep.mergedCommit;
+}
+
+/**
+ * ¿Se puede preparar `it` sobre la versión actual de su dependencia `dep` (sin integrar)? Devuelve el motivo si no. Solo
+ * sobre una versión terminada, verificada en el sandbox y cubierta por QA, de una dependencia que no está ella misma
+ * apilada (un solo nivel) ni trabajando. Los hechos de git (cabeza de su rama, rama propia libre) se comprueban al empezar.
+ */
+function stackable(slug: string, b: Batch, dep: BatchItem, it: BatchItem): string | null {
+  if (dep.stack) return `${dep.storyId} también se preparó sobre una versión provisional (solo se apila un nivel)`;
+  const p = processesRepo(slug).get(currentProcessId(dep) ?? '');
+  if (it.noStack && (!it.noStackFor || same7(it.noStackFor, p?.result?.applied?.commit))) return it.noStack;
+  if (!p?.result?.applied?.branch) return `${dep.storyId} no tiene una rama aplicada`;
+  if (p.status === 'running' || p.status === 'pending_authorization') return `${dep.storyId} está trabajando`;
+  const rev = revisionStatus(p);
+  if (!rev?.verifiedHead) return `la versión de ${dep.storyId} no está verificada en el sandbox`;
+  if (!rev.qa.coversHead) return `QA no cubre la versión actual de ${dep.storyId}`;
+  return null;
+}
+
 function afterMerge(slug: string, id: string, itemId: string, p: Process) {
   const b = batchesRepo(slug).get(id)!;
   const internal = slug === INTERNAL_WORKSPACE.slug;
   const commit = p.result!.merged!.commit;
-  if (internal && b.auth.git.activate) return setItem(slug, id, itemId, { state: 'integrating', mergedCommit: commit, activated: false, reason: `Integrada en main (${commit}); se activará en el Portal cuando no haya nada en marcha.` }, `integrada en main (${commit}).`, 'integration');
+  if (internal && b.auth.git.activate && (!onAcceptance(b) || !!b.items.find(i => i.itemId === itemId)?.acceptance)) return setItem(slug, id, itemId, { state: 'integrating', mergedCommit: commit, activated: false, reason: `Integrada en main (${commit}); se activará en el Portal cuando no haya nada en marcha.` }, `integrada en main (${commit}).`, 'integration');
   // Ya la aceptaste (integración al aceptar): no se pide otra aceptación; queda cerrada.
   if (b.items.find(i => i.itemId === itemId)?.acceptance && onAcceptance(b)) return closeAccepted(slug, id, itemId, p, commit);
   setItem(slug, id, itemId, { state: 'awaiting_acceptance', mergedCommit: commit, reason: internal ? `Integrada en main (${commit}). Activarla en el Portal en marcha (reconstruir y reiniciar) es decisión tuya: la aceptación lo exige.` : `Integrada en main (${commit}) y verificada: falta tu aceptación.` }, `integrada en main (${commit}); pendiente de tu aceptación.`, 'integration');
@@ -774,18 +854,46 @@ function afterMerge(slug: string, id: string, itemId: string, p: Process) {
 
 function resolveDependencies(slug: string, id: string) {
   const b = batchesRepo(slug).get(id)!;
+  for (const it of b.items.filter(i => i.state === 'prepared')) {
+    const dep = b.items.find(i => i.storyId === (it.stack?.storyId ?? it.dependsOn));
+    const st = it.stack;
+    if (!dep || DEPENDENCY_SATISFIED.includes(dep.state) || dep.mergedCommit) { setItem(slug, id, it.itemId, { state: 'ready', freshness: null, reason: `${dep?.storyId ?? 'Su dependencia'} ya está en main: se comprueba si su evidencia sigue valiendo y, si hace falta, se pone al día con la versión final (git, sandbox y QA si cambió).` }, `su dependencia ${dep?.storyId ?? ''} ya está en main: pasa a lista (se pone al día si hace falta).`); continue; }
+    if (dep.state === 'rejected' || dep.state === 'postponed' || DEPENDENCY_BROKEN.includes(dep.state)) { setItem(slug, id, it.itemId, { state: 'blocked', failureClass: 'dependency', reason: `Preparada sobre ${dep.storyId}, que ${dep.state === 'rejected' ? 'no aceptaste' : dep.state === 'postponed' ? 'aplazaste' : `quedó ${ITEM_LABEL[dep.state]}`}: su trabajo se conserva; si iteras o recuperas ${dep.storyId}, vuelve a «preparada».` }, `bloqueada: ${dep.storyId} quedó ${ITEM_LABEL[dep.state]} (su trabajo se conserva).`); continue; }
+    const dh = dependencyHead(slug, b, it);
+    const reason = st && dh && !same7(dh, st.commit)
+      ? `Preparada sobre ${dep.storyId} ${st.commit.slice(0, 7)}; ${dep.storyId} cambió desde entonces (${dh.slice(0, 7)}): se pondrá al día con su versión final (y QA la revisará) cuando la aceptes e integres.`
+      : `Preparada sobre ${dep.storyId}${st ? ` ${st.commit.slice(0, 7)}` : ''} (sin integrar): se revisa e integra después de ${dep.storyId}.`;
+    if (it.reason !== reason) setItem(slug, id, it.itemId, { reason });
+  }
   for (const it of b.items.filter(i => i.state === 'waiting_dependency')) {
     const dep = b.items.find(i => i.storyId === it.dependsOn);
     if (!dep) { setItem(slug, id, it.itemId, { state: 'queued', reason: null }); continue; }
     if (DEPENDENCY_SATISFIED.includes(dep.state)) setItem(slug, id, it.itemId, { state: 'queued', reason: null }, `su dependencia ${dep.storyId} ya está integrada; entra en la cola.`);
     else if (onAcceptance(b) && (dep.state === 'rejected' || dep.state === 'postponed')) setItem(slug, id, it.itemId, { state: 'blocked', failureClass: 'dependency', reason: `Depende de ${dep.storyId}, que ${dep.state === 'rejected' ? 'no aceptaste' : 'aplazaste'}: necesita su código en main. Si la iteras o la recuperas, esta vuelve a esperarla.`, finishedAt: now() }, `bloqueada: su dependencia ${dep.storyId} quedó ${ITEM_LABEL[dep.state]}.`);
-    else if (onAcceptance(b) && (dep.state === 'ready' || dep.state === 'revalidating' || dep.state === 'integrating')) { const reason = `Espera a que aceptes e integres ${dep.storyId} (necesita su código en main): revísala primero.`; if (it.reason !== reason) setItem(slug, id, it.itemId, { reason }); }
+    else if (onAcceptance(b) && b.auth.git.prepareDependents && dep.state === 'ready' && !it.resumeProcessId && !it.stack && !stackable(slug, b, dep, it)) {
+      const dp = processesRepo(slug).get(currentProcessId(dep)!)!;
+      const stack = { storyId: dep.storyId, itemId: dep.itemId, processId: dp.id, commit: dp.result!.applied!.commit, branch: dp.result!.applied!.branch, at: now() };
+      setItem(slug, id, it.itemId, { state: 'queued', stack, reason: `Se prepara sobre la versión verificada y revisada de ${dep.storyId} (commit ${stack.commit}, sin integrar), sin esperar a tu revisión. No se integrará antes que ${dep.storyId}.` }, `se preparará sobre la versión provisional de ${dep.storyId} (${stack.commit}); no se integra antes que ella.`);
+    }
+    else if (onAcceptance(b) && (dep.state === 'ready' || dep.state === 'revalidating' || dep.state === 'integrating' || dep.state === 'prepared')) {
+      const why = b.auth.git.prepareDependents && dep.state === 'ready' ? stackable(slug, b, dep, it) : null;
+      const reason = `Espera a que aceptes e integres ${dep.storyId} (necesita su código en main)${why ? `; no se prepara antes sobre su versión provisional: ${why}` : ''}: revísala primero.`;
+      if (it.reason !== reason) setItem(slug, id, it.itemId, { reason });
+    }
     else if (DEPENDENCY_BROKEN.includes(dep.state)) setItem(slug, id, it.itemId, { state: 'blocked', failureClass: 'dependency', reason: `Depende de ${dep.storyId}, que quedó ${ITEM_LABEL[dep.state]}: no se ejecuta (no se omite en silencio).`, finishedAt: now() }, `bloqueada: su dependencia ${dep.storyId} quedó ${ITEM_LABEL[dep.state]}.`);
     else { const reason = `Espera a ${dep.storyId} (${ITEM_LABEL[dep.state]}).`; if (it.reason !== reason) setItem(slug, id, it.itemId, { reason }); }
   }
 }
 
+/**
+ * Integración automática (lotes 'auto'): marcada «en curso» mientras dura (también la espera por el carril), para que un
+ * cambio de política no se aplique a medias; el merge se veta dentro del carril si la política cambió o el lote se pausó.
+ */
 async function integrate(slug: string, id: string, itemId: string) {
+  const key = `${slug}:${id}:${itemId}`; integratingNow.add(key);
+  try { await integrateAuto(slug, id, itemId); } finally { integratingNow.delete(key); }
+}
+async function integrateAuto(slug: string, id: string, itemId: string) {
   const b = batchesRepo(slug).get(id)!; const it = b.items.find(i => i.itemId === itemId)!;
   const procs = processesRepo(slug); const pid = it.processId!;
   const repoPath = projectsRepo(slug).repository(b.projectId)?.path ?? b.projectId;
@@ -813,16 +921,13 @@ async function integrate(slug: string, id: string, itemId: string) {
       // QA lo revisa en su turno; integrar sigue exigiendo que QA cubra el commit.
       if (candidateNeedsQa(procs.get(pid)!)) return setItem(slug, id, itemId, { state: 'queued', resumeProcessId: pid, reason: `${rev!.qa.why} QA revisa el candidato en su turno; después se integra.` }, `QA revisará el candidato antes de integrarlo: ${rev!.qa.why}`, 'integration');
       if (rev && rev.qa.state === 'approved' && !rev.qa.coversHead) return setItem(slug, id, itemId, { state: 'needs_owner', failureClass: 'integration', reason: `${rev.qa.why} Pide a QA que revise el candidato o intégralo tú desde el proceso.` }, `no se integra sola: ${rev.qa.why}`, 'integration');
-      const m = await mergeStory(slug, pid, {}, logger);
-      if (b.auth.git.publish) {
-        requirePolicy('git_push', { slug, processId: pid, projectId: b.projectId, authorized: true });
-        const pushed = await pushBranches(repoPath, [m.result!.applied!.branch, m.result!.merged!.into]);
-        procs.setResult(pid, { ...procs.get(pid)!.result!, published: { ...pushed, pushedAt: now() } });
-        setItem(slug, id, itemId, {}, `publicada en ${pushed.remote} (pre-autorizado en el lote).`, 'integration');
-      }
+      const guard = () => { const cur = batchesRepo(slug).get(id); const x = cur?.items.find(i => i.itemId === itemId); return !cur || cur.status !== 'running' ? 'el lote ya no está en marcha' : onAcceptance(cur) && !x?.acceptance ? 'la política del lote cambió a «integrar al aceptar» y no la has aceptado' : null; };
+      const m = await mergeStory(slug, pid, { guard }, logger);
+      await publishIfAuthorized(slug, id, itemId, pid, repoPath, m);
       setItem(slug, id, itemId, { integrationRetries: 0 });
       afterMerge(slug, id, itemId, procs.get(pid)!);
     } catch (e: any) {
+      if (e?.code === 'integration_vetoed') return setItem(slug, id, itemId, onAcceptance(getBatch(slug, id)) ? { state: 'ready', freshness: null, acceptance: null, reason: 'Terminada técnicamente: con la política actual espera tu revisión (no se integra sin tu aceptación).' } : { state: 'awaiting_integration', reason: `No se integró: ${e.message}. Intégrala desde el proceso o reanuda el lote.` }, `no se integró (${e.message}); main no cambió.`, 'integration');
       // main avanzó mientras se verificaba el candidato (otra integración): se prepara otro en la siguiente vuelta, sin IA.
       const n = (getBatch(slug, id).items.find(i => i.itemId === itemId)?.integrationRetries ?? 0) + 1;
       if (e?.code === 'integration_candidate_required' && n <= 3) return setItem(slug, id, itemId, { integrationRetries: n, reason: `main avanzó mientras se verificaba el candidato: se prepara otro sin IA (intento ${n} de 3).` }, `main avanzó durante la verificación; nuevo candidato (intento ${n} de 3).`, 'integration');
@@ -835,7 +940,8 @@ async function integrate(slug: string, id: string, itemId: string) {
 async function maybeActivate(slug: string, id: string): Promise<boolean> {
   const b = batchesRepo(slug).get(id)!;
   if (slug !== INTERNAL_WORKSPACE.slug || !b.auth.git.activate || b.activation?.state === 'requested') return b.activation?.state === 'requested';
-  const pending = b.items.filter(i => i.state === 'integrating' && i.mergedCommit && !i.activated);
+  // Con integración al aceptar solo se activa lo que aceptaste (lo integrado antes de cambiar de política no reinicia el Portal).
+  const pending = b.items.filter(i => i.state === 'integrating' && i.mergedCommit && !i.activated && (!onAcceptance(b) || !!i.acceptance));
   if (!pending.length) return false;
   if (b.items.some(i => i.state === 'running' || i.state === 'revalidating' || (i.state === 'integrating' && !i.mergedCommit))) return false;
   if ([...integratingNow, ...revalidating].some(k => k.startsWith(`${slug}:${id}:`))) return false;
@@ -915,7 +1021,7 @@ function startNext(slug: string, id: string) {
       const reason = `Espera: ${c}`; if (q.reason !== reason) setItem(slug, id, q.itemId, { reason });
     }
     if (!next) return;
-    if (slug === INTERNAL_WORKSPACE.slug && b.auth.git.activate && b.items.some(i => i.state === 'integrating' && i.mergedCommit && !i.activated)) return;
+    if (slug === INTERNAL_WORKSPACE.slug && b.auth.git.activate && b.items.some(i => i.state === 'integrating' && i.mergedCommit && !i.activated && (!onAcceptance(b) || !!i.acceptance))) return;
     let prep: Prepared;
     try { prep = prepareItem(slug, b, next); } catch (e: any) { notStartable(slug, id, next, `No se pudo preparar la historia: ${e?.message ?? e}`); continue; }
     // Los USD solo limitan a una historia cuyo equipo puede gastar API; una solo con la suscripción no los reserva ni los necesita.
@@ -987,6 +1093,8 @@ function startItem(slug: string, id: string, itemId: string, prep: Prepared) {
     const p = prep.resume; const pl = p.result!.pipeline!;
     if (p.status === 'running') return setItem(slug, id, itemId, { state: 'running', resumeProcessId: null, reason: null, failureClass: null }, 'la retomaste desde el proceso; el lote la sigue.');
     const qaRetry = qaRetryable(it, p);
+    // Puesta al día de una apilada cuya dependencia cambió: QA revisa el commit nuevo aunque git no viera conflictos.
+    const forceQa = !!it.revalidation?.forceQa && !!p.result?.applied;
     const allowed = resumableInBatch(slug, p) === 'continue' || candidateNeedsQa(p) || qaRetry || (!!it.revalidation && (pl.pauseKind === 'integration' || pl.state === 'verified'));
     if (!allowed) return setItem(slug, id, itemId, { state: 'needs_owner', resumeProcessId: null, reason: 'Ya no está en una pausa que el lote pueda retomar: decide desde su proceso.' }, 'ya no está en una pausa reanudable: decides tú.');
     // QA vuelve a evaluar el MISMO commit una vez (con la evidencia actual): se marca para que la etapa de QA se repita.
@@ -998,7 +1106,7 @@ function startItem(slug: string, id: string, itemId: string, prep: Prepared) {
     const unspent = Math.max(0, (p.budgetUsd ?? 0) - p.spentUsd - (p.unconfirmedUsd ?? 0)); const left = budgetOf(slug, b).remaining;
     if (prep.api && left + 1e-9 < unspent + grant) return setItem(slug, id, itemId, { state: 'needs_owner', resumeProcessId: null, failureClass: 'budget', reason: `Para seguir haría falta ${(unspent + grant).toFixed(2)} USD de API y al lote le quedan ${left.toFixed(2)}: reanuda concediendo más presupuesto al lote (no se supera el total autorizado).` }, 'sin USD de API suficientes en el lote para seguir: decides tú.');
     procs.resume(p.id, Math.max(p.budgetUsd ?? 0, p.spentUsd) + grant);
-    procs.setResult(p.id, { ...p.result!, pipeline: { ...pl, failures: [], startedAt: now(), ...(qaRetry ? { state: 'paused' as const, qaRequestedFor: p.result!.applied!.commit } : {}) } });
+    procs.setResult(p.id, { ...p.result!, pipeline: { ...pl, failures: [], startedAt: now(), ...(qaRetry || forceQa ? { state: 'paused' as const, qaRequestedFor: p.result!.applied!.commit } : {}) } });
     setItem(slug, id, itemId, { state: 'running', resumeProcessId: null, usesApi: prep.api, reason: null, failureClass: null, notStarted: false, startedAt: now(), finishedAt: null }, `se retoma donde quedó (proceso ${p.id.slice(0, 8)}), sin repetir lo hecho.`, 'recovery');
     const run = batchDeps.resumeStory(slug, p.id, logger, () => isCancelled(p.id)).finally(() => { clearCancel(p.id); void scheduleTick(slug, id); });
     trackJob(p.id, run).catch(e => logger({ err: e?.message, processId: p.id }, 'lote: fallo inesperado al retomar'));
@@ -1028,7 +1136,27 @@ function startItem(slug: string, id: string, itemId: string, prep: Prepared) {
   procs.authorize(p.id, b.auth.perStoryBudgetUsd);
   setItem(slug, id, itemId, { state: 'running', processId: p.id, processIds: [...it.processIds.filter(x => x !== p.id), p.id], nextProcessId: null, usesApi: prep.api, reason: null, failureClass: null, notStarted: false, startedAt: now(), finishedAt: null }, `empieza (proceso ${p.id.slice(0, 8)}, ${prep.api ? `tope ${b.auth.perStoryBudgetUsd} USD de API` : 'solo con la suscripción (sin USD)'}, ${b.auth.maxCorrections} corrección(es), Gauntlet ${b.auth.gauntlet.mode}).`);
   procs.logExecution({ projectId: b.projectId, agentId: '', kind: `batch_story_started:${id}`, status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: now() });
-  const run = batchDeps.runStory(slug, p.id, logger, () => isCancelled(p.id)).finally(() => { clearCancel(p.id); void scheduleTick(slug, id); });
+  const stack = it.stack ?? null; const pid = p.id;
+  const run = (async () => {
+    // Apilada: su worktree nace del commit verificado de la dependencia (comprobado con git en el carril) ANTES de cualquier
+    // llamada. Si la dependencia cambió o su rama propia ya existe, no se gasta nada: vuelve a esperar con el motivo.
+    if (stack) {
+      // Solo se toca la historia si sigue siendo ESTA ejecución (pudo cancelarse o anularse mientras esperaba el carril).
+      const mine = () => { const x = batchesRepo(slug).get(id); const y = x?.items.find(i => i.itemId === itemId); return !!x && liveBatch(x) && y?.state === 'running' && y.processId === pid && !y.stack?.invalid; };
+      try {
+        const full = await prepareStackedBase(slug, pid, stack, it.storyId);
+        // Huella de los cambios propios de la dependencia en esta versión: si se integra con la misma, QA no repite por ella.
+        const repoPath = projectsRepo(slug).repository(b.projectId)?.path;
+        const patchId = repoPath ? await storyPatchId(repoPath, stack.branch).catch(() => null) : null;
+        if (mine()) setItem(slug, id, itemId, { stack: { ...stack, commit: full, patchId } });
+      } catch (e: any) {
+        procs.finish(pid, 'cancelled', `No se preparó sobre ${stack.storyId}: ${e?.message ?? e}`);
+        if (mine()) setItem(slug, id, itemId, { state: 'waiting_dependency', stack: null, noStack: String(e?.message ?? e), noStackFor: e?.code === 'branch_exists' ? null : stack.commit, reason: `No se pudo preparar sobre la versión provisional de ${stack.storyId}: ${e?.message ?? e}. Espera a que aceptes e integres ${stack.storyId} (no se llamó a la IA).` }, `no se preparó sobre ${stack.storyId} (${e?.message ?? e}); vuelve a esperar sin gasto.`);
+        return;
+      }
+    }
+    return batchDeps.runStory(slug, pid, logger, () => isCancelled(pid));
+  })().finally(() => { clearCancel(pid); void scheduleTick(slug, id); });
   trackJob(p.id, run).catch(e => logger({ err: e?.message, processId: p.id }, 'lote: fallo inesperado de la historia'));
 }
 
@@ -1163,7 +1291,7 @@ export async function closeBatch(slug: string, id: string, reason: string): Prom
     batchesRepo(slug).update(id, x => {
       for (const it of x.items) {
         if (it.state === 'accepted' || it.state === 'awaiting_acceptance' || it.state === 'rejected' || it.state === 'failed' || it.state === 'blocked' || it.state === 'cancelled' || it.state === 'postponed') continue;
-        if (it.state === 'ready' || it.state === 'revalidating') { it.state = 'awaiting_integration'; it.revalidation = null; it.reason = 'Lote cerrado: lo terminado se conserva en su rama; intégrala desde su proceso si la quieres.'; continue; }
+        if (it.state === 'ready' || it.state === 'prepared' || it.state === 'revalidating') { it.state = 'awaiting_integration'; it.revalidation = null; it.reason = 'Lote cerrado: lo terminado se conserva en su rama; intégrala desde su proceso si la quieres.'; continue; }
         it.state = 'cancelled'; it.reason = 'Lote cerrado manualmente por el propietario.';
         it.resumeProcessId = null; it.nextProcessId = null; it.finishedAt = it.finishedAt ?? t;
       }
@@ -1183,8 +1311,10 @@ export function pauseBatch(slug: string, id: string): Batch {
   return getBatch(slug, id);
 }
 /** Reanudar (autorizado): con presupuesto o tope de suscripción ampliados si se indican; la duración cuenta desde ahora. */
-export function resumeBatch(slug: string, id: string, extra: { addBudgetUsd?: number; addSubscriptionCalls?: number } = {}): Batch {
+export function resumeBatch(slug: string, id: string, extra: { addBudgetUsd?: number; addSubscriptionCalls?: number; expectPolicy?: string | null } = {}): Batch {
   const b = getBatch(slug, id); controllable(b);
+  // Reanudas con la política que tenías delante: si cambió (otra pestaña), no se reanuda con otra distinta.
+  if (extra.expectPolicy && extra.expectPolicy !== integrationPolicy(b.auth)) throw fail(409, `La política de integración del lote cambió (ahora: ${POLICY_LABEL[integrationPolicy(b.auth)]}): revisa qué hará al reanudar y vuelve a intentarlo.`, 'policy_changed');
   // «En marcha» de verdad solo si algo avanza: un lote donde todo espera tu decisión también se reanuda.
   if (b.status === 'running' && batchMoving(b.items)) throw fail(409, 'El lote ya está en marcha.', 'running');
   batchesRepo(slug).update(id, x => {
@@ -1193,8 +1323,10 @@ export function resumeBatch(slug: string, id: string, extra: { addBudgetUsd?: nu
     // (tope de llamadas, entorno, USD de la API, duración, reinicio sin cobro incierto). Solo con esta acción del propietario.
     for (const i of x.items) {
       const mode = requeueMode(slug, i); if (!mode) continue;
-      i.state = i.dependsInBatch ? 'waiting_dependency' : 'queued'; i.failureClass = null; i.notStarted = false;
+      // Una apilada con trabajo sigue sobre su versión provisional (no vuelve a esperar ni se le cambia la base).
+      i.state = i.dependsInBatch && !(i.stack && mode === 'continue') ? 'waiting_dependency' : 'queued'; i.failureClass = null; i.notStarted = false;
       i.resumeProcessId = mode === 'continue' ? i.processId : null;
+      if (mode === 'restart') { i.stack = null; i.noStack = null; i.noStackFor = null; }
       i.reason = mode === 'continue' ? 'Se retoma donde quedó al reanudar (no se repite lo hecho).' : 'Vuelve a la cola al reanudar (no tenía trabajo que conservar).';
     }
     x.auth.totalBudgetUsd = Math.min(BATCH_LIMITS.maxTotalUsd, x.auth.totalBudgetUsd + Math.max(0, extra.addBudgetUsd ?? 0));
@@ -1219,7 +1351,7 @@ export function cancelBatch(slug: string, id: string): Batch {
     if (i.state === 'needs_owner') { i.state = 'cancelled'; i.reason = `Cancelada con el lote mientras esperaba tu decisión (${i.reason ?? 'sin motivo'}). Lo hecho en su proceso se conserva.`; }
     if (i.state === 'external') { i.state = 'cancelled'; i.reason = 'Cancelada con el lote; su iteración fuera del lote sigue como la autorizaste.'; }
     // Integración al aceptar: lo terminado y no integrado se conserva en su rama; integrarlo vuelve a ser decisión tuya.
-    if (i.state === 'ready' || i.state === 'revalidating' || (i.state === 'integrating' && !i.mergedCommit)) { i.state = 'awaiting_integration'; i.revalidation = null; i.reason = 'Lote cancelado: lo terminado se conserva en su rama; intégrala desde su proceso si la quieres.'; }
+    if (i.state === 'ready' || i.state === 'prepared' || i.state === 'revalidating' || (i.state === 'integrating' && !i.mergedCommit)) { i.state = 'awaiting_integration'; i.revalidation = null; i.reason = 'Lote cancelado: lo terminado se conserva en su rama; intégrala desde su proceso si la quieres.'; }
   }));
   setStatus(slug, id, 'cancelled', 'Cancelado por el propietario: lo que estaba en marcha se detiene entre pasos; lo terminado se conserva y puedes aceptarlo.', 'cancel');
   return getBatch(slug, id);
@@ -1233,7 +1365,7 @@ export function revokeBatch(slug: string, id: string, reason: string | null): Ba
     if (i.state === 'integrating' && !i.mergedCommit) { i.state = 'awaiting_integration'; i.reason = 'Autorización revocada: integrar vuelve a ser decisión tuya.'; }
     if (i.state === 'needs_owner') { i.state = 'cancelled'; i.reason = `Autorización revocada mientras esperaba tu decisión (${i.reason ?? 'sin motivo'}). Lo hecho en su proceso se conserva.`; }
     if (i.state === 'external') { i.state = 'cancelled'; i.reason = 'Autorización del lote revocada; su iteración fuera del lote sigue como la autorizaste.'; }
-    if (i.state === 'ready' || i.state === 'revalidating') { i.state = 'awaiting_integration'; i.revalidation = null; i.reason = 'Autorización revocada: lo terminado se conserva en su rama; integrar vuelve a ser decisión tuya.'; }
+    if (i.state === 'ready' || i.state === 'prepared' || i.state === 'revalidating') { i.state = 'awaiting_integration'; i.revalidation = null; i.reason = 'Autorización revocada: lo terminado se conserva en su rama; integrar vuelve a ser decisión tuya.'; }
   }));
   setStatus(slug, id, 'revoked', `Autorización revocada por el propietario${reason ? `: ${reason}` : ''}. No se empieza, integra, activa ni publica nada más.`, 'revoke');
   processesRepo(slug).logExecution({ projectId: b.projectId, agentId: '', kind: `batch_revoked:${id}`, status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: now() });
@@ -1271,6 +1403,7 @@ export function resumableInBatch(slug: string, p: Process | undefined | null): '
 /** Qué hace «Reanudar» con una historia que espera tu decisión (null: nada; decides tú desde su proceso). */
 function requeueMode(slug: string, it: BatchItem): 'continue' | 'restart' | null {
   if (it.state !== 'needs_owner') return null;
+  if (it.stack?.invalid) return null; // su base provisional ya no se integrará: decides tú («Iterar» la rehace)
   if (it.notStarted) return 'restart';
   const p = it.processId ? processesRepo(slug).get(it.processId) : undefined;
   if ((it.failureClass === 'subscription' || it.failureClass === 'environment') && retryable(it, p?.status)) return 'restart';
@@ -1303,17 +1436,28 @@ export function retryItem(slug: string, id: string, itemId: string): Batch {
   // Las que quedaron bloqueadas SOLO porque esta falló (y las suyas, en cadena) vuelven a esperarla: si no, reintentarla
   // dejaría a sus dependientes bloqueadas para siempre (no se pueden reintentar ni iterar estando bloqueadas).
   reopenDependents(slug, id, it.storyId, 'vuelve a ejecutarse (reintentada por ti)');
-  setItem(slug, id, itemId, { state: it.dependsInBatch ? 'waiting_dependency' : 'queued', reason: b.status === 'running' ? null : 'En cola: empezará al reanudar el lote.', failureClass: null, notStarted: false, resumeProcessId: null, finishedAt: null, followedProcessId: null }, `reintentada por ti: vuelvea la cola (se comprueban otra vez su equipo y sus orígenes).`);
+  setItem(slug, id, itemId, { state: it.dependsInBatch ? 'waiting_dependency' : 'queued', reason: b.status === 'running' ? null : 'En cola: empezará al reanudar el lote.', failureClass: null, notStarted: false, resumeProcessId: null, finishedAt: null, followedProcessId: null, stack: null, noStack: null, noStackFor: null }, `reintentada por ti: vuelvea la cola (se comprueban otra vez su equipo y sus orígenes).`);
   void scheduleTick(slug, id);
   return getBatch(slug, id);
 }
 
 // ---------------------------------------------------------------- Aceptación del propietario (distinta de QA)
 
-export async function acceptItems(slug: string, id: string, itemIds: string[], note: string | null, checks: Record<string, boolean[]> = {}): Promise<Batch> {
+/** Lo decidiste mirando un commit concreto (p. ej. en la vista previa): si el candidato ya es otro, no se aplica a ciegas. */
+function assertRevisions(slug: string, items: BatchItem[], revisions: Record<string, string>) {
+  for (const it of items) {
+    const want = revisions[it.itemId]; if (!want) continue;
+    const head = processesRepo(slug).get(currentProcessId(it) ?? '')?.result?.applied?.commit ?? null;
+    if (!same7(want, head)) throw fail(409, `${it.storyId} cambió desde que la revisaste (revisaste ${want.slice(0, 7)}; ahora es ${head?.slice(0, 7) ?? 'otra versión'}): vuelve a revisarla (y su vista previa) antes de decidir.`, 'revision_changed');
+  }
+}
+
+export async function acceptItems(slug: string, id: string, itemIds: string[], note: string | null, checks: Record<string, boolean[]> = {}, revisions: Record<string, string> = {}): Promise<Batch> {
   const b = getBatch(slug, id); const procs = processesRepo(slug);
   const items = itemIds.map(x => b.items.find(i => i.itemId === x));
-  if (onAcceptance(b) && items.some(i => i?.state === 'ready')) return acceptReady(slug, id, itemIds, note, checks);
+  if (items.some(i => i?.state === 'prepared')) throw fail(409, `${items.filter(i => i?.state === 'prepared').map(i => `${i!.storyId} está preparada sobre la versión provisional de ${i!.stack?.storyId ?? i!.dependsOn}`).join(' · ')}: acepta e integra antes su dependencia; después se pone al día y la revisas.`, 'dependency_first');
+  assertRevisions(slug, items.filter(Boolean) as BatchItem[], revisions);
+  if (onAcceptance(b) && items.some(i => i?.state === 'ready')) return acceptReady(slug, id, itemIds, note, checks, revisions);
   const wrong = items.filter(i => !i || i.state !== 'awaiting_acceptance');
   if (wrong.length) throw fail(409, `Solo se aceptan historias terminadas técnicamente: ${wrong.map(i => i ? `${i.storyId} está ${ITEM_LABEL[i.state]}` : 'una no está en el lote').join(' · ')}.`, 'not_ready');
   for (const it of items as BatchItem[]) {
@@ -1332,7 +1476,9 @@ export async function acceptItems(slug: string, id: string, itemIds: string[], n
     procs.setResult(p.id, { ...p.result!, acceptance: { at, by: 'owner', batchId: id, note }, ...(mt && checks[it.itemId] ? { manualTest: { ...mt, checks: checks[it.itemId] } } : {}) });
     backlogRepo(slug).setStatus(it.itemId, 'done', p.id);
     procs.logExecution({ projectId: b.projectId, agentId: '', kind: `owner_acceptance:${it.storyId}`, status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: at });
-    setItem(slug, id, it.itemId, { state: 'accepted', acceptance: { at, note, checks: checks[it.itemId] ?? null }, rejection: null }, `aceptada por ti${note ? `: ${note.slice(0, 200)}` : ''}.`, 'acceptance');
+    // Ya estaba en main (integrada antes de tu revisión): aceptarla es RECONOCERLA; no autoriza ninguna integración nueva.
+    const commit = it.mergedCommit ?? p.result?.merged?.commit ?? null;
+    setItem(slug, id, it.itemId, { state: 'accepted', acceptance: { at, note, checks: checks[it.itemId] ?? null, kind: 'acknowledged', commit, revision: revisions[it.itemId] ?? null }, rejection: null }, `reconocida y aceptada por ti: ya estaba integrada en main (${commit ?? 'sin commit registrado'}); no autoriza ninguna integración nueva${note ? `. Nota: ${note.slice(0, 200)}` : ''}.`, 'acceptance');
   }
   return getBatch(slug, id);
 }
@@ -1342,7 +1488,7 @@ export async function acceptItems(slug: string, id: string, itemIds: string[], n
  * integración y de una en una. Se guarda el commit que revisaste y la huella de sus cambios: si al ponerla al día cambia
  * su código, la aceptación se anula y vuelves a revisarla. Su dependencia del lote debe estar integrada antes.
  */
-async function acceptReady(slug: string, id: string, itemIds: string[], note: string | null, checks: Record<string, boolean[]>): Promise<Batch> {
+async function acceptReady(slug: string, id: string, itemIds: string[], note: string | null, checks: Record<string, boolean[]>, revisions: Record<string, string> = {}): Promise<Batch> {
   const b = getBatch(slug, id); controllable(b);
   if (b.status === 'completed') throw fail(409, 'El lote ya terminó.', 'closed');
   const procs = processesRepo(slug);
@@ -1366,10 +1512,11 @@ async function acceptReady(slug: string, id: string, itemIds: string[], note: st
   // Mientras se calculaban las huellas pudo empezar a ponerse al día (u otra cosa): solo se acepta lo que SIGUE lista.
   const moved = (items as BatchItem[]).filter(it => getBatch(slug, id).items.find(i => i.itemId === it.itemId)?.state !== 'ready');
   if (moved.length) throw fail(409, `${moved.map(i => i.storyId).join(', ')} cambió de estado mientras la aceptabas (p. ej. empezó a ponerse al día): vuelve a intentarlo cuando esté lista.`, 'state_changed');
+  assertRevisions(slug, items as BatchItem[], revisions);
   for (const it of items as BatchItem[]) {
     const f = facts.get(it.itemId)!;
     const stale = it.freshness && it.freshness.status !== 'current';
-    setItem(slug, id, it.itemId, { state: 'integrating', acceptance: { at, note, checks: checks[it.itemId] ?? null, commit: f.head, patchId: f.patchId }, rejection: null, reason: `Aceptada por ti${stale ? '; antes de integrarla se pone al día con main (si su código cambia, vuelves a revisarla)' : ''}: se integra en main en su turno, de una en una.` }, `aceptada por ti (commit ${f.head})${note ? `: ${note.slice(0, 200)}` : ''}; se integra en su turno.`, 'acceptance');
+    setItem(slug, id, it.itemId, { state: 'integrating', acceptance: { at, note, checks: checks[it.itemId] ?? null, commit: f.head, patchId: f.patchId, kind: 'integrate', revision: revisions[it.itemId] ?? null }, rejection: null, reason: `Aceptada por ti${stale ? '; antes de integrarla se pone al día con main (si su código cambia, vuelves a revisarla)' : ''}: se integra en main en su turno, de una en una.` }, `aceptada por ti (commit ${f.head})${note ? `: ${note.slice(0, 200)}` : ''}; se integra en su turno.`, 'acceptance');
   }
   void scheduleTick(slug, id);
   return getBatch(slug, id);
@@ -1379,7 +1526,9 @@ async function acceptReady(slug: string, id: string, itemIds: string[], note: st
 function reopenDependents(slug: string, id: string, storyId: string, why: string, seen = new Set<string>()) {
   if (seen.has(storyId)) return; seen.add(storyId);
   for (const d of getBatch(slug, id).items.filter(i => i.state === 'blocked' && i.failureClass === 'dependency' && i.dependsOn === storyId)) {
-    setItem(slug, id, d.itemId, { state: 'waiting_dependency', failureClass: null, reason: `Espera a ${storyId}, que ${why}.`, finishedAt: null }, `vuelve a esperar a ${storyId} (${why}).`);
+    const work = !!d.stack && !d.stack.invalid && !!processesRepo(slug).get(d.processId ?? '')?.result?.applied;
+    if (work) { setItem(slug, id, d.itemId, { state: 'prepared', failureClass: null, reason: `Preparada sobre ${storyId}, que ${why}: su trabajo se conserva.`, finishedAt: null }, `vuelve a «preparada» sobre ${storyId} (${why}); su trabajo se conserva.`); }
+    else setItem(slug, id, d.itemId, { state: 'waiting_dependency', failureClass: null, stack: null, reason: `Espera a ${storyId}, que ${why}.`, finishedAt: null }, `vuelve a esperar a ${storyId} (${why}).`);
     reopenDependents(slug, id, d.storyId, why, seen);
   }
 }
@@ -1388,7 +1537,7 @@ function reopenDependents(slug: string, id: string, storyId: string, why: string
 export function postponeItem(slug: string, id: string, itemId: string, note: string | null): Batch {
   const b = getBatch(slug, id); controllable(b);
   const it = b.items.find(i => i.itemId === itemId); if (!it) throw fail(404, 'La historia no está en el lote.', 'not_found');
-  if (!['queued', 'waiting_dependency', 'ready', 'needs_owner', 'failed', 'blocked', 'awaiting_integration'].includes(it.state)) throw fail(409, `No se puede aplazar una historia ${ITEM_LABEL[it.state]}.`, 'invalid_state');
+  if (!['queued', 'waiting_dependency', 'ready', 'prepared', 'needs_owner', 'failed', 'blocked', 'awaiting_integration'].includes(it.state)) throw fail(409, `No se puede aplazar una historia ${ITEM_LABEL[it.state]}.`, 'invalid_state');
   setItem(slug, id, itemId, { state: 'postponed', postponed: { at: now(), from: it.state, note }, acceptance: null, reason: `Aplazada por ti${note ? `: ${note.slice(0, 300)}` : ''}. No se integra en este lote; puedes recuperarla.` }, `aplazada por ti${note ? `: ${note.slice(0, 200)}` : ''}.`, 'acceptance');
   void scheduleTick(slug, id);
   return getBatch(slug, id);
@@ -1398,7 +1547,7 @@ export function restoreItem(slug: string, id: string, itemId: string): Batch {
   const it = b.items.find(i => i.itemId === itemId); if (!it || it.state !== 'postponed') throw fail(409, 'Solo se recupera una historia aplazada.', 'invalid_state');
   const from = it.postponed?.from ?? 'queued';
   const state: BatchItemState = from === 'ready' || from === 'awaiting_integration' ? (onAcceptance(b) ? 'ready' : from) : from === 'queued' || from === 'waiting_dependency' ? (it.dependsInBatch ? 'waiting_dependency' : 'queued') : from;
-  setItem(slug, id, itemId, { state, postponed: null, freshness: null, reason: 'Recuperada por ti.' }, 'recuperada por ti.', 'acceptance');
+  setItem(slug, id, itemId, { state, postponed: null, freshness: null, reason: 'Recuperada por ti.', ...(it.stack?.invalid && (state === 'queued' || state === 'waiting_dependency') ? { stack: null } : {}) }, 'recuperada por ti.', 'acceptance');
   reopenDependents(slug, id, it.storyId, 'recuperaste');
   if (b.status === 'completed') batchesRepo(slug).update(id, x => { x.status = 'running'; x.finishedAt = null; x.reason = null; x.createdAt = now(); });
   void scheduleTick(slug, id);
@@ -1408,7 +1557,7 @@ export function restoreItem(slug: string, id: string, itemId: string): Batch {
 /** No aceptar: queda registrada con tus notas y cada paso que falló se convierte en una tarea de la historia. */
 export function rejectItem(slug: string, id: string, itemId: string, input: { note: string; failedSteps?: string[] }): Batch {
   const b = getBatch(slug, id); const it = b.items.find(i => i.itemId === itemId);
-  if (!it || (it.state !== 'awaiting_acceptance' && it.state !== 'accepted' && it.state !== 'ready')) throw fail(409, 'Solo se puede no aceptar una historia terminada técnicamente (o reabrir una aceptada).', 'not_ready');
+  if (!it || (it.state !== 'awaiting_acceptance' && it.state !== 'accepted' && it.state !== 'ready' && it.state !== 'prepared')) throw fail(409, 'Solo se puede no aceptar una historia terminada técnicamente (o reabrir una aceptada).', 'not_ready');
   const thread = threadRepo(slug);
   const taskIds = (input.failedSteps ?? []).map(s => s.trim()).filter(Boolean).slice(0, 20).map(s => thread.addTask({ backlogItemId: itemId, title: `Aceptación: ${s}`.slice(0, 300), assigneeAgentId: null, assigneeName: null }).id);
   thread.add({ backlogItemId: itemId, role: 'owner', agentId: null, agentName: null, content: `No aceptada en el lote «${b.title}»: ${input.note}${taskIds.length ? ` (${taskIds.length} tarea(s) creadas con los pasos que fallaron)` : ''}`, processId: it.processId, costUsd: 0, tokens: 0, proposals: null });
@@ -1430,10 +1579,12 @@ export function reopenItem(slug: string, id: string, itemId: string): Batch {
  * Iterar SOLO esta historia dentro de la autorización del lote (presupuesto, correcciones, Gauntlet): se prepara la
  * iteración con tu nota y los pasos que fallaron, y el lote la ejecuta en su turno. Las demás no se repiten.
  */
-export async function iterateItem(slug: string, id: string, itemId: string, note: string): Promise<Batch> {
+export async function iterateItem(slug: string, id: string, itemId: string, note: string, revision?: string | null): Promise<Batch> {
   const b = getBatch(slug, id); controllable(b);
   const it = b.items.find(i => i.itemId === itemId);
-  if (!it || !['rejected', 'needs_owner', 'failed', 'awaiting_acceptance', 'awaiting_integration', 'ready', 'postponed'].includes(it.state)) throw fail(409, `Solo se itera una historia no aceptada, detenida o fallida${it ? ` (está ${ITEM_LABEL[it.state]})` : ''}.`, 'invalid_state');
+  const wasIntegrated = !!it && (!!it.mergedCommit || DEPENDENCY_SATISFIED.includes(it.state));
+  if (!it || !['rejected', 'needs_owner', 'failed', 'awaiting_acceptance', 'awaiting_integration', 'ready', 'postponed', 'prepared'].includes(it.state)) throw fail(409, `Solo se itera una historia no aceptada, detenida o fallida${it ? ` (está ${ITEM_LABEL[it.state]})` : ''}.`, 'invalid_state');
+  if (revision) assertRevisions(slug, [it], { [itemId]: revision });
   const lease = acquireWork(slug, { id: '', backlogItemId: itemId, assignmentId: null }, `batch-iterate:${id}`, 'preparar una iteración del lote');
   if ('conflict' in lease) throw fail(409, lease.conflict, 'busy');
   // Su trabajo NO está en main (lista, aplazada, detenida…): los cambios se aplican sobre SU rama como una ronda dirigida
@@ -1441,7 +1592,8 @@ export async function iterateItem(slug: string, id: string, itemId: string, note
   const cur = currentProcessId(it) ? processesRepo(slug).get(currentProcessId(it)!) : undefined;
   // No sirve si espera una respuesta tuya, si rechazaste su diff o si su problema es un conflicto con main (una ronda
   // sobre la rama vieja no lo arregla): entonces, iteración nueva como siempre.
-  const ownerRound = ownerRoundPossible(cur) && !cur!.result?.pipeline?.ownerRequest && it.failureClass !== 'integration';
+  // Tampoco si se preparó sobre una versión provisional de su dependencia que ya no vale: hay que rehacerla sobre main.
+  const ownerRound = ownerRoundPossible(cur) && !cur!.result?.pipeline?.ownerRequest && it.failureClass !== 'integration' && !it.stack?.invalid;
   let prepared = false;
   if (ownerRound) { try { prepareOwnerRound(slug, cur!.id, note); prepared = true; } catch { /* sin worktree utilizable: iteración nueva */ } }
   if (prepared && cur) {
@@ -1449,8 +1601,9 @@ export async function iterateItem(slug: string, id: string, itemId: string, note
     threadRepo(slug).add({ backlogItemId: itemId, role: 'owner', agentId: null, agentName: null, content: `Cambios pedidos en el lote «${b.title}» (sobre su rama, sin descartarla): ${note}`, processId: cur.id, costUsd: 0, tokens: 0, proposals: null });
     batchesRepo(slug).update(id, x => {
       const y = x.items.find(i => i.itemId === itemId)!;
-      Object.assign(y, { state: y.dependsInBatch ? 'waiting_dependency' : 'queued', resumeProcessId: cur.id, nextProcessId: null, acceptance: null, freshness: null, revalidation: null, postponed: null, failureClass: null, finishedAt: null, reason: `Cambios pedidos por ti (sobre su rama, sin rehacerla): ${note.slice(0, 200)}` });
-      x.events.push({ at: now(), kind: 'item', itemId, message: `${y.storyId}: cambios pedidos por ti; se aplican sobre su rama (proceso ${cur.id.slice(0, 8)}) en su turno, con una corrección autorizada más; se repiten verificación, QA y Gauntlet.` });
+      // Una apilada trabaja sobre su versión provisional: sigue en cola (no vuelve a esperar ni se le cambia la base).
+      Object.assign(y, { state: y.stack || !y.dependsInBatch ? 'queued' : 'waiting_dependency', resumeProcessId: cur.id, nextProcessId: null, acceptance: null, freshness: null, revalidation: null, postponed: null, failureClass: null, finishedAt: null, reason: `Cambios pedidos por ti (sobre su rama, sin rehacerla): ${note.slice(0, 200)}` });
+      x.events.push({ at: now(), kind: 'item', itemId, message: `${y.storyId}: cambios pedidos por ti${revision ? ` sobre el commit ${revision.slice(0, 7)}` : ''}; se aplican sobre su rama (proceso ${cur.id.slice(0, 8)}) en su turno, con una corrección autorizada más; se repiten verificación, QA y Gauntlet.` });
       if (x.status === 'completed') { x.status = 'running'; x.finishedAt = null; x.reason = null; x.createdAt = now(); }
     });
     reopenDependents(slug, id, it.storyId, 'vuelve a trabajarse');
@@ -1462,10 +1615,142 @@ export async function iterateItem(slug: string, id: string, itemId: string, note
   batchesRepo(slug).update(id, x => {
     const y = x.items.find(i => i.itemId === itemId)!;
     // El lote vuelve a llevar la historia: la iteración que seguía de fuera queda como resuelta (no se vuelve a seguir).
-    Object.assign(y, { state: 'queued', nextProcessId: process.id, resumeProcessId: null, followedProcessId: null, acceptance: null, freshness: null, revalidation: null, postponed: null, dismissedProcessIds: [...(y.dismissedProcessIds ?? []), ...(y.followedProcessId ? [y.followedProcessId] : [])], reason: `Nueva iteración con tu nota: ${note.slice(0, 200)}`, failureClass: null, finishedAt: null, mergedCommit: null, activated: false });
+    // Una dependiente vuelve a esperar a su dependencia (la iteración nueva nace de main y necesita su código).
+    Object.assign(y, { state: y.dependsInBatch && !dependencyIntegrated(x, { ...y, stack: null }) ? 'waiting_dependency' : 'queued', nextProcessId: process.id, resumeProcessId: null, followedProcessId: null, acceptance: null, freshness: null, revalidation: null, postponed: null, stack: null, noStack: null, dismissedProcessIds: [...(y.dismissedProcessIds ?? []), ...(y.followedProcessId ? [y.followedProcessId] : [])], reason: `Nueva iteración con tu nota: ${note.slice(0, 200)}`, failureClass: null, finishedAt: null, mergedCommit: null, activated: false });
     x.events.push({ at: now(), kind: 'item', itemId, message: `${y.storyId}: iteración dirigida preparada (proceso ${process.id.slice(0, 8)}); se ejecuta en su turno dentro de los límites del lote.` });
     if (x.status === 'completed') { x.status = 'running'; x.finishedAt = null; x.reason = null; }
   });
+  if (!wasIntegrated) invalidateStackedOn(slug, id, it.storyId, `${it.storyId} se rehace desde main (iteración nueva): la versión provisional sobre la que se preparó ya no se integrará.`);
+  void scheduleTick(slug, id);
+  return getBatch(slug, id);
+}
+
+/**
+ * La dependencia se rehace desde main: lo preparado sobre su versión anterior no se integrará nunca. Se detiene lo que esté
+ * trabajando sobre ella (sin seguir gastando), lo que aún no empezó vuelve a esperar, y lo terminado espera tu decisión
+ * («Iterar» lo rehace sobre la versión nueva).
+ */
+function invalidateStackedOn(slug: string, id: string, storyId: string, why: string) {
+  // Solo lo que aún depende de esa versión provisional (lo que ya pasó a lista o se integra trabaja sobre main con ella).
+  for (const d of getBatch(slug, id).items.filter(i => i.stack?.storyId === storyId && !i.stack.invalid && ['queued', 'running', 'prepared', 'blocked', 'needs_owner', 'postponed'].includes(i.state))) {
+    const p = d.processId ? processesRepo(slug).get(d.processId) : undefined;
+    const started = !!p && d.processIds.includes(p.id) && !!p.result?.stack;
+    if (!started && d.state === 'queued') { setItem(slug, id, d.itemId, { state: 'waiting_dependency', stack: null, reason: `Espera a ${storyId}: ${why}` }, `vuelve a esperar a ${storyId} sin gasto (${why})`); continue; }
+    if (d.state === 'running' && p) { cancelProcess(p.id); abortProcessCalls(p.id); }
+    setItem(slug, id, d.itemId, { state: 'needs_owner', failureClass: 'dependency', stack: { ...d.stack!, invalid: why }, resumeProcessId: null, reason: `${why} Su trabajo se conserva en su proceso; «Iterar» la rehace sobre la versión nueva de ${storyId} (no se integra nada de la anterior).` }, `${d.state === 'running' ? 'detenida' : 'en espera de tu decisión'}: ${why}`);
+  }
+}
+
+// ---------------------------------------------------------------- Cambio explícito de la política de integración
+
+const POLICY_LABEL: Record<string, string> = { auto: 'integrar al terminar cada historia', on_acceptance: 'integrar al aceptar cada historia', manual: 'sin integrar (manual)' };
+const gitText = (g: { merge: boolean; activate: boolean; publish: boolean; integration?: string; prepareDependents?: boolean }) => `${g.merge ? POLICY_LABEL[g.integration ?? 'auto'] : POLICY_LABEL.manual}; activar ${g.activate ? 'sí' : 'no'}; publicar en GitHub ${g.publish ? 'sí' : 'no'}${g.integration === 'on_acceptance' ? `; preparar dependientes ${g.prepareDependents ? 'sí' : 'no'}` : ''}`;
+
+/** Qué hará «Reanudar» con cada historia bajo una política (sin IA ni git): lo que ves antes de reanudar. */
+function resumeEffects(slug: string, b: Batch, git: Batch['auth']['git']): { itemId: string; storyId: string; effect: string }[] {
+  const pol = git.merge ? (git.integration ?? 'auto') : 'manual';
+  const after = pol === 'auto' ? `se integra en main${git.publish ? ', se publica en GitHub' : ''}${git.activate && slug === INTERNAL_WORKSPACE.slug ? ' y se activa en el Portal (reconstruir y reiniciar)' : ''} SIN esperar tu revisión` : pol === 'on_acceptance' ? 'queda lista para tu revisión, sin integrar (entra en main solo cuando la aceptes)' : 'queda terminada; integrarla es decisión tuya desde su proceso';
+  const out: { itemId: string; storyId: string; effect: string }[] = [];
+  const procs = processesRepo(slug);
+  for (const it of b.items) {
+    const p = it.processId ? procs.get(it.processId) : undefined;
+    if (it.state === 'awaiting_integration' && git.merge) { out.push({ itemId: it.itemId, storyId: it.storyId, effect: pol === 'auto' ? `Terminada: ${after}.` : `Terminada: ${after}.` }); continue; }
+    const mode = requeueMode(slug, it); if (!mode) continue;
+    const effect = p && candidateNeedsQa(p) ? `QA revisa su candidato de integración (una llamada); si lo aprueba, ${after}.`
+      : p && qaRetryable(it, p) ? `QA vuelve a revisarla una vez con la evidencia actual (una llamada); si la aprueba, ${after}.`
+      : mode === 'continue' ? `Se retoma donde quedó (sin repetir lo hecho); al terminar, ${after}.`
+      : `Vuelve a la cola (no tenía trabajo que conservar); al terminar, ${after}.`;
+    out.push({ itemId: it.itemId, storyId: it.storyId, effect });
+  }
+  return out;
+}
+
+export interface PolicyView {
+  policy: string; label: string; git: Batch['auth']['git'];
+  /** Se puede pasar a «integrar al aceptar» (y por qué no, si no). */
+  canChange: boolean; blockedBy: string | null;
+  alreadyIntegrated: { itemId: string; storyId: string; commit: string; activated: boolean; accepted: boolean }[];
+  willBecomeReady: { itemId: string; storyId: string; from: string }[];
+  resumeNow: { itemId: string; storyId: string; effect: string }[];
+  resumeAfter: { itemId: string; storyId: string; effect: string }[];
+  history: NonNullable<Batch['policyHistory']>;
+}
+
+function integratedFacts(slug: string, b: Batch) {
+  const procs = processesRepo(slug);
+  return b.items.map(it => { const p = procs.get(currentProcessId(it) ?? ''); return { it, merged: it.mergedCommit ?? p?.result?.merged?.commit ?? null }; });
+}
+const changeBlocker = (slug: string, b: Batch): string | null => {
+  if (b.status === 'cancelled' || b.status === 'revoked' || b.status === 'completed') return `El lote está ${b.status === 'completed' ? 'terminado' : b.status === 'cancelled' ? 'cancelado' : 'revocado'}: no hay integraciones futuras que cambiar.`;
+  const pol = integrationPolicy(b.auth);
+  if (pol === 'manual') return 'Este lote no tiene «Integrar en main» autorizado: no integra nada solo (ya decides tú cada integración).';
+  if (pol === 'on_acceptance') return 'Este lote ya integra al aceptar cada historia.';
+  if (updateRunning()) return 'El Portal se está reconstruyendo para activar una integración: espera a que termine.';
+  if (b.activation?.state === 'requested') return `Hay una activación pedida (${b.activation.itemIds.length} historia(s)) que se comprueba al volver el Portal: espera a que termine (o reinicia el Portal) antes de cambiar la política.`;
+  const busy = [...integratingNow, ...revalidating, ...finishing].find(k => k.startsWith(`${slug}:${b.id}:`));
+  if (busy) { const st = b.items.find(i => busy.endsWith(`:${i.itemId}`))?.storyId; return `Hay una integración en curso${st ? ` (${st})` : ''}: espera a que termine (no se cambia la política a medias).`; }
+  return null;
+};
+
+/** Vista previa (sin cambiar nada) del cambio de política y de lo que hará «Reanudar» antes y después. */
+export function policyView(slug: string, id: string): PolicyView {
+  const b = getBatch(slug, id); const blockedBy = changeBlocker(slug, b);
+  const to = { ...b.auth.git, integration: 'on_acceptance' as const, prepareDependents: false };
+  const facts = integratedFacts(slug, b);
+  return {
+    policy: integrationPolicy(b.auth), label: POLICY_LABEL[integrationPolicy(b.auth)], git: b.auth.git, canChange: !blockedBy, blockedBy,
+    alreadyIntegrated: facts.filter(f => f.merged).map(f => ({ itemId: f.it.itemId, storyId: f.it.storyId, commit: f.merged!, activated: !!f.it.activated, accepted: f.it.state === 'accepted' })),
+    willBecomeReady: facts.filter(f => !f.merged && (f.it.state === 'awaiting_integration' || (f.it.state === 'integrating' && !f.it.mergedCommit))).map(f => ({ itemId: f.it.itemId, storyId: f.it.storyId, from: f.it.state })),
+    resumeNow: resumeEffects(slug, b, b.auth.git), resumeAfter: resumeEffects(slug, b, to),
+    history: b.policyHistory ?? []
+  };
+}
+
+/**
+ * Cambio EXPLÍCITO de un lote ya autorizado con integración automática a «integrar al aceptar» (decisión tuya, auditable y
+ * que solo restringe). No reinterpreta nada en silencio: la autorización original queda en el registro; lo ya integrado no
+ * se des-integra (aceptarlo es reconocerlo); lo terminado sin integrar pasa a esperar tu revisión; publicar y activar se
+ * pueden mantener o quitar, nunca añadir. Se rechaza mientras haya una integración en curso.
+ */
+export async function changePolicy(slug: string, id: string, input: { publish: boolean; activate: boolean; note: string | null }): Promise<Batch> {
+  const b0 = getBatch(slug, id);
+  const blocked = changeBlocker(slug, b0); if (blocked) throw fail(409, blocked, 'policy_change_blocked');
+  if ((input.publish && !b0.auth.git.publish) || (input.activate && !b0.auth.git.activate)) throw fail(409, 'El cambio de política solo restringe: no puede añadir publicar ni activar si el lote no los tenía autorizados (para eso, autoriza otro lote).', 'widening');
+  // Un merge hecho y no registrado (reinicio entre el merge y su registro) ya está en main: se registra como integrado, no se
+  // presenta como «sin integrar».
+  const procs = processesRepo(slug);
+  for (const it of b0.items.filter(i => (i.state === 'integrating' && !i.mergedCommit) || i.state === 'awaiting_integration')) {
+    const p = procs.get(currentProcessId(it) ?? '');
+    if (p && await alreadyInMain(slug, p)) await mergeStory(slug, p.id, {}, logger);
+  }
+  const b = getBatch(slug, id);
+  const again = changeBlocker(slug, b); if (again) throw fail(409, again, 'policy_change_blocked');
+  const at = now(); const from = { ...b.auth.git };
+  const to = { ...from, integration: 'on_acceptance' as const, publish: from.publish && input.publish, activate: from.activate && input.activate, prepareDependents: false };
+  const internal = slug === INTERNAL_WORKSPACE.slug;
+  batchesRepo(slug).update(id, x => {
+    const alreadyIntegrated: NonNullable<Batch['policyHistory']>[number]['alreadyIntegrated'] = []; const converted: NonNullable<Batch['policyHistory']>[number]['converted'] = [];
+    for (const i of x.items) {
+      const merged = i.mergedCommit ?? procs.get(currentProcessId(i) ?? '')?.result?.merged?.commit ?? null;
+      if (merged) {
+        alreadyIntegrated.push({ itemId: i.itemId, storyId: i.storyId, commit: merged, activated: !!i.activated, accepted: i.state === 'accepted' });
+        // Integrada (y quizá pendiente de activar) bajo la política anterior: no se des-integra ni se activa sola.
+        if (i.state === 'integrating' || i.state === 'awaiting_integration') {
+          converted.push({ itemId: i.itemId, storyId: i.storyId, from: i.state, to: 'awaiting_acceptance' });
+          Object.assign(i, { state: 'awaiting_acceptance', mergedCommit: merged, reason: `Ya estaba integrada en main (${merged}) antes del cambio de política: aceptarla es reconocerla${internal && !i.activated ? '. No está activa en el Portal en marcha: lo estará cuando se active otra historia aceptada o reconstruyas tú' : ''}.` });
+        }
+        continue;
+      }
+      if (i.state === 'integrating' || i.state === 'awaiting_integration') {
+        converted.push({ itemId: i.itemId, storyId: i.storyId, from: i.state, to: 'ready' });
+        Object.assign(i, { state: 'ready', freshness: null, acceptance: null, revalidation: null, reason: 'Terminada técnicamente: con la nueva política espera tu revisión y solo entra en main cuando la aceptes.' });
+      }
+    }
+    x.auth.git = to;
+    (x.policyHistory ??= []).push({ at, by: 'owner', note: input.note, from, to, alreadyIntegrated, converted });
+    x.events.push({ at, kind: 'policy', message: `Política de integración cambiada por el propietario (decisión explícita): antes «${gitText(from)}» → ahora «${gitText(to)}». ${alreadyIntegrated.length ? `Ya estaban en main y no se des-integran (aceptarlas es reconocerlas): ${alreadyIntegrated.map(a => `${a.storyId} ${a.commit}`).join(', ')}. ` : ''}${converted.filter(c => c.to === 'ready').length ? `Pasan a esperar tu revisión sin integrar: ${converted.filter(c => c.to === 'ready').map(c => c.storyId).join(', ')}. ` : ''}A partir de ahora ninguna historia entra en main sin tu aceptación.${input.note ? ` Nota: ${input.note.slice(0, 300)}` : ''}` });
+  });
+  procs.logExecution({ projectId: b.projectId, agentId: '', kind: `batch_policy_changed:${id}`, status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: at });
   void scheduleTick(slug, id);
   return getBatch(slug, id);
 }
@@ -1528,8 +1813,13 @@ export function batchView(slug: string, b: Batch) {
   const procs = processesRepo(slug);
   const items = b.items.map(it => {
     const cur = currentProcessId(it); const p = cur ? procs.get(cur) : undefined; const r = p?.result;
+    const rev = p ? revisionStatus(p) : null; const pv = r?.previews?.at(-1) ?? null;
+    const dh = it.stack ? dependencyHead(slug, b, it) : null;
     return {
       ...it, label: ITEM_LABEL[it.state],
+      stackInfo: it.stack ? { storyId: it.stack.storyId, commit: it.stack.commit, dependencyHead: dh, moved: !!dh && !same7(dh, it.stack.commit), invalid: it.stack.invalid ?? null } : null,
+      evidence: p && r?.applied ? { head: r.applied.commit, verifiedHead: !!rev?.verifiedHead, commands: (r.pipeline?.config.commands ?? ['typecheck']).map(c => ({ command: c, ok: verificationsForApplied(r).some(v => v.command === c && v.exitCode === 0), isolation: verificationsForApplied(r).filter(v => v.command === c).at(-1)?.isolation ?? null })), qa: rev ? { state: rev.qa.state, coversHead: rev.qa.coversHead, why: rev.qa.why } : null } : null,
+      preview: pv ? { ...pv, live: previewLive(p!.id, pv.id), outdated: !same7(pv.commit, r?.applied?.commit) } : null,
       process: p ? { id: p.id, status: p.status, spentUsd: p.spentUsd, unconfirmedUsd: p.unconfirmedUsd ?? 0, budgetUsd: p.budgetUsd, pipeline: r?.pipeline ? { state: r.pipeline.state, phase: r.pipeline.phase, pauseKind: r.pipeline.pauseKind, reason: r.pipeline.reason, corrections: r.pipeline.corrections } : null, gauntlet: r?.gauntlet ? { mode: r.gauntlet.mode, status: r.gauntlet.status, rounds: r.gauntlet.rounds.length, reason: r.gauntlet.reason } : null, review: r?.review?.verdict ?? null, merged: r?.merged ?? null, manualTest: r?.manualTest ? { steps: r.manualTest.steps, checks: r.manualTest.checks } : null, userFacing: r?.userFacing ?? null, implementer: p.steps.find(s => s.role === 'implementer')?.agentName ?? null, evaluator: p.steps.find(s => s.role === 'evaluator' && s.status !== 'skipped')?.agentName ?? null } : null
     };
   });

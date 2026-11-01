@@ -1,6 +1,6 @@
 import type { ExecutionBackend } from './claude-code.ts';
 import type { GauntletConfig } from './gauntlet.ts';
-import type { BacklogStatus, PipelinePauseKind } from './types.ts';
+import type { BacklogStatus, PipelinePauseKind, PreviewRecord } from './types.ts';
 
 /**
  * Ejecución continua del backlog (lote autorizado). El propietario autoriza UNA vez un alcance explícito (historias,
@@ -32,6 +32,12 @@ export type BatchItemState =
   | 'ready'
   /** Integración al aceptar: main cambió algo que la afecta y su candidato se pone al día (git, sandbox y QA si hace falta). */
   | 'revalidating'
+  /**
+   * Integración al aceptar con preparación apilada: terminada técnicamente (verificada, QA y Gauntlet) SOBRE LA VERSIÓN
+   * PROVISIONAL de su dependencia (sin integrar). No está lista para integrar: cuando aceptes e integres su dependencia,
+   * se pone al día con la versión final (git, sandbox y QA si la dependencia cambió) y pasa a «lista».
+   */
+  | 'prepared'
   /** La aplazaste: no se integra en este lote; cuenta como decisión tomada. Puedes recuperarla. */
   | 'postponed'
   | 'accepted'
@@ -73,6 +79,11 @@ export interface BatchGitAuthorization {
    * anteriores sin el campo) integra cada historia al terminarla y la aceptas ya integrada.
    */
   integration?: BatchIntegrationPolicy;
+  /**
+   * Integración al aceptar: preparar las historias que dependen de otra del lote SOBRE la versión verificada y revisada de
+   * su dependencia (sin integrar) en lugar de esperar a que la aceptes. Sin el campo (lotes anteriores): no.
+   */
+  prepareDependents?: boolean;
 }
 
 export type BatchIntegrationPolicy = 'auto' | 'on_acceptance';
@@ -111,6 +122,13 @@ export interface BatchAuthorization {
 
 export interface BatchAcceptance {
   at: string; note: string | null; checks: boolean[] | null;
+  /**
+   * 'integrate': aceptas un candidato SIN integrar y autorizas su integración; 'acknowledged': reconoces una historia que YA
+   * estaba en main (integrada automáticamente antes de tu revisión): no autoriza ninguna integración nueva.
+   */
+  kind?: 'integrate' | 'acknowledged';
+  /** Commit que tenías delante (p. ej. el de la vista previa) al decidir. */
+  revision?: string | null;
   /**
    * Integración al aceptar: commit que revisaste y huella de SUS cambios (`git patch-id` del diff sin contexto respecto a
    * main). Si al ponerla al día cambia su código (conflictos resueltos por el agente, correcciones), la huella cambia y la
@@ -160,11 +178,38 @@ export interface BatchItem {
   /** ¿Sigue valiendo su evidencia con el main actual? (sin IA; ver `CandidateFreshness`). */
   freshness?: CandidateFreshness | null;
   /** Puesta al día en curso (integración al aceptar): paso persistido para retomarla tras un reinicio sin repetir lo hecho. */
-  revalidation?: { at: string; step: 'merge' | 'resolve' | 'verify' | 'qa'; mainHead: string | null; causes: string[] } | null;
+  revalidation?: { at: string; step: 'merge' | 'resolve' | 'verify' | 'qa'; mainHead: string | null; causes: string[]; /** Apilada cuya dependencia cambió: QA revisa el commit nuevo aunque git no vea conflictos. */ forceQa?: boolean } | null;
   /** Revisiones de QA repetidas por el lote con evidencia nueva (QA no pudo verificar): como mucho una. */
   qaRetries?: number;
   /** Aplazada por ti: desde qué estado (para recuperarla) y con qué nota. */
   postponed?: { at: string; from: BatchItemState; note: string | null } | null;
+  /**
+   * Preparación apilada: versión provisional de su dependencia sobre la que se prepara (commit verificado y revisado de la
+   * rama de la dependencia, sin integrar). Se conserva mientras su trabajo dependa de ella.
+   */
+  stack?: BatchStack | null;
+  /** Por qué esta historia no se puede preparar sobre la versión provisional de su dependencia (espera a que se integre). */
+  noStack?: string | null;
+  /** Commit de la dependencia al que se refiere `noStack` (si cambia, se vuelve a intentar); sin él, vale siempre. */
+  noStackFor?: string | null;
+}
+
+export interface BatchStack {
+  storyId: string; itemId: string; processId: string; commit: string; branch: string; at: string;
+  /** Esa versión provisional ya no se integrará (la dependencia se rehízo o se integró otra): motivo. Su trabajo no entra en main. */
+  invalid?: string | null;
+  /** Huella de los cambios PROPIOS de la dependencia en esa versión: si la integrada tiene la misma, QA no repite por ella. */
+  patchId?: string | null;
+}
+
+/** Cambio explícito de la política de integración de un lote ya autorizado (solo restringe; auditable). */
+export interface BatchPolicyChange {
+  at: string; by: 'owner'; note: string | null;
+  from: BatchGitAuthorization; to: BatchGitAuthorization;
+  /** Historias que YA estaban en main al cambiar (no se pueden des-integrar): aceptarlas es reconocerlas. */
+  alreadyIntegrated: { itemId: string; storyId: string; commit: string; activated: boolean; accepted: boolean }[];
+  /** Historias cuyo estado cambió al aplicar la nueva política (p. ej. pendiente de integrar → lista para tu revisión). */
+  converted: { itemId: string; storyId: string; from: BatchItemState; to: BatchItemState }[];
 }
 
 /**
@@ -188,6 +233,10 @@ export interface CandidateFreshness {
   causes: string[];
   /** Conflictos previstos (git merge-tree en memoria) al incorporar el main actual, si está `stale`. */
   conflicts?: string[];
+  /** Preparada sobre una versión provisional de su dependencia que NO acabó en main: no se pone al día ni se integra. */
+  stackInvalid?: boolean;
+  /** Preparada sobre una versión provisional y su dependencia se integró con cambios posteriores: QA vuelve a revisarla. */
+  dependencyChanged?: boolean;
   checkedAt: string;
   detail: string | null;
 }
@@ -295,11 +344,12 @@ export function mentionedFiles(text: string): string[] {
 // ---------------------------------------------------------------- Ciclo de vida del lote (sin IA)
 
 /** Situación de una historia para el resumen del lote. */
-export type ItemOutcome = 'in_progress' | 'waiting' | 'ready' | 'decision' | 'technical_blocker' | 'integrating' | 'integrated' | 'accepted' | 'rejected' | 'postponed' | 'cancelled';
+export type ItemOutcome = 'in_progress' | 'waiting' | 'prepared' | 'ready' | 'decision' | 'technical_blocker' | 'integrating' | 'integrated' | 'accepted' | 'rejected' | 'postponed' | 'cancelled';
 export function itemOutcome(it: Pick<BatchItem, 'state' | 'failureClass'>): ItemOutcome {
   switch (it.state) {
     case 'queued': case 'running': case 'revalidating': return 'in_progress';
     case 'waiting_dependency': case 'external': return 'waiting';
+    case 'prepared': return 'prepared';
     case 'ready': case 'awaiting_integration': return 'ready';
     case 'needs_owner': return it.failureClass === 'environment' || it.failureClass === 'failure' || it.failureClass === 'dependency' ? 'technical_blocker' : 'decision';
     case 'failed': case 'blocked': return 'technical_blocker';
@@ -333,7 +383,7 @@ const n = (k: number, one: string, many: string) => `${k} ${k === 1 ? one : many
  * No se da por terminado mientras quede trabajo aceptado sin integrar o decisiones tuyas pendientes.
  */
 export function batchLifecycle(items: Pick<BatchItem, 'itemId' | 'storyId' | 'state' | 'failureClass' | 'dependsOn' | 'dependsInBatch'>[], policy: BatchIntegrationPolicy | 'manual', order: string[] = []): BatchLifecycle {
-  const counts = { in_progress: 0, waiting: 0, ready: 0, decision: 0, technical_blocker: 0, integrating: 0, integrated: 0, accepted: 0, rejected: 0, postponed: 0, cancelled: 0 } as Record<ItemOutcome, number>;
+  const counts = { in_progress: 0, waiting: 0, prepared: 0, ready: 0, decision: 0, technical_blocker: 0, integrating: 0, integrated: 0, accepted: 0, rejected: 0, postponed: 0, cancelled: 0 } as Record<ItemOutcome, number>;
   for (const i of items) counts[itemOutcome(i)]++;
   const readyForOwner = counts.ready + counts.integrated;
   const technicallyComplete = counts.in_progress === 0 && counts.integrating === 0;
@@ -346,9 +396,11 @@ export function batchLifecycle(items: Pick<BatchItem, 'itemId' | 'storyId' | 'st
   const next = (reviewable ?? sorted.find(i => itemOutcome(i) === 'decision'))?.itemId ?? null;
   const total = n(items.length, 'historia', 'historias');
   const parts = [
-    readyForOwner ? `${readyForOwner} ${policy === 'on_acceptance' ? (readyForOwner === 1 ? 'lista para tu aceptación (sin integrar)' : 'listas para tu aceptación (sin integrar)') : (readyForOwner === 1 ? 'lista para tu aceptación' : 'listas para tu aceptación')}` : '',
+    counts.ready ? `${counts.ready} ${policy === 'on_acceptance' ? (counts.ready === 1 ? 'lista para tu aceptación (sin integrar)' : 'listas para tu aceptación (sin integrar)') : (counts.ready === 1 ? 'lista para tu aceptación' : 'listas para tu aceptación')}` : '',
+    counts.integrated ? `${counts.integrated} ${policy === 'on_acceptance' ? (counts.integrated === 1 ? 'ya integrada en main (falta reconocerla)' : 'ya integradas en main (falta reconocerlas)') : (counts.integrated === 1 ? 'integrada, pendiente de tu aceptación' : 'integradas, pendientes de tu aceptación')}` : '',
     counts.decision ? `${counts.decision} ${counts.decision === 1 ? 'requiere una decisión tuya' : 'requieren una decisión tuya'}` : '',
     counts.technical_blocker ? `${counts.technical_blocker} ${counts.technical_blocker === 1 ? 'bloqueada por un problema técnico' : 'bloqueadas por un problema técnico'}` : '',
+    counts.prepared ? `${counts.prepared} ${counts.prepared === 1 ? 'preparada sobre su dependencia (se revisa después de ella)' : 'preparadas sobre su dependencia (se revisan después de ella)'}` : '',
     counts.waiting ? `${counts.waiting} ${counts.waiting === 1 ? 'espera a otra historia' : 'esperan a otras historias'}` : '',
     counts.accepted ? `${counts.accepted} ${counts.accepted === 1 ? 'aceptada e integrada' : 'aceptadas e integradas'}` : '',
     counts.postponed ? `${counts.postponed} ${counts.postponed === 1 ? 'aplazada' : 'aplazadas'}` : '',
@@ -365,7 +417,7 @@ export function batchLifecycle(items: Pick<BatchItem, 'itemId' | 'storyId' | 'st
 export interface BatchEvent {
   at: string;
   /** 'close': cierre manual del propietario (con su motivo en el mensaje), sin IA. */
-  kind: 'authorized' | 'planned' | 'item' | 'integration' | 'activation' | 'pause' | 'resume' | 'cancel' | 'revoke' | 'acceptance' | 'budget' | 'recovery' | 'completed' | 'close';
+  kind: 'authorized' | 'planned' | 'item' | 'integration' | 'activation' | 'pause' | 'resume' | 'cancel' | 'revoke' | 'acceptance' | 'budget' | 'recovery' | 'completed' | 'close' | 'policy';
   itemId?: string | null;
   message: string;
 }
@@ -398,6 +450,8 @@ export interface Batch {
   closed?: { at: string; reason: string; outcome: 'completed' | 'cancelled' } | null;
   /** Orden de integración propuesto (sin IA), recalculado al saberse mejor qué archivos toca cada historia. */
   integrationPlan?: IntegrationPlan | null;
+  /** Cambios explícitos de la política de integración después de autorizarlo (la autorización original no se reescribe). */
+  policyHistory?: BatchPolicyChange[];
   createdAt: string;
   updatedAt: string;
   finishedAt: string | null;
@@ -517,7 +571,7 @@ export function batchMoving(items: Pick<BatchItem, 'storyId' | 'state' | 'depend
 
 /** Resumen por estado para el monitor (cuántas completas, bloqueadas, pendientes de aceptación…). */
 export function batchSummary(items: Pick<BatchItem, 'state'>[]): Record<BatchItemState, number> {
-  const out = { queued: 0, waiting_dependency: 0, running: 0, integrating: 0, needs_owner: 0, awaiting_integration: 0, awaiting_acceptance: 0, ready: 0, revalidating: 0, postponed: 0, accepted: 0, rejected: 0, failed: 0, blocked: 0, cancelled: 0, external: 0 } as Record<BatchItemState, number>;
+  const out = { queued: 0, waiting_dependency: 0, running: 0, integrating: 0, needs_owner: 0, awaiting_integration: 0, awaiting_acceptance: 0, ready: 0, revalidating: 0, prepared: 0, postponed: 0, accepted: 0, rejected: 0, failed: 0, blocked: 0, cancelled: 0, external: 0 } as Record<BatchItemState, number>;
   for (const i of items) out[i.state]++;
   return out;
 }
@@ -525,6 +579,12 @@ export function batchSummary(items: Pick<BatchItem, 'state'>[]): Record<BatchIte
 /** Vista del monitor (lo que sirve GET /batches/:id): cada historia con su proceso y los totales del lote. */
 export interface BatchItemView extends BatchItem {
   label: string;
+  /** Preparación apilada: sobre qué versión de su dependencia y si la dependencia cambió desde entonces. */
+  stackInfo?: { storyId: string; commit: string; dependencyHead: string | null; moved: boolean; invalid: string | null } | null;
+  /** Evidencia del commit actual del candidato: verificación por comando y QA (por commit). */
+  evidence?: { head: string; verifiedHead: boolean; commands: { command: string; ok: boolean; isolation: string | null }[]; qa: { state: string; coversHead: boolean; why: string } | null } | null;
+  /** Última vista previa del candidato (en marcha o como evidencia) y si ya no corresponde al commit actual. */
+  preview?: (PreviewRecord & { live: boolean; outdated: boolean }) | null;
   process: {
     id: string; status: string; spentUsd: number; unconfirmedUsd: number; budgetUsd: number | null;
     pipeline: { state: string; phase: string; pauseKind: string | null; reason: string | null; corrections: number } | null;

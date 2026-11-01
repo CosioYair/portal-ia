@@ -232,7 +232,7 @@ export function worktreePathFor(repoPath: string, processId: string): string {
  * rama ni se toca. La rama de la historia nace de la rama principal; si ya existe (iteración), se reutiliza.
  * Rollback: eliminar el worktree (y la rama si la creamos nosotros y no tiene commits propios). Nunca `reset --hard`.
  */
-export async function applyChanges(repoPath: string, branch: string, changes: ProposedChange[], message: string, opts: { processId?: string; base?: string | null } = {}): Promise<{ branch: string; commit: string; files: string[]; worktree: string | null }> {
+export async function applyChanges(repoPath: string, branch: string, changes: ProposedChange[], message: string, opts: { processId?: string; base?: string | null; /** Historia apilada: si falla, se deja otra vez el worktree preparado en `base` (el código de su dependencia). */ keepBaseWorktree?: boolean } = {}): Promise<{ branch: string; commit: string; files: string[]; worktree: string | null }> {
   const cwd = repoRoot(repoPath);
   if (!fs.existsSync(path.join(cwd, '.git'))) throw Object.assign(new Error('La carpeta registrada no es un repositorio git.'), { statusCode: 400 });
   if (!/^[A-Za-z0-9._\/-]{1,80}$/.test(branch)) throw Object.assign(new Error('Nombre de rama no válido.'), { statusCode: 400 });
@@ -273,7 +273,11 @@ export async function applyChanges(repoPath: string, branch: string, changes: Pr
     const commit = await git(wt, ['rev-parse', '--short', 'HEAD']);
     return { branch, commit, files, worktree: wt };
   } catch (e) {
-    await withRepoLock(cwd, async () => { try { await git(cwd, ['worktree', 'remove', '--force', wt]); if (!branchExisted) await git(cwd, ['branch', '-D', branch]); } catch { /* informar el error original */ } });
+    await withRepoLock(cwd, async () => {
+      try { await git(cwd, ['worktree', 'remove', '--force', wt]); if (!branchExisted) await git(cwd, ['branch', '-D', branch]); } catch { /* informar el error original */ }
+      // Sin él, la siguiente unidad leería main (sin el código de la dependencia) y podría «crear» sus archivos de nuevo.
+      if (opts.keepBaseWorktree && opts.base && !branchExisted) await git(cwd, ['worktree', 'add', '-q', '--detach', wt, opts.base]).catch(() => '');
+    });
     throw e;
   }
 }
@@ -320,9 +324,9 @@ export async function commitInWorktree(wt: string, changes: ProposedChange[], me
  * Diff acumulado de la rama del proceso respecto a su base en la rama principal (lo que el propietario revisa al final,
  * tras correcciones). Cada archivo: contenido de la base → contenido actual del worktree.
  */
-export async function changesSinceBase(repoPath: string, wt: string): Promise<ProposedChange[]> {
+export async function changesSinceBase(repoPath: string, wt: string, stackBase?: string | null): Promise<ProposedChange[]> {
   const main = await mainBranch(repoRoot(repoPath));
-  const base = await git(wt, ['merge-base', 'HEAD', main]);
+  const base = await ownBase(wt, 'HEAD', main, stackBase);
   const status = (await git(wt, ['diff', '--name-status', '--no-renames', base, 'HEAD'])).split('\n').filter(Boolean);
   const out: ProposedChange[] = [];
   for (const line of status) {
@@ -334,6 +338,21 @@ export async function changesSinceBase(repoPath: string, wt: string): Promise<Pr
     out.push({ path: file, action, content: action === 'delete' ? null : after, diff: unifiedDiff(before, after, file), before: st === 'A' ? 0 : before.split('\n').length, after: st === 'D' ? 0 : after.split('\n').length, error: null, warning: action !== 'delete' ? scanSecrets(after) : null, baseHash: st === 'A' ? null : hashText(before) });
   }
   return out;
+}
+
+const isAncestorGit = (cwd: string, a: string, b: string) => execFileP('git', ['merge-base', '--is-ancestor', a, b], { cwd, windowsHide: true }).then(() => true, () => false);
+/**
+ * Base de los cambios PROPIOS de una rama: su merge-base con main o, si se preparó sobre la versión provisional de su
+ * dependencia (`stackBase`, aún no integrada en main), ese commit: así el diff, la revisión de QA, la huella y los archivos
+ * de la historia no incluyen los cambios de la dependencia. En cuanto la dependencia está en main, vale el merge-base.
+ */
+export async function ownBase(cwd: string, head: string, main: string, stackBase?: string | null): Promise<string> {
+  const mb = await git(cwd, ['merge-base', head, main]);
+  if (!stackBase) return mb;
+  if (await isAncestorGit(cwd, stackBase, main)) return mb;
+  // Mientras la versión provisional no esté en main, la base es SIEMPRE ella (main no entra antes en la rama: ver
+  // assertStackIntegrated); si la rama no la contiene, no es una rama apilada válida y vale el merge-base.
+  return (await isAncestorGit(cwd, stackBase, head)) ? (await git(cwd, ['rev-parse', stackBase])) : mb;
 }
 
 /** Retira el worktree de un proceso (tras integrar o rechazar). Solo rutas bajo `<repo>-worktrees`. */

@@ -89,7 +89,7 @@ process.once('exit', () => {
 /** Marca que deja `install` en el volumen al terminar bien; sin ella, el resto de comandos no se ejecutan. */
 const DEPS_READY = 'node_modules/.portal-ia-ready';
 /** Cachés que las herramientas escriben dentro de node_modules (vite, babel…): tmpfs privados sobre el volumen de solo lectura. */
-const NM_CACHES = ['.vite-temp', '.vite', '.cache'];
+export const NM_CACHES = ['.vite-temp', '.vite', '.cache'];
 export const DEPS_MISSING_EXIT = 86;
 /**
  * Marca de salida que imprime el propio contenedor al terminar. Docker Desktop (Windows) a veces no registra el final

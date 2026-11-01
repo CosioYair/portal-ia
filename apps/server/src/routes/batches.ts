@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { BATCH_LIMITS } from '@portal-ia/domain';
 import { workspacesRepo } from '../db/platform.ts';
 import { batchesRepo } from '../db/batches.ts';
-import { acceptItems, batchView, cancelBatch, cancelItem, closeBatch, createBatch, getBatch, iterateItem, pauseBatch, postponeItem, previewBatch, reconcileBatch, rejectItem, reopenItem, restoreItem, resumeBatch, retryItem, revokeBatch, setBatchLogger } from '../services/batchRunner.ts';
+import { acceptItems, batchView, cancelBatch, cancelItem, changePolicy, closeBatch, createBatch, getBatch, iterateItem, pauseBatch, policyView, postponeItem, previewBatch, reconcileBatch, rejectItem, reopenItem, restoreItem, resumeBatch, retryItem, revokeBatch, setBatchLogger } from '../services/batchRunner.ts';
 import type { Batch } from '@portal-ia/domain';
 
 const CLOSE_INPUT = z.object({ reason: z.string().trim().min(3).max(500) });
@@ -23,7 +23,7 @@ const BATCH_INPUT = z.object({
   concurrency: z.number().int().min(1).max(BATCH_LIMITS.maxConcurrency).optional(),
   commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(),
   allowInstall: z.boolean().optional(),
-  git: z.object({ merge: z.boolean().optional(), activate: z.boolean().optional(), publish: z.boolean().optional(), integration: z.enum(['auto', 'on_acceptance']).optional() }).optional(),
+  git: z.object({ merge: z.boolean().optional(), activate: z.boolean().optional(), publish: z.boolean().optional(), integration: z.enum(['auto', 'on_acceptance']).optional(), prepareDependents: z.boolean().optional() }).optional(),
   autoResume: z.boolean().optional()
 });
 
@@ -88,16 +88,27 @@ export async function batchRoutes(app: FastifyInstance) {
     });
   control('pause', (s, id) => pauseBatch(s, id));
   // Reanudar es seguir gastando: exige autorización (y puede ampliar el presupuesto o el tope de la suscripción).
-  control('resume', (s, id, b) => resumeBatch(s, id, { addBudgetUsd: Number(b.addBudgetUsd) || 0, addSubscriptionCalls: Number(b.addSubscriptionCalls) || 0 }), true);
+  control('resume', (s, id, b) => resumeBatch(s, id, { addBudgetUsd: Number(b.addBudgetUsd) || 0, addSubscriptionCalls: Number(b.addSubscriptionCalls) || 0, expectPolicy: typeof b.expectPolicy === 'string' ? b.expectPolicy : null }), true);
+  // Política de integración de un lote ya autorizado: ver qué cambiaría (sin tocar nada) y cambiarla explícitamente (solo restringe).
+  app.get('/api/workspaces/:slug/batches/:id/policy', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    try { return policyView(slug, id); } catch (e) { return send(reply, e); }
+  });
+  app.post('/api/workspaces/:slug/batches/:id/policy', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ authorized: z.literal(true), integration: z.literal('on_acceptance'), publish: z.boolean(), activate: z.boolean(), note: z.string().trim().max(1000).optional() }).safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Cambiar la política exige tu confirmación explícita y decir si mantienes publicar y activar.', code: 'authorization_required' });
+    try { const b = await changePolicy(slug, id, { publish: body.data.publish, activate: body.data.activate, note: body.data.note || null }); req.log.info({ batchId: id }, 'política de integración cambiada por el propietario'); return batchView(slug, b); } catch (e) { return send(reply, e); }
+  });
   control('cancel', (s, id) => cancelBatch(s, id));
   control('revoke', (s, id, b) => revokeBatch(s, id, typeof b.reason === 'string' ? b.reason.slice(0, 300) : null));
 
   // Aceptación del propietario (distinta de QA): una o varias a la vez.
   app.post('/api/workspaces/:slug/batches/:id/accept', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ itemIds: z.array(z.string()).min(1).max(BATCH_LIMITS.maxItems), note: z.string().trim().max(1000).optional(), checks: z.record(z.string(), z.array(z.boolean()).max(50)).optional() }).safeParse(req.body ?? {});
+    const body = z.object({ itemIds: z.array(z.string()).min(1).max(BATCH_LIMITS.maxItems), note: z.string().trim().max(1000).optional(), checks: z.record(z.string(), z.array(z.boolean()).max(50)).optional(), revisions: z.record(z.string(), z.string().trim().min(4).max(64)).optional() }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Indica qué historias aceptas.' });
-    try { return batchView(slug, await acceptItems(slug, id, body.data.itemIds, body.data.note || null, body.data.checks ?? {})); } catch (e) { return send(reply, e); }
+    try { return batchView(slug, await acceptItems(slug, id, body.data.itemIds, body.data.note || null, body.data.checks ?? {}, body.data.revisions ?? {})); } catch (e) { return send(reply, e); }
   });
   app.post('/api/workspaces/:slug/batches/:id/items/:itemId/reject', async (req, reply) => {
     const { slug, id, itemId } = req.params as any; if (!guard(slug, reply)) return;
@@ -112,9 +123,9 @@ export async function batchRoutes(app: FastifyInstance) {
   // Iterar SOLO esta historia dentro de los límites del lote (gasta: exige autorización).
   app.post('/api/workspaces/:slug/batches/:id/items/:itemId/iterate', async (req, reply) => {
     const { slug, id, itemId } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ authorized: z.literal(true), note: z.string().trim().min(3).max(2000) }).safeParse(req.body ?? {});
+    const body = z.object({ authorized: z.literal(true), note: z.string().trim().min(3).max(2000), revision: z.string().trim().min(4).max(64).optional() }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Iterar exige tu autorización y una nota con lo que hay que cambiar.', code: 'authorization_required' });
-    try { return batchView(slug, await iterateItem(slug, id, itemId, body.data.note)); } catch (e) { return send(reply, e); }
+    try { return batchView(slug, await iterateItem(slug, id, itemId, body.data.note, body.data.revision ?? null)); } catch (e) { return send(reply, e); }
   });
   // Reintentar una historia que no llegó a trabajar, con los límites del lote (puede gastar: exige autorización).
   app.post('/api/workspaces/:slug/batches/:id/items/:itemId/retry', async (req, reply) => {

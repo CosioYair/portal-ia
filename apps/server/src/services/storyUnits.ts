@@ -69,7 +69,9 @@ function setUnit(ctx: StoryRunCtx, id: string, patch: Partial<WorkUnit> | ((u: W
   saveManifest(ctx, m => { const u = m.units.find(x => x.id === id)!; if (typeof patch === 'function') patch(u); else Object.assign(u, patch); });
 }
 const worktreeOf = (ctx: StoryRunCtx) => { const wt = resultOf(ctx).applied?.worktree; return wt && fs.existsSync(wt) ? wt : null; };
-const basePathOf = (ctx: StoryRunCtx) => worktreeOf(ctx) ?? ctx.repoPath;
+/** Dónde se lee el código: el worktree de la historia o, antes de su primer commit, el preparado sobre su dependencia. */
+const basePathOf = (ctx: StoryRunCtx) => worktreeOf(ctx) ?? stackedRoot(ctx) ?? ctx.repoPath;
+const stackedRoot = (ctx: StoryRunCtx) => { const wt = resultOf(ctx).stack?.worktree; return wt && fs.existsSync(wt) ? wt : null; };
 const linesOf = (text: string | null) => text === null ? 0 : text.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n').length;
 
 function purposeFor(file: string, tasks: string[], summary: string): string {
@@ -112,7 +114,7 @@ export function buildManifest(ctx: StoryRunCtx): StoryManifest {
   for (const f of plan.filesToChange) if (typeof f === 'string' && clean(f) && !planned.has(clean(f))) planned.set(clean(f), {});
   const deliverables: Deliverable[] = Array.from(planned, ([p, d]) => {
     const kind = d.kind && d.kind in RANK ? d.kind : kindOf(p);
-    const existing = readRepoFile(ctx.repoPath, p, 400_000);
+    const existing = readRepoFile(basePathOf(ctx), p, 400_000);
     // Archivo existente: se modifica con un parche (salida pequeña); nuevo: el tamaño que prevé el Coordinador o uno típico.
     const lines = existing === null ? Math.max(5, Math.min(2000, Math.round(Number(d.estimatedLines)) || KIND_LINES[kind])) : Math.min(140, Math.ceil(linesOf(existing) * 0.2) + 15);
     return { path: p, purpose: String(d.purpose || purposeFor(p, plan.tasks, plan.summary)).slice(0, 300), kind, planned: true, status: 'pending', unitId: null, commit: null, lines: null, estimatedLines: lines, note: null };
@@ -368,7 +370,7 @@ async function commitUnit(ctx: StoryRunCtx, unit: WorkUnit, label: string, valid
   const msg = `${ctx.item.storyId}: ${label} — ${unit.title}\n\nEntrega incremental del equipo de agentes de Portal IA (pipeline autorizado).\nProceso: ${ctx.processId}`;
   if (!r.applied) {
     // La rama nace del commit de main que vio el Desarrollador (fijado al empezar), no del main de ahora.
-    const a = await applyChanges(ctx.repoPath, `portal-ia/${ctx.item.storyId.toLowerCase()}`, valid, msg, { processId: ctx.processId, base: r.baseCommit ?? null });
+    const a = await applyChanges(ctx.repoPath, `portal-ia/${ctx.item.storyId.toLowerCase()}`, valid, msg, { processId: ctx.processId, base: r.baseCommit ?? null, keepBaseWorktree: !!r.stack });
     commit = a.commit; files = a.files;
     updateResult(ctx.slug, ctx.processId, x => ({ ...x, applied: { ...a, appliedAt: now() } }));
   } else {
@@ -377,7 +379,7 @@ async function commitUnit(ctx: StoryRunCtx, unit: WorkUnit, label: string, valid
     updateResult(ctx.slug, ctx.processId, x => ({ ...x, applied: { ...x.applied!, commit, files: Array.from(new Set([...x.applied!.files, ...files])), appliedAt: now() } }));
   }
   const wt = resultOf(ctx).applied!.worktree!;
-  const all = await changesSinceBase(ctx.repoPath, wt);
+  const all = await changesSinceBase(ctx.repoPath, wt, resultOf(ctx).stack?.commit);
   updateResult(ctx.slug, ctx.processId, x => ({ ...x, changes: all }));
   processesRepo(ctx.slug).logExecution({ projectId: ctx.project.id, agentId: unit.agentId, kind: 'repo_write', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: now() });
   emit(ctx, 'apply', `${label[0].toUpperCase()}${label.slice(1)} aplicada en el worktree aislado (rama ${resultOf(ctx).applied!.branch}, commit ${commit}). Tu carpeta del Portal no cambia.`, { phase: 'applying', detail: files.join(', ') });

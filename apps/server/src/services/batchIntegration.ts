@@ -2,7 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { SHARED_FILE, integrationOrder, mentionedFiles, type Batch, type BatchItem, type CandidateFreshness, type FileBasis, type IntegrationPlan, type IntegrationPlanInput, type Process } from '@portal-ia/domain';
 import { backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
-import { mainBranch, repoRoot } from './repoWrite.ts';
+import { mainBranch, ownBase, repoRoot } from './repoWrite.ts';
 import { revisionStatus } from './revision.ts';
 
 /**
@@ -33,11 +33,14 @@ export interface StoryGitFacts {
   files: string[]; adds: string[];
 }
 
-/** Hechos de git de la rama de una historia frente a main (solo lectura). */
-export async function storyGitFacts(repoPath: string, branch: string): Promise<StoryGitFacts> {
+/**
+ * Hechos de git de la rama de una historia frente a main (solo lectura). `stackBase`: preparada sobre la versión
+ * provisional de su dependencia (aún no integrada): sus archivos son los que cambia desde ese commit (ver ownBase).
+ */
+export async function storyGitFacts(repoPath: string, branch: string, stackBase?: string | null): Promise<StoryGitFacts> {
   const root = repoRoot(repoPath);
   const target = await mainBranch(root, branch);
-  const [base, mainHead, head] = [await git(root, ['merge-base', target, branch]), await git(root, ['rev-parse', target]), await git(root, ['rev-parse', branch])];
+  const [base, mainHead, head] = [await ownBase(root, branch, target, stackBase), await git(root, ['rev-parse', target]), await git(root, ['rev-parse', branch])];
   // --no-renames: un archivo renombrado cuenta por su ruta vieja y la nueva (las dos pueden chocar con otra historia).
   const files = lines(await git(root, ['diff', '--name-only', '--no-renames', base, branch]));
   const adds = lines(await git(root, ['diff', '--name-only', '--no-renames', '--diff-filter=A', base, branch]));
@@ -49,11 +52,11 @@ export async function storyGitFacts(repoPath: string, branch: string): Promise<S
  * entre el main que incorpora y su rama. Un merge limpio de main la conserva; conflictos resueltos o correcciones la
  * cambian. Sirve para saber si lo que aceptaste sigue siendo lo que se integra.
  */
-export async function storyPatchId(repoPath: string, branch: string): Promise<string | null> {
+export async function storyPatchId(repoPath: string, branch: string, stackBase?: string | null): Promise<string | null> {
   const root = repoRoot(repoPath);
   try {
     const target = await mainBranch(root, branch);
-    const base = await git(root, ['merge-base', target, branch]);
+    const base = await ownBase(root, branch, target, stackBase);
     const diff = (await execFileP('git', ['diff', '-U0', '--no-color', '--no-renames', base, branch], { cwd: root, maxBuffer: 50 * 1024 * 1024, windowsHide: true })).stdout;
     if (!diff.trim()) return 'empty';
     const out = await new Promise<string>((resolve, reject) => {
@@ -91,19 +94,35 @@ export async function abortPendingMerge(worktree: string | null): Promise<boolea
  * ¿Sigue valiendo la evidencia de esta historia con el main actual? Sin IA. Una historia sin rama o sin git queda
  * `unknown` (nunca se presenta como vigente). `current` exige además que QA cubra el commit actual (revision.ts).
  */
-export async function freshnessOf(slug: string, p: Process): Promise<CandidateFreshness> {
+export async function freshnessOf(slug: string, p: Process, opts: { dependencyHead?: string | null } = {}): Promise<CandidateFreshness> {
   const at = new Date().toISOString();
   const r = p.result; const branch = r?.applied?.branch;
   const repo = projectsRepo(slug).repository(p.projectId);
   if (!branch || !repo) return { status: 'unknown', base: null, mainHead: null, head: r?.applied?.commit ?? null, overlap: [], causes: [], checkedAt: at, detail: 'Sin rama aplicada: no hay evidencia que comparar con main.' };
   let f: StoryGitFacts;
-  try { f = await storyGitFacts(repo.path, branch); }
+  const st = r?.stack ?? null;
+  try { f = await storyGitFacts(repo.path, branch, st?.commit); }
   catch (e: any) { return { status: 'unknown', base: null, mainHead: null, head: r?.applied?.commit ?? null, overlap: [], causes: [], checkedAt: at, detail: `git no pudo comparar la rama con main: ${String(e?.message ?? e).split('\n')[0].slice(0, 200)}` }; }
   const rev = revisionStatus(p);
   const base = { base: short(f.base), mainHead: short(f.mainHead), head: short(f.head), checkedAt: at };
   // La evidencia es del commit REGISTRADO; si la rama tiene otro (p. ej. un merge que un reinicio dejó sin registrar), no vale.
   const recorded = r?.applied?.commit ?? null;
   if (recorded && !f.head.startsWith(recorded.slice(0, 7))) return { ...base, status: 'stale', overlap: [], causes: [], detail: `La rama tiene commits que el Portal no registró (${short(recorded)} → ${short(f.head)}): su evidencia no cubre lo que hay; se pone al día antes de presentarla como vigente.` };
+  const root0 = repoRoot(repo.path);
+  if (st) {
+    // Preparada sobre una versión provisional de su dependencia: solo vale si ESA versión acabó en main. Si la dependencia se
+    // rehízo desde main (otra versión), su rama arrastra commits que nunca aceptaste: no se pone al día ni se integra.
+    if (!(await isAncestorIn(root0, st.commit, f.mainHead))) return { ...base, status: 'unknown', overlap: [], causes: [st.storyId], stackInvalid: true, detail: `Se preparó sobre una versión provisional de ${st.storyId} (${short(st.commit)}) que no está en main: ${st.storyId} se integró con otra versión. Sus commits no se integran; iterarla la rehace sobre main.` };
+    // La dependencia cambió mientras la revisabas (p. ej. pediste cambios): hasta que esta rama incorpore la versión final y QA
+    // la revise, su evidencia es de la versión provisional.
+    const dep = opts.dependencyHead ?? null;
+    const qaCommit = rev?.qa.commit ?? null;
+    if (dep && !same7(dep, st.commit) && (!(await isAncestorIn(root0, dep, f.head)) || !qaCommit || !(await isAncestorIn(root0, dep, qaCommit)))) {
+      const depFiles = lines(await git(root0, ['diff', '--name-only', '--no-renames', st.commit, dep]).catch(() => ''));
+      const mt = await mergeConflicts(root0, f.mainHead, f.head);
+      return { ...base, status: 'stale', overlap: depFiles.slice(0, 30), causes: [st.storyId], conflicts: mt.slice(0, 20), dependencyChanged: true, detail: `Se preparó sobre ${st.storyId} ${short(st.commit)} y ${st.storyId} se integró con cambios posteriores (${short(dep)}, ${depFiles.length} archivo(s)): se pone al día con la versión final, se verifica en el sandbox y QA la revisa otra vez${mt.length ? ` (conflictos previstos en ${mt.slice(0, 3).join(', ')})` : ''}.` };
+    }
+  }
   if (f.base === f.mainHead) {
     const covered = !!rev?.qa.coversHead && !!rev.verifiedHead;
     return { ...base, status: covered ? 'current' : 'stale', overlap: [], causes: [], detail: covered ? null : (rev?.qa.why ?? 'La evidencia no cubre el commit actual.') };
@@ -116,8 +135,14 @@ export async function freshnessOf(slug: string, p: Process): Promise<CandidateFr
   const behind = Number(await git(root, ['rev-list', '--count', `${f.base}..${f.mainHead}`]).catch(() => '0')) || 0;
   if (!overlap.length) return { ...base, status: rev?.qa.coversHead ? 'clean_carry' : 'stale', overlap: [], causes, detail: rev?.qa.coversHead ? `main avanzó ${behind} commit(s)${causes.length ? ` (${causes.join(', ')})` : ''} sin tocar sus archivos ni compartidos: la evidencia se arrastra y al integrar se verifica otra vez sin IA.` : (rev?.qa.why ?? null) };
   // Predicción de conflictos en memoria (merge-tree, no toca nada): se dice antes de ponerla al día.
-  const mt = await execFileP('git', ['merge-tree', '--write-tree', '--name-only', f.mainHead, f.head], { cwd: root, maxBuffer: 20 * 1024 * 1024, windowsHide: true }).then(() => [] as string[]).catch((e: any) => e?.code === 1 ? lines(String(e.stdout ?? '').split(/\r?\n\r?\n/)[0]).slice(1) : [] as string[]);
+  const mt = await mergeConflicts(root, f.mainHead, f.head);
   return { ...base, status: 'stale', overlap: overlap.slice(0, 30), causes, conflicts: mt.slice(0, 20), detail: `main avanzó ${behind} commit(s)${causes.length ? ` (${causes.join(', ')})` : ''} y cambió ${overlap.length} archivo(s) suyos o compartidos (${overlap.slice(0, 4).join(', ')}${overlap.length > 4 ? '…' : ''}): su evidencia es de ${short(f.base)} y hay que ponerla al día${mt.length ? ` (conflictos previstos en ${mt.slice(0, 3).join(', ')})` : ''}.` };
+}
+
+const same7 = (a: string, b: string) => a.slice(0, 7) === b.slice(0, 7);
+/** Archivos en conflicto al combinar dos commits, calculado en memoria (git merge-tree): no toca ninguna referencia. */
+export async function mergeConflicts(root: string, a: string, b: string): Promise<string[]> {
+  return execFileP('git', ['merge-tree', '--write-tree', '--name-only', a, b], { cwd: root, maxBuffer: 20 * 1024 * 1024, windowsHide: true }).then(() => [] as string[]).catch((e: any) => e?.code === 1 ? lines(String(e.stdout ?? '').split(/\r?\n\r?\n/)[0]).slice(1) : [] as string[]);
 }
 
 // ---------------------------------------------------------------- Orden de integración
@@ -160,7 +185,7 @@ export async function computeIntegrationPlan(slug: string, b: Batch): Promise<In
     const p = procOf(slug, it);
     let files: string[] = []; let adds: string[] = []; let basis: FileBasis = 'none';
     if (p?.result?.applied?.branch && root) {
-      try { const f = await storyGitFacts(root, p.result.applied.branch); files = f.files; adds = f.adds; basis = 'actual'; } catch { /* rama desaparecida: se usa el plan */ }
+      try { const f = await storyGitFacts(root, p.result.applied.branch, p.result.stack?.commit); files = f.files; adds = f.adds; basis = 'actual'; } catch { /* rama desaparecida: se usa el plan */ }
     }
     if (basis === 'none' && p?.result?.plan?.filesToChange?.length) { files = p.result.plan.filesToChange; basis = 'planned'; }
     if (basis === 'none') { files = predictFiles(text, all); basis = files.length ? 'predicted' : 'none'; }

@@ -347,6 +347,18 @@ export interface StoryRunCtx {
   unit?: { prompt: string; files: string[]; basePath: string; label: string } | null;
 }
 
+/**
+ * Raíz desde la que se lee el código de la historia. Una preparada sobre la versión provisional de su dependencia lee su
+ * worktree (aplicado o, antes del primer commit, el preparado): main no tiene el código de la dependencia. Las demás,
+ * como siempre (la unidad en curso o el repositorio).
+ */
+export function readRootOf(ctx: StoryRunCtx): string {
+  if (ctx.unit?.basePath) return ctx.unit.basePath;
+  const r = processesRepo(ctx.slug).get(ctx.processId)?.result;
+  if (r?.stack) for (const wt of [r.applied?.worktree, r.stack.worktree]) if (wt && fs.existsSync(wt)) return wt;
+  return ctx.repoPath;
+}
+
 export const fileExistsIn = (base: string) => (rel: string) => { try { return fs.existsSync(path.join(base, safeRelPath(rel))); } catch { return false; } };
 /** Duración máxima autorizada (se comprueba antes de cada unidad y de cada llamada, no solo por vuelta del pipeline). */
 export function checkDuration(ctx: StoryRunCtx, cfg: PipelineConfig) {
@@ -405,7 +417,7 @@ function repairPrompt(ctx: StoryRunCtx, a: DevOutputAssessment, previous: string
   const got = new Set([...ok.map(c => c.path), ...bad.map(c => c.path)]);
   const neverSent = (ctx.plan?.filesToChange ?? []).filter(f => !got.has(f) && f !== a.truncatedFile);
   const resend = Array.from(new Set([...(a.truncatedFile ? [a.truncatedFile] : []), ...bad.map(c => c.path), ...neverSent]));
-  const extraFiles = Array.from(new Set([...a.requestedFiles, ...bad.map(c => c.path)])).map(f => { const c = readRepoFile(ctx.repoPath, f, 30_000); return c === null ? null : `## ${f}\n\`\`\`\n${c}\n\`\`\``; }).filter(Boolean).join('\n\n').slice(0, 90_000);
+  const extraFiles = Array.from(new Set([...a.requestedFiles, ...bad.map(c => c.path)])).map(f => { const c = readRepoFile(readRootOf(ctx), f, 30_000); return c === null ? null : `## ${f}\n\`\`\`\n${c}\n\`\`\``; }).filter(Boolean).join('\n\n').slice(0, 90_000);
   const partial = ok.length > 0 && (a.kind === 'truncated' || a.kind === 'incomplete' || bad.length > 0);
   return `Tu entrega anterior para esta historia no se pudo convertir en cambios aplicables. NO repitas el plan ni el análisis: repara la ENTREGA.
 # Diagnóstico (automático, sin IA)
@@ -470,7 +482,7 @@ export function filesContext(base: string, files: string[], budget: number, omit
 /** Contexto que pidió el agente y que el equipo puede darle sin preguntar a nadie: archivos del repositorio. */
 function suppliedFiles(ctx: StoryRunCtx, files: string[]): string {
   let budget = 90_000;
-  return files.map(f => { const c = readRepoFile(ctx.unit?.basePath ?? ctx.repoPath, f, 30_000); if (c === null || budget <= 0) return null; budget -= c.length; return `## ${f}\n\`\`\`\n${c}\n\`\`\``; }).filter(Boolean).join('\n\n');
+  return files.map(f => { const c = readRepoFile(readRootOf(ctx), f, 30_000); if (c === null || budget <= 0) return null; budget -= c.length; return `## ${f}\n\`\`\`\n${c}\n\`\`\``; }).filter(Boolean).join('\n\n');
 }
 
 function continuationPrompt(ctx: StoryRunCtx, need: string, info: string, previous: string): string {
@@ -545,7 +557,7 @@ ${blocker.need}
 # Plan del Coordinador
 ${ctx.plan ? JSON.stringify(ctx.plan, null, 2) : '(sin plan)'}
 # Contenido actual de los archivos del plan (ya incluido: no hace falta buscarlo)
-${filesContext(ctx.unit?.basePath ?? ctx.repoPath, planFiles(ctx.plan), CONSULT_EVIDENCE_CHARS)}`, 2500);
+${filesContext(readRootOf(ctx), planFiles(ctx.plan), CONSULT_EVIDENCE_CHARS)}`, 2500);
     const res = await stepCall(ctx, ctx.dev, 'implementer', `Implementación con la respuesta de ${consultant.config.name}`, `Consultó a ${consultant.config.name}`, system, continuationPrompt(ctx, blocker.need, `## Respuesta de ${consultant.config.name} (${consultant.template.role})\n${`${cRes.recovered ? RECOVERED_NOTE : ''}${cRes.text.trim()}`.slice(0, 8000)}`, previous), DEV_MAX_TOKENS);
     return { text: res.text, stopReason: res.stopReason, refusal: res.refusal ?? null, stepId: res.stepId };
   }
@@ -581,7 +593,7 @@ export interface Settled { outcome: 'ok' | 'no_changes'; changes: ProposedChange
  * resultado se devuelve a la unidad para aplicarlo; sin `unit`, se finaliza la implementación de la historia entera.
  */
 async function settleCore(ctx: StoryRunCtx, outputs: DevOutput[], opts: { config: PipelineConfig | null; unit?: UnitHooks }): Promise<Settled> {
-  const base = ctx.unit?.basePath ?? ctx.repoPath;
+  const base = readRootOf(ctx);
   const knownFiles = [...(ctx.plan ? [...ctx.plan.filesToRead, ...ctx.plan.filesToChange] : []), ...(ctx.unit?.files ?? [])];
   const exists = fileExistsIn(base);
   const evaluate = () => {
@@ -832,7 +844,7 @@ ${PATCH_ONLY_FORMAT}`;
   requirePolicy('write_worktree', { slug: ctx.slug, processId: ctx.processId, agentId: ctx.dev.id, projectId: ctx.project.id, authorized: true });
   try {
     const c = await commitInWorktree(wt, fixes, `${ctx.item.storyId}: corrección ${n} (pipeline)\n\nProceso: ${ctx.processId}`);
-    const all = await changesSinceBase(ctx.repoPath, wt);
+    const all = await changesSinceBase(ctx.repoPath, wt, processesRepo(ctx.slug).get(ctx.processId)!.result?.stack?.commit);
     updateResult(ctx.slug, ctx.processId, x => ({ ...x, changes: all, applied: { ...x.applied!, commit: c.commit, files: Array.from(new Set([...x.applied!.files, ...c.files])), appliedAt: now() } }));
     updatePipeline(ctx.slug, ctx.processId, { corrections: n, ineffectiveRounds: 0 });
     emit(ctx, 'correction', `Corrección ${n} aplicada (commit ${c.commit}). Se repite la verificación.`, { costUsd: res.costUsd, detail: c.files.join(', ') });
@@ -1027,6 +1039,9 @@ export async function resumeStory(slug: string, processId: string, log: (o: any,
     // Un commit que el equipo no hizo (o cambios sin confirmar) deja obsoleta la evidencia guardada: no se paga nada contra ella.
     const drift = await worktreeDrift(procs.get(processId)!.result);
     if (drift && drift.state !== 'same') throw new PipelinePause('external', driftMessage(drift));
+    // Apilada: su worktree preparado sobre la dependencia existe (se rehace si un fallo o un reinicio lo retiró) y su rama
+    // conserva esa versión; si no, se detiene sin llamar a la IA.
+    if (procs.get(processId)!.result?.stack) { try { await (await import('./stackedBranch.ts')).ensureStackWorktree(slug, processId); } catch (e: any) { throw new PipelinePause('external', `No se puede retomar sobre la versión provisional de su dependencia: ${e?.message ?? e}. No se ha llamado a la IA.`); } }
     const cur = procs.get(processId)!.result!;
     if (cur.manifest) (await import('./storyUnits.ts')).prepareResume(ctx);
     else if (!cur.applied && !cur.changes.some(c => !c.error)) {

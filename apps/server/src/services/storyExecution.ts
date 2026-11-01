@@ -18,6 +18,7 @@ import { assessDeveloperOutput, failureClassOf, mergeChanges, type ParsedDevOutp
 import { callAgentStep, CONSULT_EVIDENCE_CHARS, filesContext, implementerOutputs, isTruncatedStop, newPipeline, pausePipeline, PipelinePause, planFiles, providerPause, runPipelineStages, settleImplementation, StoryFailure, updateResult, worstCaseCallUsd, type StoryRunCtx } from './storyPipeline.ts';
 export { parseFileBlocks, parseRuntimeChecks } from './devOutput.ts';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { setWorkStatus, workItemOf, type WorkItem } from './workItems.ts';
@@ -208,7 +209,11 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   const item = workItemOf(slug, proc)!;
   const project = projectsRepo(slug).get(proc.projectId)!;
   const repo = projectsRepo(slug).repository(project.id)!;
-  const ctx = buildRepoContext(repo.path, 60_000);
+  // Preparada sobre la versión provisional de su dependencia: el plan, las consultas y el Desarrollador leen SU worktree
+  // (el código de la dependencia, aún sin integrar), no main. La rama nace de ese commit (ver ExecutionResult.stack).
+  const stack = proc.result?.stack ?? null;
+  const readRoot = stack?.worktree && fs.existsSync(stack.worktree) ? stack.worktree : repo.path;
+  const ctx = buildRepoContext(readRoot, 60_000);
   const treeText = `## Árbol del repositorio\n\`\`\`\n${ctx.tree}\n\`\`\``;
   const docs = knowledge.list(project.id);
   // Con una etapa vigente, la dirección es su línea base (y una síntesis escrita en la etapa); la síntesis anterior es histórica.
@@ -221,7 +226,7 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   const accepted = proc.result?.gauntlet?.planReview?.ownerAccepted && proc.result.plan ? proc.result.plan : null;
   // Plan de una ejecución anterior detenida antes de implementar: se reutiliza (ya se pagó); su revisión sí se hace.
   const carried = !accepted && proc.result?.carriedPlan && proc.result.plan ? proc.result.plan : null;
-  const result: ExecutionResult = { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: proc.result?.team ?? null, consultations: [], iterationContext: proc.result?.iterationContext ?? null, pipeline: config ? (accepted && proc.result?.pipeline ? { ...newPipeline(config), events: proc.result.pipeline.events } : newPipeline(config)) : null, failure: null, ...(accepted ? { gauntlet: proc.result!.gauntlet } : {}) };
+  const result: ExecutionResult = { plan: null, implementationSummary: null, changes: [], verifyCommands: [], review: null, applied: null, verifications: [], team: proc.result?.team ?? null, consultations: [], iterationContext: proc.result?.iterationContext ?? null, pipeline: config ? (accepted && proc.result?.pipeline ? { ...newPipeline(config), events: proc.result.pipeline.events } : newPipeline(config)) : null, failure: null, ...(accepted ? { gauntlet: proc.result!.gauntlet } : {}), ...(stack ? { stack, baseCommit: stack.commit } : {}) };
   const iterText = result.iterationContext ? `\n# Contexto de iteración (feedback del propietario y estado anterior; OBLIGATORIO tenerlo en cuenta)\n${result.iterationContext}\n` : '';
   const involved = Array.from(new Set(proc.steps.map(s => s.agentId)));
   const roleStep = (role: TeamRole) => { const st = stepByRole(proc, role); if (!st) throw new Error(`El proceso no tiene paso de ${role}.`); return st; };
@@ -240,6 +245,8 @@ export async function runStory(slug: string, processId: string, log: (o: any, m:
   let runCtx: StoryRunCtx | null = null;
 
   try {
+    // Apilada sin su worktree preparado: se detiene ANTES de cualquier llamada (sobre main no está el código de su dependencia).
+    if (stack && readRoot !== stack.worktree) throw new PipelinePause('external', `No está el worktree preparado sobre la versión de ${stack.storyId} (${stack.commit.slice(0, 7)}) en el que debe trabajar: sin él, el equipo leería main sin el código de su dependencia. No se ha llamado a la IA; continúala para prepararlo otra vez.`);
     // 1 · Plan técnico
     cancelled();
     const planStep = roleStep('planner'); const coord = agents.get(planStep.agentId)!;
@@ -308,7 +315,7 @@ Responde SOLO con el JSON del plan completo, en el mismo formato.`, MAX_TOKENS.p
       return { agentId: consultant.id, agentName: consultant.config.name, role: consultant.template.role, text: `${cRes.recovered ? RECOVERED_NOTE : ''}${cRes.text.trim()}`.slice(0, 8000) };
     };
     // Paquete de evidencia: el contenido de los archivos que el plan ya conoce (sin él, el especialista los busca y agota turnos).
-    const evidence = filesContext(repo.path, planFiles(plan), CONSULT_EVIDENCE_CHARS);
+    const evidence = filesContext(readRoot, planFiles(plan), CONSULT_EVIDENCE_CHARS);
     const consultPrompt = (consultant: Agent) => `Como ${consultant.template.role.toLowerCase()}, aporta recomendaciones concretas y accionables para esta historia desde tu especialidad, a partir del plan del Coordinador. Máximo 10 puntos, cada uno de una o dos líneas, en orden de importancia; indica archivos o pantallas cuando aplique. No escribas código completo.
 # Plan
 ${JSON.stringify(plan, null, 2)}
@@ -354,7 +361,7 @@ ${treeText}`;
       runCtx = rc;
       const units = await import('./storyUnits.ts');
       // Base de la historia: el main que verá el Desarrollador en su primera unidad (ver ExecutionResult.baseCommit).
-      const baseCommit = await mainHead(repo.path).catch(() => null);
+      const baseCommit = stack ? stack.commit : await mainHead(repo.path).catch(() => null);
       units.startIncremental(rc, implStep.status === 'pending' ? implStep.id : null, baseCommit);
       await runPipelineStages(rc);
       const fin = procs.get(processId)!.result!;
@@ -363,7 +370,7 @@ ${treeText}`;
       return;
     }
     // Contexto acotado: archivos del plan, cada uno hasta 30 000 caracteres y 120 000 en total (lo demás, el modelo lo parchea a ciegas con contexto suficiente o lo pide en NOTAS).
-    const filesCtx = filesContext(repo.path, planFiles(plan), 120_000, '; si debes modificarlo usa patch con fragmentos que conozcas o crea un módulo nuevo');
+    const filesCtx = filesContext(readRoot, planFiles(plan), 120_000, '; si debes modificarlo usa patch con fragmentos que conozcas o crea un módulo nuevo');
     const implPrompt = `Implementa la historia siguiendo este plan del Coordinador:
 ${JSON.stringify(plan, null, 2)}
 ${iterText}${consultText}

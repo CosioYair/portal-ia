@@ -2,7 +2,7 @@ import type { RestoreSupersededResult, StoryDecisionHistory } from '@portal-ia/d
 import type { PipelineConfig, PhaseTransition, PhaseTransitionPreview, ProjectArchive, StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
 import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
-import type { BatchPreview, BatchView, GauntletAdvice, GauntletConfig, GauntletProjectInfo } from '@portal-ia/domain';
+import type { BatchPolicyChange, BatchPreview, BatchView, GauntletAdvice, GauntletConfig, GauntletProjectInfo, PreviewRecord } from '@portal-ia/domain';
 import type { OrgApplication, OrgBriefAttachment, OrgChange, OrgDecision, OrgEvaluation, OrgEvaluationBrief, OrgProposal, OrgProposalSpec } from '@portal-ia/domain';
 import type { ClaudeCodeRun, ClaudeCodeStatusView, ClaudeCodeUsage, ClaudeCodeUsageReport, ClaudeCodeWorkerView, ClaudeCodeWorkspaceView, ExecutionBackend } from '@portal-ia/domain';
 import type { Assignment, AssistantConversation, ConversationArtifact, ConversationDecision, ConversationStage } from '@portal-ia/domain';
@@ -335,10 +335,16 @@ export const api = {
   /** Cierre manual de un lote en pausa con motivo obligatorio (sin costo de IA). 409 si el lote no está en pausa. */
   closeBatch: (slug: string, projectId: string, id: string, reason: string) => request<BatchView>(`/api/workspaces/${slug}/projects/${projectId}/batches/${id}/close`, { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) }),
   batchControl: (slug: string, id: string, action: 'pause' | 'resume' | 'cancel' | 'revoke', body: Record<string, unknown> = {}) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/${action}`, { method: 'POST', body: JSON.stringify(action === 'resume' ? { ...body, authorized: true } : body) }),
-  acceptBatchItems: (slug: string, id: string, itemIds: string[], note?: string, checks?: Record<string, boolean[]>) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/accept`, { method: 'POST', body: JSON.stringify({ itemIds, note: note?.trim() || undefined, checks }) }),
+  /** `revisions`: commit que tenías delante al decidir (p. ej. el de la vista previa): si cambió, el servidor no lo aplica. */
+  acceptBatchItems: (slug: string, id: string, itemIds: string[], note?: string, checks?: Record<string, boolean[]>, revisions?: Record<string, string>) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/accept`, { method: 'POST', body: JSON.stringify({ itemIds, note: note?.trim() || undefined, checks, revisions }) }),
+  batchPolicy: (slug: string, id: string) => request<BatchPolicyView>(`/api/workspaces/${slug}/batches/${id}/policy`),
+  changeBatchPolicy: (slug: string, id: string, body: { publish: boolean; activate: boolean; note?: string }) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/policy`, { method: 'POST', body: JSON.stringify({ ...body, note: body.note?.trim() || undefined, integration: 'on_acceptance', authorized: true }) }),
+  previews: (slug: string, processId: string) => request<(PreviewRecord & { live: boolean })[]>(`/api/workspaces/${slug}/processes/${processId}/previews`),
+  startPreview: (slug: string, processId: string) => request<PreviewRecord>(`/api/workspaces/${slug}/processes/${processId}/previews`, { method: 'POST', body: '{}' }),
+  stopPreview: (slug: string, processId: string, previewId: string) => request<PreviewRecord | null>(`/api/workspaces/${slug}/processes/${processId}/previews/${previewId}`, { method: 'DELETE' }),
   rejectBatchItem: (slug: string, id: string, itemId: string, note: string, failedSteps: string[]) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/reject`, { method: 'POST', body: JSON.stringify({ note, failedSteps }) }),
   reopenBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/reopen`, { method: 'POST', body: '{}' }),
-  iterateBatchItem: (slug: string, id: string, itemId: string, note: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/iterate`, { method: 'POST', body: JSON.stringify({ authorized: true, note }) }),
+  iterateBatchItem: (slug: string, id: string, itemId: string, note: string, revision?: string | null) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/iterate`, { method: 'POST', body: JSON.stringify({ authorized: true, note, revision: revision || undefined }) }),
   retryBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/retry`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   cancelBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/cancel`, { method: 'POST', body: '{}' }),
   postponeBatchItem: (slug: string, id: string, itemId: string, note: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/postpone`, { method: 'POST', body: JSON.stringify({ note }) }),
@@ -350,5 +356,16 @@ export interface BatchRequest {
   title?: string; itemIds: string[]; backends?: ('api' | 'claude_code')[]; apiFallback?: boolean;
   totalBudgetUsd: number; perStoryBudgetUsd: number; maxCorrections?: number; maxDurationMin?: number; maxSubscriptionCalls?: number;
   gauntlet?: GauntletConfig; concurrency?: number; commands?: ('typecheck' | 'test' | 'build')[]; allowInstall?: boolean;
-  git?: { merge?: boolean; activate?: boolean; publish?: boolean; integration?: 'auto' | 'on_acceptance' }; autoResume?: boolean;
+  git?: { merge?: boolean; activate?: boolean; publish?: boolean; integration?: 'auto' | 'on_acceptance'; prepareDependents?: boolean }; autoResume?: boolean;
+}
+
+/** Política de integración de un lote y lo que haría cambiarla / reanudar (GET /batches/:id/policy). */
+export interface BatchPolicyView {
+  policy: string; label: string; git: BatchView['auth']['git'];
+  canChange: boolean; blockedBy: string | null;
+  alreadyIntegrated: { itemId: string; storyId: string; commit: string; activated: boolean; accepted: boolean }[];
+  willBecomeReady: { itemId: string; storyId: string; from: string }[];
+  resumeNow: { itemId: string; storyId: string; effect: string }[];
+  resumeAfter: { itemId: string; storyId: string; effect: string }[];
+  history: BatchPolicyChange[];
 }

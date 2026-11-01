@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { gauntletReviewed } from '@portal-ia/domain';
-import type { IntegrationCandidate, BranchIntegration, Process } from '@portal-ia/domain';
+import type { IntegrationCandidate, BranchIntegration, ExecutionResult, Process } from '@portal-ia/domain';
 import { backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { changesSinceBase, mainBranch, repoRoot, safeRelPath, writablePath } from './repoWrite.ts';
 import { parseFileBlocks } from './devOutput.ts';
@@ -152,7 +152,7 @@ export async function processIntegration(slug: string, processId: string): Promi
 
 /** Registra el candidato preparado: nuevo commit de la rama, archivos y cambios desde la base, y el evento. */
 async function recordCandidate(slug: string, processId: string, repoPath: string, wt: string, res: Awaited<ReturnType<typeof prepareCandidate>>, resolvedBy: IntegrationCandidate['resolvedBy']) {
-  const changes = await changesSinceBase(repoPath, wt);
+  const changes = await changesSinceBase(repoPath, wt, processesRepo(slug).get(processId)!.result?.stack?.commit);
   const rec: IntegrationCandidate = { state: 'candidate', at: now(), target: res.status.target, targetHead: res.status.targetHead, behindCount: res.status.behindCount, commit: res.commit, previousCommit: res.previous, files: res.files, conflicts: res.status.conflicts.map(c => c.path), resolvedBy };
   updateResult(slug, processId, x => ({
     ...x, changes, mergeError: null, integration: rec,
@@ -202,8 +202,19 @@ export async function prepareIntegration(slug: string, processId: string): Promi
   // main entra en la rama de la historia en el carril del repositorio: nunca a la vez que otra integración en main.
   return withRepoLock(repo.path, () => prepareIntegrationLocked(slug, processId));
 }
+/**
+ * Preparada sobre la versión PROVISIONAL de su dependencia (ExecutionResult.stack): main no entra en su rama hasta que esa
+ * versión esté en main. Antes, la combinación mezclaría main con código de la dependencia sin aprobar y su diff, su QA y
+ * su huella dejarían de ser solo suyos.
+ */
+export async function assertStackIntegrated(repoPath: string, r: Pick<ExecutionResult, 'stack' | 'applied'>): Promise<void> {
+  const st = r.stack; if (!st) return;
+  const root = repoRoot(repoPath); const target = await mainBranch(root, r.applied?.branch ?? '');
+  if ((await run(root, ['merge-base', '--is-ancestor', st.commit, target])).code !== 0) throw fail(409, `Se preparó sobre una versión provisional de ${st.storyId} (${st.commit.slice(0, 7)}) que aún no está en ${target}: se pone al día cuando aceptes e integres ${st.storyId}.`, 'stack_base_not_integrated');
+}
 async function prepareIntegrationLocked(slug: string, processId: string): Promise<{ state: 'up_to_date' | 'candidate' | 'conflicts'; status: BranchIntegration }> {
   const { r, wt, repo } = storyOf(slug, processId);
+  await assertStackIntegrated(repo.path, r);
   const head = await must(wt, ['rev-parse', '--short', 'HEAD']);
   const recorded = await must(wt, ['rev-parse', '--short', `${r.applied!.commit}^{commit}`]);
   if (head !== recorded && await adoptCandidate(slug, processId, repo.path, wt, head, recorded)) return { state: 'candidate', status: await branchIntegration(repo.path, r.applied!.branch) };
@@ -246,6 +257,7 @@ export async function resolveIntegrationConflicts(slug: string, processId: strin
   const { ctx } = storyRunContext(slug, processId, log, isCancelled);
   const proc = procs.get(processId)!; const r = proc.result!; const wt = r.applied!.worktree!;
   const repo = projectsRepo(slug).repository(proc.projectId)!;
+  await assertStackIntegrated(repo.path, r);
   try {
     updatePipeline(slug, processId, { state: 'running', reason: null, pauseKind: null, finishedAt: null, phase: 'correcting' });
     const status = await branchIntegration(repo.path, r.applied!.branch);

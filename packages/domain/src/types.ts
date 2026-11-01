@@ -956,6 +956,15 @@ export interface ExecutionResult {
    */
   baseCommit?: string | null;
   /**
+   * Preparada SOBRE LA VERSIÓN PROVISIONAL de su dependencia (lote con integración al aceptar): la rama nace del commit
+   * verificado y revisado de la dependencia (`commit`, aún sin integrar), no de main. Sus cambios propios son los que van
+   * desde ese commit; nunca se integra mientras ese commit no esté en main (storyMerge lo exige). `worktree`: carpeta
+   * preparada antes de implementar para que el plan y el Desarrollador lean el código de la dependencia.
+   */
+  stack?: { storyId: string; commit: string; branch: string; worktree?: string | null; at: string } | null;
+  /** Vistas previas aisladas del candidato (sin IA): se conservan como evidencia aunque se detengan. */
+  previews?: PreviewRecord[];
+  /**
    * El Coordinador concluyó, a propósito, que la historia no cambia archivos del repositorio (auditoría, análisis, documento
    * en Conocimiento): no se implementa a ciegas ni se repite igual; se ofrece convertirla en un encargo de análisis.
    * `basis` es la huella de la historia (`planBasis`) con la que lo concluyó: volver a ejecutarla sin cambiarla no sirve.
@@ -1010,6 +1019,24 @@ export interface ExecutionResult {
   acceptance?: { at: string; by: 'owner'; batchId: string | null; note: string | null } | null;
 }
 export interface ExternalCorrection { at: string; commit: string; previousCommit: string; files: string[]; note: string; by: 'owner' }
+/**
+ * Vista previa temporal de un candidato de integración (ver apps/server/src/services/preview.ts): el árbol que dejaría
+ * integrar (main + candidato, `combined`) o, si chocan, la rama sola; en un contenedor sin red, con datos temporales y la
+ * IA simulada. `commit` y `mainHead` identifican exactamente lo que se ve; si cambian, la vista previa queda desactualizada.
+ */
+export interface PreviewRecord {
+  id: string;
+  /** Commit del candidato (cabeza de su rama) y de main al prepararla; `tree`: árbol exacto que se sirve. */
+  commit: string; mainHead: string | null; tree: string; combined: boolean;
+  /** Incluye una versión provisional de su dependencia (preparación apilada): cuál. */
+  includesProvisional?: { storyId: string; commit: string } | null;
+  profile: 'portal' | 'script';
+  status: 'starting' | 'ready' | 'failed' | 'stopped';
+  url: string | null;
+  startedAt: string; readyAt?: string | null; stoppedAt?: string | null; expiresAt: string;
+  /** Por qué falló o se detuvo (TTL, a petición, reinicio del Portal…) y las últimas líneas del contenedor. */
+  reason?: string | null; logTail?: string | null;
+}
 /** Integración de la rama de una historia con la rama principal (se calcula al leer, con git y sin IA). */
 export interface BranchIntegration {
   target: string; branch: string; base: string; targetHead: string; branchHead: string;
