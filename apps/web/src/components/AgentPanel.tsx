@@ -11,8 +11,9 @@ import { TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
 import { HARNESSES } from '@portal-ia/domain';
 import { FolderPicker } from './FolderPicker.tsx';
 import { DocumentsTab, ImprovementsTab, OriginTab } from './ExternalAgent.tsx';
+import { ChatTab, FeedbackForm } from './AgentChat.tsx';
 import { INTEGRATION_LABEL } from '@portal-ia/domain';
-import { osApi, type AgentMessage, type AgentPanel as Panel, type Department, type FolderStatus, type HarnessOptions, type OfficeAgent, type WorkItem } from '../lib/osApi.ts';
+import { osApi, type AgentPanel as Panel, type Department, type FolderStatus, type HarnessOptions, type OfficeAgent, type WorkItem } from '../lib/osApi.ts';
 
 /**
  * Panel de un agente: todo lo suyo en un sitio, sin navegar por seis pantallas.
@@ -87,79 +88,6 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
       </div>}
     </div>}
   </aside>, document.body);
-}
-
-// ---------------------------------------------------------------- Chat
-
-function ChatTab({ slug, p, projects, onChanged }: { slug: string; p: Panel; projects: { id: string; name: string }[]; onChanged: () => void }) {
-  const { flash, status } = useApp();
-  const id = p.agent.id;
-  const [msgs, setMsgs] = useState<AgentMessage[] | null>(null);
-  const [text, setText] = useState(() => { const k = `portal-ia.chat.prefill.${id}`; const v = sessionStorage.getItem(k) ?? ''; sessionStorage.removeItem(k); return v; });
-  const [billOk, setBillOk] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
-  const [fb, setFb] = useState<string | null>(null);
-  const projectId = p.agent.scope === 'project' ? p.agent.projectId : status.project?.id ?? projects[0]?.id ?? null;
-  const load = useCallback(() => osApi.chat(slug, id).then(r => setMsgs(r.messages)).catch(e => setError(e.message)), [slug, id]);
-  useEffect(() => { void load(); }, [load]);
-  useLive(c => c.ws === slug && c.entity === 'agent_chat' && c.id === id, () => void load(), { minMs: 300 });
-  const end = useRef<HTMLDivElement>(null);
-  useEffect(() => { end.current?.scrollIntoView({ block: 'end' }); }, [msgs?.length]);
-  const pending = msgs?.some(m => m.status === 'running');
-  const consoleOnly = p.agent.config.backend === 'claude-code-terminal';
-  const canSend = !busy && !pending && text.trim().length >= 2 && !p.retired && !consoleOnly && (!p.chat.estimate.billable || billOk);
-  const lastReply = msgs?.filter(m => m.role === 'agent' && m.status !== 'running').slice(-1)[0];
-  const send = async () => {
-    if (!canSend) return;
-    setBusy(true); setError(null);
-    try { await osApi.sendChat(slug, id, text.trim(), projectId, p.chat.estimate.billable ? billOk : undefined); setText(''); setBillOk(false); await load(); onChanged(); }
-    catch (e: any) { setError(e.message); } finally { setBusy(false); }
-  };
-  return <>
-    <div className="agent-panel-body">
-      {p.retired && <Notice kind="warn">Agente retirado: reactívalo desde Equipo de IA para conversar.</Notice>}
-      {consoleOnly && <Notice kind="info">{p.agent.config.name} trabaja desde tu propia consola de Claude Code, así que no puede conversar aquí. Dale trabajo en la pestaña <strong>Trabajo</strong>, o cambia con qué IA trabaja en <strong>Configuración</strong>.</Notice>}
-      <div className="sr" role="status" aria-live="polite">{lastReply ? `${p.agent.config.name} respondió.` : ''}</div>
-      <div className="chat-log">
-        {msgs === null ? <Spinner /> : msgs.length === 0 ? <p className="small muted">Aún no habéis hablado. Pregúntale lo que quieras sobre su especialidad; para un trabajo con entregable, usa la pestaña Trabajo.</p>
-          : msgs.map(m => <div key={m.id} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'owner' ? 'flex-end' : 'flex-start' }}>
-            <div className={`msg msg-${m.role}`}>{m.role === 'agent' && m.status === 'running' ? <span className="small">Pensando…</span> : m.role === 'agent' && m.content ? <Markdown text={m.content} /> : m.content}</div>
-            {m.role === 'agent' && <div className="msg-meta">
-              {m.status === 'failed' && <span style={{ color: 'var(--color-err-text)' }}>{m.error}</span>}
-              {m.status === 'interrupted' && <span>{m.error}</span>}
-              {m.status === 'done' && <><span>{m.harness === 'api' ? fmtUsd(m.costUsd) : 'con tu suscripción'}</span>
-                <button type="button" className="lnk" onClick={() => setFb(fb === m.id ? null : m.id)}>¿Qué debería aprender?</button></>}
-            </div>}
-            {fb === m.id && <FeedbackForm slug={slug} agentId={id} messageId={m.id} onDone={() => { setFb(null); flash('Aprendizaje propuesto: verifícalo en Memoria'); onChanged(); }} />}
-          </div>)}
-        <div ref={end} />
-      </div>
-    </div>
-    <form className="composer" onSubmit={e => { e.preventDefault(); void send(); }}>
-      {error && <Notice kind="err">{error}</Notice>}
-      <label className="sr" htmlFor="chat-text">Mensaje para {p.agent.config.name}</label>
-      <textarea id="chat-text" className="input" rows={3} value={text} onChange={e => setText(e.target.value)} placeholder={`Escribe a ${p.agent.config.name}…`} disabled={p.retired} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void send(); } }} />
-      <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' }}>
-        <span className="small muted">{p.chat.estimate.label} · {p.chat.estimate.billable ? `≈ ${fmtUsd(p.chat.estimate.estimatedUsd)} por mensaje` : 'sin cargo a la API'} · hoy {p.chat.usage.used}/{p.chat.usage.cap}</span>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          {p.chat.estimate.billable && <label className="ck small"><input className="cb" type="checkbox" checked={billOk} onChange={e => setBillOk(e.target.checked)} /> Autorizo esta llamada facturable</label>}
-          <button className="btn btn-primary btn-sm" type="submit" disabled={!canSend}>{busy ? 'Enviando…' : pending ? 'Respondiendo…' : 'Enviar'}</button>
-        </div>
-      </div>
-    </form>
-  </>;
-}
-
-function FeedbackForm({ slug, agentId, processId, messageId, onDone }: { slug: string; agentId: string; processId?: string; messageId?: string; onDone: () => void }) {
-  const [rating, setRating] = useState<'useful' | 'needs_changes'>('needs_changes');
-  const [feedback, setFeedback] = useState(''); const [lesson, setLesson] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
-  const submit = async () => { setBusy(true); setError(null); try { await osApi.feedback(slug, agentId, { processId: processId ?? null, messageId: messageId ?? null, rating, feedback: feedback.trim(), lesson: lesson.trim() || null }); onDone(); } catch (e: any) { setError(e.message); } finally { setBusy(false); } };
-  return <div className="card" style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8, width: '100%' }}>
-    {error && <Notice kind="err">{error}</Notice>}
-    <div className="seg" role="group" aria-label="Valoración"><button type="button" aria-pressed={rating === 'useful'} onClick={() => setRating('useful')}>Útil</button><button type="button" aria-pressed={rating === 'needs_changes'} onClick={() => setRating('needs_changes')}>Necesita cambios</button></div>
-    <textarea className="input" rows={2} value={feedback} onChange={e => setFeedback(e.target.value)} placeholder="Tu opinión (qué estuvo bien o qué faltó)" aria-label="Tu opinión" />
-    <textarea className="input" rows={2} value={lesson} onChange={e => setLesson(e.target.value)} placeholder="Lo que debería aprender para la próxima vez (opcional: si no, se usa tu opinión)" aria-label="Lo que debería aprender" />
-    <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}><span className="small muted" style={{ marginRight: 'auto' }}>Queda como propuesta: solo cuenta cuando la verifiques en Memoria.</span><button className="btn btn-primary btn-sm" disabled={busy || feedback.trim().length < 3} onClick={() => void submit()}>Proponer aprendizaje</button></div>
-  </div>;
 }
 
 // ---------------------------------------------------------------- Solicitudes

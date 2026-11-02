@@ -1,5 +1,5 @@
-import type { Agent, Capability, DocumentJob, ExecutionBackend, ExternalFileChange, ExternalGrants, ExternalLayout, ExternalProvenance, HarnessCapability, HarnessDescriptor, ImprovementProposal, IntegrationState, Lesson, Process, PortableFiles, PortableKnowledge, PortableSkill, ProviderId } from '@portal-ia/domain';
-import { apiRequest as request } from './api.ts';
+import type { Agent, Capability, DocumentBatch, DocumentJob, ExecutionBackend, ExternalFileChange, ExternalGrants, ExternalLayout, ExternalProvenance, HarnessCapability, HarnessDescriptor, ImprovementProposal, IntegrationState, Lesson, Process, PortableFiles, PortableKnowledge, PortableSkill, ProviderId } from '@portal-ia/domain';
+import { ApiError, apiRequest as request } from './api.ts';
 
 /** Cliente del «sistema operativo de agentes» (apps/server/src/routes/agentsOs.ts). */
 export type OfficeState = 'working' | 'queued' | 'attention' | 'unavailable' | 'idle' | 'retired';
@@ -19,8 +19,23 @@ export interface HarnessOptions { current: ExecutionBackend; currentLabel: strin
   work: { inFlight: { id: string; title: string }[]; open: { id: string; title: string; status: string }[]; batches: { id: string; title: string; status: string; sources: string[] }[] } }
 export interface CodexDetection { checkedAt: string; installed: boolean; path: string | null; version: string | null; auth: string; billing: string; exposedTools: string[] | null; blockedTools: string[]; userContext: string[]; restricted: boolean; models: { id: string; name: string }[]; credentialVars: string[]; problems: string[] }
 export interface CodexSettings { enabled: boolean; cliPath: string | null; maxDurationSec: number; authorizedAt: string | null }
-export interface AgentMessage { id: string; agentId: string; role: 'owner' | 'agent'; content: string; status: 'done' | 'running' | 'failed' | 'interrupted'; harness: string | null; model: string | null; tokensIn: number; tokensOut: number; costUsd: number; error: string | null; createdAt: string; finishedAt: string | null; replyTo: string | null }
-export interface ChatEstimate { harness: ExecutionBackend; label: string; billable: boolean; estimatedUsd: number }
+export interface AgentMessage { id: string; agentId: string; role: 'owner' | 'agent'; content: string; status: 'done' | 'running' | 'failed' | 'interrupted'; harness: string | null; model: string | null; tokensIn: number; tokensOut: number; costUsd: number; error: string | null; createdAt: string; finishedAt: string | null; replyTo: string | null;
+  /** Adjuntos del mensaje, qué recibió el modelo de cada uno y acciones que propuso el agente (apps/server/src/services/agentAttachments.ts, agentActions.ts). */
+  attachments?: ChatAttachment[]; sent?: { id: string; how: 'image' | 'metadata' | 'text' | 'not_sent' }[]; actions?: AgentAction[];
+  /** La llamada terminó bien (true), falló (false) o no consta (null). */
+  delivered?: boolean | null }
+export type AttachmentKind = 'image' | 'pdf' | 'zip' | 'text';
+export interface ChatAttachment { id: string; agentId: string; projectId: string | null; name: string; mime: string; kind: AttachmentKind; size: number; sha256: string;
+  status: 'uploaded' | 'attached' | 'deleted' | 'expired'; meta: Record<string, any>; createdAt: string; messageIds: string[] }
+export type AgentActionKind = 'mejorar_agente' | 'mejorar_portal' | 'procesar_documentos' | 'corregir_documento';
+export interface AgentAction { id: string; agentId: string; messageId: string; kind: AgentActionKind; payload: Record<string, any>; status: 'proposed' | 'running' | 'done' | 'failed' | 'dismissed';
+  result: Record<string, any> | null; error: string | null; link: string | null; createdAt: string; updatedAt: string; needsConfirmation: boolean }
+export interface DocumentQueue { queued: number; active: number; maxActive: number; minFreeMb: number; freeMb: number }
+export interface BatchLimits { maxUploadBytes: number; maxEntries: number; maxDocs: number; maxPdfBytes: number; maxTotal: number; maxRatio: number }
+export type ReceiveResult = { kind: 'pdf'; jobs: (DocumentJob & { duplicate?: boolean })[] } | { kind: 'zip'; batch: DocumentBatch };
+export interface ChatEstimate { harness: ExecutionBackend; label: string; billable: boolean; estimatedUsd: number;
+  /** USD por millón de tokens de entrada (0 si no factura) y si su arnés envía de verdad las imágenes al modelo. */
+  inputUsdPerMTok?: number; imagesToModel?: boolean }
 export interface WorkItem { id: string; kind: string; title: string; status: string; column: 'requested' | 'queued' | 'doing' | 'done' | 'stopped'; createdAt: string; finishedAt: string | null; projectId: string; lead: boolean; purpose: string | null; deliverable: string | null; knowledgeDocId: string | null; steps: { title: string; status: string }[] }
 export interface Revision { n: number; hash: string; state: string; source: string; note: string; by: string; at: string }
 export interface FolderStatus { folder: string | null; path: string | null; adopted: { n: number; hash: string; at: string; source: string; files?: PortableFiles; fileList?: string[] } | null; missingOnDisk?: boolean;
@@ -39,6 +54,22 @@ export interface ImportPreview { path: string; hash: string; files: string[]; ig
   requests: { harness: string; model: string; tools: string[]; autonomy: string } | null; instructions: string; skills: { slug: string; name: string; description: string; body: string }[]; memory: { title: string; text: string }[]; references: { slug: string; title: string; body: string }[]; note: string }
 
 const J = (body: unknown) => JSON.stringify(body);
+/** PUT del archivo tal cual (application/octet-stream) con progreso: el servidor lo escribe en disco por partes. */
+function streamUpload<T>(url: string, file: File, onProgress?: (fraction: number) => void, signal?: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest(); x.open('PUT', url); x.setRequestHeader('Content-Type', 'application/octet-stream');
+    if (onProgress) x.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    x.onload = () => {
+      let body: any = null; try { body = x.responseText ? JSON.parse(x.responseText) : null; } catch { /* respuesta no JSON */ }
+      if (x.status >= 200 && x.status < 300) resolve(body as T);
+      else reject(new ApiError(x.status, body?.error ?? (x.status === 413 ? 'El archivo supera el tamaño permitido.' : `Error ${x.status}`), body));
+    };
+    x.onerror = () => reject(new ApiError(0, 'No se pudo contactar con el servidor del Portal.', { code: 'unreachable' }));
+    x.onabort = () => reject(new ApiError(0, 'Subida cancelada.', { code: 'aborted' }));
+    signal?.addEventListener('abort', () => x.abort());
+    x.send(file);
+  });
+}
 const W = (slug: string) => `/api/workspaces/${encodeURIComponent(slug)}`;
 export const osApi = {
   office: (slug: string, projectId?: string | null) => request<OfficeView>(`${W(slug)}/office${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
@@ -56,7 +87,15 @@ export const osApi = {
   harnessOptions: (slug: string, id: string) => request<HarnessOptions>(`${W(slug)}/agents/${id}/harness`),
   switchHarness: (slug: string, id: string, harness: ExecutionBackend, model: string, provider?: ProviderId | null) => request<Agent>(`${W(slug)}/agents/${id}/harness`, { method: 'PUT', body: J({ harness, model, provider: provider ?? null, authorized: true }) }),
   chat: (slug: string, id: string) => request<{ messages: AgentMessage[]; usage: { used: number; cap: number }; estimate: ChatEstimate }>(`${W(slug)}/agents/${id}/chat`),
-  sendChat: (slug: string, id: string, text: string, projectId: string | null, authorizeBillable?: boolean) => request<{ owner: AgentMessage; reply: AgentMessage }>(`${W(slug)}/agents/${id}/chat`, { method: 'POST', body: J({ text, projectId, authorizeBillable }) }),
+  sendChat: (slug: string, id: string, text: string, projectId: string | null, authorizeBillable?: boolean, attachmentIds: string[] = []) => request<{ owner: AgentMessage; reply: AgentMessage }>(`${W(slug)}/agents/${id}/chat`, { method: 'POST', body: J({ text, projectId, authorizeBillable, attachmentIds }) }),
+  attachments: (slug: string, id: string) => request<{ attachments: ChatAttachment[]; limits: Record<AttachmentKind, number> }>(`${W(slug)}/agents/${id}/attachments`),
+  uploadAttachment: (slug: string, id: string, file: File, projectId: string | null, onProgress?: (fraction: number) => void, signal?: AbortSignal) =>
+    streamUpload<ChatAttachment>(`${W(slug)}/agents/${id}/attachments?name=${encodeURIComponent(file.name)}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`, file, onProgress, signal),
+  deleteAttachment: (slug: string, id: string, attId: string) => request<{ ok: boolean }>(`${W(slug)}/agents/${id}/attachments/${attId}`, { method: 'DELETE' }),
+  attachmentUrl: (slug: string, id: string, attId: string) => `${W(slug)}/agents/${id}/attachments/${attId}/file`,
+  confirmAction: (slug: string, id: string, actionId: string) => request<AgentAction>(`${W(slug)}/agents/${id}/actions/${actionId}/confirm`, { method: 'POST', body: J({ authorized: true }) }),
+  rerouteAction: (slug: string, id: string, actionId: string) => request<AgentAction>(`${W(slug)}/agents/${id}/actions/${actionId}/reroute`, { method: 'POST', body: J({}) }),
+  dismissAction: (slug: string, id: string, actionId: string) => request<AgentAction>(`${W(slug)}/agents/${id}/actions/${actionId}/dismiss`, { method: 'POST', body: J({}) }),
   task: (slug: string, id: string, body: { request: string; projectId: string | null; budgetUsd?: number; maxSubscriptionCalls?: number; preview?: boolean }) => request<Process & { estimate?: any }>(`${W(slug)}/agents/${id}/tasks`, { method: 'POST', body: J({ ...body, authorized: true }) }),
   folder: (slug: string, id: string) => request<FolderStatus>(`${W(slug)}/agents/${id}/folder`),
   createFolder: (slug: string, id: string) => request<FolderStatus>(`${W(slug)}/agents/${id}/folder`, { method: 'POST', body: J({}) }),
@@ -81,7 +120,13 @@ export const osApi = {
   adoptSource: (slug: string, id: string, hash: string) => request<{ revision: number }>(`${W(slug)}/agents/${id}/source/adopt`, { method: 'POST', body: J({ hash }) }),
   setGrants: (slug: string, id: string, grants: ExternalGrants) => request<unknown>(`${W(slug)}/agents/${id}/source/grants`, { method: 'PUT', body: J({ grants, authorized: true }) }),
   restoreSource: (slug: string, id: string, n: number) => request<{ revision: number; backup: string }>(`${W(slug)}/agents/${id}/source/restore`, { method: 'POST', body: J({ n, authorized: true }) }),
-  documents: (slug: string, id: string) => request<{ jobs: DocumentJob[]; running: { slug: string; agentId: string; jobId: string }[]; proposals: ImprovementProposal[] }>(`${W(slug)}/agents/${id}/documents`),
+  documents: (slug: string, id: string) => request<{ jobs: DocumentJob[]; batches: DocumentBatch[]; running: { slug: string; agentId: string; jobId: string }[]; proposals: ImprovementProposal[]; queue: DocumentQueue; limits: BatchLimits }>(`${W(slug)}/agents/${id}/documents`),
+  /** Subida en flujo (sin base64 ni límite de 10 PDF): un PDF → documento; un ZIP → lote con todos sus PDF. */
+  uploadDocumentFile: (slug: string, id: string, file: File, onProgress?: (fraction: number) => void) => streamUpload<ReceiveResult>(`${W(slug)}/agents/${id}/documents/upload?name=${encodeURIComponent(file.name)}`, file, onProgress),
+  batchAction: (slug: string, id: string, batchId: string, action: 'start' | 'pause' | 'resume' | 'retry' | 'cancel', body: { includeRejected?: boolean; items?: number[] } = {}) =>
+    request<DocumentBatch>(`${W(slug)}/agents/${id}/batches/${batchId}/${action}`, { method: 'POST', body: J({ ...body, authorized: true }) }),
+  batchDeliverable: (slug: string, id: string, batchId: string) => request<{ deliverable: string | null }>(`${W(slug)}/agents/${id}/batches/${batchId}/deliverable`, { method: 'POST', body: J({}) }),
+  batchFileUrl: (slug: string, id: string, batchId: string, path: string) => `${W(slug)}/agents/${id}/batches/${batchId}/file?path=${encodeURIComponent(path)}`,
   uploadDocument: (slug: string, id: string, name: string, contentBase64: string) => request<{ jobs: (DocumentJob & { duplicate?: boolean })[]; skipped: string[] }>(`${W(slug)}/agents/${id}/documents`, { method: 'POST', body: J({ name, contentBase64 }) }),
   processDocument: (slug: string, id: string, jobId: string, feedback?: string | null) => request<DocumentJob>(`${W(slug)}/agents/${id}/documents/${jobId}/process`, { method: 'POST', body: J({ authorized: true, feedback: feedback ?? null }) }),
   documentFileUrl: (slug: string, id: string, jobId: string, path: string, download = false) => `${W(slug)}/agents/${id}/documents/${jobId}/file?path=${encodeURIComponent(path)}${download ? '&download=1' : ''}`,

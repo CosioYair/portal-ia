@@ -58,8 +58,11 @@ conserva su historial y anota la vuelta atrás).
 
 ## Trabajo con documentos (pestaña Documentos)
 
-1. Das un PDF o un ZIP con PDF. ZIP seguro: solo PDF, sin rutas (nombre base), sin cifrados, enlaces, ZIP64, bombas de
-   compresión ni CRC falsos; el mismo PDF (SHA-256) no se duplica. Se guarda en `documentos/<documento>/original/`.
+1. Das un PDF o un ZIP con PDF (subida en flujo, sin base64). Un PDF se guarda en `documentos/<documento>/original/`;
+   un ZIP es un **lote** con todos sus PDF (sin el antiguo límite de 10), su ZIP original en `documentos/<lote>/origen/`
+   y una entrada por archivo (aceptado, ya recibido o excluido con su motivo). ZIP seguro: sin recorridos, cifrados,
+   enlaces, ZIP64, bombas de compresión ni CRC falsos; el mismo PDF (SHA-256) no se duplica. Lotes, cola, reintentos y
+   entregables: [lotes-adjuntos-y-mejoras.md](lotes-adjuntos-y-mejoras.md).
 2. **Procesar** (lo confirmas): inventario (páginas, texto extraíble). Un PDF escaneado sin OCR instalado se rechaza con
    el motivo (no se entrega un Word de imágenes).
 3. El agente **planifica** (una llamada a Claude Code): qué script de su habilidad y con qué argumentos, en JSON. El Portal
@@ -131,7 +134,7 @@ avisos en la oficina de cambios externos y mejoras pendientes, actualización en
 
 ## Fallos contemplados
 
-Escritura sin permiso (403), recorridos y enlaces (rechazados), ZIP inseguros (omitidos con motivo), conversión fallida
+Escritura sin permiso (403), recorridos y enlaces (rechazados), entradas de ZIP inseguras (excluidas con su motivo en el lote), conversión fallida
 (versión registrada como fallida), Word no editable o con páginas como imagen (rechazado por la QA), arnés caído (falla con
 su motivo; nunca otro arnés ni la API), límites (uno a la vez, tope diario), mejora sin aprobación o con cambios externos
 pendientes (409), aprendizaje inválido (se descarta lo inseguro), importación duplicada (409), reinicio a mitad (el trabajo
@@ -141,8 +144,10 @@ queda «falló» y se puede repetir; el original y las versiones anteriores sigu
 
 `POST /api/workspaces/:slug/agents/external/preview` · `POST …/agents/external` · `GET …/agents/:id/source` ·
 `POST …/source/adopt` · `PUT …/source/grants` · `POST …/source/restore` · `GET|POST …/agents/:id/documents` ·
+`PUT …/documents/upload?name=` · `POST …/batches/:batchId/start|pause|resume|retry|cancel|deliverable` ·
 `POST …/documents/:jobId/process` · `GET …/documents/:jobId/file?path=` · `GET …/documents/:jobId/versions/:n/evidence` ·
 `POST …/agents/:id/feedback` · `POST …/proposals/:pid/apply|reject`.
 
 Esquema de datos 0.18 (copia automática antes de migrar): `agent_sources`, `agent_source_revisions`, `document_jobs`,
-`improvement_proposals` (aditivas).
+`improvement_proposals` (aditivas). 0.19: lotes, adjuntos del chat y acciones (ver
+[lotes-adjuntos-y-mejoras.md](lotes-adjuntos-y-mejoras.md)).

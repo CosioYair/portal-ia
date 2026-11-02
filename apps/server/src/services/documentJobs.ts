@@ -36,14 +36,16 @@ import { monotonicNow } from '../clock.ts';
  * `configuracion/respaldos/`, entrada en CAMBIOS.md, nueva revisión adoptada y registro de integración.
  */
 const now = monotonicNow;
-const PDF_MAX = 40 * 1024 * 1024;
-const ZIP_MAX = 60 * 1024 * 1024;
-const ZIP_MAX_ENTRIES = 200;
-const ZIP_MAX_PDFS = 10;
-const ZIP_MAX_TOTAL = 200 * 1024 * 1024;
-const ZIP_MAX_RATIO = 200;
+export const PDF_MAX = 100 * 1024 * 1024;
+/**
+ * Límites de un lote (ZIP). No hay un número fijo de PDF que se «corte» en silencio: si un ZIP supera un límite, se rechaza
+ * ENTERO antes de aceptar nada, explicando cuál y cómo seguir (dividirlo). Protegen disco, memoria y tiempo.
+ */
+export const BATCH_LIMITS = { maxUploadBytes: 1024 * 1024 * 1024, maxEntries: 5000, maxDocs: 500, maxPdfBytes: PDF_MAX, maxTotal: 4 * 1024 ** 3, maxRatio: 200 };
 const RUN_TIMEOUT_MS = 20 * 60_000;
-const DAILY_RUNS = 20;
+/** Topes diarios por agente: conversiones (recursos del equipo) y llamadas al modelo (tu suscripción) por separado. */
+export const VERSIONS_PER_DAY = 600;
+export const MODEL_CALLS_PER_DAY = 80;
 /** Herramientas del Portal (QA, inventario, kits). Las pruebas usan unas simuladas (PORTAL_DOC_TOOLS_DIR). */
 const TOOLS_DIR = process.env.PORTAL_DOC_TOOLS_DIR ?? path.join(REPO_ROOT, 'apps/server/tools');
 /** Herramientas verificadas del Portal que una mejora aprobada puede instalar en una habilidad (código nunca escrito por el modelo). */
@@ -61,30 +63,51 @@ function ensure(slug: string) {
     id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, title TEXT NOT NULL, slug TEXT NOT NULL, status TEXT NOT NULL, input_name TEXT NOT NULL,
     input_sha TEXT NOT NULL, pages INTEGER, source TEXT NOT NULL, versions_json TEXT NOT NULL DEFAULT '[]', error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   ); CREATE INDEX IF NOT EXISTS document_jobs_agent ON document_jobs(agent_id, created_at);
+  CREATE TABLE IF NOT EXISTS document_batches (
+    id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, name TEXT NOT NULL, slug TEXT NOT NULL, source_name TEXT NOT NULL, source_sha TEXT NOT NULL,
+    source_rel TEXT, status TEXT NOT NULL, plan_json TEXT, summary TEXT, summary_by TEXT, deliverable_rel TEXT, deliverable_sig TEXT, manifest_rel TEXT, error TEXT,
+    calls INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, finished_at TEXT
+  ); CREATE INDEX IF NOT EXISTS document_batches_agent ON document_batches(agent_id, created_at);
+  CREATE TABLE IF NOT EXISTS document_model_calls (agent_id TEXT NOT NULL, at TEXT NOT NULL, what TEXT NOT NULL DEFAULT 'lote');
+  CREATE INDEX IF NOT EXISTS document_model_calls_agent ON document_model_calls(agent_id, at);
+  CREATE TABLE IF NOT EXISTS document_batch_items (
+    batch_id TEXT NOT NULL, idx INTEGER NOT NULL, entry_name TEXT NOT NULL, sha TEXT, size INTEGER NOT NULL DEFAULT 0, outcome TEXT NOT NULL,
+    reason TEXT, job_id TEXT, state TEXT NOT NULL, PRIMARY KEY (batch_id, idx)
+  );
   CREATE TABLE IF NOT EXISTS improvement_proposals (
     id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, job_id TEXT, feedback TEXT NOT NULL, classification TEXT NOT NULL, reason TEXT NOT NULL, summary TEXT NOT NULL,
     changes_json TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL, decided_at TEXT, applied_at TEXT, backup_dir TEXT, error TEXT, evidence_json TEXT NOT NULL DEFAULT '{}', base_revision INTEGER
   );`);
+  // 0.19 (aditivo): cada trabajo puede pertenecer a un lote.
+  const cols = (db.prepare(`PRAGMA table_info(document_jobs)`).all() as any[]).map(c => c.name);
+  if (!cols.includes('batch_id')) db.exec(`ALTER TABLE document_jobs ADD COLUMN batch_id TEXT`);
   return db;
 }
-const mapJob = (r: any): DocumentJob => ({ id: r.id, agentId: r.agent_id, title: r.title, slug: r.slug, status: r.status, inputName: r.input_name, inputSha256: r.input_sha, pages: r.pages ?? null, source: r.source, versions: JSON.parse(r.versions_json), error: r.error ?? null, createdAt: r.created_at, updatedAt: r.updated_at });
+export const documentsDb = ensure;
+const mapJob = (r: any): DocumentJob => ({ id: r.id, agentId: r.agent_id, title: r.title, slug: r.slug, status: r.status, inputName: r.input_name, inputSha256: r.input_sha, pages: r.pages ?? null, source: r.source, versions: JSON.parse(r.versions_json), error: r.error ?? null, createdAt: r.created_at, updatedAt: r.updated_at, batchId: r.batch_id ?? null });
 const mapProposal = (r: any): ImprovementProposal => ({ id: r.id, agentId: r.agent_id, jobId: r.job_id ?? null, feedback: r.feedback, classification: r.classification, reason: r.reason, summary: r.summary, changes: JSON.parse(r.changes_json), state: r.state, createdAt: r.created_at, decidedAt: r.decided_at ?? null, appliedAt: r.applied_at ?? null, backupDir: r.backup_dir ?? null, error: r.error ?? null, evidence: JSON.parse(r.evidence_json), baseRevision: r.base_revision ?? null });
 
-function jobsDb(slug: string) {
+export function jobsDb(slug: string) {
   const db = ensure(slug);
   return {
-    list(agentId: string): DocumentJob[] { return (db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? ORDER BY created_at DESC LIMIT 100`).all(agentId) as any[]).map(mapJob); },
+    list(agentId: string): DocumentJob[] { return (db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? ORDER BY created_at DESC LIMIT 2000`).all(agentId) as any[]).map(mapJob); },
     get(id: string): DocumentJob | null { const r = db.prepare(`SELECT * FROM document_jobs WHERE id = ?`).get(id) as any; return r ? mapJob(r) : null; },
     bySha(agentId: string, sha: string): DocumentJob | null { const r = db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ?`).get(agentId, sha) as any; return r ? mapJob(r) : null; },
-    insert(j: Omit<DocumentJob, 'versions' | 'error' | 'createdAt' | 'updatedAt'>) { db.prepare(`INSERT INTO document_jobs (id, agent_id, title, slug, status, input_name, input_sha, pages, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(j.id, j.agentId, j.title, j.slug, j.status, j.inputName, j.inputSha256, j.pages, j.source, now(), now()); },
+    insert(j: Omit<DocumentJob, 'versions' | 'error' | 'createdAt' | 'updatedAt'>) { db.prepare(`INSERT INTO document_jobs (id, agent_id, title, slug, status, input_name, input_sha, pages, source, batch_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(j.id, j.agentId, j.title, j.slug, j.status, j.inputName, j.inputSha256, j.pages, j.source, j.batchId ?? null, now(), now()); },
     update(id: string, patch: { status?: string; versions?: DocumentVersion[]; error?: string | null; pages?: number | null }) {
       const cur = this.get(id)!;
       db.prepare(`UPDATE document_jobs SET status = ?, versions_json = ?, error = ?, pages = ?, updated_at = ? WHERE id = ?`).run(patch.status ?? cur.status, JSON.stringify(patch.versions ?? cur.versions), patch.error === undefined ? cur.error : patch.error, patch.pages === undefined ? cur.pages : patch.pages, now(), id);
       changed({ ws: slug, entity: 'agent', id: cur.agentId, kind: 'progress' });
     },
-    runsToday(agentId: string): number {
-      const since = new Date(); since.setHours(0, 0, 0, 0);
-      return (db.prepare(`SELECT versions_json FROM document_jobs WHERE agent_id = ?`).all(agentId) as any[]).reduce((n, r) => n + (JSON.parse(r.versions_json) as DocumentVersion[]).filter(v => v.createdAt >= since.toISOString()).length, 0);
+    /** Versiones de hoy y llamadas al modelo de hoy (versiones sueltas: plan + informe; lotes: plan y resumen del lote; feedback). */
+    usageToday(agentId: string): { versions: number; calls: number } {
+      const since = new Date(); since.setHours(0, 0, 0, 0); const iso = since.toISOString();
+      let versions = 0; let calls = 0;
+      for (const r of db.prepare(`SELECT versions_json FROM document_jobs WHERE agent_id = ?`).all(agentId) as any[]) for (const v of JSON.parse(r.versions_json) as DocumentVersion[]) if (v.createdAt >= iso) { versions++; calls += v.calls ?? 2; }
+      // Llamadas de los lotes (plan y resumen), cada una con su hora: un lote antiguo tocado hoy no vuelve a contar.
+      calls += Number((db.prepare(`SELECT COUNT(*) AS c FROM document_model_calls WHERE agent_id = ? AND at >= ?`).get(agentId, iso) as any).c);
+      calls += Number((db.prepare(`SELECT COUNT(*) AS c FROM improvement_proposals WHERE agent_id = ? AND created_at >= ?`).get(agentId, iso) as any).c);
+      return { versions, calls };
     }
   };
 }
@@ -176,104 +199,24 @@ function baseEnv(tc: Toolchain | null, tmp: string | null): NodeJS.ProcessEnv {
 
 // ---------------------------------------------------------------- Entradas: PDF y ZIP seguros
 
-const RESERVED = /^(con|prn|aux|nul|com\d|lpt\d)$/i;
+export const RESERVED = /^(con|prn|aux|nul|com\d|lpt\d)$/i;
 /** Nombre de archivo seguro en Windows: sin rutas, caracteres prohibidos, nombres reservados ni puntos/espacios finales. */
-const safeName = (n: string) => {
+export const safeName = (n: string) => {
   let s = path.basename(n.replace(/\\/g, '/')).replace(/[\u0000-\u001f<>:"/\\|?*]/g, '-').replace(/\s+/g, ' ').slice(0, 120).replace(/[. ]+$/, '').trim();
   const ext = /\.([a-z0-9]{1,5})$/i.exec(s)?.[1] ?? ''; const stem = ext ? s.slice(0, -(ext.length + 1)) : s;
   if (!stem || RESERVED.test(stem.replace(/\..*$/, ''))) s = `documento-${stem || 'sin-nombre'}${ext ? `.${ext}` : ''}`;
   return s || 'documento.pdf';
 };
-const isPdf = (b: Buffer) => { const i = b.subarray(0, 1024).indexOf('%PDF-'); return i >= 0; };
+export const isPdf = (b: Buffer) => { const i = b.subarray(0, 1024).indexOf('%PDF-'); return i >= 0; };
 
-/**
- * Lector de ZIP mínimo y defensivo: solo PDF, sin rutas (se usa el nombre base), sin cifrado, sin enlaces, sin ZIP64,
- * límites de número, tamaño total y relación de compresión, y CRC comprobado. Lo que no cumple se informa y se omite.
- */
-export function readZipPdfs(buf: Buffer): { pdfs: { name: string; data: Buffer }[]; skipped: string[] } {
-  if (buf.length > ZIP_MAX) throw err('El ZIP es demasiado grande (máx. 60 MB).', 413);
-  const sig = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
-  const from = Math.max(0, buf.length - 65_557); const eocd = buf.lastIndexOf(sig);
-  if (eocd < from || eocd < 0 || eocd + 22 > buf.length) throw err('No es un ZIP válido.', 400);
-  const count = buf.readUInt16LE(eocd + 10); const cdSize = buf.readUInt32LE(eocd + 12); const cdOff = buf.readUInt32LE(eocd + 16);
-  if (count === 0xffff || cdOff === 0xffffffff) throw err('ZIP64 no admitido.', 400);
-  if (count > ZIP_MAX_ENTRIES) throw err(`El ZIP tiene demasiados archivos (máx. ${ZIP_MAX_ENTRIES}).`, 400);
-  if (cdOff + cdSize > buf.length) throw err('ZIP dañado (directorio central fuera del archivo).', 400);
-  const pdfs: { name: string; data: Buffer }[] = []; const skipped: string[] = []; let total = 0; let p = cdOff;
-  for (let k = 0; k < count; k++) {
-    if (p + 46 > buf.length || buf.readUInt32LE(p) !== 0x02014b50) throw err('ZIP dañado (entrada del directorio central).', 400);
-    const flags = buf.readUInt16LE(p + 8); const method = buf.readUInt16LE(p + 10); const crc = buf.readUInt32LE(p + 16);
-    const csize = buf.readUInt32LE(p + 20); const usize = buf.readUInt32LE(p + 24); const nlen = buf.readUInt16LE(p + 28);
-    const xlen = buf.readUInt16LE(p + 30); const clen = buf.readUInt16LE(p + 32); const ext = buf.readUInt32LE(p + 38); const loff = buf.readUInt32LE(p + 42);
-    const raw = buf.subarray(p + 46, p + 46 + nlen); const name = (flags & 0x800 ? raw.toString('utf8') : raw.toString('latin1')).replace(/\\/g, '/');
-    p += 46 + nlen + xlen + clen;
-    if (name.endsWith('/')) continue;
-    const why = (() => {
-      if (name.startsWith('/') || /^[a-z]:/i.test(name) || name.split('/').includes('..')) return 'ruta no permitida (recorrido de directorios)';
-      if (((ext >>> 16) & 0o170000) === 0o120000) return 'es un enlace';
-      if (flags & 0x1) return 'cifrado';
-      if (!/\.pdf$/i.test(name)) return 'no es PDF';
-      if (method !== 0 && method !== 8) return 'compresión no admitida';
-      if (csize === 0xffffffff || usize === 0xffffffff) return 'ZIP64 no admitido';
-      if (usize > PDF_MAX) return 'demasiado grande (máx. 40 MB)';
-      if (csize > 0 && usize / csize > ZIP_MAX_RATIO) return 'relación de compresión sospechosa';
-      if (pdfs.length >= ZIP_MAX_PDFS) return `solo se toman ${ZIP_MAX_PDFS} PDF por ZIP`;
-      return null;
-    })();
-    if (why) { skipped.push(`${name.slice(0, 120)}: ${why}`); continue; }
-    total += usize; if (total > ZIP_MAX_TOTAL) throw err('El contenido del ZIP es demasiado grande en total.', 413);
-    if (loff + 30 > buf.length || buf.readUInt32LE(loff) !== 0x04034b50) { skipped.push(`${name}: cabecera local dañada`); continue; }
-    const start = loff + 30 + buf.readUInt16LE(loff + 26) + buf.readUInt16LE(loff + 28);
-    if (start + csize > buf.length) { skipped.push(`${name}: datos fuera del archivo`); continue; }
-    const comp = buf.subarray(start, start + csize);
-    let data: Buffer;
-    try { data = method === 0 ? Buffer.from(comp) : zlib.inflateRawSync(comp, { maxOutputLength: usize + 1 }); } catch { skipped.push(`${name}: no se pudo descomprimir (o excede lo declarado)`); continue; }
-    if (data.length !== usize || zlib.crc32(data) !== crc) { skipped.push(`${name}: tamaño o CRC no coinciden`); continue; }
-    if (!isPdf(data)) { skipped.push(`${name}: no es un PDF válido`); continue; }
-    pdfs.push({ name: safeName(name), data });
-  }
-  return { pdfs, skipped };
-}
-
-function sourceOr(slug: string, agentId: string) {
+export function sourceOr(slug: string, agentId: string) {
   const s = sourcesRepo(slug).get(agentId);
   if (!s) throw err('Este agente no tiene carpeta externa.', 404);
   if (!s.layout.outputs) throw err('La carpeta del agente no tiene «documentos/» para sus entregables.', 409);
   return s;
 }
 
-/** Recibe un PDF o un ZIP de PDF: cada PDF es un trabajo (el mismo PDF ya recibido no se duplica). */
-export function receiveDocuments(slug: string, agentId: string, input: { name: string; contentBase64: string }, by = 'owner') {
-  const s = sourceOr(slug, agentId);
-  if (!s.grants.writeDocuments) throw err('Concede antes a este agente «escribir en documentos/ y bandeja-de-entrada/».', 403);
-  const name = safeName(input.name);
-  const buf = Buffer.from(input.contentBase64, 'base64');
-  if (!buf.length) throw err('El archivo está vacío.', 400);
-  let items: { name: string; data: Buffer; source: 'upload' | 'zip' }[]; let skipped: string[] = [];
-  if (/\.zip$/i.test(name)) { const z = readZipPdfs(buf); items = z.pdfs.map(p => ({ ...p, source: 'zip' as const })); skipped = z.skipped; if (!items.length) throw err(`El ZIP no contiene PDF utilizables. ${skipped.slice(0, 5).join(' · ')}`, 400); }
-  else if (/\.pdf$/i.test(name)) { if (buf.length > PDF_MAX) throw err('El PDF es demasiado grande (máx. 40 MB).', 413); if (!isPdf(buf)) throw err('No es un PDF válido (falta la cabecera %PDF-).', 400); items = [{ name, data: buf, source: 'upload' }]; }
-  else throw err('Solo se admiten PDF o ZIP con PDF.', 400);
-  const jobs = jobsDb(slug); const out: (DocumentJob & { duplicate?: boolean })[] = [];
-  const zones = [s.layout.outputs!];
-  for (const it of items) {
-    const sha = crypto.createHash('sha256').update(it.data).digest('hex');
-    const dup = jobs.bySha(agentId, sha); if (dup) { out.push({ ...dup, duplicate: true }); continue; }
-    let base = slugify(it.name.replace(/\.pdf$/i, '')).slice(0, 60).replace(/[-.]+$/, '') || 'documento'; if (RESERVED.test(base)) base = `documento-${base}`;
-    let docSlug = base; let k = 2;
-    while (fs.existsSync(path.join(s.root, ...s.layout.outputs!.split('/'), docSlug))) docSlug = `${base}-${k++}`;
-    const dir = `${s.layout.outputs}/${docSlug}`;
-    safeWrite(s.root, `${dir}/original/${it.name}`, it.data, zones, { exclusive: true });
-    appendHistory(s.root, dir, zones, `Recibido por Portal IA: «${it.name}» (${(it.data.length / 1024).toFixed(0)} KB, sha256 ${sha.slice(0, 12)}…${it.source === 'zip' ? `, desde ${name}` : ''}).`);
-    const id = crypto.randomUUID();
-    jobs.insert({ id, agentId, title: it.name.replace(/\.pdf$/i, ''), slug: docSlug, status: 'received', inputName: it.name, inputSha256: sha, pages: null, source: it.source });
-    recordAgentEvent(slug, agentId, 'document_job', { jobId: id, action: 'received', name: it.name, sha256: sha, folder: dir }, by);
-    out.push(jobs.get(id)!);
-  }
-  changed({ ws: slug, entity: 'agent', id: agentId });
-  return { jobs: out, skipped };
-}
-
-function appendHistory(root: string, dir: string, zones: string[], line: string) {
+export function appendHistory(root: string, dir: string, zones: string[], line: string) {
   const rel = `${dir}/HISTORIAL.md`;
   let cur = ''; try { cur = fs.readFileSync(safePath(root, rel, zones, { create: true }), 'utf8'); } catch { cur = ''; }
   const stamp = new Date().toLocaleString('sv-SE', { hour12: false }).slice(0, 16);
@@ -282,7 +225,11 @@ function appendHistory(root: string, dir: string, zones: string[], line: string)
 
 // ---------------------------------------------------------------- Procesar una versión
 
-const running = new Map<string, string>(); // `${slug}:${agentId}` → jobId
+const running = new Map<string, string>(); // `${slug}:${agentId}` → jobId (uno a la vez por agente; lo usa también la cola de lotes)
+export const runKey = (slug: string, agentId: string) => `${slug}:${agentId}`;
+export const isAgentRunning = (slug: string, agentId: string) => running.has(runKey(slug, agentId));
+export const reserveRun = (slug: string, agentId: string, jobId: string) => { const k = runKey(slug, agentId); if (running.has(k)) return false; running.set(k, jobId); return true; };
+export const releaseRun = (slug: string, agentId: string) => { running.delete(runKey(slug, agentId)); };
 export const documentJobsRunning = () => [...running.entries()].map(([k, jobId]) => { const i = k.lastIndexOf(':'); return { slug: k.slice(0, i), agentId: k.slice(i + 1), jobId }; });
 
 export function listJobs(slug: string, agentId: string): DocumentJob[] {
@@ -293,29 +240,32 @@ export function listJobs(slug: string, agentId: string): DocumentJob[] {
 }
 
 /** Lo que el agente necesita del modelo, sin el contenido del documento. */
-function skillContext(files: SnapshotFiles, layoutSkills: { slug: string; path: string; scripts: string[] }[]) {
+export function skillContext(files: SnapshotFiles, layoutSkills: { slug: string; path: string; scripts: string[] }[]) {
   const clip = (s: string, n: number) => s.length > n ? `${s.slice(0, n)}\n…(recortado)` : s;
   const skills = layoutSkills.map(s => `## Habilidad «${s.slug}» (${s.path})\n${clip(files[s.path] ?? '', 9000)}`).join('\n\n');
   const context = Object.keys(files).filter(p => /^contexto\//i.test(p)).map(p => `## ${p}\n${clip(files[p], 4000)}`).join('\n\n');
-  const scripts = layoutSkills.flatMap(s => s.scripts).map(p => `- ${p}: ${(/^"""([\s\S]*?)"""/.exec(files[p] ?? '')?.[1] ?? '').trim().split('\n').slice(0, 4).join(' ').slice(0, 400)}`).join('\n');
+  // Descripción de cada script: primeras líneas Y su sección «Uso» (opciones), para que el plan pueda usarlas.
+  const doc = (p: string) => (/^"""([\s\S]*?)"""/.exec(files[p] ?? '')?.[1] ?? '').trim();
+  const usage = (d: string) => { const i = d.search(/^\s*(Uso|Usage)\s*:/im); return i < 0 ? '' : ` · ${d.slice(i).split('\n').slice(0, 4).join(' ').replace(/\s+/g, ' ').slice(0, 400)}`; };
+  const scripts = layoutSkills.flatMap(s => s.scripts).map(p => `- ${p}: ${doc(p).split('\n').slice(0, 4).join(' ').slice(0, 400)}${usage(doc(p))}`).join('\n');
   return { skills, context, scripts };
 }
 
-function extractJson(text: string): unknown {
+export function extractJson(text: string): unknown {
   const t = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
   const a = t.indexOf('{'); const b = t.lastIndexOf('}');
   if (a < 0 || b <= a) throw new Error('La respuesta no contiene un objeto JSON.');
   return JSON.parse(t.slice(a, b + 1));
 }
 
-function callerFor(slug: string, a: Agent, title: string) {
+export function callerFor(slug: string, a: Agent, title: string) {
   if (agentBackend(a) === 'api') throw err('Este agente usa la API facturable: para documentos usa Claude Code (tu suscripción). No se ha llamado a la API.', 409);
   const c = agentCaller(slug, a, null, title);
   if (!c) throw err('El arnés del agente no está disponible.', 409);
   return c;
 }
 
-export interface ProcessOptions { authorized: boolean; feedback?: string | null; by?: string }
+export interface ProcessOptions { authorized: boolean; feedback?: string | null; by?: string; plan?: ScriptPlan | null; reportMode?: 'agent' | 'portal'; batchId?: string | null }
 
 export async function startProcessing(slug: string, agentId: string, jobId: string, opts: ProcessOptions): Promise<DocumentJob> {
   if (!opts.authorized) throw err('Procesar ejecuta scripts del agente en este equipo y usa tu suscripción: confírmalo.', 403);
@@ -325,7 +275,9 @@ export async function startProcessing(slug: string, agentId: string, jobId: stri
   const jobs = jobsDb(slug); const job = jobs.get(jobId); if (!job || job.agentId !== agentId) throw err('Trabajo no encontrado', 404);
   const key = `${slug}:${agentId}`;
   if (running.has(key)) throw err(`«${a.config.name}» ya está procesando un documento.`, 409);
-  if (jobs.runsToday(agentId) >= DAILY_RUNS) throw err(`Tope diario de ${DAILY_RUNS} versiones por agente alcanzado.`, 429);
+  const use = jobs.usageToday(agentId);
+  if (use.versions >= VERSIONS_PER_DAY) throw err(`Tope diario de ${VERSIONS_PER_DAY} conversiones por agente alcanzado.`, 429);
+  if (use.calls + 2 > MODEL_CALLS_PER_DAY) throw err(`Tope diario de ${MODEL_CALLS_PER_DAY} llamadas a tu suscripción para documentos alcanzado (hoy: ${use.calls}). Mañana se renueva.`, 429);
   running.set(key, jobId); // reservado ANTES de esperar nada: dos clics no lanzan dos ejecuciones
   try {
     const tc0 = await detectToolchain();
@@ -346,7 +298,7 @@ export async function startProcessing(slug: string, agentId: string, jobId: stri
  * CORTA fuera de la carpeta del agente y se borra al terminar: dentro de `documentos/…/revisiones/vN/` los perfiles de
  * LibreOffice superan el límite de ruta de Windows y LibreOffice se cierra al arrancar. Las evidencias sí van al agente.
  */
-async function processVersion(slug: string, a: Agent, jobId: string, tc: Toolchain, opts: ProcessOptions): Promise<void> {
+export async function processVersion(slug: string, a: Agent, jobId: string, tc: Toolchain, opts: ProcessOptions): Promise<void> {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'pia-'));
   try { await processVersionIn(slug, a, jobId, tc, opts, work); }
   finally { try { fs.rmSync(work, { recursive: true, force: true }); } catch { /* temporal del sistema */ } }
@@ -377,21 +329,13 @@ async function processVersionIn(slug: string, a: Agent, jobId: string, tc: Toolc
   const scanned = (pdf.text_pages ?? 0) < (pdf.pages ?? 0) * 0.5;
   if (scanned && !pdf.ocr_available) throw err(`Este PDF es escaneado (${(pdf.pages ?? 0) - (pdf.text_pages ?? 0)} de ${pdf.pages} páginas sin texto extraíble): necesita OCR y Tesseract no está instalado en este equipo. No se instala nada sin tu autorización; no se entrega un Word de imágenes como si fuera editable.`, 422);
 
-  // 2. Plan del agente (Claude Code): qué script de su habilidad y con qué argumentos.
-  const caller = callerFor(slug, a, `Documento «${job.title}»`);
-  requirePolicy('ai_call', { slug, agentId: a.id, authorized: true, route: 'claude-code' });
-  const ctx = skillContext(files, s.layout.skills);
+  // 2. Plan del agente (Claude Code): qué script de su habilidad y con qué argumentos. Un lote trae su plan (una llamada).
   const scripts = s.layout.skills.flatMap(k => k.scripts);
-  const prev = job.versions.map(v => `- v${v.n}: ${v.passed ? 'aprobada por la QA' : 'RECHAZADA por la QA'} · script ${v.plan.script} ${v.plan.args.join(' ')} · puertas fallidas: ${Object.entries(v.gates).filter(([, ok]) => !ok).map(([g]) => g).join(', ') || 'ninguna'}${v.feedback ? ` · corrección del propietario: «${v.feedback.slice(0, 300)}»` : ''}`).join('\n');
-  const planPrompt = `${clipTotal(ctx.skills, 30_000)}\n\n${ctx.context ? `# Contexto\n${clipTotal(ctx.context, 12_000)}\n\n` : ''}# Scripts disponibles (SOLO estos)\n${ctx.scripts || '(ninguno)'}\n\n# Documento\n- Archivo: ${job.inputName} · páginas: ${pdf.pages} · páginas con texto extraíble: ${pdf.text_pages}\n${prev ? `- Versiones anteriores:\n${prev}\n` : ''}${opts.feedback ? `\n# Corrección del propietario para ESTA versión\n${opts.feedback.slice(0, 2000)}\n` : ''}\n# Reglas del plan\n- Empieza SIEMPRE por {entrada} {salida} (PDF original y DOCX nuevo). {informe} (JSON de informe del script, si lo admite) y {trabajo} (carpeta de trabajo temporal) solo como valor de una opción. Cada marcador una vez.\n- Argumentos: solo marcadores, opciones --nombre y valores simples (números o palabras). Ninguna ruta. Programas y perfiles (p. ej. LibreOffice) los fija el Portal.\n- Sigue el procedimiento de tu habilidad para producir el entregable COMPLETO (todas las páginas), salvo que el propietario pida un piloto.\n- La QA la hace el Portal después: no planifiques scripts de QA.\nResponde SOLO con JSON: {"script": "<ruta exacta de la lista>", "args": ["..."], "reason": "<por qué, en una frase>"}`;
-  let plan: ScriptPlan; let planError: string | null = null;
-  try {
-    const r = await caller.complete({ model: a.config.model, system: `Eres «${a.config.name}». Planificas UNA ejecución de los scripts de tu habilidad para convertir un PDF. No ejecutas nada: el Portal valida y ejecuta tu plan. Respondes solo con JSON.`, user: planPrompt, maxTokens: 1500, effort: a.config.effort, supportsEffort: false });
-    const v = validatePlan(extractJson(r.text), scripts);
-    if (!v.ok) { planError = v.error; throw new Error(v.error); }
-    plan = v.plan;
-  } catch (e: any) {
-    throw err(`El agente no produjo un plan válido: ${planError ?? e?.message ?? e}. No se ejecutó nada, no se usó otro arnés ni la API.`, 502);
+  let plan: ScriptPlan;
+  if (opts.plan) { const v = validatePlan(opts.plan, scripts); if (!v.ok) throw err(`El plan del lote ya no es válido: ${v.error}`, 409); plan = v.plan; }
+  else {
+    const prev = job.versions.map(v => `- v${v.n}: ${v.passed ? 'aprobada por la QA' : 'RECHAZADA por la QA'} · script ${v.plan.script} ${v.plan.args.join(' ')} · puertas fallidas: ${Object.entries(v.gates).filter(([, ok]) => !ok).map(([g]) => g).join(', ') || 'ninguna'}${v.feedback ? ` · corrección del propietario: «${v.feedback.slice(0, 300)}»` : ''}`).join('\n');
+    plan = await planScript(slug, a, `- Archivo: ${job.inputName} · páginas: ${pdf.pages} · páginas con texto extraíble: ${pdf.text_pages}\n${prev ? `- Versiones anteriores:\n${prev}\n` : ''}`, opts.feedback ?? null);
   }
 
   // 3. Ejecutar el script adoptado: se ejecuta una COPIA en la carpeta temporal, escrita desde la instantánea adoptada
@@ -411,7 +355,7 @@ async function processVersionIn(slug: string, a: Agent, jobId: string, tc: Toolc
   const conv = await run(tc.python!, [...pyRunFlags(work), scriptAbs, ...plan.args.map(x => sub[x] ?? x)], { cwd: work, timeoutMs: RUN_TIMEOUT_MS, env: runEnv });
   const tail = (t: string) => t.slice(-1500);
   if (conv.code !== 0 || !fs.existsSync(output)) {
-    const version: DocumentVersion = { n, docx: '', qaDir: '', passed: false, gates: { conversion_completada: false }, metrics: { exit_code: conv.code ?? -1 }, plan, scriptHash: sha256Text(onDisk), skillRevision: String(s.revision), report: `La conversión falló${conv.timedOut ? ' (tiempo agotado)' : ''}: ${tail(conv.stderr || conv.stdout)}`, reportBy: 'Portal', feedback: opts.feedback ?? null, createdAt: now(), durationMs: Date.now() - t0 };
+    const version: DocumentVersion = { n, docx: '', qaDir: '', passed: false, gates: { conversion_completada: false }, metrics: { exit_code: conv.code ?? -1 }, plan, scriptHash: sha256Text(onDisk), skillRevision: String(s.revision), report: `La conversión falló${conv.timedOut ? ' (tiempo agotado)' : ''}: ${tail(conv.stderr || conv.stdout)}`, reportBy: 'Portal', feedback: opts.feedback ?? null, createdAt: now(), durationMs: Date.now() - t0, calls: opts.plan ? 0 : 1, batchId: opts.batchId ?? null };
     jobs.update(jobId, { status: 'failed', versions: [...job.versions, version], error: version.report.slice(0, 600) });
     appendHistory(s.root, dir, zones, `v${n}: la conversión falló (${plan.script}).`);
     return;
@@ -436,9 +380,13 @@ async function processVersionIn(slug: string, a: Agent, jobId: string, tc: Toolc
     imagenes_de_pagina_completa: q.docx?.pictures_over_60pct, tablas: q.docx?.tables, diferencia_visual_media: q.pages?.length ? Number((q.pages.reduce((t: number, p: any) => t + p.visual_diff, 0) / q.pages.length).toFixed(4)) : 0
   } : { qa_error: tail(qa.stderr || qa.stdout) };
 
-  // 5. Informe honesto del agente (a partir de las métricas).
+  // 5. Informe honesto: del agente (a partir de las métricas) o, en un lote, del Portal (sin gastar una llamada por documento).
   let report = ''; let reportBy = a.config.name;
-  try {
+  if (opts.reportMode === 'portal') {
+    reportBy = 'Portal';
+    report = portalReport(passed, gates, metrics);
+  } else try {
+    const caller = callerFor(slug, a, `Documento «${job.title}»`);
     const worst = (q?.pages ?? []).slice().sort((x: any, y: any) => y.visual_diff - x.visual_diff).slice(0, 5).map((p: any) => ({ pagina: p.page, diferencia_visual: p.visual_diff, palabras_en_render: p.rendered_words }));
     const r = await caller.complete({ model: a.config.model, system: `Eres «${a.config.name}». Redactas el informe de entrega de una conversión PDF→Word para el propietario: en español, claro, ≤ 220 palabras. Honesto: no afirmes nada que no esté en los datos; si una puerta de calidad falló, dilo lo primero y no presentes el documento como válido. Distingue lo comprobado (métricas, render en LibreOffice) de lo pendiente (p. ej. revisión en Microsoft Word, que no está en este equipo).`, user: JSON.stringify({ documento: job.inputName, version: n, plan, codigo_de_salida: conv.code, puertas: gates, aprobado_por_la_QA: passed, metricas: metrics, peores_paginas: worst, problemas_de_estructura: q?.schema_problems ?? [] }, null, 1), maxTokens: 900, effort: a.config.effort, supportsEffort: false });
     report = r.text.trim();
@@ -446,7 +394,7 @@ async function processVersionIn(slug: string, a: Agent, jobId: string, tc: Toolc
     reportBy = 'Portal';
     report = `${passed ? 'La QA del Portal aprobó esta versión.' : `La QA del Portal RECHAZÓ esta versión (puertas fallidas: ${Object.entries(gates).filter(([, ok]) => !ok).map(([g]) => g).join(', ')}).`} Métricas: ${JSON.stringify(metrics)}. (Informe automático: el arnés del agente falló al redactarlo — ${String(e?.message ?? e).slice(0, 200)}.)`;
   }
-  const version: DocumentVersion = { n, docx: `versiones/v${n}.docx`, qaDir: q ? `revisiones/v${n}/qa` : '', passed, gates, metrics, plan, scriptHash: sha256Text(onDisk), skillRevision: String(s.revision), report, reportBy, feedback: opts.feedback ?? null, createdAt: now(), durationMs: Date.now() - t0 };
+  const version: DocumentVersion = { n, docx: `versiones/v${n}.docx`, qaDir: q ? `revisiones/v${n}/qa` : '', passed, gates, metrics, plan, scriptHash: sha256Text(onDisk), skillRevision: String(s.revision), report, reportBy, feedback: opts.feedback ?? null, createdAt: now(), durationMs: Date.now() - t0, calls: (opts.plan ? 0 : 1) + (opts.reportMode === 'portal' ? 0 : 1), batchId: opts.batchId ?? null };
   safeWrite(s.root, `${dir}/revisiones/v${n}/INFORME.md`, `# Versión ${n} — ${passed ? 'aprobada por la QA del Portal' : 'RECHAZADA por la QA del Portal'}\n\n${report}\n\n## Plan\n\`${plan.script} ${plan.args.join(' ')}\`\n\n${plan.reason}\n\n## Puertas\n${Object.entries(gates).map(([g, ok]) => `- ${ok ? '✔' : '✘'} ${g}`).join('\n')}\n`, zones);
   jobs.update(jobId, { status: passed ? 'ready' : 'rejected', versions: [...job.versions, version], error: null });
   appendHistory(s.root, dir, zones, `v${n}: ${passed ? 'aprobada' : 'rechazada'} por la QA del Portal (${plan.script.split('/').pop()}, revisión ${s.revision} de la habilidad).`);
@@ -455,6 +403,40 @@ async function processVersionIn(slug: string, a: Agent, jobId: string, tc: Toolc
 }
 
 const clipTotal = (t: string, n: number) => t.length > n ? `${t.slice(0, n)}\n…(recortado: el resto no se envía)` : t;
+
+/** Informe del Portal (sin modelo) a partir de las puertas y métricas: lo que se comprobó, sin adornos. */
+export function portalReport(passed: boolean, gates: Record<string, boolean>, metrics: Record<string, number | string>): string {
+  const failed = Object.entries(gates).filter(([, ok]) => !ok).map(([g]) => g.replace(/_/g, ' '));
+  const m = metrics as Record<string, any>;
+  const lines = [passed ? 'La comprobación del Portal aprobó esta versión.' : `La comprobación del Portal RECHAZÓ esta versión: ${failed.join(', ') || 'sin comprobación'}.`];
+  if (m.paginas_pdf !== undefined) lines.push(`Páginas: ${m.paginas_pdf} en el PDF, ${m.paginas_word} en el Word. Tablas: ${m.tablas}. Imágenes: ${m.imagenes} (de página completa: ${m.imagenes_de_pagina_completa}).`);
+  if (m.palabras_en_figuras) lines.push(`${m.palabras_en_figuras} palabras (${Math.round(Number(m.proporcion_en_figuras) * 100)} %) están dentro de figuras: van como imagen con su texto alternativo, no son editables.`);
+  if (m.qa_error) lines.push(`La comprobación no terminó: ${String(m.qa_error).slice(0, 300)}`);
+  lines.push('Informe automático del Portal (en un lote no se gasta una llamada por documento). Microsoft Word no está en este equipo: el render comprobado es el de LibreOffice.');
+  return lines.join('\n\n');
+}
+
+/**
+ * Plan del agente para UNA ejecución (una llamada a Claude Code): qué script de su habilidad y con qué argumentos, validado.
+ * `docInfo` describe el documento o el lote (sin su contenido).
+ */
+export async function planScript(slug: string, a: Agent, docInfo: string, feedback: string | null): Promise<ScriptPlan> {
+  const repo = sourcesRepo(slug); const s = repo.get(a.id)!; const files = repo.files(a.id)!;
+  const caller = callerFor(slug, a, 'Plan de conversión');
+  requirePolicy('ai_call', { slug, agentId: a.id, authorized: true, route: 'claude-code' });
+  const ctx = skillContext(files, s.layout.skills);
+  const scripts = s.layout.skills.flatMap(k => k.scripts);
+  const planPrompt = `${clipTotal(ctx.skills, 30_000)}\n\n${ctx.context ? `# Contexto\n${clipTotal(ctx.context, 12_000)}\n\n` : ''}# Scripts disponibles (SOLO estos)\n${ctx.scripts || '(ninguno)'}\n\n# Documento\n${docInfo}${feedback ? `\n# Corrección del propietario para ESTA versión\n${feedback.slice(0, 2000)}\n` : ''}\n# Reglas del plan\n- Empieza SIEMPRE por {entrada} {salida} (PDF original y DOCX nuevo). {informe} (JSON de informe del script, si lo admite) y {trabajo} (carpeta de trabajo temporal) solo como valor de una opción. Cada marcador una vez.\n- Argumentos: solo marcadores, opciones --nombre y valores simples (números o palabras). Ninguna ruta. Programas y perfiles (p. ej. LibreOffice) los fija el Portal.\n- Sigue el procedimiento de tu habilidad para producir el entregable COMPLETO (todas las páginas), salvo que el propietario pida un piloto.\n- La QA la hace el Portal después: no planifiques scripts de QA.\nResponde SOLO con JSON: {"script": "<ruta exacta de la lista>", "args": ["..."], "reason": "<por qué, en una frase>"}`;
+  let planError: string | null = null;
+  try {
+    const r = await caller.complete({ model: a.config.model, system: `Eres «${a.config.name}». Planificas UNA ejecución de los scripts de tu habilidad para convertir PDF. No ejecutas nada: el Portal valida y ejecuta tu plan. Respondes solo con JSON.`, user: planPrompt, maxTokens: 1500, effort: a.config.effort, supportsEffort: false });
+    const v = validatePlan(extractJson(r.text), scripts);
+    if (!v.ok) { planError = v.error; throw new Error(v.error); }
+    return v.plan;
+  } catch (e: any) {
+    throw err(`El agente no produjo un plan válido: ${planError ?? e?.message ?? e}. No se ejecutó nada, no se usó otro arnés ni la API.`, 502);
+  }
+}
 /** Opciones de Python de una ejecución: sin paquetes del usuario salvo los pasados, sin escribir ni leer cachés de bytecode del agente. */
 const pyRunFlags = (work: string) => process.env.PORTAL_PYTHON_ARGS !== undefined ? pyFlags() : [...pyFlags(), '-X', `pycache_prefix=${path.join(work, 'pyc')}`];
 
@@ -484,8 +466,14 @@ export function pendingProposalCounts(slug: string): [string, number][] {
 }
 
 /** Clasifica el feedback (una llamada del agente) y, si es reutilizable, guarda la propuesta de cambio para tu aprobación. */
+/** Anota una llamada al modelo hecha para un lote (cuenta en el tope diario aunque la respuesta no sirviera). */
+export function recordModelCall(slug: string, agentId: string, what = 'lote') {
+  documentsDb(slug).prepare(`INSERT INTO document_model_calls (agent_id, at, what) VALUES (?, ?, ?)`).run(agentId, now(), what);
+}
+
 export async function classifyFeedback(slug: string, agentId: string, input: { jobId: string | null; text: string }, by = 'owner'): Promise<ImprovementProposal> {
   const a = agentsRepo(slug).get(agentId); if (!a) throw err('Agente no encontrado', 404);
+  if (jobsDb(slug).usageToday(agentId).calls >= MODEL_CALLS_PER_DAY) throw err(`Hoy ya se usaron las ${MODEL_CALLS_PER_DAY} consultas diarias de este agente para documentos y mejoras: inténtalo mañana.`, 429);
   const s = sourceOr(slug, agentId); const repo = sourcesRepo(slug); const files = repo.files(agentId)!;
   const job = input.jobId ? jobsDb(slug).get(input.jobId) : null; if (input.jobId && (!job || job.agentId !== agentId)) throw err('Trabajo no encontrado', 404);
   const last = job?.versions[job.versions.length - 1] ?? null;

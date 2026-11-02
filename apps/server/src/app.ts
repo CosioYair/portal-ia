@@ -28,6 +28,7 @@ import { orgEvaluationRoutes } from './routes/orgEvaluation.ts';
 import { liveRoutes } from './routes/live.ts';
 import { agentsOsRoutes } from './routes/agentsOs.ts';
 import { externalAgentsRoutes } from './routes/externalAgents.ts';
+import { agentFilesRoutes } from './routes/agentFiles.ts';
 import { VERSION } from './services/system.ts';
 
 /** Script principal del paquete de la interfaz que se sirve (p. ej. «index-BYW4Vz5N.js»), o null sin paquete construido. Se relee cada 10 s. */
@@ -80,7 +81,7 @@ export async function buildApp() {
   // También el paquete de la interfaz que sirve ahora: una pestaña abierta con un paquete anterior (tras reconstruir y
   // reiniciar) lo detecta y pide recargar, en vez de ignorar acciones que no conoce (HU-159).
   // Nunca dentro de un marco de otra página (una vista previa no puede mostrar el Portal y hacerte pulsar en él).
-  app.addHook('onSend', async (req, reply, payload) => { reply.header('x-frame-options', 'DENY').header('content-security-policy', "frame-ancestors 'none'"); if (req.url.startsWith('/api/')) { reply.header('x-server-time', String(Date.now())).header('cache-control', 'no-store'); const web = currentWebBundle(); if (web) reply.header('x-portal-web', web); } return payload; });
+  app.addHook('onSend', async (req, reply, payload) => { const csp = reply.getHeader('content-security-policy'); reply.header('x-frame-options', 'DENY').header('content-security-policy', csp ? `${csp}; frame-ancestors 'none'` : "frame-ancestors 'none'"); if (req.url.startsWith('/api/')) { reply.header('x-server-time', String(Date.now())).header('cache-control', 'no-store'); const web = currentWebBundle(); if (web) reply.header('x-portal-web', web); } return payload; });
 
   app.get('/api/health', async () => ({ ok: true, name: 'portal-ia', version: VERSION, dataDir: config.dataDir, repoRoot: REPO_ROOT }));
 
@@ -109,6 +110,7 @@ export async function buildApp() {
   await app.register(liveRoutes);
   await app.register(agentsOsRoutes);
   await app.register(externalAgentsRoutes);
+  await app.register(agentFilesRoutes);
 
   // Producción local: sirve apps/web/dist si existe (npm run build). SPA fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {

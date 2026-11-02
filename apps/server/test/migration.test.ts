@@ -57,13 +57,14 @@ test('migración 0.11 → 0.16 sobre una copia sintética: copia de seguridad pr
   // Esquema 0.16 (encargos y tope de llamadas): columnas nuevas en processes, cubiertas por la copia previa.
   // Esquema 0.17 (sistema operativo de agentes): tablas nuevas y lessons.agent_id, también tras la copia previa.
   // Esquema 0.18 (agentes externos y documentos): tablas nuevas, creadas al usarse y cubiertas por la copia previa.
+  // Esquema 0.19 (lotes de documentos, adjuntos y acciones del chat): tablas y columnas nuevas, creadas al usarse, tras la copia previa.
   for (const c of ['assignment_id', 'max_subscription_calls']) assert.ok(r.procCols.includes(c), `columna ${c}`);
   assert.ok(r.agentCols.includes('template_version'));
   // Copia de seguridad previa
-  const backups = fs.readdirSync(path.join(dataDir, 'backups')); assert.equal(backups.length, 1); assert.match(backups[0], /antes-de-0\.18$/);
+  const backups = fs.readdirSync(path.join(dataDir, 'backups')); assert.equal(backups.length, 1); assert.match(backups[0], /antes-de-0\.19$/);
   assert.ok(fs.existsSync(path.join(dataDir, 'backups', backups[0], 'workspaces', 'portal-ia', 'portal-ia.sqlite')));
   assert.ok(fs.existsSync(path.join(dataDir, 'backups', backups[0], '.master.key')));
-  assert.equal(fs.readFileSync(path.join(dataDir, '.schema-version'), 'utf8').trim(), '0.18');
+  assert.equal(fs.readFileSync(path.join(dataDir, '.schema-version'), 'utf8').trim(), '0.19');
   // La copia conserva el esquema antiguo (es una copia previa, no migrada)
   const old = new DatabaseSync(path.join(dataDir, 'backups', backups[0], 'workspaces', 'portal-ia', 'portal-ia.sqlite'));
   assert.ok(!(old.prepare('PRAGMA table_info(process_steps)').all() as any[]).some(c => c.name === 'role')); old.close();

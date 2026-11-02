@@ -34,12 +34,16 @@ test('panel del agente: seis pestañas con rol de pestaña, flechas del teclado 
   assert.match(panel, /\['ArrowRight', 'ArrowLeft', 'Home', 'End'\]\.includes\(e\.key\)/);
   assert.match(panel, /if \(x\.agent\.id !== cur\.current\) return;/, 'una respuesta de otro agente se descarta');
   assert.match(panel, /createPortal\(<aside className="agent-panel"/);
+  // Todas las pestañas a la vista en cualquier ancho: pasan de línea, sin desplazamiento horizontal.
+  const css = read('office.css'); const rule = /\.agent-panel-tabs \{([^}]*)\}/.exec(css)![1];
+  assert.match(rule, /flex-wrap: wrap/); assert.doesNotMatch(rule, /overflow-x/);
 });
 
 test('nada que gaste se envía sin autorización explícita en la interfaz', () => {
-  const panel = read('components/AgentPanel.tsx'); const wizard = read('screens/AgentWizard.tsx'); const office = read('screens/Office.tsx');
-  assert.match(panel, /Autorizo esta llamada facturable/);
-  assert.match(panel, /const canSend = !busy && !pending && text\.trim\(\)\.length >= 2 && !p\.retired && !consoleOnly && \(!p\.chat\.estimate\.billable \|\| billOk\);/);
+  const panel = read('components/AgentPanel.tsx'); const wizard = read('screens/AgentWizard.tsx'); const office = read('screens/Office.tsx'); const chat = read('components/AgentChat.tsx');
+  assert.match(chat, /Autorizo esta llamada facturable/);
+  // Un mensaje lleva texto o adjuntos ya subidos (nunca a medio subir) y, si factura, la autorización marcada.
+  assert.match(chat, /const canSend = !busy && !pending && !uploading && \(text\.trim\(\)\.length >= 2 \|\| ready\.length > 0\) && !p\.retired && !consoleOnly && \(!p\.chat\.estimate\.billable \|\| billOk\);/);
   assert.match(panel, /disabled=\{busy \|\| !auth \|\| req\.trim\(\)\.length < 8/);
   assert.match(panel, /disabled=\{busy \|\| !auth \|\| !model/);
   assert.match(wizard, /const valid = \[.*auth\];/);

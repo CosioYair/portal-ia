@@ -4,7 +4,11 @@ import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
 import { agentsRepo } from '../db/workspace.ts';
 import { adoptSourceChange, externalPreview, importExternal, restoreSourceRevision, sourceStatus, updateGrants } from '../services/externalAgents.ts';
-import { applyProposal, classifyFeedback, detectToolchain, documentJobsRunning, jobFile, listJobs, listProposals, receiveDocuments, rejectProposal, startProcessing, versionEvidence } from '../services/documentJobs.ts';
+import os from 'node:os';
+import path from 'node:path';
+import { applyProposal, BATCH_LIMITS, classifyFeedback, detectToolchain, documentJobsRunning, jobFile, jobsDb, listJobs, listProposals, rejectProposal, startProcessing, versionEvidence } from '../services/documentJobs.ts';
+import { batchFile, buildDeliverable, cancelBatch, documentQueueStatus, listBatches, pauseBatch, receiveFile, resumeBatch, retryBatch, startBatch } from '../services/documentBatches.ts';
+import { acceptOctetStream, streamToTemp, uploadName } from './uploads.ts';
 
 /**
  * Agentes externos (referencia gestionada) y su banco de trabajo de documentos. Ver docs/agentes-externos.md.
@@ -14,6 +18,7 @@ const err = (reply: FastifyReply, e: any) => reply.code(e.statusCode ?? 500).sen
 const GRANTS = z.object({ writeDocuments: z.boolean(), runScripts: z.boolean(), applyImprovements: z.boolean() });
 
 export async function externalAgentsRoutes(app: FastifyInstance) {
+  acceptOctetStream(app);
   const guard = (slug: string, reply: FastifyReply) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
   const agentOk = (slug: string, id: string, reply: FastifyReply) => { if (!agentsRepo(slug).get(id)) { reply.code(404).send({ error: 'Agente no encontrado' }); return false; } return true; };
   const W = '/api/workspaces/:slug';
@@ -61,12 +66,45 @@ export async function externalAgentsRoutes(app: FastifyInstance) {
   // ---------- Documentos
   app.get(`${W}/agents/:id/documents`, async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
-    try { return { jobs: listJobs(slug, id), running: documentJobsRunning(), proposals: listProposals(slug, id) }; } catch (e) { return err(reply, e); }
+    try { const jobs = listJobs(slug, id); const batches = listBatches(slug, id, jobs); return { jobs, batches, running: documentJobsRunning(), proposals: listProposals(slug, id), queue: documentQueueStatus(), limits: BATCH_LIMITS }; } catch (e) { return err(reply, e); }
   });
+  // Compatibilidad (JSON con base64, archivos pequeños): mismo camino que la subida en flujo.
   app.post(`${W}/agents/:id/documents`, { bodyLimit: 90 * 1024 * 1024 }, async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
     const b = z.object({ name: z.string().min(1).max(200), contentBase64: z.string().min(8) }).safeParse(req.body); if (!b.success) return reply.code(400).send({ error: 'Adjunta un PDF o un ZIP.' });
-    try { return reply.code(201).send(receiveDocuments(slug, id, b.data)); } catch (e) { return err(reply, e); }
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pia-up-')); const file = path.join(dir, 'subida.bin');
+    try { fs.writeFileSync(file, Buffer.from(b.data.contentBase64, 'base64')); return reply.code(201).send(toLegacy(slug, await receiveFile(slug, id, file, b.data.name, 'upload'))); } catch (e) { return err(reply, e); }
+    finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+  // Subida en flujo (application/octet-stream; ?name=archivo.pdf|.zip): un PDF → documento; un ZIP → lote con TODOS sus PDF.
+  app.put(`${W}/agents/:id/documents/upload`, { bodyLimit: BATCH_LIMITS.maxUploadBytes }, async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
+    const name = uploadName(req); if (!name) return reply.code(400).send({ error: 'Falta el nombre del archivo.' });
+    let up: Awaited<ReturnType<typeof streamToTemp>> | null = null;
+    try { up = await streamToTemp(req, BATCH_LIMITS.maxUploadBytes); return reply.code(201).send(await receiveFile(slug, id, up.file, name, 'upload')); } catch (e) { return err(reply, e); }
+    finally { up?.cleanup(); }
+  });
+
+  // ---------- Lotes
+  const batchAct = (p: string, fn: (slug: string, id: string, bid: string, body: any) => any) =>
+    app.post(`${W}/agents/:id/batches/:batchId/${p}`, async (req, reply) => {
+      const { slug, id, batchId } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
+      try { return await fn(slug, id, batchId, req.body ?? {}); } catch (e) { return err(reply, e); }
+    });
+  batchAct('start', (s, a, b, body) => startBatch(s, a, b, { authorized: body.authorized === true }));
+  batchAct('pause', (s, a, b) => pauseBatch(s, a, b));
+  batchAct('resume', (s, a, b, body) => resumeBatch(s, a, b, { authorized: body.authorized === true }));
+  batchAct('retry', (s, a, b, body) => retryBatch(s, a, b, { authorized: body.authorized === true, includeRejected: body.includeRejected === true, items: Array.isArray(body.items) ? body.items.map(Number).filter(Number.isInteger) : undefined }));
+  batchAct('cancel', (s, a, b) => cancelBatch(s, a, b));
+  batchAct('deliverable', async (s, a, b) => ({ deliverable: await buildDeliverable(s, a, b) }));
+  app.get(`${W}/agents/:id/batches/:batchId/file`, async (req, reply) => {
+    const { slug, id, batchId } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
+    const q = z.object({ path: z.string().min(1).max(300) }).safeParse(req.query); if (!q.success) return reply.code(400).send({ error: 'Falta el archivo.' });
+    try {
+      const f = batchFile(slug, id, batchId, q.data.path);
+      reply.header('Content-Type', f.type).header('X-Content-Type-Options', 'nosniff').header('Cache-Control', 'no-store').header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(f.name)}`);
+      return reply.send(fs.createReadStream(f.abs));
+    } catch (e) { return err(reply, e); }
   });
   app.post(`${W}/agents/:id/documents/:jobId/process`, async (req, reply) => {
     const { slug, id, jobId } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
@@ -79,7 +117,7 @@ export async function externalAgentsRoutes(app: FastifyInstance) {
     try {
       const f = jobFile(slug, id, jobId, q.data.path);
       reply.header('Content-Type', f.type).header('X-Content-Type-Options', 'nosniff').header('Cache-Control', 'no-store');
-      if (q.data.download || !/^image\//.test(f.type)) reply.header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(f.name)}`);
+      if (q.data.download || !/^image\//.test(f.type)) reply.header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(f.name.replace(/[\\/]/g, '-'))}`);
       return reply.send(fs.createReadStream(f.abs));
     } catch (e) { return err(reply, e); }
   });
@@ -103,4 +141,11 @@ export async function externalAgentsRoutes(app: FastifyInstance) {
     const { slug, id, pid } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
     try { return rejectProposal(slug, id, pid); } catch (e) { return err(reply, e); }
   });
+}
+
+/** Respuesta de la ruta JSON antigua: { jobs, skipped } (un ZIP ahora es un lote; sus exclusiones van en el lote). */
+function toLegacy(slug: string, r: Awaited<ReturnType<typeof receiveFile>>) {
+  if (r.kind === 'pdf') return { jobs: r.jobs, skipped: [] as string[] };
+  const jobs = r.batch.items.filter(i => i.jobId).map(i => ({ ...jobsDb(slug).get(i.jobId!)!, duplicate: i.outcome === 'duplicate' })).filter(j => j.id);
+  return { jobs, skipped: r.batch.items.filter(i => i.state === 'excluded').map(i => `${i.entryName}: ${i.reason}`), batch: r.batch };
 }

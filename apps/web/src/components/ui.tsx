@@ -39,6 +39,7 @@ export const Icon = {
   authorization: () => svg(<><path d="M8 1.75l5 2v4c0 3-2.25 5.25-5 6.5-2.75-1.25-5-3.5-5-6.5v-4z" {...L} /><path d="M5.75 8l1.6 1.6 2.9-3.1" {...L} /></>),
   agent: () => svg(<><rect x="3" y="5" width="10" height="8" rx="2" {...L} /><path d="M8 2.5V5M6 9h.01M10 9h.01M6.5 11.25h3" {...L} /></>),
   file: () => svg(<path d="M4 1.75h5l3 3v9.5H4zM9 1.75v3h3" {...L} />),
+  clip: () => svg(<path d="M10.75 5.25 6.4 9.6a1.25 1.25 0 0 0 1.77 1.77l4.5-4.5a2.75 2.75 0 0 0-3.9-3.9L4.2 7.55a4.25 4.25 0 0 0 6 6l3.3-3.3" {...L} />),
   publish: () => svg(<path d="M8 10.5V2.75M5 5.75l3-3 3 3M2.75 10.5v2.75h10.5V10.5" {...L} />),
   panelWide: () => svg(<><rect x="1.75" y="3" width="12.5" height="10" rx="1.5" {...L} /><path d="M10.5 3v10M8 8H4M5.75 6.25 4 8l1.75 1.75" {...L} /></>),
   panelNarrow: () => svg(<><rect x="1.75" y="3" width="12.5" height="10" rx="1.5" {...L} /><path d="M10.5 3v10M4 8h4M6.25 6.25 8 8l-1.75 1.75" {...L} /></>),

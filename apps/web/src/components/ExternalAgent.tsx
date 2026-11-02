@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FEEDBACK_LABEL, INTEGRATION_LABEL, type DocumentJob, type ExecutionBackend, type ExternalGrants, type ImprovementProposal } from '@portal-ia/domain';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { BATCH_ITEM_LABEL, FEEDBACK_LABEL, INTEGRATION_LABEL, type DocumentBatch, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ExecutionBackend, type ExternalGrants, type ImprovementProposal } from '@portal-ia/domain';
 import { Chip, Icon, Notice, Spinner } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
 import { FolderPicker } from './FolderPicker.tsx';
 import { useApp } from '../lib/store.ts';
 import { useLive } from '../lib/live.ts';
-import { osApi, type AgentPanel as Panel, type ExternalPreview, type SourceStatus } from '../lib/osApi.ts';
+import { osApi, type AgentPanel as Panel, type DocumentQueue, type ExternalPreview, type SourceStatus } from '../lib/osApi.ts';
+import { fmtBytes } from './AgentChat.tsx';
 
 /**
  * Agentes externos (referencia gestionada): importar sin copiar, banco de documentos, origen e integración, mejoras.
@@ -17,7 +18,6 @@ const GRANTS_TEXT: Record<keyof ExternalGrants, { label: string; hint: string }>
   applyImprovements: { label: 'Aplicar a sus instrucciones y habilidades las mejoras que apruebes', hint: 'Solo cuando apruebas una propuesta concreta: antes guarda una copia en «configuracion/respaldos/», anota el cambio en CAMBIOS.md y siempre se puede volver atrás.' }
 };
 const NO_GRANTS: ExternalGrants = { writeDocuments: false, runScripts: false, applyImprovements: false };
-const PDF_MAX = 40 * 1024 * 1024; const ZIP_MAX = 60 * 1024 * 1024;
 
 function GrantsEditor({ value, onChange, disabled }: { value: ExternalGrants; onChange: (g: ExternalGrants) => void; disabled?: boolean }) {
   return <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 6 }}><legend className="label">Permisos que le das (solo en su carpeta)</legend>
@@ -135,47 +135,175 @@ const METRIC_TEXT: Record<string, (v: unknown) => string> = {
 export function DocumentsTab({ slug, p, onChanged, onTab }: { slug: string; p: Panel; onChanged: () => void; onTab: (t: 'origen' | 'mejoras') => void }) {
   const { flash } = useApp();
   const [data, setData] = useState<Awaited<ReturnType<typeof osApi.documents>> | null>(null); const [src, setSrc] = useState<SourceStatus | null>(null);
-  const [error, setError] = useState<string | null>(null); const [warn, setWarn] = useState<string | null>(null); const [busy, setBusy] = useState(false); const [open, setOpen] = useState<string | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null); const opened = useRef(false);
+  const [error, setError] = useState<string | null>(null); const [busy, setBusy] = useState(false); const [open, setOpen] = useState<string | null>(null);
+  const [openBatch, setOpenBatch] = useState<string | null>(null); const [intake, setIntake] = useState<DocumentBatch | null>(null);
+  const [upload, setUpload] = useState<{ name: string; progress: number; n: number; of: number } | null>(null); const [dragging, setDragging] = useState(false);
+  const [said, setSaid] = useState(''); // anuncio para lectores de pantalla (inicio y fin de cada subida, no cada porcentaje)
+  const fileRef = useRef<HTMLInputElement>(null); const chooseBtn = useRef<HTMLButtonElement>(null); const opened = useRef(false); const depth = useRef(0);
   const load = useCallback(() => Promise.all([osApi.documents(slug, p.agent.id), osApi.source(slug, p.agent.id)]).then(([d, s]) => {
     setData(d); setSrc(s);
-    if (!opened.current && d.jobs[0]) { opened.current = true; setOpen(d.jobs[0].id); } // solo al abrir: no se reabre si lo cierras
+    // Solo al abrir: el lote o documento más reciente (no se reabre si lo cierras).
+    if (!opened.current) { opened.current = true; if (d.batches[0]) setOpenBatch(d.batches[0].id); else if (d.jobs[0]) setOpen(d.jobs[0].id); }
   }).catch(e => setError(e.message)), [slug, p.agent.id]);
   useEffect(() => { void load(); }, [load]);
-  useLive(c => c.ws === slug && c.entity === 'agent' && c.id === p.agent.id, () => void load(), { minMs: 800 });
+  useLive(c => c.ws === slug && c.entity === 'agent' && c.id === p.agent.id, () => void load(), { minMs: 1500 });
   const act = async (fn: () => Promise<unknown>, ok: string): Promise<boolean> => { setBusy(true); setError(null); try { await fn(); flash(ok); await load(); onChanged(); return true; } catch (e: any) { setError(e.message); return false; } finally { setBusy(false); } };
-  const upload = (f: File) => {
-    const zip = /\.zip$/i.test(f.name);
-    if (f.size > (zip ? ZIP_MAX : PDF_MAX)) { setError(`El archivo pesa ${(f.size / 1048576).toFixed(0)} MB: el máximo es ${zip ? 60 : 40} MB.`); return; }
-    setWarn(null);
-    void act(async () => {
-      const b64 = await new Promise<string>((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] ?? ''); r.onerror = () => rej(new Error('No se pudo leer el archivo.')); r.readAsDataURL(f); });
-      const r = await osApi.uploadDocument(slug, p.agent.id, f.name, b64);
-      if (r.skipped.length) setWarn(`Del ZIP no se tomaron: ${r.skipped.join(' · ')}`);
-      if (r.jobs[0]) setOpen(r.jobs[0].id);
-      if (r.jobs.some(j => j.duplicate)) flash('Ese PDF ya estaba recibido: se reutiliza su trabajo (no se duplica).');
-    }, 'Recibido');
+  // Los límites se dicen ANTES de subir nada; un archivo que no cabe no se sube (y se explica cómo seguir).
+  const uploadFiles = async (files: File[]) => {
+    if (!data || !files.length) return;
+    if (upload) { setError('Espera a que termine la subida en curso y vuelve a soltar los archivos.'); return; }
+    if (!src?.grants.writeDocuments) { setError('Concede antes en Origen «guardar documentos en su carpeta».'); return; }
+    const L = data.limits; const problems: string[] = []; const ok: File[] = [];
+    for (const f of files) {
+      const zip = /\.zip$/i.test(f.name); const pdf = /\.pdf$/i.test(f.name);
+      if (!zip && !pdf) problems.push(`«${f.name}» no es un PDF ni un ZIP.`);
+      else if (f.size > (zip ? L.maxUploadBytes : L.maxPdfBytes)) problems.push(`«${f.name}» pesa ${fmtBytes(f.size)}: el máximo ${zip ? 'para un ZIP' : 'para un PDF'} es ${fmtBytes(zip ? L.maxUploadBytes : L.maxPdfBytes)}.${zip ? ' Divídelo en varios ZIP más pequeños: cada uno será su propio lote.' : ''}`);
+      else ok.push(f);
+    }
+    setIntake(null);
+    // Una subida que falla no detiene las demás: al final se dice qué no entró y por qué.
+    for (let k = 0; k < ok.length; k++) {
+      const f = ok[k]; setUpload({ name: f.name, progress: 0, n: k + 1, of: ok.length }); setSaid(`Subiendo «${f.name}»${ok.length > 1 ? ` (${k + 1} de ${ok.length})` : ''}.`);
+      try {
+        const r = await osApi.uploadDocumentFile(slug, p.agent.id, f, fr => setUpload({ name: f.name, progress: fr, n: k + 1, of: ok.length }));
+        if (r.kind === 'zip') { setIntake(r.batch); setOpenBatch(r.batch.id); setSaid(`«${f.name}» recibido: ${r.batch.counts.accepted + r.batch.counts.duplicates} PDF en el lote.`); flash(`ZIP recibido: ${r.batch.counts.accepted + r.batch.counts.duplicates} PDF en el lote`); }
+        else { if (r.jobs[0]) setOpen(r.jobs[0].id); setSaid(`«${f.name}» recibido.`); flash(r.jobs.some(j => j.duplicate) ? 'Ese PDF ya estaba recibido: se reutiliza su trabajo (no se duplica).' : 'PDF recibido'); }
+      } catch (e: any) { problems.push(`«${f.name}»: ${e.message}`); setSaid(`No se pudo subir «${f.name}».`); }
+    }
+    setError(problems.length ? `No entró: ${problems.join(' ')}` : null);
+    setUpload(null); await load(); onChanged();
   };
   if (!data || !src) return error ? <Notice kind="err">{error}</Notice> : <Spinner />;
   if (!src.layout.outputs) return <Notice kind="info">La carpeta de este agente no tiene «documentos/»: no puede recibir PDF desde aquí.</Notice>;
   const missing = (['writeDocuments', 'runScripts'] as const).filter(k => !src.grants[k]);
   const running = data.running.some(r => r.agentId === p.agent.id);
+  const canRun = src.grants.runScripts && src.grants.writeDocuments && !src.toolchain.problems.length;
+  const L = data.limits; const loose = data.jobs.filter(j => !j.batchId); const jobsById = new Map(data.jobs.map(j => [j.id, j]));
+  const jobCard = (j: DocumentJob) => <JobCard key={j.id} slug={slug} agentId={p.agent.id} job={j} open={open === j.id} onToggle={() => setOpen(open === j.id ? null : j.id)} busy={busy || running} canRun={canRun}
+    onProcess={fb => act(() => osApi.processDocument(slug, p.agent.id, j.id, fb), fb ? 'Generando una nueva versión con tu corrección' : 'Procesando: el agente decide, el Portal ejecuta y comprueba')}
+    onFeedback={text => act(() => osApi.sendFeedback(slug, p.agent.id, j.id, text), 'Feedback clasificado: revísalo en «Mejoras»').then(ok => { if (ok) onTab('mejoras'); return ok; })} />;
+  const dropOk = !!src.grants.writeDocuments;
   return <>
     {error && <Notice kind="err">{error}</Notice>}
-    {warn && <Notice kind="warn">{warn}</Notice>}
     {src.toolchain.problems.map((x, i) => <Notice key={i} kind="warn">{x}</Notice>)}
     {missing.length > 0 && <Notice kind="info">Para trabajar con documentos dale en Origen estos permisos: {missing.map(k => `«${GRANTS_TEXT[k].label.toLowerCase()}»`).join(' y ')}. <button type="button" className="lnk" onClick={() => onTab('origen')}>Ir a Origen</button></Notice>}
-    <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div className="h3">Dar un PDF (o un ZIP con PDF)</div>
-      <p className="small muted">Se guarda en su carpeta (<code>{src.layout.outputs}/&lt;documento&gt;/original/</code>). Al procesarlo, el agente decide con su habilidad qué hacer, el Portal ejecuta su programa y comprueba el Word: que el texto sea editable, que no haya páginas convertidas en imagen, que estén todas las páginas y todo el texto, que se abra bien en Word, y lo compara página a página. A Claude se le envían su habilidad, los nombres de archivo, las cifras de las comprobaciones y tu feedback; el texto del PDF no se le envía.</p>
-      <input ref={fileRef} type="file" accept=".pdf,.zip,application/pdf,application/zip" style={{ display: 'none' }} onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) upload(f); }} aria-label="Elegir PDF o ZIP" />
-      <button className="btn btn-primary btn-sm" style={{ alignSelf: 'flex-start' }} disabled={busy || !src.grants.writeDocuments} onClick={() => fileRef.current?.click()}>{Icon.file()} Elegir PDF o ZIP… <span className="muted">(máx. 40 MB; ZIP 60 MB)</span></button>
+    <section className="card dropzone" data-dragging={dragging || undefined}
+      onDragEnter={e => { if (!e.dataTransfer.types.includes('Files')) return; e.preventDefault(); depth.current++; setDragging(true); }}
+      onDragOver={e => { if (e.dataTransfer.types.includes('Files')) e.preventDefault(); }}
+      onDragLeave={() => { depth.current = Math.max(0, depth.current - 1); if (!depth.current) setDragging(false); }}
+      onDrop={e => { e.preventDefault(); depth.current = 0; setDragging(false); void uploadFiles(Array.from(e.dataTransfer.files)); }}>
+      <div className="h3">Dar PDF o un ZIP con PDF</div>
+      <p className="small muted" style={{ margin: 0 }}>Arrastra aquí los archivos o elígelos. Un PDF es un documento; un ZIP es un <strong>lote</strong>: se registran todos sus PDF (hasta {L.maxDocs} y {fmtBytes(L.maxTotal)} descomprimidos; el ZIP hasta {fmtBytes(L.maxUploadBytes)}; cada PDF hasta {fmtBytes(L.maxPdfBytes)}). Lo que no sea un PDF válido se excluye y se te dice por qué; si el ZIP supera los límites no se importa nada y se te explica cómo dividirlo.</p>
+      <p className="small muted" style={{ margin: 0 }}>Se guarda en su carpeta (<code>{src.layout.outputs}/</code>). Al procesar, el agente decide con su habilidad, el Portal ejecuta su programa y comprueba cada Word: texto editable, sin páginas convertidas en imagen, todas las páginas y todo el texto, que se abra bien en Word, y lo compara página a página. A Claude se le envían su habilidad, los nombres de archivo, las cifras de las comprobaciones y tu feedback; el texto de los PDF no se le envía.</p>
+      <input ref={fileRef} type="file" multiple accept=".pdf,.zip,application/pdf,application/zip" style={{ display: 'none' }} onChange={e => { const fs = Array.from(e.target.files ?? []); e.target.value = ''; void uploadFiles(fs); }} aria-hidden="true" tabIndex={-1} />
+      <button ref={chooseBtn} className="btn btn-primary btn-sm" disabled={busy || !!upload || !dropOk} onClick={() => fileRef.current?.click()}>{Icon.file()} Elegir PDF o ZIP…</button>
+      <div className="sr" role="status" aria-live="polite">{said}</div>
+      {upload && <div style={{ width: '100%' }}>
+        <div className="small" aria-hidden="true">{upload.of > 1 ? `${upload.n} de ${upload.of}: ` : ''}«{upload.name}» — {upload.progress < 1 ? `subiendo ${Math.round(upload.progress * 100)} %` : 'revisando el archivo en el servidor (un ZIP grande tarda un poco)…'}</div>
+        <progress className="batch-progress" value={upload.progress} max={1} aria-label={`Subiendo ${upload.name}`} />
+      </div>}
     </section>
+    {intake && <IntakeSummary b={intake} onClose={() => { setIntake(null); requestAnimationFrame(() => chooseBtn.current?.focus()); }} />}
+    {data.batches.length > 0 && <div className="h3">Lotes</div>}
+    {data.batches.map(b => <BatchCard key={b.id} slug={slug} agentId={p.agent.id} b={b} jobsById={jobsById} queue={data.queue} open={openBatch === b.id} onToggle={() => setOpenBatch(openBatch === b.id ? null : b.id)} busy={busy} canRun={canRun} act={act} jobCard={jobCard} />)}
+    {(data.batches.length > 0 || loose.length > 0) && <div className="h3">Documentos sueltos</div>}
     {data.jobs.length === 0 && <p className="small muted">Aún no hay documentos.</p>}
-    {data.jobs.map(j => <JobCard key={j.id} slug={slug} agentId={p.agent.id} job={j} open={open === j.id} onToggle={() => setOpen(open === j.id ? null : j.id)} busy={busy || running} canRun={src.grants.runScripts && src.grants.writeDocuments && !src.toolchain.problems.length}
-      onProcess={fb => act(() => osApi.processDocument(slug, p.agent.id, j.id, fb), fb ? 'Generando una nueva versión con tu corrección' : 'Procesando: el agente decide, el Portal ejecuta y comprueba')}
-      onFeedback={text => act(() => osApi.sendFeedback(slug, p.agent.id, j.id, text), 'Feedback clasificado: revísalo en «Mejoras»').then(ok => { if (ok) onTab('mejoras'); return ok; })} />)}
+    {loose.map(jobCard)}
   </>;
+}
+
+/** Resultado de importar un ZIP: lo detectado, aceptado, ya recibido y excluido (con el motivo de cada uno). */
+function IntakeSummary({ b, onClose }: { b: DocumentBatch; onClose: () => void }) {
+  const c = b.counts; const excluded = b.items.filter(i => i.state === 'excluded'); const dup = b.items.filter(i => i.outcome === 'duplicate');
+  return <Notice kind={excluded.length ? 'warn' : 'ok'}>
+    <strong className="wrap-any">«{b.sourceName}»: {c.detected} archivo(s) en el ZIP.</strong> {c.accepted} PDF nuevos{c.duplicates ? `, ${c.duplicates} ya recibidos antes (se reutiliza su trabajo)` : ''}{c.excluded ? `, ${c.excluded} excluidos` : ''}. Nada se ha descartado sin decírtelo; el ZIP original queda guardado en el lote.
+    {b.error && <><br />{b.error}</>}
+    {(excluded.length > 0 || dup.length > 0) && <details style={{ marginTop: 4 }}><summary style={{ cursor: 'pointer' }}>Ver el detalle</summary>
+      <ul className="wrap-any" style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+        {excluded.map(i => <li key={i.idx}><code>{i.entryName}</code>: {i.reason}</li>)}
+        {dup.map(i => <li key={i.idx}><code>{i.entryName}</code>: {i.reason ?? 'ya recibido antes'}</li>)}
+      </ul></details>}
+    {' '}<button type="button" className="lnk" onClick={onClose}>Cerrar</button>
+  </Notice>;
+}
+
+const BATCH_STATUS: Record<DocumentBatch['status'], { text: string; tone: '' | 'ok' | 'warn' | 'err' | 'accent' }> = {
+  received: { text: 'Recibido: sin empezar', tone: '' }, running: { text: 'En marcha', tone: 'accent' }, paused: { text: 'En pausa', tone: 'warn' }, completed: { text: 'Terminado', tone: 'ok' }, cancelled: { text: 'Cancelado', tone: '' }
+};
+const ITEM_TONE: Record<DocumentBatchItemState, '' | 'ok' | 'warn' | 'err' | 'accent'> = { pending: '', queued: '', processing: 'accent', passed: 'ok', rejected_qa: 'warn', failed: 'err', cancelled: '', excluded: '' };
+type BatchFilter = 'all' | 'problems' | 'todo' | 'passed';
+type BatchConfirm = null | 'start' | 'resume' | 'cancel' | 'retry' | 'retryAll' | DocumentBatchItem;
+
+function BatchCard({ slug, agentId, b, jobsById, queue, open, onToggle, busy, canRun, act, jobCard }: { slug: string; agentId: string; b: DocumentBatch; jobsById: Map<string, DocumentJob>; queue: DocumentQueue; open: boolean; onToggle: () => void; busy: boolean; canRun: boolean;
+  act: (fn: () => Promise<unknown>, ok: string) => Promise<boolean>; jobCard: (j: DocumentJob) => ReactNode }) {
+  const [confirm, setConfirm] = useState<BatchConfirm>(null); const [filter, setFilter] = useState<BatchFilter>('all'); const [doc, setDoc] = useState<string | null>(null);
+  const st = BATCH_STATUS[b.status]; const c = b.counts;
+  const total = c.accepted + c.duplicates; const done = c.passed + c.rejectedQa + c.failed + c.cancelled; const todo = c.pending + c.queued + c.processing;
+  const retryable = c.failed + c.cancelled;
+  // La confirmación sigue a la vista mientras se prepara (el plan puede tardar un minuto) y se cierra al terminar.
+  const a = (action: 'start' | 'pause' | 'resume' | 'retry' | 'cancel', msg: string, body: { includeRejected?: boolean; items?: number[] } = {}) => act(() => osApi.batchAction(slug, agentId, b.id, action, body), msg).finally(() => setConfirm(null));
+  const COST = (n: number) => `Convertirá ${n} PDF de uno en uno (como máximo ${queue.maxActive} a la vez, y espera si el equipo va justo de memoria) ejecutando el programa del agente en este equipo. Usa ${b.plan ? 'una consulta' : 'dos consultas'} a tu suscripción en total (${b.plan ? '' : 'el plan del lote y '}el resumen final), no una por documento. Puede tardar bastante; puedes pausarlo cuando quieras.`;
+  const items = b.items.filter(i => filter === 'all' ? true : filter === 'problems' ? ['failed', 'rejected_qa', 'excluded', 'cancelled'].includes(i.state) : filter === 'todo' ? ['pending', 'queued', 'processing'].includes(i.state) : i.state === 'passed');
+  const file = (rel: string) => osApi.batchFileUrl(slug, agentId, b.id, rel);
+  const docxUrl = (i: DocumentBatchItem) => i.jobId && i.docxRel ? osApi.documentFileUrl(slug, agentId, i.jobId, i.docxRel, true) : null;
+  const itemConfirm = confirm !== null && typeof confirm === 'object' ? confirm : null;
+  const yes = (label: string, onClick: () => void, disabled: boolean) => <button className="btn btn-primary btn-sm" autoFocus disabled={disabled} onClick={onClick}>{busy ? 'Un momento…' : label}</button>;
+  const no = <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setConfirm(null)}>No</button>;
+  return <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
+    <button type="button" className="lnk" style={{ textAlign: 'left', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }} onClick={onToggle} aria-expanded={open}>
+      {Icon.folder()} <strong className="wrap-any">{b.sourceName}</strong> <Chip xs tone={st.tone}>{st.text}</Chip><span className="small muted">{c.passed} de {total} listos{c.excluded ? ` · ${c.excluded} excluidos` : ''}</span>
+    </button>
+    <progress className="batch-progress" value={done} max={Math.max(total, 1)} aria-label={`Lote ${b.sourceName}: ${done} de ${total} procesados`} />
+    {open && <>
+      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }} aria-label="Cifras del lote">
+        <Chip xs>{c.detected} en el ZIP</Chip><Chip xs>{c.accepted} nuevos</Chip>{c.duplicates > 0 && <Chip xs>{c.duplicates} ya recibidos</Chip>}{c.excluded > 0 && <Chip xs>{c.excluded} excluidos</Chip>}
+        {todo > 0 && <Chip xs tone="accent">{todo} por hacer{c.processing ? ` (${c.processing} en curso)` : ''}</Chip>}<Chip xs tone="ok">{c.passed} listos</Chip>
+        {c.rejectedQa > 0 && <Chip xs tone="warn">{c.rejectedQa} no pasaron las comprobaciones</Chip>}{c.failed > 0 && <Chip xs tone="err">{c.failed} fallaron</Chip>}{c.cancelled > 0 && <Chip xs>{c.cancelled} cancelados</Chip>}
+      </div>
+      {b.waiting && <Notice kind="info">{b.waiting}</Notice>}
+      {b.error && <Notice kind="warn">{b.error}</Notice>}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }} aria-live="polite">
+        {confirm === 'start' || confirm === 'resume' ? <><span className="small">{todo ? COST(todo) : 'No queda nada por convertir: el lote se cierra (sin consultas a tu suscripción).'}</span>
+          {yes(todo ? 'Sí, procesar' : 'Sí, cerrarlo', () => void a(confirm, confirm === 'start' ? 'Lote en marcha: se convierte de uno en uno' : 'Lote reanudado'), busy || !canRun)}{no}</>
+          : confirm === 'cancel' ? <><span className="small">No empezará ningún documento más; el que esté en curso termina. Lo ya convertido se conserva y cancelar no consulta a nadie.</span>
+            {yes('Sí, cancelar', () => void a('cancel', 'Lote cancelado'), busy)}{no}</>
+          : confirm === 'retry' || confirm === 'retryAll' ? <><span className="small">{COST(confirm === 'retryAll' ? retryable + c.rejectedQa : retryable)} Lo aprobado no se repite.</span>
+            {yes('Sí, reintentar', () => void a('retry', 'Reintentando', { includeRejected: confirm === 'retryAll' }), busy || !canRun)}{no}</>
+          : !itemConfirm && <>
+            {b.status === 'received' && <button className="btn btn-primary btn-sm" disabled={busy || !canRun || !total} onClick={() => setConfirm('start')}>{todo ? `Procesar el lote (${todo} PDF)` : 'Cerrar el lote (todo estaba ya convertido)'}</button>}
+            {b.status === 'running' && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void a('pause', 'Lote en pausa: el documento en curso termina')}>Pausar</button>}
+            {b.status === 'paused' && <button className="btn btn-primary btn-sm" disabled={busy || !canRun} onClick={() => setConfirm('resume')}>Reanudar</button>}
+            {(b.status === 'running' || b.status === 'paused' || b.status === 'received') && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setConfirm('cancel')}>Cancelar el lote</button>}
+            {(b.status === 'completed' || b.status === 'cancelled' || b.status === 'paused') && retryable > 0 && <button className="btn btn-secondary btn-sm" disabled={busy || !canRun} onClick={() => setConfirm('retry')}>Reintentar los que fallaron ({retryable})</button>}
+            {(b.status === 'completed' || b.status === 'cancelled' || b.status === 'paused') && c.rejectedQa > 0 && <button className="btn btn-ghost btn-sm" disabled={busy || !canRun} onClick={() => setConfirm('retryAll')}>Reintentar también los que no pasaron ({c.rejectedQa})</button>}
+          </>}
+      </div>
+      {(b.deliverable || b.manifest || (b.status !== 'running' && c.passed > 0)) && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        {b.deliverable && <a className="btn btn-primary btn-sm" href={file(b.deliverable)}>Descargar los Word aprobados (ZIP)</a>}
+        {b.status !== 'running' && c.passed > 0 && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void act(() => osApi.batchDeliverable(slug, agentId, b.id), 'ZIP de Word al día')}>{b.deliverable ? 'Actualizar el ZIP' : 'Preparar el ZIP de los Word aprobados'}</button>}
+        {b.manifest && <a className="btn btn-ghost btn-sm" href={file(b.manifest)}>Manifiesto (JSON)</a>}
+        <span className="small muted wrap-any">Cada documento conserva su carpeta, sus versiones y su historial en <code>{b.slug}/</code>.</span>
+      </div>}
+      {b.summary && <details open={b.status === 'completed'}><summary className="small" style={{ cursor: 'pointer' }}>Resumen del lote ({b.summaryBy})</summary><div className="small"><Markdown text={b.summary} /></div></details>}
+      <div className="seg seg-wrap" role="group" aria-label="Qué documentos ver">
+        {([['all', `Todos (${b.items.length})`], ['problems', `Con problemas (${c.failed + c.rejectedQa + c.excluded + c.cancelled})`], ['todo', `Por hacer (${todo})`], ['passed', `Listos (${c.passed})`]] as const).map(([k, l]) => <button key={k} type="button" aria-pressed={filter === k} onClick={() => setFilter(k)}>{l}</button>)}
+      </div>
+      <ul className="batch-items" aria-label="Documentos del lote">
+        {items.length === 0 && <li className="muted">Nada en esta vista.</li>}
+        {items.map(i => { const j = i.jobId ? jobsById.get(i.jobId) : undefined; const url = docxUrl(i); return <li key={i.idx}>
+          <span className="muted" style={{ minWidth: 28 }}>{i.idx + 1}.</span>
+          <span className="bi-name" title={i.entryName}>{i.entryName}{i.outcome === 'duplicate' && <span className="muted"> (ya recibido)</span>}{(i.reason || i.error) && <><br /><span className="muted">{i.reason ?? i.error}</span></>}</span>
+          <Chip xs tone={ITEM_TONE[i.state]}>{BATCH_ITEM_LABEL[i.state]}{i.version ? ` · v${i.version}` : ''}</Chip>
+          {url && <a className="small" href={url} aria-label={`Descargar el Word de ${i.entryName}`}>Word</a>}
+          {j && <button type="button" className="lnk small" aria-expanded={doc === j.id} onClick={() => setDoc(doc === j.id ? null : j.id)}>{doc === j.id ? 'Cerrar' : 'Abrir'}</button>}
+          {(i.state === 'failed' || i.state === 'rejected_qa' || i.state === 'cancelled') && b.status !== 'running' && itemConfirm?.idx !== i.idx && <button type="button" className="lnk small" disabled={busy || !canRun} onClick={() => setConfirm(i)}>Reintentar</button>}
+          {itemConfirm?.idx === i.idx && <div style={{ width: '100%', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }} aria-live="polite"><span className="small">Reintentar este documento: {COST(1)}</span>
+            {yes('Sí, reintentar', () => void a('retry', `Reintentando «${i.entryName.split('/').pop()}»`, { items: [i.idx], includeRejected: i.state === 'rejected_qa' }), busy || !canRun)}{no}</div>}
+          {doc === j?.id && j && <div style={{ width: '100%' }}>{jobCard(j)}</div>}
+        </li>; })}
+      </ul>
+    </>}
+  </section>;
 }
 
 function JobCard({ slug, agentId, job, open, onToggle, busy, canRun, onProcess, onFeedback }: { slug: string; agentId: string; job: DocumentJob; open: boolean; onToggle: () => void; busy: boolean; canRun: boolean; onProcess: (feedback: string | null) => Promise<boolean>; onFeedback: (text: string) => Promise<boolean> }) {

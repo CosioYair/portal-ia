@@ -67,7 +67,7 @@ export const HARNESSES: HarnessDescriptor[] = [
     capabilities: {
       unattended: { level: 'yes' }, structured_output: { level: 'yes', note: 'Con --output-schema.' }, progress: { level: 'yes', note: 'Eventos JSONL de la CLI.' },
       read_project: { level: 'partial', note: 'Recibe del Portal el contexto y los archivos del encargo; no puede pedir más por su cuenta.' }, propose_changes: PROPOSES,
-      run_commands: NO_CMDS, web_research: NO_WEB, images: { level: 'yes' }, session_continuation: NO_SESSION, delegation: NO_SUBAGENTS,
+      run_commands: NO_CMDS, web_research: NO_WEB, images: { level: 'no', note: 'Su adaptador no envía imágenes todavía.' }, session_continuation: NO_SESSION, delegation: NO_SUBAGENTS,
       cancellation: { level: 'yes' }, usage_reporting: { level: 'partial', note: 'Tokens por ejecución; Codex no expone el margen de tu plan.' }
     }
   },

@@ -114,11 +114,38 @@ export type DocumentJobStatus = 'received' | 'processing' | 'ready' | 'rejected'
 export interface DocumentVersion {
   n: number; docx: string; qaDir: string; passed: boolean; gates: Record<string, boolean>; metrics: Record<string, number | string>;
   plan: ScriptPlan; scriptHash: string; skillRevision: string; report: string; reportBy: string; feedback: string | null; createdAt: string; durationMs: number;
+  /** Llamadas al modelo que usó esta versión (plan e informe; en un lote, 0: el plan es del lote). */
+  calls?: number; batchId?: string | null;
 }
 export interface DocumentJob {
   id: string; agentId: string; title: string; slug: string; status: DocumentJobStatus; inputName: string; inputSha256: string; pages: number | null;
-  source: 'upload' | 'zip'; versions: DocumentVersion[]; error: string | null; createdAt: string; updatedAt: string;
+  source: 'upload' | 'zip' | 'attachment'; versions: DocumentVersion[]; error: string | null; createdAt: string; updatedAt: string; batchId?: string | null;
 }
+
+// ---------------------------------------------------------------- Lotes de documentos (un ZIP con muchos PDF)
+
+export type DocumentBatchStatus = 'received' | 'running' | 'paused' | 'completed' | 'cancelled';
+/** Estado de cada archivo del lote. `excluded`: no es un PDF utilizable (con su motivo); nada se omite en silencio. */
+export type DocumentBatchItemState = 'pending' | 'queued' | 'processing' | 'passed' | 'rejected_qa' | 'failed' | 'cancelled' | 'excluded';
+export interface DocumentBatchItem {
+  idx: number; entryName: string; sha256: string | null; size: number; outcome: 'accepted' | 'duplicate' | 'rejected'; reason: string | null;
+  jobId: string | null; state: DocumentBatchItemState; version: number | null;
+  /** Word aprobado: `docx` relativo a «documentos/» (manifiesto, entregable); `docxRel` relativo a la carpeta del documento (descarga). */
+  docx: string | null; docxRel: string | null; error: string | null;
+}
+export interface DocumentBatchCounts {
+  detected: number; accepted: number; duplicates: number; excluded: number;
+  pending: number; queued: number; processing: number; passed: number; rejectedQa: number; failed: number; cancelled: number;
+}
+export interface DocumentBatch {
+  id: string; agentId: string; name: string; slug: string; sourceName: string; sourceSha256: string; status: DocumentBatchStatus;
+  createdAt: string; updatedAt: string; startedAt: string | null; finishedAt: string | null; plan: ScriptPlan | null; summary: string | null;
+  summaryBy: string | null; deliverable: string | null; manifest: string | null; error: string | null; waiting: string | null; calls: number;
+  counts: DocumentBatchCounts; items: DocumentBatchItem[];
+}
+export const BATCH_ITEM_LABEL: Record<DocumentBatchItemState, string> = {
+  pending: 'Pendiente', queued: 'En cola', processing: 'Convirtiendo…', passed: 'Listo', rejected_qa: 'No pasó las comprobaciones', failed: 'Falló', cancelled: 'Cancelado', excluded: 'Excluido'
+};
 
 export type FeedbackClass = 'document_only' | 'reusable' | 'needs_validation' | 'invalid';
 export const FEEDBACK_LABEL: Record<FeedbackClass, string> = {

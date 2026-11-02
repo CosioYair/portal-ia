@@ -167,9 +167,9 @@ export async function agentsOsRoutes(app: FastifyInstance) {
   });
   app.post('/api/workspaces/:slug/agents/:id/chat', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    const b = z.object({ text: z.string().trim().min(2).max(8000), projectId: z.string().nullable().optional(), authorizeBillable: z.boolean().optional() }).safeParse(req.body);
-    if (!b.success) return reply.code(400).send({ error: 'Escribe un mensaje (máx. 8000 caracteres).' });
-    try { return reply.code(202).send(await sendChat(slug, id, { text: b.data.text, projectId: b.data.projectId ?? null, authorizeBillable: b.data.authorizeBillable })); } catch (e) { return err(reply, e); }
+    const b = z.object({ text: z.string().trim().max(8000).default(''), projectId: z.string().nullable().optional(), authorizeBillable: z.boolean().optional(), attachmentIds: z.array(z.string().max(80)).max(10).default([]) }).safeParse(req.body);
+    if (!b.success || (b.data.text.length < 2 && !b.data.attachmentIds.length)) return reply.code(400).send({ error: 'Escribe un mensaje (máx. 8000 caracteres) o adjunta algo.' });
+    try { return reply.code(202).send(await sendChat(slug, id, { text: b.data.text, projectId: b.data.projectId ?? null, authorizeBillable: b.data.authorizeBillable, attachmentIds: b.data.attachmentIds })); } catch (e) { return err(reply, e); }
   });
 
   // ---------- Encargo directo (tablero de trabajo): creado y autorizado en el mismo acto, con su tope de llamadas.

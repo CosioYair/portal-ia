@@ -55,7 +55,7 @@ const { buildApp } = await import('../src/app.ts');
 const { getClaudeCodeSettings, saveClaudeCodeSettings } = await import('../src/services/claudeCode/settings.ts');
 const { resetDetectionCache, verifiedDetection } = await import('../src/services/claudeCode/detect.ts');
 const { identityBlock } = await import('../src/services/agentIdentity.ts');
-const { readZipPdfs } = await import('../src/services/documentJobs.ts');
+const { listZip, readZipEntry, writeZip } = await import('../src/services/zipFile.ts');
 const { safeWrite } = await import('../src/services/externalAgents.ts');
 
 providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');
@@ -129,7 +129,7 @@ test('plan del modelo: solo scripts adoptados, marcadores y valores simples (sin
   assert.deepEqual(D.parseSkillHeader(SKILL1), { name: 'convertir-pdf-word', description: 'Convertir PDF a Word con fidelidad visual.', version: '0.4.0' });
 });
 
-test('ZIP: solo PDF, sin recorridos, cifrados, enlaces, bombas, CRC falsos ni ZIP64', () => {
+test('ZIP: solo PDF, sin recorridos, cifrados, enlaces, bombas, CRC falsos ni ZIP64', async () => {
   const big = Buffer.alloc(300_000, 0x41);
   const z = zip([
     { name: 'a.pdf', data: PDF('A') }, { name: 'sub/b.pdf', data: PDF('B'), deflate: true },
@@ -137,12 +137,33 @@ test('ZIP: solo PDF, sin recorridos, cifrados, enlaces, bombas, CRC falsos ni ZI
     { name: 'enlace.pdf', data: PDF(), ext: (0o120777 << 16) >>> 0 }, { name: 'nota.txt', data: Buffer.from('x') },
     { name: 'bomba.pdf', data: Buffer.concat([PDF(), big]), deflate: true }, { name: 'crc.pdf', data: PDF(), badCrc: true }, { name: 'falso.pdf', data: Buffer.from('no soy un pdf') }
   ]);
-  const r = readZipPdfs(z);
-  assert.deepEqual(r.pdfs.map(p => p.name), ['a.pdf', 'b.pdf']);
-  for (const why of ['recorrido', 'cifrado', 'enlace', 'no es PDF', 'compresión sospechosa', 'CRC', 'no es un PDF válido']) assert.ok(r.skipped.some(s => s.includes(why)), why);
-  const z64 = zip([{ name: 'a.pdf', data: PDF() }]); z64.writeUInt32LE(0xffffffff, z64.length - 6);
-  assert.throws(() => readZipPdfs(z64), /ZIP64/);
-  assert.throws(() => readZipPdfs(Buffer.from('nada')), /ZIP válido/);
+  // Lectura DESDE DISCO, entrada a entrada (nunca el ZIP entero en memoria).
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pia-zip-')); const f = path.join(tmp, 'z.zip'); fs.writeFileSync(f, z);
+  const opts = { maxEntries: 100, maxEntryBytes: 100 * 1024 * 1024, maxRatio: 200 };
+  const l = listZip(f, opts);
+  const problem = (n: string) => l.entries.find(e => e.name === n)!.problem ?? '';
+  assert.equal(problem('a.pdf'), ''); assert.equal(problem('sub/b.pdf'), '');
+  assert.match(problem('../../evil.pdf'), /recorrido/); assert.match(problem('C:/x/abs.pdf'), /recorrido/); assert.match(problem('cifrado.pdf'), /cifrado/);
+  assert.match(problem('enlace.pdf'), /enlace/); assert.match(problem('bomba.pdf'), /compresión sospechosa/);
+  assert.ok(readZipEntry(f, l.entries.find(e => e.name === 'sub/b.pdf')!).toString().startsWith('%PDF-'));
+  assert.throws(() => readZipEntry(f, l.entries.find(e => e.name === 'crc.pdf')!), /CRC/);
+  assert.throws(() => readZipEntry(f, l.entries.find(e => e.name === '../../evil.pdf')!), /recorrido/);
+  const z64 = zip([{ name: 'a.pdf', data: PDF() }]); z64.writeUInt32LE(0xffffffff, z64.length - 6); fs.writeFileSync(f, z64);
+  assert.throws(() => listZip(f, opts), /ZIP64/);
+  fs.writeFileSync(f, 'nada'); assert.throws(() => listZip(f, opts), /ZIP válido/);
+  fs.writeFileSync(f, zip(Array.from({ length: 12 }, (_, i) => ({ name: `d${i}.pdf`, data: PDF(String(i)) }))));
+  assert.throws(() => listZip(f, { ...opts, maxEntries: 10 }), /12 entradas: el máximo es 10/);
+  // Escritura del entregable: nombres únicos y nunca reemplaza un ZIP existente.
+  const a = path.join(tmp, 'a.docx'); fs.writeFileSync(a, 'A');
+  await writeZip(path.join(tmp, 'out.zip'), [{ name: 'uno.docx', file: a }, { name: 'dos.docx', file: a }]);
+  assert.deepEqual(listZip(path.join(tmp, 'out.zip'), opts).entries.map(e => e.name), ['uno.docx', 'dos.docx']);
+  await assert.rejects(writeZip(path.join(tmp, 'out.zip'), [{ name: 'x.docx', file: a }]), /EEXIST/);
+  await assert.rejects(writeZip(path.join(tmp, 'out2.zip'), [{ name: '../x.docx', file: a }]), /no permitido/);
+  await assert.rejects(writeZip(path.join(tmp, 'out3.zip'), [{ name: 'X.docx', file: a }, { name: 'x.docx', file: a }]), /repetido/);
+  // Un tamaño comprimido declarado que no cabe en el archivo no llega a reservar memoria (bomba de 124 bytes que pedía 4 GB).
+  const bogus = zip([{ name: 'a.pdf', data: PDF() }, { name: 'b.pdf', data: PDF('b') }]); bogus.writeUInt32LE(0xfffffff0, bogus.lastIndexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02])) + 20); fs.writeFileSync(f, bogus);
+  const lb = listZip(f, opts); assert.equal(lb.entries[0].problem, null); assert.match(lb.entries[1].problem ?? '', /datos fuera del archivo/);
+  fs.rmSync(tmp, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------- Importar
@@ -223,7 +244,10 @@ test('entradas: permisos por ruta, PDF y ZIP seguros, sin duplicados, original c
   assert.ok(!fs.existsSync(path.join(base, 'Propuesta Visual.pdf')), 'el nombre no escapa de la carpeta');
   const again = await up('otra-copia.pdf', PDF('P')); assert.equal(again.json.jobs[0].duplicate, true); assert.equal(again.json.jobs[0].id, jobId);
   const z = await up('lote.zip', zip([{ name: 'uno.pdf', data: PDF('U') }, { name: '../dos.pdf', data: PDF('D') }, { name: 'Propuesta.pdf', data: PDF('P') }]));
-  assert.equal(z.status, 201); assert.deepEqual(z.json.jobs.map((j: any) => [j.inputName, !!j.duplicate]), [['uno.pdf', false], ['Propuesta Visual.pdf', true]]);
+  // Un ZIP es un lote: cada entrada queda registrada (nueva, ya recibida antes o excluida con su motivo).
+  assert.equal(z.status, 201); const items = z.json.batch.items;
+  assert.deepEqual(items.map((i: any) => [i.entryName, i.outcome]), [['uno.pdf', 'accepted'], ['../dos.pdf', 'rejected'], ['Propuesta.pdf', 'duplicate']]);
+  assert.match(items[1].reason, /recorrido/); assert.equal(items[2].jobId, jobId, 'el mismo contenido reutiliza su documento');
   assert.ok(z.json.skipped.some((s: string) => s.includes('recorrido')));
   assert.match(fs.readFileSync(path.join(root, 'documentos', 'propuesta-visual', 'HISTORIAL.md'), 'utf8'), /Recibido por Portal IA/);
 });

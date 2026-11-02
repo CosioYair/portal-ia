@@ -350,7 +350,9 @@ export function markEvaluating(slug: string, agentId: string) {
  */
 export function safePath(root: string, rel: string, zones: string[], opts: { create?: boolean } = {}): string {
   const norm = rel.replace(/\\/g, '/');
-  if (!norm || norm.startsWith('/') || /^[a-z]:/i.test(norm) || norm.split('/').some(seg => seg === '..' || seg === '.' || seg === '')) throw err(`Ruta no válida: ${rel}`, 400);
+  // Sin «:» (flujos NTFS como «carpeta::$INDEX_ALLOCATION»), NUL ni segmentos con punto o espacio final (Windows los
+  // quita y serían otro nombre para la misma carpeta): cada ruta tiene una sola forma.
+  if (!norm || norm.startsWith('/') || /^[a-z]:/i.test(norm) || norm.split('/').some(seg => seg === '..' || seg === '.' || seg === '' || /[:\u0000]/.test(seg) || /[. ]$/.test(seg))) throw err(`Ruta no válida: ${rel}`, 400);
   if (!zones.some(z => norm === z || norm.startsWith(`${z}/`))) throw err(`Ruta fuera de la zona concedida: ${rel}`, 403);
   // La raíz debe seguir siendo la carpeta registrada (no un enlace puesto en su lugar después de integrarla).
   if (fs.lstatSync(root).isSymbolicLink()) throw err('La carpeta del agente es ahora un enlace (symlink/junction): no se lee ni se escribe a través de él.', 409);
