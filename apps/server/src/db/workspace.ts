@@ -284,10 +284,12 @@ export function agentsRepo(slug: string) {
       const id = uuid(); const ts = now();
       db.prepare(`INSERT INTO agents (id, key, project_id, template_id, scope, status, config_json, config_edited, template_json, created_at, updated_at)
         VALUES (?, ?, ?, 'tpl.custom@1', ?, 'inactive', ?, 0, ?, ?, ?)`).run(id, input.key, input.projectId, input.scope, JSON.stringify(input.config), JSON.stringify(input.template), ts, ts);
+      changed({ ws: slug, entity: 'agent', id, projectId: input.projectId });
       return this.get(id)!;
     },
     updateTemplateMeta(id: string, template: Agent['template']) {
       db.prepare(`UPDATE agents SET template_json = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(template), now(), id);
+      changed({ ws: slug, entity: 'agent', id });
     },
     delete(id: string) { db.prepare(`DELETE FROM agents WHERE id = ?`).run(id); changed({ ws: slug, entity: 'agent', id }); },
     keyExists(key: string): boolean { return !!db.prepare(`SELECT 1 FROM agents WHERE key = ?`).get(key); }

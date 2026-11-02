@@ -41,7 +41,7 @@ export interface PolicyContext {
   /** Para ai_call: el proceso debe estar autorizado y con presupuesto; para operaciones de agente, ámbito de proyecto. */
   projectId?: string | null;
   /** Para ai_call: por dónde va la llamada. Con la suscripción de Claude Code no hay USD que agotar (la limita su tope de llamadas). */
-  route?: 'api' | 'claude-code';
+  route?: 'api' | 'claude-code' | 'codex';
 }
 
 export class PolicyError extends Error { statusCode = 403; code: string; constructor(code: string, message: string) { super(message); this.code = code; } }
@@ -66,7 +66,7 @@ export function requirePolicy(op: PolicyOp, ctx: PolicyContext): PolicyTicket {
   if (op === 'ai_call' && ctx.processId) {
     const p = procs.get(ctx.processId);
     if (!p || p.status !== 'running') { log('denied', 'proceso_no_autorizado'); throw new PolicyError('process_not_running', 'Solo un proceso autorizado y en ejecución puede llamar a un modelo.'); }
-    if (ctx.route !== 'claude-code' && p.spentUsd >= p.budgetUsd) { log('denied', 'presupuesto_agotado'); throw new PolicyError('budget_exhausted', `Presupuesto agotado (${p.spentUsd.toFixed(2)} de ${p.budgetUsd.toFixed(2)} USD).`); }
+    if ((ctx.route ?? 'api') === 'api' && p.spentUsd >= p.budgetUsd) { log('denied', 'presupuesto_agotado'); throw new PolicyError('budget_exhausted', `Presupuesto agotado (${p.spentUsd.toFixed(2)} de ${p.budgetUsd.toFixed(2)} USD).`); }
   }
   log('granted');
   return { op, level: def.level, agent, grantedAt: new Date().toISOString() };

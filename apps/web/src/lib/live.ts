@@ -11,7 +11,7 @@ import { noteFailure, noteResponse } from './liveStatus.ts';
  *   volver a verse se reconecta y vuelve a pedir todo.
  * - Los latidos llevan la hora del servidor: la pantalla sabe que está al día aunque no haga peticiones.
  */
-export interface LiveChange { ws: string | null; entity: 'process' | 'backlog' | 'batch' | 'assignment' | 'assistant' | 'system' | 'knowledge' | 'agent' | 'story' | 'usage'; id: string | null; projectId?: string | null; itemId?: string | null; kind?: 'state' | 'progress' }
+export interface LiveChange { ws: string | null; entity: 'process' | 'backlog' | 'batch' | 'assignment' | 'assistant' | 'system' | 'knowledge' | 'agent' | 'story' | 'usage' | 'department' | 'agent_chat'; id: string | null; projectId?: string | null; itemId?: string | null; kind?: 'state' | 'progress' }
 type Sub = { match: (c: LiveChange) => boolean; fire: (resync: boolean) => void };
 
 const subs = new Set<Sub>();

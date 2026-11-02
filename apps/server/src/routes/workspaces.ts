@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
+import { agentFoldersRepo, syncAgentFolder } from '../services/agentFolders.ts';
 import { publishProjectMain } from '../services/capabilities.ts';
 import { KNOWLEDGE, TOOLS, type AgentConfig, type AgentCreateInput } from '@portal-ia/domain';
 import { createAgent, deleteAgent, draftAgent, estimateDraft } from '../services/agentFactory.ts';
@@ -180,6 +181,9 @@ export async function workspaceRoutes(app: FastifyInstance) {
     cfg.fallbacks = cfg.fallbacks.filter(f => f !== cfg.model);
     for (const k of Object.keys(cfg.tools)) if (!TOOLS.some(t => t.id === k)) return reply.code(400).send({ error: `Herramienta desconocida: ${k}` });
     for (const k of Object.keys(cfg.knowledge)) if (!KNOWLEDGE.some(t => t.id === k)) return reply.code(400).send({ error: `Fuente de conocimiento desconocida: ${k}` });
-    return agents.updateConfig(id, cfg);
+    const updated = agents.updateConfig(id, cfg);
+    // Su carpeta portable (si la tiene) refleja la configuración nueva.
+    if (agentFoldersRepo(slug).folderOf(id)) await syncAgentFolder(slug, updated).catch(() => null);
+    return updated;
   });
 }

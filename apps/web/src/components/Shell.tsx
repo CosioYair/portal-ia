@@ -12,7 +12,7 @@ import { AssistantDock } from './AssistantDock.tsx';
 import { useLive, useLiveConnection } from '../lib/live.ts';
 import { useBack } from '../lib/nav.ts';
 
-const SOON = [['Herramientas y MCP', Icon.plug], ['Organización', Icon.org]] as const;
+const SOON = [['Herramientas y MCP', Icon.plug]] as const;
 
 /** Diálogo mínimo para crear empresa o proyecto (operación local, sin IA). */
 function CreateDialog({ kind, onClose }: { kind: 'company' | 'project'; onClose: () => void }) {
@@ -84,6 +84,7 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
         </select>
         <div className="side-sec">Navegación</div>
         <nav style={{ display: 'flex', flexDirection: 'column', gap: 2 }} aria-label="Secciones">
+          <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/oficina">{Icon.org()}<span>Oficina</span></NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/asistente">{Icon.user(16)}<span>Asistente</span></NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/panel">{Icon.grid()}<span>Panel</span></NavLink>
           <NavLink className={({ isActive }) => `navi ${isActive ? 'is-active' : ''}`} to="/equipo">{Icon.users()}<span>Equipo de IA</span></NavLink>

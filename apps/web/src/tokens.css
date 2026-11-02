@@ -106,4 +106,21 @@
 
   /* Foco */
   --focus-ring: 2px solid #0F6E6A;
+
+  /* Oficina (office.css y components/AgentFigure.tsx): planta, mobiliario y estados de los puestos */
+  --color-office-floor: #EEEAE0;
+  --color-office-tile: #E6E1D4;
+  --color-office-wall: #DCD5C5;
+  --color-office-sign: #2B2E33;
+  --color-office-desk: #9A6E45;
+  --color-office-desk-top: #C8986A;
+  --color-office-chair: #5B6470;
+  --color-office-screen: #3A4750;
+  --color-office-screen-frame: #23292F;
+  --color-office-screen-on: #7FD6CF;
+  --color-office-screen-wait: #F0C66B;
+  --color-office-ink: #1F2328;
+  --color-office-plant: #4E8A5C;
+  --shadow-panel: -12px 0 40px rgba(26,27,30,.16);
+  --shadow-desk: 0 2px 0 rgba(26,27,30,.06);
 }

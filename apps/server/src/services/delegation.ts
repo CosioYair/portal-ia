@@ -1,4 +1,6 @@
-import { agentCaller, completeWith, RECOVERED_NOTE } from './claudeCode/backend.ts';
+import { agentBackend, agentCaller, completeWith, RECOVERED_NOTE } from './claudeCode/backend.ts';
+import { agentFoldersRepo } from './agentFolders.ts';
+import { identityBlock } from './agentIdentity.ts';
 import { filesIn } from './diagnostics.ts';
 import { readRepoFile } from './repoWrite.ts';
 import { CONSULT_EVIDENCE_CHARS, filesContext } from './storyPipeline.ts';
@@ -22,9 +24,14 @@ import { callTimeoutMs, maybeBilled, registerCall, unregisterCall, withWatchdog 
  * propietario aplica con un clic. No todo se resuelve con historias de desarrollo: esto es el resto del trabajo.
  */
 const MAX_CONSULTS = 3;
+/** Una petición a un departamento puede consultar a más miembros (los que confirmó el propietario al enviarla). */
+export const MAX_DEPARTMENT_CONSULTS = 6;
+export const TASK_TITLE = 'Entregable del encargo';
 /** Instrucciones del entregable según el propósito (conversaciones del Asistente). */
 const PURPOSE_TEXT: Record<NonNullable<DelegationResult['purpose']>, string> = {
   analysis: '',
+  task: '',
+  department: `Es una PETICIÓN AL DEPARTAMENTO que coordinas: consolida en UN entregable lo que aporta cada miembro consultado, atribuyendo cada aportación a su especialista, con conclusiones, próximos pasos con responsable y lo que necesita decisión del propietario. Nunca inventes datos de mercado, cifras ni resultados: distingue lo comprobado de lo supuesto.\n`,
   proposal: `Es la PROPUESTA (especificación) de una idea que el propietario ha ido definiendo con el Asistente. Apartados: Objetivo; Alcance; Fuera de alcance; Decisiones aprobadas (cítalas tal cual; no cambies ninguna); Requisitos funcionales; Requisitos no funcionales; Seguridad; Dependencias; Riesgos; Criterios de aceptación (comprobables); Preguntas abiertas. NO propongas cambios al backlog: omite el bloque backlog-ops.\n`,
   team_review: `Es la REVISIÓN DEL EQUIPO de una propuesta: omisiones, supuestos que cuestionáis (con el motivo), mejoras, complejidad estimada (S/M/L por bloque), habilidades necesarias, decisiones de arquitectura recomendadas y preguntas sin resolver. Atribuye cada aportación a su especialista. NO propongas cambios al backlog: omite el bloque backlog-ops.\n`,
   stories: `Genera las HISTORIAS del backlog que implementan la propuesta APROBADA, en orden de prioridad (la primera, la más importante). Solo operaciones "add": título claro; descripción con el contexto, los especialistas necesarios y «Origen: propuesta aprobada de la conversación»; criterio comprobable; tamaño S/M/L; dependsOn con el id de una historia existente o con el TÍTULO EXACTO de otra historia de esta misma lista. No dupliques historias que ya existen en el backlog (reutilízalas: no las añadas).\n`
@@ -113,12 +120,16 @@ function contextFor(slug: string, projectId: string | null): string {
   return lines.join('\n');
 }
 
-function sys(agent: Agent, slug: string): string {
+function sys(agent: Agent, slug: string, d?: DelegationResult): string {
   const ws = workspacesRepo.get(slug)!;
+  // Identidad portable (instrucciones propias, habilidades, memoria verificada) de la revisión FIJADA al crear el encargo.
+  // Vacía para los agentes sin contenido propio: su prompt es el de siempre.
+  const pin = d?.pins?.[agent.id];
+  const identity = pin ? identityBlock(slug, agent, pin.revision) : '';
   return `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} en la empresa «${ws.name}» dentro de Portal IA (plataforma local donde empresas son operadas por equipos de agentes de IA bajo la autoridad del propietario).
 Especialización: ${agent.config.specialization}
 Responsabilidades: ${agent.config.responsibilities.map(r => '- ' + r).join('\n')}
-Trabajas en español, con criterio profesional y sin inventar datos: usa solo el estado real que se te da. Si algo no procede o falta información, dilo con claridad.${ws.kind === 'internal' ? `\n${PORTAL_CAPABILITIES}` : ''}`;
+Trabajas en español, con criterio profesional y sin inventar datos: usa solo el estado real que se te da. Si algo no procede o falta información, dilo con claridad.${ws.kind === 'internal' ? `\n${PORTAL_CAPABILITIES}` : ''}${identity}`;
 }
 
 function extractJson(text: string): any | null {
@@ -137,12 +148,20 @@ export function pickChallenger(slug: string, projectId: string | null, lead: Age
   return pool.find(a => (a.config.capabilities ?? []).includes('evaluar_gauntlet')) ?? pool.find(a => a.key === 'pj-arquitecto') ?? pool.find(a => a.key === 'pj-qa') ?? null;
 }
 
-export function estimateDelegation(slug: string, projectId: string | null, agentRef: any, request: string, purpose: DelegationResult['purpose'] = 'analysis'): AssessmentEstimate & { leadAgentId: string; teamSize: number } {
+export function estimateDelegation(slug: string, projectId: string | null, agentRef: any, request: string, purpose: DelegationResult['purpose'] = 'analysis', teamIds?: string[]): AssessmentEstimate & { leadAgentId: string; teamSize: number; teamIds: string[] } {
   const lead = pickLeadAgent(slug, projectId, agentRef);
   const challenger = purpose === 'proposal' ? pickChallenger(slug, projectId, lead) : null;
-  const team = teamOf(slug, lead).filter(a => a.id !== challenger?.id).slice(0, MAX_CONSULTS);
+  // Un equipo elegido (p. ej. los miembros de un departamento que confirmó el propietario) manda sobre el organigrama.
+  const chosen = teamIds ? teamIds.map(id => activeAgents(slug).find(a => a.id === id)).filter((a): a is Agent => !!a && a.id !== lead.id && a.key !== 'ws-asistente') : null;
+  const team = purpose === 'task' ? [] : (chosen ?? teamOf(slug, lead)).filter(a => a.id !== challenger?.id).slice(0, chosen ? MAX_DEPARTMENT_CONSULTS : MAX_CONSULTS);
   const ctxTok = estimateTokens(contextFor(slug, projectId) + request) + 600;
   const price = (a: Agent, inTok: number, outTok: number) => { const p = estimatePricing(a.config.provider, a.config.model); const think = a.config.effort === 'high' ? 6000 : a.config.effort === 'medium' ? 2500 : 0; return (inTok * p.inPerM + (outTok + think) * p.outPerM) / 1_000_000; };
+  // Encargo directo a un agente: UNA llamada (su entregable), sin validación previa ni consultas.
+  if (purpose === 'task') {
+    const steps = [{ agentId: lead.id, agentName: lead.config.name, title: TASK_TITLE, model: lead.config.model, estimatedUsd: price(lead, ctxTok, TOKENS.synthesis) }];
+    const estimatedUsd = steps[0].estimatedUsd;
+    return { steps, estimatedUsd, suggestedBudgetUsd: Math.max(0.5, Math.ceil(estimatedUsd * 2 * 2) / 2), leadAgentId: lead.id, teamSize: 0, teamIds: [] } as any;
+  }
   const steps = [
     { agentId: lead.id, agentName: lead.config.name, title: 'Validación y plan del encargo', model: lead.config.model, estimatedUsd: price(lead, ctxTok, TOKENS.triage) },
     ...team.map(a => ({ agentId: a.id, agentName: a.config.name, title: `Consulta a ${a.config.name}`, model: a.config.model, estimatedUsd: price(a, ctxTok, TOKENS.consult) })),
@@ -150,17 +169,23 @@ export function estimateDelegation(slug: string, projectId: string | null, agent
   ];
   if (challenger) steps.push({ agentId: challenger.id, agentName: challenger.config.name, title: CHALLENGE_TITLE, model: challenger.config.model, estimatedUsd: price(challenger, ctxTok + TOKENS.synthesis, TOKENS.consult) });
   const estimatedUsd = steps.reduce((a, s) => a + s.estimatedUsd, 0);
-  return { steps, estimatedUsd, suggestedBudgetUsd: Math.max(0.5, Math.ceil(estimatedUsd * 2 * 2) / 2), leadAgentId: lead.id, teamSize: team.length } as any;
+  return { steps, estimatedUsd, suggestedBudgetUsd: Math.max(0.5, Math.ceil(estimatedUsd * 2 * 2) / 2), leadAgentId: lead.id, teamSize: team.length, teamIds: team.map(a => a.id) } as any;
 }
 
-export function createDelegation(slug: string, projectId: string | null, agentRef: any, request: string, opts: { purpose?: DelegationResult['purpose']; conversationId?: string | null } = {}): Process {
+export function createDelegation(slug: string, projectId: string | null, agentRef: any, request: string, opts: { purpose?: DelegationResult['purpose']; conversationId?: string | null; teamIds?: string[]; department?: { slug: string; name: string } | null } = {}): Process {
   const req = request.trim();
   if (req.length < 8) throw Object.assign(new Error('Describe el encargo con más detalle.'), { statusCode: 400 });
-  const est = estimateDelegation(slug, projectId, agentRef, req, opts.purpose ?? 'analysis');
+  const est = estimateDelegation(slug, projectId, agentRef, req, opts.purpose ?? 'analysis', opts.teamIds);
   const lead = agentsRepo(slug).get(est.leadAgentId)!;
-  const pid = projectId ?? projectsRepo(slug).list()[0]?.id ?? '';
-  const proc = processesRepo(slug).create({ projectId: pid, kind: 'delegated_task', title: `Análisis de ${lead.config.name}: ${req.slice(0, 90)}${req.length > 90 ? '…' : ''}`, estimatedUsd: est.estimatedUsd, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model })) });
-  const d: DelegationResult = { request: req, leadAgentId: lead.id, leadAgentName: lead.config.name, triage: null, consulted: [], deliverable: null, knowledgeDocId: null, backlogOps: [], opsApplied: null, purpose: opts.purpose ?? 'analysis', conversationId: opts.conversationId ?? null, challenge: null };
+  // Un proceso siempre pertenece a un proyecto (y su entregable, a su Conocimiento): sin proyecto no se adivina uno.
+  const pid = projectId ?? (lead.scope === 'project' ? lead.projectId : null) ?? projectsRepo(slug).list()[0]?.id ?? '';
+  if (!pid) throw Object.assign(new Error('Esta empresa aún no tiene ningún proyecto: crea uno para guardar el entregable del encargo.'), { statusCode: 409 });
+  const label = opts.purpose === 'task' ? `Encargo a ${lead.config.name}` : opts.purpose === 'department' ? `Petición a ${opts.department?.name ?? 'un departamento'}` : `Análisis de ${lead.config.name}`;
+  const proc = processesRepo(slug).create({ projectId: pid, kind: 'delegated_task', title: `${label}: ${req.slice(0, 90)}${req.length > 90 ? '…' : ''}`, estimatedUsd: est.estimatedUsd, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model })) });
+  // Arnés y revisión de identidad de cada participante, fijados ahora: un cambio posterior no altera este encargo en silencio.
+  const folders = agentFoldersRepo(slug); const pins: NonNullable<DelegationResult['pins']> = {};
+  for (const id of new Set(est.steps.map(s => s.agentId))) { const a = agentsRepo(slug).get(id); if (a) pins[id] = { harness: agentBackend(a), revision: folders.folderOf(id)?.adoptedN ?? null }; }
+  const d: DelegationResult = { request: req, leadAgentId: lead.id, leadAgentName: lead.config.name, triage: null, consulted: [], deliverable: null, knowledgeDocId: null, backlogOps: [], opsApplied: null, purpose: opts.purpose ?? 'analysis', conversationId: opts.conversationId ?? null, challenge: null, teamIds: est.teamIds, pins, department: opts.department ?? null };
   processesRepo(slug).setDelegation(proc.id, d);
   return processesRepo(slug).get(proc.id)!;
 }
@@ -180,6 +205,9 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
     const providerId = agent.config.provider as ProviderId;
     const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
     // Una consulta («consultant») que agota los turnos se recupera UNA vez sin herramientas (claudeCode/backend.ts).
+    // El arnés fijado al crear el encargo: si cambió, no se llama (ni con el nuevo ni con otro).
+    const pin = d.pins?.[agent.id];
+    if (pin && agentBackend(agent) !== pin.harness) throw Object.assign(new Error(`El arnés de «${agent.config.name}» cambió desde que se creó este encargo (${pin.harness} → ${agentBackend(agent)}): no se ha hecho la llamada. Crea el encargo de nuevo para usar el arnés actual.`), { harnessChanged: true });
     const cc = agentCaller(slug, agent, projectId, 'Encargo', processId, role);
     if (!cc && (!cred || prow.status !== 'connected')) throw new Error(`El proveedor ${providerId} no está conectado.`);
     const models: ModelInfo[] = JSON.parse(prow.models_json);
@@ -217,13 +245,31 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
   };
 
   const challengeIdx = proc.steps.findIndex(s => s.title === CHALLENGE_TITLE);
-  const team = teamOf(slug, lead).filter(a => challengeIdx < 0 || a.id !== proc.steps[challengeIdx].agentId).slice(0, MAX_CONSULTS);
+  // El equipo fijado al crear (si lo hay) y en su orden: cada consulta va al agente de SU paso, nunca a otro.
+  const team = d.teamIds ? proc.steps.slice(1, challengeIdx >= 0 ? challengeIdx - 1 : proc.steps.length - 1).map(s => agents.get(s.agentId)!).filter(Boolean)
+    : teamOf(slug, lead).filter(a => challengeIdx < 0 || a.id !== proc.steps[challengeIdx].agentId).slice(0, MAX_CONSULTS);
   const synIdx = challengeIdx >= 0 ? challengeIdx - 1 : proc.steps.length - 1;
   const consultSteps = proc.steps.slice(1, synIdx); // uno por miembro del equipo, en el mismo orden
   try {
+    // Encargo directo: una sola llamada con el entregable.
+    if (d.purpose === 'task') {
+      if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
+      const res = await call(0, sys(lead, slug, d), `El propietario te encarga directamente:
+«${d.request}»
+
+# Estado real
+${ctx}
+
+Entrega el resultado en markdown claro y conciso para el propietario (máx. ~900 palabras): lo que hiciste o concluyes, lo que no pudiste comprobar y lo que necesita su decisión. No propongas cambios al backlog.`, TOKENS.synthesis);
+      d.triage = { accepted: true, understanding: 'Encargo directo del propietario.', rejectionReason: null, plan: [] };
+      d.deliverable = `${res.recovered ? RECOVERED_NOTE : ''}${res.text.trim()}`;
+      const doc = knowledge.add({ projectId: proc.projectId, title: `Encargo a ${lead.config.name} · ${d.request.split('\n')[0].slice(0, 70)}`, body: `# Encargo\n${d.request}\n\n# Responsable\n${lead.config.name}\n\n# Entregable\n${d.deliverable}`, authorAgentId: lead.id, authorAgentName: lead.config.name, processId });
+      d.knowledgeDocId = doc.id; procs.setDelegation(processId, d);
+      return;
+    }
     // 1 · Validación y plan
     if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
-    const triRes = await call(0, sys(lead, slug), `El propietario te hace este encargo a través del Asistente:
+    const triRes = await call(0, sys(lead, slug, d), `El propietario te hace este encargo a través del Asistente:
 «${d.request}»
 
 Tu equipo directo (puedes consultar hasta ${team.length} de ellos, una pregunta concreta a cada uno): ${team.map(a => `${a.config.name} (${a.template.role}, clave ${a.key})`).join('; ') || 'ninguno'}
@@ -253,7 +299,7 @@ Responde SOLO con JSON: {"accepted": boolean, "rejectionReason": string|null, "u
         const evidence = repoPath ? filesContext(repoPath, filesIn(`${d.request}\n${q.question}`).filter(f => readRepoFile(repoPath, f, 1) !== null), CONSULT_EVIDENCE_CHARS) : '';
         let answer: string;
         try {
-          const ans = await call(i + 1, sys(member, slug), `Tu responsable, ${lead.config.name}, trabaja en este encargo del propietario: «${d.request}».
+          const ans = await call(i + 1, sys(member, slug, d), `Tu responsable, ${lead.config.name}, trabaja en este encargo del propietario: «${d.request}».
 Te pregunta: ${q.question}
 
 # Estado real
@@ -286,12 +332,12 @@ ${PURPOSE_TEXT[d.purpose ?? 'analysis']}Entrega el resultado del encargo en mark
 {"op":"merge","into":"HU-xxx","from":["HU-yyy"],"title"?:string,"criterion"?:string,"reason":string}
 {"op":"reprioritize","order":["HU-xxx", ...] (ids en el nuevo orden, solo los que cambian de sitio o todos),"reason":string}
 Usa solo ids de historias que existen en el estado real. Cierra el bloque con \`\`\`. Si no hay cambios al backlog, omite el bloque.`;
-      let synRes = await call(synIdx, sys(lead, slug), synPrompt, TOKENS.synthesis);
+      let synRes = await call(synIdx, sys(lead, slug, d), synPrompt, TOKENS.synthesis);
       let synText = synRes.text;
       for (let i = 0; i < 2 && isTruncated(synRes.stopReason); i++) {
         if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
         log({ step: 'Entregable', continuation: i + 1 }, 'respuesta cortada: se pide continuación');
-        synRes = await call(synIdx, sys(lead, slug), 'Tu respuesta anterior se cortó por el límite de longitud. Continúa EXACTAMENTE desde el último carácter que escribiste, sin repetir nada, sin saludos, manteniendo el formato (si estabas dentro del bloque backlog, continúa el JSON y ciérralo con ```).', TOKENS.synthesis, [{ role: 'user', content: synPrompt }, { role: 'assistant', content: synText }]);
+        synRes = await call(synIdx, sys(lead, slug, d), 'Tu respuesta anterior se cortó por el límite de longitud. Continúa EXACTAMENTE desde el último carácter que escribiste, sin repetir nada, sin saludos, manteniendo el formato (si estabas dentro del bloque backlog, continúa el JSON y ciérralo con ```).', TOKENS.synthesis, [{ role: 'user', content: synPrompt }, { role: 'assistant', content: synText }]);
         synText += synRes.text;
       }
       const ex = extractBacklogOps(synText);
@@ -303,7 +349,7 @@ Usa solo ids de historias que existen en el estado real. Cierra el bloque con \`
       if (d.purpose === 'proposal' && challengeIdx >= 0) {
         if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
         const ch = agents.get(proc.steps[challengeIdx].agentId)!;
-        const chRes = await call(challengeIdx, sys(ch, slug), `Cuestiona de forma INDEPENDIENTE esta propuesta antes de que llegue al propietario. No la redactaste tú.
+        const chRes = await call(challengeIdx, sys(ch, slug, d), `Cuestiona de forma INDEPENDIENTE esta propuesta antes de que llegue al propietario. No la redactaste tú.
 # Encargo y decisiones del propietario
 ${d.request}
 

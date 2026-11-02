@@ -6,6 +6,7 @@ import { agentsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { inheritLatestTemplate } from './agentTemplates.ts';
+import { archiveAgentFolder } from './agentFolders.ts';
 
 /**
  * Creación de agentes especializados (propósito central del producto).
@@ -61,6 +62,8 @@ export function deleteAgent(slug: string, id: string) {
       agents.updateTemplateMeta(other.id, { ...other.template, supervises: other.template.supervises.filter(k => k !== a.key), collaborates: other.template.collaborates.filter(k => k !== a.key) });
     }
   }
+  // Su carpeta portable se archiva (no se borra ni la hereda otro agente con el mismo nombre).
+  try { archiveAgentFolder(slug, id); } catch { /* sin carpeta */ }
   agents.delete(id);
 }
 

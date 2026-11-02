@@ -31,18 +31,27 @@ export function ensureLessonsTable(slug: string) {
     source TEXT NOT NULL DEFAULT 'detector', used_count INTEGER NOT NULL DEFAULT 0, recurrence_count INTEGER NOT NULL DEFAULT 0, promoted_to TEXT,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, validated_at TEXT
   ); CREATE INDEX IF NOT EXISTS lessons_status ON lessons(status); CREATE UNIQUE INDEX IF NOT EXISTS lessons_dedupe ON lessons(dedupe_key);`);
+  // Memoria de UN agente (aprendizaje verificado por el propietario a partir de su trabajo): misma tabla, mismo flujo de
+  // validación, pero fuera de las listas e inyecciones de siempre (agent_id NULL en todas las lecciones existentes).
+  const cols = (db.prepare(`PRAGMA table_info(lessons)`).all() as any[]).map(c => c.name);
+  if (!cols.includes('agent_id')) db.exec(`ALTER TABLE lessons ADD COLUMN agent_id TEXT`);
   return db;
 }
 
-const map = (r: any): Lesson => ({ id: r.id, projectId: r.project_id, role: r.role, tags: JSON.parse(r.tags || '[]'), status: r.status, version: r.version, parentId: r.parent_id, title: r.title, detector: r.detector, evidence: JSON.parse(r.evidence_json), rootCause: r.root_cause, correctiveAction: r.corrective_action, lessonText: r.lesson_text, source: r.source, usedCount: r.used_count, recurrenceCount: r.recurrence_count, promotedTo: r.promoted_to, createdAt: r.created_at, updatedAt: r.updated_at, validatedAt: r.validated_at });
+const map = (r: any): Lesson => ({ id: r.id, projectId: r.project_id, role: r.role, tags: JSON.parse(r.tags || '[]'), status: r.status, version: r.version, parentId: r.parent_id, title: r.title, detector: r.detector, evidence: JSON.parse(r.evidence_json), rootCause: r.root_cause, correctiveAction: r.corrective_action, lessonText: r.lesson_text, source: r.source, usedCount: r.used_count, recurrenceCount: r.recurrence_count, promotedTo: r.promoted_to, createdAt: r.created_at, updatedAt: r.updated_at, validatedAt: r.validated_at, agentId: r.agent_id ?? null });
 
 export function lessonsRepo(slug: string) {
   const db = ensureLessonsTable(slug);
   return {
     list(projectId?: string | null, status?: LessonStatus | null): Lesson[] {
-      const rows = db.prepare(`SELECT * FROM lessons WHERE (? IS NULL OR project_id IS NULL OR project_id = ?) AND (? IS NULL OR status = ?) ORDER BY updated_at DESC`).all(projectId ?? null, projectId ?? null, status ?? null, status ?? null) as any[];
+      const rows = db.prepare(`SELECT * FROM lessons WHERE agent_id IS NULL AND (? IS NULL OR project_id IS NULL OR project_id = ?) AND (? IS NULL OR status = ?) ORDER BY updated_at DESC`).all(projectId ?? null, projectId ?? null, status ?? null, status ?? null) as any[];
       return rows.map(map);
     },
+    /** Memoria de un agente (todas sus entradas o las de un estado). */
+    listForAgent(agentId: string, status?: LessonStatus | null): Lesson[] {
+      return (db.prepare(`SELECT * FROM lessons WHERE agent_id = ? AND (? IS NULL OR status = ?) ORDER BY created_at`).all(agentId, status ?? null, status ?? null) as any[]).map(map);
+    },
+    setAgent(id: string, agentId: string) { db.prepare(`UPDATE lessons SET agent_id = ? WHERE id = ?`).run(agentId, id); },
     get(id: string): Lesson | undefined { const r = db.prepare(`SELECT * FROM lessons WHERE id = ?`).get(id); return r ? map(r) : undefined; },
     insert(l: Omit<Lesson, 'id' | 'createdAt' | 'updatedAt' | 'usedCount' | 'recurrenceCount' | 'validatedAt'> & { dedupeKey?: string | null }): Lesson | null {
       const id = crypto.randomUUID(); const ts = now();

@@ -369,3 +369,6 @@ export interface BatchPolicyView {
   resumeAfter: { itemId: string; storyId: string; effect: string }[];
   history: BatchPolicyChange[];
 }
+
+/** Para los clientes de API de otras áreas (lib/osApi.ts): mismas cabeceras, errores y control de versiones. */
+export { request as apiRequest };

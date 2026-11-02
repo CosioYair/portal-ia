@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
+import { agentFoldersRepo, syncAgentFolder } from '../services/agentFolders.ts';
+import { recordAgentEvent } from '../services/agentEvents.ts';
 import { backendLabel, type ClaudeCodeStatusView, type ClaudeCodeWorkspaceView } from '@portal-ia/domain';
 import { claudeCodeWorkersRepo, providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
@@ -158,6 +160,8 @@ export async function claudeCodeRoutes(app: FastifyInstance) {
     }
     const updated = agents.updateConfig(id, { ...agent.config, backend });
     req.log.info({ slug, agent: id, backend }, 'backend de ejecución del agente actualizado');
+    recordAgentEvent(slug, id, 'harness_changed', { from: agent.config.backend ?? 'api', to: backend, via: 'conector Claude Code' });
+    if (agentFoldersRepo(slug).folderOf(id)) await syncAgentFolder(slug, updated).catch(() => null);
     return updated;
   });
 

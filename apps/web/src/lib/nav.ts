@@ -67,7 +67,8 @@ export function parentOf(pathname: string): { path: string; label: string } | nu
   if (/^\/procesos\//.test(pathname)) return { path: '/actividad', label: 'Actividad' };
   if (/^\/lotes\/[^/]+/.test(pathname)) return { path: '/lotes', label: 'Ejecución continua' };
   if (/^\/equipo\/.+/.test(pathname)) return { path: '/equipo', label: 'Equipo de IA' };
-  if (pathname === '/panel' || pathname === '/') return null;
+  if (/^\/oficina\/.+/.test(pathname)) return { path: '/oficina', label: 'Oficina' };
+  if (pathname === '/panel' || pathname === '/' || pathname === '/oficina') return null;
   return { path: '/panel', label: 'Panel' };
 }
 
@@ -77,7 +78,9 @@ export function screenName(path: string): string {
   if (p.startsWith('/historias/')) return 'la historia';
   if (p.startsWith('/procesos/')) return 'el proceso';
   if (p.startsWith('/lotes/')) return 'el lote';
-  const names: Record<string, string> = { '/backlog': 'Backlog', '/lotes': 'Ejecución continua', '/actividad': 'Actividad', '/panel': 'Panel', '/asistente': 'Asistente', '/autorizaciones': 'Autorizaciones', '/equipo': 'Equipo de IA', '/conocimiento': 'Conocimiento', '/presupuestos': 'Presupuestos', '/etapa': 'Etapas', '/archivo': 'Archivo' };
+  if (p.startsWith('/oficina/agente/')) return 'el agente';
+  if (p === '/oficina/nuevo-agente') return 'Nuevo agente';
+  const names: Record<string, string> = { '/backlog': 'Backlog', '/lotes': 'Ejecución continua', '/actividad': 'Actividad', '/panel': 'Panel', '/oficina': 'Oficina', '/asistente': 'Asistente', '/autorizaciones': 'Autorizaciones', '/equipo': 'Equipo de IA', '/conocimiento': 'Conocimiento', '/presupuestos': 'Presupuestos', '/etapa': 'Etapas', '/archivo': 'Archivo' };
   return names[p] ?? 'la pantalla anterior';
 }
 

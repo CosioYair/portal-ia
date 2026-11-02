@@ -33,18 +33,21 @@ export function authorizeProcess(slug: string, id: string, input: AuthorizeInput
   const gauntlet = story && input.pipeline ? resolveGauntletFor(slug, proc, normalizeGauntlet(input.pipeline.gauntlet ?? projectGauntlet(slug, proc.projectId))) : null;
   if (gauntlet) syncEvaluatorStep(slug, id, gauntlet);
   // Claude Code: un equipo que no puede ejecutar (proyecto sin autorizar, consola sin conectar…) no empieza.
-  const readiness = story ? teamReadiness(slug, id) : null;
+  // Encargos (de un agente, de un departamento o del Asistente): también se comprueba su equipo antes de empezar, y con
+  // TODO el equipo por una suscripción (Claude Code o Codex) no necesitan presupuesto de API. Un encargo no cede a la API.
+  const delegated = proc.kind === 'delegated_task';
+  const readiness = story || delegated ? teamReadiness(slug, id) : null;
   // Sin presupuesto de API (0 USD): solo con TODO el equipo por la suscripción, sin alternativa por la API; lo limita su tope de llamadas.
   const noApi = !(input.budgetUsd >= 0.1);
-  if (noApi && !(story && input.pipeline && readiness?.team.length && readiness.team.every(t => t.backend !== 'api'))) throw fail(400, 'Sin presupuesto de API (0 USD) todo el equipo debe ir por tu suscripción de Claude Code (la limita su tope de llamadas). Asigna un presupuesto de API o cambia el origen de los agentes que usan la API.', 'budget_required');
-  if (readiness && !readiness.ready && (readiness.fallback !== 'api' || noApi)) throw fail(409, `No se inicia: ${readiness.team.find(t => !t.ready)!.reason}`, 'backend_not_ready', { readiness });
-  if (readiness?.team.some(t => t.backend !== 'api')) {
+  if (noApi && !(((story && input.pipeline) || delegated) && readiness?.team.length && readiness.team.every(t => t.backend !== 'api'))) throw fail(400, 'Sin presupuesto de API (0 USD) todo el equipo debe ir por una suscripción (Claude Code o Codex; la limita su tope de llamadas). Asigna un presupuesto de API o cambia el arnés de los agentes que usan la API.', 'budget_required');
+  if (readiness && !readiness.ready && (delegated || readiness.fallback !== 'api' || noApi)) throw fail(409, `No se inicia: ${readiness.team.find(t => !t.ready)!.reason}`, 'backend_not_ready', { readiness });
+  if (readiness?.team.some(t => t.backend === 'claude-code' || t.backend === 'claude-code-terminal')) {
     const gate = subscriptionGate();
     if (!gate.ok) throw fail(409, `No se inicia: ${gate.reason}`, 'subscription_limit', { report: gate.report });
   }
   if (story && input.pipeline && proc.result) {
     // Con la suscripción el USD no limita nada: sin tope indicado, el de un lote (60 llamadas), ampliable al continuar.
-    const subscription = !!readiness?.team.some(t => t.backend !== 'api');
+    const subscription = !!readiness?.team.some(t => t.backend === 'claude-code' || t.backend === 'claude-code-terminal');
     const maxSubscriptionCalls = input.pipeline.maxSubscriptionCalls ?? (subscription ? DEFAULT_SUBSCRIPTION_CALLS : undefined);
     procs.setResult(id, { ...procs.get(id)!.result!, pipeline: newPipeline(normalizePipeline({ ...input.pipeline, maxSubscriptionCalls, gauntlet: gauntlet ?? undefined, ...(noApi ? { apiFallback: false } : {}) })) });
   }

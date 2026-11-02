@@ -58,10 +58,19 @@ export type BatchItemState =
  * Origen de ejecución que autoriza un lote: la API del proveedor (facturable, en USD) o la suscripción de Claude Code.
  * El origen es de cada AGENTE, no de la historia: un equipo puede mezclar orígenes y cada agente se comprueba aparte.
  */
-export type BatchSource = 'api' | 'claude_code';
-/** Backend del agente → origen que lo autoriza en un lote (Claude Code gestionado y la consola usan la suscripción). */
+export type BatchSource = 'api' | 'claude_code' | 'codex';
+/**
+ * Backend del agente → origen que lo autoriza en un lote (Claude Code gestionado y la consola usan la suscripción de
+ * Claude). Codex es su PROPIO origen: ningún lote lo autoriza hoy (las historias aún no se ejecutan con Codex), así que un
+ * agente que pase a Codex nunca entra en un lote autorizado para Claude Code ni para la API.
+ */
 export function batchSourceOf(backend: ExecutionBackend | null | undefined): BatchSource {
-  return !backend || backend === 'api' ? 'api' : 'claude_code';
+  switch (backend ?? 'api') {
+    case 'api': return 'api';
+    case 'claude-code': case 'claude-code-terminal': return 'claude_code';
+    case 'codex': return 'codex';
+    default: { const never: never = backend as never; return never; }
+  }
 }
 
 export type BatchFailureClass = 'owner_decision' | 'environment' | 'budget' | 'subscription' | 'failure' | 'dependency' | 'integration';

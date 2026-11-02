@@ -23,6 +23,7 @@ import { repoStatus } from './repoStatus.ts';
 import { phaseContext } from './operationalPhase.ts';
 import { CAPABILITIES, type CapabilityPreview, type CapabilityResult } from './capabilities.ts';
 import { agentBackend, agentCaller, claudeCodeGate } from './claudeCode/backend.ts';
+import { codexGate } from './harness/codex.ts';
 import { lastDetection } from './claudeCode/detect.ts';
 import { ASSIGNMENT_OPEN, ASSIGNMENT_STATUS_LABEL, backendLabel, PORTAL_CAPABILITIES, STAGE_LABEL } from '@portal-ia/domain';
 import { monotonicNow } from '../clock.ts';
@@ -133,8 +134,8 @@ export function assistantInfo() {
   const spent = (workspaceDb(INTERNAL_WORKSPACE.slug).prepare(`SELECT COALESCE(SUM(cost_usd),0) AS c FROM execution_history WHERE agent_id = ? AND started_at >= ?`).get(a.id, monthStart.toISOString()) as any).c as number;
   const p = estimatePricing(a.config.provider, a.config.model);
   // Backend del Asistente (como el de cualquier agente): se muestra ANTES de enviar, con su origen de facturación.
-  const backend = agentBackend(a); const gate = backend === 'api' ? null : claudeCodeGate(INTERNAL_WORKSPACE.slug, a, null);
-  const available = backend === 'api' || (backend === 'claude-code' && !!gate?.ok);
+  const backend = agentBackend(a); const gate = backend === 'api' ? null : backend === 'codex' ? codexGate(a) : claudeCodeGate(INTERNAL_WORKSPACE.slug, a, null);
+  const available = backend === 'api' || ((backend === 'claude-code' || backend === 'codex') && !!gate?.ok);
   const unavailableReason = backend === 'claude-code-terminal' ? 'La consola de Claude Code atiende tareas de procesos, no respuestas inmediatas: elige «Claude Code (gestionado)» o la API para el Asistente.' : gate && !gate.ok ? gate.reason : null;
   return { agentId: a.id, name: a.config.name, model: a.config.model, provider: a.config.provider, monthlyLimitUsd: a.config.monthlyLimitUsd, spentThisMonthUsd: spent,
     backend, backendLabel: backendLabel(backend, lastDetection()?.billing, a.config.provider), billing: backend === 'api' ? 'api' as const : 'subscription' as const, available, unavailableReason,
@@ -143,6 +144,7 @@ export function assistantInfo() {
 
 /** Mapa de pantallas del Portal, para poder decir DÓNDE está cada cosa. */
 const SCREEN_MAP = `# Pantallas del Portal (menú izquierdo salvo que se indique)
+- Oficina (/oficina, portada): la empresa por departamentos (salas) con cada agente en su puesto y su estado real (trabajando, en cola, te necesita, disponible); vista «Lista» equivalente; barra «Pide algo a tu empresa» (@agente → su chat; «Departamento: …» → petición al departamento; lo demás → Asistente); «Nuevo agente» (asistente sin código: qué necesitas → identidad → cómo trabaja (arnés: Claude Code, Codex, API) → revisión → primera tarea; también importar una carpeta de agente); «Nuevo departamento»; «Arneses» (estado de Claude Code, Codex y la API; habilitar Codex solo si su modo restringido está verificado). Panel de cada agente (/oficina/agente/<id>/<pestaña>): Chat (una llamada por mensaje con SU arnés), Solicitudes, Trabajo (encargos directos con su autorización y entregables), Archivos (carpeta portable: AGENTS.md, habilidades, memoria verificada; cambios externos para adoptar o descartar; revisiones y vuelta atrás; exportar), Memoria (aprendizaje que el propietario verifica a partir de su trabajo) y Configuración (departamento, cambio de arnés con compatibilidad y autorización, permisos, registro). Codex aún no ejecuta historias ni lotes.
 - Asistente (/asistente): este chat a pantalla completa; también como panel flotante «Asistente» abajo a la derecha en todas las pantallas.
 - Panel (/panel): contexto del proyecto, dirección, tarjeta Repositorio (estado git, crear main, remoto, publicar main, «Usar la carpeta de esta instalación»), backlog resumido, equipo.
 - Equipo de IA (/equipo): agentes, organigrama, crear agente especializado, configurar cada agente (modelo, límites).
@@ -158,7 +160,7 @@ const SCREEN_MAP = `# Pantallas del Portal (menú izquierdo salvo que se indique
 - Proveedores (/configuracion/proveedor; abajo a la izquierda «Proveedores»): conectar proveedores de API y la sección «Claude Code — Local» (/configuracion/proveedor#claude-code): activar el conector, CLI y sesión de la suscripción, «Proyectos autorizados» (qué proyectos pueden usar Claude Code), límites, consolas y prueba de humo. Una historia pausada porque su proyecto no está autorizado ofrece también «Autorizar «<proyecto>» para Claude Code» en su cabecera; después se continúa con «Continuar la operación pendiente».
 - Barra amarilla superior: aparece cuando el código del Portal cambió respecto al que arrancó o la interfaz se construyó antes; «Reconstruir y reiniciar» con autorización. Una historia del Portal solo cuenta como ACTIVADA cuando el servidor y la interfaz en marcha contienen su commit; después debe «Comprobar en ejecución» (el Portal se verifica a sí mismo) y probarse paso a paso antes de cerrarse. Publicar en GitHub es opcional.
 - Seguridad (M1): los cambios se escriben en worktrees aislados (la carpeta del Portal no cambia de rama); las verificaciones corren en sandbox (Docker/WSL2) o quedan bloqueadas (fail-closed); toda operación pasa por la política de ejecución del backend.
-Herramientas y MCP, Organización, Configuración: marcadas «próx.», aún no existen.`;
+Herramientas y MCP, Configuración: marcadas «próx.», aún no existen.`;
 
 /** Estado real para el prompt. Con alcance (conversación de un proyecto), solo ese proyecto en detalle y el resto en una línea; el backlog abierto, acotado. */
 async function platformSnapshot(scope: { workspaceSlug: string | null; projectId: string | null } = { workspaceSlug: null, projectId: null }): Promise<string> {

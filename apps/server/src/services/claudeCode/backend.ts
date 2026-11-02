@@ -15,6 +15,7 @@ export { BRIDGE_SCRIPT };
 import { cliCommandFor, findCli, lastDetection, verifiedDetection } from './detect.ts';
 import { getClaudeCodeSettings, projectAuthorized } from './settings.ts';
 import { overageAccepted, saveUsageReport, subscriptionGate } from './usage.ts';
+import { codexComplete, codexGate, lastCodexDetection } from '../harness/codex.ts';
 
 /**
  * Backend de ejecución «Claude Code» para los pasos de un proceso autorizado. El agente del Portal conserva su identidad,
@@ -23,7 +24,12 @@ import { overageAccepted, saveUsageReport, subscriptionGate } from './usage.ts';
  * (pausa, o la API solo si el propietario lo autorizó en los ajustes del conector).
  */
 export const agentBackend = (a: Agent): ExecutionBackend => a.config.backend ?? 'api';
-export const usesClaudeCode = (a: Agent) => agentBackend(a) !== 'api';
+/** Solo Claude Code (gestionado o la consola). Codex es OTRO arnés: nunca pasa por la CLI de Claude ni por sus permisos. */
+export const usesClaudeCode = (a: Agent) => { const b = agentBackend(a); return b === 'claude-code' || b === 'claude-code-terminal'; };
+/** ¿El arnés va por una suscripción (sin USD de la API)? Claude Code o Codex. */
+export const usesSubscription = (a: Agent) => agentBackend(a) !== 'api';
+/** Las historias y los lotes (pipeline de desarrollo) aún no se ejecutan con Codex: lo dice y no llama a nada. */
+export const codexStoryRefusal = (a: Agent) => `«${a.config.name}» usa Codex: las historias del backlog y los lotes aún no se ejecutan con Codex (sí sus conversaciones, encargos y peticiones de departamento). No se ha hecho ninguna llamada ni se ha usado otro arnés en su lugar. Para esta historia, cambia su arnés a Claude Code o la API.`;
 
 /** Herramientas del puente que puede usar una ejecución gestionada (solo lectura y progreso). */
 export const JOB_TOOLS = ['portal_task_context', 'portal_list_files', 'portal_read_file', 'portal_search', 'portal_diff', 'portal_knowledge', 'portal_report_progress'];
@@ -40,6 +46,7 @@ export type GateProblem = 'api' | 'disabled' | 'provider' | 'project' | 'console
  */
 export function claudeCodeGate(slug: string, agent: Agent, projectId: string | null): { ok: true } | { ok: false; reason: string; problem: GateProblem } {
   const s = getClaudeCodeSettings();
+  if (agentBackend(agent) === 'codex') return { ok: false, reason: 'El agente usa Codex, no Claude Code.', problem: 'api' };
   if (!usesClaudeCode(agent)) return { ok: false, reason: 'El agente usa la API de su proveedor.', problem: 'api' };
   if (!s.enabled) return { ok: false, reason: 'El conector «Claude Code — Local» está desactivado (Proveedores → Claude Code).', problem: 'disabled' };
   if (agent.config.provider !== 'anthropic') return { ok: false, reason: 'Solo los agentes con modelos de Anthropic pueden ejecutarse con Claude Code.', problem: 'provider' };
@@ -58,16 +65,22 @@ export function teamReadiness(slug: string, processId: string) {
   const proc = processesRepo(slug).get(processId); if (!proc) return null;
   const s = getClaudeCodeSettings(); const det = lastDetection(); const agents = agentsRepo(slug);
   const ids = Array.from(new Set(proc.steps.map(st => st.agentId)));
+  const story = proc.kind === 'story_execution';
   const team = ids.map(id => agents.get(id)).filter((a): a is Agent => !!a).map(a => {
-    const b = agentBackend(a); const g = b === 'api' ? null : claudeCodeGate(slug, a, proc.projectId);
+    const b = agentBackend(a);
+    // Codex: su propia comprobación; en historias y lotes, todavía no admitido (fail closed, sin sustituto).
+    const g: { ok: true } | { ok: false; reason: string; problem: GateProblem | 'codex' } | null = b === 'api' ? null
+      : b === 'codex' ? (story ? { ok: false, reason: codexStoryRefusal(a), problem: 'codex' } : (() => { const c = codexGate(a); return c.ok ? c : { ok: false as const, reason: c.reason, problem: 'codex' as const }; })())
+      : claudeCodeGate(slug, a, proc.projectId);
     return {
       agentId: a.id, name: a.config.name, roles: Array.from(new Set(proc.steps.filter(st => st.agentId === a.id).map(st => st.role ?? 'implementer'))),
-      backend: b, label: backendLabel(b, det?.billing, a.config.provider), ready: !g || g.ok,
+      backend: b, label: backendLabel(b, b === 'codex' ? lastCodexDetection()?.billing === 'subscription' ? 'subscription' : 'unverified' : det?.billing, a.config.provider), ready: !g || g.ok,
       reason: g && !g.ok ? g.reason : null, problem: g && !g.ok ? g.problem : null
     };
   });
   const projectName = projectsRepo(slug).get(proc.projectId)?.name ?? null;
-  const cc = team.filter(t => t.backend !== 'api');
+  const cc = team.filter(t => t.backend === 'claude-code' || t.backend === 'claude-code-terminal');
+  const cx = team.filter(t => t.backend === 'codex');
   // Qué se retomará exactamente al continuar (para decidirlo ANTES de cualquier llamada).
   const stale = staleCorrectionUnits(proc.result);
   const staleIds = stale.map(s => s.id);
@@ -88,11 +101,12 @@ export function teamReadiness(slug: string, processId: string) {
     /** Ejecutor gestionado: disponible si el conector está activo con la suscripción verificada; ocupación actual. */
     worker: { managedAvailable: s.enabled && det?.billing === 'subscription', running: runningClaudeCode(), maxConcurrent: s.maxConcurrent },
     /** Lo que se autoriza (alcance), en lenguaje llano. */
-    scope: cc.length ? [
+    scope: cc.length || cx.length ? [
       `Proyecto «${projectName ?? proc.projectId}» de este espacio (no otros proyectos ni empresas)`,
-      `Agentes: ${cc.map(t => t.name).join(', ')}, con tu suscripción de Claude (0 USD de la API)`,
-      s.repoRead ? 'Lectura (solo lectura) de la carpeta de trabajo del proceso a través del Portal; sin .env, claves, .git ni data/' : 'Sin acceso a archivos: solo el contexto que prepara el Portal',
-      'Claude Code no ejecuta órdenes ni escribe archivos: el Portal aplica los cambios en el worktree aislado'
+      ...(cc.length ? [`Agentes: ${cc.map(t => t.name).join(', ')}, con tu suscripción de Claude (0 USD de la API)`,
+        s.repoRead ? 'Lectura (solo lectura) de la carpeta de trabajo del proceso a través del Portal; sin .env, claves, .git ni data/' : 'Sin acceso a archivos: solo el contexto que prepara el Portal',
+        'Claude Code no ejecuta órdenes ni escribe archivos: el Portal aplica los cambios en el worktree aislado'] : []),
+      ...(cx.length ? [`Agentes: ${cx.map(t => t.name).join(', ')}, con Codex y tu sesión de ChatGPT (0 USD de la API)`, 'Codex en modo restringido: sin shell, sin escritura, sin plugins; solo el contexto que prepara el Portal'] : [])
     ] : [],
     nextOperation, staleCorrections: stale.length,
     corrections: pl ? { used: pl.corrections, max: pl.config.maxCorrections } : null
@@ -111,9 +125,19 @@ export function completeWith(cc: ReturnType<typeof agentCaller>, providerId: Pro
  * no está disponible, se dice por qué y NO se usa la API en su lugar (la alternativa por API es solo de los pasos de
  * procesos autorizados y la decide el propietario en los ajustes del conector).
  */
-export function agentCaller(slug: string, agent: Agent, projectId: string | null, title: string, processId: string | null = null, role: string | null = null, opts: { interactive?: boolean } = {}): { backend: ExecutionBackend; label: string; subscription: boolean; complete: (req: CompletionRequest, signal?: AbortSignal) => Promise<ClaudeCodeCompletion> } | null {
+export function agentCaller(slug: string, agent: Agent, projectId: string | null, title: string, processId: string | null = null, role: string | null = null, opts: { interactive?: boolean; lane?: 'chat' } = {}): { backend: ExecutionBackend; label: string; subscription: boolean; complete: (req: CompletionRequest, signal?: AbortSignal) => Promise<ClaudeCodeCompletion> } | null {
   const b = agentBackend(agent);
   if (b === 'api') return null;
+  if (b === 'codex') {
+    // Codex: su propio arnés, comprobación y carril. Si no está disponible, se dice y NO se usa otro arnés ni la API.
+    const g = codexGate(agent);
+    if (!g.ok) throw Object.assign(new Error(`${g.reason} No se ha usado la API ni otro arnés en su lugar.`), { statusCode: 409 });
+    return {
+      backend: b, label: 'Codex — Sesión de ChatGPT', subscription: true,
+      complete: (req, signal) => codexComplete({ slug, projectId: projectId ?? '', processId, stepId: null, agent, title }, req, signal ?? new AbortController().signal)
+        .then(r => ({ ...r, billing: 'subscription' as const }))
+    };
+  }
   if (b === 'claude-code-terminal') throw Object.assign(new Error(`«${agent.config.name}» usa tu consola de Claude Code, que atiende tareas de procesos y no respuestas inmediatas. Cambia su backend a «Claude Code (gestionado)» o a la API para esto. No se ha usado la API.`), { statusCode: 409 });
   const g = claudeCodeGate(slug, agent, projectId);
   if (!g.ok) throw Object.assign(new Error(`${g.reason} No se ha usado la API en su lugar.`), { statusCode: 409 });
@@ -121,7 +145,7 @@ export function agentCaller(slug: string, agent: Agent, projectId: string | null
     backend: b, label: backendLabel(b, lastDetection()?.billing), subscription: true,
     // Con el proceso: cada llamada cuenta para su tope de llamadas a la suscripción (y su ejecución queda ligada a él).
     // El papel decide si una consulta que agota los turnos se recupera UNA vez sin herramientas (ver claudeCodeComplete).
-    complete: (req, signal) => claudeCodeComplete({ slug, projectId: projectId ?? '', processId, stepId: null, agent, role, title, interactive: !!opts.interactive }, req, signal ?? new AbortController().signal, () => undefined)
+    complete: (req, signal) => claudeCodeComplete({ slug, projectId: projectId ?? '', processId, stepId: null, agent, role, title, interactive: !!opts.interactive, lane: opts.lane }, req, signal ?? new AbortController().signal, () => undefined)
   };
 }
 
@@ -132,10 +156,12 @@ export function agentCaller(slug: string, agent: Agent, projectId: string | null
  * conversación con el propietario. Antes compartían el único hueco: el Asistente podía esperar hasta el plazo entero de una
  * unidad de un lote para contestar. Cada ejecución sigue contando en el registro y en los topes de llamadas.
  */
-const lanes = { work: { active: 0, waiters: [] as (() => void)[] }, interactive: { active: 0, waiters: [] as (() => void)[] } };
+const lanes = { work: { active: 0, waiters: [] as (() => void)[] }, interactive: { active: 0, waiters: [] as (() => void)[] },
+  // Conversaciones directas con un agente (pestaña Chat de la oficina): su propio carril, ni detrás de los lotes ni del Asistente.
+  chat: { active: 0, waiters: [] as (() => void)[] } };
 const runningKeys = new Set<string>();
 async function acquireSlot(max: number, signal: AbortSignal, onWait: (n: number) => void, lane: keyof typeof lanes = 'work') {
-  const l = lanes[lane]; const limit = lane === 'interactive' ? 1 : Math.max(1, max);
+  const l = lanes[lane]; const limit = lane === 'interactive' || lane === 'chat' ? 1 : Math.max(1, max);
   while (l.active >= limit) {
     if (signal.aborted) throw ccError('cancelled', 'Cancelado mientras esperaba turno para Claude Code.');
     onWait(l.active);
@@ -145,7 +171,7 @@ async function acquireSlot(max: number, signal: AbortSignal, onWait: (n: number)
   l.active++;
 }
 function releaseSlot(lane: keyof typeof lanes = 'work') { const l = lanes[lane]; l.active = Math.max(0, l.active - 1); l.waiters.shift()?.(); }
-export const runningClaudeCode = () => lanes.work.active + lanes.interactive.active;
+export const runningClaudeCode = () => lanes.work.active + lanes.interactive.active + lanes.chat.active;
 
 const liveListeners = new Map<string, (text: string) => void>();
 setProgressListener((t, message) => {
@@ -165,7 +191,9 @@ export function readRootFor(slug: string, processId: string | null, projectId: s
 
 export interface ExecutionTarget { slug: string; projectId: string; processId: string | null; stepId: string | null; agent: Agent; role: string | null; title: string;
   /** Conversación con el propietario (el chat del Asistente): carril propio, nunca espera detrás del trabajo de los procesos. */
-  interactive?: boolean }
+  interactive?: boolean;
+  /** Carril de las conversaciones directas con un agente. */
+  lane?: 'chat' }
 export interface ClaudeCodeCompletion extends CompletionResult { backendLabel: string; billing: ClaudeCodeBilling; apiEquivalentUsd: number | null; runId: string; numTurns?: number | null; cacheReadTokens?: number; tools?: Record<string, number>;
   /** Respuesta de la recuperación sin herramientas tras agotar los turnos (el motivo); su uso incluye el de la ejecución agotada. */
   recovered?: string | null }
@@ -278,7 +306,7 @@ async function claudeCodeRun(t: ExecutionTarget, req: CompletionRequest, signal:
   if (runningKeys.has(key)) throw ccError('backend_unavailable', 'Ya hay una ejecución idéntica de Claude Code en curso para este paso: no se duplica.');
   runningKeys.add(key);
   try {
-    const lane = t.interactive ? 'interactive' as const : 'work' as const;
+    const lane = t.interactive ? 'interactive' as const : t.lane === 'chat' ? 'chat' as const : 'work' as const;
     await acquireSlot(s.maxConcurrent, signal, n => say(lane === 'interactive' ? 'En cola: el Asistente termina otra respuesta. Nada se ha enviado y el plazo aún no corre.' : `En cola: ${n} ejecución(es) de Claude Code en curso (máximo ${s.maxConcurrent}). Nada se ha enviado y el plazo de la llamada aún no corre.`, 'queued'), lane);
     // Tope de llamadas: comprobado y registrado en el mismo tramo síncrono (sin «await» entre medias): sin carreras.
     const cap = callCapCheck(t.slug, t.processId); if (!cap.ok) { releaseSlot(lane); throw ccError('call_cap', cap.detail); }

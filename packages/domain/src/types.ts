@@ -682,7 +682,7 @@ export interface PipelineConfig {
    * Orígenes permitidos en TODA la ejecución (los fija un lote): si un agente pasa a otro origen a mitad de la historia,
    * su llamada no se hace y el pipeline se pausa. Sin valor: cualquier origen del agente, como siempre.
    */
-  backends?: ('api' | 'claude_code')[];
+  backends?: ('api' | 'claude_code' | 'codex')[];
   /**
    * Tope de llamadas a la suscripción de Claude Code autorizadas para ESTE proceso (también las fallidas). Con la
    * suscripción el presupuesto en USD no limita nada (cada llamada cuesta 0 USD de API): este es su límite de recursos.
@@ -1120,8 +1120,14 @@ export interface DelegationResult {
    * Para qué es (v0.16): análisis libre (por defecto), propuesta de una conversación (con cuestionamiento independiente
    * antes de presentarla), revisión del equipo de una propuesta, o historias de una propuesta aprobada (solo «add»).
    */
-  purpose?: 'analysis' | 'proposal' | 'team_review' | 'stories';
+  purpose?: 'analysis' | 'proposal' | 'team_review' | 'stories' | 'task' | 'department';
   conversationId?: string | null;
+  /** Equipo fijado al crear (ids en el orden de sus pasos de consulta): el motor no lo recalcula aunque cambie el organigrama. */
+  teamIds?: string[];
+  /** Arnés y revisión de identidad de cada agente fijados al crear: si el arnés cambia, esa llamada no se hace. */
+  pins?: Record<string, { harness: import('./claude-code.ts').ExecutionBackend; revision: number | null }>;
+  /** Petición a un departamento (Marketing, Desarrollo…): quién la recibió. */
+  department?: { slug: string; name: string } | null;
   /** Cuestionamiento independiente de la propuesta (otro especialista, contexto nuevo, sin el razonamiento del redactor). */
   challenge?: { agentId: string; agentName: string; text: string } | null;
 }
@@ -1436,6 +1442,8 @@ export interface Lesson {
   /** Versión de plantilla a la que se promovió como práctica (M5), p. ej. «pj-dev@2». */
   promotedTo: string | null;
   createdAt: string; updatedAt: string; validatedAt: string | null;
+  /** Memoria de un agente concreto (null = lección de la organización, la de siempre). */
+  agentId?: string | null;
 }
 
 // ---- M5 · Plantillas versionadas ----

@@ -521,7 +521,7 @@ function maxTurnsPause(ctx: StoryRunCtx, unitId: string, e: any): PipelinePause 
   const bp = basePathOf(ctx);
   const chars = [...unit.files, ...relatedFiles(ctx, unit)].reduce((s, f) => s + Math.min(60_000, (readRepoFile(bp, f, 60_000) ?? '').length), 0);
   const estTokens = Math.round((chars + 12_000) / 3.5 / 1000) * 1000;
-  const usage = `El intento acotado enviaría ≈ ${estTokens.toLocaleString('es-MX')} tokens de entrada${ctx.dev.config.backend && ctx.dev.config.backend !== 'api' ? ' con tu suscripción de Claude (0 USD de la API)' : ' a la API del proveedor (con el presupuesto del proceso)'}.`;
+  const usage = `El intento acotado enviaría ≈ ${estTokens.toLocaleString('es-MX')} tokens de entrada${usesClaudeCode(ctx.dev) ? ' con tu suscripción de Claude (0 USD de la API)' : ' a la API del proveedor (con el presupuesto del proceso)'}.`;
   return new PipelinePause('max_turns', n >= 2
     ? `«${unit.title}»: Claude Code agotó sus turnos por segunda vez (${detail}). No se insiste con la misma tarea. ${remaining} Decide: volver a verificar sin IA, corregirlo tú (corrección externa) o acotar la historia.`
     : `«${unit.title}»: ${detail} ${remaining} Al continuar, el siguiente intento será acotado: incluye ya el contenido de los archivos relacionados para que no tenga que explorarlos, con los mismos límites autorizados. ${usage} Si vuelve a agotar los turnos, se detiene.`);

@@ -167,6 +167,7 @@ export function checkTeam(slug: string, projectId: string, members: { agentId: s
     const agentLink = { label: `Origen de «${name}» (Equipo de IA)`, href: `/equipo/${id}` };
     if (!base.allowed) return { ...base, ready: false, fix: agentLink, problem: source === 'api'
       ? `«${name}» usa ${api} (facturable) y este lote no autoriza la API.`
+      : source === 'codex' ? `«${name}» usa Codex: los lotes aún no se ejecutan con Codex (ningún lote lo autoriza). Cambia su arnés a Claude Code o la API para esta historia; no se usará otro en su lugar.`
       : `«${name}» usa Claude Code (${backend === 'claude-code-terminal' ? 'tu consola' : 'gestionado'}) y este lote no autoriza la suscripción de Claude Code.` };
     if (source === 'api') return apiReady ? { ...base, ready: true, problem: null, fix: null } : { ...base, ready: false, problem: `El proveedor de «${name}» (${api}) no está conectado.`, fix: PROVIDERS_LINK };
     const g = claudeCodeGate(slug, a, projectId);

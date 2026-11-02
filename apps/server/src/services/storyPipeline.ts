@@ -24,7 +24,7 @@ import { DEPS_MISSING_EXIT } from './sandbox.ts';
 import { DEV_MAX_TOKENS, FILE_FORMAT, PATCH_ONLY_FORMAT, sys } from './storyPrompts.ts';
 import { runVerification, sandboxDeps } from './verification.ts';
 import { driftMessage, worktreeDrift } from './worktreeDrift.ts';
-import { agentBackend, claudeCodeComplete, claudeCodeGate, RECOVERED_NOTE, usesClaudeCode } from './claudeCode/backend.ts';
+import { agentBackend, claudeCodeComplete, claudeCodeGate, codexStoryRefusal, RECOVERED_NOTE, usesClaudeCode } from './claudeCode/backend.ts';
 import { lastDetection } from './claudeCode/detect.ts';
 import { getClaudeCodeSettings } from './claudeCode/settings.ts';
 import { monotonicNow } from '../clock.ts';
@@ -148,6 +148,8 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
   const step = proc.steps.find(s => s.id === stepId)!; const agent = agentsRepo(slug).get(step.agentId)!;
   const blocked = originBlocked(proc, agent); if (blocked) throw originFailure(blocked);
   const system = stepSystem(slug, proc, stepId, agent, system0, opts.injected);
+  // Codex aún no ejecuta historias: nunca se convierte en una llamada a la API ni a Claude Code (fail closed).
+  if (agentBackend(agent) === 'codex') { const msg = codexStoryRefusal(agent); throw Object.assign(new Error(msg), { failure: { kind: 'provider', class: 'PERMISSION_REQUIRED', providerCode: 'origin_not_allowed', detail: msg } satisfies ProcessFailure }); }
   const providerId = agent.config.provider as ProviderId;
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
   const apiConnected = !!cred && prow.status === 'connected';
@@ -375,6 +377,7 @@ export async function stepCall(ctx: StoryRunCtx, agent: Agent, role: TeamRole, t
   // Claude Code no disponible (proyecto sin autorizar, consola desconectada…): se pausa ANTES de crear el paso, como con el
   // presupuesto. Antes quedaba un paso «pendiente» huérfano por cada «Continuar» (HU-159, pasos 21 y 22).
   if (!reuseStepId) { const blocked = originBlocked(processesRepo(ctx.slug).get(ctx.processId)!, agent); if (blocked) throw originFailure(blocked); }
+  if (agentBackend(agent) === 'codex') throw originFailure(codexStoryRefusal(agent));
   if (!reuseStepId && usesClaudeCode(agent)) {
     const proc = processesRepo(ctx.slug).get(ctx.processId)!;
     const g = claudeCodeGate(ctx.slug, agent, proc.projectId);

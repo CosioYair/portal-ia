@@ -9,7 +9,7 @@ const webSrc = fileURLToPath(new URL('../../web/src/', import.meta.url));
 const read = (rel: string) => fs.readFileSync(path.join(webSrc, rel), 'utf8');
 const stripComments = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, '');
 
-const FILES = ['story-flow.css', 'manual-test-feedback.css', 'components/BudgetMeter.css'];
+const FILES = ['story-flow.css', 'manual-test-feedback.css', 'components/BudgetMeter.css', 'office.css'];
 const LOCAL_VARS = new Set(['--n']);
 const LEGACY_VARS = ['--line', '--line-soft', '--line-strong', '--surface', '--surface-2', '--ink', '--ink-2', '--ink-3'];
 

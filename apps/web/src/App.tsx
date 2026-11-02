@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useEntryRecorder } from './lib/nav.ts';
 import { Navigate, Route, Routes, useLocation, useNavigate, useNavigationType, useParams } from 'react-router-dom';
 import type { Project, ProviderView, Workspace } from '@portal-ia/domain';
@@ -23,6 +23,10 @@ import { BatchDetail, Batches } from './screens/Batches.tsx';
 import { CompanyHome } from './screens/CompanyHome.tsx';
 import { Icon, Spinner } from './components/ui.tsx';
 import { InboxLauncher, InboxScreen } from './screens/InboxScreen.tsx';
+// La oficina y el asistente de creación se cargan aparte (no engordan la carga del resto de pantallas).
+const Office = lazy(() => import('./screens/Office.tsx').then(m => ({ default: m.Office })));
+const AgentWizard = lazy(() => import('./screens/AgentWizard.tsx').then(m => ({ default: m.AgentWizard })));
+const lazyScreen = (el: ReactElement) => <Suspense fallback={<div className="app" style={{ display: 'grid', placeItems: 'center' }}><Spinner /></div>}>{el}</Suspense>;
 
 const SEL_KEY = 'portal-ia.seleccion';
 type Selection = { ws: string; project: string | null };
@@ -158,7 +162,8 @@ export default function App() {
 
   const connected = providers.find(p => p.status === 'connected') ?? null;
   const ready = status.initialized && !!status.workspace;
-  const home = ready ? '/panel' : connected ? '/configuracion/inicializar' : '/configuracion/proveedor';
+  // La oficina es la portada: la empresa, sus departamentos y sus agentes de un vistazo (el Panel sigue en /panel).
+  const home = ready ? '/oficina' : connected ? '/configuracion/inicializar' : '/configuracion/proveedor';
   const guard = (el: ReactElement) => ready ? (status.project ? el : <CompanyHome />) : <Navigate to={home} replace />;
 
   return (
@@ -169,13 +174,16 @@ export default function App() {
         <ScrollMemory />
         <SelectionHistory sel={sel} workspaces={workspaces} select={select} />
         <Routes>
-          <Route path="/" element={ready ? <Navigate to="/panel" replace /> : <Welcome />} />
+          <Route path="/" element={ready ? <Navigate to="/oficina" replace /> : <Welcome />} />
           <Route path="/configuracion/proveedor" element={<ProviderSetup />} />
           <Route path="/configuracion/inicializar" element={connected ? <Initialization /> : <Navigate to="/configuracion/proveedor" replace />} />
           <Route path="/empresa/:slug/proyecto/:pid/*" element={<SelectRoute select={select} />} />
           <Route path="/empresa/:slug/*" element={<SelectRoute select={select} />} />
           <Route path="/asistente" element={ready ? <Assistant /> : <Navigate to={home} replace />} />
           <Route path="/panel" element={guard(<Dashboard />)} />
+          <Route path="/oficina" element={guard(lazyScreen(<Office />))} />
+          <Route path="/oficina/nuevo-agente" element={guard(lazyScreen(<AgentWizard />))} />
+          <Route path="/oficina/agente/:agentId/:tab?" element={guard(lazyScreen(<Office />))} />
           <Route path="/equipo" element={guard(<Team />)} />
           <Route path="/equipo/nuevo" element={guard(<AgentCreate />)} />
           <Route path="/equipo/:agentId" element={guard(<AgentDetail />)} />

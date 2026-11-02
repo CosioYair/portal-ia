@@ -6,8 +6,10 @@
  * - `claude-code`: el Portal lanza la CLI oficial de Claude Code (`claude -p`) con la sesión del propietario.
  * - `claude-code-terminal`: la tarea espera a que el propietario la atienda desde su propia consola de Claude Code
  *   conectada al Portal por el puente MCP.
+ * - `codex`: el Portal lanza la CLI oficial de Codex (`codex exec`) en modo restringido con la sesión de ChatGPT del
+ *   propietario (ver apps/server/src/services/harness/codex.ts y packages/domain/src/harness.ts).
  */
-export type ExecutionBackend = 'api' | 'claude-code' | 'claude-code-terminal';
+export type ExecutionBackend = 'api' | 'claude-code' | 'claude-code-terminal' | 'codex';
 
 /**
  * Informe de límites tal como lo emite el CLI oficial en `stream-json` (`rate_limit_event`, versión 2.1.311). Solo
@@ -117,7 +119,7 @@ export type ClaudeCodeRunStatus = 'queued' | 'running' | 'done' | 'failed' | 'ca
 
 export interface ClaudeCodeRun {
   id: string;
-  mode: 'cli' | 'terminal';
+  mode: 'cli' | 'terminal' | 'codex';
   projectId: string;
   processId: string | null;
   stepId: string | null;
@@ -185,6 +187,7 @@ export const DEFAULT_CLAUDE_CODE_SETTINGS: ClaudeCodeSettings = {
 /** Etiqueta visible del origen de ejecución. */
 export function backendLabel(backend: ExecutionBackend | null | undefined, billing?: ClaudeCodeBilling | null, provider?: string | null): string {
   if (!backend || backend === 'api') return provider === 'openai' ? 'OpenAI API' : 'Anthropic API';
+  if (backend === 'codex') return billing === 'subscription' ? 'Codex — Sesión de ChatGPT' : billing === 'api' ? 'Codex — Facturación API' : 'Codex — No verificado';
   if (backend === 'claude-code-terminal') return 'Claude Code — Consola (no verificado)';
   if (billing === 'subscription') return 'Claude Code — Suscripción';
   if (billing === 'api') return 'Claude Code — Facturación API';

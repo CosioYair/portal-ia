@@ -11,7 +11,7 @@ import crypto from 'node:crypto';
  * - `kind: 'progress'` (llamada en curso, consumo) frente a `'state'` (estado, resultado, pasos): los listados solo
  *   escuchan cambios de estado; la vista abierta de ese proceso, ambos.
  */
-export type LiveEntity = 'process' | 'backlog' | 'batch' | 'assignment' | 'assistant' | 'system' | 'knowledge' | 'agent' | 'story' | 'usage';
+export type LiveEntity = 'process' | 'backlog' | 'batch' | 'assignment' | 'assistant' | 'system' | 'knowledge' | 'agent' | 'story' | 'usage' | 'department' | 'agent_chat';
 export interface LiveChange { ws: string | null; entity: LiveEntity; id: string | null; projectId?: string | null; itemId?: string | null; kind?: 'state' | 'progress' }
 export interface LiveMessage { seq: number; epoch: string; at: string; changes: LiveChange[] }
 
