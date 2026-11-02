@@ -139,3 +139,7 @@
   .agent-panel { width: 100vw; }
 }
 /* Movimiento reducido: la regla global de styles.css (prefers-reduced-motion) ya detiene estas animaciones. */
+
+/* Agente externo (referencia gestionada): su carpeta original es la fuente. */
+.desk-ext { font-size: 10px; padding: 0 6px; border-radius: var(--radius-pill); border: 1px solid var(--color-border); color: var(--color-text-med); align-self: center; }
+.agent-panel .lnk:disabled { opacity: .5; cursor: not-allowed; text-decoration: none; }

@@ -1,3 +1,4 @@
+import { externalSource } from './externalAgents.ts';
 import { agentBackend, agentCaller, completeWith, RECOVERED_NOTE } from './claudeCode/backend.ts';
 import { agentFoldersRepo } from './agentFolders.ts';
 import { identityBlock } from './agentIdentity.ts';
@@ -126,7 +127,7 @@ function sys(agent: Agent, slug: string, d?: DelegationResult): string {
   // Vacía para los agentes sin contenido propio: su prompt es el de siempre.
   const pin = d?.pins?.[agent.id];
   // Sin revisión fijada (el agente no tenía carpeta al crear el encargo), sin identidad portable: el prompt de siempre.
-  const identity = pin && pin.revision !== null ? identityBlock(slug, agent, pin.revision) : '';
+  const identity = pin && pin.revision !== null ? identityBlock(slug, agent, pin.revision, pin.sourceRevision ?? null) : '';
   return `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} en la empresa «${ws.name}» dentro de Portal IA (plataforma local donde empresas son operadas por equipos de agentes de IA bajo la autoridad del propietario).
 Especialización: ${agent.config.specialization}
 Responsabilidades: ${agent.config.responsibilities.map(r => '- ' + r).join('\n')}
@@ -185,7 +186,7 @@ export function createDelegation(slug: string, projectId: string | null, agentRe
   const proc = processesRepo(slug).create({ projectId: pid, kind: 'delegated_task', title: `${label}: ${req.slice(0, 90)}${req.length > 90 ? '…' : ''}`, estimatedUsd: est.estimatedUsd, steps: est.steps.map(s => ({ agentId: s.agentId, agentName: s.agentName, title: s.title, model: s.model })) });
   // Arnés y revisión de identidad de cada participante, fijados ahora: un cambio posterior no altera este encargo en silencio.
   const folders = agentFoldersRepo(slug); const pins: NonNullable<DelegationResult['pins']> = {};
-  for (const id of new Set(est.steps.map(s => s.agentId))) { const a = agentsRepo(slug).get(id); if (a) pins[id] = { harness: agentBackend(a), revision: folders.folderOf(id)?.adoptedN ?? null }; }
+  for (const id of new Set(est.steps.map(s => s.agentId))) { const a = agentsRepo(slug).get(id); if (a) pins[id] = { harness: agentBackend(a), revision: folders.folderOf(id)?.adoptedN ?? null, sourceRevision: externalSource(slug, id)?.revision ?? null }; }
   const d: DelegationResult = { request: req, leadAgentId: lead.id, leadAgentName: lead.config.name, triage: null, consulted: [], deliverable: null, knowledgeDocId: null, backlogOps: [], opsApplied: null, purpose: opts.purpose ?? 'analysis', conversationId: opts.conversationId ?? null, challenge: null, teamIds: est.teamIds, pins, department: opts.department ?? null };
   processesRepo(slug).setDelegation(proc.id, d);
   return processesRepo(slug).get(proc.id)!;

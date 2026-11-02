@@ -15,6 +15,7 @@ export * from './portal-capabilities.ts';
 export * from './portable-agent.ts';
 export * from './harness.ts';
 export * from './agent-catalog.ts';
+export * from './external-agent.ts';
 
 export const PROVIDER_META = {
   anthropic: { id: 'anthropic', name: 'Anthropic', consoleHost: 'console.anthropic.com', keyHint: 'sk-ant-…' },

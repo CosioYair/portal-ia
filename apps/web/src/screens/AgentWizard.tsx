@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import type { Capability, ExecutionBackend, PortableSkill, ProviderId } from '@portal-ia/domain';
 import { AGENT_ARCHETYPES, CAPABILITIES, DEPARTMENT_PRESETS, GENERAL_ARCHETYPE, HARNESSES, KNOWLEDGE, TOOLS, suggestArchetypes, type AgentArchetype } from '@portal-ia/domain';
 import { FolderPicker } from '../components/FolderPicker.tsx';
+import { ExternalImportBox } from '../components/ExternalAgent.tsx';
 import { DraftNote } from '../components/ui.tsx';
 const HARNESS_NAME: Record<string, string> = Object.fromEntries(HARNESSES.map(h => [h.id, h.name]));
 import { Shell } from '../components/Shell.tsx';
@@ -44,7 +45,7 @@ export function AgentWizard() {
   const [departments, setDepartments] = useState<string[]>([]);
   const [advanced, setAdvanced] = useState(false); const [auth, setAuth] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ id: string; name: string; firstTask: string } | null>(null);
-  const [importing, setImporting] = useState(false);
+  const [importing, setImporting] = useState<false | 'portable' | 'external'>(false);
   const [showDevTools, setShowDevTools] = useState(false);
   useEffect(() => { osApi.harnesses().then(r => setHarnesses(r.harnesses)).catch(e => setError(e.message)); osApi.departments(ws.slug).then(l => setDepartments(l.map(x => x.name))).catch(() => undefined); }, [ws.slug]);
   const suggestions = useMemo(() => suggestArchetypes(d.need), [d.need]);
@@ -88,9 +89,11 @@ export function AgentWizard() {
               <strong>{a.id === 'general' ? 'Otro tipo de agente' : a.name}</strong><span className="small muted">{a.summary}</span>
             </button>)}</div>
           </>}
-          <button type="button" className="lnk small" style={{ alignSelf: 'flex-start' }} onClick={() => setImporting(true)}>¿Ya tienes la carpeta de un agente (AGENTS.md, skills…)? Impórtala</button>
+          <button type="button" className="lnk small" style={{ alignSelf: 'flex-start' }} onClick={() => setImporting('portable')}>¿Tienes la carpeta portable de un agente (agent.yaml)? Impórtala</button>
+          <button type="button" className="lnk small" style={{ alignSelf: 'flex-start' }} onClick={() => setImporting('external')}>¿Es un agente que ya trabaja en su propia carpeta (AGENTS.md, CLAUDE.md, skills…)? Intégralo sin copiarlo</button>
         </section>}
-        {step === 0 && importing && <ImportBox slug={ws.slug} projectId={project?.id ?? null} harnesses={harnesses} departments={departments} onCancel={() => setImporting(false)} onDone={id => navigate(`/oficina/agente/${id}/archivos`)} />}
+        {step === 0 && importing === 'external' && <ExternalImportBox slug={ws.slug} harnesses={harnesses} departments={departments} onCancel={() => setImporting(false)} onDone={id => navigate(`/oficina/agente/${id}/origen`)} />}
+        {step === 0 && importing === 'portable' && <ImportBox slug={ws.slug} projectId={project?.id ?? null} harnesses={harnesses} departments={departments} onCancel={() => setImporting(false)} onDone={id => navigate(`/oficina/agente/${id}/archivos`)} />}
 
         {step === 1 && <section className="card" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div className="summary-cols">

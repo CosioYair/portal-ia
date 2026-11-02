@@ -16,6 +16,7 @@ import { agentEvents, recordAgentEvent } from '../services/agentEvents.ts';
 import { createDelegation, estimateDelegation, MAX_DEPARTMENT_CONSULTS } from '../services/delegation.ts';
 import { authorizeProcess } from '../services/processAuthorization.ts';
 import { identityParts } from '../services/agentIdentity.ts';
+import { externalSource } from '../services/externalAgents.ts';
 
 /**
  * Rutas del «sistema operativo de agentes»: oficina, departamentos, panel de cada agente (chat, trabajo, archivos,
@@ -124,7 +125,8 @@ export async function agentsOsRoutes(app: FastifyInstance) {
       work: agentWork(slug, id), memory: agentMemory(slug, id), chat: { usage: chatUsageToday(slug, id), estimate: chatEstimate(slug, a, '') },
       identity: { hasInstructions: !!identity.instructions, skills: identity.skills.length, memory: identity.memory.length },
       folder: (() => { const s = folderStatus(slug, a); return { ...s, adopted: s.adopted ? { ...s.adopted, files: undefined, fileList: Object.keys(s.adopted.files).sort() } : null }; })(),
-      events: agentEvents(slug, id, 30)
+      events: agentEvents(slug, id, 30),
+      external: (() => { const s = externalSource(slug, id); return s ? { state: s.state, hasOutputs: !!s.layout.outputs, root: s.root } : null; })()
     };
   });
 
@@ -150,6 +152,7 @@ export async function agentsOsRoutes(app: FastifyInstance) {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
     const b = z.object({ harness: HARNESS, model: z.string().trim().min(1).max(120), provider: z.enum(['anthropic', 'openai']).nullable().optional(), authorized: z.boolean() }).safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: 'Arnés no válido.' });
+    if (externalSource(slug, id) && (b.data.harness === 'api' || b.data.harness === 'claude-code-terminal')) return reply.code(409).send({ error: 'Un agente externo trabaja con Claude Code gestionado (tu suscripción): no se pasa a la API facturable ni a la consola.' });
     try {
       const updated = switchHarness(slug, id, b.data);
       if (agentFoldersRepo(slug).folderOf(id)) await syncAgentFolder(slug, updated, `Arnés cambiado a ${b.data.harness}`).catch(() => null);

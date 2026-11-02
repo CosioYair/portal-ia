@@ -7,7 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node --test --import tsx test/*.test.ts"
+    "test": "node scripts/run-tests.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.1",

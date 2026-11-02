@@ -1,4 +1,4 @@
-import type { Agent, Capability, ExecutionBackend, HarnessCapability, HarnessDescriptor, Lesson, Process, PortableFiles, PortableKnowledge, PortableSkill, ProviderId } from '@portal-ia/domain';
+import type { Agent, Capability, DocumentJob, ExecutionBackend, ExternalFileChange, ExternalGrants, ExternalLayout, ExternalProvenance, HarnessCapability, HarnessDescriptor, ImprovementProposal, IntegrationState, Lesson, Process, PortableFiles, PortableKnowledge, PortableSkill, ProviderId } from '@portal-ia/domain';
 import { apiRequest as request } from './api.ts';
 
 /** Cliente del «sistema operativo de agentes» (apps/server/src/routes/agentsOs.ts). */
@@ -7,6 +7,7 @@ export interface OfficeAgent {
   id: string; key: string; name: string; role: string; initials: string; scope: 'workspace' | 'project'; projectId: string | null;
   department: string; departmentSlug: string; harness: ExecutionBackend; harnessLabel: string; model: string;
   state: OfficeState; activity: string | null; attention: { kind: string; label: string; processId?: string | null }[]; harnessIssue: string | null; hasFolder: boolean; custom: boolean;
+  integration: IntegrationState | null;
 }
 export interface Department { id: string; slug: string; name: string; purpose: string; hue: number; coordinatorAgentId: string | null; createdAt: string; archivedAt: string | null; implicit?: boolean; members: string[] }
 export interface OfficeView { agents: OfficeAgent[]; departments: Department[]; counts: { agents: number; working: number; attention: number; decisions: number }; projects: { id: string; name: string }[] }
@@ -26,7 +27,8 @@ export interface FolderStatus { folder: string | null; path: string | null; adop
   external: { hash: string; diff: { path: string; change: string; added: string[]; removed: string[] }[]; problems: { path: string; message: string; blocking: boolean }[]; notAdopted: string[] } | null; revisions: Revision[]; ignored: string[] }
 export interface AgentEvent { id: string; kind: string; detail: Record<string, unknown>; at: string; by: string }
 export interface AgentPanel { agent: Agent; office: OfficeAgent | null; department: { slug: string; name: string; purpose: string } | null; retired: boolean; work: WorkItem[];
-  memory: { verified: Lesson[]; proposed: Lesson[]; retired: Lesson[] }; chat: { usage: { used: number; cap: number }; estimate: ChatEstimate }; identity: { hasInstructions: boolean; skills: number; memory: number }; folder: FolderStatus; events: AgentEvent[] }
+  memory: { verified: Lesson[]; proposed: Lesson[]; retired: Lesson[] }; chat: { usage: { used: number; cap: number }; estimate: ChatEstimate }; identity: { hasInstructions: boolean; skills: number; memory: number }; folder: FolderStatus; events: AgentEvent[];
+  external: { state: IntegrationState; hasOutputs: boolean; root: string } | null }
 export interface WizardInput {
   name: string; role: string; summary: string; responsibilities: string[]; deliverables: string[]; department: string; departmentPurpose?: string | null;
   scope: 'workspace' | 'project'; projectId: string | null; harness: ExecutionBackend; model: string; provider?: ProviderId | null; effort: 'low' | 'medium' | 'high';
@@ -70,5 +72,34 @@ export const osApi = {
   importPreview: (slug: string, path: string) => request<ImportPreview>(`${W(slug)}/agents/import/preview`, { method: 'POST', body: J({ path }) }),
   importAgent: (slug: string, body: Omit<WizardInput, 'name' | 'role' | 'summary' | 'responsibilities' | 'deliverables' | 'instructions' | 'skills' | 'references' | 'capabilities'> & { path: string; hash: string }) => request<Agent>(`${W(slug)}/agents/import`, { method: 'POST', body: J(body) }),
   exportFiles: (slug: string, id: string) => request<{ folder: string; files: PortableFiles }>(`${W(slug)}/agents/${id}/export`),
-  exportTo: (slug: string, id: string, path: string) => request<{ path: string }>(`${W(slug)}/agents/${id}/export`, { method: 'POST', body: J({ path }) })
+  exportTo: (slug: string, id: string, path: string) => request<{ path: string }>(`${W(slug)}/agents/${id}/export`, { method: 'POST', body: J({ path }) }),
+  // Agentes externos (referencia gestionada) y su banco de documentos — apps/server/src/routes/externalAgents.ts
+  externalPreview: (slug: string, path: string) => request<ExternalPreview>(`${W(slug)}/agents/external/preview`, { method: 'POST', body: J({ path }) }),
+  importExternal: (slug: string, body: { path: string; hash: string; name: string; role: string; summary: string; department: string; harness: ExecutionBackend; model: string; effort?: 'low' | 'medium' | 'high'; grants: ExternalGrants }) =>
+    request<Agent>(`${W(slug)}/agents/external`, { method: 'POST', body: J({ ...body, authorized: true }) }),
+  source: (slug: string, id: string) => request<SourceStatus>(`${W(slug)}/agents/${id}/source`),
+  adoptSource: (slug: string, id: string, hash: string) => request<{ revision: number }>(`${W(slug)}/agents/${id}/source/adopt`, { method: 'POST', body: J({ hash }) }),
+  setGrants: (slug: string, id: string, grants: ExternalGrants) => request<unknown>(`${W(slug)}/agents/${id}/source/grants`, { method: 'PUT', body: J({ grants, authorized: true }) }),
+  restoreSource: (slug: string, id: string, n: number) => request<{ revision: number; backup: string }>(`${W(slug)}/agents/${id}/source/restore`, { method: 'POST', body: J({ n, authorized: true }) }),
+  documents: (slug: string, id: string) => request<{ jobs: DocumentJob[]; running: { slug: string; agentId: string; jobId: string }[]; proposals: ImprovementProposal[] }>(`${W(slug)}/agents/${id}/documents`),
+  uploadDocument: (slug: string, id: string, name: string, contentBase64: string) => request<{ jobs: (DocumentJob & { duplicate?: boolean })[]; skipped: string[] }>(`${W(slug)}/agents/${id}/documents`, { method: 'POST', body: J({ name, contentBase64 }) }),
+  processDocument: (slug: string, id: string, jobId: string, feedback?: string | null) => request<DocumentJob>(`${W(slug)}/agents/${id}/documents/${jobId}/process`, { method: 'POST', body: J({ authorized: true, feedback: feedback ?? null }) }),
+  documentFileUrl: (slug: string, id: string, jobId: string, path: string, download = false) => `${W(slug)}/agents/${id}/documents/${jobId}/file?path=${encodeURIComponent(path)}${download ? '&download=1' : ''}`,
+  evidence: (slug: string, id: string, jobId: string, n: number) => request<{ images: string[] }>(`${W(slug)}/agents/${id}/documents/${jobId}/versions/${n}/evidence`),
+  sendFeedback: (slug: string, id: string, jobId: string | null, text: string) => request<ImprovementProposal>(`${W(slug)}/agents/${id}/feedback`, { method: 'POST', body: J({ jobId, text }) }),
+  applyProposal: (slug: string, id: string, pid: string) => request<{ revision: number; backup: string; files: ExternalFileChange[] }>(`${W(slug)}/agents/${id}/proposals/${pid}/apply`, { method: 'POST', body: J({ authorized: true }) }),
+  rejectProposal: (slug: string, id: string, pid: string) => request<ImprovementProposal>(`${W(slug)}/agents/${id}/proposals/${pid}/reject`, { method: 'POST', body: J({}) })
 };
+
+export interface ExternalPreview {
+  path: string; hash: string; layout: ExternalLayout; links: string[]; problems: { path: string; message: string; blocking: boolean }[]; otherFiles: number; ok: boolean;
+  duplicate: { agentId: string; name: string } | null; suggested: { name: string; summary: string };
+  prompt: { instructions: string; context: { path: string; text: string }[]; skills: (ExternalLayout['skills'][number] & { body: string })[]; memory: { path: string; text: string } | null };
+  adapters: { path: string; text: string }[]; scripts: { path: string; sha256: string; bytes: number }[]; note: string;
+}
+export interface SourceStatus {
+  root: string; layout: ExternalLayout; provenance: ExternalProvenance; state: IntegrationState; grants: ExternalGrants; revision: number; adoptedHash: string; diskHash: string | null; readError: string | null;
+  changes: ExternalFileChange[]; diff: { path: string; before: string | null; after: string | null }[]; problems: { path: string; message: string; blocking: boolean }[]; links: string[]; scripts: { path: string; sha256: string; changedOnDisk: boolean }[];
+  revisions: { n: number; hash: string; source: string; note: string; by: string; at: string }[];
+  toolchain: { python: string | null; pythonVersion: string | null; soffice: string | null; problems: string[] };
+}

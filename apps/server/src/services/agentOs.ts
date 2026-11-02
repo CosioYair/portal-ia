@@ -1,4 +1,4 @@
-import { backendLabel, isRetired, type Agent, type DelegationResult, type ExecutionBackend, type PendingDecision } from '@portal-ia/domain';
+import { backendLabel, isRetired, type Agent, type DelegationResult, type ExecutionBackend, type IntegrationState, type PendingDecision } from '@portal-ia/domain';
 import { agentsRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
 import { agentBackend } from './claudeCode/backend.ts';
 import { lastDetection } from './claudeCode/detect.ts';
@@ -8,6 +8,8 @@ import { departmentsRepo, departmentLabelOf } from './departments.ts';
 import { agentFoldersRepo, diskHash, folderPath } from './agentFolders.ts';
 import { ensureLessonsTable, lessonsRepo } from './lessons.ts';
 import { chatInFlight } from './agentChat.ts';
+import { documentJobsRunning, pendingProposalCounts } from './documentJobs.ts';
+import { pendingExternalChanges, sourcesRepo } from './externalAgents.ts';
 import fs from 'node:fs';
 
 /**
@@ -28,6 +30,8 @@ export interface OfficeAgent {
   /** Por qué no puede trabajar ahora con su arnés (desactivado, sin sesión, bloqueado…), o null. */
   harnessIssue: string | null;
   hasFolder: boolean; custom: boolean;
+  /** Agente externo (referencia gestionada): su estado de integración; null si no lo es. */
+  integration: IntegrationState | null;
 }
 
 /** Quién «lleva» un proceso: el responsable del encargo o, en una historia, quien implementa (o el primer paso). */
@@ -50,6 +54,7 @@ export function officeView(slug: string, decisions: PendingDecision[], opts: { p
     else if (!queued.has(r.agent_id)) queued.set(r.agent_id, `${r.step} · ${r.title}`);
   }
   for (const c of chatInFlight(slug)) working.set(c.agentId, 'Conversando contigo');
+  for (const j of documentJobsRunning()) if (j.slug === slug) working.set(j.agentId, 'Convirtiendo un documento');
   // Lo que espera tu decisión, por responsable.
   const attention = new Map<string, OfficeAgent['attention']>();
   const add = (id: string | null, item: OfficeAgent['attention'][number]) => { if (!id) return; const l = attention.get(id) ?? []; l.push(item); attention.set(id, l); };
@@ -67,6 +72,10 @@ export function officeView(slug: string, decisions: PendingDecision[], opts: { p
     if (!avail.has(key)) avail.set(key, harnessAvailability(h, h === 'api' ? a.config.provider : null));
     const av = avail.get(key)!; return av.available ? null : av.reason ?? 'Su arnés no está disponible.';
   };
+  let integration = new Map<string, IntegrationState>();
+  try { const sr = sourcesRepo(slug); integration = new Map(sr.list().map(id => [id, sr.get(id)?.state ?? 'pending'] as const)); } catch { /* sin agentes externos */ }
+  try { for (const [id, n] of pendingProposalCounts(slug)) add(id, { kind: 'improvement', label: `${n} mejora(s) propuesta(s) esperan tu aprobación` }); } catch { /* sin propuestas */ }
+  for (const id of integration.keys()) { const n = pendingExternalChanges(slug, id); if (n) add(id, { kind: 'source', label: `${n} archivo(s) de su carpeta cambiaron fuera del Portal: revísalos en «Origen»` }); }
   const out: OfficeAgent[] = agents.map(a => {
     const f = folders.folderOf(a.id);
     if (f?.adoptedN) {
@@ -81,7 +90,7 @@ export function officeView(slug: string, decisions: PendingDecision[], opts: { p
     return {
       id: a.id, key: a.key, name: a.config.name, role: a.template.role, initials: a.template.initials, scope: a.scope, projectId: a.projectId,
       department: departmentLabelOf(a), departmentSlug: dep?.slug ?? '', harness, harnessLabel: backendLabel(harness, harness === 'codex' ? (codexBilling as any) : harness === 'api' ? null : ccBilling, a.config.provider), model: a.config.model,
-      state, activity: working.get(a.id) ?? queued.get(a.id) ?? null, attention: att, harnessIssue: issue, hasFolder: !!f, custom: a.templateId === 'tpl.custom@1'
+      state, activity: working.get(a.id) ?? queued.get(a.id) ?? null, attention: att, harnessIssue: issue, hasFolder: !!f, custom: a.templateId === 'tpl.custom@1', integration: integration.get(a.id) ?? null
     };
   });
   // Coordinador de cada sala con los miembros ya calculados (sin volver a listar agentes por departamento).

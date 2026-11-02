@@ -10,6 +10,8 @@ import { useLive } from '../lib/live.ts';
 import { TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
 import { HARNESSES } from '@portal-ia/domain';
 import { FolderPicker } from './FolderPicker.tsx';
+import { DocumentsTab, ImprovementsTab, OriginTab } from './ExternalAgent.tsx';
+import { INTEGRATION_LABEL } from '@portal-ia/domain';
 import { osApi, type AgentMessage, type AgentPanel as Panel, type Department, type FolderStatus, type HarnessOptions, type OfficeAgent, type WorkItem } from '../lib/osApi.ts';
 
 /**
@@ -17,8 +19,10 @@ import { osApi, type AgentMessage, type AgentPanel as Panel, type Department, ty
  *  Chat · Solicitudes · Trabajo · Archivos · Memoria · Configuración.
  * Cada acción que gasta (un mensaje, un encargo) lo dice antes; nada se autoriza solo.
  */
-const TABS = [['chat', 'Chat'], ['solicitudes', 'Solicitudes'], ['trabajo', 'Trabajo'], ['archivos', 'Archivos'], ['memoria', 'Memoria'], ['configuracion', 'Configuración']] as const;
-type Tab = typeof TABS[number][0];
+const BASE_TABS = [['chat', 'Chat'], ['solicitudes', 'Solicitudes'], ['trabajo', 'Trabajo'], ['archivos', 'Archivos'], ['memoria', 'Memoria'], ['configuracion', 'Configuración']] as const;
+/** Agente externo (su carpeta original es la fuente): Documentos, Origen y Mejoras; «Archivos» es su carpeta original (en Origen). */
+const EXTERNAL_TABS = [['chat', 'Chat'], ['documentos', 'Documentos'], ['solicitudes', 'Solicitudes'], ['trabajo', 'Trabajo'], ['mejoras', 'Mejoras'], ['origen', 'Origen'], ['memoria', 'Memoria'], ['configuracion', 'Configuración']] as const;
+type Tab = typeof BASE_TABS[number][0] | typeof EXTERNAL_TABS[number][0];
 
 export function AgentPanel({ slug, agentId, tab, office, departments, projects, onTab, onClose, onChanged }: { slug: string; agentId: string; tab: string; office: OfficeAgent | null; departments: Department[]; projects: { id: string; name: string }[]; onTab: (t: Tab) => void; onClose: () => void; onChanged: () => void }) {
   const [p, setP] = useState<Panel | null>(null); const [error, setError] = useState<string | null>(null);
@@ -26,7 +30,11 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
   const load = useCallback(() => osApi.panel(slug, agentId).then(x => { if (x.agent.id !== cur.current) return; setP(x); setError(null); }).catch(e => { if (agentId === cur.current) setError(e.message); }), [slug, agentId]);
   useEffect(() => { setP(null); void load(); }, [load]);
   useLive(c => c.ws === slug && ((c.entity === 'agent' && c.id === agentId) || (c.entity === 'process' && c.kind !== 'progress') || (c.entity === 'agent_chat' && c.id === agentId)), () => void load(), { minMs: 1000 });
-  const current = (TABS.some(t => t[0] === tab) ? tab : 'chat') as Tab;
+  const external = !!(p?.office?.integration ?? office?.integration);
+  // Sin «documentos/» en su carpeta no hay banco de documentos.
+  const TABS: readonly (readonly [Tab, string])[] = external ? EXTERNAL_TABS.filter(t => t[0] !== 'documentos' || p?.external?.hasOutputs !== false) : BASE_TABS;
+  const improvements = p?.office?.attention.filter(a => a.kind === 'improvement').length ?? 0;
+  const current = (TABS.some(t => t[0] === tab) ? tab : external && tab === 'archivos' ? 'origen' : 'chat') as Tab;
   const hue = departments.find(d => d.slug === (office?.departmentSlug ?? p?.office?.departmentSlug))?.hue ?? 200;
   const ref = useRef<HTMLDivElement>(null);
   // El foco va al panel al abrir OTRO agente (no en cada render: si no, se lo quitaría a la pestaña que eliges con el teclado).
@@ -52,6 +60,7 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
           <Chip xs tone="accent">{p?.department?.name ?? office?.department}</Chip>
           <Chip xs>{p?.office?.harnessLabel ?? office?.harnessLabel}</Chip>
           {p?.office && <Chip xs tone={p.office.state === 'attention' ? 'warn' : p.office.state === 'working' ? 'ok' : ''}>{STATE_TEXT[p.office.state]}</Chip>}
+          {p?.office?.integration && <Chip xs tone={p.office.integration === 'integrated' ? 'ok' : 'soon'}>{INTEGRATION_LABEL[p.office.integration]}</Chip>}
         </div>
         {p?.office?.activity && <span className="small muted">{p.office.activity}</span>}
       </div>
@@ -59,7 +68,7 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
     </div>
     <div className="agent-panel-tabs" role="tablist" aria-label="Secciones del agente" onKeyDown={onTabKey}>
       {TABS.map(([id, label]) => <button key={id} id={`tab-${id}`} role="tab" type="button" aria-selected={current === id} aria-controls={`tp-${id}`} tabIndex={current === id ? 0 : -1} onClick={() => onTab(id)}>
-        {label}{id === 'solicitudes' && requests > 0 && <span className="tab-count">{requests}</span>}{id === 'memoria' && (p?.memory.proposed.length ?? 0) > 0 && <span className="tab-count">{p!.memory.proposed.length}</span>}
+        {label}{id === 'solicitudes' && requests > 0 && <span className="tab-count">{requests}</span>}{id === 'memoria' && (p?.memory.proposed.length ?? 0) > 0 && <span className="tab-count">{p!.memory.proposed.length}</span>}{id === 'mejoras' && improvements > 0 && <span className="tab-count" aria-label="mejoras pendientes de tu aprobación">{improvements}</span>}
       </button>)}
     </div>
     {error && <div style={{ padding: 12 }}><Notice kind="err">{error}</Notice></div>}
@@ -70,6 +79,9 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
         {current === 'solicitudes' && <RequestsTab p={p} onTab={onTab} />}
         {current === 'trabajo' && <WorkTab slug={slug} p={p} projects={projects} onChanged={refresh} />}
         {current === 'archivos' && <FilesTab slug={slug} p={p} onChanged={refresh} />}
+        {current === 'documentos' && <DocumentsTab slug={slug} p={p} onChanged={refresh} onTab={onTab} />}
+        {current === 'origen' && <OriginTab slug={slug} p={p} onChanged={refresh} />}
+        {current === 'mejoras' && <ImprovementsTab slug={slug} p={p} onChanged={refresh} onTab={onTab} />}
         {current === 'memoria' && <MemoryTab slug={slug} p={p} onChanged={refresh} />}
         {current === 'configuracion' && <ConfigTab slug={slug} p={p} departments={departments} onChanged={refresh} />}
       </div>}
@@ -163,6 +175,8 @@ function RequestsTab({ p, onTab }: { p: Panel; onTab: (t: Tab) => void }) {
         {a.processId && <Link className="btn btn-secondary btn-sm" to={`/procesos/${a.processId}`}>Abrir y decidir</Link>}
         {a.kind === 'memory' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('memoria')}>Revisar en Memoria</button>}
         {a.kind === 'folder' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('archivos')}>Revisar en Archivos</button>}
+        {a.kind === 'improvement' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('mejoras')}>Revisar en Mejoras</button>}
+        {a.kind === 'source' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('origen')}>Revisar en Origen</button>}
       </div>
     </div>)}
     <Link className="btn btn-ghost btn-sm" to="/autorizaciones" style={{ alignSelf: 'flex-start' }}>{Icon.authorization()} Todas las decisiones pendientes</Link>
@@ -327,7 +341,7 @@ function MemoryTab({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: 
     </div>
   </div>;
   return <>
-    <p className="small muted">La memoria de {p.agent.config.name} es lo que tú has verificado a partir de su trabajo. Se aplica con cualquier arnés y viaja en su carpeta (memory/MEMORY.md). Nada generado por un modelo entra aquí solo.</p>
+    <p className="small muted">{p.external ? <>La memoria de {p.agent.config.name} es su propio archivo de memoria (en su carpeta original; lo cambian las mejoras que apruebas) más lo que verifiques aquí a partir de su trabajo.</> : <>La memoria de {p.agent.config.name} es lo que tú has verificado a partir de su trabajo. Se aplica con cualquier arnés y viaja en su carpeta (memory/MEMORY.md).</>} Nada generado por un modelo entra aquí solo.</p>
     {error && <Notice kind="err">{error}</Notice>}
     <div className="h3">Por verificar ({p.memory.proposed.length})</div>
     {p.memory.proposed.length ? p.memory.proposed.map(l => card(l, 'proposed')) : <p className="small muted">Nada pendiente.</p>}
@@ -408,11 +422,14 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
     </section>
     <section style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div className="h3">Registro</div>
-      {p.events.slice(0, 12).map(e => <div key={e.id} className="small"><span className="muted">{new Date(e.at).toLocaleString('es-MX')}</span> · {EVENT_TEXT[e.kind] ?? e.kind}{e.detail?.to ? ` → ${HARNESS_NAME[String(e.detail.to)] ?? String(e.detail.to)}` : ''}</div>)}
+      {p.events.slice(0, 12).map(e => <div key={e.id} className="small"><span className="muted">{new Date(e.at).toLocaleString('es-MX')}</span> · {EVENT_TEXT[e.kind] ?? e.kind}{e.kind === 'integration_state' && e.detail?.to ? ` → ${INTEGRATION_TO[String(e.detail.to)] ?? String(e.detail.to)}` : e.kind === 'document_job' ? `: ${JOB_ACTION[String(e.detail?.action)] ?? String(e.detail?.action ?? '')}${e.detail?.version ? ` (v${e.detail.version})` : ''}` : e.detail?.to ? ` → ${HARNESS_NAME[String(e.detail.to)] ?? String(e.detail.to)}` : ''}</div>)}
       {!p.events.length && <span className="small muted">Sin eventos todavía.</span>}
     </section>
   </>;
 }
 const LEVEL: Record<string, string> = { yes: 'sí', partial: 'parcial', no: 'no' };
 const HARNESS_NAME: Record<string, string> = Object.fromEntries(HARNESSES.map(h => [h.id, h.name]));
-const EVENT_TEXT: Record<string, string> = { created: 'Creado', imported: 'Importado', exported: 'Exportado', harness_changed: 'Arnés cambiado', department_changed: 'Cambio de departamento', folder_created: 'Carpeta creada', folder_adopted: 'Cambios externos adoptados', folder_discarded: 'Cambios externos descartados', folder_restored: 'Vuelta a una revisión anterior', identity_updated: 'Identidad editada', memory_proposed: 'Aprendizaje propuesto', memory_verified: 'Aprendizaje verificado', memory_retired: 'Aprendizaje retirado', task_created: 'Encargo creado', chat: 'Conversación' };
+const EVENT_TEXT: Record<string, string> = { created: 'Creado', imported: 'Importado', exported: 'Exportado', harness_changed: 'Arnés cambiado', department_changed: 'Cambio de departamento', folder_created: 'Carpeta creada', folder_adopted: 'Cambios externos adoptados', folder_discarded: 'Cambios externos descartados', folder_restored: 'Vuelta a una revisión anterior', identity_updated: 'Identidad editada', memory_proposed: 'Aprendizaje propuesto', memory_verified: 'Aprendizaje verificado', memory_retired: 'Aprendizaje retirado', task_created: 'Encargo creado', chat: 'Conversación',
+  source_imported: 'Integrado desde su carpeta', source_adopted: 'Cambios externos adoptados', source_grants: 'Permisos cambiados', source_restored: 'Vuelta a una versión anterior', integration_state: 'Estado de integración', document_job: 'Documento', improvement_proposed: 'Mejora propuesta', improvement_applied: 'Mejora aplicada', improvement_rejected: 'Mejora rechazada' };
+const INTEGRATION_TO: Record<string, string> = { pending: 'pendiente', evaluating: 'en evaluación', integrated: 'integrado' };
+const JOB_ACTION: Record<string, string> = { received: 'recibido', run: 'en proceso', ready: 'pasó las comprobaciones', rejected: 'no pasó las comprobaciones' };

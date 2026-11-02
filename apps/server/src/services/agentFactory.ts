@@ -1,3 +1,5 @@
+import { documentJobsRunning } from './documentJobs.ts';
+import { retireSource } from './externalAgents.ts';
 import type { Agent, AgentConfig, AgentCreateInput, AgentDraftResult, ModelInfo, ProviderId, Scope } from '@portal-ia/domain';
 import { CAPABILITIES, KNOWLEDGE, TOOLS, pickByTier } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
@@ -62,8 +64,11 @@ export function deleteAgent(slug: string, id: string) {
       agents.updateTemplateMeta(other.id, { ...other.template, supervises: other.template.supervises.filter(k => k !== a.key), collaborates: other.template.collaborates.filter(k => k !== a.key) });
     }
   }
+  if (documentJobsRunning().some(j => j.slug === slug && j.agentId === id)) throw Object.assign(new Error('Está convirtiendo un documento: espera a que termine para eliminarlo.'), { statusCode: 409 });
   // Su carpeta portable se archiva (no se borra ni la hereda otro agente con el mismo nombre).
   try { archiveAgentFolder(slug, id); } catch { /* sin carpeta */ }
+  // Agente externo: su fuente se retira (queda el historial) y su carpeta original se puede volver a integrar.
+  try { retireSource(slug, id); } catch { /* sin fuente */ }
   agents.delete(id);
 }
 

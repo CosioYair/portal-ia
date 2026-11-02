@@ -123,12 +123,13 @@ export function Office() {
 }
 
 function Desk({ a, hue, current, onOpen }: { a: OfficeAgent; hue: number; current: boolean; onOpen: () => void }) {
-  const label = `${a.name}, ${a.role}. ${STATE_TEXT[a.state]}${a.state === 'unavailable' && a.harnessIssue ? `: ${a.harnessIssue}` : ''}${a.activity ? `: ${a.activity}` : ''}${a.attention.length ? `. ${a.attention.length} asunto(s) para ti` : ''}. Arnés: ${a.harnessLabel}.`;
+  const label = `${a.name}, ${a.role}${a.integration ? ` (${a.integration === 'integrated' ? 'agente externo integrado' : 'agente externo'})` : ''}. ${STATE_TEXT[a.state]}${a.state === 'unavailable' && a.harnessIssue ? `: ${a.harnessIssue}` : ''}${a.activity ? `: ${a.activity}` : ''}${a.attention.length ? `. ${a.attention.length} asunto(s) para ti` : ''}. Arnés: ${a.harnessLabel}.`;
   return <button type="button" data-agent-id={a.id} className={`desk${a.state === 'retired' ? ' desk-retired' : ''}`} aria-current={current} aria-label={label} title={a.activity ?? a.attention[0]?.label ?? a.harnessIssue ?? STATE_TEXT[a.state]} data-state={a.state} onClick={onOpen}>
     <StateBadge state={a.state} />
     <AgentFigure id={a.id} hue={hue} state={a.state} />
     <span className="desk-name">{a.name}</span>
     <span className="desk-role">{a.role}</span>
+    {a.integration && <span className="desk-ext small">{a.integration === 'integrated' ? 'Integrado' : 'Externo'}</span>}
     <span className="desk-state">{STATE_TEXT[a.state]}</span>
   </button>;
 }

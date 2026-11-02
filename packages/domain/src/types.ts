@@ -1125,7 +1125,7 @@ export interface DelegationResult {
   /** Equipo fijado al crear (ids en el orden de sus pasos de consulta): el motor no lo recalcula aunque cambie el organigrama. */
   teamIds?: string[];
   /** Arnés y revisión de identidad de cada agente fijados al crear: si el arnés cambia, esa llamada no se hace. */
-  pins?: Record<string, { harness: import('./claude-code.ts').ExecutionBackend; revision: number | null }>;
+  pins?: Record<string, { harness: import('./claude-code.ts').ExecutionBackend; revision: number | null; sourceRevision?: number | null }>;
   /** Petición a un departamento (Marketing, Desarrollo…): quién la recibió. */
   department?: { slug: string; name: string } | null;
   /** Cuestionamiento independiente de la propuesta (otro especialista, contexto nuevo, sin el razonamiento del redactor). */

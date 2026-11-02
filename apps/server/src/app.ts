@@ -27,6 +27,7 @@ import { assignmentRoutes } from './routes/assignments.ts';
 import { orgEvaluationRoutes } from './routes/orgEvaluation.ts';
 import { liveRoutes } from './routes/live.ts';
 import { agentsOsRoutes } from './routes/agentsOs.ts';
+import { externalAgentsRoutes } from './routes/externalAgents.ts';
 import { VERSION } from './services/system.ts';
 
 /** Script principal del paquete de la interfaz que se sirve (p. ej. «index-BYW4Vz5N.js»), o null sin paquete construido. Se relee cada 10 s. */
@@ -107,6 +108,7 @@ export async function buildApp() {
   await app.register(orgEvaluationRoutes);
   await app.register(liveRoutes);
   await app.register(agentsOsRoutes);
+  await app.register(externalAgentsRoutes);
 
   // Producción local: sirve apps/web/dist si existe (npm run build). SPA fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {
