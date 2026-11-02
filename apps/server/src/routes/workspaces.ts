@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { agentFoldersRepo, syncAgentFolder } from '../services/agentFolders.ts';
+import { harnessModels } from '../services/harness/index.ts';
 import { publishProjectMain } from '../services/capabilities.ts';
 import { KNOWLEDGE, TOOLS, type AgentConfig, type AgentCreateInput } from '@portal-ia/domain';
 import { createAgent, deleteAgent, draftAgent, estimateDraft } from '../services/agentFactory.ts';
@@ -172,12 +173,21 @@ export async function workspaceRoutes(app: FastifyInstance) {
     const cfg = body.data as AgentConfig;
     // El backend de ejecución (Claude Code) solo cambia con su propia autorización (PUT …/backend): editar la configuración lo conserva.
     if (agent.config.backend) cfg.backend = agent.config.backend;
-    // Validaciones de dominio: proveedor conectado, modelo en catálogo, herramientas/conocimiento conocidos.
-    const prov = providersRepo.get(cfg.provider);
-    if (!prov || prov.status !== 'connected') return reply.code(409).send({ error: 'El proveedor elegido no está conectado.' });
-    const models: { id: string }[] = JSON.parse(prov.models_json);
-    if (!models.some(m => m.id === cfg.model)) return reply.code(400).send({ error: 'El modelo preferido no está disponible en el proveedor.' });
-    for (const f of cfg.fallbacks) if (!models.some(m => m.id === f)) return reply.code(400).send({ error: `Modelo alternativo no disponible: ${f}` });
+    // Validaciones de dominio: el modelo según el ARNÉS del agente (con la API, su proveedor conectado y su catálogo; con
+    // Claude Code o Codex, el proveedor lo fija el arnés y no hace falta una clave de API), herramientas y conocimiento.
+    const harness = agent.config.backend ?? 'api';
+    if (harness !== 'api') {
+      cfg.provider = harness === 'codex' ? 'openai' : 'anthropic';
+      const hm = harnessModels(harness, cfg.provider).find(g => g.provider === cfg.provider)?.models ?? [];
+      if (hm.length && !hm.some(m => m.id === cfg.model)) return reply.code(400).send({ error: `El modelo «${cfg.model}» no está disponible con el arnés del agente.` });
+      cfg.fallbacks = hm.length ? cfg.fallbacks.filter(f => hm.some(m => m.id === f)) : [];
+    } else {
+      const prov = providersRepo.get(cfg.provider);
+      if (!prov || prov.status !== 'connected') return reply.code(409).send({ error: 'El proveedor elegido no está conectado.' });
+      const models: { id: string }[] = JSON.parse(prov.models_json);
+      if (!models.some(m => m.id === cfg.model)) return reply.code(400).send({ error: 'El modelo preferido no está disponible en el proveedor.' });
+      for (const f of cfg.fallbacks) if (!models.some(m => m.id === f)) return reply.code(400).send({ error: `Modelo alternativo no disponible: ${f}` });
+    }
     cfg.fallbacks = cfg.fallbacks.filter(f => f !== cfg.model);
     for (const k of Object.keys(cfg.tools)) if (!TOOLS.some(t => t.id === k)) return reply.code(400).send({ error: `Herramienta desconocida: ${k}` });
     for (const k of Object.keys(cfg.knowledge)) if (!KNOWLEDGE.some(t => t.id === k)) return reply.code(400).send({ error: `Fuente de conocimiento desconocida: ${k}` });

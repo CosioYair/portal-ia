@@ -3,6 +3,7 @@ import { agentsRepo, processesRepo, projectsRepo, workspaceDb } from '../db/work
 import { agentBackend } from './claudeCode/backend.ts';
 import { lastDetection } from './claudeCode/detect.ts';
 import { lastCodexDetection } from './harness/codex.ts';
+import { harnessAvailability } from './harness/index.ts';
 import { departmentsRepo, departmentLabelOf } from './departments.ts';
 import { agentFoldersRepo, diskHash, folderPath } from './agentFolders.ts';
 import { ensureLessonsTable, lessonsRepo } from './lessons.ts';
@@ -19,11 +20,13 @@ import fs from 'node:fs';
  *  - disponible / retirado.
  * Sin IA y sin escrituras. La interfaz la vuelve a pedir cuando llega un aviso en tiempo real (procesos, agentes…).
  */
-export type OfficeState = 'working' | 'queued' | 'attention' | 'idle' | 'retired';
+export type OfficeState = 'working' | 'queued' | 'attention' | 'unavailable' | 'idle' | 'retired';
 export interface OfficeAgent {
   id: string; key: string; name: string; role: string; initials: string; scope: 'workspace' | 'project'; projectId: string | null;
   department: string; departmentSlug: string; harness: ExecutionBackend; harnessLabel: string; model: string;
   state: OfficeState; activity: string | null; attention: { kind: string; label: string; processId?: string | null }[];
+  /** Por qué no puede trabajar ahora con su arnés (desactivado, sin sesión, bloqueado…), o null. */
+  harnessIssue: string | null;
   hasFolder: boolean; custom: boolean;
 }
 
@@ -57,6 +60,13 @@ export function officeView(slug: string, decisions: PendingDecision[], opts: { p
   const folders = agentFoldersRepo(slug);
   // Etiqueta del arnés con la facturación REAL detectada (sin llamar a nada): Claude Code y Codex por separado.
   const ccBilling = lastDetection()?.billing ?? null; const codexBilling = lastCodexDetection()?.billing ?? null;
+  // Disponibilidad de cada arnés una sola vez (sin llamar a nada): un agente cuyo arnés no puede trabajar no está «Disponible».
+  const avail = new Map<string, ReturnType<typeof harnessAvailability>>();
+  const issueOf = (a: Agent): string | null => {
+    const h = agentBackend(a); const key = h === 'api' ? `api:${a.config.provider}` : h;
+    if (!avail.has(key)) avail.set(key, harnessAvailability(h, h === 'api' ? a.config.provider : null));
+    const av = avail.get(key)!; return av.available ? null : av.reason ?? 'Su arnés no está disponible.';
+  };
   const out: OfficeAgent[] = agents.map(a => {
     const f = folders.folderOf(a.id);
     if (f?.adoptedN) {
@@ -65,12 +75,13 @@ export function officeView(slug: string, decisions: PendingDecision[], opts: { p
     }
     const att = attention.get(a.id) ?? [];
     const retired = isRetired(a.template);
-    const state: OfficeState = retired ? 'retired' : working.has(a.id) ? 'working' : att.length ? 'attention' : queued.has(a.id) ? 'queued' : 'idle';
+    const issue = retired ? null : issueOf(a);
+    const state: OfficeState = retired ? 'retired' : working.has(a.id) ? 'working' : att.length ? 'attention' : queued.has(a.id) ? 'queued' : issue ? 'unavailable' : 'idle';
     const harness = agentBackend(a); const dep = deps.departmentOf(a);
     return {
       id: a.id, key: a.key, name: a.config.name, role: a.template.role, initials: a.template.initials, scope: a.scope, projectId: a.projectId,
       department: departmentLabelOf(a), departmentSlug: dep?.slug ?? '', harness, harnessLabel: backendLabel(harness, harness === 'codex' ? (codexBilling as any) : harness === 'api' ? null : ccBilling, a.config.provider), model: a.config.model,
-      state, activity: working.get(a.id) ?? queued.get(a.id) ?? null, attention: att, hasFolder: !!f, custom: a.templateId === 'tpl.custom@1'
+      state, activity: working.get(a.id) ?? queued.get(a.id) ?? null, attention: att, harnessIssue: issue, hasFolder: !!f, custom: a.templateId === 'tpl.custom@1'
     };
   });
   // Coordinador de cada sala con los miembros ya calculados (sin volver a listar agentes por departamento).
@@ -94,7 +105,7 @@ export function agentWork(slug: string, agentId: string, limit = 40) {
     const steps = db.prepare(`SELECT title, status FROM process_steps WHERE process_id = ? AND agent_id = ? ORDER BY position`).all(r.id, agentId) as any[];
     const column = r.status === 'pending_authorization' ? 'requested' : r.status === 'running' ? (steps.some(s => s.status === 'running') ? 'doing' : 'queued') : r.status === 'done' ? 'done' : 'stopped';
     return { id: r.id, kind: r.kind, title: r.title, status: r.status, column, createdAt: r.created_at, finishedAt: r.finished_at, projectId: r.project_id,
-      lead: d?.leadAgentId === agentId, purpose: d?.purpose ?? null, deliverable: d?.deliverable ? d.deliverable.slice(0, 4000) : null, knowledgeDocId: d?.knowledgeDocId ?? null,
+      lead: d?.leadAgentId === agentId, purpose: d?.purpose ?? null, deliverable: d?.deliverable ? (d.deliverable.length > 4000 ? `${d.deliverable.slice(0, 4000)}\n\n…` : d.deliverable) : null, knowledgeDocId: d?.knowledgeDocId ?? null,
       steps: steps.map(s => ({ title: s.title, status: s.status })) };
   });
 }

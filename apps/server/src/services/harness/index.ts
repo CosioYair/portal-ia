@@ -29,12 +29,12 @@ export function harnessAvailability(id: ExecutionBackend, provider: ProviderId |
   }
   if (id === 'codex') {
     const s = getCodexSettings(); const d = lastCodexDetection();
-    if (!d) return { id, state: 'not_installed', available: false, reason: 'Codex aún no se ha comprobado (Proveedores → Codex → Comprobar).', detail: null };
+    if (!d) return { id, state: 'not_installed', available: false, reason: 'Codex aún no se ha comprobado (Oficina → Arneses → Comprobar Codex).', detail: null };
     if (!d.installed) return { id, state: 'not_installed', available: false, reason: d.problems[0] ?? 'No se encontró la CLI de Codex.', detail: null };
     const detail = `Codex ${d.version ?? ''} · ${d.auth === 'chatgpt' ? 'sesión de ChatGPT' : d.auth === 'api_key' ? 'clave de API' : 'sin sesión'}`.trim();
     if (d.billing !== 'subscription') return { id, state: 'blocked', available: false, reason: d.problems[0] ?? 'Codex no tiene una sesión de ChatGPT.', detail };
     if (!d.restricted) return { id, state: 'blocked', available: false, reason: d.problems.find(p => /herramientas/.test(p)) ?? 'Codex no está verificado en modo restringido.', detail };
-    if (!s.enabled || !s.authorizedAt) return { id, state: 'disabled', available: false, reason: 'Codex está listo pero no habilitado: habilítalo en Proveedores → Codex.', detail };
+    if (!s.enabled || !s.authorizedAt) return { id, state: 'disabled', available: false, reason: 'Codex está listo pero no habilitado: habilítalo en Oficina → Arneses.', detail };
     return { id, state: 'ready', available: true, reason: null, detail };
   }
   const connected = (['anthropic', 'openai'] as ProviderId[]).filter(p => providersRepo.get(p)?.status === 'connected' && (!provider || p === provider));
@@ -99,7 +99,9 @@ export function switchHarness(slug: string, agentId: string, input: { harness: E
   const models = harnessModels(input.harness, provider).find(m => m.provider === provider)?.models ?? [];
   const model = input.model.trim();
   if (!model || (models.length && !models.some(m => m.id === model))) throw Object.assign(new Error(`El modelo «${model}» no está disponible con ${av.id === 'codex' ? 'Codex' : av.id === 'api' ? 'la API' : 'Claude Code'}.`), { statusCode: 400 });
-  const cfg = { ...a.config, backend: input.harness, provider, model, fallbacks: input.harness === a.config.backend && provider === a.config.provider ? a.config.fallbacks.filter(f => f !== model) : [] };
+  // Pasar a la API (facturable) con un límite mensual sin fijar: se fija uno prudente (el propietario lo cambia en avanzada).
+  const limits = input.harness === 'api' && !(a.config.monthlyLimitUsd > 0) ? { monthlyLimitUsd: 20, perTaskAuthUsd: a.config.perTaskAuthUsd > 0 ? a.config.perTaskAuthUsd : 2 } : {};
+  const cfg = { ...a.config, ...limits, backend: input.harness, provider, model, fallbacks: input.harness === a.config.backend && provider === a.config.provider ? a.config.fallbacks.filter(f => f !== model) : [] };
   const updated = agents.updateConfig(agentId, cfg);
   recordAgentEvent(slug, agentId, 'harness_changed', { from, to: input.harness, fromModel: a.config.model, toModel: model, provider, openWork: work.open.length, batches: work.batches.map(b => b.id) });
   return updated;

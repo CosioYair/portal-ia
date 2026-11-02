@@ -4,6 +4,20 @@
 > hoja de ruta (`docs/hoja-de-ruta-capacidades.md`). **No es política operativa:** no concede permisos, no activa
 > integraciones ni autoriza gasto. Cada capacidad nueva entra con su propia autorización, sus límites y su evidencia.
 
+## 0. Posicionamiento (2 de noviembre de 2026)
+
+**Portal IA es un sistema operativo local, visual y cercano para gestionar agentes de IA como se gestiona a las personas de
+una pequeña empresa.** No construye modelos ni compite con su infraestructura:
+
+- **El Portal es el plano de control**: organización (departamentos, encargos, peticiones), propiedad local, permisos y
+  autorizaciones, contabilidad, auditoría y una interfaz que entiende alguien no técnico.
+- **Los arneses son motores de ejecución**: Claude Code, Codex, la API de un proveedor y los que vengan. Cada uno con sus
+  capacidades reales y su forma de facturar; nunca uno en lugar de otro en silencio (`docs/arneses.md`).
+- **Los agentes son identidades del propietario**, en carpetas locales y portables (`agent.yaml`, `AGENTS.md`, habilidades,
+  memoria verificada): cambiar de arnés no los recrea (`docs/agentes-portables.md`).
+
+Agente ≠ arnés ≠ modelo ≠ cuenta del proveedor ≠ permisos. La experiencia diaria es la **oficina** (`docs/sistema-operativo-agentes.md`).
+
 ## 1. Propósito
 
 Portal IA es una empresa operada por agentes de IA. El propietario describe un objetivo y autoriza un alcance. La

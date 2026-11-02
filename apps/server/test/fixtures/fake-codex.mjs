@@ -30,6 +30,9 @@ if (args[0] === 'features' && args[1] === 'list') {
 }
 if (args[0] === 'debug' && args[1] === 'prompt-input') {
   log({ kind: 'prompt-input' });
+  // Salidas inesperadas para comprobar que la comprobación falla CERRADA: código de error o una forma desconocida.
+  if (sc.promptInput === 'fail') { console.error('error: no se pudo'); process.exit(3); }
+  if (sc.promptInput === 'object') { console.log(JSON.stringify({ input: [], tools: [{ name: 'exec' }] })); process.exit(0); }
   const tools = (sc.tools ?? []).map(name => ({ type: 'function', name, description: name, parameters: { type: 'object', properties: {} } }));
   console.log(JSON.stringify([
     { type: 'additional_tools', role: 'developer', tools: [{ type: 'namespace', name: 'functions', tools }] },

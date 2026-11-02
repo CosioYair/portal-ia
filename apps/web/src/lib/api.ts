@@ -149,7 +149,7 @@ export const api = {
   claudeCodeFix: (slug: string, id: string, fix: { authorizeProject: boolean; switchToManaged: string[] }) => request<ProcessBackends>(`/api/workspaces/${slug}/processes/${id}/claude-code/fix`, { method: 'POST', body: JSON.stringify({ authorized: true, ...fix }) }),
   claudeCodeWorkspace: (slug: string) => request<ClaudeCodeWorkspaceView>(`/api/workspaces/${slug}/claude-code`),
   claudeCodeProjects: (slug: string, projectIds: string[]) => request<{ projects: string[] }>(`/api/workspaces/${slug}/claude-code/projects`, { method: 'PUT', body: JSON.stringify({ authorized: true, projectIds }) }),
-  setAgentBackend: (slug: string, id: string, backend: ExecutionBackend) => request<Agent>(`/api/workspaces/${slug}/agents/${id}/backend`, { method: 'PUT', body: JSON.stringify(backend === 'api' ? { backend } : { backend, authorized: true }) }),
+  setAgentBackend: (slug: string, id: string, backend: ExecutionBackend) => request<Agent>(`/api/workspaces/${slug}/agents/${id}/backend`, { method: 'PUT', body: JSON.stringify({ backend, authorized: true }) }),
   createClaudeCodeWorker: (slug: string, name: string, agentIds: string[]) => request<{ worker: ClaudeCodeWorkerView; token: string; setup: { cwd: string; command: string; args: string[] } }>(`/api/workspaces/${slug}/claude-code/workers`, { method: 'POST', body: JSON.stringify({ authorized: true, name, agentIds }) }),
   revokeClaudeCodeWorker: (slug: string, id: string) => request<ClaudeCodeWorkerView>(`/api/workspaces/${slug}/claude-code/workers/${id}`, { method: 'DELETE' }),
   agent: (slug: string, id: string) => request<Agent>(`/api/workspaces/${slug}/agents/${id}`),

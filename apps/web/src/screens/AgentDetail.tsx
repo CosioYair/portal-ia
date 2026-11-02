@@ -72,6 +72,7 @@ export function AgentDetail() {
   };
   const applyBackend = async () => {
     if (!backendPick) return;
+    if (backendPick === 'api' && !confirm(`¿Autorizas que «${agent.config.name}» use la API de su proveedor? Se factura por uso (cada trabajo pide presupuesto).`)) return;
     if (backendPick !== 'api' && !confirm(`¿Autorizas que «${agent.config.name}» ejecute sus pasos con ${backendPick === 'claude-code' ? 'Claude Code gestionado por el Portal' : 'tu consola de Claude Code'} (tu suscripción de Claude)?`)) return;
     try { await api.setAgentBackend(ws.slug, agent.id, backendPick); await load(); setBackendPick(null); flash(`Backend de ${agent.config.name}: ${backendLabel(backendPick, cc?.detection?.billing, agent.config.provider)}`); }
     catch (e: any) { flash(e.message, 'err'); }
@@ -169,6 +170,7 @@ export function AgentDetail() {
                     <option value="api">API del proveedor · presupuesto en USD</option>
                     <option value="claude-code" disabled={!cc?.ready || agent.config.provider !== 'anthropic'}>Claude Code — gestionado por el Portal (suscripción)</option>
                     <option value="claude-code-terminal" disabled={!cc?.settings.enabled || agent.config.provider !== 'anthropic'}>Claude Code — tu consola (puente MCP)</option>
+                    <option value="codex" disabled>Codex — se elige en su panel de la Oficina (Configuración)</option>
                   </select>
                   <button className="btn btn-secondary" disabled={!backendPick || backendPick === (agent.config.backend ?? 'api')} onClick={applyBackend}>Aplicar</button>
                 </div>

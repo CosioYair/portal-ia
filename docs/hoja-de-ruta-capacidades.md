@@ -31,6 +31,10 @@
 | Cambio explícito y auditable de la política de un lote ya autorizado (solo restringe); «Reanudar» dice antes qué hará (puerta final) | `changePolicy`/`policyView` en `batchRunner.ts` |
 | Preparación apilada de dependientes sobre la versión verificada de su dependencia, sin integrarse antes que ella (puerta final; R5, primera versión) | `batchRunner.ts`, `stackedBranch.ts`, `ownBase` |
 | Vista previa aislada del candidato exacto (Docker sin red, IA simulada, proxy con CSP en 127.0.0.2) y decisiones ligadas al commit (puerta final; R4, primera versión) | `preview.ts`, `scripts/preview-*.mjs` |
+| Oficina visual (portada), panel del agente en 6 pestañas, creación sin código e importación (sistema operativo de agentes) | `screens/Office.tsx`, `components/AgentPanel.tsx`, `screens/AgentWizard.tsx` |
+| Agentes portables con revisiones, cambios externos revisados, exportación (`portal-ia/agent@1`) | `agentFolders.ts`, `docs/agentes-portables.md` |
+| Registro de arneses con capacidades reales y cambio con compatibilidad; Codex detectado y bloqueado por seguridad | `harness/`, `docs/arneses.md` |
+| Departamentos con propósito y coordinador; peticiones a un departamento; encargos directos; chat por agente; memoria verificada por agente | `departments.ts`, `delegation.ts`, `agentChat.ts`, `agentLearning.ts` |
 
 ### Parcial
 

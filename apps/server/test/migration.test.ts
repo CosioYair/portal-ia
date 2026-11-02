@@ -55,13 +55,14 @@ test('migración 0.11 → 0.16 sobre una copia sintética: copia de seguridad pr
   assert.equal(r.backlog, 'review'); assert.equal(r.knowledge, 1); assert.equal(r.lessons, 0); assert.equal(r.templates, 9, '8 plantillas activas + la propuesta del Evaluador Gauntlet (solo catálogo, sin agente)'); assert.equal(r.tasks, 0); assert.equal(r.hist, 1);
   for (const c of ['role', 'reason', 'lessons_used', 'backend']) assert.ok(r.stepCols.includes(c), `columna ${c}`);
   // Esquema 0.16 (encargos y tope de llamadas): columnas nuevas en processes, cubiertas por la copia previa.
+  // Esquema 0.17 (sistema operativo de agentes): tablas nuevas y lessons.agent_id, también tras la copia previa.
   for (const c of ['assignment_id', 'max_subscription_calls']) assert.ok(r.procCols.includes(c), `columna ${c}`);
   assert.ok(r.agentCols.includes('template_version'));
   // Copia de seguridad previa
-  const backups = fs.readdirSync(path.join(dataDir, 'backups')); assert.equal(backups.length, 1); assert.match(backups[0], /antes-de-0\.16$/);
+  const backups = fs.readdirSync(path.join(dataDir, 'backups')); assert.equal(backups.length, 1); assert.match(backups[0], /antes-de-0\.17$/);
   assert.ok(fs.existsSync(path.join(dataDir, 'backups', backups[0], 'workspaces', 'portal-ia', 'portal-ia.sqlite')));
   assert.ok(fs.existsSync(path.join(dataDir, 'backups', backups[0], '.master.key')));
-  assert.equal(fs.readFileSync(path.join(dataDir, '.schema-version'), 'utf8').trim(), '0.16');
+  assert.equal(fs.readFileSync(path.join(dataDir, '.schema-version'), 'utf8').trim(), '0.17');
   // La copia conserva el esquema antiguo (es una copia previa, no migrada)
   const old = new DatabaseSync(path.join(dataDir, 'backups', backups[0], 'workspaces', 'portal-ia', 'portal-ia.sqlite'));
   assert.ok(!(old.prepare('PRAGMA table_info(process_steps)').all() as any[]).some(c => c.name === 'role')); old.close();

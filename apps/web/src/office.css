@@ -28,7 +28,7 @@
 .room-meta { font-size: 12px; color: var(--color-text-med); display: flex; gap: 8px; align-items: center; }
 .room-purpose { padding: 6px 12px 0; font-size: 12.5px; color: var(--color-text-med); }
 .room-desks { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; padding: 12px; }
-.room-empty { padding: 18px 12px 22px; font-size: 13px; color: var(--color-text-muted); }
+.room-empty { margin: 12px; padding: 10px 12px; font-size: 13px; color: var(--color-text-med); background: var(--color-surface); border-radius: var(--radius); }
 .room-actions { display: flex; gap: 6px; padding: 0 12px 12px; flex-wrap: wrap; }
 .room-plant { position: absolute; right: 10px; bottom: 8px; width: 14px; height: 18px; border-radius: var(--radius-xs) var(--radius-xs) 0 0; background: var(--color-office-plant); opacity: .7; pointer-events: none; }
 
@@ -45,6 +45,7 @@
 .state-badge-attention { background: var(--color-warn); color: var(--color-office-ink); animation: officePulse var(--dur-loop) ease-in-out infinite; }
 .state-badge-working { background: var(--color-accent); color: var(--color-on-dark); }
 .state-badge-queued { background: var(--color-warn-bg); color: var(--color-warn-text); border-color: var(--color-warn-border); }
+.state-badge-unavailable { background: var(--color-surface-muted); color: var(--color-err-text); border-color: var(--color-err-border); }
 .state-badge-retired { background: var(--color-surface-muted); color: var(--color-text-muted); }
 
 .fig-working .fig-arm-l { animation: officeType var(--dur-loop) steps(2) infinite; }
@@ -70,12 +71,17 @@
 .strip-agent[aria-current="true"] { border-color: var(--color-accent); background: var(--color-accent-soft); }
 .strip-dot { width: 8px; height: 8px; border-radius: var(--radius-pill); background: var(--color-border-strong); }
 .strip-dot-working { background: var(--color-accent); }
-.strip-dot-attention { background: var(--color-warn); }
-.strip-dot-queued { background: var(--color-flow-waiting); }
+.strip-dot-attention { background: var(--color-warn-text); }
+.strip-dot-queued { background: var(--color-text-muted); }
+.strip-dot-unavailable { background: var(--color-err-text); }
 
 /* Panel del agente */
 /* El panel y los diálogos se montan en <body> (por encima de los botones flotantes): heredan aquí la tipografía del Portal. */
 .agent-panel, .os-portal { font-family: var(--font-sans); color: var(--color-text); font-size: 14px; line-height: 1.45; }
+.agent-panel, .agent-panel *, .os-portal, .os-portal * { box-sizing: border-box; }
+/* Los diálogos van por encima del panel del agente (y Escape solo cierra el de arriba); los avisos, por encima de todo. */
+.os-portal { z-index: 70; }
+.toast { z-index: 80; }
 .agent-panel { position: fixed; top: 0; right: 0; bottom: 0; width: min(580px, 100vw); z-index: 60; background: var(--color-surface); box-shadow: var(--shadow-panel); display: flex; flex-direction: column; animation: fadeIn var(--dur-enter) ease-out; }
 .agent-panel-head { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px 10px; border-bottom: 1px solid var(--color-divider); }
 .agent-panel-head .who { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }

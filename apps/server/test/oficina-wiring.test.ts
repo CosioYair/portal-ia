@@ -21,7 +21,7 @@ test('la oficina es la portada y el Panel sigue existiendo', () => {
 
 test('los estados de los agentes nunca dependen solo del color: texto, forma y etiqueta accesible', () => {
   const office = read('screens/Office.tsx'); const fig = read('components/AgentFigure.tsx');
-  assert.match(fig, /STATE_TEXT: Record<OfficeState, string> = \{ working: 'Trabajando', queued: 'En cola', attention: 'Te necesita', idle: 'Disponible', retired: 'Retirado' \}/);
+  assert.match(fig, /STATE_TEXT: Record<OfficeState, string> = \{ working: 'Trabajando', queued: 'En cola', attention: 'Te necesita', unavailable: 'No puede trabajar', idle: 'Disponible', retired: 'Retirado' \}/);
   assert.match(office, /aria-label=\{label\}/);
   assert.match(office, /<span className="desk-state">\{STATE_TEXT\[a\.state\]\}<\/span>/);
   assert.match(office, /<caption className="sr">/);
@@ -31,13 +31,15 @@ test('panel del agente: seis pestañas con rol de pestaña, flechas del teclado 
   const panel = read('components/AgentPanel.tsx');
   for (const t of ['Chat', 'Solicitudes', 'Trabajo', 'Archivos', 'Memoria', 'Configuración']) assert.ok(panel.includes(`'${t}'`), t);
   assert.match(panel, /role="tablist"/); assert.match(panel, /aria-selected=\{current === id\}/);
-  assert.match(panel, /e\.key !== 'ArrowRight' && e\.key !== 'ArrowLeft'/);
+  assert.match(panel, /\['ArrowRight', 'ArrowLeft', 'Home', 'End'\]\.includes\(e\.key\)/);
+  assert.match(panel, /if \(x\.agent\.id !== cur\.current\) return;/, 'una respuesta de otro agente se descarta');
   assert.match(panel, /createPortal\(<aside className="agent-panel"/);
 });
 
 test('nada que gaste se envía sin autorización explícita en la interfaz', () => {
   const panel = read('components/AgentPanel.tsx'); const wizard = read('screens/AgentWizard.tsx'); const office = read('screens/Office.tsx');
   assert.match(panel, /Autorizo esta llamada facturable/);
+  assert.match(panel, /const canSend = !busy && !pending && text\.trim\(\)\.length >= 2 && !p\.retired && !consoleOnly && \(!p\.chat\.estimate\.billable \|\| billOk\);/);
   assert.match(panel, /disabled=\{busy \|\| !auth \|\| req\.trim\(\)\.length < 8/);
   assert.match(panel, /disabled=\{busy \|\| !auth \|\| !model/);
   assert.match(wizard, /const valid = \[.*auth\];/);

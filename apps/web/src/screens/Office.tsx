@@ -24,7 +24,7 @@ export function Office() {
   const navigate = useNavigate();
   const [view, setView] = useState<OfficeView | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [mode, setMode] = usePersistentState<'oficina' | 'lista'>('portal-ia.oficina.vista', 'oficina');
+  const [mode, setMode] = usePersistentState<'oficina' | 'lista'>('portal-ia.oficina.vista', () => (typeof window !== 'undefined' && window.innerWidth < 720 ? 'lista' : 'oficina'));
   const [dialog, setDialog] = useState<null | 'department' | 'harness' | { request: Department }>(null);
   // Con muchos agentes: búsqueda y salas que muestran primero a quien te necesita o trabaja (12 por sala, «Ver todos»).
   const [q, setQ] = useState(''); const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -33,12 +33,19 @@ export function Office() {
   const matches = (a: OfficeAgent) => !q.trim() || norm(`${a.name} ${a.role} ${a.department}`).includes(norm(q.trim()));
   const load = useCallback(() => osApi.office(ws.slug, project?.id ?? null).then(v => { setView(v); setError(null); }).catch(e => setError(e.message)), [ws.slug, project?.id]);
   useEffect(() => { void load(); }, [load]);
-  useLive(c => c.ws === ws.slug && ['process', 'agent', 'department', 'agent_chat', 'batch', 'assignment'].includes(c.entity), () => void load(), { minMs: 1200 });
-  const open = (id: string, t = 'chat') => navigate(`/oficina/agente/${id}/${t}`);
-  const close = () => navigate('/oficina');
+  useLive(c => c.ws === ws.slug && ['process', 'agent', 'department', 'agent_chat', 'batch', 'assignment'].includes(c.entity) && (c.kind !== 'progress' || c.entity === 'agent_chat' || c.entity === 'agent'), () => void load(), { minMs: 1200 });
+  // Abrir un panel desde la oficina crea una entrada en el historial; cerrarlo vuelve atrás (Atrás no lo reabre) y devuelve
+  // el foco al puesto del agente.
+  const openedHere = useRef(false); const lastDesk = useRef<string | null>(null);
+  const open = (id: string, t = 'chat') => { openedHere.current = true; lastDesk.current = id; navigate(`/oficina/agente/${id}/${t}`); };
+  const close = useCallback(() => {
+    const id = agentId ?? lastDesk.current;
+    if (openedHere.current) { openedHere.current = false; navigate(-1); } else navigate('/oficina', { replace: true });
+    requestAnimationFrame(() => (document.querySelector(`[data-agent-id="${id}"]`) as HTMLElement | null)?.focus());
+  }, [agentId, navigate]);
   const byDep = useMemo(() => {
     const m = new Map<string, OfficeAgent[]>();
-    const rank: Record<OfficeAgent['state'], number> = { attention: 0, working: 1, queued: 2, idle: 3, retired: 4 };
+    const rank: Record<OfficeAgent['state'], number> = { attention: 0, working: 1, queued: 2, unavailable: 3, idle: 4, retired: 5 };
     for (const a of view?.agents ?? []) { if (!matches(a)) continue; const l = m.get(a.departmentSlug) ?? []; l.push(a); m.set(a.departmentSlug, l); }
     for (const l of m.values()) l.sort((x, y) => rank[x.state] - rank[y.state] || x.name.localeCompare(y.name, 'es'));
     return m;
@@ -52,7 +59,7 @@ export function Office() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div className="eyebrow">Tu empresa</div>
             <h1 className="h1" style={{ fontSize: 26 }}>{ws.name}</h1>
-            {view && <div className="office-counts" role="status" aria-live="polite">
+            {view && <div className="office-counts">
               <Chip>{view.counts.agents} agentes</Chip>
               <Chip dot={view.counts.working ? 'pulse' : ''}>{view.counts.working} trabajando</Chip>
               <Chip tone={view.counts.attention ? 'warn' : ''}>{view.counts.attention} te necesitan</Chip>
@@ -82,7 +89,7 @@ export function Office() {
             return <section key={d.slug} className="room" aria-labelledby={`room-${d.slug}`}>
               <div className="room-wall">
                 <span className="room-sign" id={`room-${d.slug}`}><span className="swatch" style={{ background: `hsl(${d.hue} 42% 46%)` }} aria-hidden="true" />{d.name}</span>
-                <span className="room-meta">{members.filter(m => m.state !== 'retired').length} agentes{members.some(m => m.state === 'attention') && <Chip xs tone="warn">te necesita</Chip>}</span>
+                <span className="room-meta">{(n => `${n} ${n === 1 ? 'agente' : 'agentes'}`)(all.filter(m => m.state !== 'retired').length)}{all.some(m => m.state === 'attention') && <Chip xs tone="warn">te necesita</Chip>}</span>
               </div>
               {d.purpose && <div className="room-purpose">{d.purpose}</div>}
               {members.length ? <div className="room-desks">
@@ -116,8 +123,8 @@ export function Office() {
 }
 
 function Desk({ a, hue, current, onOpen }: { a: OfficeAgent; hue: number; current: boolean; onOpen: () => void }) {
-  const label = `${a.name}, ${a.role}. ${STATE_TEXT[a.state]}${a.activity ? `: ${a.activity}` : ''}${a.attention.length ? `. ${a.attention.length} asunto(s) para ti` : ''}. Arnés: ${a.harnessLabel}.`;
-  return <button type="button" className={`desk${a.state === 'retired' ? ' desk-retired' : ''}`} aria-current={current} aria-label={label} title={a.activity ?? a.attention[0]?.label ?? STATE_TEXT[a.state]} data-state={a.state} onClick={onOpen}>
+  const label = `${a.name}, ${a.role}. ${STATE_TEXT[a.state]}${a.state === 'unavailable' && a.harnessIssue ? `: ${a.harnessIssue}` : ''}${a.activity ? `: ${a.activity}` : ''}${a.attention.length ? `. ${a.attention.length} asunto(s) para ti` : ''}. Arnés: ${a.harnessLabel}.`;
+  return <button type="button" data-agent-id={a.id} className={`desk${a.state === 'retired' ? ' desk-retired' : ''}`} aria-current={current} aria-label={label} title={a.activity ?? a.attention[0]?.label ?? a.harnessIssue ?? STATE_TEXT[a.state]} data-state={a.state} onClick={onOpen}>
     <StateBadge state={a.state} />
     <AgentFigure id={a.id} hue={hue} state={a.state} />
     <span className="desk-name">{a.name}</span>
@@ -153,16 +160,21 @@ function CommandBar({ agents, departments, onAgent, onDepartment }: { agents: Of
   const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
   const route = useMemo(() => {
     const t = text.trim(); if (!t) return null;
-    const at = t.match(/^@([^\s,:]+(?:\s[^\s,:]+)?)/);
-    if (at) { const q = norm(at[1]); const a = agents.find(x => norm(x.name).startsWith(q) || norm(x.name).includes(q)); if (a) return { kind: 'agent' as const, label: `Conversar con ${a.name}`, id: a.id }; }
-    const dm = norm(t).match(/^(?:equipo de |departamento de |el equipo de )?([^,:]{2,40})[,:]/);
-    if (dm) { const d = departments.find(x => norm(x.name) === dm[1].trim() || norm(x.name).startsWith(dm[1].trim())); if (d) return { kind: 'department' as const, label: `Petición al departamento ${d.name}`, dep: d }; }
+    if (t.startsWith('@')) {
+      // El nombre (o la primera palabra del nombre) más largo que coincide con lo escrito tras «@»: «@Arquitecto revisa…».
+      const after = norm(t.slice(1));
+      const cands = agents.flatMap(x => [norm(x.name), norm(x.name).split(/[\s,]+/)[0]].map(k => ({ x, k }))).filter(c => c.k.length >= 2 && after.startsWith(c.k) && /^($|[\s,:])/.test(after.slice(c.k.length)));
+      const best = cands.sort((p, q) => q.k.length - p.k.length)[0];
+      if (best) return { kind: 'agent' as const, label: `Conversar con ${best.x.name}`, id: best.x.id, rest: t.slice(1 + best.k.length).replace(/^[\s,:]+/, '') };
+    }
+    const dm = norm(t).match(/^(?:equipo de |departamento de |el equipo de |el departamento de )?([^,:]{2,40})[,:]/);
+    if (dm) { const d = departments.find(x => norm(x.name) === dm[1].trim()); if (d) return { kind: 'department' as const, label: `Petición al departamento ${d.name}`, dep: d, rest: t.replace(/^[^,:]+[,:]\s*/, '') }; }
     return { kind: 'assistant' as const, label: 'El Asistente lo estudia y te propone cómo hacerlo' };
   }, [text, agents, departments]);
   const go = () => {
     if (!route) return;
-    if (route.kind === 'agent') { sessionStorage.setItem(`portal-ia.chat.prefill.${route.id}`, text.trim().replace(/^@\S+(\s\S+)?\s*/, '')); onAgent(route.id); }
-    else if (route.kind === 'department') { sessionStorage.setItem(`portal-ia.dep.prefill.${route.dep.slug}`, text.trim().replace(/^[^,:]+[,:]\s*/, '')); onDepartment(route.dep); }
+    if (route.kind === 'agent') { sessionStorage.setItem(`portal-ia.chat.prefill.${route.id}`, route.rest); onAgent(route.id); }
+    else if (route.kind === 'department') { sessionStorage.setItem(`portal-ia.dep.prefill.${route.dep.slug}`, route.rest); onDepartment(route.dep); }
     else navigate('/asistente', { state: { draft: text.trim() } });
     setText('');
   };
@@ -194,7 +206,8 @@ function DepartmentRequestDialog({ slug, department, agents, projects, defaultPr
   const [members, setMembers] = useState<string[]>(agents.slice(0, 6).map(a => a.id));
   const [budget, setBudget] = useState(0); const [auth, setAuth] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<any>(null);
-  const billable = agents.some(a => members.includes(a.id) && a.harness === 'api');
+  const coordinator = agents.find(a => a.id === department.coordinatorAgentId) ?? null;
+  const billable = agents.some(a => (members.includes(a.id) || a.id === coordinator?.id) && a.harness === 'api');
   const ready = text.trim().length >= 8 && !!projectId;
   const doPreview = async () => { setError(null); try { setPreview(await osApi.departmentRequest(slug, department.id, { request: text.trim(), projectId, memberIds: members, preview: true })); } catch (e: any) { setError(e.message); } };
   const submit = async () => { setBusy(true); setError(null); try { const p = await osApi.departmentRequest(slug, department.id, { request: text.trim(), projectId, memberIds: members, budgetUsd: billable ? budget : 0 }); onDone(p.id); } catch (e: any) { setError(e.message); } finally { setBusy(false); } };
@@ -250,9 +263,23 @@ function HarnessDialog({ onClose }: { onClose: () => void }) {
 
 export function Modal({ title, children, footer, onClose, wide }: { title: string; children: React.ReactNode; footer: React.ReactNode; onClose: () => void; wide?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => { const prev = document.activeElement as HTMLElement | null; const k = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); }; window.addEventListener('keydown', k); return () => { window.removeEventListener('keydown', k); prev?.focus?.(); }; }, [onClose]);
+  const opener = useRef<HTMLElement | null>(typeof document !== 'undefined' ? document.activeElement as HTMLElement | null : null);
+  const closeRef = useRef(onClose); closeRef.current = onClose;
+  useEffect(() => {
+    const box = ref.current;
+    if (box && !box.contains(document.activeElement)) (box.querySelector<HTMLElement>('input, textarea, select, button:not(.xbtn)') ?? box).focus();
+    const k = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.stopPropagation(); closeRef.current(); return; }
+      if (e.key !== 'Tab' || !box) return;
+      const f = [...box.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+      if (!f.length) return; const first = f[0]; const last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); } else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    window.addEventListener('keydown', k, true);
+    return () => { window.removeEventListener('keydown', k, true); opener.current?.focus?.(); };
+  }, []);
   return createPortal(<div className="backdrop os-portal" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-    <div className="modal" role="dialog" aria-modal="true" aria-label={title} ref={ref} style={{ width: wide ? 'min(860px, 100%)' : 'min(560px, 100%)' }}>
+    <div className="modal" role="dialog" aria-modal="true" aria-label={title} ref={ref} tabIndex={-1} style={{ width: wide ? 'min(860px, 100%)' : 'min(560px, 100%)' }}>
       <div className="modal-h"><div className="h3">{title}</div><button className="xbtn" onClick={onClose} aria-label="Cerrar">{Icon.x(16)}</button></div>
       <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12, maxHeight: '70vh', overflowY: 'auto' }}>{children}</div>
       <div className="modal-f"><span /><div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>{footer}</div></div>

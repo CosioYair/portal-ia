@@ -7,7 +7,9 @@ import { AgentFigure, STATE_TEXT } from './AgentFigure.tsx';
 import { Markdown } from './Markdown.tsx';
 import { useApp } from '../lib/store.ts';
 import { useLive } from '../lib/live.ts';
-import { fmtUsd } from '../lib/labels.ts';
+import { TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
+import { HARNESSES } from '@portal-ia/domain';
+import { FolderPicker } from './FolderPicker.tsx';
 import { osApi, type AgentMessage, type AgentPanel as Panel, type Department, type FolderStatus, type HarnessOptions, type OfficeAgent, type WorkItem } from '../lib/osApi.ts';
 
 /**
@@ -20,19 +22,21 @@ type Tab = typeof TABS[number][0];
 
 export function AgentPanel({ slug, agentId, tab, office, departments, projects, onTab, onClose, onChanged }: { slug: string; agentId: string; tab: string; office: OfficeAgent | null; departments: Department[]; projects: { id: string; name: string }[]; onTab: (t: Tab) => void; onClose: () => void; onChanged: () => void }) {
   const [p, setP] = useState<Panel | null>(null); const [error, setError] = useState<string | null>(null);
-  const load = useCallback(() => osApi.panel(slug, agentId).then(x => { setP(x); setError(null); }).catch(e => setError(e.message)), [slug, agentId]);
+  const cur = useRef(agentId); cur.current = agentId;
+  const load = useCallback(() => osApi.panel(slug, agentId).then(x => { if (x.agent.id !== cur.current) return; setP(x); setError(null); }).catch(e => { if (agentId === cur.current) setError(e.message); }), [slug, agentId]);
   useEffect(() => { setP(null); void load(); }, [load]);
-  useLive(c => c.ws === slug && ((c.entity === 'agent' && c.id === agentId) || c.entity === 'process' || (c.entity === 'agent_chat' && c.id === agentId)), () => void load(), { minMs: 1000 });
+  useLive(c => c.ws === slug && ((c.entity === 'agent' && c.id === agentId) || (c.entity === 'process' && c.kind !== 'progress') || (c.entity === 'agent_chat' && c.id === agentId)), () => void load(), { minMs: 1000 });
   const current = (TABS.some(t => t[0] === tab) ? tab : 'chat') as Tab;
   const hue = departments.find(d => d.slug === (office?.departmentSlug ?? p?.office?.departmentSlug))?.hue ?? 200;
   const ref = useRef<HTMLDivElement>(null);
   // El foco va al panel al abrir OTRO agente (no en cada render: si no, se lo quitaría a la pestaña que eliges con el teclado).
   const closeRef = useRef(onClose); closeRef.current = onClose;
   useEffect(() => { ref.current?.focus(); }, [agentId]);
-  useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key === 'Escape') closeRef.current(); }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, []);
+  useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key !== 'Escape') return; const el = document.activeElement as HTMLElement | null; if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && (el as HTMLInputElement).value) return; closeRef.current(); }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, []);
   const onTabKey = (e: RKeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
-    const i = TABS.findIndex(t => t[0] === current); const n = (i + (e.key === 'ArrowRight' ? 1 : TABS.length - 1)) % TABS.length;
+    if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const i = TABS.findIndex(t => t[0] === current); const n = e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : TABS.length - 1)) % TABS.length;
     onTab(TABS[n][0]); requestAnimationFrame(() => (document.getElementById(`tab-${TABS[n][0]}`) as HTMLButtonElement | null)?.focus());
   };
   const refresh = () => { void load(); onChanged(); };
@@ -60,7 +64,7 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
     </div>
     {error && <div style={{ padding: 12 }}><Notice kind="err">{error}</Notice></div>}
     {!p && !error && <div style={{ padding: 24 }}><Spinner /></div>}
-    {p && <div role="tabpanel" id={`tp-${current}`} aria-labelledby={`tab-${current}`} style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+    {p && <div role="tabpanel" tabIndex={0} id={`tp-${current}`} aria-labelledby={`tab-${current}`} style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       {current === 'chat' && <ChatTab slug={slug} p={p} projects={projects} onChanged={refresh} />}
       {current !== 'chat' && <div className="agent-panel-body">
         {current === 'solicitudes' && <RequestsTab p={p} onTab={onTab} />}
@@ -89,7 +93,11 @@ function ChatTab({ slug, p, projects, onChanged }: { slug: string; p: Panel; pro
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => { end.current?.scrollIntoView({ block: 'end' }); }, [msgs?.length]);
   const pending = msgs?.some(m => m.status === 'running');
+  const consoleOnly = p.agent.config.backend === 'claude-code-terminal';
+  const canSend = !busy && !pending && text.trim().length >= 2 && !p.retired && !consoleOnly && (!p.chat.estimate.billable || billOk);
+  const lastReply = msgs?.filter(m => m.role === 'agent' && m.status !== 'running').slice(-1)[0];
   const send = async () => {
+    if (!canSend) return;
     setBusy(true); setError(null);
     try { await osApi.sendChat(slug, id, text.trim(), projectId, p.chat.estimate.billable ? billOk : undefined); setText(''); setBillOk(false); await load(); onChanged(); }
     catch (e: any) { setError(e.message); } finally { setBusy(false); }
@@ -97,14 +105,16 @@ function ChatTab({ slug, p, projects, onChanged }: { slug: string; p: Panel; pro
   return <>
     <div className="agent-panel-body">
       {p.retired && <Notice kind="warn">Agente retirado: reactívalo desde Equipo de IA para conversar.</Notice>}
-      <div className="chat-log" aria-live="polite">
+      {consoleOnly && <Notice kind="info">{p.agent.config.name} trabaja desde tu propia consola de Claude Code, así que no puede conversar aquí. Dale trabajo en la pestaña <strong>Trabajo</strong>, o cambia con qué IA trabaja en <strong>Configuración</strong>.</Notice>}
+      <div className="sr" role="status" aria-live="polite">{lastReply ? `${p.agent.config.name} respondió.` : ''}</div>
+      <div className="chat-log">
         {msgs === null ? <Spinner /> : msgs.length === 0 ? <p className="small muted">Aún no habéis hablado. Pregúntale lo que quieras sobre su especialidad; para un trabajo con entregable, usa la pestaña Trabajo.</p>
           : msgs.map(m => <div key={m.id} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'owner' ? 'flex-end' : 'flex-start' }}>
             <div className={`msg msg-${m.role}`}>{m.role === 'agent' && m.status === 'running' ? <span className="small">Pensando…</span> : m.role === 'agent' && m.content ? <Markdown text={m.content} /> : m.content}</div>
             {m.role === 'agent' && <div className="msg-meta">
               {m.status === 'failed' && <span style={{ color: 'var(--color-err-text)' }}>{m.error}</span>}
               {m.status === 'interrupted' && <span>{m.error}</span>}
-              {m.status === 'done' && <><span>{m.harness === 'api' ? fmtUsd(m.costUsd) : 'suscripción'} · {m.tokensIn + m.tokensOut} tokens</span>
+              {m.status === 'done' && <><span>{m.harness === 'api' ? fmtUsd(m.costUsd) : 'con tu suscripción'}</span>
                 <button type="button" className="lnk" onClick={() => setFb(fb === m.id ? null : m.id)}>¿Qué debería aprender?</button></>}
             </div>}
             {fb === m.id && <FeedbackForm slug={slug} agentId={id} messageId={m.id} onDone={() => { setFb(null); flash('Aprendizaje propuesto: verifícalo en Memoria'); onChanged(); }} />}
@@ -112,15 +122,15 @@ function ChatTab({ slug, p, projects, onChanged }: { slug: string; p: Panel; pro
         <div ref={end} />
       </div>
     </div>
-    <form className="composer" onSubmit={e => { e.preventDefault(); if (text.trim().length >= 2) void send(); }}>
+    <form className="composer" onSubmit={e => { e.preventDefault(); void send(); }}>
       {error && <Notice kind="err">{error}</Notice>}
       <label className="sr" htmlFor="chat-text">Mensaje para {p.agent.config.name}</label>
-      <textarea id="chat-text" className="input" rows={3} value={text} onChange={e => setText(e.target.value)} placeholder={`Escribe a ${p.agent.config.name}…`} disabled={p.retired} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && text.trim().length >= 2) { e.preventDefault(); void send(); } }} />
+      <textarea id="chat-text" className="input" rows={3} value={text} onChange={e => setText(e.target.value)} placeholder={`Escribe a ${p.agent.config.name}…`} disabled={p.retired} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void send(); } }} />
       <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' }}>
         <span className="small muted">{p.chat.estimate.label} · {p.chat.estimate.billable ? `≈ ${fmtUsd(p.chat.estimate.estimatedUsd)} por mensaje` : 'sin cargo a la API'} · hoy {p.chat.usage.used}/{p.chat.usage.cap}</span>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {p.chat.estimate.billable && <label className="ck small"><input className="cb" type="checkbox" checked={billOk} onChange={e => setBillOk(e.target.checked)} /> Autorizo esta llamada facturable</label>}
-          <button className="btn btn-primary btn-sm" type="submit" disabled={busy || pending || text.trim().length < 2 || p.retired || (p.chat.estimate.billable && !billOk)}>{busy ? 'Enviando…' : pending ? 'Respondiendo…' : 'Enviar'}</button>
+          <button className="btn btn-primary btn-sm" type="submit" disabled={!canSend}>{busy ? 'Enviando…' : pending ? 'Respondiendo…' : 'Enviar'}</button>
         </div>
       </div>
     </form>
@@ -186,13 +196,18 @@ function WorkTab({ slug, p, projects, onChanged }: { slug: string; p: Panel; pro
       <label className="ck small"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /> Autorizo este encargo: {billable ? `llamadas facturables hasta ${fmtUsd(budget)}` : `una llamada con ${p.office?.harnessLabel ?? 'su arnés'} (tope de 3 llamadas)`}. El resultado se guarda en Conocimiento.</label>
       <button className="btn btn-primary btn-sm" style={{ alignSelf: 'flex-end' }} disabled={busy || !auth || req.trim().length < 8 || !projectId || p.retired} onClick={() => void submit()}>{busy ? 'Enviando…' : 'Encargar'}</button>
     </section>
+    {open && (() => { const w = p.work.find(x => x.id === open); return w?.deliverable ? <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }} aria-label={`Entregable: ${w.title}`}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}><strong className="small">{w.title}</strong><button type="button" className="xbtn" onClick={() => setOpen(null)} aria-label="Cerrar el entregable">{Icon.x(14)}</button></div>
+      <div className="file-view" style={{ fontFamily: 'var(--font-sans)', maxHeight: 420 }}><Markdown text={w.deliverable} /></div>
+      <Link className="lnk small" to={`/procesos/${w.id}`}>{w.deliverable.length >= 3990 ? 'Está recortado: ábrelo completo en su proceso' : 'Abrir su proceso'}</Link>
+    </section> : null; })()}
     <div className="board">{COLS.map(([col, label]) => { const items = p.work.filter(w => w.column === col); return <div key={col} className="board-col">
       <h4>{label}<span>{items.length}</span></h4>
       {items.slice(0, 12).map(w => <div key={w.id} className="work-card">
         <Link to={`/procesos/${w.id}`} className="lnk" style={{ fontWeight: 600 }}>{w.title}</Link>
         <span className="small muted">{new Date(w.createdAt).toLocaleString('es-MX')}{w.lead ? ' · responsable' : ' · participa'}</span>
         {w.deliverable && <button type="button" className="lnk small" onClick={() => setOpen(open === w.id ? null : w.id)} aria-expanded={open === w.id}>{open === w.id ? 'Ocultar entregable' : 'Ver entregable'}</button>}
-        {open === w.id && w.deliverable && <div className="file-view" style={{ fontFamily: 'var(--font-sans)' }}><Markdown text={w.deliverable} /></div>}
+
         {w.column === 'done' && w.lead && <button type="button" className="lnk small" onClick={() => setFb(fb === w.id ? null : w.id)}>Valorar y enseñar</button>}
         {fb === w.id && <FeedbackForm slug={slug} agentId={p.agent.id} processId={w.id} onDone={() => { setFb(null); flash('Aprendizaje propuesto: verifícalo en Memoria'); onChanged(); }} />}
       </div>)}
@@ -207,6 +222,7 @@ function FilesTab({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: (
   const [st, setSt] = useState<FolderStatus | null>(null); const [file, setFile] = useState<string | null>(null);
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const [edit, setEdit] = useState<string | null>(null); const [skill, setSkill] = useState<PortableSkill | null>(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false); const [confirmRestore, setConfirmRestore] = useState<number | null>(null);
   const load = useCallback(() => osApi.folder(slug, p.agent.id).then(setSt).catch(e => setError(e.message)), [slug, p.agent.id]);
   useEffect(() => { void load(); }, [load, p.folder.adopted?.n]);
   const act = async (fn: () => Promise<unknown>, ok: string) => { setBusy(true); setError(null); try { await fn(); flash(ok); await load(); onChanged(); } catch (e: any) { setError(e.message); } finally { setBusy(false); } };
@@ -230,7 +246,8 @@ function FilesTab({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: (
         <div className="file-view">{d.removed.map((l, i) => <div key={`r${i}`} className="diff-del">- {l}</div>)}{d.added.map((l, i) => <div key={`a${i}`} className="diff-add">+ {l}</div>)}</div></div>)}
       <div style={{ display: 'flex', gap: 8 }}>
         <button className="btn btn-primary btn-sm" disabled={busy || st.external.problems.some(x => x.blocking)} onClick={() => void act(() => osApi.adopt(slug, p.agent.id, st.external!.hash), 'Cambios adoptados')}>Adoptar los cambios</button>
-        <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => void act(() => osApi.discard(slug, p.agent.id), 'Cambios descartados: carpeta restaurada')}>Descartarlos</button>
+        {confirmDiscard ? <><button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => { setConfirmDiscard(false); void act(() => osApi.discard(slug, p.agent.id), 'Cambios descartados: carpeta restaurada'); }}>Sí, descartarlos (se pierden)</button><button className="btn btn-ghost btn-sm" onClick={() => setConfirmDiscard(false)}>No</button></>
+          : <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => setConfirmDiscard(true)}>Descartarlos…</button>}
       </div>
     </section>}
     <section aria-labelledby="files-h" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -257,7 +274,8 @@ function FilesTab({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: (
       <div className="h3" id="rev-h">Revisiones</div>
       {st.revisions.filter(r => r.state === 'adopted' || r.state === 'superseded').slice(0, 12).map(r => <div key={r.n} className="small" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         <span className="mono">#{r.n}</span><span>{r.source}</span><span className="muted">{new Date(r.at).toLocaleString('es-MX')}</span><span className="muted" style={{ flex: 1 }}>{r.note}</span>
-        {r.state === 'superseded' && <button className="lnk" disabled={busy || !!st.external} onClick={() => void act(() => osApi.restore(slug, p.agent.id, r.n), `Vuelta a la revisión ${r.n}`)}>Volver a esta</button>}
+        {r.state === 'superseded' && (confirmRestore === r.n ? <><button className="lnk" disabled={busy || !!st.external} onClick={() => { setConfirmRestore(null); void act(() => osApi.restore(slug, p.agent.id, r.n), `Vuelta a la revisión ${r.n}`); }}>Sí, volver (queda como revisión nueva)</button><button className="lnk" onClick={() => setConfirmRestore(null)}>No</button></>
+          : <button className="lnk" disabled={busy || !!st.external} onClick={() => setConfirmRestore(r.n)}>Volver a esta…</button>)}
         {r.state === 'adopted' && <Chip xs tone="ok">actual</Chip>}
       </div>)}
     </section>
@@ -275,7 +293,7 @@ function SkillsList({ files }: { files: Record<string, string> }) {
 }
 function ExportBox({ slug, agentId }: { slug: string; agentId: string }) {
   const { flash } = useApp();
-  const [path, setPath] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
+  const [path, setPath] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const [picking, setPicking] = useState(false);
   const download = async () => { try { const r = await osApi.exportFiles(slug, agentId); const blob = new Blob([JSON.stringify({ schema: 'portal-ia/agent-bundle@1', folder: r.folder, files: r.files }, null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${r.folder}.agente.json`; a.click(); URL.revokeObjectURL(a.href); } catch (e: any) { setError(e.message); } };
   const toFolder = async () => { setBusy(true); setError(null); try { const r = await osApi.exportTo(slug, agentId, path.trim()); flash(`Exportado a ${r.path}`); setPath(''); } catch (e: any) { setError(e.message); } finally { setBusy(false); } };
   return <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -283,6 +301,8 @@ function ExportBox({ slug, agentId }: { slug: string; agentId: string }) {
     {error && <Notice kind="err">{error}</Notice>}
     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
       <input className="input" style={{ flex: 1, minWidth: 200 }} value={path} onChange={e => setPath(e.target.value)} placeholder="Carpeta de destino (p. ej. ~/Documentos/agentes)" aria-label="Carpeta de destino" />
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPicking(true)}>{Icon.folder()} Elegir…</button>
+      {picking && <FolderPicker title="Exportar a…" hint="Elige dónde copiar la carpeta del agente (no se sobrescribe nada)." initialPath={path || null} onSelect={x => { setPicking(false); setPath(x); }} onClose={() => setPicking(false)} />}
       <button className="btn btn-secondary btn-sm" disabled={busy || !path.trim()} onClick={() => void toFolder()}>Copiar carpeta</button>
       <button className="btn btn-ghost btn-sm" onClick={() => void download()}>Descargar (.json)</button>
     </div>
@@ -348,8 +368,9 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
     <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }} aria-labelledby="harness-h">
       <div className="h3" id="harness-h">Cómo trabaja (arnés)</div>
       {!opts ? <Spinner /> : <>
-        <p className="small">Ahora: <strong>{opts.currentLabel}</strong> · modelo <span className="mono">{opts.model}</span>. {opts.continuity}</p>
-        <div className="harness-cards">{opts.options.map(o => <button key={o.id} type="button" className="harness-card" aria-pressed={(pick ?? opts.current) === o.id} disabled={!o.availability.available && !o.current} onClick={() => setPick(o.current ? null : o.id)}>
+        <p className="small">Ahora trabaja con <strong>{opts.currentLabel}</strong>. {opts.continuity}</p>
+        <details className="small muted"><summary style={{ cursor: 'pointer' }}>Detalles técnicos</summary>Modelo: <span className="mono">{opts.model}</span></details>
+        <div className="harness-cards">{opts.options.filter(o => o.id !== 'claude-code-terminal' || o.current).map(o => <button key={o.id} type="button" className="harness-card" aria-pressed={(pick ?? opts.current) === o.id} disabled={!o.availability.available && !o.current} onClick={() => setPick(o.current ? null : o.id)}>
           <strong>{o.name}{o.current ? ' · actual' : ''}</strong>
           <span className="small muted">{o.vendor} · {o.billing === 'subscription' ? 'tu suscripción' : o.billing === 'api' ? 'API facturable' : 'no verificable'}</span>
           <span className="small">{o.availability.available ? (o.availability.detail ?? 'Disponible') : o.availability.reason}</span>
@@ -381,16 +402,17 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
     </section>
     <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div className="h3">Permisos</div>
-      <div className="small">Herramientas concedidas: {tools.length ? tools.join(', ') : 'ninguna'}</div>
+      <div className="small">Permisos concedidos: {tools.length ? tools.map(t => TOOL_LABELS[t]?.name ?? t).join(', ') : 'ninguno'}</div>
       <div className="small">Ámbito: {p.agent.scope === 'workspace' ? 'toda la empresa' : 'su proyecto'} · las acciones externas, publicar o gastar siempre te piden aprobación.</div>
       <div className="small muted">Las instrucciones o habilidades de su carpeta nunca amplían estos permisos.</div>
     </section>
     <section style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div className="h3">Registro</div>
-      {p.events.slice(0, 12).map(e => <div key={e.id} className="small"><span className="muted">{new Date(e.at).toLocaleString('es-MX')}</span> · {EVENT_TEXT[e.kind] ?? e.kind}{e.detail?.to ? ` → ${String(e.detail.to)}` : ''}</div>)}
+      {p.events.slice(0, 12).map(e => <div key={e.id} className="small"><span className="muted">{new Date(e.at).toLocaleString('es-MX')}</span> · {EVENT_TEXT[e.kind] ?? e.kind}{e.detail?.to ? ` → ${HARNESS_NAME[String(e.detail.to)] ?? String(e.detail.to)}` : ''}</div>)}
       {!p.events.length && <span className="small muted">Sin eventos todavía.</span>}
     </section>
   </>;
 }
 const LEVEL: Record<string, string> = { yes: 'sí', partial: 'parcial', no: 'no' };
+const HARNESS_NAME: Record<string, string> = Object.fromEntries(HARNESSES.map(h => [h.id, h.name]));
 const EVENT_TEXT: Record<string, string> = { created: 'Creado', imported: 'Importado', exported: 'Exportado', harness_changed: 'Arnés cambiado', department_changed: 'Cambio de departamento', folder_created: 'Carpeta creada', folder_adopted: 'Cambios externos adoptados', folder_discarded: 'Cambios externos descartados', folder_restored: 'Vuelta a una revisión anterior', identity_updated: 'Identidad editada', memory_proposed: 'Aprendizaje propuesto', memory_verified: 'Aprendizaje verificado', memory_retired: 'Aprendizaje retirado', task_created: 'Encargo creado', chat: 'Conversación' };

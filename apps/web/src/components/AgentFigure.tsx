@@ -54,11 +54,12 @@ export const AgentFigure = memo(function AgentFigure({ id, hue, state, size = 64
 /** Insignia de estado con forma propia (no depende del color): ! atención, reloj en cola, ondas trabajando, raya retirado. */
 export function StateBadge({ state }: { state: OfficeState }) {
   if (state === 'idle') return null;
-  const shape = state === 'attention' ? <path d="M8 3.5v5.2M8 11.4h.01" strokeWidth="2.2" strokeLinecap="round" />
+  const shape = state === 'unavailable' ? <><circle cx="8" cy="8" r="4.6" fill="none" strokeWidth="1.6" /><path d="M5 11l6-6" strokeWidth="1.6" strokeLinecap="round" /></>
+    : state === 'attention' ? <path d="M8 3.5v5.2M8 11.4h.01" strokeWidth="2.2" strokeLinecap="round" />
     : state === 'queued' ? <><circle cx="8" cy="8" r="4.2" fill="none" strokeWidth="1.6" /><path d="M8 5.8V8l1.6 1.2" strokeWidth="1.6" strokeLinecap="round" /></>
       : state === 'working' ? <path d="M3.5 9.5c1.2-2 2.4-2 3.6 0s2.4 2 3.6 0" fill="none" strokeWidth="1.7" strokeLinecap="round" />
         : <path d="M4 8h8" strokeWidth="2" strokeLinecap="round" />;
   return <span className={`state-badge state-badge-${state}`} aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" stroke="currentColor">{shape}</svg></span>;
 }
 
-export const STATE_TEXT: Record<OfficeState, string> = { working: 'Trabajando', queued: 'En cola', attention: 'Te necesita', idle: 'Disponible', retired: 'Retirado' };
+export const STATE_TEXT: Record<OfficeState, string> = { working: 'Trabajando', queued: 'En cola', attention: 'Te necesita', unavailable: 'No puede trabajar', idle: 'Disponible', retired: 'Retirado' };

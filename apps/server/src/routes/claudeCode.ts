@@ -4,6 +4,7 @@ import path from 'node:path';
 import { z } from 'zod';
 import { agentFoldersRepo, syncAgentFolder } from '../services/agentFolders.ts';
 import { recordAgentEvent } from '../services/agentEvents.ts';
+import { affectedWork } from '../services/harness/index.ts';
 import { backendLabel, type ClaudeCodeStatusView, type ClaudeCodeWorkspaceView } from '@portal-ia/domain';
 import { claudeCodeWorkersRepo, providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
@@ -148,8 +149,9 @@ export async function claudeCodeRoutes(app: FastifyInstance) {
     const body = z.object({ backend: z.enum(['api', 'claude-code', 'claude-code-terminal']), authorized: z.literal(true).optional() }).strict().safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Backend no válido' });
     const backend = body.data.backend;
+    if (body.data.authorized !== true) return reply.code(403).send({ error: backend === 'api' ? 'Pasar un agente a la API (facturable por uso) requiere tu autorización explícita.' : 'Asignar Claude Code a un agente requiere tu autorización explícita.' });
+    const busy = affectedWork(slug, id).inFlight; if (busy.length) return reply.code(409).send({ error: `«${agent.config.name}» tiene una llamada en curso («${busy[0].title}»): espera a que termine antes de cambiar su arnés.` });
     if (backend !== 'api') {
-      if (body.data.authorized !== true) return reply.code(403).send({ error: 'Asignar Claude Code a un agente requiere tu autorización explícita.' });
       const s = getClaudeCodeSettings();
       if (!s.enabled) return reply.code(409).send({ error: 'Activa primero el conector «Claude Code — Local».' });
       if (agent.config.provider !== 'anthropic') return reply.code(409).send({ error: 'Solo los agentes con modelos de Anthropic pueden ejecutarse con Claude Code.' });

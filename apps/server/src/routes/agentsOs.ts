@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { CAPABILITIES, isRetired, type Agent } from '@portal-ia/domain';
+import { CAPABILITIES, isRetired, slugify, type Agent } from '@portal-ia/domain';
 import { workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { listPendingDecisions } from '../services/inbox.ts';
@@ -23,6 +23,15 @@ import { identityParts } from '../services/agentIdentity.ts';
  * enviar un mensaje a un agente (una llamada, la autoriza el propio envío) y los encargos, que pasan por la autorización
  * única de siempre (processAuthorization.ts).
  */
+/**
+ * Encargos y peticiones se crean y autorizan en el mismo acto. Si la autorización no procede (sin presupuesto, equipo no
+ * listo, límite de la suscripción…), el proceso recién creado se cancela con el motivo: nunca queda una autorización
+ * pendiente fantasma en la bandeja por cada reintento.
+ */
+function authorizeOrDiscard(slug: string, processId: string, budgetUsd: number, log: (o: any, m: string) => void) {
+  try { return authorizeProcess(slug, processId, { budgetUsd }, log); }
+  catch (e: any) { try { processesRepo(slug).finish(processId, 'cancelled', `No se inició: ${e?.message ?? e}`); } catch { /* ya no existe */ } throw e; }
+}
 const err = (reply: FastifyReply, e: any) => reply.code(e.statusCode ?? 500).send({ error: e.message, ...(e.estimate ? { estimate: e.estimate } : {}), ...(e.code ? { code: e.code } : {}), ...(e.payload ?? {}) });
 
 const SKILL = z.object({ slug: z.string().max(64).default(''), name: z.string().trim().min(2).max(80), description: z.string().max(400).default(''), body: z.string().max(20_000).default('') });
@@ -100,7 +109,7 @@ export async function agentsOsRoutes(app: FastifyInstance) {
       if (b.data.preview) return { coordinator: { id: coord.id, name: coord.config.name }, estimate: estimateDelegation(slug, b.data.projectId, coord.id, b.data.request, 'department', teamIds) };
       const proc = createDelegation(slug, b.data.projectId, coord.id, b.data.request, { purpose: 'department', teamIds, department: { slug: d.slug, name: d.name } });
       if (b.data.maxSubscriptionCalls) processesRepo(slug).setCallCap(proc.id, b.data.maxSubscriptionCalls);
-      return reply.code(201).send(authorizeProcess(slug, proc.id, { budgetUsd: b.data.budgetUsd }, (o, m) => app.log.info(o, m)));
+      return reply.code(201).send(authorizeOrDiscard(slug, proc.id, b.data.budgetUsd, (o, m) => app.log.info(o, m)));
     } catch (e) { return err(reply, e); }
   });
 
@@ -171,8 +180,9 @@ export async function agentsOsRoutes(app: FastifyInstance) {
       if (b.data.preview) return { estimate: estimateDelegation(slug, projectId, a.id, b.data.request, 'task') };
       const proc = createDelegation(slug, projectId, a.id, b.data.request, { purpose: 'task' });
       processesRepo(slug).setCallCap(proc.id, b.data.maxSubscriptionCalls ?? 3);
+      const started = authorizeOrDiscard(slug, proc.id, b.data.budgetUsd, (o, m) => app.log.info(o, m));
       recordAgentEvent(slug, a.id, 'task_created', { processId: proc.id });
-      return reply.code(201).send(authorizeProcess(slug, proc.id, { budgetUsd: b.data.budgetUsd }, (o, m) => app.log.info(o, m)));
+      return reply.code(201).send(started);
     } catch (e) { return err(reply, e); }
   });
 
@@ -218,7 +228,7 @@ export async function agentsOsRoutes(app: FastifyInstance) {
     if (b.data.expectN !== cur) return reply.code(409).send({ error: 'La identidad del agente cambió mientras la editabas: recarga para ver la versión actual.' });
     try {
       const { expectN: _e, references, ...rest } = b.data;
-      const r = await updateExtras(slug, id, { ...rest, ...(references ? { knowledge: references.map(k => ({ ...k, slug: k.slug || k.title })) } : {}), ...(rest.skills ? { skills: rest.skills.map(s => ({ ...s, slug: s.slug || s.name })) } : {}) } as any, 'portal', 'Identidad editada por el propietario');
+      const r = await updateExtras(slug, id, { ...rest, ...(references ? { knowledge: references.map(k => ({ ...k, slug: slugify(k.slug || k.title) })) } : {}), ...(rest.skills ? { skills: rest.skills.map(s => ({ ...s, slug: slugify(s.slug || s.name) })) } : {}) } as any, 'portal', 'Identidad editada por el propietario');
       recordAgentEvent(slug, id, 'identity_updated', { revision: r.n });
       return r;
     } catch (e) { return err(reply, e); }

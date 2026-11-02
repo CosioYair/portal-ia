@@ -89,9 +89,12 @@ export function localDir(p: string, opts: { mustExist?: boolean } = {}): string 
     let st: fs.Stats; try { st = fs.lstatSync(abs); } catch { throw Object.assign(new Error('La carpeta no existe.'), { statusCode: 404 }); }
     if (st.isSymbolicLink() || !st.isDirectory()) throw Object.assign(new Error('Elige una carpeta normal (no un enlace).'), { statusCode: 400 });
   }
-  const inside = (root: string) => { const r = path.relative(root, abs); return r === '' || (!r.startsWith('..') && !path.isAbsolute(r)); };
+  const real = (p: string) => { try { return fs.realpathSync.native(p); } catch { return path.resolve(p); } };
+  const target = fs.existsSync(abs) ? real(abs) : path.join(real(path.dirname(abs)), path.basename(abs));
+  if (/^(\\\\|\/\/)/.test(target)) throw Object.assign(new Error('Esa carpeta está en una unidad de red: elige una carpeta de tu equipo.'), { statusCode: 400 });
+  const inside = (root: string) => { const r = path.relative(real(root).toLowerCase(), target.toLowerCase()); return r === '' || (!r.startsWith('..') && !path.isAbsolute(r)); };
   if (inside(config.dataDir)) throw Object.assign(new Error('Esa carpeta pertenece a los datos internos del Portal.'), { statusCode: 403 });
-  return abs;
+  return target;
 }
 
 export function importPreview(slug: string, dir: string) {
@@ -106,8 +109,9 @@ export function importPreview(slug: string, dir: string) {
     ok: !!d && !parsed.problems.some(p => p.blocking),
     agent: d ? { name: d.manifest.name, role: d.manifest.role, summary: d.manifest.summary, department: d.manifest.department, responsibilities: d.manifest.responsibilities, deliverables: d.manifest.deliverables, capabilities: d.manifest.capabilities.filter(c => CAPABILITIES.some(x => x.id === c)) } : null,
     requests: d ? { harness: d.manifest.harness.preferred, model: d.manifest.harness.model, tools: d.manifest.permissions.tools, autonomy: d.manifest.permissions.autonomy } : null,
-    instructions: d?.instructions ?? '', skills: d?.skills.map(s => ({ slug: s.slug, name: s.name, description: s.description })) ?? [],
-    memory: d?.memory.map(m => ({ title: m.title, text: m.text })) ?? [], references: d?.knowledge.map(k => ({ slug: k.slug, title: k.title })) ?? [],
+    // Todo lo que llegaría a sus prompts, para leerlo ANTES de importar (instrucciones, habilidades y referencias completas).
+    instructions: d?.instructions ?? '', skills: d?.skills.map(s => ({ slug: s.slug, name: s.name, description: s.description, body: s.body })) ?? [],
+    memory: d?.memory.map(m => ({ title: m.title, text: m.text })) ?? [], references: d?.knowledge.map(k => ({ slug: k.slug, title: k.title, body: k.body })) ?? [],
     note: 'Lo que la carpeta pide (arnés, herramientas, autonomía) no se concede solo: tú eliges lo que concedes. Su memoria llega como propuesta, sin verificar. El agente recibe un identificador nuevo.'
   };
 }
@@ -121,14 +125,14 @@ export async function importConfirm(slug: string, dir: string, expectHash: strin
   const d = parsed.definition;
   const agent = await createAgentFromWizard(slug, {
     ...grant, name: d.manifest.name, role: d.manifest.role, summary: d.manifest.summary, responsibilities: d.manifest.responsibilities, deliverables: d.manifest.deliverables,
-    capabilities: grant.capabilities ?? d.manifest.capabilities.filter((c): c is Capability => CAPABILITIES.some(x => x.id === c)),
+    capabilities: grant.capabilities ?? [],
     instructions: d.instructions, skills: d.skills, references: d.knowledge, initials: d.manifest.initials
   }, 'import');
   // La memoria de la carpeta llega como PROPUESTA (el propietario la verifica o la descarta).
   const lessons = lessonsRepo(slug); const ts = monotonicNow();
   for (const m of d.memory.slice(0, 50)) {
-    const l = lessons.insert({ projectId: null, role: null, tags: ['importada'], status: 'proposed', version: 1, parentId: null, title: m.title.slice(0, 120) || 'Aprendizaje importado', detector: 'import', evidence: { processId: null, processTitle: null, stepId: null, agentId: agent.id, agentName: agent.config.name, file: null, detail: `Importado de ${abs} (${m.source || 'sin origen'}) el ${ts.slice(0, 10)}; sin verificar.`, at: ts }, rootCause: null, correctiveAction: null, lessonText: m.text, source: 'import', promotedTo: null, dedupeKey: null });
-    if (l) lessons.setAgent(l.id, agent.id);
+    const l = lessons.insert({ projectId: null, role: null, tags: ['importada'], status: 'proposed', version: 1, parentId: null, title: m.title.slice(0, 120) || 'Aprendizaje importado', detector: 'import', evidence: { processId: null, processTitle: null, stepId: null, agentId: agent.id, agentName: agent.config.name, file: null, detail: `Importado de ${abs} (${m.source || 'sin origen'}) el ${ts.slice(0, 10)}; sin verificar.`, at: ts }, rootCause: null, correctiveAction: null, lessonText: m.text, source: 'import', promotedTo: null, dedupeKey: null, agentId: agent.id });
+    void l;
   }
   return agent;
 }
@@ -145,12 +149,14 @@ export async function exportFiles(slug: string, agentId: string): Promise<{ fold
 /** Copia la carpeta del agente a una carpeta elegida por el propietario (nunca sobrescribe). */
 export async function exportTo(slug: string, agentId: string, destDir: string): Promise<string> {
   const dest = localDir(destDir);
-  const inside = (root: string) => { const r = path.relative(root, dest); return r === '' || (!r.startsWith('..') && !path.isAbsolute(r)); };
+  const inside = (root: string) => { let r0 = root; try { r0 = fs.realpathSync.native(root); } catch { /* tal cual */ } const r = path.relative(r0.toLowerCase(), dest.toLowerCase()); return r === '' || (!r.startsWith('..') && !path.isAbsolute(r)); };
   if (inside(REPO_ROOT)) throw Object.assign(new Error('Elige una carpeta fuera de la instalación del Portal.'), { statusCode: 403 });
   const { folder, files } = await exportFiles(slug, agentId);
   const target = path.join(dest, folder);
   if (fs.existsSync(target)) throw Object.assign(new Error(`Ya existe ${target}: elige otra carpeta (no se sobrescribe nada).`), { statusCode: 409 });
-  for (const [rel, content] of Object.entries(files)) { const p = path.join(target, ...rel.split('/')); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, content, 'utf8'); }
+  // Creación exclusiva: nunca se sigue un enlace ni se sobrescribe nada que aparezca a la vez.
+  fs.mkdirSync(target);
+  for (const [rel, content] of Object.entries(files)) { const p = path.join(target, ...rel.split('/')); fs.mkdirSync(path.dirname(p), { recursive: true }); if (fs.realpathSync.native(path.dirname(p)).toLowerCase().indexOf(fs.realpathSync.native(target).toLowerCase()) !== 0) throw Object.assign(new Error('Ruta de exportación no válida.'), { statusCode: 400 }); fs.writeFileSync(p, content, { encoding: 'utf8', flag: 'wx' }); }
   recordAgentEvent(slug, agentId, 'exported', { to: target });
   return target;
 }

@@ -124,21 +124,31 @@ export function restrictedArgs(features: Set<string> | null): string[] {
 }
 
 /** Herramientas que expone la sesión, leídas del primer elemento «additional_tools» de `codex debug prompt-input`. */
-export function toolsFromPromptInput(json: unknown): { tools: string[]; userContext: string[] } {
+/**
+ * Herramientas que expone la sesión, leídas de `codex debug prompt-input`. Falla CERRADA: `recognized` solo es true si la
+ * salida es la lista de elementos conocida y trae su sección de herramientas; cualquier herramienta sin nombre cuenta como
+ * herramienta («(sin nombre: tipo)»), y quien llama trata como bloqueado todo lo que no esté en la lista permitida.
+ */
+export function toolsFromPromptInput(json: unknown): { tools: string[]; userContext: string[]; recognized: boolean } {
   const items = Array.isArray(json) ? json : [];
   const tools = new Set<string>(); const userContext: string[] = [];
+  const NAMESPACES = new Set(['namespace']);
   const walk = (v: unknown, inTools: boolean) => {
     if (Array.isArray(v)) { v.forEach(x => walk(x, inTools)); return; }
     if (!v || typeof v !== 'object') return;
     const o = v as Record<string, unknown>;
-    if (inTools && typeof o.name === 'string' && (o.type === 'function' || o.type === 'custom' || o.parameters || o.input_schema || o.format)) tools.add(o.name);
-    for (const [k, x] of Object.entries(o)) walk(x, inTools || k === 'tools');
+    if (inTools && typeof o.type === 'string' && !NAMESPACES.has(o.type) && (typeof o.name === 'string' || o.type !== 'object')) {
+      // Cada elemento de una lista de herramientas es una herramienta (con nombre o, si no lo tiene, por su tipo).
+      if (!(o.properties && o.type === 'object')) tools.add(typeof o.name === 'string' ? o.name : `(sin nombre: ${o.type})`);
+    }
+    for (const [k, x] of Object.entries(o)) { if (k === 'parameters' || k === 'input_schema' || k === 'format' || k === 'properties') continue; walk(x, k === 'tools' ? true : inTools); }
   };
-  for (const it of items) if (it && typeof it === 'object' && ((it as any).type === 'additional_tools' || Array.isArray((it as any).tools))) walk(it, false);
+  let section = false;
+  for (const it of items) if (it && typeof it === 'object' && ((it as any).type === 'additional_tools' || Array.isArray((it as any).tools))) { section = true; walk(it, false); }
   const text = JSON.stringify(items);
   if (/Available skills/i.test(text)) userContext.push('tus skills personales de Codex (solo su lista y descripción)');
   if (/AGENTS\.md instructions for/i.test(text)) userContext.push('un AGENTS.md global de tu carpeta de Codex');
-  return { tools: [...tools].filter(t => t !== 'functions'), userContext };
+  return { tools: [...tools].filter(t => t !== 'functions'), userContext, recognized: Array.isArray(json) && items.length > 0 && section };
 }
 
 function readModels(env: NodeJS.ProcessEnv = process.env): { id: string; name: string }[] {
@@ -152,8 +162,14 @@ function readModels(env: NodeJS.ProcessEnv = process.env): { id: string; name: s
 
 let detecting: Promise<CodexDetection> | null = null;
 /** Detección completa SIN llamar al modelo: versión, sesión, funciones y herramientas expuestas en modo restringido. */
-export function detectCodex(s: CodexSettings = getCodexSettings()): Promise<CodexDetection> {
-  detecting ??= (async () => {
+export function detectCodex(s: CodexSettings = getCodexSettings(), model: string | null = null): Promise<CodexDetection> {
+  // Con un modelo concreto (antes de cada ejecución) la comprobación es la de ESE modelo: las herramientas dependen de él.
+  if (model) return detectNow(s, model);
+  detecting ??= detectNow(s, null).finally(() => { detecting = null; });
+  return detecting;
+}
+async function detectNow(s: CodexSettings, model: string | null): Promise<CodexDetection> {
+  {
     const det: CodexDetection = { checkedAt: new Date().toISOString(), installed: false, path: null, version: null, auth: 'unknown', billing: 'unverified', exposedTools: null, blockedTools: [], userContext: [], restricted: false, models: [], credentialVars: codexCredentialVars(), problems: [] };
     const cli = codexCommandFor(s.cliPath) ?? findCodex();
     if (!cli) { det.problems.push('No se encontró la CLI de Codex (instala la app de Codex o indica la ruta de codex.exe).'); return det; }
@@ -168,28 +184,30 @@ export function detectCodex(s: CodexSettings = getCodexSettings()): Promise<Code
       if (det.auth === 'none') det.problems.push('Codex no tiene sesión iniciada: ejecuta «codex login» con tu cuenta de ChatGPT.');
       const f = await run(cli, ['features', 'list'], work);
       const features = new Set(f.stdout.split(/\r?\n/).map(x => x.trim().split(/\s+/)[0]).filter(Boolean));
-      const pi = await run(cli, ['debug', 'prompt-input', ...restrictedArgs(features.size ? features : null), 'portal-ia-comprobacion'], work, 30_000);
-      let parsed: unknown = null; try { parsed = JSON.parse(pi.stdout); } catch { /* no comprobable */ }
-      if (parsed) {
-        const t = toolsFromPromptInput(parsed);
+      // `debug prompt-input` no admite --ignore-user-config ni -s: se le pasan las mismas restricciones expresables como
+      // configuración (-c y --disable) y el modelo. La ejecución real además ignora la configuración del usuario, lo que solo
+      // puede QUITAR herramientas (MCP, plugins), nunca añadirlas.
+      const pi = await run(cli, ['debug', 'prompt-input', ...restrictedArgs(features.size ? features : null), ...(model && model !== 'default' ? ['-c', `model=${JSON.stringify(model)}`] : []), 'portal-ia-comprobacion'], work, 30_000);
+      let parsed: unknown = null; try { parsed = pi.code === 0 ? JSON.parse(pi.stdout) : null; } catch { /* no comprobable */ }
+      const t = parsed ? toolsFromPromptInput(parsed) : null;
+      if (t?.recognized) {
         det.exposedTools = t.tools; det.userContext = t.userContext;
         det.blockedTools = t.tools.filter(x => !ALLOWED_TOOLS.has(x));
-      } else det.problems.push('No se pudo comprobar qué herramientas expondría Codex (codex debug prompt-input): por seguridad, no se ejecuta.');
+      } else det.problems.push('No se pudo comprobar qué herramientas expondría Codex (codex debug prompt-input no devolvió la salida esperada): por seguridad, no se ejecuta.');
       if (det.blockedTools.length) det.problems.push(`Esta versión de Codex expone herramientas que el Portal no puede desactivar ni acotar (${det.blockedTools.join(', ')}): podrían leer archivos fuera de lo autorizado. El Portal no ejecuta agentes con Codex hasta que la versión instalada permita el modo restringido.`);
       det.restricted = det.exposedTools !== null && det.blockedTools.length === 0;
       if (det.credentialVars.length) det.problems.push(`Hay credenciales de OpenAI en el entorno del Portal (${det.credentialVars.join(', ')}): no se pasan a Codex.`);
       det.models = readModels();
     } finally { try { fs.rmSync(work, { recursive: true, force: true }); } catch { /* temporal */ } }
-    try { settingsRepo.set(DETECTION_KEY, JSON.stringify(det)); } catch { /* sin base */ }
+    if (!model) { try { settingsRepo.set(DETECTION_KEY, JSON.stringify(det)); } catch { /* sin base */ } }
     return det;
-  })().finally(() => { detecting = null; });
-  return detecting;
+  }
 }
 
 /** ¿Puede ESTE agente ejecutar con Codex ahora? (sin efectos; con la última detección). */
 export function codexGate(agent: Agent, det: CodexDetection | null = lastCodexDetection(), s: CodexSettings = getCodexSettings()): { ok: true } | { ok: false; reason: string } {
   if ((agent.config.backend ?? 'api') !== 'codex') return { ok: false, reason: 'El agente no usa Codex.' };
-  if (!s.enabled || !s.authorizedAt) return { ok: false, reason: 'El arnés «Codex» no está habilitado (Proveedores → Codex). No se ha usado ningún otro arnés en su lugar.' };
+  if (!s.enabled || !s.authorizedAt) return { ok: false, reason: 'Codex no está habilitado (Oficina → Arneses). No se ha usado ningún otro arnés en su lugar.' };
   if (!det?.installed) return { ok: false, reason: 'No se encontró la CLI de Codex.' };
   if (det.billing !== 'subscription') return { ok: false, reason: det.problems[0] ?? 'Codex no está verificado con tu sesión de ChatGPT.' };
   if (!det.restricted) return { ok: false, reason: det.problems.find(p => /herramientas/.test(p)) ?? 'Codex no está verificado en modo restringido.' };
@@ -210,6 +228,7 @@ export function parseCodexLine(line: string): CodexEvent | null {
   if (t === 'turn.started') return { kind: 'turn' };
   if (t === 'turn.completed') { const u = j.usage ?? {}; return { kind: 'usage', usage: { input: Number(u.input_tokens ?? 0), cached: Number(u.cached_input_tokens ?? 0), output: Number(u.output_tokens ?? 0) } }; }
   if (t === 'turn.failed' || t === 'error') return { kind: 'error', detail: String(j.error?.message ?? j.message ?? 'error de Codex') };
+  if (t === 'thread.completed' || t === 'turn.updated') return null;
   if (t.startsWith('item.')) {
     const it = j.item ?? {}; const type = String(it.type ?? it.item_type ?? '');
     if (TEXT_ITEMS.has(type)) return t === 'item.completed' && (type === 'agent_message' || type === 'assistant_message' || type === 'message') ? { kind: 'message', detail: String(it.text ?? '') } : null;
@@ -217,7 +236,8 @@ export function parseCodexLine(line: string): CodexEvent | null {
     if (type === 'todo_list') return null;
     return { kind: 'tool', detail: type || 'desconocido' };
   }
-  return null;
+  // Cualquier otro tipo de evento (p. ej. de una versión nueva con órdenes o herramientas) detiene la ejecución: lista permitida.
+  return t ? { kind: 'tool', detail: `evento ${t}` } : null;
 }
 
 const codexError = (code: 'usage_limit' | 'call_cap' | 'backend_unavailable' | 'timeout' | 'cancelled' | 'provider_error', message: string) => new ProviderRequestError({ code, message });
@@ -229,6 +249,7 @@ export function classifyCodexFailure(text: string): 'usage_limit' | 'backend_una
 }
 
 let active = 0; const waiters: (() => void)[] = [];
+const QUEUE_MAX_MS = 10 * 60_000;
 const runningKeys = new Set<string>();
 export const runningCodex = () => active;
 
@@ -243,25 +264,33 @@ export interface CodexCompletion extends CompletionResult { backendLabel: string
 export async function codexComplete(t: CodexTarget, req: CompletionRequest, signal: AbortSignal, onLive: (patch: Partial<LiveCall>) => void = () => undefined): Promise<CodexCompletion> {
   const say = (lastEvent: string, state: LiveCall['state'] = 'waiting') => onLive({ state, lastEvent, lastEventAt: new Date().toISOString() });
   say('Comprobando Codex (sesión y modo restringido, sin llamar al modelo)', 'preparing');
-  const s = getCodexSettings(); const det = await detectCodex(s);
+  const s = getCodexSettings(); const det = await detectCodex(s, req.model || 'default');
   const g = codexGate(t.agent, det, s); if (!g.ok) throw codexError('backend_unavailable', g.reason);
   const cli = codexCommandFor(det.path); if (!cli) throw codexError('backend_unavailable', 'No se encontró la CLI de Codex.');
   const key = crypto.createHash('sha256').update([t.processId, t.stepId, t.agent.id, req.model, req.system, req.user].join('\u0000')).digest('hex');
   if (runningKeys.has(key)) throw codexError('backend_unavailable', 'Ya hay una ejecución idéntica de Codex en curso: no se duplica.');
   runningKeys.add(key);
   try {
+    const queuedSince = Date.now();
     while (active >= 1) {
       if (signal.aborted) throw codexError('cancelled', 'Cancelado mientras esperaba turno para Codex.');
+      if (Date.now() - queuedSince > QUEUE_MAX_MS) throw codexError('timeout', `Codex lleva más de ${Math.round(QUEUE_MAX_MS / 60000)} min ocupado con otra ejecución: no se ha enviado nada. Inténtalo más tarde.`);
       say('En cola: Codex termina otra ejecución. Nada se ha enviado.', 'queued');
-      await new Promise<void>(res => { const w = () => { signal.removeEventListener('abort', w); res(); }; waiters.push(w); signal.addEventListener('abort', w, { once: true }); });
+      await new Promise<void>(res => {
+        const done = () => { clearTimeout(tm); signal.removeEventListener('abort', done); const i = waiters.indexOf(done); if (i >= 0) waiters.splice(i, 1); res(); };
+        const tm = setTimeout(done, 30_000); waiters.push(done); signal.addEventListener('abort', done, { once: true });
+      });
     }
     if (signal.aborted) throw codexError('cancelled', 'Cancelado antes de empezar.');
     // Tope de llamadas y registro en el mismo tramo síncrono (sin carreras).
     const cap = callCapCheck(t.slug, t.processId); if (!cap.ok) throw codexError('call_cap', cap.detail);
-    active++;
     const runs = claudeCodeRunsRepo(t.slug);
-    const run0 = runs.start({ mode: 'codex', projectId: t.projectId, processId: t.processId, stepId: t.stepId, agentId: t.agent.id, agentName: t.agent.config.name, model: req.model || 'predeterminado de Codex', billing: 'subscription', authMethod: 'chatgpt', subscriptionType: null });
-    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-codex-'));
+    active++;
+    let run0: ReturnType<typeof runs.start>; let work: string;
+    try {
+      run0 = runs.start({ mode: 'codex', projectId: t.projectId, processId: t.processId, stepId: t.stepId, agentId: t.agent.id, agentName: t.agent.config.name, model: req.model || 'predeterminado de Codex', billing: 'subscription', authMethod: 'chatgpt', subscriptionType: null });
+      work = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-codex-'));
+    } catch (e) { active = Math.max(0, active - 1); waiters.shift()?.(); throw e; }
     const cwd = path.join(work, 'vacia'); fs.mkdirSync(cwd);
     const out = path.join(work, 'ultimo-mensaje.txt');
     const started = Date.now(); let usage = { input: 0, cached: 0, output: 0 }; let text = ''; let failure: Error | null = null; let incident: string | null = null;

@@ -7,6 +7,9 @@ import { effectiveVersion, promoteLesson, setAgentTemplateVersion, templatesRepo
 import { PolicyError } from '../services/executionPolicy.ts';
 
 /** M4 · Lecciones validadas y M5 · plantillas versionadas. Ninguna ruta llama a la IA salvo /propose (autorizada). */
+/** La memoria de un agente (lessons.agent_id) se gestiona en su panel; estas rutas son de la organización. */
+function agentMemoryGuard(slug: string, id: string): string | null { const l = lessonsRepo(slug).get(id); return l?.agentId ? 'Ese aprendizaje es la memoria de un agente: gestiónalo en su panel (Memoria).' : null; }
+
 export async function learningRoutes(app: FastifyInstance) {
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
   const fail = (reply: any, e: any) => reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : undefined });
@@ -33,25 +36,25 @@ export async function learningRoutes(app: FastifyInstance) {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     try { return estimatePropose(slug, id); } catch (e: any) { return fail(reply, e); }
   });
-  app.post('/api/workspaces/:slug/lessons/:id/propose', async (req, reply) => {
+  app.post('/api/workspaces/:slug/lessons/:id/propose', async (req, reply) => { { const { slug: s0, id: i0 } = req.params as any; const g = agentMemoryGuard(s0, i0); if (g) return reply.code(409).send({ error: g }); }
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ authorized: z.literal(true) }).safeParse(req.body);
     if (!body.success) return reply.code(403).send({ error: 'Proponer una lección llama a la IA: requiere autorización explícita.', code: 'authorization_required' });
     try { return await proposeLesson(slug, id, { authorized: true }); } catch (e: any) { return fail(reply, e); }
   });
-  app.post('/api/workspaces/:slug/lessons/:id/validate', async (req, reply) => {
+  app.post('/api/workspaces/:slug/lessons/:id/validate', async (req, reply) => { { const { slug: s0, id: i0 } = req.params as any; const g = agentMemoryGuard(s0, i0); if (g) return reply.code(409).send({ error: g }); }
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ lessonText: z.string().trim().min(10).max(1500).optional(), rootCause: z.string().max(1000).optional(), correctiveAction: z.string().max(1000).optional(), role: z.enum(['planner', 'implementer', 'reviewer', 'consultant']).nullable().optional(), tags: z.array(z.string().max(40)).max(6).optional() }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Datos no válidos', issues: body.error.issues });
     try { return validateLesson(slug, id, body.data); } catch (e: any) { return fail(reply, e); }
   });
-  app.post('/api/workspaces/:slug/lessons/:id/reject', async (req, reply) => { const { slug, id } = req.params as any; if (!guard(slug, reply)) return; try { return setLessonStatus(slug, id, 'rejected'); } catch (e: any) { return fail(reply, e); } });
-  app.post('/api/workspaces/:slug/lessons/:id/obsolete', async (req, reply) => { const { slug, id } = req.params as any; if (!guard(slug, reply)) return; try { return setLessonStatus(slug, id, 'obsolete'); } catch (e: any) { return fail(reply, e); } });
+  app.post('/api/workspaces/:slug/lessons/:id/reject', async (req, reply) => { { const { slug: s0, id: i0 } = req.params as any; const g = agentMemoryGuard(s0, i0); if (g) return reply.code(409).send({ error: g }); } const { slug, id } = req.params as any; if (!guard(slug, reply)) return; try { return setLessonStatus(slug, id, 'rejected'); } catch (e: any) { return fail(reply, e); } });
+  app.post('/api/workspaces/:slug/lessons/:id/obsolete', async (req, reply) => { { const { slug: s0, id: i0 } = req.params as any; const g = agentMemoryGuard(s0, i0); if (g) return reply.code(409).send({ error: g }); } const { slug, id } = req.params as any; if (!guard(slug, reply)) return; try { return setLessonStatus(slug, id, 'obsolete'); } catch (e: any) { return fail(reply, e); } });
 
   // ---- M5 · plantillas ----
   app.get('/api/workspaces/:slug/templates', async (req, reply) => { const { slug } = req.params as any; if (!guard(slug, reply)) return; return templatesRepo(slug).keys(); });
   app.get('/api/workspaces/:slug/templates/:key/versions', async (req, reply) => { const { slug, key } = req.params as any; if (!guard(slug, reply)) return; return templatesRepo(slug).versions(key); });
-  app.post('/api/workspaces/:slug/lessons/:id/promote', async (req, reply) => {
+  app.post('/api/workspaces/:slug/lessons/:id/promote', async (req, reply) => { { const { slug: s0, id: i0 } = req.params as any; const g = agentMemoryGuard(s0, i0); if (g) return reply.code(409).send({ error: g }); }
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ authorized: z.literal(true), targetKey: z.string().max(80).nullable().optional() }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita.' });

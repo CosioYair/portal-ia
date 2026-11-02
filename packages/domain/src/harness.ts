@@ -44,7 +44,7 @@ const PROPOSES = { level: 'yes' as const, note: 'Entrega los cambios como texto;
 export const HARNESSES: HarnessDescriptor[] = [
   {
     id: 'claude-code', name: 'Claude Code', vendor: 'Anthropic', modelVendor: 'anthropic', billing: 'subscription',
-    summary: 'La CLI oficial de Claude Code con tu suscripción, en modo restringido: sin herramientas propias, solo lectura a través del Portal.',
+    summary: 'Claude, con tu suscripción de Claude. Solo lee lo que el Portal le permite y nunca cambia nada por su cuenta.',
     capabilities: {
       unattended: { level: 'yes' }, structured_output: { level: 'yes' }, progress: { level: 'yes', note: 'Turnos y herramientas en directo.' },
       read_project: { level: 'yes', note: 'Con el puente de solo lectura del Portal (sin .env, claves, .git ni data/).' }, propose_changes: PROPOSES,
@@ -54,7 +54,7 @@ export const HARNESSES: HarnessDescriptor[] = [
   },
   {
     id: 'claude-code-terminal', name: 'Claude Code (tu consola)', vendor: 'Anthropic', modelVendor: 'anthropic', billing: 'unverified',
-    summary: 'Las tareas esperan a que las atiendas desde tu propia consola de Claude Code conectada al Portal.',
+    summary: 'Para usuarios avanzados: las tareas esperan a que las atiendas tú en tu propia consola de Claude Code. No trabaja solo.',
     capabilities: {
       unattended: { level: 'no', note: 'Solo avanza cuando la atiendes en tu consola.' }, structured_output: { level: 'partial', note: 'Depende de tu sesión.' }, progress: { level: 'partial', note: 'Lo que informe tu consola.' },
       read_project: { level: 'yes', note: 'Con el puente del Portal.' }, propose_changes: PROPOSES, run_commands: NO_CMDS, web_research: { level: 'partial', note: 'Lo que permita tu consola.' }, images: { level: 'no' },
@@ -63,7 +63,7 @@ export const HARNESSES: HarnessDescriptor[] = [
   },
   {
     id: 'codex', name: 'Codex', vendor: 'OpenAI', modelVendor: 'openai', billing: 'subscription',
-    summary: 'La CLI oficial de Codex (`codex exec`) con tu sesión de ChatGPT, en modo restringido: sin shell, sin escritura, sin plugins ni configuración de usuario, en una carpeta vacía.',
+    summary: 'Codex de OpenAI, con tu cuenta de ChatGPT. El Portal le da solo lo que necesita cada tarea; no puede tocar tus archivos.',
     capabilities: {
       unattended: { level: 'yes' }, structured_output: { level: 'yes', note: 'Con --output-schema.' }, progress: { level: 'yes', note: 'Eventos JSONL de la CLI.' },
       read_project: { level: 'partial', note: 'Recibe del Portal el contexto y los archivos del encargo; no puede pedir más por su cuenta.' }, propose_changes: PROPOSES,
@@ -73,7 +73,7 @@ export const HARNESSES: HarnessDescriptor[] = [
   },
   {
     id: 'api', name: 'API del proveedor', vendor: 'Anthropic u OpenAI', modelVendor: 'anthropic', billing: 'api',
-    summary: 'Llamadas directas a la API con tu clave: se facturan por uso y exigen presupuesto autorizado.',
+    summary: 'Directamente con tu clave de API: se paga por uso, así que cada trabajo te pide un presupuesto.',
     capabilities: {
       unattended: { level: 'yes' }, structured_output: { level: 'yes' }, progress: { level: 'partial', note: 'Tokens recibidos en directo.' },
       read_project: { level: 'partial', note: 'Recibe del Portal el contexto y los archivos del encargo.' }, propose_changes: PROPOSES,

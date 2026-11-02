@@ -83,8 +83,12 @@ export function readFolder(dir: string): { files: PortableFiles; ignored: string
 
 /** Escribe los archivos de una revisión: cada uno a un temporal y luego rename; borra solo archivos permitidos que sobran. */
 function writeFiles(dir: string, files: PortableFiles) {
+  const parent = path.dirname(dir);
+  fs.mkdirSync(parent, { recursive: true });
+  if (fs.existsSync(dir) && fs.lstatSync(dir).isSymbolicLink()) throw Object.assign(new Error('La carpeta del agente es un enlace (symlink o junction): el Portal no escribe a través de él. Sustitúyela por una carpeta normal.'), { statusCode: 400 });
   fs.mkdirSync(dir, { recursive: true });
   const root = fs.realpathSync(dir);
+  if (path.dirname(root) !== fs.realpathSync(parent)) throw Object.assign(new Error('La carpeta del agente no está dentro de la carpeta de agentes del Portal.'), { statusCode: 400 });
   for (const [rel, content] of Object.entries(files)) {
     if (!allowedPortablePath(rel)) throw new Error(`Ruta no permitida: ${rel}`);
     const target = path.join(root, ...rel.split('/'));
@@ -235,7 +239,10 @@ function resolveWriting(slug: string, agentId: string) {
 /** Escribe una nueva revisión adoptada. Se niega si hay un cambio externo sin revisar (nunca lo pisa). */
 export async function writeRevision(slug: string, agentId: string, files: PortableFiles, source: RevisionSource, note: string, by = 'owner'): Promise<AgentRevision> {
   for (const [p, c] of Object.entries(files)) { const s = findSecret(c); if (s) throw Object.assign(new Error(`${p} contiene lo que parece una ${s}: las credenciales nunca van en la carpeta de un agente.`), { statusCode: 400 }); }
-  return withLock(`${slug}:${agentId}`, () => {
+  return withLock(`${slug}:${agentId}`, () => writeRevisionUnlocked(slug, agentId, files, source, note, by));
+}
+function writeRevisionUnlocked(slug: string, agentId: string, files: PortableFiles, source: RevisionSource, note: string, by: string): AgentRevision {
+  {
     resolveWriting(slug, agentId);
     const repo = agentFoldersRepo(slug); const f = repo.folderOf(agentId);
     if (!f) throw Object.assign(new Error('El agente aún no tiene carpeta.'), { statusCode: 409 });
@@ -243,10 +250,16 @@ export async function writeRevision(slug: string, agentId: string, files: Portab
     if (adopted && disk && hashFiles(disk.files) !== adopted.hash) throw Object.assign(new Error('La carpeta del agente tiene cambios hechos fuera del Portal sin revisar: adóptalos o descártalos antes de cambiar nada.'), { statusCode: 409, external: true });
     if (adopted && adopted.hash === hashFiles(files)) return adopted;
     const n = repo.begin(agentId, files, source, note, by);
-    try { writeFiles(folderPath(slug, f.folder), files); } catch (e) { repo.abandon(agentId, n); throw e; }
+    try { writeFiles(folderPath(slug, f.folder), files); }
+    catch (e) {
+      repo.abandon(agentId, n);
+      // Una escritura a medias (p. ej. un antivirus bloquea un rename) no debe parecer un cambio hecho fuera del Portal.
+      if (adopted) { try { writeFiles(folderPath(slug, f.folder), adopted.files); } catch { /* lo verá el propietario en Archivos */ } }
+      throw e;
+    }
     repo.adopt(agentId, n);
     return repo.revisions(agentId).find(r => r.n === n)!;
-  });
+  }
 }
 
 /** Lo propio de la carpeta adoptada (o lo vacío si aún no tiene): lo que usan los prompts. */
@@ -259,11 +272,9 @@ export function adoptedExtras(slug: string, a: Agent): AgentExtras {
 function freeFolderName(slug: string, a: Agent): string {
   // «<clave>-<id8>»: único (dos proyectos pueden tener su propio pj-dev), ASCII, corto y estable aunque se renombre.
   const agentId = a.id; const repo = agentFoldersRepo(slug); const base = slugify(`${a.key}-${a.id.slice(0, 8)}`); let candidate = base; let i = 2;
-  const takenOnDisk = (c: string) => {
-    const dir = folderPath(slug, c); if (!fs.existsSync(dir)) return false;
-    // Una carpeta huérfana con el mismo id (migración interrumpida) se reutiliza; cualquier otra se respeta.
-    try { const y = readFolder(dir).files['agent.yaml']; return !(y && y.includes(`id: ${agentId}`)); } catch { return true; }
-  };
+  void agentId;
+  // Cualquier cosa que ya exista en disco con ese nombre se respeta y NO se adopta: se usa el siguiente nombre libre.
+  const takenOnDisk = (c: string) => { try { fs.lstatSync(folderPath(slug, c)); return true; } catch { return false; } };
   while (repo.folderTaken(candidate) || takenOnDisk(candidate)) candidate = `${base}-${i++}`;
   return candidate;
 }
@@ -285,12 +296,6 @@ export async function syncAgentFolder(slug: string, a: Agent, note = 'Sincroniza
   const extras = (adopted && extrasFromFiles(adopted.files)) ?? EMPTY_EXTRAS(a);
   const files = definitionToFiles(definitionFor(slug, a, extras));
   if (!adopted) {
-    const disk = diskFiles(slug, f.folder);
-    // Carpeta preexistente del mismo agente (escritura anterior interrumpida): se adopta tal cual si es válida.
-    if (disk && disk.files['agent.yaml']?.includes(`id: ${a.id}`) && filesToDefinition(disk.files).definition) {
-      const n = repo.begin(a.id, disk.files, 'migrated', 'Carpeta existente del agente', 'portal'); repo.adopt(a.id, n);
-      return { created, revision: repo.revisions(a.id)[0], pendingExternal: false };
-    }
     const rev = await writeRevision(slug, a.id, files, created ? 'migrated' : 'portal', created ? 'Carpeta creada a partir de la configuración existente del agente (sin cambiar la fila)' : note, 'portal');
     return { created, revision: rev, pendingExternal: false };
   }
@@ -317,7 +322,10 @@ export function folderStatus(slug: string, a: Agent) {
   resolveWriting(slug, a.id);
   const repo = agentFoldersRepo(slug); const f = repo.folderOf(a.id);
   if (!f) return { folder: null, path: null, adopted: null, external: null, revisions: [], ignored: [] as string[] };
-  const adopted = repo.adopted(a.id); const disk = diskFiles(slug, f.folder);
+  const adopted = repo.adopted(a.id);
+  // Huella en caché por firma: solo se relee el contenido si la carpeta cambió de verdad.
+  const dh = diskHash(folderPath(slug, f.folder));
+  const disk = adopted && dh && dh === adopted.hash ? { files: adopted.files, ignored: diskFiles(slug, f.folder)?.ignored ?? [] } : diskFiles(slug, f.folder);
   let external: { hash: string; diff: ReturnType<typeof diffFiles>; problems: ReturnType<typeof filesToDefinition>['problems']; notAdopted: string[] } | null = null;
   if (adopted && disk && hashFiles(disk.files) !== adopted.hash) {
     const parsed = filesToDefinition(disk.files);
@@ -338,6 +346,7 @@ function notAdoptedChanges(before: PortableFiles, after: PortableFiles): string[
   const out: string[] = [];
   if (a.harness.preferred !== b.harness.preferred || a.harness.model !== b.harness.model) out.push(`Arnés/modelo (${b.harness.preferred} · ${b.harness.model || 'predeterminado'}): se cambia en Configuración, con su comprobación y tu autorización.`);
   if (a.harness.effort !== b.harness.effort) out.push('Esfuerzo: se cambia en Configuración.');
+  if (a.permissions.autonomy !== b.permissions.autonomy) out.push('Autonomía: se cambia en el Portal, no desde la carpeta.');
   if (a.capabilities.join(',') !== b.capabilities.join(',')) out.push('Capacidades (qué papel tiene en el equipo de una historia): se cambian en Configuración, no desde la carpeta.');
   if (a.permissions.tools.join(',') !== b.permissions.tools.join(',')) out.push(`Herramientas (${b.permissions.tools.join(', ') || 'ninguna'}): se conceden en Configuración, nunca desde la carpeta.`);
   if (a.id !== b.id) out.push('El identificador (id) no se puede cambiar.');
@@ -349,7 +358,22 @@ function notAdoptedChanges(before: PortableFiles, after: PortableFiles): string[
  * Adopta el cambio externo: la nueva revisión es lo que hay en disco, salvo arnés, permisos e id, que se reponen desde la
  * base (y se reescriben en la carpeta). Nombre, papel, resumen, responsabilidades y departamento pasan a la fila.
  */
-export async function adoptExternal(slug: string, agentId: string, expectHash: string, onRow: (patch: { name: string; role: string; summary: string; responsibilities: string[]; initials: string; department: string | null; capabilities: string[] }) => void): Promise<AgentRevision> {
+type RowPatch = { name: string; role: string; summary: string; responsibilities: string[]; initials: string; department: string | null; capabilities: string[] };
+/** Aplica a la fila lo que se adopta y, si lo que sigue falla, la deja exactamente como estaba. */
+function withRowRollback<T>(slug: string, agentId: string, onRow: (p: RowPatch) => void, patch: RowPatch, rest: () => T): T {
+  const agents = agentsRepo(slug); const before = agents.get(agentId)!;
+  if (patch.department !== null && (patch.department.trim().length < 2 || patch.department.trim().length > 60)) throw Object.assign(new Error('El departamento de la carpeta no es válido (2–60 caracteres).'), { statusCode: 400 });
+  try { onRow(patch); return rest(); }
+  catch (e) { try { agents.updateConfig(agentId, before.config); agents.updateTemplateMeta(agentId, before.template); } catch { /* se informa el error original */ } throw e; }
+}
+const rowPatchOf = (d: PortableAgentDefinition): RowPatch => ({ name: d.manifest.name, role: d.manifest.role, summary: d.manifest.summary, responsibilities: d.manifest.responsibilities, initials: d.manifest.initials, department: d.manifest.department, capabilities: d.manifest.capabilities });
+
+/**
+ * Adopta el cambio externo: la nueva revisión es lo que hay en disco, salvo arnés, permisos (herramientas y autonomía),
+ * capacidades, id y memoria, que se reponen desde la base (y se reescriben en la carpeta). Nombre, papel, resumen,
+ * responsabilidades y departamento pasan a la fila.
+ */
+export async function adoptExternal(slug: string, agentId: string, expectHash: string, onRow: (patch: RowPatch) => void): Promise<AgentRevision> {
   return withLock(`${slug}:${agentId}`, async () => {
     const a = agentsRepo(slug).get(agentId); if (!a) throw Object.assign(new Error('Agente no encontrado'), { statusCode: 404 });
     const repo = agentFoldersRepo(slug); const f = repo.folderOf(agentId); const disk = f ? diskFiles(slug, f.folder) : null;
@@ -358,14 +382,16 @@ export async function adoptExternal(slug: string, agentId: string, expectHash: s
     const parsed = filesToDefinition(disk.files);
     const blocking = parsed.problems.filter(p => p.blocking);
     if (!parsed.definition || blocking.length) throw Object.assign(new Error(`No se puede adoptar: ${blocking.map(p => `${p.path} — ${p.message}`).join(' · ') || 'carpeta no válida'}`), { statusCode: 400 });
-    const d = parsed.definition;
-    onRow({ name: d.manifest.name, role: d.manifest.role, summary: d.manifest.summary, responsibilities: d.manifest.responsibilities, initials: d.manifest.initials, department: d.manifest.department, capabilities: d.manifest.capabilities });
-    const fresh = agentsRepo(slug).get(agentId)!;
-    const files = definitionToFiles(definitionFor(slug, fresh, { instructions: d.instructions, skills: d.skills, memory: d.memory, knowledge: d.knowledge, deliverables: d.manifest.deliverables, autonomy: d.manifest.permissions.autonomy }));
-    const n = repo.begin(agentId, files, 'external', 'Cambio hecho fuera del Portal, revisado y adoptado por el propietario', 'owner');
-    try { writeFiles(folderPath(slug, f.folder), files); } catch (e) { repo.abandon(agentId, n); throw e; }
-    repo.adopt(agentId, n);
-    return repo.revisions(agentId).find(r => r.n === n)!;
+    const d = parsed.definition; const current = adoptedExtras(slug, a);
+    return withRowRollback(slug, agentId, onRow, rowPatchOf(d), () => {
+      const fresh = agentsRepo(slug).get(agentId)!;
+      const files = definitionToFiles(definitionFor(slug, fresh, { instructions: d.instructions, skills: d.skills, memory: [], knowledge: d.knowledge, deliverables: d.manifest.deliverables, autonomy: current.autonomy }));
+      // El cambio externo sigue en disco: se escribe la revisión adoptada encima (la huella del disco ya se comprobó).
+      const n = repo.begin(agentId, files, 'external', 'Cambio hecho fuera del Portal, revisado y adoptado por el propietario', 'owner');
+      try { writeFiles(folderPath(slug, f.folder), files); } catch (e) { repo.abandon(agentId, n); throw e; }
+      repo.adopt(agentId, n);
+      return repo.revisions(agentId).find(r => r.n === n)!;
+    });
   });
 }
 
@@ -381,16 +407,20 @@ export async function discardExternal(slug: string, agentId: string): Promise<vo
 
 /**
  * Vuelve a una revisión anterior (nueva revisión «restore»). Lo propio de la carpeta (instrucciones, habilidades,
- * memoria, referencias) vuelve tal cual; la identidad pasa a la fila. Arnés y permisos NO cambian con esto.
+ * referencias) vuelve tal cual; la identidad pasa a la fila. Arnés, permisos, autonomía y memoria NO cambian con esto.
  */
-export async function restoreRevision(slug: string, agentId: string, n: number, onRow: Parameters<typeof adoptExternal>[3]): Promise<AgentRevision> {
-  const repo = agentFoldersRepo(slug); const files = repo.revisionFiles(agentId, n);
-  if (!files) throw Object.assign(new Error('Revisión no encontrada'), { statusCode: 404 });
-  const d = filesToDefinition(files).definition; if (!d) throw Object.assign(new Error('La revisión no es válida.'), { statusCode: 400 });
-  onRow({ name: d.manifest.name, role: d.manifest.role, summary: d.manifest.summary, responsibilities: d.manifest.responsibilities, initials: d.manifest.initials, department: d.manifest.department, capabilities: d.manifest.capabilities });
-  const fresh = agentsRepo(slug).get(agentId)!;
-  const out = definitionToFiles(definitionFor(slug, fresh, { instructions: d.instructions, skills: d.skills, memory: d.memory, knowledge: d.knowledge, deliverables: d.manifest.deliverables, autonomy: d.manifest.permissions.autonomy }));
-  return writeRevision(slug, agentId, out, 'restore', `Vuelta a la revisión ${n}`);
+export async function restoreRevision(slug: string, agentId: string, n: number, onRow: (patch: RowPatch) => void): Promise<AgentRevision> {
+  return withLock(`${slug}:${agentId}`, () => {
+    const repo = agentFoldersRepo(slug); const files = repo.revisionFiles(agentId, n);
+    if (!files) throw Object.assign(new Error('Revisión no encontrada'), { statusCode: 404 });
+    const d = filesToDefinition(files).definition; if (!d) throw Object.assign(new Error('La revisión no es válida.'), { statusCode: 400 });
+    const a = agentsRepo(slug).get(agentId)!; const current = adoptedExtras(slug, a);
+    return withRowRollback(slug, agentId, onRow, rowPatchOf(d), () => {
+      const fresh = agentsRepo(slug).get(agentId)!;
+      const out = definitionToFiles(definitionFor(slug, fresh, { instructions: d.instructions, skills: d.skills, memory: [], knowledge: d.knowledge, deliverables: d.manifest.deliverables, autonomy: current.autonomy }));
+      return writeRevisionUnlocked(slug, agentId, out, 'restore', `Vuelta a la revisión ${n}`, 'owner');
+    });
+  });
 }
 
 /** Cambia lo propio de la carpeta (instrucciones, habilidades, memoria, referencias, entregables, autonomía). */

@@ -1,6 +1,6 @@
 import { normalizeGauntlet, normalizePipeline, type PipelineConfig, type Process } from '@portal-ia/domain';
 import { sameWorkRunning } from './executionLocks.ts';
-import { processesRepo } from '../db/workspace.ts';
+import { agentsRepo, processesRepo } from '../db/workspace.ts';
 import { trackJob } from './activeJobs.ts';
 import { clearCancel, isCancelled, runAssessment } from './assessment.ts';
 import { teamReadiness } from './claudeCode/backend.ts';
@@ -36,6 +36,13 @@ export function authorizeProcess(slug: string, id: string, input: AuthorizeInput
   // Encargos (de un agente, de un departamento o del Asistente): también se comprueba su equipo antes de empezar, y con
   // TODO el equipo por una suscripción (Claude Code o Codex) no necesitan presupuesto de API. Un encargo no cede a la API.
   const delegated = proc.kind === 'delegated_task';
+  // Un encargo fijó el arnés de cada participante al crearse: si alguno cambió desde entonces, no empieza.
+  if (delegated && proc.delegation?.pins) {
+    for (const [agentId, pin] of Object.entries(proc.delegation.pins)) {
+      const a = agentsRepo(slug).get(agentId); const now = a ? (a.config.backend ?? 'api') : null;
+      if (a && now !== pin.harness) throw fail(409, `El arnés de «${a.config.name}» cambió desde que se creó este encargo (${pin.harness} → ${now}): no se inicia. Crea el encargo de nuevo para usar el arnés actual.`, 'harness_changed');
+    }
+  }
   const readiness = story || delegated ? teamReadiness(slug, id) : null;
   // Sin presupuesto de API (0 USD): solo con TODO el equipo por la suscripción, sin alternativa por la API; lo limita su tope de llamadas.
   const noApi = !(input.budgetUsd >= 0.1);

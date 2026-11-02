@@ -1,3 +1,32 @@
+# Portal IA · Sistema operativo visual de agentes (2 de noviembre de 2026)
+
+**Estado: implementado y verificado en la rama `mejora/sistema-operativo-agentes`** (desde `6eb119f`).
+**NO está integrado en `main`, NO está publicado y NO está activado:** las tres cosas requieren tu autorización.
+Detalle: `docs/sistema-operativo-agentes.md` (referencia, arquitectura, diseño, recorridos, Gauntlet, pruebas, rendimiento,
+activación, limitaciones), `docs/agentes-portables.md` (carpeta del agente) y `docs/arneses.md` (arneses y Codex).
+
+## Qué cambia para el propietario
+
+- **La oficina es la portada** (`/oficina`; el Panel sigue en `/panel`): cada departamento es una sala y cada agente un
+  puesto con su personaje y su estado REAL (trabajando, en cola, te necesita, disponible). Vista Lista, búsqueda, tira de
+  agentes y barra «Pide algo a tu empresa» (`@agente`, `Departamento: …` o el Asistente).
+- **Panel de cada agente**: Chat, Solicitudes, Trabajo (encargos con entregable), Archivos (su carpeta portable),
+  Memoria (lo que tú verificas a partir de su trabajo) y Configuración (departamento, arnés, permisos, registro).
+- **Crear un agente sin código** en 5 pasos (o importar una carpeta): nada se crea ni gasta sin tu confirmación.
+- **Agentes portables**: cada agente puede tener su carpeta (`agent.yaml`, `AGENTS.md`, habilidades, memoria verificada)
+  con revisiones, vuelta atrás, cambios externos que revisas antes de que cuenten, importación y exportación. Sin
+  credenciales; los permisos solo los concedes tú.
+- **Arneses**: cambiar un agente de Claude Code a otro arnés conserva su identidad; antes ves qué gana o pierde. **Codex**
+  está detectado (app de escritorio, sesión de ChatGPT) pero **bloqueado** en este equipo: su CLI expone herramientas
+  (`exec`, subagentes) que el Portal no puede acotar. Comprobado sin llamar al modelo.
+
+## Activación (pendiente de tu autorización)
+
+Migración solo aditiva con copia de seguridad previa automática (esquema 0.17). No cambia agentes, procesos ni el lote
+568c60cb. Pasos y recomendaciones en `docs/sistema-operativo-agentes.md` §9.
+
+---
+
 # Portal IA · Puerta final antes de activar: política del lote, dependientes preparadas y vista previa (1 de noviembre de 2026)
 
 **Estado: implementado y verificado en la rama `mejora/empresa-autonoma`** (encima de sus commits anteriores, que se conservan).

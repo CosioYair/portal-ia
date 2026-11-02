@@ -125,7 +125,8 @@ function sys(agent: Agent, slug: string, d?: DelegationResult): string {
   // Identidad portable (instrucciones propias, habilidades, memoria verificada) de la revisión FIJADA al crear el encargo.
   // Vacía para los agentes sin contenido propio: su prompt es el de siempre.
   const pin = d?.pins?.[agent.id];
-  const identity = pin ? identityBlock(slug, agent, pin.revision) : '';
+  // Sin revisión fijada (el agente no tenía carpeta al crear el encargo), sin identidad portable: el prompt de siempre.
+  const identity = pin && pin.revision !== null ? identityBlock(slug, agent, pin.revision) : '';
   return `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} en la empresa «${ws.name}» dentro de Portal IA (plataforma local donde empresas son operadas por equipos de agentes de IA bajo la autoridad del propietario).
 Especialización: ${agent.config.specialization}
 Responsabilidades: ${agent.config.responsibilities.map(r => '- ' + r).join('\n')}

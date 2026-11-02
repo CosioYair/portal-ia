@@ -53,11 +53,11 @@ export function lessonsRepo(slug: string) {
     },
     setAgent(id: string, agentId: string) { db.prepare(`UPDATE lessons SET agent_id = ? WHERE id = ?`).run(agentId, id); },
     get(id: string): Lesson | undefined { const r = db.prepare(`SELECT * FROM lessons WHERE id = ?`).get(id); return r ? map(r) : undefined; },
-    insert(l: Omit<Lesson, 'id' | 'createdAt' | 'updatedAt' | 'usedCount' | 'recurrenceCount' | 'validatedAt'> & { dedupeKey?: string | null }): Lesson | null {
+    insert(l: Omit<Lesson, 'id' | 'createdAt' | 'updatedAt' | 'usedCount' | 'recurrenceCount' | 'validatedAt' | 'agentId'> & { dedupeKey?: string | null; agentId?: string | null }): Lesson | null {
       const id = crypto.randomUUID(); const ts = now();
       try {
-        db.prepare(`INSERT INTO lessons (id, project_id, role, tags, status, version, parent_id, title, detector, dedupe_key, evidence_json, root_cause, corrective_action, lesson_text, source, promoted_to, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-          .run(id, l.projectId, l.role, JSON.stringify(l.tags), l.status, l.version, l.parentId ?? null, l.title, l.detector, l.dedupeKey ?? null, JSON.stringify(l.evidence), l.rootCause ?? null, l.correctiveAction ?? null, l.lessonText ?? null, l.source, l.promotedTo ?? null, ts, ts);
+        db.prepare(`INSERT INTO lessons (id, project_id, role, tags, status, version, parent_id, title, detector, dedupe_key, evidence_json, root_cause, corrective_action, lesson_text, source, promoted_to, created_at, updated_at, agent_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(id, l.projectId, l.role, JSON.stringify(l.tags), l.status, l.version, l.parentId ?? null, l.title, l.detector, l.dedupeKey ?? null, JSON.stringify(l.evidence), l.rootCause ?? null, l.correctiveAction ?? null, l.lessonText ?? null, l.source, l.promotedTo ?? null, ts, ts, l.agentId ?? null);
       } catch (e: any) { if (/UNIQUE/.test(e.message)) return null; throw e; }
       return this.get(id)!;
     },

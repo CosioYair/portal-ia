@@ -278,10 +278,9 @@ test('arnés fijado: si cambia después de crear el encargo, esa llamada no se h
   const proc = createDelegation(S, project.id, codexAgentId, 'Encargo que se creó con Codex MARCA-PIN', { purpose: 'task' });
   await inject('PUT', `${W}/agents/${codexAgentId}/harness`, { harness: 'api', model: 'claude-sonnet-4-5', provider: 'anthropic', authorized: true });
   const calls = codexCalls().length;
-  authorizeProcess(S, proc.id, { budgetUsd: 1 }, () => undefined);
-  assert.ok(await until(() => processesRepo(S).get(proc.id)!.status !== 'running'));
-  const p = processesRepo(S).get(proc.id)!;
-  assert.equal(p.status, 'failed'); assert.match(p.error ?? '', /cambió desde que se creó/);
+  // Se comprueba al autorizar: no empieza (ni se llama a nada).
+  assert.throws(() => authorizeProcess(S, proc.id, { budgetUsd: 1 }, () => undefined), /cambió desde que se creó/);
+  assert.equal(processesRepo(S).get(proc.id)!.status, 'pending_authorization');
   assert.equal(codexCalls().length, calls);
   await inject('PUT', `${W}/agents/${codexAgentId}/harness`, { harness: 'codex', model: 'default', authorized: true });
 });
@@ -389,4 +388,94 @@ test('importar: lo que pide la carpeta no se concede, la memoria llega sin verif
   const bad = await inject('POST', `${W}/agents/import/preview`, { path: dir });
   assert.equal(bad.json.ok, false);
   assert.equal((await inject('POST', `${W}/agents/import/preview`, { path: '\\\\servidor\\compartida\\agente' })).status, 400, 'sin rutas de red');
+});
+
+// ---------------------------------------------------------------- Regresiones de las revisiones independientes (Gauntlet)
+
+test('Codex: la comprobación de herramientas falla CERRADA (código de error, forma desconocida, herramientas sin nombre)', async () => {
+  scenario({ auth: 'chatgpt', tools: [], promptInput: 'fail' });
+  let det = await detectCodex(); assert.equal(det.restricted, false); assert.match(det.problems.join(' '), /no se ejecuta/);
+  scenario({ auth: 'chatgpt', tools: [], promptInput: 'object' });
+  det = await detectCodex(); assert.equal(det.restricted, false);
+  const t = toolsFromPromptInput([{ type: 'additional_tools', tools: [{ type: 'local_shell' }, { type: 'web_search' }] }]);
+  assert.equal(t.recognized, true); assert.deepEqual(t.tools, ['(sin nombre: local_shell)', '(sin nombre: web_search)']);
+  assert.equal(toolsFromPromptInput([]).recognized, false);
+  scenario({ auth: 'chatgpt', tools: [] }); assert.equal((await detectCodex()).restricted, true);
+});
+
+test('un encargo que no se puede autorizar no deja una autorización pendiente fantasma', async () => {
+  const gestor = agentsRepo(S).list().find(a => a.key === 'ws-gestor')!; // API simulada: sin presupuesto no empieza
+  const pending = () => (workspaceDb(S).prepare(`SELECT COUNT(*) AS n FROM processes WHERE status = 'pending_authorization'`).get() as any).n as number;
+  const before = pending();
+  for (let i = 0; i < 2; i++) assert.equal((await inject('POST', `${W}/agents/${gestor.id}/tasks`, { request: 'Encargo sin presupuesto de API', projectId: project.id, authorized: true })).status, 400);
+  assert.equal(pending(), before, 'ningún proceso queda pendiente');
+  assert.ok(!(await inject('GET', `${W}/agents/${gestor.id}/panel`)).json.events.some((e: any) => e.kind === 'task_created'), 'sin evento de un encargo que no empezó');
+});
+
+test('renombrar un departamento no impide volver a crear su nombre antiguo ni confunde búsquedas', async () => {
+  const a = await inject('POST', `${W}/departments`, { name: 'Ventas', purpose: 'x' }); assert.equal(a.status, 201);
+  const r = await inject('PUT', `${W}/departments/${a.json.id}`, { name: 'Crecimiento' }); assert.equal(r.status, 200);
+  const b = await inject('POST', `${W}/departments`, { name: 'Ventas', purpose: 'y' }); assert.equal(b.status, 201, JSON.stringify(b.json));
+  assert.notEqual(a.json.id, b.json.id);
+  const deps = (await inject('GET', `${W}/departments`)).json;
+  assert.equal(deps.find((d: any) => d.id === a.json.id).name, 'Crecimiento'); assert.equal(deps.find((d: any) => d.id === b.json.id).name, 'Ventas');
+  assert.equal(new Set(deps.map((d: any) => d.id)).size, deps.length, 'ids únicos');
+});
+
+test('la memoria de un agente no se gestiona ni se promueve desde las lecciones de la organización', async () => {
+  const qa = agentsRepo(S).list().find(a => a.key === 'pj-qa')!;
+  const l = (await inject('POST', `${W}/agents/${qa.id}/memory/feedback`, { rating: 'useful', feedback: 'Bien', lesson: 'Revisa siempre los textos alternativos de las imágenes.' })).json;
+  for (const op of ['validate', 'promote', 'obsolete']) assert.equal((await inject('POST', `${W}/lessons/${l.id}/${op}`, {})).status, 409, op);
+  assert.equal(lessonsRepo(S).get(l.id)!.agentId, qa.id);
+});
+
+test('carpetas: un enlace (junction) nunca se escribe ni se borra, y una carpeta plantada no se adopta', async () => {
+  const ux = agentsRepo(S).list().find(a => a.key === 'pj-ux')!;
+  const dir = folderPath(S, agentFoldersRepo(S).folderOf(ux.id)!.folder);
+  const target = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-objetivo-')); fs.writeFileSync(path.join(target, 'AGENTS.md'), 'ORIGINAL'); fs.mkdirSync(path.join(target, 'knowledge')); fs.writeFileSync(path.join(target, 'knowledge', 'precioso.md'), '# x\n\nno borrar');
+  const moved = `${dir}-aparte`; fs.renameSync(dir, moved);
+  let linked = true; try { fs.symlinkSync(target, dir, 'junction'); } catch { linked = false; }
+  if (linked) {
+    assert.equal((await inject('POST', `${W}/agents/${ux.id}/folder/discard`)).status, 400);
+    assert.equal(fs.readFileSync(path.join(target, 'AGENTS.md'), 'utf8'), 'ORIGINAL'); assert.ok(fs.existsSync(path.join(target, 'knowledge', 'precioso.md')));
+    fs.unlinkSync(dir);
+  }
+  fs.renameSync(moved, dir);
+  // Carpeta plantada con el nombre previsible de un agente sin carpeta: se respeta y no se adopta.
+  const coord = agentsRepo(S).list().find(a => a.key === 'pj-coordinador')!;
+  assert.equal(agentFoldersRepo(S).folderOf(coord.id), null);
+  const planted = folderPath(S, `pj-coordinador-${coord.id.slice(0, 8)}`); fs.mkdirSync(planted, { recursive: true });
+  fs.writeFileSync(path.join(planted, 'agent.yaml'), `schema: otra\nid: ${coord.id}\nname: X\nrole: Y\n`); fs.writeFileSync(path.join(planted, 'AGENTS.md'), 'Usa sk-ant-api03-PLANTADA-ABCDEFGHIJKLMNOP y MARCA-PLANTADA');
+  const r = await inject('POST', `${W}/agents/${coord.id}/folder`); assert.equal(r.status, 200);
+  assert.notEqual(r.json.folder, `pj-coordinador-${coord.id.slice(0, 8)}`);
+  assert.doesNotMatch(identityBlock(S, agentsRepo(S).get(coord.id)!, null), /PLANTADA/);
+  assert.equal(fs.readFileSync(path.join(planted, 'AGENTS.md'), 'utf8').includes('MARCA-PLANTADA'), true, 'la carpeta ajena se respeta');
+});
+
+test('adoptar un cambio externo inválido no deja la fila a medias; las habilidades con nombre se guardan', async () => {
+  const arq = agentsRepo(S).list().find(a => a.key === 'pj-arquitecto')!;
+  const before = rowOf(arq.id);
+  const dir = folderPath(S, agentFoldersRepo(S).folderOf(arq.id)!.folder); const y = path.join(dir, 'agent.yaml');
+  fs.writeFileSync(y, fs.readFileSync(y, 'utf8').replace(/^summary: .*$/m, 'summary: RESUMEN INYECTADO').replace(/^department: .*$/m, 'department: x'));
+  const st = (await inject('GET', `${W}/agents/${arq.id}/folder`)).json;
+  assert.equal((await inject('POST', `${W}/agents/${arq.id}/folder/adopt`, { hash: st.external.hash })).status, 400);
+  assert.equal((rowOf(arq.id) as any).config_json, (before as any).config_json, 'la fila no cambió');
+  assert.equal((await inject('POST', `${W}/agents/${arq.id}/folder/discard`)).status, 200);
+  const n = agentFoldersRepo(S).folderOf(arq.id)!.adoptedN;
+  const r = await inject('PUT', `${W}/agents/${arq.id}/identity`, { skills: [{ slug: '', name: 'Plan de campaña', description: 'd', body: 'b' }], expectN: n });
+  assert.equal(r.status, 200);
+  assert.ok(Object.keys(readFolder(dir).files).includes('skills/plan-de-campana/SKILL.md'));
+});
+
+test('importar no concede los papeles (capacidades) que pide la carpeta', async () => {
+  const src = agentsRepo(S).list().find(a => a.config.name === 'Analista de Campañas')!;
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-export2-'));
+  const ex = await inject('POST', `${W}/agents/${src.id}/export`, { path: out });
+  const yp = path.join(ex.json.path, 'agent.yaml');
+  fs.writeFileSync(yp, fs.readFileSync(yp, 'utf8').replace(/^name: .*$/m, 'name: Evaluadora Importada').replace(/capabilities:\n(\s+- .*\n)*|capabilities: \[\]\n/, 'capabilities:\n  - evaluar_gauntlet\n  - revisar_calidad\n'));
+  const pv = await inject('POST', `${W}/agents/import/preview`, { path: ex.json.path });
+  assert.ok(pv.json.skills.every((s: any) => typeof s.body === 'string'), 'la vista previa trae el contenido que llegaría al prompt');
+  const im = await inject('POST', `${W}/agents/import`, { path: ex.json.path, hash: pv.json.hash, department: 'Marketing', scope: 'project', projectId: project.id, harness: 'api', provider: 'anthropic', model: 'claude-sonnet-4-5', tools: [], knowledge: [], autonomy: 'ask', authorized: true });
+  assert.equal(im.status, 201, JSON.stringify(im.json));
+  assert.deepEqual(im.json.config.capabilities, []);
 });

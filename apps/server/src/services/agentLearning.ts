@@ -32,9 +32,8 @@ export function proposeFromFeedback(slug: string, agentId: string, input: { proc
     title: text.split('\n')[0].slice(0, 100), detector: 'owner_feedback',
     evidence: { processId: proc?.id ?? null, processTitle: proc?.title ?? (msg ? 'conversación directa' : null), stepId: null, agentId, agentName: a.config.name, file: null,
       detail: `${input.rating === 'useful' ? 'Útil' : 'Necesita cambios'} — opinión del propietario: «${feedback.slice(0, 600)}»${msg ? ` (sobre la respuesta del ${msg.createdAt.slice(0, 16).replace('T', ' ')})` : ''}`, at: ts },
-    rootCause: null, correctiveAction: null, lessonText: text.slice(0, 2000), source: 'owner_feedback', promotedTo: null, dedupeKey: null
+    rootCause: null, correctiveAction: null, lessonText: text.slice(0, 2000), source: 'owner_feedback', promotedTo: null, dedupeKey: null, agentId
   })!;
-  lessonsRepo(slug).setAgent(l.id, agentId);
   recordAgentEvent(slug, agentId, 'memory_proposed', { lessonId: l.id, processId: proc?.id ?? null, messageId: msg?.id ?? null, rating: input.rating });
   return lessonsRepo(slug).get(l.id)!;
 }

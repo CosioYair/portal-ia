@@ -75,9 +75,11 @@ export function departmentsRepo(slug: string) {
       const existing = rows().find(d => d.slug === s); if (existing) return existing;
       const preset = DEPARTMENT_PRESETS.find(p => p.slug === s);
       const implicit = self.list(true).find(d => d.slug === s);
+      // Id propio y estable: un renombrado posterior no impide volver a crear el nombre antiguo ni confunde búsquedas por id.
+      const newId = `dep-${crypto.randomUUID().slice(0, 8)}`;
       db.prepare(`INSERT INTO departments (id, slug, name, purpose, hue, coordinator_agent_id, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)`)
-        .run(`dep-${s}`, s, implicit?.name ?? name, (input.purpose ?? implicit?.purpose ?? preset?.purpose ?? '').trim().slice(0, 400), Math.round(input.hue ?? implicit?.hue ?? preset?.hue ?? 200) % 360, now());
-      touched(); changed({ ws: slug, entity: 'department', id: `dep-${s}` });
+        .run(newId, s, implicit?.name ?? name, (input.purpose ?? implicit?.purpose ?? preset?.purpose ?? '').trim().slice(0, 400), Math.round(input.hue ?? implicit?.hue ?? preset?.hue ?? 200) % 360, now());
+      touched(); changed({ ws: slug, entity: 'department', id: newId });
       return rows().find(d => d.slug === s)!;
     },
     update(idOrSlug: string, patch: { name?: string; purpose?: string; coordinatorAgentId?: string | null; hue?: number }): Department {
@@ -87,7 +89,7 @@ export function departmentsRepo(slug: string) {
       const name = patch.name?.trim() ?? d.name; if (name.length < 2 || name.length > 60) throw Object.assign(new Error('Nombre no válido.'), { statusCode: 400 });
       if (name !== d.name) {
         // Renombrar = cambiar la etiqueta de sus miembros (una sola fuente de pertenencia) y el slug de la fila.
-        const s = norm(name); if (s !== d.slug && rows().some(x => x.slug === s)) throw Object.assign(new Error('Ya existe un departamento con ese nombre.'), { statusCode: 409 });
+        const s = norm(name); if (s !== d.slug && self.list(true).some(x => x.slug === s && x.id !== d.id)) throw Object.assign(new Error('Ya existe un departamento con ese nombre.'), { statusCode: 409 });
         const agents = agentsRepo(slug);
         for (const a of self.members(d.slug, { includeRetired: true })) agents.updateTemplateMeta(a.id, { ...a.template, department: name } as Agent['template']);
         db.prepare(`UPDATE departments SET slug = ?, name = ? WHERE id = ?`).run(s, name, d.id); touched();

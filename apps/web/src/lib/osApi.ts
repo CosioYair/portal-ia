@@ -2,11 +2,11 @@ import type { Agent, Capability, ExecutionBackend, HarnessCapability, HarnessDes
 import { apiRequest as request } from './api.ts';
 
 /** Cliente del «sistema operativo de agentes» (apps/server/src/routes/agentsOs.ts). */
-export type OfficeState = 'working' | 'queued' | 'attention' | 'idle' | 'retired';
+export type OfficeState = 'working' | 'queued' | 'attention' | 'unavailable' | 'idle' | 'retired';
 export interface OfficeAgent {
   id: string; key: string; name: string; role: string; initials: string; scope: 'workspace' | 'project'; projectId: string | null;
   department: string; departmentSlug: string; harness: ExecutionBackend; harnessLabel: string; model: string;
-  state: OfficeState; activity: string | null; attention: { kind: string; label: string; processId?: string | null }[]; hasFolder: boolean; custom: boolean;
+  state: OfficeState; activity: string | null; attention: { kind: string; label: string; processId?: string | null }[]; harnessIssue: string | null; hasFolder: boolean; custom: boolean;
 }
 export interface Department { id: string; slug: string; name: string; purpose: string; hue: number; coordinatorAgentId: string | null; createdAt: string; archivedAt: string | null; implicit?: boolean; members: string[] }
 export interface OfficeView { agents: OfficeAgent[]; departments: Department[]; counts: { agents: number; working: number; attention: number; decisions: number }; projects: { id: string; name: string }[] }
@@ -34,7 +34,7 @@ export interface WizardInput {
 }
 export interface ImportPreview { path: string; hash: string; files: string[]; ignored: string[]; problems: { path: string; message: string; blocking: boolean }[]; ok: boolean;
   agent: { name: string; role: string; summary: string; department: string | null; responsibilities: string[]; deliverables: string[]; capabilities: string[] } | null;
-  requests: { harness: string; model: string; tools: string[]; autonomy: string } | null; instructions: string; skills: { slug: string; name: string; description: string }[]; memory: { title: string; text: string }[]; references: { slug: string; title: string }[]; note: string }
+  requests: { harness: string; model: string; tools: string[]; autonomy: string } | null; instructions: string; skills: { slug: string; name: string; description: string; body: string }[]; memory: { title: string; text: string }[]; references: { slug: string; title: string; body: string }[]; note: string }
 
 const J = (body: unknown) => JSON.stringify(body);
 const W = (slug: string) => `/api/workspaces/${encodeURIComponent(slug)}`;

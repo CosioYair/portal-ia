@@ -102,7 +102,8 @@ export async function sendChat(slug: string, agentId: string, input: { text: str
     const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
     const spent = (db.prepare(`SELECT COALESCE(SUM(cost_usd),0) AS c FROM execution_history WHERE agent_id = ? AND started_at >= ?`).get(a.id, monthStart.toISOString()) as any).c as number;
     const est = chatEstimate(slug, a, text).estimatedUsd;
-    if (a.config.monthlyLimitUsd > 0 && spent + est > a.config.monthlyLimitUsd) throw Object.assign(new Error(`Este mensaje superaría el límite mensual de «${a.config.name}» (${spent.toFixed(2)} + ≈${est.toFixed(3)} de ${a.config.monthlyLimitUsd.toFixed(2)} USD).`), { statusCode: 409 });
+    if (!(a.config.monthlyLimitUsd > 0)) throw Object.assign(new Error(`«${a.config.name}» no tiene límite mensual de gasto en la API: fíjalo en su configuración avanzada antes de conversar por la API.`), { statusCode: 409 });
+    if (spent + est > a.config.monthlyLimitUsd) throw Object.assign(new Error(`Este mensaje superaría el límite mensual de «${a.config.name}» (${spent.toFixed(2)} + ≈${est.toFixed(3)} de ${a.config.monthlyLimitUsd.toFixed(2)} USD).`), { statusCode: 409 });
   } else {
     caller = agentCaller(slug, a, projectId, 'Conversación', null, null, { lane: 'chat' }); // lanza 409 si su arnés no está disponible (sin sustituto)
   }
@@ -110,12 +111,16 @@ export async function sendChat(slug: string, agentId: string, input: { text: str
   const newestFirst = db.prepare(`SELECT role, content FROM agent_messages WHERE agent_id = ? AND status = 'done' ORDER BY created_at DESC LIMIT ?`).all(agentId, HISTORY) as any[];
   let budget = HISTORY_CHARS; const hist: { role: 'user' | 'assistant'; content: string }[] = [];
   for (const h of newestFirst) { if (budget <= 0) break; const c = String(h.content).slice(0, budget); budget -= c.length; hist.unshift({ role: h.role === 'owner' ? 'user' : 'assistant', content: c }); }
+  // Turnos alternados: sin respuesta inicial del agente y sin dos mensajes seguidos del mismo lado (se unen).
+  while (hist.length && hist[0].role === 'assistant') hist.shift();
+  for (let i = hist.length - 1; i > 0; i--) if (hist[i].role === hist[i - 1].role) { hist[i - 1] = { ...hist[i - 1], content: `${hist[i - 1].content}\n\n${hist[i].content}` }; hist.splice(i, 1); }
+  if (hist.length && hist[hist.length - 1].role === 'user') hist.pop();
+  const system = systemFor(slug, a, projectId);
   const ts = now(); const ownerId = crypto.randomUUID(); const replyId = crypto.randomUUID();
   db.prepare(`INSERT INTO agent_messages (id, agent_id, role, content, status, harness, model, project_id, created_at, finished_at) VALUES (?, ?, 'owner', ?, 'done', NULL, NULL, ?, ?, ?)`).run(ownerId, agentId, text, projectId, ts, ts);
   db.prepare(`INSERT INTO agent_messages (id, agent_id, role, content, status, harness, model, reply_to, project_id, created_at) VALUES (?, ?, 'agent', '', 'running', ?, ?, ?, ?, ?)`).run(replyId, agentId, harness, a.config.model, ownerId, projectId, now());
   inFlight.set(replyId, { slug, agentId, messageId: replyId });
   changed({ ws: slug, entity: 'agent_chat', id: agentId }); changed({ ws: slug, entity: 'agent', id: agentId, kind: 'progress' });
-  const system = systemFor(slug, a, projectId);
   const startedAt = new Date().toISOString();
   const finish = (status: 'done' | 'failed', patch: { content?: string; error?: string | null; tokensIn?: number; tokensOut?: number; cost?: number }) => {
     db.prepare(`UPDATE agent_messages SET status = ?, content = ?, error = ?, tokens_in = ?, tokens_out = ?, cost_usd = ?, finished_at = ? WHERE id = ?`)

@@ -51,8 +51,13 @@ está listo ahora, **sin llamar al modelo**. La ejecución devuelve texto + uso 
   --disable multi_agent …`, prompt por stdin, entorno mínimo **sin** `OPENAI_API_KEY`/`CODEX_API_KEY`, solo con sesión de
   ChatGPT (una clave de API se rechaza: facturaría). Cualquier evento de herramienta durante la ejecución la detiene y queda
   como incidente. Un límite de uso pausa; nunca cambia de arnés.
-- **Comprobación sin llamar al modelo:** `codex debug prompt-input` con esos mismos argumentos devuelve la lista de herramientas
-  que vería el modelo. **Con la versión instalada, incluso con todas las restricciones, expone `exec` (ejecución de código),
+- **Comprobación sin llamar al modelo:** `codex debug prompt-input` con las mismas restricciones expresables como configuración
+  (`-c …`, `--disable …`) y con el modelo del agente (las herramientas dependen del modelo) devuelve la lista de herramientas que
+  vería el modelo. Se repite antes de cada ejecución. Falla **cerrada**: exige código de salida 0 y la sección de herramientas
+  conocida; cualquier herramienta (con o sin nombre) fuera de la lista permitida bloquea. `debug prompt-input` no admite
+  `--ignore-user-config`: la ejecución real además ignora la configuración del usuario, lo que solo puede quitar herramientas
+  (MCP, plugins), no añadirlas. Durante la ejecución, los eventos de la CLI van por lista permitida: cualquier otro tipo de evento
+  o elemento detiene la ejecución como incidente. **Con la versión instalada, incluso con todas las restricciones, expone `exec` (ejecución de código),
   `wait`, `spawn_agent`, `send_message`, `wait_agent`, `followup_task`, `interrupt_agent`, `list_agents`** y la lista de
   skills personales del propietario. El Portal no puede demostrar que `exec` quede dentro de lo autorizado, así que **Codex
   queda bloqueado** («No disponible» con el motivo) y no se puede habilitar. Cuando una versión permita el modo restringido, la
