@@ -22,6 +22,7 @@ import { claudeCodeRoutes } from './routes/claudeCode.ts';
 import { metricsRoutes } from './routes/metrics.ts';
 import { gauntletRoutes } from './routes/gauntlet.ts';
 import { batchRoutes } from './routes/batches.ts';
+import { maintenanceRoutes } from './routes/maintenance.ts';
 import { previewRoutes } from './routes/previews.ts';
 import { assignmentRoutes } from './routes/assignments.ts';
 import { orgEvaluationRoutes } from './routes/orgEvaluation.ts';
@@ -104,6 +105,7 @@ export async function buildApp() {
   await app.register(metricsRoutes);
   await app.register(gauntletRoutes);
   await app.register(batchRoutes);
+  await app.register(maintenanceRoutes);
   await app.register(previewRoutes);
   await app.register(assignmentRoutes);
   await app.register(orgEvaluationRoutes);

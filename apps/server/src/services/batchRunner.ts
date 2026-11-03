@@ -1372,12 +1372,13 @@ export function revokeBatch(slug: string, id: string, reason: string | null): Ba
   processesRepo(slug).logExecution({ projectId: b.projectId, agentId: '', kind: `batch_revoked:${id}`, status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: now() });
   return getBatch(slug, id);
 }
-export function cancelItem(slug: string, id: string, itemId: string): Batch {
+/** Cancelar una historia del lote. Con `tick: false` (lote en pausa, desde la revisión del proyecto) no se mueve nada más del lote. */
+export function cancelItem(slug: string, id: string, itemId: string, opts: { tick?: boolean } = {}): Batch {
   const b = getBatch(slug, id); const it = b.items.find(i => i.itemId === itemId); if (!it) throw fail(404, 'La historia no está en el lote.', 'not_found');
   if (!['queued', 'waiting_dependency', 'running', 'needs_owner', 'blocked'].includes(it.state)) throw fail(409, `No se puede cancelar una historia ${ITEM_LABEL[it.state]}.`, 'invalid_state');
   if (it.state === 'running' && it.processId) { cancelProcess(it.processId); abortProcessCalls(it.processId); }
   setItem(slug, id, itemId, { state: 'cancelled', reason: 'Cancelada por el propietario.', finishedAt: now() }, 'cancelada por ti.');
-  void scheduleTick(slug, id);
+  if (opts.tick !== false) void scheduleTick(slug, id);
   return getBatch(slug, id);
 }
 

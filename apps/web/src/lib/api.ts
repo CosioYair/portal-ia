@@ -1,4 +1,4 @@
-import type { RestoreSupersededResult, StoryDecisionHistory } from '@portal-ia/domain';
+import type { RestoreSupersededResult, StoryDecisionHistory, MaintenancePlan, MaintenanceSelection } from '@portal-ia/domain';
 import type { PipelineConfig, PhaseTransition, PhaseTransitionPreview, ProjectArchive, StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
 import type { BudgetBalance, BudgetLevel } from '@portal-ia/domain';
@@ -61,7 +61,7 @@ export interface AssistantInfo { agentId: string; name: string; model: string; p
 export type AssistantActionType = 'create_company' | 'create_project' | 'add_backlog_item' | 'propose_execution' | 'propose_apply' | 'propose_delegation' | 'propose_operation' | 'propose_local' | 'open_decision' | 'propose_assignment' | 'info';
 export interface AssistantAction {
   type: AssistantActionType; status: 'done' | 'failed' | 'pending' | 'running' | 'rejected'; label: string; detail?: string; link?: string;
-  operation?: { id: string; capability: string; params: Record<string, unknown>; preview: { ok: boolean; title: string; details: string[]; blockers: string[]; excluded: string[] }; result?: { summary: string; details: string[] } | null; decidedAt?: string | null };
+  operation?: { id: string; capability: string; params: Record<string, unknown>; preview: { ok: boolean; title: string; details: string[]; blockers: string[]; excluded: string[]; planId?: string | null; reviewPath?: string | null; target?: { workspace: string; projectId: string; projectName: string } }; result?: { summary: string; details: string[] } | null; decidedAt?: string | null };
   processId?: string; workspaceSlug?: string; projectId?: string; storyId?: string; estimatedUsd?: number; suggestedBudgetUsd?: number; changes?: number;
   /** propose_local: cambio que el propietario confirma; open_decision / propose_assignment: a qué apuntan. */
   local?: { op: string; params: Record<string, unknown>; result?: string | null }; decisionId?: string; assignmentId?: string;
@@ -333,6 +333,12 @@ export const api = {
   previewBatch: (slug: string, projectId: string, body: BatchRequest) => request<BatchPreview>(`/api/workspaces/${slug}/projects/${projectId}/batches/preview`, { method: 'POST', body: JSON.stringify(body) }),
   createBatch: (slug: string, projectId: string, body: BatchRequest) => request<BatchView>(`/api/workspaces/${slug}/projects/${projectId}/batches`, { method: 'POST', body: JSON.stringify({ ...body, authorized: true }) }),
   /** Cierre manual de un lote en pausa con motivo obligatorio (sin costo de IA). 409 si el lote no está en pausa. */
+  // Revisión del proyecto (ramas, worktrees y backlog frente a main): revisar es solo lectura; ejecutar, solo lo elegido.
+  maintenancePlans: (slug: string, projectId: string) => request<MaintenancePlan[]>(`/api/workspaces/${slug}/projects/${projectId}/maintenance/plans`),
+  createMaintenancePlan: (slug: string, projectId: string, from: string | null = null) => request<MaintenancePlan>(`/api/workspaces/${slug}/projects/${projectId}/maintenance/plans`, { method: 'POST', body: JSON.stringify(from ? { from } : {}) }),
+  maintenancePlan: (slug: string, id: string) => request<MaintenancePlan>(`/api/workspaces/${slug}/maintenance/plans/${id}`),
+  executeMaintenancePlan: (slug: string, id: string, selection: MaintenanceSelection[]) => request<MaintenancePlan>(`/api/workspaces/${slug}/maintenance/plans/${id}/execute`, { method: 'POST', body: JSON.stringify({ authorized: true, selection }) }),
+  rejectMaintenancePlan: (slug: string, id: string) => request<MaintenancePlan>(`/api/workspaces/${slug}/maintenance/plans/${id}/reject`, { method: 'POST', body: '{}' }),
   closeBatch: (slug: string, projectId: string, id: string, reason: string) => request<BatchView>(`/api/workspaces/${slug}/projects/${projectId}/batches/${id}/close`, { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) }),
   batchControl: (slug: string, id: string, action: 'pause' | 'resume' | 'cancel' | 'revoke', body: Record<string, unknown> = {}) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/${action}`, { method: 'POST', body: JSON.stringify(action === 'resume' ? { ...body, authorized: true } : body) }),
   /** `revisions`: commit que tenías delante al decidir (p. ej. el de la vista previa): si cambió, el servidor no lo aplica. */

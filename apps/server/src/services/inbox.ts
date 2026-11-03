@@ -65,7 +65,7 @@ export function decisionsFromProcess(slug: string, p: Process): PendingDecision[
         denyEffect: p.assignmentId ? 'Se rechaza el diff: no se aplica y el encargo queda esperando tu decisión.' : 'Se rechaza el diff: no se aplica y la historia vuelve a pendiente.'
       })];
     }
-    if (r.applied && !r.merged) {
+    if (r.applied && !r.merged && !r.rejected) {
       return [make('integrate', r.applied.appliedAt, {
         estimatedCost: null,
         impact: `Integrar la rama ${r.applied.branch} (${r.applied.files.length} archivo${r.applied.files.length === 1 ? '' : 's'}) en la rama principal.`,

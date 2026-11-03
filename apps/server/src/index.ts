@@ -8,6 +8,8 @@ const app = await buildApp();
 try { const { runBacklogMaintenance } = await import('./services/backlogMaintenance.ts'); const r = runBacklogMaintenance((o, m) => app.log.info(o, m)); r.summary.forEach(l => app.log.info(l)); } catch (e) { app.log.warn({ err: (e as Error).message }, 'saneamiento del backlog omitido'); }
 // Procesos «en ejecución» de un arranque anterior: se marcan como interrumpidos sin reenviar ninguna llamada (ver interruptions.ts).
 try { const { recoverInterruptedProcesses } = await import('./services/interruptions.ts'); const n = recoverInterruptedProcesses((o, m) => app.log.info(o, m)); if (n) app.log.warn({ interrupted: n }, 'procesos interrumpidos por el reinicio: pausados sin reenviar nada'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'recuperación de procesos interrumpidos omitida'); }
+// Revisiones del proyecto que se estaban ejecutando: quedan «a medias» (reanudables) y su tarjeta del Asistente lo dice.
+try { const { recoverInterruptedPlans } = await import('./services/projectMaintenance.ts'); const n = recoverInterruptedPlans(); if (n) app.log.warn({ interrupted: n }, 'revisiones del proyecto interrumpidas por el reinicio: quedan a medias, reanudables'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'recuperación de revisiones interrumpidas omitida'); }
 // HU-144: Ctrl+C, SIGTERM y SIGHUP hacen el mismo apagado limpio que «Reiniciar» (puerto libre, sin hijos huérfanos).
 installSignalHandlers(app);
 attachApp(app);

@@ -1,6 +1,6 @@
 import { INTERNAL_WORKSPACE, verificationsForApplied, type BranchIntegration, type Process } from '@portal-ia/domain';
 import { changed } from './live.ts';
-import { processesRepo, projectsRepo } from '../db/workspace.ts';
+import { processesRepo, projectsRepo, backlogRepo } from '../db/workspace.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { git, mainBranch, mergeBranch, removeWorktree, repoRoot } from './repoWrite.ts';
 import { branchIntegration } from './storyIntegration.ts';
@@ -31,6 +31,8 @@ async function mergeStoryLocked(slug: string, id: string, opts: MergeOpts, log: 
   const procs = processesRepo(slug); const proc = procs.get(id);
   if (!proc?.result?.applied) throw fail(409, 'Primero aplica los cambios en la rama.');
   if (proc.result.merged) throw fail(409, `Ya integrada en ${proc.result.merged.into}.`);
+  if (proc.result.rejected) throw fail(409, `Esta iteración se descartó (${proc.result.rejected.reason}): no se integra.`);
+  if (proc.backlogItemId && backlogRepo(slug).get(proc.backlogItemId)?.status === 'discarded') throw fail(409, 'La historia está cancelada (Descartadas): su código no se integra.');
   if (!proc.result.applied.worktree) throw fail(409, 'Esta iteración se aplicó antes de v0.12 (sin worktree aislado) y no se integra con el flujo actual. Ciérrala como resuelta o descártala y prepara una nueva iteración.', 'legacy_applied');
   const repoA = projectsRepo(slug).repository(proc.projectId);
   if (repoA) {

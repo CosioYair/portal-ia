@@ -64,6 +64,7 @@ export function useEntryState<T>(name: string, initial: T): [T, (v: T | ((p: T) 
 /** Pantalla «madre» de una ruta (para entrar por un enlace directo y volver sin salir del Portal). */
 export function parentOf(pathname: string): { path: string; label: string } | null {
   if (/^\/historias\//.test(pathname)) return { path: '/backlog', label: 'Backlog' };
+  if (/^\/mantenimiento(\/|$)/.test(pathname)) return { path: '/panel', label: 'Resumen' };
   if (/^\/procesos\//.test(pathname)) return { path: '/actividad', label: 'Actividad' };
   if (/^\/lotes\/[^/]+/.test(pathname)) return { path: '/lotes', label: 'Lotes' };
   if (/^\/equipo\/.+/.test(pathname)) return { path: '/oficina/organizacion', label: 'Organización' };
@@ -84,6 +85,7 @@ export function screenName(path: string): string {
   if (p.startsWith('/oficina/agente/')) return 'el agente';
   if (p === '/oficina/nuevo-agente') return 'Nuevo agente';
   if (p.startsWith('/equipo/')) return 'la configuración del agente';
+  if (p.startsWith('/mantenimiento')) return 'la revisión del proyecto';
   const names: Record<string, string> = { '/backlog': 'Backlog', '/lotes': 'Lotes', '/actividad': 'Actividad', '/panel': 'Resumen', '/oficina': 'Oficina', '/oficina/organizacion': 'Organización', '/oficina/departamentos': 'Departamentos', '/oficina/lista': 'la lista de agentes', '/asistente': 'Asistente', '/autorizaciones': 'Decisiones', '/conocimiento': 'Conocimiento', '/presupuestos': 'Presupuestos', '/ajustes': 'Ajustes', '/archivo': 'Archivo', '/etapa': 'Nueva etapa', '/configuracion/proveedor': 'Proveedores' };
   return names[p] ?? 'la pantalla anterior';
 }

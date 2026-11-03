@@ -1,3 +1,4 @@
+import { Link } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import type { RepoStatus } from '@portal-ia/domain';
 import { api, type ProjectFull } from '../lib/api.ts';
@@ -75,6 +76,7 @@ export function RepoCard({ project, onPick, onChanged }: { project: ProjectFull;
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         {mainMissing && <button className="btn btn-primary btn-sm" onClick={() => act('main', async () => { const r = await api.repoInitMain(ws.slug, project.id); return `Rama ${r.mainBranch} creada desde ${r.from}`; })} disabled={!auth || busy !== null}>{busy === 'main' ? <span className="spin spin-light" /> : Icon.git()}Crear rama main desde {st.branch}</button>}
         {st?.hasMain && <button className={`btn btn-sm ${neverPublished || st.aheadOfRemote ? 'btn-primary' : 'btn-secondary'}`} onClick={() => act('publish', async () => { const r = await api.repoPublishMain(ws.slug, project.id); return `${r.branches.join(', ')} publicada en ${r.remote}`; })} disabled={!auth || busy !== null || !st.remote}>{busy === 'publish' ? <span className="spin" /> : null}Publicar {st.mainBranch} en el remoto</button>}
+        <Link className="btn btn-secondary btn-sm" to="/mantenimiento">{Icon.history()}Revisar ramas y backlog</Link>
         <button className="btn btn-ghost btn-sm" onClick={onPick} disabled={busy !== null}>{Icon.folder()}Cambiar carpeta…</button>
         <button className="btn btn-ghost btn-sm" onClick={load} disabled={busy !== null}>Actualizar estado</button>
       </div>

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { runningPlans } from './maintenanceRuns.ts';
 import { workspacesRepo } from '../db/platform.ts';
 import { withRepoLock } from './repoLock.ts';
 import { changed } from './live.ts';
@@ -234,6 +235,7 @@ export const updateRunning = () => update?.status === 'running';
 export function runningEverywhere(): { slug: string; id: string; title: string }[] {
   const out: { slug: string; id: string; title: string }[] = [];
   for (const ws of workspacesRepo.list()) { try { for (const p of processesRepo(ws.slug).running()) out.push({ slug: ws.slug, id: p.id, title: p.title }); } catch { /* espacio sin base */ } }
+  for (const [id, v] of runningPlans) out.push({ slug: v.slug, id, title: v.title });
   return out;
 }
 

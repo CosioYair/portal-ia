@@ -6,6 +6,7 @@ import { backlogRepo, knowledgeRepo, processesRepo } from '../db/workspace.ts';
 import { activeAgents } from './activeAgents.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
+import { threadRepo } from './storyThread.ts';
 import { currentPhase, isBaselineDoc } from './operationalPhase.ts';
 
 export interface ParsedStory { storyId: string; title: string; ownerKey: string | null; dependsOn: string | null; estimate: 'S' | 'M' | 'L' | null; criterion: string }
@@ -178,4 +179,30 @@ export function resetStory(slug: string, itemId: string, reason: string): Backlo
   repo.update(it.id, { description: `${it.description ? it.description + '\n' : ''}[${new Date().toISOString().slice(0, 10)}] Devuelta a pendiente: ${reason}` });
   repo.setStatus(it.id, 'pending', last?.id ?? null);
   return repo.get(it.id)!;
+}
+
+/**
+ * HU-165 · Cancelar una historia: «no se hará», queda en «Descartadas» con el motivo en su descripción y en su hilo.
+ * Nunca la marca como hecha ni borra su historial. Con una iteración aplicada sin integrar, el botón exige antes
+ * «Devolver a pendiente»; la revisión del proyecto (decisión explícita del propietario) puede cancelarla igual y la rama
+ * queda intacta (se decide aparte en la misma revisión).
+ */
+export function discardStory(slug: string, id: string, reason: string, opts: { allowUnmergedBranch?: boolean } = {}): BacklogItem {
+  const repo = backlogRepo(slug); const item = repo.get(id);
+  if (!item) throw Object.assign(new Error('Historia no encontrada'), { statusCode: 404 });
+  const blocked: Partial<Record<string, string>> = {
+    in_progress: 'La historia está en ejecución: cancela o espera a que termine su proceso antes de descartarla.',
+    done: 'La historia ya está completada: no se puede cancelar. Si hace falta rehacerla, crea una nueva iteración.',
+    discarded: 'La historia ya está descartada.'
+  };
+  const why = blocked[item.status];
+  if (why) throw Object.assign(new Error(why), { statusCode: 409, code: 'story_not_cancellable' });
+  const last = item.lastProcessId ? processesRepo(slug).get(item.lastProcessId) : undefined;
+  const unmerged = last?.result?.applied && !last.result.merged && !last.result.rejected ? last.result.applied.branch : null;
+  if (unmerged && !opts.allowUnmergedBranch) throw Object.assign(new Error(`La última iteración está aplicada en ${unmerged} sin integrar. Primero usa «Devolver a pendiente» para retirar esa rama y después cancela la historia.`), { statusCode: 409, code: 'applied_not_integrated' });
+  repo.update(id, { description: `${item.description ? item.description + '\n' : ''}[${new Date().toISOString().slice(0, 10)}] Descartada: ${reason}` });
+  repo.setStatus(id, 'discarded');
+  if (unmerged && last?.result) processesRepo(slug).setResult(last.id, { ...last.result, rejected: { at: new Date().toISOString(), reason: `Historia cancelada: ${reason}` } });
+  threadRepo(slug).add({ backlogItemId: id, role: 'system', agentId: null, agentName: null, content: `Cancelada por el propietario: ${reason}. Queda en «Descartadas» (no se consumió IA).${unmerged ? ` Su trabajo sin integrar sigue en la rama ${unmerged}.` : ''}`, processId: item.lastProcessId ?? null, costUsd: 0, tokens: 0, proposals: null });
+  return repo.get(id)!;
 }

@@ -14,7 +14,7 @@ import { agentsRepo, processesRepo } from '../db/workspace.ts';
 export type PolicyOp =
   | 'read_repo' | 'write_worktree' | 'sandbox_exec' | 'install_deps' | 'host_typecheck_min'
   | 'git_merge' | 'git_push' | 'restart_portal' | 'delete_worktree' | 'runtime_check' | 'ai_call' | 'phase_transition'
-  | 'agent_script' | 'agent_files_write';
+  | 'agent_script' | 'agent_files_write' | 'git_branch_delete' | 'git_remote_branch_delete' | 'backlog_maintenance';
 
 export type PolicyLevel = 'local' | 'auth' | 'external';
 
@@ -32,7 +32,10 @@ const OPS: Record<PolicyOp, { level: PolicyLevel; tool: string | null; label: st
   ai_call: { level: 'auth', tool: null, label: 'Llamada a un modelo de IA' },
   agent_script: { level: 'auth', tool: null, label: 'Ejecución de un script de habilidad de un agente externo en este equipo (no es un sandbox)' },
   agent_files_write: { level: 'auth', tool: null, label: 'Escritura en la carpeta original de un agente externo (instrucciones o habilidades)' },
-  phase_transition: { level: 'auth', tool: null, label: 'Inicio de etapa: archivo reversible del trabajo activo' }
+  phase_transition: { level: 'auth', tool: null, label: 'Inicio de etapa: archivo reversible del trabajo activo' },
+  git_branch_delete: { level: 'auth', tool: null, label: 'Borrado de una rama local (revisión del proyecto)' },
+  git_remote_branch_delete: { level: 'external', tool: null, label: 'Borrado de una rama en el remoto (revisión del proyecto, sin forzar)' },
+  backlog_maintenance: { level: 'auth', tool: null, label: 'Cierre o cancelación de historias y lotes (revisión del proyecto)' }
 };
 
 export interface PolicyContext {

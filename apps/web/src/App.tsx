@@ -35,6 +35,7 @@ const Phase = lazy(() => import('./screens/Phase.tsx').then(m => ({ default: m.P
 const Archive = lazy(() => import('./screens/Archive.tsx').then(m => ({ default: m.Archive })));
 const Batches = lazy(() => import('./screens/Batches.tsx').then(m => ({ default: m.Batches })));
 const BatchDetail = lazy(() => import('./screens/Batches.tsx').then(m => ({ default: m.BatchDetail })));
+const Maintenance = lazy(() => import('./screens/Maintenance.tsx').then(m => ({ default: m.Maintenance })));
 
 const SEL_KEY = 'portal-ia.seleccion';
 type Selection = { ws: string; project: string | null };
@@ -217,6 +218,8 @@ export default function App() {
           <Route path="/lotes" element={guard(<Batches />)} />
           <Route path="/lotes/:batchId" element={guard(<BatchDetail />)} />
           <Route path="/etapa" element={guard(<Phase />)} />
+          <Route path="/mantenimiento" element={guard(<Maintenance />)} />
+          <Route path="/mantenimiento/:planId" element={guard(<Maintenance />)} />
           <Route path="/archivo" element={guard(<Archive />)} />
           <Route path="/autorizaciones" element={company(<InboxScreen />)} />
           <Route path="/decisiones" element={<Redirect to="/autorizaciones" />} />

@@ -32,7 +32,7 @@ import { REPO_ROOT } from '../config.ts';
 import { activationOf } from '../services/system.ts';
 import { defaultChecks, runRuntimeChecks, runtimeVerified } from '../services/runtimeChecks.ts';
 import { recordDetections } from '../services/lessons.ts';
-import { addManualItem, estimateExtraction, extractBacklogWithAI, importBacklogFromKnowledge, resetStory } from '../services/backlog.ts';
+import { addManualItem, discardStory, estimateExtraction, extractBacklogWithAI, importBacklogFromKnowledge, resetStory } from '../services/backlog.ts';
 import { backlogRepo } from '../db/workspace.ts';
 import { assertNotSuperseded, InboxError } from '../services/inbox.ts';
 import { monotonicNow } from '../clock.ts';
@@ -583,23 +583,11 @@ Proceso: ${proc.id}`, { processId: proc.id });
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ reason: z.string().trim().min(3).max(300) }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Indica el motivo para cancelar la historia (al menos 3 caracteres).', code: 'reason_required' });
-    const repo = backlogRepo(slug); const item = repo.get(id);
-    if (!item) return reply.code(404).send({ error: 'Historia no encontrada' });
-    const blocked: Partial<Record<string, string>> = {
-      in_progress: 'La historia está en ejecución: cancela o espera a que termine su proceso antes de descartarla.',
-      done: 'La historia ya está completada: no se puede cancelar. Si hace falta rehacerla, crea una nueva iteración.',
-      discarded: 'La historia ya está descartada.'
-    };
-    const why = blocked[item.status];
-    if (why) return reply.code(409).send({ error: why, code: 'story_not_cancellable' });
-    const last = item.lastProcessId ? processesRepo(slug).get(item.lastProcessId) : undefined;
-    if (last?.result?.applied && !last.result.merged && !last.result.rejected) return reply.code(409).send({ error: `La última iteración está aplicada en ${last.result.applied.branch} sin integrar. Primero usa «Devolver a pendiente» para retirar esa rama y después cancela la historia.`, code: 'applied_not_integrated' });
-    const reason = body.data.reason;
-    repo.update(id, { description: `${item.description ? item.description + '\n' : ''}[${new Date().toISOString().slice(0, 10)}] Descartada: ${reason}` });
-    repo.setStatus(id, 'discarded');
-    threadRepo(slug).add({ backlogItemId: id, role: 'system', agentId: null, agentName: null, content: `Cancelada por el propietario: ${reason}. Queda en «Descartadas» (no se consumió IA).`, processId: item.lastProcessId ?? null, costUsd: 0, tokens: 0, proposals: null });
-    app.log.info({ story: item.storyId, reason }, 'historia cancelada (descartada)');
-    return repo.get(id);
+    try {
+      const item = discardStory(slug, id, body.data.reason);
+      app.log.info({ story: item.storyId, reason: body.data.reason }, 'historia cancelada (descartada)');
+      return item;
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e.code }); }
   });
 
   app.get('/api/workspaces/:slug/projects/:projectId/knowledge', async (req, reply) => {

@@ -4,6 +4,8 @@ import { projectsRepo } from '../db/workspace.ts';
 import { requirePolicy, type PolicyOp } from './executionPolicy.ts';
 import { repoStatus } from './repoStatus.ts';
 import { git, pushBranches, repoRoot } from './repoWrite.ts';
+import { createPlan, rejectPlan, setPlanSource } from './projectMaintenance.ts';
+import type { MaintenanceItem, MaintenancePlan } from '@portal-ia/domain';
 
 /**
  * Operaciones del Portal que el Asistente puede PROPONER y el propietario autoriza en la conversación. Cada capacidad:
@@ -25,15 +27,29 @@ export interface CapabilityPreview {
   target: { workspace: string; projectId: string; projectName: string };
   /** Estado exacto que muestra la vista previa (p. ej. el commit de main): autorizar exige que siga igual. */
   fingerprint?: string | null;
+  /** Operaciones con varios objetivos: el plan persistido y dónde se revisa y se autoriza objetivo a objetivo. */
+  planId?: string | null;
+  reviewPath?: string | null;
+  /** Esta misma conversación ya tiene esa revisión pendiente (nada cambió): no se crea otra tarjeta. */
+  alreadyPending?: boolean;
 }
+/** Desde dónde se pide la vista previa (la conversación del Asistente). */
+export interface CapabilityContext { conversationId?: string | null }
 export interface CapabilityResult { summary: string; details: string[] }
 export interface Capability<P = any> {
   id: string;
   label: string;
   policy: PolicyOp;
   params: z.ZodType<P>;
-  preview(p: P): Promise<CapabilityPreview>;
+  /** Línea del catálogo que ve el modelo: qué hace y cuándo usarla (el catálogo del prompt sale de aquí). */
+  promptHint: string;
+  /** Empresa y proyecto afectados, SIN efectos: el alcance de la conversación se comprueba antes de la vista previa. */
+  target?(p: P): { workspace: string; projectId: string };
+  preview(p: P, ctx?: CapabilityContext): Promise<CapabilityPreview>;
   execute(p: P): Promise<CapabilityResult>;
+  /** Operaciones con plan: enlazar el plan con su tarjeta del chat y rechazarlo desde ella (lanza si ya no se puede). */
+  onLink?(preview: CapabilityPreview, source: { messageId: string; operationId: string; conversationId?: string | null }): void;
+  onReject?(preview: CapabilityPreview): void;
 }
 
 const err = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
@@ -65,6 +81,8 @@ const publishMain: Capability<{ company: string; project: string }> = {
   label: 'Publicar la rama principal en el remoto (git push, sin forzar)',
   policy: 'git_push',
   params: z.object({ company: z.string().trim().min(1).max(120), project: z.string().trim().min(1).max(160) }),
+  promptHint: '{"type":"request_operation","capability":"publish_main","company":slug,"project":slug} → publica la rama principal en su remoto (sin forzar, solo main; la tarjeta muestra qué commits y qué queda fuera). Si la publicación debe esperar a un encargo («…y publícalo cuando termines»), NO la propongas ahora: explícale que se propone cuando el EN esté integrado en main (y activo, si es el Portal).',
+  target({ company, project }) { const t = resolveProject(company, project); return { workspace: t.slug, projectId: t.projectId }; },
   async preview({ company, project }) {
     const t = resolveProject(company, project);
     const repo = projectsRepo(t.slug).repository(t.projectId);
@@ -106,4 +124,49 @@ const publishMain: Capability<{ company: string; project: string }> = {
   }
 };
 
-export const CAPABILITIES: Record<string, Capability> = { [publishMain.id]: publishMain };
+/** Resumen de una revisión para su tarjeta del chat (también cuando la tarjeta pasa a una revisión nueva). */
+export function reviewDetails(plan: MaintenancePlan): string[] {
+  const by = (c: MaintenanceItem['category']) => plan.items.filter(i => i.category === c);
+  const kinds = (list: MaintenanceItem[]) => {
+    const n = (k: MaintenanceItem['kind']) => list.filter(i => i.kind === k).length;
+    return [n('remote_branch') && `${n('remote_branch')} rama(s) en ${plan.repo.remote}`, n('local_branch') && `${n('local_branch')} rama(s) locales`, n('worktree') && `${n('worktree')} worktree(s)`, n('story') && `${n('story')} historia(s)`, n('batch') && `${n('batch')} lote(s)`].filter(Boolean).join(', ') || 'nada';
+  };
+  return [
+    `Repositorio: ${plan.repo.path} · ${plan.repo.mainBranch ?? 'sin main'} en ${plan.repo.mainSha?.slice(0, 7) ?? '—'}`,
+    plan.repo.remoteAvailable ? `Remoto: ${plan.repo.remote} (${plan.counts.remoteBranches} rama(s), comprobado en vivo)` : `Remoto: ${plan.repo.remoteError ?? 'no disponible'}`,
+    `Ya integrado — seguro: ${kinds(by('safe'))}`,
+    `Requiere tu decisión: ${kinds(by('decision'))}`,
+    `Protegido — no se toca: ${kinds(by('protected'))}`,
+    ...(by('outside').length ? [`Fuera del alcance del Portal: ${kinds(by('outside'))}`] : []),
+    'Nada se ejecuta desde aquí: abre la revisión, elige objetivo a objetivo y autoriza allí.'
+  ];
+}
+
+/**
+ * Revisar el proyecto frente a main (ramas del remoto y locales, worktrees, historias, lotes) y preparar un plan de
+ * limpieza y reconciliación. La vista previa es la revisión misma (solo lectura, sin IA, sin autorización); NADA se
+ * ejecuta desde la tarjeta: el propietario elige objetivo a objetivo en la pantalla de revisión y allí autoriza.
+ */
+const reconcileProject: Capability<{ company: string; project: string }> = {
+  id: 'reconcile_project',
+  label: 'Revisar el proyecto: ramas, worktrees y backlog frente a main (plan para autorizar objetivo a objetivo)',
+  policy: 'read_repo',
+  params: z.object({ company: z.string().trim().min(1).max(120), project: z.string().trim().min(1).max(160) }),
+  promptHint: '{"type":"request_operation","capability":"reconcile_project","company":slug,"project":slug} → REVISA el proyecto frente a main (ramas del remoto y locales, carpetas de trabajo, historias abiertas, lotes) y prepara un plan: lo ya integrado y seguro, lo que contiene trabajo que no está en main (requiere decisión) y lo protegido (main, en uso, lote abierto). Es la operación para «limpia/borra las ramas viejas u obsoletas (también en GitHub)», «reconcilia o cierra el backlog obsoleto», «que no aparezca trabajo viejo como pendiente», «revisa el estado del repositorio», también si te dice «encárgate», «hazlo» u «organiza»: NO es un encargo ni un análisis delegado ni ediciones de historias. Revisar es de solo lectura y sin IA; el propietario elige objetivo a objetivo y autoriza en la pantalla de revisión (borrar ramas en el remoto sin forzar, guardar copia y borrar trabajo no integrado, retirar carpetas de trabajo, aceptar/cerrar/cancelar historias con motivo, cerrar un lote). Si en esta conversación ya hay una revisión pendiente de ese proyecto, remítele a su tarjeta en vez de pedir otra. Nunca digas que algo se borró o se cerró hasta que la tarjeta muestre el resultado; si antes dijiste que no se podía, corrígelo.',
+  target({ company, project }) { const t = resolveProject(company, project); return { workspace: t.slug, projectId: t.projectId }; },
+  onLink(pv, source) { if (pv.planId) setPlanSource(pv.target.workspace, pv.planId, source); },
+  onReject(pv) { if (pv.planId) rejectPlan(pv.target.workspace, pv.planId); },
+  async preview({ company, project }, ctx) {
+    const t = resolveProject(company, project);
+    const target = { workspace: t.slug, projectId: t.projectId, projectName: t.projectName };
+    const title = `Revisión del proyecto «${t.projectName}»: ramas y backlog`;
+    if (!projectsRepo(t.slug).repository(t.projectId)) return { ok: false, title, details: [], blockers: ['El proyecto no tiene repositorio registrado (Resumen › Repositorio).'], excluded: [], target };
+    // Otra petición en minutos, sin cambios y desde esta conversación (o sin tarjeta aún), reutiliza la revisión.
+    const plan = await createPlan(t.slug, t.projectId, { reuseMinutes: 10, conversationId: ctx?.conversationId ?? null });
+    return { ok: true, title, details: reviewDetails(plan), blockers: [], excluded: [], target, fingerprint: plan.repo.mainSha, planId: plan.id, reviewPath: `/empresa/${encodeURIComponent(t.slug)}/proyecto/${encodeURIComponent(t.projectId)}/mantenimiento/${plan.id}`,
+      alreadyPending: !!ctx?.conversationId && plan.source?.conversationId === ctx.conversationId };
+  },
+  async execute() { throw err(409, 'Esta revisión se autoriza en su pantalla, objetivo a objetivo (no desde la tarjeta).'); }
+};
+
+export const CAPABILITIES: Record<string, Capability> = { [publishMain.id]: publishMain, [reconcileProject.id]: reconcileProject };

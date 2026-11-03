@@ -98,7 +98,7 @@ export function SystemBar() {
       {open === 'confirm' && phase === 'idle' && <div className="sysbar-panel" id="sysbar-confirm">
         <label className="ck"><input ref={authRef} className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo ejecutar <span className="mono">npm install</span> (si cambiaron dependencias), <span className="mono">npm run build</span>{restart ? ' y reiniciar el servidor del Portal' : ''} en la carpeta de esta instalación.</span></label>
         {restart && running.length > 0 && <div role="alert" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <span><strong>Hay {running.length} proceso(s) en ejecución</strong> ({running.slice(0, 3).map(r => `«${r.title}»`).join(', ')}{running.length > 3 ? '…' : ''}). Reiniciar los interrumpe: quedan en pausa, sin repetir lo hecho, y se retoman con «Continuar». Lo más seguro es esperar a que terminen.</span>
+          <span><strong>Hay {running.length} proceso(s) en ejecución</strong> ({running.slice(0, 3).map(r => `«${r.title}»`).join(', ')}{running.length > 3 ? '…' : ''}). Reiniciar los interrumpe: quedan en pausa, sin repetir lo hecho, y se retoman con «Continuar» (una revisión del proyecto, con «Reanudar»). Lo más seguro es esperar a que terminen.</span>
           <label className="ck"><input className="cb" type="checkbox" checked={interrupt} onChange={e => setInterrupt(e.target.checked)} /><span>Entiendo que se interrumpirán y quiero reiniciar ahora.</span></label>
         </div>}
         <div className="sysbar-actions">
