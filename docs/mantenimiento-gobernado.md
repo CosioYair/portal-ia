@@ -114,6 +114,10 @@ lote siga abierto, sus ramas y carpetas de trabajo no se pueden borrar.
 - Peticiones con otro nombre que el catálogo ya cubre (p. ej. «borrar ramas del remoto») se resuelven a `reconcile_project`.
 - Alcance: la empresa y el proyecto de la conversación; una petición de otra empresa u otro proyecto se rechaza antes de
   revisar nada. Si la empresa tiene varios proyectos y no queda claro cuál, pregunta.
+- El modelo escribe antes de que el Portal calcule la revisión: por eso, debajo de su respuesta, el Portal añade los datos
+  reales de la revisión (una foto al prepararla, con la hora) y cómo seguir exactamente; esa foto no vuelve al historial del
+  modelo (allí cuenta la tarjeta con su estado real). En la primera prueba real, el modelo inventó un botón «Autorizar» y una
+  carpeta a retirar que estaba protegida: de ahí esta corrección.
 - Si dice que algo «ya está hecho» mientras la revisión sigue pendiente, la respuesta se corrige. La tarjeta muestra en
   todo momento el estado real (pendiente, en curso con progreso, hecha, a medias, rechazada, caducada).
 - Si falta una capacidad de verdad, propone crear la historia de desarrollo en Portal IA › Desarrollo del Portal, enlazada a

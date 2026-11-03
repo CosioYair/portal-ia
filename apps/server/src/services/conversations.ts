@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { changed } from './live.ts';
 import { nextConversationAction, type AssistantConversation, type ConversationArtifact, type ConversationArtifactKind, type ConversationDecision, type ConversationStage, type DecisionOption } from '@portal-ia/domain';
 import { monotonicNow } from '../clock.ts';
+import { withoutReviewFacts } from './reviewFacts.ts';
 import { artifactsRepo, conversationsRepo, decisionsRepo } from '../db/conversations.ts';
 import { platform, workspacesRepo } from '../db/platform.ts';
 import { processesRepo, projectsRepo } from '../db/workspace.ts';
@@ -106,7 +107,7 @@ function decisionsText(conversationId: string): string {
 }
 function explorationText(conversationId: string, max = 5000): string {
   const rows = (platform.prepare(`SELECT role, content FROM assistant_messages WHERE conversation_id = ? AND model IS NOT 'portal' ORDER BY created_at DESC LIMIT 12`).all(conversationId) as any[]).reverse();
-  const text = rows.map(r => `${r.role === 'user' ? 'Propietario' : 'Asistente'}: ${String(r.content).slice(0, 900)}`).join('\n');
+  const text = rows.map(r => `${r.role === 'user' ? 'Propietario' : 'Asistente'}: ${withoutReviewFacts(String(r.content)).slice(0, 900)}`).join('\n');
   return text.length > max ? `…${text.slice(-max)}` : text;
 }
 function deliverableOf(slug: string, a: ConversationArtifact | null): { text: string; challenge: string | null } | null {

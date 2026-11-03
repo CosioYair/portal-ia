@@ -27,7 +27,8 @@ const { buildApp } = await import('../src/app.ts');
 const { addManualItem } = await import('../src/services/backlog.ts');
 const { threadRepo } = await import('../src/services/storyThread.ts');
 const { CAPABILITIES } = await import('../src/services/capabilities.ts');
-const { prepareOperations, truthfulReply, assistantRepo } = await import('../src/services/assistant.ts');
+const { prepareOperations, truthfulReply, withReviewFacts, assistantRepo } = await import('../src/services/assistant.ts');
+const { reviewFactsBlock, withoutReviewFacts, REVIEW_PENDING_POINTER } = await import('../src/services/reviewFacts.ts');
 const { recoverInterruptedPlans, setPlanSource, getPlan } = await import('../src/services/projectMaintenance.ts');
 const { conversationsRepo } = await import('../src/db/conversations.ts');
 const { stopBatchScheduler } = await import('../src/services/batchRunner.ts');
@@ -506,4 +507,29 @@ test('«Revisar de nuevo» tras una ejecución parcial: la tarjeta sigue a la nu
   assert.ok(!review.some(x => x.type === 'propose_operation'), 'revisar una historia no es la limpieza');
   const local = await prepareOperations([{ type: 'request_operation', capability: 'add_backlog_item' }], { conversationId: 'c-l', workspaceSlug: S, projectId: project.id } as any);
   assert.equal(local.length, 1); assert.match(local[0].detail!, /ya puede proponer/);
+});
+
+test('el Asistente presenta la revisión con los datos reales del Portal y los pasos exactos (sin «Autorizar» inventado)', async () => {
+  const conv = conversationsRepo.create('Datos reales', S, project.id);
+  const acts = await prepareOperations([{ type: 'request_operation', capability: 'reconcile_project', company: S, project: project.id }], { conversationId: conv.id, workspaceSlug: S, projectId: project.id } as any);
+  const out = withReviewFacts('Te preparo la revisión.', acts);
+  const pv = acts[0].operation!.preview;
+  assert.match(out, /^Te preparo la revisión\./); assert.match(out, /Datos reales de la revisión \(al prepararla, /); assert.match(out, /no se había ejecutado nada; el estado actual está en la tarjeta/);
+  for (const d of pv.details.filter(d => /^(Ya integrado|Requiere tu decisión|Protegido)/.test(d))) assert.ok(out.includes(d), `incluye «${d}»`);
+  assert.match(out, /«Abrir la revisión para elegir y autorizar»/); assert.match(out, /autoriza una sola vez/);
+  assert.ok(pv.details.filter(d => /^(Remoto|Fuera)/.test(d)).every(d => out.includes(d)), 'remoto y fuera del alcance también');
+  assert.equal(withoutReviewFacts(out), 'Te preparo la revisión.', 'el historial del modelo no arrastra la foto');
+  // Nada que limpiar: no se dan pasos que no aplican.
+  const empty = reviewFactsBlock('P', ['Repositorio: r', 'Remoto: origin', 'Ya integrado — seguro: nada', 'Requiere tu decisión: nada', 'Protegido — no se toca: 1 rama(s) locales', 'Nada se ejecuta desde aquí']);
+  assert.match(empty, /Nada que limpiar en lo que se pudo comprobar/, 'remoto sin comprobar: no se dice que todo está limpio');
+  const clean = reviewFactsBlock('P', ['Remoto: origin (3 rama(s), comprobado en vivo)', 'Ya integrado — seguro: nada', 'Requiere tu decisión: nada', 'Protegido — no se toca: 1 rama(s) locales']);
+  assert.match(clean, /No hay nada que limpiar ahora/); assert.doesNotMatch(clean, /Cómo seguir/);
+  assert.equal(withoutReviewFacts(`Ya la tienes.\n\n${REVIEW_PENDING_POINTER}`), 'Ya la tienes.', 'el aviso de «ya pendiente» tampoco vuelve al historial');
+  // Ya pendiente en esta conversación: sin tarjeta nueva, pero con sus cifras y cómo seguir.
+  const again = await prepareOperations([{ type: 'request_operation', capability: 'reconcile_project', company: S, project: project.id }, { type: 'request_operation', capability: 'reconcile_project', company: S, project: project.id }], { conversationId: conv.id, workspaceSlug: S, projectId: project.id } as any);
+  assert.equal(again.filter(x => x.type === 'propose_operation').length, 1, 'dos peticiones iguales en una respuesta: una sola tarjeta');
+  assert.match(again[1].label, /Ya incluida arriba/);
+  assert.equal(withReviewFacts('Hola.', [{ type: 'info', status: 'done', label: 'x' } as any]), 'Hola.', 'sin revisión preparada no se añade nada');
+  const hint = CAPABILITIES.reconcile_project.promptHint;
+  assert.match(hint, /NO tiene botón «Autorizar»/); assert.match(hint, /no las inventes/);
 });
