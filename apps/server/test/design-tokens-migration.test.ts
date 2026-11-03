@@ -9,8 +9,9 @@ const webSrc = fileURLToPath(new URL('../../web/src/', import.meta.url));
 const read = (rel: string) => fs.readFileSync(path.join(webSrc, rel), 'utf8');
 const stripComments = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, '');
 
-const FILES = ['story-flow.css', 'manual-test-feedback.css', 'components/BudgetMeter.css', 'office.css'];
-const LOCAL_VARS = new Set(['--n']);
+const FILES = ['story-flow.css', 'manual-test-feedback.css', 'components/BudgetMeter.css', 'office.css', 'system.css', 'batch-wizard.css'];
+// --dept-h: tono del departamento, lo fija cada sala en su style (OKLCH), con el violeta de la marca como respaldo.
+const LOCAL_VARS = new Set(['--n', '--dept-h']);
 const LEGACY_VARS = ['--line', '--line-soft', '--line-strong', '--surface', '--surface-2', '--ink', '--ink-2', '--ink-3'];
 
 const declaredTokens = new Set(

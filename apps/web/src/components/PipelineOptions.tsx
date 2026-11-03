@@ -15,7 +15,7 @@ export function PipelineOptions({ value, onChange, team, repo, compact }: { valu
   const num = (k: 'maxOutputRepairs' | 'maxCorrections' | 'maxIdenticalFailures' | 'maxDurationMin', min: number, max: number) =>
     <input className="input mono" type="number" min={min} max={max} value={value[k]} onChange={e => set({ [k]: Math.max(min, Math.min(max, Math.floor(Number(e.target.value) || min))) } as Partial<PipelineConfig>)} style={{ width: 72, height: 30 }} aria-label={k} />;
   return (
-    <div className="pipe-opts" style={{ display: 'flex', flexDirection: 'column', gap: 8, border: '1px solid #E4E2DC', borderRadius: 10, padding: '10px 12px', background: '#FBFAF7' }} data-testid="pipeline-options">
+    <div className="pipe-opts" style={{ display: 'flex', flexDirection: 'column', gap: 8, border: '1px solid var(--color-border-soft)', borderRadius: 10, padding: '10px 12px', background: 'var(--color-surface-sunken)' }} data-testid="pipeline-options">
       <label className="ck"><input className="cb" type="checkbox" checked={value.autoApply} onChange={e => set({ autoApply: e.target.checked, autoVerify: e.target.checked })} />
         <span><strong>Completar el ciclo técnico sin interrupciones</strong>: el equipo aplica los cambios en un worktree aislado, verifica en el sandbox, QA valida con la evidencia y corrige errores rutinarios dentro de este presupuesto. Te avisa al terminar.</span></label>
       {value.autoApply && <>

@@ -38,7 +38,7 @@ export function DelegationResultView({ proc, onChange }: { proc: Process; onChan
     {d.consulted.length > 0 && <section className="card"><div className="card-h"><div className="h3">Consultas a su equipo</div><Chip xs>{d.consulted.length}</Chip></div>
       <div style={{ display: 'flex', flexDirection: 'column' }}>{d.consulted.map((c, i) => <div key={i}>
         <button className="arow" style={{ borderRadius: 0, padding: '10px 18px' }} onClick={() => setOpen(open === i ? null : i)} aria-expanded={open === i}><span style={{ flex: 1, textAlign: 'left', display: 'flex', flexDirection: 'column' }}><span style={{ fontWeight: 500, fontSize: 13 }}>{c.agentName}</span><span className="small muted">{c.question}</span></span>{Icon.chevR()}</button>
-        {open === i && <div className="card-b" style={{ background: '#FAF9F6', borderTop: '1px solid #EEECE6' }}><Markdown text={c.answer} /></div>}
+        {open === i && <div className="card-b" style={{ background: 'var(--color-surface-alt)', borderTop: '1px solid var(--color-divider)' }}><Markdown text={c.answer} /></div>}
       </div>)}</div></section>}
 
     {d.deliverable && <section className="card"><div className="card-h"><div className="h3">Entregable</div>{d.knowledgeDocId && <Link className="lnk sm13" to="/conocimiento">guardado en Conocimiento</Link>}</div><div className="card-b"><Markdown text={d.deliverable} /></div></section>}

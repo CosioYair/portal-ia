@@ -142,8 +142,8 @@ export function ClaudeCodePanel() {
           {view.workers.filter(w => !w.revokedAt).map(w => (
             <div key={w.id} className="krow" style={{ alignItems: 'center' }}>
               <Chip xs tone={w.connected ? 'ok' : ''} dot={w.connected ? 'ok' : ''}>{w.connected ? 'Conectada' : 'Desconectada'}</Chip>
-              <span className="small" style={{ flex: 1 }}>{w.name} · {w.agentIds.map(id => view.agents.find(a => a.id === id)?.name ?? id).join(', ')} · última señal {when(w.lastSeenAt)} · {w.expired ? <span style={{ color: '#8A2B2B' }}>caducada</span> : `caduca ${when(w.expiresAt)}`}
-                {w.clientEnvCredentials.length > 0 && <span style={{ color: '#7A4A00' }}> · tu consola tiene {w.clientEnvCredentials.join(', ')}: podría facturar por API</span>}</span>
+              <span className="small" style={{ flex: 1 }}>{w.name} · {w.agentIds.map(id => view.agents.find(a => a.id === id)?.name ?? id).join(', ')} · última señal {when(w.lastSeenAt)} · {w.expired ? <span style={{ color: 'var(--color-err-text-strong)' }}>caducada</span> : `caduca ${when(w.expiresAt)}`}
+                {w.clientEnvCredentials.length > 0 && <span style={{ color: 'var(--color-warn-text)' }}> · tu consola tiene {w.clientEnvCredentials.join(', ')}: podría facturar por API</span>}</span>
               <button className="lnk sm13" onClick={() => { if (confirm(`¿Revocar «${w.name}»? Su token deja de funcionar al instante.`)) void act('rev', () => api.revokeClaudeCodeWorker(slug, w.id), 'Consola revocada'); }}>Revocar</button>
             </div>
           ))}
@@ -172,7 +172,7 @@ export function ClaudeCodePanel() {
           {view.runs.map(r => <div key={r.id} className="small" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <span className="mono muted">{when(r.startedAt)}</span><span>{r.agentName}</span><span className="muted">{r.mode === 'cli' ? 'gestionado' : 'consola'} · {RUN[r.status] ?? r.status}</span>
             {r.durationMs != null && <span className="muted">{Math.round(r.durationMs / 1000)} s</span>}{r.tokensIn != null && <span className="muted">{r.tokensIn + (r.tokensOut ?? 0)} tokens</span>}
-            {r.apiEquivalentUsd != null && <span className="muted">≈ {fmtUsd(r.apiEquivalentUsd)} equivalente</span>}{r.error && <span style={{ color: '#8A2B2B' }}>{r.error.slice(0, 140)}</span>}
+            {r.apiEquivalentUsd != null && <span className="muted">≈ {fmtUsd(r.apiEquivalentUsd)} equivalente</span>}{r.error && <span style={{ color: 'var(--color-err-text-strong)' }}>{r.error.slice(0, 140)}</span>}
           </div>)}
         </div>}
       </div>

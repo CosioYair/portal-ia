@@ -14,7 +14,7 @@ export function CompanyHome() {
   const [error, setError] = useState<string | null>(null);
   const create = async () => {
     if (name.trim().length < 2) return; setBusy(true); setError(null);
-    try { const p = await api.createProject(ws.slug, name.trim(), desc.trim()); await select(ws.slug, p.id); flash(`Proyecto «${p.name}» creado con su equipo de 5 agentes (inactivos)`); navigate('/panel'); }
+    try { const p = await api.createProject(ws.slug, name.trim(), desc.trim()); await select(ws.slug, p.id, { to: () => '/panel' }); flash(`Proyecto «${p.name}» creado con su equipo de 5 agentes`); }
     catch (e: any) { setError(e.message); } finally { setBusy(false); }
   };
   return (

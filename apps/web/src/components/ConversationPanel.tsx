@@ -99,7 +99,7 @@ function ArtifactCard({ conversationId, a, onChanged }: { conversationId: string
   const st = ARTIFACT_STATUS[a.status] ?? { label: a.status, tone: '' as const };
   const act = async (fn: () => Promise<unknown>, msg: string) => { setBusy(true); setErr(null); try { await fn(); flash(msg); onChanged(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
   const link = a.process && a.content.workspaceSlug ? `/empresa/${a.content.workspaceSlug}/procesos/${a.process.id}` : null;
-  return <div className="card" style={{ borderColor: a.status === 'pending_authorization' ? '#F0C66B' : undefined }}>
+  return <div className="card" style={{ borderColor: a.status === 'pending_authorization' ? 'var(--color-flow-waiting)' : undefined }}>
     <div className="card-h" style={{ alignItems: 'flex-start', gap: 8 }}>
       <div><div className="h3" style={{ fontSize: 14 }}>{ARTIFACT_LABEL[a.kind]} v{a.version}</div>{a.process && <div className="small muted">{fmtUsd(a.process.spentUsd)} gastados{a.process.budgetUsd ? ` de ${fmtUsd(a.process.budgetUsd)}` : ''}</div>}</div>
       <Chip xs tone={st.tone}>{st.label}</Chip>
@@ -183,7 +183,7 @@ export function ConversationPanel({ detail, compact, onChanged }: { detail: Conv
   const approved = proposals.some(a => a.status === 'approved');
   // En el dock y en móvil, plegado salvo que haya algo que decidir (el resumen con la siguiente acción siempre se ve).
   const narrow = typeof window !== 'undefined' && !!window.matchMedia?.('(max-width: 720px)').matches;
-  return <details className="conv-panel" open={!(compact || narrow) || open > 0 || detail.artifacts.some(a => a.status === 'pending_authorization' || a.status === 'ready')} style={{ borderBottom: '1px solid #EEECE6' }}>
+  return <details className="conv-panel" open={!(compact || narrow) || open > 0 || detail.artifacts.some(a => a.status === 'pending_authorization' || a.status === 'ready')} style={{ borderBottom: '1px solid var(--color-divider)' }}>
     <summary style={{ cursor: 'pointer', padding: compact ? '8px 12px' : '10px 18px', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
       <Chip xs tone="accent">{STAGE_LABEL[detail.stage]}</Chip>
       <span className="sm13" data-testid="next-action"><strong>Siguiente:</strong> {detail.next}</span>
@@ -232,7 +232,7 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
   if (!a) return err ? <Notice kind="err">{err}</Notice> : null;
   const act = async (fn: () => Promise<unknown>, msg: string) => { setBusy(true); setErr(null); try { await fn(); flash(msg); setOk(false); cardDraft.clear(); setDiscard(false); setPre(null); await load(); onChanged?.(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
   const link = a.process ? `/empresa/${slug}/procesos/${a.process.id}` : null;
-  return <div className="card" style={{ borderColor: authorizable ? '#F0C66B' : undefined }} data-testid={`assignment-${a.code}`}>
+  return <div className="card" style={{ borderColor: authorizable ? 'var(--color-flow-waiting)' : undefined }} data-testid={`assignment-${a.code}`}>
     <div className="card-h" style={{ alignItems: 'flex-start', gap: 8 }}>
       <div><div className="h3" style={{ fontSize: 14 }}><span className="mono">{a.code}</span> {a.title}</div><div className="small muted">Encargo de desarrollo, sin historia{a.size ? ` · tamaño ${a.size}` : ''}</div></div>
       <Chip xs tone={a.status === 'ready_for_review' ? 'accent' : a.status === 'accepted' ? 'ok' : a.status === 'failed' || a.status === 'cancelled' ? 'err' : authorizable ? 'warn' : ''}>{a.statusLabel}</Chip>
@@ -290,7 +290,7 @@ export function LocalChangeCard({ msgId, index, action, onResolved }: { msgId: s
     setBusy(true); setErr(null);
     try { const r = await api.decideLocal(msgId, index, d); onResolved(r.message); if (d === 'approve') { await refreshStructure(); flash('Hecho'); } } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
-  return <div className="card" style={{ borderColor: '#F0C66B', background: '#FFFBF0' }}>
+  return <div className="card" style={{ borderColor: 'var(--color-flow-waiting)', background: 'var(--color-warn-bg-soft)' }}>
     <div className="card-h" style={{ alignItems: 'flex-start' }}><div><div className="h3" style={{ fontSize: 14 }}>{action.label}</div>{action.detail && <div className="small muted">{action.detail}</div>}</div><Chip tone="warn" xs>sin IA · requiere tu confirmación</Chip></div>
     <div className="card-b" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
       {err && <Notice kind="err">{err}</Notice>}

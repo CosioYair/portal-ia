@@ -73,24 +73,24 @@ export function AgentCreate() {
         scope, projectId: scope === 'project' ? project.id : null, name: name.trim(), role: role.trim(), reportsTo, collaborates: collab,
         evaluation: evaluation.map(e => e.trim()).filter(Boolean), config: { ...cfg, name: name.trim(), responsibilities: cfg.responsibilities.filter(Boolean) }
       });
-      formDraft.clear(); flash(`Agente «${a.config.name}» creado · inactivo`); navigate(`/equipo/${a.id}`);
+      formDraft.clear(); flash(`Agente «${a.config.name}» creado · inactivo`); navigate(`/oficina/agente/${encodeURIComponent(a.id)}/configuracion`);
     } catch (e: any) { setError(e.message); } finally { setSaving(false); }
   };
 
   const valid = name.trim().length >= 2 && role.trim().length >= 2 && cfg.specialization.trim().length > 0 && cfg.responsibilities.length > 0 && !!cfg.model && !!prov && prov.status === 'connected';
 
   return (
-    <Shell crumb={<>Equipo de IA / Nuevo agente</>}>
+    <Shell crumb="Formulario completo de agente">
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
         <DraftNote status={formDraft.status === 'restored' || formDraft.status === 'error' ? formDraft.status : 'idle'} onDiscard={formDraft.clear} />
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <Link className="lnk sm13" to="/equipo">← Equipo de IA</Link>
+            <Link className="lnk sm13" to="/oficina/organizacion">← Organización</Link>
             <h1 className="h1" style={{ fontSize: 26 }}>Nuevo agente especializado</h1>
             <p className="med" style={{ maxWidth: '70ch' }}>Define identidad, ámbito, relaciones, modelo y permisos. Se crea <strong>inactivo</strong>, sin ninguna llamada a modelos, y podrás editarlo después. Si quieres, el Agente de Onboarding puede proponerte la configuración.</p>
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
-            <Link className="btn btn-ghost" to="/equipo">Cancelar</Link>
+            <Link className="btn btn-ghost" to="/oficina/organizacion">Cancelar</Link>
             <button className="btn btn-primary" onClick={create} disabled={!valid || saving}>{saving ? 'Creando…' : 'Crear agente'}</button>
           </div>
         </div>
@@ -114,8 +114,8 @@ export function AgentCreate() {
             <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div><div className="label">Ámbito</div><div className="seg" role="group" aria-label="Ámbito">
                 <button aria-pressed={scope === 'project'} onClick={() => { setScope('project'); setReportsTo('pj-coordinador'); }}>Proyecto · {project.name}</button>
-                <button aria-pressed={scope === 'workspace'} onClick={() => { setScope('workspace'); setReportsTo('ws-gestor'); }}>Espacio · {ws.name}</button></div>
-                <div className="help">{scope === 'project' ? 'Solo accede al conocimiento y agentes de este proyecto.' : 'Accede a todos los proyectos del espacio.'}</div></div>
+                <button aria-pressed={scope === 'workspace'} onClick={() => { setScope('workspace'); setReportsTo('ws-gestor'); }}>Empresa · {ws.name}</button></div>
+                <div className="help">{scope === 'project' ? 'Solo accede al conocimiento y agentes de este proyecto.' : 'Accede a todos los proyectos de la empresa.'}</div></div>
               <div><label className="label" htmlFor="n-name">Nombre</label><input id="n-name" className="input" value={name} onChange={e => setName(e.target.value)} placeholder="Ej.: Documentador Técnico" /></div>
               <div><label className="label" htmlFor="n-role">Rol organizacional</label><input id="n-role" className="input" value={role} onChange={e => setRole(e.target.value)} placeholder="Ej.: Documentación y comunicación técnica" /></div>
               <div><label className="label" htmlFor="n-spec">Especialización</label><textarea id="n-spec" className="input" value={cfg.specialization} onChange={e => edit({ specialization: e.target.value })} placeholder="Qué hace y qué no hace este agente." /></div>
@@ -135,7 +135,7 @@ export function AgentCreate() {
           <section className="card"><div className="card-h"><div className="h3">Relaciones organizacionales</div></div>
             <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <div><label className="label" htmlFor="n-boss">Reporta a</label><select id="n-boss" className="input" value={reportsTo} onChange={e => setReportsTo(e.target.value)}>
-                <option value="owner">Tú · propietario del espacio</option>
+                <option value="owner">Tú · propietario de la empresa</option>
                 {candidates.map(a => <option key={a.id} value={a.key}>{a.config.name} · {a.template.role}</option>)}</select></div>
               <div><div className="label">Colabora con</div><div style={{ display: 'flex', flexDirection: 'column' }}>
                 {candidates.map(a => <label key={a.id} className="krow"><input className="cb" type="checkbox" checked={collab.includes(a.key)} onChange={e => setCollab(e.target.checked ? [...collab, a.key] : collab.filter(k => k !== a.key))} /><span style={{ flex: 1 }}>{a.config.name}</span><span className="small muted">{a.template.role}</span></label>)}
@@ -174,7 +174,7 @@ export function AgentCreate() {
                 <button className="lnk small" style={{ marginTop: 6 }} onClick={() => setEvaluation([...evaluation, ''])}>Añadir criterio</button></div>
             </div></section>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}><Link className="btn btn-ghost" to="/equipo">Cancelar</Link><button className="btn btn-primary" onClick={create} disabled={!valid || saving}>{saving ? 'Creando…' : 'Crear agente'}</button></div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}><Link className="btn btn-ghost" to="/oficina/organizacion">Cancelar</Link><button className="btn btn-primary" onClick={create} disabled={!valid || saving}>{saving ? 'Creando…' : 'Crear agente'}</button></div>
       </main>
     </Shell>
   );

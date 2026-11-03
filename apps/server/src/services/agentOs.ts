@@ -9,6 +9,7 @@ import { agentFoldersRepo, diskHash, folderPath } from './agentFolders.ts';
 import { ensureLessonsTable, lessonsRepo } from './lessons.ts';
 import { chatInFlight } from './agentChat.ts';
 import { documentJobsRunning, pendingProposalCounts } from './documentJobs.ts';
+import { pendingActionCounts } from './agentActions.ts';
 import { pendingExternalChanges, sourcesRepo } from './externalAgents.ts';
 import fs from 'node:fs';
 
@@ -75,6 +76,7 @@ export function officeView(slug: string, decisions: PendingDecision[], opts: { p
   let integration = new Map<string, IntegrationState>();
   try { const sr = sourcesRepo(slug); integration = new Map(sr.list().map(id => [id, sr.get(id)?.state ?? 'pending'] as const)); } catch { /* sin agentes externos */ }
   try { for (const [id, n] of pendingProposalCounts(slug)) add(id, { kind: 'improvement', label: `${n} mejora(s) propuesta(s) esperan tu aprobación` }); } catch { /* sin propuestas */ }
+  try { for (const [id, n] of pendingActionCounts(slug)) add(id, { kind: 'action', label: `${n} acción(es) del chat esperan tu «Sí, hazlo»` }); } catch { /* sin acciones */ }
   for (const id of integration.keys()) { const n = pendingExternalChanges(slug, id); if (n) add(id, { kind: 'source', label: `${n} archivo(s) de su carpeta cambiaron fuera del Portal: revísalos en «Origen»` }); }
   const out: OfficeAgent[] = agents.map(a => {
     const f = folders.folderOf(a.id);

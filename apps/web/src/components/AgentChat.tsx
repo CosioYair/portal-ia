@@ -119,7 +119,7 @@ export function ChatTab({ slug, p, projects, onChanged }: { slug: string; p: Pan
   return <div className="chat-drop" onDragEnter={dragOn} onDragOver={e => { if (canAttach && e.dataTransfer.types.includes('Files')) e.preventDefault(); }} onDragLeave={dragOff} onDrop={onDrop}>
     {dragging && <div className="chat-drop-hint" aria-hidden="true">Suelta aquí para adjuntar. {LIMITS_TEXT(limits)}</div>}
     <div className="agent-panel-body">
-      {p.retired && <Notice kind="warn">Agente retirado: reactívalo desde Equipo de IA para conversar.</Notice>}
+      {p.retired && <Notice kind="warn">Agente retirado: reactívalo desde Oficina › Organización para conversar.</Notice>}
       {consoleOnly && <Notice kind="info">{p.agent.config.name} trabaja desde tu propia consola de Claude Code, así que no puede conversar aquí. Dale trabajo en la pestaña <strong>Trabajo</strong>, o cambia con qué IA trabaja en <strong>Configuración</strong>.</Notice>}
       <div className="sr" role="status" aria-live="polite">{lastReply ? `${p.agent.config.name} respondió.` : ''}</div>
       <div className="chat-log">

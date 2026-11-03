@@ -20,7 +20,7 @@ function contrast(a: string, b: string): number {
   return (l1 + 0.05) / (l2 + 0.05);
 }
 
-test('tokens.css existe y solo declara variables en :root con los valores actuales', () => {
+test('tokens.css existe y solo declara variables en :root; styles.css y system.css no escriben colores', () => {
   const css = read('tokens.css').replace(/\/\*[\s\S]*?\*\//g, '');
   const blocks = css.match(/[^{}]+\{[^{}]*\}/g) ?? [];
   assert.equal(blocks.length, 1, 'tokens.css debe tener un único bloque');
@@ -28,12 +28,34 @@ test('tokens.css existe y solo declara variables en :root con los valores actual
   for (const decl of blocks[0].slice(blocks[0].indexOf('{') + 1, -1).split(';').map(s => s.trim()).filter(Boolean)) {
     assert.match(decl, /^--[a-z0-9-]+\s*:/, `declaración no permitida en tokens.css: ${decl}`);
   }
-  assert.match(css, /--color-placeholder\s*:\s*#686B72/i);
-  const styles = read('styles.css').toLowerCase();
-  for (const hex of ['#F4F3EF', '#1A1B1E', '#4F5259', '#686B72', '#E5E3DC', '#CFCCC3', '#EEECE6', '#0F6E6A', '#0B5652', '#FAF9F6', '#F7F6F2']) {
-    assert.ok(css.includes(hex), `falta el token ${hex}`);
-    assert.ok(styles.includes(hex.toLowerCase()), `${hex} no es un valor actual de styles.css`);
+  for (const name of ['--color-bg', '--color-surface', '--color-text', '--color-text-med', '--color-text-muted', '--color-placeholder', '--color-primary', '--color-working', '--color-queued', '--color-attention', '--color-blocked', '--color-idle']) {
+    assert.match(css, new RegExp(`${name}\\s*:`), `falta el token ${name}`);
   }
+  // Portal IA 2.0: las hojas globales solo usan var(--color-…); cambiar la paleta es cambiar tokens.css.
+  for (const file of ['styles.css', 'system.css']) {
+    const sheet = read(file).replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.deepEqual(sheet.match(/#[0-9a-f]{3,8}\b/gi) ?? [], [], `${file} escribe colores #hex; usa var(--color-…) de tokens.css`);
+    assert.deepEqual(sheet.match(/\b(?:rgba?|hsla?)\(/gi) ?? [], [], `${file} escribe colores rgb()/hsl(); usa var(--color-…) de tokens.css`);
+  }
+});
+
+test('Portal IA 2.0: cada par de texto y fondo del sistema alcanza AA (≥4,5:1) y los bordes de control ≥3:1', () => {
+  const css = read('tokens.css');
+  const tok = (name: string) => { const m = css.match(new RegExp(`${name}\\s*:\\s*(#[0-9a-f]{3,6})\\b`, 'i')); assert.ok(m, `falta ${name} con un color #hex`); return m[1]; };
+  const TEXT: [string, string][] = [
+    ['--color-text', '--color-bg'], ['--color-text-med', '--color-bg'], ['--color-text-muted', '--color-bg'], ['--color-text-muted', '--color-surface'],
+    ['--color-text-faint', '--color-surface'], ['--color-on-dark', '--color-primary'], ['--color-on-dark', '--color-primary-hover'], ['--color-primary', '--color-bg'],
+    ['--color-working-text', '--color-working-bg'], ['--color-attention-text', '--color-attention-bg'], ['--color-blocked-text', '--color-blocked-bg'],
+    ['--color-queued-text', '--color-queued-bg'], ['--color-idle-text', '--color-idle-bg'], ['--color-ok-text', '--color-ok-bg'], ['--color-err-text', '--color-err-bg'],
+    ['--color-side-text', '--color-side-bg'], ['--color-side-label', '--color-side-bg'], ['--color-side-label', '--color-side-bg-2'], ['--color-tile-fg', '--color-tile-bg'],
+    ['--color-activity', '--color-surface']
+  ];
+  for (const [fg, bg] of TEXT) {
+    const r = contrast(tok(fg), tok(bg));
+    assert.ok(r >= 4.5, `${fg} sobre ${bg}: ${r.toFixed(2)}:1 < 4,5:1`);
+  }
+  const border = contrast(tok('--color-control-border'), tok('--color-surface'));
+  assert.ok(border >= 3, `--color-control-border sobre --color-surface: ${border.toFixed(2)}:1 < 3:1`);
 });
 
 test('main.tsx importa tokens.css antes que styles.css', () => {

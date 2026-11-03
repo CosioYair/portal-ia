@@ -71,7 +71,7 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
   };
   const close = async () => { setBusy(true); setErr(null); try { await onClose(); flash('Historia completada'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
 
-  return <section className="card" style={{ borderColor: '#C6E2DE' }}>
+  return <section className="card" style={{ borderColor: 'var(--color-accent-border)' }}>
     <div className="card-h"><div><div className="h3">Resumen de la historia</div><div className="small muted">Qué cambia para ti, cómo comprobarlo y la prueba de aceptación.</div></div>{proc.guidance && !proc.guidance.flow && <Chip tone={proc.guidance.tone === 'err' ? 'err' : proc.guidance.tone === 'ok' ? 'ok' : proc.guidance.tone === 'warn' ? 'warn' : ''} xs>{proc.guidance.phase}</Chip>}</div>
     <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       {rejected && <Notice kind="warn">Este diff fue rechazado ({r.rejected!.reason}); la historia volvió a pendiente.</Notice>}
@@ -83,7 +83,7 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
       {portalFlow && rc?.ranAt && <div id="sec-runtime">
         <div className="eyebrow" style={{ marginBottom: 6 }}>Comprobaciones en ejecución · {new Date(rc.ranAt).toLocaleString()}</div>
         <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {rc.results.map((x, i) => <li key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '6px 10px', borderRadius: 8, background: x.status === 'ok' ? '#F2FAF5' : x.status === 'fail' ? '#FDF2F1' : '#FFFBF0' }}>
+          {rc.results.map((x, i) => <li key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', padding: '6px 10px', borderRadius: 8, background: x.status === 'ok' ? 'var(--color-ok-bg)' : x.status === 'fail' ? 'var(--color-err-bg-soft)' : 'var(--color-warn-bg-soft)' }}>
             <Chip tone={x.status === 'ok' ? 'ok' : x.status === 'fail' ? 'err' : 'warn'} xs>{x.status === 'ok' ? 'ok' : x.status === 'fail' ? 'falló' : 'pendiente'}</Chip>
             <span style={{ display: 'flex', flexDirection: 'column', gap: 2, flex: 1 }}><span className="mono sm13">{x.check.kind} {x.check.path}{x.check.selector ? ` · ${x.check.selector}` : ''} → {x.check.expect}</span><span className="small muted">{x.detail}{x.evidence ? ` · evidencia: ${x.evidence.split(/[\\/]/).slice(-2).join('/')}` : ''}</span></span>
           </li>)}

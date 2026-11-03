@@ -13,6 +13,7 @@ import { KNOWLEDGE_LABELS, TOOL_LABELS } from '../lib/labels.ts';
 import { useDraft, draftKey } from '../lib/persist.ts';
 import { osApi, type ImportPreview } from '../lib/osApi.ts';
 import '../office.css';
+import { officeHome } from '../lib/routes.ts';
 
 /**
  * Crear un agente sin tocar archivos: 1 ¿Qué necesitas? → 2 Identidad → 3 Cómo trabaja → 4 Revisión → 5 Primera tarea.
@@ -45,7 +46,8 @@ export function AgentWizard() {
   const [departments, setDepartments] = useState<string[]>([]);
   const [advanced, setAdvanced] = useState(false); const [auth, setAuth] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ id: string; name: string; firstTask: string } | null>(null);
-  const [importing, setImporting] = useState<false | 'portable' | 'external'>(false);
+  // «Nuevo agente ▾» de la Oficina puede abrir directamente la importación (?importar=portable|externo).
+  const [importing, setImporting] = useState<false | 'portable' | 'external'>(() => params.get('importar') === 'portable' ? 'portable' : params.get('importar') === 'externo' ? 'external' : false);
   const [showDevTools, setShowDevTools] = useState(false);
   useEffect(() => { osApi.harnesses().then(r => setHarnesses(r.harnesses)).catch(e => setError(e.message)); osApi.departments(ws.slug).then(l => setDepartments(l.map(x => x.name))).catch(() => undefined); }, [ws.slug]);
   const suggestions = useMemo(() => suggestArchetypes(d.need), [d.need]);
@@ -123,7 +125,7 @@ export function AgentWizard() {
         {step === 2 && <section className="card" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div className="h3">¿Con qué IA trabaja?</div>
           <p className="small muted">Elige la herramienta de IA que hará su trabajo (en el Portal la llamamos «arnés»). Podrás cambiarla después sin perder su identidad ni su memoria.</p>
-          {harnesses && !harnesses.some(h => h.id !== 'claude-code-terminal' && h.availability.available) && <Notice kind="warn">Ahora mismo no hay ninguna IA disponible. Revisa <strong>Proveedores → Claude Code — Local</strong> o, en la Oficina, el botón <strong>Arneses</strong>.</Notice>}
+          {harnesses && !harnesses.some(h => h.id !== 'claude-code-terminal' && h.availability.available) && <Notice kind="warn">Ahora mismo no hay ninguna IA disponible. Revisa <strong>Proveedores → Claude Code — Local</strong> o, en la Oficina, el botón <strong>Motores de IA</strong>.</Notice>}
           {!harnesses ? <Spinner /> : <div className="harness-cards">{harnesses.filter(h => h.id !== 'claude-code-terminal').map(h => <button key={h.id} type="button" className="harness-card" aria-pressed={d.harness === h.id} disabled={!h.availability.available} onClick={() => pickHarness(h.id)}>
             <strong>{h.name}</strong><span className="small muted">{h.billing === 'subscription' ? 'con tu suscripción (sin pago por uso)' : h.billing === 'api' ? 'se paga por uso' : 'no verificable'}</span>
             <span className="small">{h.summary}</span>
@@ -169,7 +171,7 @@ export function AgentWizard() {
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button className="btn btn-primary" onClick={() => { sessionStorage.setItem(`portal-ia.chat.prefill.${created.id}`, created.firstTask); navigate(`/oficina/agente/${created.id}/chat`); }}>Abrir su chat con esta pregunta</button>
             <Link className="btn btn-secondary" to={`/oficina/agente/${created.id}/archivos`}>Ver sus archivos</Link>
-            <Link className="btn btn-ghost" to="/oficina">Volver a la oficina</Link>
+            <Link className="btn btn-ghost" to={officeHome()}>Volver a la oficina</Link>
           </div>
         </section>}
 

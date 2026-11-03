@@ -8,6 +8,7 @@ import { Shell } from '../components/Shell.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { Chip, Icon, KV, Notice } from '../components/ui.tsx';
 import { Disclosure } from '../components/Disclosure.tsx';
+import { Tile } from '../components/kit.tsx';
 
 const PROC_LABEL: Record<string, string> = { running: 'en ejecución', done: 'terminados', pending_authorization: 'pendientes de autorización', failed: 'con errores', cancelled: 'cancelados', budget_exceeded: 'presupuesto agotado' };
 const DECISION_LABEL: Record<string, string> = { process_authorization: 'autorizar proceso', apply_diff: 'revisar diff', integrate: 'integrar', publish: 'publicar', backlog_proposal: 'propuestas al backlog' };
@@ -55,13 +56,16 @@ export function Phase() {
   return (
     <Shell crumb="Nueva etapa">
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20, maxWidth: 1000 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <div className="eyebrow">Etapas del proyecto</div>
+        <div className="page-head-main">
+          <Tile icon={Icon.history(22)} tone="project" size="lg" />
+          <div className="page-head-text">
+          <div className="eyebrow">Resumen · Etapas del proyecto</div>
           <h1 className="h1" style={{ fontSize: 26 }}>Empezar una etapa nueva sin perder el conocimiento</h1>
           <p className="med lede-2l" style={{ maxWidth: '78ch', lineHeight: 1.55 }}>Archiva el trabajo activo y guarda una <strong>línea base</strong> en Conocimiento. Nada se borra, es reversible y no consume IA.</p>
           <Disclosure title="Más información">
             <p className="sm13 med" style={{ lineHeight: 1.5, maxWidth: '78ch' }}>Se archivan las historias, los procesos y las decisiones pendientes, y el backlog queda vacío. Agentes, conversaciones, lecciones, plantillas, costos y git quedan intactos. Lo archivado se puede consultar, restaurar o revertir.</p>
           </Disclosure>
+          </div>
         </div>
         {error && <Notice kind="err">{error}</Notice>}
 
@@ -117,7 +121,7 @@ export function Phase() {
                 {p.running.map(r => <div key={r.id}>{r.title} · {r.orphan ? 'no se está ejecutando: quedó interrumpido por un reinicio del Portal; cancelarlo lo cierra sin consumir IA' : 'se está ejecutando ahora y consume IA; cancelarlo lo detiene al terminar el paso actual'} · <button className="lnk" onClick={() => navigate(`/procesos/${r.id}`)}>abrir el proceso</button> (cancelarlo es tu decisión, desde su pantalla)</div>)}</div></Notice>}
 
               <details><summary className="small" style={{ cursor: 'pointer' }}>Ver la línea base que se guardará en Conocimiento</summary>
-                <div style={{ maxHeight: 420, overflow: 'auto', marginTop: 8, padding: '8px 12px', border: '1px solid #EEECE6', borderRadius: 8 }}><Markdown text={p.baselinePreview} /></div></details>
+                <div style={{ maxHeight: 420, overflow: 'auto', marginTop: 8, padding: '8px 12px', border: '1px solid var(--color-divider)', borderRadius: 8 }}><Markdown text={p.baselinePreview} /></div></details>
 
               <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} disabled={!p.canStart} /><span>Autorizo archivar el trabajo activo de este proyecto e iniciar la etapa <strong>{name || p.phaseName}</strong>. Entiendo que es reversible y que no se borra nada.</span></label>
               <div><button className="btn btn-primary" onClick={start} disabled={!auth || busy || !p.canStart || name.trim().length < 3}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}{busy ? 'Iniciando…' : 'Iniciar la etapa'}</button></div>

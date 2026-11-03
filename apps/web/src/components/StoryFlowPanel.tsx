@@ -193,7 +193,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         <div className="sf-now-head"><strong>Ahora: {cur.label}</strong><Chip tone={STATUS_TONE[cur.status]} xs>{STATUS_TXT[cur.status]}</Chip></div>
         {cur.detail && <span className="small muted">{cur.detail}</span>}
         {flow.responsible.length > 0 && <span className="small">{flow.responsible.map(r => `${r.agentName} (${r.role})`).join(' · ')} — {flow.responsible[0].status}</span>}
-        {flow.stages.filter(s => s.status === 'warning' || s.status === 'rejected').filter(s => s.key !== flow.current).map(s => <span key={s.key} className="small" style={{ color: '#7A4A00' }}>⚠ {s.label}: {s.detail}</span>)}
+        {flow.stages.filter(s => s.status === 'warning' || s.status === 'rejected').filter(s => s.key !== flow.current).map(s => <span key={s.key} className="small" style={{ color: 'var(--color-warn-text)' }}>⚠ {s.label}: {s.detail}</span>)}
       </div>
 
       {flow.delivery && <DeliveryPanel d={flow.delivery} running={proc.status === 'running' && !orphan} next={issue && primary ? primary.label : null} />}
@@ -406,7 +406,7 @@ function ClaudeCodeCard({ cc }: { cc: ProcessBackends }) {
 /** Errores de la API en lenguaje claro (permisos, autorización, conflictos). */
 export function explainError(e: any): string {
   const code = e instanceof ApiError ? e.body?.code : undefined;
-  if (code === 'tool_not_granted') return `${e.message} Actívala en Equipo de IA → el agente → Herramientas, o elige otro agente para este papel.`;
+  if (code === 'tool_not_granted') return `${e.message} Actívala en la ficha avanzada del agente (su panel › Ajustes › Ajustes avanzados) → Herramientas, o elige otro agente para este papel.`;
   if (code === 'authorization_required' || code === 'network_confirmation_required') return `${e.message} Marca la autorización y vuelve a intentarlo.`;
   if (code === 'merge_conflict') return 'No se pudo integrar por conflictos con main. Arriba tienes la explicación y la corrección.';
   if (code === 'backend_not_ready') return `${e.message} No se ha registrado nada en el proceso: resuelve lo que falta (arriba) y continúa después.`;

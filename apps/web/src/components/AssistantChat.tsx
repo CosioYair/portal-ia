@@ -53,7 +53,7 @@ function SupersededProposalCard({ action, info, onRestore }: { action: Assistant
 
 /** Tarjeta de propuesta: ejecutar historia / aplicar cambios. La autorización ocurre aquí, con costo visible. */
 function ProposalCard({ msgId, action, onResolved }: { msgId: string; action: AssistantAction; onResolved: (m: AssistantMessage) => void }) {
-  const { flash } = useApp();
+  const { flash, workspaces } = useApp();
   const [budget, setBudget] = useState((action.suggestedBudgetUsd ?? Math.max(0.5, (action.estimatedUsd ?? 0.5) * 2)).toFixed(2));
   const [auth, setAuth] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -84,8 +84,8 @@ function ProposalCard({ msgId, action, onResolved }: { msgId: string; action: As
 
   const link = action.link ? `/empresa/${action.workspaceSlug}/proyecto/${action.projectId}/procesos/${action.processId}` : null;
   return (
-    <div className="card" style={{ borderColor: '#F0C66B', background: '#FFFBF0' }}>
-      <div className="card-h" style={{ alignItems: 'flex-start' }}><div><div className="h3" style={{ fontSize: 14 }}>{action.label}</div>{action.detail && <div className="small muted">{action.detail}</div>}</div><Chip tone="warn" xs>{isExec ? 'consume IA' : 'escribe en git'} · requiere tu autorización</Chip></div>
+    <div className="card" style={{ borderColor: 'var(--color-flow-waiting)', background: 'var(--color-warn-bg-soft)' }}>
+      <div className="card-h" style={{ alignItems: 'flex-start' }}><div><div className="h3" style={{ fontSize: 14 }}>{action.label}</div>{action.detail && <div className="small muted">{action.detail}</div>}</div><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>{action.workspaceSlug && <Chip xs tone="accent">Empresa · {workspaces.find(w => w.slug === action.workspaceSlug)?.name ?? action.workspaceSlug}</Chip>}<Chip tone="warn" xs>{isExec ? 'consume IA' : 'escribe en git'} · requiere tu autorización</Chip></div></div>
       <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {err && <Notice kind="err"><strong>No se pudo {isExec ? 'iniciar la ejecución' : 'aplicar los cambios'}.</strong> {err}</Notice>}
         {isExec && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(200px, 100%), 1fr))', gap: 12, alignItems: 'end' }}>
@@ -257,7 +257,7 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
 
   return (
     <section className="card" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ padding: compact ? '8px 12px' : '10px 18px', borderBottom: '1px solid #EEECE6' }}>
+      <div style={{ padding: compact ? '8px 12px' : '10px 18px', borderBottom: '1px solid var(--color-divider)' }}>
         <ConversationBar conversations={conversations} current={current} onSelect={id => { setConvId(id); load(id).catch(e => setError(e.message)); }} onChanged={() => { load().catch(e => setError(e.message)); }} />
       </div>
       <UsageBanner />
@@ -271,11 +271,11 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
           {!compact && <div className="small muted" style={{ marginTop: 6 }}>Ejemplos: «quiero un modo oscuro, ayúdame a decidir cómo» · «arregla el texto del pie y déjalo listo para revisar» · «¿por qué falló la última historia?» · «¿qué historias quedan por revisar?»</div>}
         </div></div>}
         {msgs.map(m => <div key={m.id} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start', gap: 6 }}>
-          <div className="msg-bubble" style={{ padding: '10px 14px', borderRadius: 12, background: m.role === 'user' ? '#1A1B1E' : '#FAF9F6', color: m.role === 'user' ? '#fff' : '#1A1B1E', border: m.role === 'user' ? 0 : '1px solid #E5E3DC' }}>
+          <div className="msg-bubble" style={{ padding: '10px 14px', borderRadius: 12, background: m.role === 'user' ? 'var(--color-ink)' : 'var(--color-surface-alt)', color: m.role === 'user' ? 'var(--color-surface)' : 'var(--color-ink)', border: m.role === 'user' ? 0 : '1px solid var(--color-border)' }}>
             {m.role === 'user'
-              ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content.length > 900 && !expanded[m.id] ? m.content.slice(0, 900) + '…' : m.content}{m.content.length > 900 && <> <button type="button" className="lnk" style={{ color: '#9BD5CC' }} onClick={() => setExpanded(x => ({ ...x, [m.id]: !x[m.id] }))}>{expanded[m.id] ? 'ver menos' : `ver todo (${m.content.length.toLocaleString()} caracteres)`}</button></>}</span>
+              ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content.length > 900 && !expanded[m.id] ? m.content.slice(0, 900) + '…' : m.content}{m.content.length > 900 && <> <button type="button" className="lnk" style={{ color: 'var(--color-on-dark-link)' }} onClick={() => setExpanded(x => ({ ...x, [m.id]: !x[m.id] }))}>{expanded[m.id] ? 'ver menos' : `ver todo (${m.content.length.toLocaleString()} caracteres)`}</button></>}</span>
               : <Markdown text={m.content} />}
-            {m.attachments?.length > 0 && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>{m.attachments.map((at, i) => <span key={i} className="chip chip-xs" style={{ background: 'rgba(255,255,255,.12)', color: '#fff', border: 0 }}>{at.mediaType.startsWith('image/') ? '🖼' : '📄'} {at.name} · {Math.max(1, Math.round(at.bytes / 1024))} KB</span>)}</div>}
+            {m.attachments?.length > 0 && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>{m.attachments.map((at, i) => <span key={i} className="chip chip-xs" style={{ background: 'var(--color-on-dark-chip)', color: 'var(--color-on-dark)', border: 0 }}>{at.mediaType.startsWith('image/') ? '🖼' : '📄'} {at.name} · {Math.max(1, Math.round(at.bytes / 1024))} KB</span>)}</div>}
           </div>
           {m.actions.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', maxWidth: 760 }}>
             {m.actions.map((a, i) => a.type === 'propose_operation' && a.operation
@@ -295,11 +295,11 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
         {busy && <div style={{ display: 'flex', gap: 8, alignItems: 'center' }} className="muted sm13"><span className="spin" /> El asistente está pensando…</div>}
         <div ref={endRef} />
       </div>
-      <form style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: compact ? 10 : 12, borderTop: '1px solid #EEECE6', background: dragging ? '#E3F1EF' : undefined }} onSubmit={e => { e.preventDefault(); void send(); }} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
+      <form style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: compact ? 10 : 12, borderTop: '1px solid var(--color-divider)', background: dragging ? 'var(--color-accent-soft)' : undefined }} onSubmit={e => { e.preventDefault(); void send(); }} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
         {images.length > 0 && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {images.map((im, i) => im.kind === 'image' ? <div key={i} style={{ position: 'relative', width: 72, height: 72, borderRadius: 8, overflow: 'hidden', border: '1px solid #E5E3DC', background: '#FAF9F6' }}>
+          {images.map((im, i) => im.kind === 'image' ? <div key={i} style={{ position: 'relative', width: 72, height: 72, borderRadius: 8, overflow: 'hidden', border: '1px solid var(--color-border)', background: 'var(--color-surface-alt)' }}>
             <img src={im.preview} alt={im.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-            <button type="button" className="xbtn" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label={`Quitar ${im.name}`} style={{ position: 'absolute', top: 2, right: 2, background: '#fff', borderRadius: 999, width: 22, height: 22, display: 'grid', placeItems: 'center' }}>{Icon.x(12)}</button>
+            <button type="button" className="xbtn" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label={`Quitar ${im.name}`} style={{ position: 'absolute', top: 2, right: 2, background: 'var(--color-surface)', borderRadius: 999, width: 22, height: 22, display: 'grid', placeItems: 'center' }}>{Icon.x(12)}</button>
           </div> : <span key={i} className="chip" style={{ height: 'auto', padding: '4px 6px 4px 10px', gap: 8 }}>📄 {im.name} · {im.text.length.toLocaleString()} caracteres<button type="button" className="xbtn" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label={`Quitar ${im.name}`}>{Icon.x(12)}</button></span>)}
           <span className="small muted" style={{ alignSelf: 'center' }}>Los adjuntos se envían al modelo del asistente y aumentan el costo del mensaje.</span>
         </div>}
@@ -307,7 +307,7 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
           <input ref={fileRef} type="file" accept={ACCEPT_ATTR} multiple hidden onChange={onPick} />
           <button type="button" className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy} title="Adjuntar imagen o archivo de texto (también puedes pegar o arrastrar)" aria-label="Adjuntar archivo">📎</button>
           <textarea className="input" value={text} onChange={e => setText(e.target.value)} onPaste={onPaste} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} placeholder={compact ? 'Pídele algo al asistente… (arrastra o pega archivos)' : 'Escribe tu petición, pega una captura o arrastra un archivo .md/.txt… (Enter envía · Shift+Enter salto de línea)'} aria-label="Mensaje para el asistente" style={{ minHeight: 48, height: 48, flex: 1 }} disabled={busy} />
-          <button className="btn btn-primary" type="submit" disabled={busy || (!text.trim() && !images.length)}>{Icon.arrow()}{compact ? '' : 'Enviar'}</button>
+          <button className="btn btn-primary" type="submit" aria-label="Enviar" disabled={busy || (!text.trim() && !images.length)}>{Icon.arrow()}{compact ? '' : 'Enviar'}</button>
         </div>
         {(msgDraft.status === 'restored' || msgDraft.status === 'error') && !!text && <DraftNote status={msgDraft.status} onDiscard={msgDraft.clear} />}
         {compact && info && <div className="small muted" style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>{info.backendLabel} · {info.billing === 'subscription' ? 'sin cargo a la API' : `≈ ${fmtUsd(info.estimatedPerMessageUsd)} por mensaje · mes ${fmtUsd(info.spentThisMonthUsd)} de ${fmtUsd(info.monthlyLimitUsd)}`}{!info.available && info.unavailableReason ? ` · ⚠ ${info.unavailableReason}` : ''}</span>{convId && <button type="button" className="lnk" onClick={() => void archive()} title="Se conserva todo; puedes reactivarla">archivar</button>}</div>}

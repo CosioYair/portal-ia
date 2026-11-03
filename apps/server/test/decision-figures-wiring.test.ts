@@ -65,8 +65,9 @@ test('Presupuestos: saldo disponible a 28 px y alertas con icono aria-hidden', (
 
 test('las introducciones ocupan como máximo 2 líneas, con recorte CSS de respaldo', () => {
   assert.ok(rules(styles, '.lede-2l').some(b => /-webkit-line-clamp:\s*2/.test(b) && /overflow:\s*hidden/.test(b)), 'falta .lede-2l con -webkit-line-clamp:2');
+  assert.ok(read('components/kit.tsx').includes('<p className="lede lede-2l">{description}</p>'), 'PageHeader pinta la descripción con lede-2l');
   for (const [name, src] of [['Autorizaciones', inbox], ['Presupuestos', budgets]] as const) {
-    const m = src.match(/className="lede lede-2l"[^>]*>([^<]+)</);
+    const m = src.match(/className="lede lede-2l"[^>]*>([^<]+)</) ?? src.match(/<PageHeader\b[\s\S]*?\sdescription="([^"]+)"/);
     assert.ok(m, `${name}: la introducción debe usar lede-2l`);
     assert.ok(m[1].trim().length <= 110, `${name}: introducción de ${m[1].trim().length} caracteres (máx. 110)`);
   }

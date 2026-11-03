@@ -77,7 +77,7 @@ export function FolderPicker({ title, hint, initialPath, requireGit, onSelect, o
           </nav>
           {!showRoots && listing?.isGit && <Chip tone="accent" xs>repositorio git</Chip>}
         </div>
-        <form className="fp-bar" style={{ borderBottom: '1px solid #EEECE6', padding: '8px 18px' }} onSubmit={e => { e.preventDefault(); void jump(); }}>
+        <form className="fp-bar" style={{ borderBottom: '1px solid var(--color-divider)', padding: '8px 18px' }} onSubmit={e => { e.preventDefault(); void jump(); }}>
           <input className="input mono" style={{ height: 34, fontSize: 13, flex: 1 }} value={goto} onChange={e => setGoto(e.target.value)} placeholder="Ir a ruta… (p. ej. C:\Mis Proyectos\Portal IA o ~/proyectos)" aria-label="Ir a ruta" />
           <button className="btn btn-secondary btn-sm" type="submit" disabled={!goto.trim() || loading}>Ir</button>
         </form>
@@ -104,8 +104,8 @@ export function FolderPicker({ title, hint, initialPath, requireGit, onSelect, o
             <span className="small muted">Selección</span>
             <span className="mono sm13" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{selected ?? 'Ninguna carpeta seleccionada'}</span>
             {!showRoots && listing && selected !== listing.path && <button className="lnk small" style={{ alignSelf: 'flex-start' }} onClick={() => setSelected(listing.path)}>Usar la carpeta actual ({listing.path})</button>}
-            {selected && requireGit && info && !info.isGit && <span className="small" style={{ color: '#7A4A00' }}>Esta carpeta no contiene un repositorio git.</span>}
-            {selected && info?.isGit && <span className="small" style={{ color: '#166534' }}>Repositorio git{info.branch ? ` · rama ${info.branch}` : ''}</span>}
+            {selected && requireGit && info && !info.isGit && <span className="small" style={{ color: 'var(--color-warn-text)' }}>Esta carpeta no contiene un repositorio git.</span>}
+            {selected && info?.isGit && <span className="small" style={{ color: 'var(--color-ok-text)' }}>Repositorio git{info.branch ? ` · rama ${info.branch}` : ''}</span>}
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
             <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>

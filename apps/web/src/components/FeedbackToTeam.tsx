@@ -40,7 +40,7 @@ export function FeedbackToTeam({ slug, itemId, failed, flush }: { slug: string; 
         <button type="button" className="btn btn-secondary btn-sm" onClick={() => void createTasks()} disabled={busy}>Crear tareas con estos fallos</button>
       </div>
       {tasksMsg && <div className="small" role="status">{tasksMsg} <button type="button" className="lnk" onClick={() => navigate(`/historias/${itemId}#tareas`)}>Ver tareas</button></div>}
-      {open && ctx && <div style={{ background: '#fff', border: '1px solid #E5E3DC', borderRadius: 8, padding: 12 }}>
+      {open && ctx && <div style={{ background: 'var(--color-surface)', border: '1px solid var(--color-border)', borderRadius: 8, padding: 12 }}>
         <div className="small" style={{ marginBottom: 6 }}><strong>El equipo recibirá</strong> {failed.length} paso(s) con falla y sus comentarios, {ctx.tasks.filter(t => t.status === 'open').length} tarea(s) abiertas, el criterio de aceptación vigente y tu nota.</div>
         <IterationComposer slug={slug} itemId={itemId} iteration={ctx.iteration} nextNumber={ctx.iterations + 1} beforeSubmit={flush}
           placeholder="Nota adicional para el equipo (opcional): qué esperabas ver, prioridades, qué no tocar…"

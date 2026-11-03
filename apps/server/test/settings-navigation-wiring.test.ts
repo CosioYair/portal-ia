@@ -12,8 +12,10 @@ const read = (rel: string) => fs.readFileSync(path.join(webSrc, rel), 'utf8');
 
 test('Presupuestos es una sección navegable con el subsistema que ya existe (no «próx.»)', () => {
   const shell = read('components/Shell.tsx'); const app = read('App.tsx'); const screen = read('screens/Budgets.tsx');
-  assert.match(app, /<Route path="\/presupuestos" element=\{guard\(<Budgets \/>\)\} \/>/);
-  assert.match(shell, /to="\/presupuestos">\{Icon\.wallet\(\)\}<span>Presupuestos<\/span>/);
+  assert.match(app, /<Route path="\/presupuestos" element=\{company\(<Budgets \/>\)\} \/>/, 'presupuesto de empresa: también en una empresa sin proyectos');
+  const settings = read('screens/Settings.tsx');
+  assert.match(settings, /to="\/presupuestos">Abrir Presupuestos/); assert.match(shell, /<Link to="\/presupuestos" className="side-usage"/);
+  assert.match(read('lib/routes.ts'), /match: \/\^\\\/\(ajustes\|presupuestos\|configuracion\)/, 'Presupuestos y Proveedores marcan «Ajustes» en el menú');
   assert.ok(!/\['Presupuestos', Icon\.wallet\]/.test(shell), 'ya no aparece deshabilitada');
   assert.match(screen, /<BudgetMeter level="company" scopeId=\{ws\.slug\}/); assert.match(screen, /<BudgetMeter level="project" scopeId=\{project\.id\} workspace=\{ws\.slug\}/);
   assert.match(screen, /presupuesto no positivo/, 'distingue el gasto de pruebas que hablan de presupuestos');
@@ -22,7 +24,7 @@ test('Presupuestos es una sección navegable con el subsistema que ya existe (no
 
 test('Claude Code — Local y sus proyectos autorizados tienen enlace directo; autorizar se comprueba con lo guardado', () => {
   const shell = read('components/Shell.tsx'); const panel = read('components/ClaudeCodePanel.tsx'); const agent = read('screens/AgentDetail.tsx');
-  assert.match(shell, /to="\/configuracion\/proveedor#claude-code">\{Icon\.plug\(\)\}<span style=\{\{ flex: 1 \}\}>Claude Code — Local/);
+  assert.match(read('screens/Settings.tsx'), /to="\/configuracion\/proveedor#claude-code">Claude Code/);
   assert.match(panel, /id="claude-code-proyectos"/); assert.match(panel, /window\.location\.hash\.startsWith\('#claude-code'\)/, 'el enlace se desplaza a la sección al cargar');
   assert.match(panel, /const saved = !!v\?\.projects\.includes\(id\)/, 'el mensaje sale de lo releído, no de lo pedido');
   assert.match(agent, /fresh\.projects\.find\(x => x\.id === p\.id\)\?\.authorized/);

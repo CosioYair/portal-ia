@@ -61,7 +61,7 @@ export function AgentDetail() {
   const nameOf = (k: string) => byKey(k)?.config.name ?? k;
   const openKey = (k: string) => { const a = byKey(k); if (a) navigate(`/equipo/${a.id}`); };
 
-  if (!agent || !cfg) return <Shell crumb="Equipo de IA"><main className="page"><span className="spin" aria-label="Cargando" /></main></Shell>;
+  if (!agent || !cfg) return <Shell crumb="Ajustes avanzados"><main className="page"><span className="spin" aria-label="Cargando" /></main></Shell>;
   const wsScope = agent.scope === 'workspace';
 
   const save = async () => {
@@ -91,11 +91,11 @@ export function AgentDetail() {
   const fbCount = cfg.fallbacks.filter(f => f !== cfg.model).length;
 
   return (
-    <Shell crumb={<>Equipo de IA / {cfg.name}</>}>
+    <Shell crumb={<>{cfg.name} · ajustes avanzados</>}>
       <main style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'stretch', flex: 1 }}>
-        <aside style={{ flex: '1 1 260px', maxWidth: 290, borderRight: '1px solid #E5E3DC', padding: '16px 12px 24px', background: '#FAF9F6', display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <Link className="btn btn-ghost btn-sm" to="/equipo" style={{ justifyContent: 'flex-start', marginBottom: 6 }}>{Icon.back()}Equipo de IA</Link>
-          <div className="side-sec">Agentes del espacio</div>{agents.filter(a => a.scope === 'workspace').map(rail)}
+        <aside style={{ flex: '1 1 260px', maxWidth: 290, borderRight: '1px solid var(--color-border)', padding: '16px 12px 24px', background: 'var(--color-surface-alt)', display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <Link className="btn btn-ghost btn-sm" to="/oficina/organizacion" style={{ justifyContent: 'flex-start', marginBottom: 6 }}>{Icon.back()}Organización</Link>
+          <div className="side-sec">Agentes de la empresa</div>{agents.filter(a => a.scope === 'workspace').map(rail)}
           <div className="side-sec">Proyecto · {status.project!.name}</div>{agents.filter(a => a.scope === 'project').map(rail)}
         </aside>
         <div className="page" style={{ flex: '999 1 560px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20, maxWidth: 'none' }}>
@@ -104,17 +104,17 @@ export function AgentDetail() {
               <Avatar initials={agent.template.initials} ws={wsScope} lg />
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <h1 className="h1" style={{ fontSize: 24 }}>{cfg.name}</h1><div className="med">{agent.template.role}</div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone={wsScope ? 'accent' : ''} xs>{wsScope ? 'Ámbito: espacio de trabajo' : 'Ámbito: proyecto'}</Chip><Chip xs dot={agent.status === 'active' ? 'ok' : ''}>Configurado · {agent.status === 'active' ? 'Activo' : 'Inactivo'}</Chip><Chip xs className="mono">{agent.templateId === 'tpl.custom@1' ? 'personalizado' : agent.templateId}</Chip></div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone={wsScope ? 'accent' : ''} xs>{wsScope ? 'Ámbito: empresa' : 'Ámbito: proyecto'}</Chip><Chip xs dot={agent.status === 'active' ? 'ok' : ''}>Configurado · {agent.status === 'active' ? 'Activo' : 'Inactivo'}</Chip><Chip xs className="mono">{agent.templateId === 'tpl.custom@1' ? 'personalizado' : agent.templateId}</Chip></div>
               </div>
             </div>
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-              {agent.templateId === 'tpl.custom@1' && <button className="btn btn-ghost" style={{ color: '#B3261E' }} disabled={saving} onClick={async () => { if (!confirm(`¿Eliminar el agente «${agent.config.name}»? Esta acción no se puede deshacer.`)) return; try { await api.deleteAgent(ws.slug, agent.id); flash('Agente eliminado'); navigate('/equipo'); } catch (e: any) { flash(e.message, 'err'); } }}>Eliminar</button>}
+              {agent.templateId === 'tpl.custom@1' && <button className="btn btn-ghost" style={{ color: 'var(--color-err-text)' }} disabled={saving} onClick={async () => { if (!confirm(`¿Eliminar el agente «${agent.config.name}»? Esta acción no se puede deshacer.`)) return; try { await api.deleteAgent(ws.slug, agent.id); flash('Agente eliminado'); navigate('/equipo'); } catch (e: any) { flash(e.message, 'err'); } }}>Eliminar</button>}
               <button className="btn btn-ghost" onClick={discardDraft} disabled={!dirty || saving}>Descartar</button>
               <button className="btn btn-primary" onClick={save} disabled={!dirty || saving}>{saving ? 'Guardando…' : 'Guardar cambios'}</button>
             </div>
           </div>
           <DraftNote status={dirty ? cfgDraft.status : 'idle'} stale={cfgDraft.stale} />
-          {dirty && <Notice kind="warn">Hay cambios sin guardar. Al guardar se actualiza la configuración del agente en la base local del espacio; no se activa ni realiza ninguna llamada a modelos.</Notice>}
+          {dirty && <Notice kind="warn">Hay cambios sin guardar. Al guardar se actualiza la configuración del agente en la base local de la empresa; no se activa ni realiza ninguna llamada a modelos.</Notice>}
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(420px, 100%), 1fr))', gap: 20, alignItems: 'start' }}>
             <section className="card"><div className="card-h"><div className="h3">Identidad y rol</div></div>
@@ -137,15 +137,15 @@ export function AgentDetail() {
 
             <section className="card"><div className="card-h"><div className="h3">Relaciones organizacionales</div></div>
               <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                <div><div className="label">Reporta a</div><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{agent.template.reportsTo === 'owner' ? <Chip>Tú · propietario del espacio</Chip> : chipLink(agent.template.reportsTo)}</div></div>
+                <div><div className="label">Reporta a</div><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{agent.template.reportsTo === 'owner' ? <Chip>Tú · propietario de la empresa</Chip> : chipLink(agent.template.reportsTo)}</div></div>
                 <div><div className="label">Supervisa</div><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{agent.template.supervises.length ? agent.template.supervises.map(chipLink) : <span className="sm13 muted">No supervisa a otros agentes.</span>}</div></div>
                 <div><div className="label">Colabora con</div><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{agent.template.collaborates.map(chipLink)}</div></div>
               </div></section>
 
-            <section className="card"><div className="card-h"><div className="h3">Ámbito asignado</div><Chip tone={wsScope ? 'accent' : ''} xs>{wsScope ? 'Espacio de trabajo' : 'Proyecto'}</Chip></div>
+            <section className="card"><div className="card-h"><div className="h3">Ámbito asignado</div><Chip tone={wsScope ? 'accent' : ''} xs>{wsScope ? 'Empresa' : 'Proyecto'}</Chip></div>
               <div className="card-b">
-                <KV k="Espacio de trabajo">{ws.name} · interno</KV>
-                <KV k="Proyecto">{wsScope ? 'Todos los proyectos del espacio' : status.project!.name}</KV>
+                <KV k="Empresa">{ws.name}</KV>
+                <KV k="Proyecto">{wsScope ? 'Todos los proyectos de la empresa' : status.project!.name}</KV>
                 <KV k="Fuera del ámbito"><Chip tone="err" xs>sin acceso</Chip></KV>
                 <div className="help" style={{ marginTop: 10 }}>El ámbito limita el conocimiento, las herramientas y los agentes con los que puede interactuar. Se define al crear el agente y no es editable aquí.</div>
               </div></section>
@@ -163,7 +163,7 @@ export function AgentDetail() {
                   <div className="help">{model ? `${model.description} ${model.supportsEffort ? 'Admite esfuerzo de razonamiento ajustable.' : 'No admite ajuste de esfuerzo.'}` : 'Modelo no disponible en el proveedor conectado.'}</div></div>
               </div></section>
 
-            <section className="card" id="backend"><div className="card-h"><div className="h3">Backend de ejecución</div><Chip xs tone={agent.config.backend && agent.config.backend !== 'api' ? 'accent' : ''}>{backendLabel(agent.config.backend, cc?.detection?.billing, agent.config.provider)}</Chip></div>
+            <section className="card" id="backend"><div className="card-h"><div className="h3">Motor de IA (backend de ejecución)</div><Chip xs tone={agent.config.backend && agent.config.backend !== 'api' ? 'accent' : ''}>{backendLabel(agent.config.backend, cc?.detection?.billing, agent.config.provider)}</Chip></div>
               <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   <select className="input" style={{ flex: '1 1 260px' }} aria-label="Backend de ejecución" value={backendPick ?? agent.config.backend ?? 'api'} onChange={e => setBackendPick(e.target.value as ExecutionBackend)}>
@@ -213,7 +213,7 @@ export function AgentDetail() {
             <section className="card" style={{ gridColumn: '1 / -1' }}><div className="card-h"><div><div className="h3">Capacidades y participación</div><div className="small muted">Las capacidades deciden su papel en cada historia (sin IA); la participación se calcula de los pasos ejecutados.</div></div><span className="small muted">{(cfg.capabilities ?? []).length} capacidades</span></div>
               <div className="card-b" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))', gap: 16 }}>
                 <div style={{ display: 'flex', flexDirection: 'column' }}>
-                  {CAPABILITIES.map(c => { const on = (cfg.capabilities ?? []).includes(c.id); const needs = c.id === 'implementar' ? 'write_repo' : c.role === 'reviewer' || c.role === 'consultant' ? 'read_repo' : null; return <label key={c.id} className="krow"><input className="cb" type="checkbox" checked={on} onChange={e => edit({ capabilities: e.target.checked ? [...(cfg.capabilities ?? []), c.id] : (cfg.capabilities ?? []).filter(x => x !== c.id) })} /><span style={{ flex: 1 }}>{c.label}{needs && on && !cfg.tools[needs] ? <span className="small" style={{ color: '#9A1F18' }}> · falta la herramienta {needs}: el backend lo excluirá</span> : null}</span></label>; })}
+                  {CAPABILITIES.map(c => { const on = (cfg.capabilities ?? []).includes(c.id); const needs = c.id === 'implementar' ? 'write_repo' : c.role === 'reviewer' || c.role === 'consultant' ? 'read_repo' : null; return <label key={c.id} className="krow"><input className="cb" type="checkbox" checked={on} onChange={e => edit({ capabilities: e.target.checked ? [...(cfg.capabilities ?? []), c.id] : (cfg.capabilities ?? []).filter(x => x !== c.id) })} /><span style={{ flex: 1 }}>{c.label}{needs && on && !cfg.tools[needs] ? <span className="small" style={{ color: 'var(--color-err-text)' }}> · falta la herramienta {needs}: el backend lo excluirá</span> : null}</span></label>; })}
                 </div>
                 <div>
                   <div className="label">Participación real</div>
@@ -236,7 +236,7 @@ export function AgentDetail() {
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                     <select className="input" style={{ maxWidth: 200 }} value={tplTo} onChange={e => { setTplTo(e.target.value); loadTpl(e.target.value || undefined); }}><option value="">— elegir versión —</option>{tpl.versions.filter(v => v.id !== tpl.current!.id).map(v => <option key={v.id} value={v.id}>{v.id} · {v.practices.length} práctica(s){tpl.latest?.id === v.id ? ' · última' : ''}</option>)}</select>
                   </div>
-                  {tpl.diff && (tplTo ? tpl.diff.to === tplTo : true) && <div style={{ marginTop: 8 }}><div className="small muted">Diff {tpl.diff.from ?? '—'} → {tpl.diff.to}</div><pre className="mono" style={{ margin: '4px 0 8px', padding: 8, background: '#FAF9F6', borderRadius: 8, fontSize: 12, whiteSpace: 'pre-wrap' }}>{tpl.diff.diffMd}</pre>
+                  {tpl.diff && (tplTo ? tpl.diff.to === tplTo : true) && <div style={{ marginTop: 8 }}><div className="small muted">Diff {tpl.diff.from ?? '—'} → {tpl.diff.to}</div><pre className="mono" style={{ margin: '4px 0 8px', padding: 8, background: 'var(--color-surface-alt)', borderRadius: 8, fontSize: 12, whiteSpace: 'pre-wrap' }}>{tpl.diff.diffMd}</pre>
                     <button className="btn btn-primary btn-sm" disabled={tplBusy} onClick={() => changeVersion(tpl.diff!.to)}>{tplBusy ? <span className="spin spin-light" /> : null}{tpl.diff.to > (tpl.current.id) ? `Actualizar a ${tpl.diff.to}` : `Volver a ${tpl.diff.to}`}</button></div>}
                   {!tpl.diff && !tplTo && <div className="help" style={{ marginTop: 8 }}>No hay versión más reciente que la que sigue este agente.</div>}
                 </div>
@@ -263,15 +263,12 @@ export function AgentDetail() {
             <section className="card" style={{ gridColumn: '1 / -1' }}><div className="card-h"><div className="h3">Estado</div><Chip dot={agent.status === 'active' ? 'ok' : ''}>{agent.status === 'active' ? 'Activo' : 'Inactivo'} · configurado</Chip></div>
               <div className="card-b" style={{ display: 'flex', justifyContent: 'space-between', gap: 20, flexWrap: 'wrap', alignItems: 'center' }}>
                 <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap' }}>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><span className="small muted">Última actividad</span><span className="mono sm13">ninguna</span></div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><span className="small muted">Llamadas a modelos</span><span className="mono sm13">0</span></div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><span className="small muted">Costo acumulado</span><span className="mono sm13">{fmtUsd(0)}</span></div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}><span className="small muted">Configuración</span><span className="mono sm13">{agent.configEdited ? `editada · ${new Date(agent.updatedAt).toLocaleString('es-MX')}` : 'plantilla sin cambios'}</span></div>
                 </div>
-                <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}><span className="small muted" style={{ maxWidth: '36ch' }}>La activación requiere autorización de ejecución y un presupuesto aprobado. Se habilita en la siguiente historia de usuario.</span><button className="btn btn-secondary" disabled>Activar agente</button></div>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}><span className="small muted" style={{ maxWidth: '40ch' }}>Su estado real (trabajando, en cola, te necesita), su actividad y su trabajo están en su panel de la Oficina.</span><Link className="btn btn-secondary" to={`/oficina/agente/${encodeURIComponent(agent.id)}`}>Abrir su panel</Link></div>
               </div></section>
           </div>
-          <div><Link className="btn btn-ghost" to="/panel">Volver al panel</Link></div>
+          <div><Link className="btn btn-ghost" to={`/oficina/agente/${encodeURIComponent(agent.id)}/configuracion`}>Volver a su panel</Link></div>
         </div>
       </main>
     </Shell>

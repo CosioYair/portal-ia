@@ -61,7 +61,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
       {r.changes.length > 0 && <section className="card" id="sec-diff">
         <div className="card-h"><div><div className="h3">Cambios propuestos</div><div className="small muted">{byRole('implementer') ? `${byRole('implementer')} · ` : ''}{r.changes.length} archivo{r.changes.length === 1 ? '' : 's'} · +{added} líneas{r.applied ? '' : ' · aún no escritos en el repositorio'}</div></div>
           {r.review && <Chip tone={r.review.approve ? 'ok' : 'warn'} xs>{r.review.approve ? 'QA: aprobado' : 'QA: con observaciones'}</Chip>}</div>
-        {r.implementationSummary && <div className="card-b" style={{ borderBottom: '1px solid #EEECE6' }}><Markdown text={r.implementationSummary} /></div>}
+        {r.implementationSummary && <div className="card-b" style={{ borderBottom: '1px solid var(--color-divider)' }}><Markdown text={r.implementationSummary} /></div>}
         <div style={{ display: 'flex', flexDirection: 'column' }}>
           {r.changes.map(c => <div key={c.path}>
             <button className="arow" style={{ borderRadius: 0, padding: '10px 18px' }} onClick={() => setOpen(open === c.path ? null : c.path)} aria-expanded={open === c.path}>
@@ -70,9 +70,9 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
               {c.warning && <Chip tone="warn" xs>⚠ posible secreto</Chip>}
               <span className="small mono muted">{c.before} → {c.after} líneas</span>{Icon.chevR()}
             </button>
-            {open === c.path && (c.error || c.warning) && <div className="card-b" style={{ padding: '8px 18px', borderTop: '1px solid #EEECE6' }}>{c.error && <Notice kind="err">{c.error} Este cambio no se escribirá; el resto sí.</Notice>}{c.warning && <Notice kind="warn">{c.warning}</Notice>}</div>}
-            {open === c.path && !c.error && <pre className="mono" style={{ margin: 0, padding: '12px 18px', background: '#FAF9F6', borderTop: '1px solid #EEECE6', borderBottom: '1px solid #EEECE6', fontSize: 12, lineHeight: 1.5, overflow: 'auto', maxHeight: 480, whiteSpace: 'pre' }}>
-              {(c.diff ?? '').split('\n').map((l, i) => <div key={i} style={{ color: l.startsWith('+') && !l.startsWith('+++') ? '#166534' : l.startsWith('-') && !l.startsWith('---') ? '#9A1F18' : l.startsWith('@@') ? '#686B72' : '#1A1B1E', background: l.startsWith('+') && !l.startsWith('+++') ? '#E4F3EA' : l.startsWith('-') && !l.startsWith('---') ? '#FBE7E5' : 'transparent' }}>{l || ' '}</div>)}
+            {open === c.path && (c.error || c.warning) && <div className="card-b" style={{ padding: '8px 18px', borderTop: '1px solid var(--color-divider)' }}>{c.error && <Notice kind="err">{c.error} Este cambio no se escribirá; el resto sí.</Notice>}{c.warning && <Notice kind="warn">{c.warning}</Notice>}</div>}
+            {open === c.path && !c.error && <pre className="mono" style={{ margin: 0, padding: '12px 18px', background: 'var(--color-surface-alt)', borderTop: '1px solid var(--color-divider)', borderBottom: '1px solid var(--color-divider)', fontSize: 12, lineHeight: 1.5, overflow: 'auto', maxHeight: 480, whiteSpace: 'pre' }}>
+              {(c.diff ?? '').split('\n').map((l, i) => <div key={i} style={{ color: l.startsWith('+') && !l.startsWith('+++') ? 'var(--color-ok-text)' : l.startsWith('-') && !l.startsWith('---') ? 'var(--color-err-text)' : l.startsWith('@@') ? 'var(--color-text-muted)' : 'var(--color-ink)', background: l.startsWith('+') && !l.startsWith('+++') ? 'var(--color-ok-bg)' : l.startsWith('-') && !l.startsWith('---') ? 'var(--color-err-bg)' : 'transparent' }}>{l || ' '}</div>)}
             </pre>}
           </div>)}
         </div>
@@ -118,7 +118,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
             {(['typecheck', 'test', 'build', 'install'] as const).map(c => <button key={c} className="btn btn-secondary btn-sm" onClick={() => verify(c)} disabled={!authVerify || busy !== null || (c === 'install' && !allowNet)}>{busy === c ? <span className="spin" /> : null}{c === 'install' ? 'npm ci (install)' : `npm run ${c}`}</button>)}
             <label className="ck small" style={{ marginLeft: 4 }}><input className="cb" type="checkbox" checked={allowNet} onChange={e => setAllowNet(e.target.checked)} /><span>Permitir red <strong>solo para install</strong> (revisa antes el diff de package.json)</span></label>
           </div></div></details>}
-          {r.verifications.map((v, i) => <div key={i} className="card" style={{ background: '#FAF9F6' }}>
+          {r.verifications.map((v, i) => <div key={i} className="card" style={{ background: 'var(--color-surface-alt)' }}>
             <div className="card-h" style={{ padding: '10px 14px' }}><span className="mono sm13">{v.command}{v.isolation ? <span className="muted"> · {isoLabel(v.isolation)}</span> : null}</span><Chip tone={v.exitCode === 0 ? 'ok' : v.exitCode === null || (v.exitCode === 86 && v.isolation === 'docker') ? 'warn' : 'err'} xs>{v.exitCode === 0 ? 'correcto' : v.exitCode === null ? 'no terminó · tiempo agotado' : v.exitCode === 86 && v.isolation === 'docker' ? 'bloqueado · faltan dependencias' : v.isolation === 'unavailable' ? 'no ejecutado · sin sandbox' : `falló · código ${v.exitCode ?? '?'}`} · {(v.durationMs / 1000).toFixed(1)} s</Chip></div>
             <details open={i === r.verifications.length - 1 && v.exitCode !== 0 && v.exitCode !== 86}><summary className="small muted" style={{ cursor: 'pointer', padding: '6px 14px' }}>{lastLine(v.output).slice(0, 160) || 'Ver la salida'}</summary>
             <pre className="mono" style={{ margin: 0, padding: '10px 14px', fontSize: 12, maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{v.output || '(sin salida)'}</pre></details>

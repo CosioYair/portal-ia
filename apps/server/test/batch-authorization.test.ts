@@ -237,7 +237,7 @@ test('agente solo API: exige la API autorizada en el lote (se explica qué agent
   const p = await preview([a.id], { backends: ['claude_code'] });
   assert.equal(p.plan[0].executable, false); assert.deepEqual(p.plan[0].disallowedBackends, ['api']);
   const t = p.plan[0].team[0];
-  assert.match(t.problem, /usa Anthropic API \(facturable\) y este lote no autoriza la API/); assert.equal(t.fix.href, `/equipo/${t.agentId}`);
+  assert.match(t.problem, /usa Anthropic API \(facturable\) y este lote no autoriza la API/); assert.equal(t.fix.href, `/oficina/agente/${t.agentId}/configuracion`);
   assert.equal(p.summary.subscriptionCalls.max, 0); assert.ok(p.estimateUsd === 0 && p.plan[0].estimatedUsd > 0, 'el total solo cuenta lo que empezará');
   const ok = await preview([a.id], { backends: ['api'] });
   assert.equal(ok.plan[0].executable, true); assert.ok(ok.estimateUsd > 0); assert.equal(ok.summary.subscriptionCalls.max, 0);
@@ -303,7 +303,7 @@ test('consola de Claude Code sin conectar: no empieza; el arreglo apunta al agen
   const p = await preview([a.id]);
   const t = p.plan[0].team.find((x: any) => x.agentId === dev);
   assert.equal(t.source, 'claude_code', 'la consola es el origen «suscripción de Claude Code»'); assert.equal(t.allowed, true); assert.equal(t.ready, false);
-  assert.match(t.problem, /consola/); assert.equal(t.fix.href, `/equipo/${dev}`);
+  assert.match(t.problem, /consola/); assert.equal(t.fix.href, `/oficina/agente/${dev}/configuracion`);
   await setBackends('api');
 });
 

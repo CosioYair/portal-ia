@@ -5,6 +5,7 @@ import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, KV, Notice, Stepper, Wordmark } from '../components/ui.tsx';
 import { ClaudeCodePanel } from '../components/ClaudeCodePanel.tsx';
+import { Shell } from '../components/Shell.tsx';
 import { Disclosure } from '../components/Disclosure.tsx';
 
 const CONN: Record<ProviderView['status'], { label: string; tone: '' | 'warn' | 'ok' | 'err'; dot: '' | 'pulse' | 'ok' | 'err' }> = {
@@ -63,23 +64,18 @@ export function ProviderSetup() {
     { label: 'Modelo predeterminado', cls: view.defaultModel ? 'is-done' : '', meta: view.models.find(m => m.id === view.defaultModel)?.short ?? 'pendiente' }
   ];
 
-  return (
-    <div className="screen setup">
-      <header className="setup-top">
-        <Wordmark />
-        {setupDone ? <Link className="btn btn-ghost btn-sm" to="/panel">Volver al panel</Link> : <Stepper s1="is-active" s2="" s3="" />}
-        <div className="muted small mono">consumo de IA en este paso · 0 tokens</div>
-      </header>
-      <main className="setup-main" style={{ display: 'flex', flexWrap: 'wrap', gap: 24, maxWidth: 1200, alignItems: 'flex-start', paddingTop: 40 }}>
+  const columns = <>
         <div style={{ flex: '999 1 520px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div className="eyebrow">{setupDone ? 'Proveedores de IA' : 'Paso 1 de 3'}</div>
-            <h1 className="h1" style={{ fontSize: 28 }}>Conecta un proveedor de IA</h1>
-            <p className="med lede-2l" style={{ maxWidth: '78ch' }}>Los agentes necesitan al menos un proveedor. La verificación hace una sola solicitud y no inicia ningún proceso.</p>
+            <div className="eyebrow">{setupDone ? <><Link className="lnk" to="/ajustes">Ajustes</Link> · Proveedores de IA</> : 'Paso 1 de 3'}</div>
+            <h1 className="h1" style={{ fontSize: 28 }}>{setupDone ? 'Proveedores de IA' : 'Conecta un proveedor de IA'}</h1>
+            {setupDone
+              ? <p className="med lede-2l" style={{ maxWidth: '78ch' }}>Conecta o revisa las claves de API y Claude Code. Verificar hace una sola solicitud y no inicia ningún proceso.</p>
+              : <p className="med lede-2l" style={{ maxWidth: '78ch' }}>Los agentes necesitan al menos un proveedor. La verificación hace una sola solicitud y no inicia ningún proceso.</p>}
           </div>
 
           <section className="card">
-            <div className="card-h"><div><div className="h3">Proveedor</div><div className="small muted">Elige con qué proveedor conectarás este espacio. Puedes conectar varios.</div></div></div>
+            <div className="card-h"><div><div className="h3">Proveedor</div><div className="small muted">Elige qué proveedor conectar al Portal. Puedes conectar varios.</div></div></div>
             <div className="card-b" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(230px, 100%), 1fr))', gap: 12 }}>
               {providers.map(p => (
                 <button key={p.id} className={`pcard ${p.id === providerId ? 'is-selected' : ''}`} onClick={() => setProviderId(p.id)} aria-pressed={p.id === providerId}>
@@ -93,8 +89,8 @@ export function ProviderSetup() {
                 </button>
               ))}
               <button className="pcard" disabled>
-                <span className="plogo mono" style={{ background: 'transparent', border: '1px dashed #CFCCC3' }}>+</span>
-                <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}><span style={{ fontWeight: 600 }}>Otro proveedor</span><span className="small muted">Disponible más adelante gracias a los adaptadores independientes del proveedor.</span></span>
+                <span className="plogo mono" style={{ background: 'transparent', border: '1px dashed var(--color-border-strong)' }}>+</span>
+                <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}><span style={{ fontWeight: 600 }}>Otro proveedor</span><span className="small muted">Aún no disponible: cada proveedor necesita su adaptador.</span></span>
               </button>
             </div>
           </section>
@@ -117,7 +113,7 @@ export function ProviderSetup() {
                 <div>
                   <label className="label" htmlFor="ws-id">ID del workspace de Anthropic <span className="muted" style={{ fontWeight: 400 }}>· opcional</span></label>
                   <input id="ws-id" className="input mono" value={workspaceId} onChange={e => setWorkspaceId(e.target.value)} placeholder="wrkspc_…" autoComplete="off" spellCheck={false} />
-                  {workspaceId.trim() && !/^wrkspc_/.test(workspaceId.trim()) && <div className="help" style={{ color: '#7A4A00' }}>Ese valor no parece un ID de workspace: debe empezar por <span className="mono">wrkspc_</span>. El identificador con guiones de la URL de la consola no sirve.</div>}
+                  {workspaceId.trim() && !/^wrkspc_/.test(workspaceId.trim()) && <div className="help" style={{ color: 'var(--color-warn-text)' }}>Ese valor no parece un ID de workspace: debe empezar por <span className="mono">wrkspc_</span>. El identificador con guiones de la URL de la consola no sirve.</div>}
                   <div className="help">Solo si tu clave no pertenece a un workspace.</div>
                   <Disclosure title="Más información">
                     <div className="help">Hace falta, por ejemplo, con las claves de usuario <span className="mono">sk-ant-usr-…</span>. Lo encuentras en console.anthropic.com → Settings → Workspaces. Las claves creadas dentro de un workspace (<span className="mono">sk-ant-api03-…</span>) no lo necesitan.</div>
@@ -147,7 +143,7 @@ export function ProviderSetup() {
           {view.status === 'connected' && (
             <section className="card">
               <div className="card-h">
-                <div><div className="h3">Modelo predeterminado</div><div className="small muted">Valor inicial del espacio. Cada agente podrá tener su propio modelo y esfuerzo.</div></div>
+                <div><div className="h3">Modelo predeterminado</div><div className="small muted">Valor inicial de los agentes nuevos. Cada agente podrá tener su propio modelo y esfuerzo.</div></div>
                 <Chip xs className="mono">{view.models.length} modelos · lista del proveedor</Chip>
               </div>
               <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 420, overflow: 'auto' }}>
@@ -171,9 +167,9 @@ export function ProviderSetup() {
           {setupDone && <ClaudeCodePanel />}
 
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-            <Link className="btn btn-ghost" to={setupDone ? '/panel' : '/'}>{setupDone ? 'Cancelar' : 'Atrás'}</Link>
-            <button className="btn btn-primary" disabled={!canContinue} onClick={() => navigate(setupDone ? '/panel' : '/configuracion/inicializar')}>
-              {setupDone ? 'Volver al panel' : 'Continuar · Inicializar espacio interno'}
+            <Link className="btn btn-ghost" to={setupDone ? '/ajustes' : '/'}>{setupDone ? 'Cancelar' : 'Atrás'}</Link>
+            <button className="btn btn-primary" disabled={!setupDone && !canContinue} onClick={() => navigate(setupDone ? '/ajustes' : '/configuracion/inicializar')}>
+              {setupDone ? 'Volver a Ajustes' : 'Continuar · Preparar la empresa interna'}
             </button>
           </div>
         </div>
@@ -194,7 +190,16 @@ export function ProviderSetup() {
             <p className="sm13 med" style={{ lineHeight: 1.5 }}>Portal IA usa un adaptador por proveedor. Puedes conectar varios y asignar modelos distintos a cada agente.</p>
           </div>
         </aside>
-      </main>
+  </>;
+  if (setupDone && status.workspace) return <Shell crumb="Proveedores"><main className="page" style={{ display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'flex-start' }}>{columns}</main></Shell>;
+  return (
+    <div className="screen setup">
+      <header className="setup-top">
+        <Wordmark />
+        <Stepper s1="is-active" s2="" s3="" />
+        <div className="muted small mono">consumo de IA en este paso · 0 tokens</div>
+      </header>
+      <main className="setup-main" style={{ display: 'flex', flexWrap: 'wrap', gap: 24, maxWidth: 1200, alignItems: 'flex-start', paddingTop: 40 }}>{columns}</main>
     </div>
   );
 }

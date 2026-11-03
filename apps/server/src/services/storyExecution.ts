@@ -119,12 +119,12 @@ export function parseReview(text: string, stopReason: string | null): ReviewVerd
 /**
  * Comprobación previa (sin IA ni costo): el proyecto interno «Desarrollo del Portal» debe tener registrada la carpeta
  * desde la que corre este Portal. Si apunta a otra carpeta, los agentes construirían un proyecto paralelo que nunca
- * llegaría a este Portal: se detiene aquí, con la corrección a un clic en el Panel. (PORTAL_ALLOW_FOREIGN_REPO=1 lo permite.)
+ * llegaría a este Portal: se detiene aquí, con la corrección a un clic en el Resumen del proyecto. (PORTAL_ALLOW_FOREIGN_REPO=1 lo permite.)
  */
 export function preflightRepo(slug: string, repoPath: string) {
   if (slug !== INTERNAL_WORKSPACE.slug || process.env.PORTAL_ALLOW_FOREIGN_REPO === '1') return;
   const a = path.resolve(expandHome(repoPath)).toLowerCase(); const b = path.resolve(REPO_ROOT).toLowerCase();
-  if (a !== b) throw Object.assign(new Error(`El repositorio registrado del proyecto interno (${repoPath}) no es la carpeta desde la que corre este Portal (${REPO_ROOT}). Las mejoras del Portal deben hacerse sobre su propio código: en el Panel, pulsa «Usar la carpeta de esta instalación» y vuelve a intentarlo.`), { statusCode: 409, code: 'foreign_repo' });
+  if (a !== b) throw Object.assign(new Error(`El repositorio registrado del proyecto interno (${repoPath}) no es la carpeta desde la que corre este Portal (${REPO_ROOT}). Las mejoras del Portal deben hacerse sobre su propio código: en el Resumen del proyecto, pulsa «Usar la carpeta de esta instalación» y vuelve a intentarlo.`), { statusCode: 409, code: 'foreign_repo' });
 }
 
 /** Tamaño del contexto del repositorio que recibe cada paso (igual para todas las historias del proyecto). */

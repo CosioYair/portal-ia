@@ -11,6 +11,7 @@ import { useApp } from '../lib/store.ts';
 import { BACKLOG_STATUS, fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Chip, Icon, Notice } from '../components/ui.tsx';
+import { Tile, WorkTabs } from '../components/kit.tsx';
 import { draftKey, useDraft } from '../lib/persist.ts';
 import { TeamReady } from '../components/TeamReady.tsx';
 import { StoryCard, STATUS_ICON, type StoryCardAction } from '../components/StoryCard.tsx';
@@ -98,7 +99,7 @@ export function Backlog() {
     try {
       const est = useAI ? aiOffer : null;
       const r = await api.importBacklog(ws.slug, projectId, useAI ? { authorized: true, maxUsd: Math.max(0.1, (est?.estimatedUsd ?? 0.1) * 3) } : undefined);
-      if (!r.source) { flash('No hay una síntesis todavía: ejecuta la evaluación inicial desde el panel', 'err'); }
+      if (!r.source) { flash('No hay una síntesis todavía: ejecuta la evaluación inicial desde el Resumen', 'err'); }
       else if (r.imported === 0 && r.total === 0 && !useAI) { const e = await api.importEstimate(ws.slug, projectId).catch(() => null); setAiOffer({ source: r.source, model: e?.model ?? null, byAgent: e?.byAgent ?? null, estimatedUsd: e?.estimatedUsd ?? 0 }); }
       else { setAiOffer(null); flash(r.imported ? `${r.imported} historias importadas desde «${r.source}»${r.usedAI ? ` · extraídas por IA (${fmtUsd(r.costUsd)})` : ''}` : 'El backlog ya contenía estas historias'); }
       await load();
@@ -190,22 +191,23 @@ export function Backlog() {
   return (
     <Shell crumb="Backlog">
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div className="eyebrow">Backlog{phase ? ` · etapa «${phase.name}»` : ''}</div>
+        <header className="page-head"><div className="page-head-main">
+          <Tile icon={Icon.kanban(22)} tone="work" size="lg" />
+          <div className="page-head-text">
+            <div className="eyebrow">Trabajo · Backlog{phase ? ` · etapa «${phase.name}»` : ''}</div>
             <h1 className="h1" style={{ fontSize: 26 }}>Plan del proyecto y solicitudes</h1>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip>{items?.length ?? 0} historias</Chip><Chip tone="ok">{items?.filter(i => i.status === 'done').length ?? 0} completadas</Chip><Chip tone="accent">{items?.filter(i => i.status === 'review').length ?? 0} para revisar</Chip><Chip>{pending.length} abiertas</Chip>{runningList.length > 0 && <Chip tone="warn" dot="pulse">{runningList.length} en ejecución</Chip>}</div>
           </div>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <div className="page-head-actions">
             {!phase && <button className="btn btn-secondary" onClick={() => importPlan(false)} disabled={busy}>{Icon.book()}Importar historias de la síntesis</button>}
-            <Link className="btn btn-ghost" to="/archivo">Archivo histórico</Link>
             <Link className="btn btn-ghost" to="/etapa">Nueva etapa</Link>
           </div>
-        </div>
+        </div><WorkTabs /></header>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip>{items?.length ?? 0} historias</Chip><Chip tone="ok">{items?.filter(i => i.status === 'done').length ?? 0} completadas</Chip><Chip tone="accent">{items?.filter(i => i.status === 'review').length ?? 0} para revisar</Chip><Chip>{pending.length} abiertas</Chip>{runningList.length > 0 && <Chip tone="working" dot="pulse">{runningList.length} en ejecución</Chip>}</div>
+
 
         {aiOffer && <Notice kind="warn"><strong>No encontré historias estructuradas en «{aiOffer.source}».</strong> El {aiOffer.byAgent ?? 'Coordinador del Proyecto'} puede extraerlas con una llamada ({aiOffer.model && <span className="mono">{aiOffer.model}</span>}, costo estimado <strong>≈ {fmtUsd(aiOffer.estimatedUsd)}</strong>). <button className="btn btn-primary btn-sm" style={{ marginLeft: 8 }} onClick={() => importPlan(true)} disabled={busy}>{busy ? 'Extrayendo…' : 'Autorizar y extraer con IA'}</button></Notice>}
-        {!project?.repository && <Notice kind="warn">Para ejecutar historias hace falta el repositorio registrado (los agentes leen el código y proponen cambios sobre él). <Link className="lnk" to="/panel">Registrarlo desde el panel</Link>.</Notice>}
-        {inboxErr && <Notice kind="err"><strong>No se pudieron cargar las autorizaciones pendientes.</strong> {inboxErr} <Link className="lnk" to="/autorizaciones">Abrir Autorizaciones</Link></Notice>}
+        {!project?.repository && <Notice kind="warn">Para ejecutar historias hace falta el repositorio registrado (los agentes leen el código y proponen cambios sobre él). <Link className="lnk" to="/panel">Registrarlo desde el Resumen</Link>.</Notice>}
+        {inboxErr && <Notice kind="err"><strong>No se pudieron cargar las autorizaciones pendientes.</strong> {inboxErr} <Link className="lnk" to="/autorizaciones">Abrir Decisiones</Link></Notice>}
 
         {runningList.length > 0 && <Notice kind="info">{runningList.length === 1 ? 'Hay un proceso en ejecución' : `Hay ${runningList.length} procesos en ejecución`}: {runningList.slice(0, 3).map((r, i) => <span key={r.id}>{i ? ', ' : ''}<button className="lnk" onClick={() => navigate(`/procesos/${r.id}`)}>{r.title}</button></span>)}. Puedes ejecutar otras historias a la vez; si no queda un hueco de Claude Code libre, esperan «En cola» sin perder nada.</Notice>}
 
@@ -234,11 +236,11 @@ export function Backlog() {
               <div className="card-h" style={{ gap: 12, flexWrap: 'wrap' }}><div className="h3">Historias</div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                   <input className="input" value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por id o texto…" aria-label="Buscar historias" style={{ height: 32, width: 220 }} />
-                  <div style={{ display: 'flex', gap: 4 }}>{([['open', 'Abiertas'], ['all', 'Todas'], ['done', 'Completadas'], ['discarded', 'Descartadas']] as const).map(([k, l]) => <button key={k} className={`btn btn-sm ${filter === k ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setFilter(k)}>{l}</button>)}</div>
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>{([['open', 'Abiertas'], ['all', 'Todas'], ['done', 'Completadas'], ['discarded', 'Descartadas']] as const).map(([k, l]) => <button key={k} className={`btn btn-sm ${filter === k ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setFilter(k)}>{l}</button>)}</div>
                 </div></div>
               {items && items.length === 0 && <TeamReady phase={phase} onCreate={() => document.getElementById('new-story-title')?.focus()} />}
-              {items && items.length > 0 && sections.map(sec => <div key={sec.key} style={{ borderTop: '1px solid #EEECE6' }}>
-                <button className="arow" style={{ borderRadius: 0, padding: '10px 18px', background: '#FAF9F6' }} onClick={() => toggleSec(sec.key)} aria-expanded={isOpen(sec)}>
+              {items && items.length > 0 && sections.map(sec => <div key={sec.key} style={{ borderTop: '1px solid var(--color-divider)' }}>
+                <button className="arow" style={{ borderRadius: 0, padding: '10px 18px', background: 'var(--color-surface-alt)' }} onClick={() => toggleSec(sec.key)} aria-expanded={isOpen(sec)}>
                   <span style={{ display: 'inline-block', transform: isOpen(sec) ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}>{Icon.chevR()}</span>
                   <span style={{ flex: 1, textAlign: 'left', fontWeight: 600, fontSize: 13 }}>{sec.title} <span className="muted" style={{ fontWeight: 400 }}>· {sec.rows.length}</span></span>
                   {sec.hint && <span className="small muted">{sec.hint}</span>}
@@ -294,7 +296,7 @@ export function Backlog() {
             </div>
           )}
 
-          <aside style={{ flex: '1 1 320px', maxWidth: 400, display: 'flex', flexDirection: 'column', gap: 20 }}>
+          <aside style={{ flex: '1 1 320px', maxWidth: 400, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
             <section className="card">
               <div className="card-h"><div className="h3">Nueva solicitud de desarrollo</div></div>
               <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

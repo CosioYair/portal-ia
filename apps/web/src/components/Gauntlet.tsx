@@ -34,13 +34,13 @@ export function GauntletOptions({ slug, projectId, itemId, value, onChange }: { 
   }, [slug, projectId, itemId]);
   const cur = normalizeGauntlet(value ?? advice?.projectDefault ?? null);
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, border: '1px solid #E4E2DC', borderRadius: 10, padding: '10px 12px', background: '#FBFAF7' }} data-testid="gauntlet-options">
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, border: '1px solid var(--color-border-soft)', borderRadius: 10, padding: '10px 12px', background: 'var(--color-surface-sunken)' }} data-testid="gauntlet-options">
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <strong className="sm13">Evaluación Gauntlet</strong>
         <span className="small muted">Un Evaluador independiente (no el que implementa) comprueba el resultado contra los criterios con evidencia.</span>
       </div>
       <div role="radiogroup" aria-label="Modo Gauntlet" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        {(['off', 'standard', 'deep'] as const).map(m => <label key={m} className="ck" style={{ gap: 6, border: `1px solid ${cur.mode === m ? '#1F6F5C' : '#E4E2DC'}`, borderRadius: 8, padding: '6px 10px', background: cur.mode === m ? '#EEF6F3' : 'transparent' }}>
+        {(['off', 'standard', 'deep'] as const).map(m => <label key={m} className="ck" style={{ gap: 6, border: `1px solid ${cur.mode === m ? 'var(--color-ok-text)' : 'var(--color-border-soft)'}`, borderRadius: 8, padding: '6px 10px', background: cur.mode === m ? 'var(--color-ok-bg)' : 'transparent' }}>
           <input type="radio" name={`gauntlet-${itemId ?? 'x'}`} checked={cur.mode === m} onChange={() => onChange(normalizeGauntlet({ mode: m }))} />
           <span><strong>{GAUNTLET_MODE[m].label}</strong>{advice?.recommended.mode === m && <> <Chip tone="accent" xs>recomendado</Chip></>}{advice?.projectDefault.mode === m && <> <Chip xs>del proyecto</Chip></>}<br /><span className="small muted">{GAUNTLET_MODE[m].help}{m !== 'off' && advice ? ` · ${overheadText(advice.overhead[m])}` : ''}</span></span>
         </label>)}
@@ -48,7 +48,7 @@ export function GauntletOptions({ slug, projectId, itemId, value, onChange }: { 
       {cur.mode === 'deep' && <label className="small" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>Correcciones dirigidas del Evaluador (máx. 3)
         <input className="input mono" type="number" min={1} max={3} value={cur.maxRounds} onChange={e => onChange(normalizeGauntlet({ mode: 'deep', maxRounds: Number(e.target.value) }))} style={{ width: 64, height: 28 }} aria-label="Rondas Gauntlet" /></label>}
       {advice && <div className="small muted">Recomendación: <strong>{GAUNTLET_MODE[advice.recommended.mode].label}</strong> — {advice.recommended.reason}{advice.recommended.signals.length ? ` (${advice.recommended.signals.join(' · ')})` : ''}</div>}
-      {advice && !advice.evaluator && cur.mode !== 'off' && <Notice kind="warn">El proyecto no tiene Evaluador Gauntlet: este modo no se aplicará (verificación y QA de siempre). Puedes proponerlo en <strong>Equipo de IA</strong>.</Notice>}
+      {advice && !advice.evaluator && cur.mode !== 'off' && <Notice kind="warn">El proyecto no tiene Evaluador Gauntlet: este modo no se aplicará (verificación y QA de siempre). Puedes proponerlo en <strong>Oficina › Organización</strong>.</Notice>}
       {advice?.evaluator && cur.mode !== 'off' && <div className="small">Evaluador: <strong>{advice.evaluator.name}</strong> · <span className="mono">{advice.evaluator.model}</span> · nunca evalúa su propio trabajo.</div>}
     </div>
   );
@@ -67,7 +67,7 @@ export function GauntletReport({ state, implementer }: { state: GauntletState; i
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
             {state.planReview.rounds.map(pr => <div key={pr.round} className="small">
               <strong>Ronda {pr.round}</strong> ({pr.reviewerName}): {pr.coverage.filter(c => c.covered === 'yes').length}/{pr.coverage.length} criterios cubiertos por el plan
-              {pr.gaps.map((g, i) => <div key={i} style={{ borderLeft: `3px solid ${g.unsupported ? '#C9C6BE' : g.severity === 'blocking' ? '#C0392B' : g.severity === 'major' ? '#D68910' : '#7F8C8D'}`, paddingLeft: 8, opacity: g.unsupported ? 0.7 : 1 }}><strong>[{SEV[g.severity]}]</strong> {g.text}{g.evidence ? <span className="mono muted"> · evidencia: {g.evidence}</span> : <span className="muted"> · sin evidencia: no motiva revisión</span>}</div>)}
+              {pr.gaps.map((g, i) => <div key={i} style={{ borderLeft: `3px solid ${g.unsupported ? 'var(--color-border-strong)' : g.severity === 'blocking' ? 'var(--color-err)' : g.severity === 'major' ? 'var(--color-warn)' : 'var(--color-text-faint)'}`, paddingLeft: 8, opacity: g.unsupported ? 0.7 : 1 }}><strong>[{SEV[g.severity]}]</strong> {g.text}{g.evidence ? <span className="mono muted"> · evidencia: {g.evidence}</span> : <span className="muted"> · sin evidencia: no motiva revisión</span>}</div>)}
               <div className="muted">Decisión del Portal (sin IA): {pr.reason}</div>
             </div>)}
           </div>
@@ -77,7 +77,7 @@ export function GauntletReport({ state, implementer }: { state: GauntletState; i
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
             {r.largestGap && <div className="small"><strong>Brecha principal:</strong> {r.largestGap}</div>}
             {r.criteria.length > 0 && <table className="tbl"><thead><tr><th>Criterio</th><th>Estado</th><th>Evidencia</th></tr></thead><tbody>{r.criteria.map((c, i) => <tr key={i}><td className="med">{c.criterion}</td><td><Chip xs tone={c.status === 'met' ? 'ok' : c.status === 'unmet' ? 'err' : 'warn'}>{CRIT[c.status]}</Chip></td><td className="small mono" style={{ whiteSpace: 'pre-wrap' }}>{c.evidence}</td></tr>)}</tbody></table>}
-            {r.findings.map((f, i) => <div key={i} className="small" style={{ borderLeft: `3px solid ${f.unsupported ? '#C9C6BE' : f.severity === 'blocking' ? '#C0392B' : f.severity === 'major' ? '#D68910' : '#7F8C8D'}`, paddingLeft: 8, opacity: f.unsupported ? .7 : 1 }}>
+            {r.findings.map((f, i) => <div key={i} className="small" style={{ borderLeft: `3px solid ${f.unsupported ? 'var(--color-border-strong)' : f.severity === 'blocking' ? 'var(--color-err)' : f.severity === 'major' ? 'var(--color-warn)' : 'var(--color-text-faint)'}`, paddingLeft: 8, opacity: f.unsupported ? .7 : 1 }}>
               <strong>[{SEV[f.severity]}]</strong> {f.text}{f.file ? <> · <span className="mono">{f.file}</span></> : null}
               {f.evidence ? <div className="mono muted" style={{ whiteSpace: 'pre-wrap' }}>evidencia: {f.evidence}</div> : <div className="muted">Sin evidencia: queda registrado, no motiva correcciones.</div>}
               {f.expected && <div className="muted">esperado: {f.expected}</div>}

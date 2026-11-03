@@ -15,10 +15,13 @@ export interface AppState {
   /** Estructura multiempresa: empresas, proyectos de la empresa actual y selección. */
   workspaces: Workspace[];
   projects: Project[];
-  select: (workspaceSlug: string, projectId?: string | null) => Promise<void>;
+  /** Elige empresa y proyecto; devuelve el proyecto elegido (null si la empresa no tiene). */
+  /** Elige empresa y proyecto; con `go`, navega en la MISMA actualización (la pantalla se monta ya en su destino). */
+  select: (workspaceSlug: string, projectId?: string | null, go?: SelectGo) => Promise<string | null>;
   refreshStructure: () => Promise<void>;
 }
 
+export interface SelectGo { to: (projectId: string | null) => string; replace?: boolean }
 export const AppContext = createContext<AppState | null>(null);
 export function useApp(): AppState {
   const ctx = useContext(AppContext);

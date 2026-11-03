@@ -65,11 +65,14 @@ export function useEntryState<T>(name: string, initial: T): [T, (v: T | ((p: T) 
 export function parentOf(pathname: string): { path: string; label: string } | null {
   if (/^\/historias\//.test(pathname)) return { path: '/backlog', label: 'Backlog' };
   if (/^\/procesos\//.test(pathname)) return { path: '/actividad', label: 'Actividad' };
-  if (/^\/lotes\/[^/]+/.test(pathname)) return { path: '/lotes', label: 'Ejecución continua' };
-  if (/^\/equipo\/.+/.test(pathname)) return { path: '/equipo', label: 'Equipo de IA' };
+  if (/^\/lotes\/[^/]+/.test(pathname)) return { path: '/lotes', label: 'Lotes' };
+  if (/^\/equipo\/.+/.test(pathname)) return { path: '/oficina/organizacion', label: 'Organización' };
   if (/^\/oficina\/.+/.test(pathname)) return { path: '/oficina', label: 'Oficina' };
+  if (/^\/(presupuestos|configuracion)(\/|$)/.test(pathname)) return { path: '/ajustes', label: 'Ajustes' };
   if (pathname === '/panel' || pathname === '/' || pathname === '/oficina') return null;
-  return { path: '/panel', label: 'Panel' };
+  // Secciones que no dependen de un proyecto vuelven a la Oficina (la portada); las del proyecto, a su Resumen.
+  if (/^\/(autorizaciones|decisiones|asistente|ajustes)(\/|$)/.test(pathname)) return { path: '/oficina', label: 'Oficina' };
+  return { path: '/panel', label: 'Resumen' };
 }
 
 /** Nombre genérico de una pantalla por su ruta (si la pantalla no dio uno más concreto). */
@@ -80,7 +83,8 @@ export function screenName(path: string): string {
   if (p.startsWith('/lotes/')) return 'el lote';
   if (p.startsWith('/oficina/agente/')) return 'el agente';
   if (p === '/oficina/nuevo-agente') return 'Nuevo agente';
-  const names: Record<string, string> = { '/backlog': 'Backlog', '/lotes': 'Ejecución continua', '/actividad': 'Actividad', '/panel': 'Panel', '/oficina': 'Oficina', '/asistente': 'Asistente', '/autorizaciones': 'Autorizaciones', '/equipo': 'Equipo de IA', '/conocimiento': 'Conocimiento', '/presupuestos': 'Presupuestos', '/etapa': 'Etapas', '/archivo': 'Archivo' };
+  if (p.startsWith('/equipo/')) return 'la configuración del agente';
+  const names: Record<string, string> = { '/backlog': 'Backlog', '/lotes': 'Lotes', '/actividad': 'Actividad', '/panel': 'Resumen', '/oficina': 'Oficina', '/oficina/organizacion': 'Organización', '/oficina/departamentos': 'Departamentos', '/oficina/lista': 'la lista de agentes', '/asistente': 'Asistente', '/autorizaciones': 'Decisiones', '/conocimiento': 'Conocimiento', '/presupuestos': 'Presupuestos', '/ajustes': 'Ajustes', '/archivo': 'Archivo', '/etapa': 'Nueva etapa', '/configuracion/proveedor': 'Proveedores' };
   return names[p] ?? 'la pantalla anterior';
 }
 

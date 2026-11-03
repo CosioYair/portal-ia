@@ -182,7 +182,7 @@ test('M · semáforo de capacidad (máximo a la vez, en orden) y cerrojo lector/
 test('A · «Atrás» sin pantalla anterior del Portal va a la pantalla madre (nunca fuera del Portal)', () => {
   assert.deepEqual(parentOf('/historias/abc'), { path: '/backlog', label: 'Backlog' });
   assert.deepEqual(parentOf('/procesos/p1'), { path: '/actividad', label: 'Actividad' });
-  assert.deepEqual(parentOf('/lotes/b1'), { path: '/lotes', label: 'Ejecución continua' });
+  assert.deepEqual(parentOf('/lotes/b1'), { path: '/lotes', label: 'Lotes' });
   assert.equal(parentOf('/panel'), null);
   assert.equal(screenName('/backlog?x=1#y'), 'Backlog'); assert.equal(screenName('/historias/1'), 'la historia');
 });

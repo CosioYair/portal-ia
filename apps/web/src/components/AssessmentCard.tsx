@@ -63,7 +63,7 @@ export function AssessmentCard({ projectId, hasRepo, compact }: { projectId: str
         </div>}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))', gap: 14, alignItems: 'end' }}>
           <div><label className="label" htmlFor="budget">Presupuesto máximo (USD)</label><input id="budget" className="input mono" type="number" min={0.1} step={0.5} value={budget} onChange={e => setBudget(e.target.value)} /><div className="help">El proceso se detiene entre pasos si el gasto se acerca a este límite.</div></div>
-          <div className="help" style={{ paddingBottom: 26 }}>Puedes bajar el costo cambiando el modelo de los agentes en Equipo de IA antes de autorizar.</div>
+          <div className="help" style={{ paddingBottom: 26 }}>Puedes bajar el costo cambiando el modelo de los agentes (su panel en la Oficina › Ajustes) antes de autorizar.</div>
         </div>
         <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo que los agentes <strong>Coordinador del Proyecto</strong>, <strong>Arquitecto de Software</strong> y <strong>Diseñador UX/UI</strong> realicen llamadas al proveedor de IA conectado, en modo solo lectura, hasta un máximo de <strong>{fmtUsd(Number(budget) || 0)}</strong>. Los agentes volverán a estar inactivos al terminar.</span></label>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>

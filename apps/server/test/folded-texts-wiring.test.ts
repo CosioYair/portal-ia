@@ -41,22 +41,19 @@ test('los avisos de error y advertencia no quedan plegados', () => {
   assert.ok(SCREENS.phase.includes('Autorizo archivar el trabajo activo'));
 });
 
-test('Team destaca «Trabajando ahora» antes del organigrama', () => {
+test('Organización muestra el estado REAL de cada agente (el de la Oficina), no el campo «activo» de configuración', () => {
   const t = SCREENS.team;
-  assert.ok(t.includes('Trabajando ahora'));
-  assert.ok(t.indexOf('Trabajando ahora') < t.indexOf('Estructura organizativa'), '«Trabajando ahora» debe ir antes del organigrama');
-  assert.ok(t.includes("current.filter(a => a.status === 'active')"), 'debe filtrar agentes activos no retirados');
-  assert.ok(t.includes('{activeAgents.length > 0'), 'la franja debe depender de que haya agentes activos');
-  assert.ok(t.includes(': <p className="sm13 muted">Ningún agente está activo ahora; todos están configurados pero inactivos.</p>}'), 'el estado vacío debe ir en la rama sin agentes activos');
-  assert.equal(t.split('configurados pero inactivos').length - 1, 1, 'el mensaje de inactivos debe aparecer una sola vez');
-  assert.ok(!t.includes('<Notice kind="info">Todos los agentes están'), 'no debe quedar el aviso duplicado de inactivos');
-  assert.ok(lede(t).includes('Ningún agente consume créditos hasta que autorices su ejecución.'), 'la garantía de coste sigue visible');
+  assert.match(t, /const stateOf = \(id: string\) => office\.find\(o => o\.id === id\)\?\.state \?\? null;/);
+  assert.ok(t.includes('<span className={`state-pill state-${st ?? \'idle\'}`}>{STATE_TEXT[st ?? \'idle\']}</span>'), 'el estado se muestra con su texto, no solo con color');
+  assert.ok(!t.includes('Trabajando ahora') && !t.includes("a.status === 'active'"), 'sin la franja que confundía «configurado como activo» con «trabajando»');
+  assert.ok(!t.includes('>Activar equipo</button>'), 'sin un botón que nunca se habilita');
+  assert.ok(lede(t).includes('Ningún agente consume créditos hasta que autorices su trabajo.'), 'la garantía de coste sigue visible');
 });
 
 test('los botones principales no cambian', () => {
   for (const label of ['Verificar conexión', 'Guardar y verificar', 'Verificar de nuevo', 'Reintentar verificación']) assert.ok(SCREENS.provider.includes(label), `falta «${label}»`);
-  for (const label of ['Evaluar organización', 'Nuevo agente especializado', '>Activar equipo</button>']) assert.ok(SCREENS.team.includes(label), `falta «${label}»`);
-  assert.ok(SCREENS.team.includes('disabled title="Requiere autorización de ejecución y presupuesto aprobado">Activar equipo'));
+  for (const label of ['Evaluar organización', 'Formulario completo de agente']) assert.ok(SCREENS.team.includes(label), `falta «${label}»`);
+  assert.ok(read('screens/Office.tsx').includes('Nuevo agente {Icon.chevD()}'), 'crear un agente sigue a un clic desde la Oficina');
   assert.ok(SCREENS.phase.includes("'Iniciar la etapa'"));
   assert.ok(SCREENS.phase.includes('disabled={!auth || busy || !p.canStart || name.trim().length < 3}'));
   assert.ok(SCREENS.archive.includes('>Restaurar al backlog</button>'));

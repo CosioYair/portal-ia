@@ -15,7 +15,7 @@ export function TeamReady({ phase, onCreate }: { phase: PhaseTransition | null; 
   return (
     <div className="empty" style={{ padding: '28px 16px 22px', gap: 10 }} data-testid="team-ready">
       <span className="empty-ic">{Icon.inbox()}</span>
-      <div style={{ fontWeight: 600, color: '#1A1B1E', fontSize: 16 }}>No hay historias pendientes</div>
+      <div style={{ fontWeight: 600, color: 'var(--color-text)', fontSize: 16 }}>No hay historias pendientes</div>
       <div className="sm13" style={{ maxWidth: '52ch' }}>Tu equipo está listo para comenzar una nueva etapa de desarrollo.{phase ? <> Etapa vigente: <strong>{phase.name}</strong>. El código existente es la base: está descrito en la <Link className="lnk" to="/conocimiento">línea base</Link>.</> : null}</div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center', marginTop: 6 }}>
         <button className="btn btn-secondary btn-sm" onClick={() => navigate('/asistente')}>{Icon.user()}Hablar con mi equipo</button>

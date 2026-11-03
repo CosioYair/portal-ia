@@ -1,31 +1,46 @@
 import { useCallback, useContext, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useLive } from '../lib/live.ts';
-import { useLocation, useNavigate } from 'react-router-dom';
 import type { DecisionVerdict, PendingDecision, PendingDecisionKind } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
+import { osApi, type OfficeAgent } from '../lib/osApi.ts';
 import { AppContext } from '../lib/store.ts';
+import { useAttention } from '../lib/uiBus.ts';
+import { tabFor } from '../lib/routes.ts';
+import { Shell } from '../components/Shell.tsx';
+import { Icon } from '../components/ui.tsx';
+import { EmptyState, PageHeader, Tile } from '../components/kit.tsx';
 import { KIND_LABEL, PendingDecisionCard } from '../components/PendingDecisionCard.tsx';
 
 type Load = { phase: 'loading' } | { phase: 'error'; message: string } | { phase: 'ready'; items: PendingDecision[] };
 type Filter = 'all' | PendingDecisionKind;
 
+/**
+ * Decisiones (Portal IA 2.0, antes «Autorizaciones»): TODO lo que espera al propietario en la empresa, agrupado.
+ * - Autorizaciones de procesos: se aprueban o deniegan aquí con su tarjeta de siempre (cifra, riesgo y confirmación).
+ * - Lo que te piden tus agentes: aprendizajes por verificar, mejoras, cambios en su carpeta, acciones del chat → enlace a
+ *   la pestaña de su panel donde se resuelven (aquí no se decide nada de eso).
+ * - Propuestas del Asistente → su conversación.
+ */
 export function InboxScreen() {
   const ctx = useContext(AppContext);
-  const navigate = useNavigate();
   const slug = ctx?.status.workspace?.slug ?? null;
   const [load, setLoad] = useState<Load>({ phase: 'loading' });
   const [filter, setFilter] = useState<Filter>('all');
+  const [agents, setAgents] = useState<OfficeAgent[] | null>(null); const [projectNames, setProjectNames] = useState<Record<string, string>>({});
+  const att = useAttention(slug);
 
   const refresh = useCallback(async () => {
     if (!slug) return;
     setLoad(prev => (prev.phase === 'ready' ? prev : { phase: 'loading' }));
     try { setLoad({ phase: 'ready', items: await api.inbox(slug) }); }
     catch (e) { setLoad({ phase: 'error', message: e instanceof Error ? e.message : 'No se pudo cargar la bandeja.' }); }
+    void osApi.office(slug, null).then(o => { setAgents(o.agents); setProjectNames(Object.fromEntries(o.projects.map(p => [p.id, p.name]))); }).catch(() => setAgents([]));
   }, [slug]);
 
   useEffect(() => { void refresh(); }, [refresh]);
   // Una decisión nueva o resuelta (aquí, en otra pestaña, en un lote o desde el Asistente) aparece sin pulsar «Actualizar».
-  useLive(c => c.ws === slug && c.kind !== 'progress' && (c.entity === 'process' || c.entity === 'assignment' || c.entity === 'batch'), () => refresh(), { minMs: 2000, enabled: !!slug });
+  useLive(c => c.ws === slug && c.kind !== 'progress' && (c.entity === 'process' || c.entity === 'assignment' || c.entity === 'batch' || c.entity === 'agent' || c.entity === 'agent_chat'), () => refresh(), { minMs: 2000, enabled: !!slug });
 
   const onResolved = useCallback((d: PendingDecision, verdict: DecisionVerdict) => {
     ctx?.flash(`${verdict === 'approve' ? 'Aprobada' : 'Denegada'}: ${d.title}`);
@@ -35,80 +50,62 @@ export function InboxScreen() {
   const items = load.phase === 'ready' ? load.items : [];
   const visible = filter === 'all' ? items : items.filter(i => i.kind === filter);
   const kinds = (Object.keys(KIND_LABEL) as PendingDecisionKind[]).filter(k => items.some(i => i.kind === k));
+  const asks = (agents ?? []).flatMap(a => a.attention.filter(x => !x.processId).map(x => ({ agent: a, item: x })));
+  const nothing = load.phase === 'ready' && items.length === 0 && asks.length === 0 && !att.assistant;
 
   return (
-    <main className="page screen" aria-labelledby="inbox-title" style={{ display: 'flex', flexDirection: 'column', gap: 18, margin: '0 auto' }}>
-      <header style={{ display: 'flex', gap: 12, alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap' }}>
-        <div>
-          <div className="eyebrow">{ctx?.status.workspace?.name ?? 'Portal IA'}</div>
-          <h1 id="inbox-title" className="h1">Autorizaciones</h1>
-          <p className="lede lede-2l">Lo que espera tu decisión. Aprobar o denegar aquí equivale a hacerlo desde el proceso.</p>
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <button className="btn btn-secondary" onClick={() => void refresh()} disabled={load.phase === 'loading'}>Actualizar</button>
-          <button className="btn btn-ghost" onClick={() => navigate('/panel')}>Volver al panel</button>
-        </div>
-      </header>
+    <Shell crumb="Decisiones">
+      <main className="page screen" aria-labelledby="inbox-title" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <PageHeader icon={Icon.bell(22)} tone={items.length + asks.length + att.assistant > 0 ? 'decisions' : 'idle'} eyebrow={ctx?.status.workspace?.name ?? 'Portal IA'} title="Decisiones" titleId="inbox-title"
+          description="Lo que espera tu respuesta. Aprobar o denegar aquí equivale a hacerlo desde el proceso."
+          actions={<button className="btn btn-secondary btn-sm" onClick={() => void refresh()} disabled={load.phase === 'loading'}>Actualizar</button>} />
 
-      {load.phase === 'loading' && (
-        <div className="card card-b" role="status" style={{ display: 'flex', gap: 10, alignItems: 'center' }}><span className="spin" aria-hidden="true" /> Cargando decisiones pendientes…</div>
-      )}
+        {load.phase === 'loading' && (
+          <div className="card card-b" role="status" style={{ display: 'flex', gap: 10, alignItems: 'center' }}><span className="spin" aria-hidden="true" /> Cargando decisiones pendientes…</div>
+        )}
 
-      {load.phase === 'error' && (
-        <div className="notice notice-err" role="alert">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div><strong>No se pudo cargar la bandeja.</strong> {load.message}</div>
-            <div><button className="btn btn-secondary btn-sm" onClick={() => void refresh()}>Reintentar</button></div>
+        {load.phase === 'error' && (
+          <div className="notice notice-err" role="alert">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div><strong>No se pudo cargar la bandeja.</strong> {load.message}</div>
+              <div><button className="btn btn-secondary btn-sm" onClick={() => void refresh()}>Reintentar</button></div>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {load.phase === 'ready' && items.length === 0 && (
-        <div className="card empty" role="status">
-          <div className="h3">No hay decisiones pendientes</div>
-          <p className="small">Cuando un proceso necesite tu autorización, un diff por aplicar, una integración, una publicación o una propuesta al backlog, aparecerá aquí.</p>
-        </div>
-      )}
+        {nothing && <div className="card"><EmptyState art="inbox" title="No hay nada pendiente">Cuando un proceso necesite tu autorización, un agente te pida revisar algo o el Asistente te proponga un paso, aparecerá aquí.</EmptyState></div>}
 
-      {load.phase === 'ready' && items.length > 0 && (
-        <>
-          <div className="seg" role="group" aria-label="Filtrar por tipo" style={{ alignSelf: 'flex-start', flexWrap: 'wrap' }}>
-            <button aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>Todas ({items.length})</button>
-            {kinds.map(k => (
-              <button key={k} aria-pressed={filter === k} onClick={() => setFilter(k)}>{KIND_LABEL[k]} ({items.filter(i => i.kind === k).length})</button>
-            ))}
-          </div>
-          <ul className="inbox-list" aria-label="Decisiones pendientes">
-            {visible.map(d => <PendingDecisionCard key={d.id} decision={d} onResolved={onResolved} />)}
-          </ul>
-        </>
-      )}
-    </main>
-  );
-}
+        {load.phase === 'ready' && items.length > 0 && (
+          <section className="dec-group" aria-labelledby="dec-proc">
+            <div className="section-title"><h2 className="h2" id="dec-proc">Autorizaciones de procesos <span className="muted">({items.length})</span></h2>
+              <div className="seg" role="group" aria-label="Filtrar por tipo">
+                <button aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>Todas ({items.length})</button>
+                {kinds.map(k => (
+                  <button key={k} aria-pressed={filter === k} onClick={() => setFilter(k)}>{KIND_LABEL[k]} ({items.filter(i => i.kind === k).length})</button>
+                ))}
+              </div>
+            </div>
+            <ul className="inbox-list" aria-label="Decisiones pendientes">
+              {visible.map(d => <PendingDecisionCard key={d.id} decision={d} onResolved={onResolved} />)}
+            </ul>
+          </section>
+        )}
 
-/** Acceso flotante a la bandeja con el contador de pendientes (se oculta dentro de la propia pantalla). */
-const inboxCountCache = new Map<string, number>();
+        {asks.length > 0 && <section className="dec-group card" aria-labelledby="dec-agents">
+          <div className="card-h"><h2 className="h3" id="dec-agents">Lo que te piden tus agentes <span className="muted">({asks.length})</span></h2><span className="small muted">Se resuelve en el panel de cada agente</span></div>
+          <div>{asks.map(({ agent, item }, i) => <div key={`${agent.id}-${i}`} className="dec-item">
+            <Tile icon={Icon.agent()} tone="attention" size="sm" />
+            <div className="dec-item-text"><strong className="sm13">{agent.name}{agent.projectId && projectNames[agent.projectId] ? <span className="small muted"> · {projectNames[agent.projectId]}</span> : null}</strong><span className="small med">{item.label}</span></div>
+            <Link className="btn btn-secondary btn-sm" to={`/oficina/agente/${encodeURIComponent(agent.id)}/${tabFor(item)}`}>Revisar</Link>
+          </div>)}</div>
+        </section>}
 
-export function InboxLauncher() {
-  const ctx = useContext(AppContext);
-  const navigate = useNavigate();
-  const location = useLocation();
-  const slug = ctx?.status.workspace?.slug ?? null;
-  const [count, setCount] = useState<number | null>(() => (slug ? inboxCountCache.get(slug) : undefined) ?? null);
-  const here = location.pathname.startsWith('/autorizaciones');
-  const tick = () => { if (!slug) return; api.inbox(slug).then(l => { inboxCountCache.set(slug, l.length); setCount(l.length); }).catch(() => setCount(null)); };
-  // Al cambiar de espacio se pide; después, solo cuando cambia algo que puede crear o cerrar una decisión (tiempo real),
-  // no cada 30 s ni en cada navegación (antes, con muchos procesos, cada navegación bloqueaba el servidor segundos).
-  useEffect(() => { tick(); // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slug]);
-  useLive(c => c.ws === slug && c.kind !== 'progress' && (c.entity === 'process' || c.entity === 'assignment' || c.entity === 'batch'), tick, { minMs: 3000, enabled: !!slug });
-
-  if (!slug || here) return null;
-  return (
-    <button className="inbox-fab" onClick={() => navigate('/autorizaciones')} aria-label={count ? `Autorizaciones, ${count} pendientes` : 'Autorizaciones'}>
-      <span aria-hidden="true">✓</span> Autorizaciones
-      {count !== null && count > 0 && <span className="dock-badge" aria-hidden="true">{count}</span>}
-    </button>
+        {att.assistant > 0 && <section className="dec-group card" aria-labelledby="dec-assistant">
+          <div className="dec-item"><Tile icon={Icon.sparkles()} tone="attention" size="sm" />
+            <div className="dec-item-text"><strong className="sm13" id="dec-assistant">El Asistente te propone {att.assistant} paso{att.assistant === 1 ? '' : 's'}</strong><span className="small med">En su conversación abierta (es global: cada propuesta dice a qué empresa va). Revísalos y autorízalos allí.</span></div>
+            <Link className="btn btn-secondary btn-sm" to="/asistente">Abrir el Asistente</Link></div>
+        </section>}
+      </main>
+    </Shell>
   );
 }

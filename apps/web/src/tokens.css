@@ -1,102 +1,221 @@
-/* HU-162 · Tokens de diseño. HU-174 · story-flow.css, manual-test-feedback.css y
-   components/BudgetMeter.css ya consumen estos tokens en vez de valores escritos a mano.
-   Solo declaraciones: copian los valores exactos que ya se usaban, así que la interfaz se ve igual.
-   Los nombres usan el prefijo --color-/--font-/--radius-/--shadow-/--dur-. */
+/* Portal IA 2.0 · «Estudio de agentes». Tokens de diseño: TODAS las hojas de estilo y los estilos en línea los consumen
+   (no hay colores escritos a mano fuera de este archivo). Contrastes WCAG comprobados en test/design-tokens-*.test.ts:
+   texto ≥ 4,5:1 sobre sus fondos, bordes de controles y foco ≥ 3:1. El color solo indica un estado real; el estado
+   siempre lleva también icono y texto. Los nombres anteriores se conservan (con los valores nuevos). */
 :root {
   /* Superficies y fondo */
-  --color-bg: #F4F3EF;
-  --color-surface: #fff;
-  --color-surface-alt: #FAF9F6;
-  --color-surface-hover: #F7F6F2;
-  --color-surface-pressed: #ECEAE4;
-  --color-surface-nav-hover: #F0EEE8;
+  --color-bg: #F5F5F8;
+  --color-surface: #FFFFFF;
+  --color-surface-alt: #FAFAFC;
+  --color-surface-hover: #F3F3F8;
+  --color-surface-pressed: #E9E9F1;
+  --color-surface-nav-hover: #EEEEF5;
+  --color-surface-muted: #F0F0F5;
+  --color-surface-sunken: #F7F7FA;
 
-  /* Texto */
-  --color-text: #1A1B1E;
-  --color-text-med: #4F5259;
-  --color-text-muted: #686B72;
-  --color-placeholder: #686B72;
+  /* Texto (tercer nivel nunca por debajo de 12 px) */
+  --color-text: #17182B;
+  --color-text-med: #45475E;
+  --color-text-muted: #5F6178;
+  --color-text-soft: #4E5068;
+  --color-text-faint: #6A6C84;
+  --color-placeholder: #5F6178;
+  --color-on-dark: #FFFFFF;
+  --color-on-dark-link: #9BD5CC;
+  --color-text-alert: #7A4100;
 
-  /* Bordes y separadores */
-  --color-border: #E5E3DC;
-  --color-border-strong: #CFCCC3;
-  --color-border-hover: #B8B5AC;
-  --color-border-hover-strong: #9D9A91;
-  --color-divider: #EEECE6;
+  /* Bordes: decorativos (divisores, tarjetas) y de controles (≥ 3:1) */
+  --color-divider: #ECECF2;
+  --color-border: #E2E2EA;
+  --color-border-soft: #E5E5EE;
+  --color-border-strong: #C8C9D6;
+  --color-border-hover: #A9AABE;
+  --color-border-hover-strong: #6E7089;
+  --color-control-border: #8B8CA3;
+  --color-track: #E9E9F1;
+  --color-dot: #9799AE;
+  --color-step-divider: rgba(128, 128, 140, 0.25);
 
-  /* Acento y acción primaria */
-  --color-accent: #0F6E6A;
-  --color-accent-hover: #0B5652;
-  --color-accent-soft: #E3F1EF;
-  --color-accent-border: #C6E2DE;
-  --color-primary-hover: #2C2E33;
-  --color-activity: #E39B1C;
+  /* Marca y acción principal (violeta: acciones, enlaces, foco, selección) */
+  --color-brand: #2F2C63;
+  --color-brand-ring: #A78BFA;
+  --color-brand-soft: #F1ECFE;
+  --color-primary: #6D28D9;
+  --color-primary-hover: #5B21B6;
+  --color-accent: #6D28D9;
+  --color-accent-hover: #5B21B6;
+  --color-accent-soft: #F1ECFE;
+  --color-accent-bg: #F1ECFE;
+  --color-accent-border: #D9CCFB;
+  --color-accent-wash: #F8F5FF;
+  --color-ink: #17182B;
+  --color-ink-2: #2A2B45;
+  /* «En curso» (un spinner, un paso que corre) es verde azulado: el ámbar queda solo para «te necesita» */
+  --color-activity: #0F766E;
 
-  /* Estados: ok / warn / err (punto, fondo, borde, texto) */
-  --color-ok: #22A55B;
-  --color-ok-bg: #E4F3EA;
-  --color-ok-border: #C2E3CF;
-  --color-ok-text: #166534;
-  --color-warn: #E39B1C;
-  --color-warn-bg: #FBF0DC;
-  --color-warn-border: #F0DCB0;
-  --color-warn-text: #7A4A00;
-  --color-err: #D93025;
-  --color-err-bg: #FBE7E5;
-  --color-err-border: #F2C7C3;
-  --color-err-text: #9A1F18;
-  --color-err-text-strong: #7F1D16;
+  /* Menú lateral (índigo tinta) */
+  --color-side-bg: #1C1B3A;
+  --color-side-bg-2: #232149;
+  --color-side-text: #C9CAE6;
+  --color-side-label: #9C9EC8;
+  --color-side-hover: #28264F;
+  --color-side-active-bg: #2F2C63;
+  --color-side-active-text: #FFFFFF;
+  --color-side-indicator: #A78BFA;
+  --color-side-focus: #C4B5FD;
+  --color-side-badge-bg: #FEF4DC;
+  --color-side-badge-text: #7A4100;
 
-  /* Texto secundario, alertas y texto sobre fondo oscuro */
-  --color-text-soft: #5C5F66;
-  --color-text-alert: #8A3A00;
-  --color-on-dark: #fff;
+  /* Estados de un agente (texto sobre su fondo ≥ 6:1; punto sobre blanco ≥ 3:1) */
+  --color-working: #0F766E;
+  --color-working-bg: #E7F5F3;
+  --color-working-soft: #E7F5F3;
+  --color-working-border: #8FCFC6;
+  --color-working-text: #0B5E58;
+  --color-attention: #B45309;
+  --color-attention-bg: #FEF4DC;
+  --color-attention-soft: #FEF4DC;
+  --color-attention-border: #EDC165;
+  --color-attention-text: #7A4100;
+  --color-blocked: #D23B2E;
+  --color-blocked-bg: #FDEDEB;
+  --color-blocked-border: #F0AFA7;
+  --color-blocked-text: #A3231A;
+  --color-queued: #2F67DB;
+  --color-queued-bg: #EAF1FE;
+  --color-queued-soft: #EAF1FE;
+  --color-queued-border: #A9C4F5;
+  --color-queued-text: #1E4AB8;
+  --color-idle: #64748B;
+  --color-idle-bg: #F1F3F6;
+  --color-idle-border: #CCD2DB;
+  --color-idle-text: #465467;
+  --color-retired-border: #B9BBCB;
+
+  /* Resultados de procesos e historias: hecho / atención / error (punto, fondo, borde, texto) */
+  --color-ok: #1E8A4C;
+  --color-ok-bg: #E8F5EC;
+  --color-ok-soft: #E8F5EC;
+  --color-ok-border: #A3D7B4;
+  --color-ok-text: #15603A;
+  --color-ok-text-strong: #0F4A2C;
+  --color-warn: #B45309;
+  --color-warn-bg: #FEF4DC;
+  --color-warn-border: #EDC165;
+  --color-warn-text: #7A4100;
+  --color-warn-text-strong: #5C3100;
+  --color-warn-bg-soft: #FFFAEC;
+  --color-err: #D23B2E;
+  --color-err-bg: #FDEDEB;
+  --color-err-border: #F0AFA7;
+  --color-err-text: #A3231A;
+  --color-err-text-strong: #7F1A12;
+  --color-err-bg-soft: #FEF5F4;
+  --color-err-bg-overdue: #FEF3F1;
+  --color-err-border-soft: #E9B4AC;
+
+  /* Avisos: informativo y pregunta del equipo */
+  --color-info-bg: #F3F6FD;
+  --color-info-border: #D5E0F7;
+  --color-ask-bg: #FFFAEC;
+  --color-ask-border: #EDC165;
 
   /* Recorrido guiado: barras de etapa y progreso */
-  --color-flow-done: #2E7D4F;
-  --color-flow-failed: #C2392F;
-  --color-flow-waiting: #F0C66B;
-  --color-flow-run-mid: #7FC4BF;
-  --color-flow-progress: #0B7A75;
+  --color-flow-done: #1E8A4C;
+  --color-flow-failed: #D23B2E;
+  --color-flow-waiting: #EDC165;
+  --color-flow-run-mid: #8FCFC6;
+  --color-flow-progress: #0F766E;
 
-  /* Avisos: informativo, error suave, vencido, advertencia suave y pregunta del equipo */
-  --color-info-bg: #F6F8FC;
-  --color-info-border: #D9E2F2;
-  --color-err-bg-soft: #FDF2F1;
-  --color-err-bg-overdue: #FDF5F3;
-  --color-err-border-soft: #E9B4AC;
-  --color-warn-bg-soft: #FFFBF0;
-  --color-ask-bg: #FFFBEF;
-  --color-ask-border: #E8D9A8;
+  /* Azulejos de sección: monocromos (índigo); el activo, violeta */
+  --color-tile-bg: #EEEDF7;
+  --color-tile-fg: #2F2C63;
+  --color-tile-active-bg: #F1ECFE;
+  --color-tile-active-fg: #5B21B6;
 
-  /* Superficies, bordes y pistas secundarias */
-  --color-surface-muted: #F3F1EC;
-  --color-surface-sunken: #FBFAF7;
-  --color-border-soft: #E4E2DA;
-  --color-track: #ECEAE3;
-  --color-step-divider: rgba(128, 128, 128, 0.25);
+  /* Oficina: planta lisa, mobiliario pixelado (contenido de la ilustración) */
+  --color-office-floor: #F5F5F8;
+  --color-office-tile: #F5F5F8;
+  --color-office-wall: #E2E2EA;
+  --color-office-sign: #1C1B3A;
+  --color-office-desk: #8A6A4A;
+  --color-office-desk-top: #C9A27C;
+  --color-office-chair: #5B6070;
+  --color-office-screen: #2F2C63;
+  --color-office-screen-frame: #1C1B3A;
+  --color-office-screen-on: #5FD3C6;
+  --color-office-screen-wait: #F2C14E;
+  --color-office-ink: #17182B;
+  --color-office-plant: #3F8F62;
 
-  /* Tipografías */
+  /* Ilustraciones (mismo lenguaje geométrico que la oficina) */
+  --color-illus-shadow: rgba(23, 24, 43, 0.08);
+  --color-illus-wall: #FFFFFF;
+  --color-illus-window: #F0F0F5;
+  --color-illus-plant: #3F8F62;
+  --color-illus-desk: #C9A27C;
+  --color-illus-desk-dark: #8A6A4A;
+  --color-illus-screen: #2F2C63;
+
+  /* Tipografías (IBM Plex: 400/500/600) y escala */
   --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --fs-title: 28px;
+  --fs-title-mobile: 24px;
+  --fs-section: 18px;
+  --fs-card: 15px;
+  --fs-body: 14px;
+  --fs-small: 12px;
+  --fs-eyebrow: 11px;
+  --fs-kpi: 24px;
+
+  /* Espacios */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
 
   /* Radios */
+  --color-scrim: rgba(23, 24, 43, 0.45);
+  --color-backdrop: rgba(23, 24, 43, 0.42);
+  --color-on-dark-wash: rgba(255, 255, 255, 0.05);
+  --color-on-dark-line: rgba(255, 255, 255, 0.08);
+  --shadow-btn: 0 1px 2px rgba(23, 24, 43, 0.18);
+  --shadow-knob: 0 1px 2px rgba(0, 0, 0, 0.2);
+  --radius-tag: 4px;
+  --radius-kbd: 5px;
+  --radius-tile-sm: 9px;
+  --radius-tile: 12px;
+  --radius-round: 50%;
+  --dur-pulse: 1.2s;
+  --shadow-bar-up: 0 -4px 12px rgba(0, 0, 0, 0.05);
+  --color-pulse-a: rgba(15, 118, 110, 0.45);
+  --color-pulse-b: rgba(15, 118, 110, 0);
+  --color-shade-14: rgba(23, 24, 43, 0.14);
+  --color-on-dark-chip: rgba(255, 255, 255, 0.12);
   --radius-xs: 2px;
   --radius-bar: 3px;
   --radius-badge: 6px;
-  --radius-sm: 7px;
-  --radius: 8px;
-  --radius-card: 10px;
-  --radius-modal: 12px;
-  --radius-dock: 14px;
+  --radius-sm: 8px;
+  --radius: 10px;
+  --radius-card: 14px;
+  --radius-modal: 16px;
+  --radius-dock: 16px;
   --radius-pill: 999px;
 
   /* Sombras */
-  --shadow-onode: 0 6px 16px rgba(26,27,30,.08);
-  --shadow-toast: 0 8px 24px rgba(0,0,0,.18);
-  --shadow-modal: 0 24px 64px rgba(26,27,30,.22);
-  --shadow-dock: 0 24px 64px rgba(26,27,30,.24);
-  --shadow-fab: 0 12px 32px rgba(26,27,30,.28);
+  --shadow-card: 0 1px 2px rgba(23, 24, 43, 0.05);
+  --shadow-raise: 0 8px 24px rgba(23, 24, 43, 0.12);
+  --shadow-onode: 0 6px 16px rgba(23, 24, 43, 0.08);
+  --shadow-toast: 0 10px 28px rgba(23, 24, 43, 0.22);
+  --shadow-modal: 0 24px 64px rgba(23, 24, 43, 0.24);
+  --shadow-dock: 0 24px 64px rgba(23, 24, 43, 0.26);
+  --shadow-fab: 0 12px 32px rgba(23, 24, 43, 0.28);
+  --shadow-panel: -16px 0 48px rgba(23, 24, 43, 0.18);
+  --shadow-desk: 0 1px 0 rgba(23, 24, 43, 0.06);
 
   /* Duraciones */
   --dur-fast: .15s;
@@ -104,23 +223,7 @@
   --dur-screen: .28s;
   --dur-loop: 1.4s;
 
-  /* Foco */
-  --focus-ring: 2px solid #0F6E6A;
-
-  /* Oficina (office.css y components/AgentFigure.tsx): planta, mobiliario y estados de los puestos */
-  --color-office-floor: #EEEAE0;
-  --color-office-tile: #E6E1D4;
-  --color-office-wall: #DCD5C5;
-  --color-office-sign: #2B2E33;
-  --color-office-desk: #9A6E45;
-  --color-office-desk-top: #C8986A;
-  --color-office-chair: #5B6470;
-  --color-office-screen: #3A4750;
-  --color-office-screen-frame: #23292F;
-  --color-office-screen-on: #7FD6CF;
-  --color-office-screen-wait: #F0C66B;
-  --color-office-ink: #1F2328;
-  --color-office-plant: #4E8A5C;
-  --shadow-panel: -12px 0 40px rgba(26,27,30,.16);
-  --shadow-desk: 0 2px 0 rgba(26,27,30,.06);
+  /* Foco: siempre con 2 px de separación (pegado a un fondo de pase del ratón no alcanzaría 3:1) */
+  --focus-ring: 2px solid #6D28D9;
+  --focus-ring-on-dark: 2px solid #C4B5FD;
 }

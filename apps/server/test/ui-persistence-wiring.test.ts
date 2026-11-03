@@ -50,7 +50,7 @@ test('navegación: el enlace directo manda sobre la selección guardada y conser
   assert.match(app, /useState<Selection \| null>\(\(\) => urlSel\(\) \?\? histSel\(\) \?\? readSel\(\)\)/);
   assert.match(app, /<SelectionHistory sel=\{sel\}/, 'Atrás/Adelante vuelven a la empresa de cada entrada del historial');
   assert.match(app, /if \(!st\?\.key\) window\.history\.replaceState/, 'también la primera entrada de la pestaña');
-  assert.match(app, /navigate\('\/' \+ \(rest \|\| 'panel'\) \+ search \+ hash/);
+  assert.match(app, /to: \(\) => '\/' \+ \(\(rest \?\? ''\)\.replace\(\/\^\[\/\\\\\]\+\/, ''\) \|\| \(pid \? 'panel' : 'oficina'\)\) \+ search \+ hash, replace: true/);
   assert.match(read('screens/StoryWorkspace.tsx'), /navigate\(`\/backlog\?ejecutar=\$\{it\.id\}`\)/, 'el enlace «Ejecutar» de la historia abre su diálogo');
 });
 

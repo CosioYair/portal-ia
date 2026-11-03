@@ -63,8 +63,8 @@ export function Initialization() {
   };
 
   const tree = [
-    { id: 'ws', d: 0, sq: 'tsq-ws', label: 'Espacio interno · Portal IA', meta: 'aislado', title: 'Espacio interno · Portal IA', body: `Espacio de trabajo reservado para la plataforma. Su base de datos, conocimiento y agentes están separados de cualquier empresa o cliente que crees después.\nAlmacenamiento: ${result?.steps.find(s => s.id === 'workspace')?.detail ?? 'data/workspaces/portal-ia/portal-ia.sqlite'}` },
-    { id: 'ws-agents', d: 1, sq: 'tsq-ws', label: 'Agentes del espacio', meta: '3 · inactivos', title: 'Agentes del espacio', body: 'Asistente de Empresa, Gestor Organizacional y Agente de Onboarding.\nCreados desde plantillas aprobadas y guardados en la base del espacio. No realizan ninguna llamada a modelos hasta que los actives.' },
+    { id: 'ws', d: 0, sq: 'tsq-ws', label: 'Empresa interna · Portal IA', meta: 'aislado', title: 'Empresa interna · Portal IA', body: `Empresa reservada para la plataforma. Su base de datos, conocimiento y agentes están separados de cualquier empresa o cliente que crees después.\nAlmacenamiento: ${result?.steps.find(s => s.id === 'workspace')?.detail ?? 'data/workspaces/portal-ia/portal-ia.sqlite'}` },
+    { id: 'ws-agents', d: 1, sq: 'tsq-ws', label: 'Agentes de la empresa', meta: '3 · inactivos', title: 'Agentes de la empresa', body: 'Asistente de Empresa, Gestor Organizacional y Agente de Onboarding.\nCreados desde plantillas aprobadas y guardados en la base de la empresa. No realizan ninguna llamada a modelos hasta que los actives.' },
     { id: 'pj', d: 1, sq: 'tsq-pj', label: 'Proyecto · Desarrollo del Portal', meta: 'seleccionado', title: 'Proyecto · Desarrollo del Portal', body: project?.description ?? 'Proyecto interno cuyo objetivo es construir la propia plataforma.' },
     { id: 'obj', d: 2, sq: '', label: 'Objetivos', meta: String(project?.objectives.length ?? 3), title: 'Objetivos iniciales', body: (project?.objectives ?? []).map((o, i) => `0${i + 1} ${o.text}`).join('\n') || 'Cargando…' },
     { id: 'ctx', d: 2, sq: '', label: 'Contexto aprobado', meta: String(project?.context.length ?? 8), title: 'Contexto aprobado', body: (project?.context ?? []).map(c => c.label).join(' · ') || 'Cargando…' },
@@ -80,13 +80,13 @@ export function Initialization() {
       <header className="setup-top">
         <Wordmark />
         <Stepper s1="is-done" s2={shown >= 4 ? 'is-done' : 'is-active'} s3={done ? 'is-done' : shown >= 4 ? 'is-active' : ''} />
-        <div className="muted small mono" title="Consumo real registrado hoy en este espacio">hoy · {usage?.calls ?? 0} llamadas a IA · {usage?.tokens ?? 0} tokens · {((usage?.costUsd ?? 0)).toFixed(2)} USD</div>
+        <div className="muted small mono" title="Consumo real registrado hoy en esta empresa">hoy · {usage?.calls ?? 0} llamadas a IA · {usage?.tokens ?? 0} tokens · {((usage?.costUsd ?? 0)).toFixed(2)} USD</div>
       </header>
       <main className="setup-main" style={{ display: 'flex', flexWrap: 'wrap', gap: 24, maxWidth: 1200, alignItems: 'flex-start', paddingTop: 40 }}>
         <div style={{ flex: '999 1 520px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div className="eyebrow">Pasos 2 y 3 de 3</div>
-            <h1 className="h1" style={{ fontSize: 28 }}>{error ? 'No se pudo inicializar' : done ? 'Espacio interno inicializado' : 'Inicializando el espacio interno…'}</h1>
+            <h1 className="h1" style={{ fontSize: 28 }}>{error ? 'No se pudo inicializar' : done ? 'Empresa interna preparada' : 'Preparando la empresa interna…'}</h1>
             <p className="med">{done ? 'Las estructuras ya existen. Ahora, si registras el repositorio y autorizas la evaluación inicial, el equipo analizará de verdad la idea, el código y el diseño del proyecto.' : 'Se crean las estructuras internas que la plataforma usará para gestionarse a sí misma. Todo ocurre localmente, sin llamadas a modelos de IA.'}</p>
           </div>
           {error && <Notice kind="err"><strong>Error.</strong> {error}</Notice>}
@@ -129,7 +129,7 @@ export function Initialization() {
                 <label className="ck"><input className="cb" type="checkbox" checked={repoAuth} disabled={!repoPath} onChange={e => setRepoAuth(e.target.checked)} /><span>Autorizo que el proyecto <strong>Desarrollo del Portal</strong> registre este repositorio con acceso de <strong>solo lectura</strong>. Ningún agente modificará archivos sin una autorización posterior.</span></label>
                 <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
                   <button className="btn btn-secondary" onClick={register} disabled={!repoAuth || !repoPath || registering || !project}>{Icon.git()}{registering ? 'Registrando…' : 'Registrar repositorio'}</button>
-                  <span className="small muted">También puedes hacerlo más tarde desde el panel del proyecto.</span>
+                  <span className="small muted">También puedes hacerlo más tarde desde el Resumen del proyecto.</span>
                 </div>
               </>)}
             </div>
@@ -139,7 +139,7 @@ export function Initialization() {
 
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
             <Link className="btn btn-ghost" to="/configuracion/proveedor">Atrás</Link>
-            <button className="btn btn-secondary" disabled={!done} onClick={() => navigate('/panel')}>Abrir el panel del proyecto sin evaluar {Icon.arrow()}</button>
+            <button className="btn btn-secondary" disabled={!done} onClick={() => navigate('/panel')}>Abrir el Resumen del proyecto sin evaluar {Icon.arrow()}</button>
           </div>
         </div>
 

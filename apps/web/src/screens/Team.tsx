@@ -1,24 +1,34 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Agent } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS } from '../lib/labels.ts';
-import { Shell } from '../components/Shell.tsx';
+import type { OfficeAgent } from '../lib/osApi.ts';
 import { Avatar, Chip, Icon } from '../components/ui.tsx';
+import { STATE_TEXT } from '../components/AgentFigure.tsx';
 import { OrgEvaluationPanel } from '../components/OrgEvaluationPanel.tsx';
 import { GauntletProposal } from '../components/Gauntlet.tsx';
 import { Disclosure } from '../components/Disclosure.tsx';
 
-export function Team() {
-  const { status, providers, navigate } = useApp();
+/**
+ * Oficina › Organización (antes «Equipo de IA»): quién reporta a quién, relaciones y configuración, evaluar la
+ * organización y el Evaluador Gauntlet. El estado de cada agente es el REAL de la Oficina (calculado en el servidor);
+ * cada agente se abre en su panel, y su ficha avanzada sigue en Configuración › Ajustes avanzados.
+ */
+export function OrganizationView({ office, onOpen }: { office: OfficeAgent[]; onOpen: (agentId: string, tab?: string) => void }) {
+  const { status, providers } = useApp();
   const ws = status.workspace!;
   const [agents, setAgents] = useState<Agent[]>([]);
   const [evalOpen, setEvalOpen] = useState(false);
+  // El organigrama abre centrado en su raíz (el propietario), no en una esquina vacía.
+  const orgBox = useRef<HTMLDivElement>(null);
+  useEffect(() => { const b = orgBox.current; if (b && agents.length) b.scrollLeft = Math.max(0, (b.scrollWidth - b.clientWidth) / 2); }, [agents.length]);
   const reload = () => api.agents(ws.slug).then(list => setAgents(list.filter(a => a.scope === 'workspace' || a.projectId === status.project?.id)));
-  useEffect(() => { void reload(); }, [ws.slug, status.project?.id]);
+  useEffect(() => { void reload(); }, [ws.slug, status.project?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const byKey = (k: string) => agents.find(a => a.key === k);
+  const stateOf = (id: string) => office.find(o => o.id === id)?.state ?? null;
   const model = (a: Agent) => providers.find(p => p.id === a.config.provider)?.models.find(m => m.id === a.config.model);
   // Retirado = desactivado de forma reversible por una propuesta aceptada (template.retiredAt), sin borrar la fila.
   const retiredAt = (a: Agent): string | null => (a.template as unknown as { retiredAt?: string | null }).retiredAt ?? null;
@@ -28,11 +38,7 @@ export function Team() {
     const d = new Date(at);
     return Number.isNaN(d.getTime()) ? 'Retirado' : `Retirado · ${d.toLocaleDateString('es-ES')}`;
   };
-  const current = agents.filter(a => !isRetired(a));
-  const retiredCount = agents.length - current.length;
-  // «Trabajando ahora» refleja el estado del agente (status === 'active'), no los procesos en curso.
-  const activeAgents = current.filter(a => a.status === 'active');
-  const active = activeAgents.length;
+  const stateChip = (a: Agent) => { const st = stateOf(a.id); return isRetired(a) ? <Chip xs>{retiredLabel(a)}</Chip> : <span className={`state-pill state-${st ?? 'idle'}`}>{STATE_TEXT[st ?? 'idle']}</span>; };
 
   // Organigrama dinámico: se construye desde las relaciones reales «reporta a», así los agentes nuevos aparecen en su sitio.
   const childrenOf = (parentKey: string) => agents.filter(a => a.template.reportsTo === parentKey).sort((a, b) => (a.scope === b.scope ? 0 : a.scope === 'workspace' ? -1 : 1) || a.createdAt.localeCompare(b.createdAt));
@@ -41,74 +47,54 @@ export function Team() {
     return <ul>{kids.map(k => <li key={k.id}><Node k={k.key} /><Children parentKey={k.key} depth={depth + 1} /></li>)}</ul>;
   };
   const Node = ({ k }: { k: string }) => {
-    const a = byKey(k); if (!a) return <div className="onode" style={{ opacity: .4 }} />;
-    const ws = a.scope === 'workspace';
-    const retired = isRetired(a);
-    return <button className="onode" onClick={() => navigate(`/equipo/${a.id}`)} style={retired ? { opacity: .55 } : undefined} title={retired ? retiredLabel(a) : undefined}>
-      <span className="onode-top"><Avatar initials={a.template.initials} ws={ws} /><Chip tone={ws ? 'accent' : ''} xs>{ws ? 'Espacio' : 'Proyecto'}</Chip></span>
+    const a = byKey(k); if (!a) return <div className="onode onode-missing" />;
+    const company = a.scope === 'workspace';
+    return <button className={`onode${isRetired(a) ? ' onode-retired' : ''}`} onClick={() => onOpen(a.id, 'configuracion')} title={isRetired(a) ? retiredLabel(a) : `Abrir el panel de ${a.config.name}`}>
+      <span className="onode-top"><Avatar initials={a.template.initials} ws={company} /><Chip tone={company ? 'accent' : ''} xs>{company ? 'Empresa' : 'Proyecto'}</Chip></span>
       <span className="onode-name">{a.config.name}</span><span className="small muted">{a.template.role}</span>
-      <span className="onode-foot">{retired
-        ? <Chip xs>{retiredLabel(a)}</Chip>
-        : <><span className={`dot ${a.status === 'active' ? 'dot-ok' : ''}`} /><span className="small muted">{a.status === 'active' ? 'Activo' : 'Inactivo'}</span></>}<span className="small mono muted" style={{ marginLeft: 'auto' }}>{model(a)?.short ?? a.config.model}</span></span>
+      <span className="onode-foot">{stateChip(a)}<span className="small mono muted" style={{ marginLeft: 'auto' }}>{model(a)?.name ?? a.config.model}</span></span>
     </button>;
   };
 
   return (
-    <Shell crumb="Equipo de IA">
-      <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div className="eyebrow">Equipo de IA</div>
-            <h1 className="h1" style={{ fontSize: 26 }}>Organización del espacio y del proyecto</h1>
-            <p className="med lede-2l" style={{ maxWidth: '78ch' }}>Ningún agente consume créditos hasta que autorices su ejecución.</p>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone="accent">{agents.filter(a => a.scope === 'workspace').length} agentes del espacio</Chip><Chip>{agents.filter(a => a.scope === 'project').length} agentes del proyecto</Chip><Chip dot={active ? 'ok' : ''}>{active} activos · {current.length} configurados</Chip>{retiredCount > 0 && <Chip>{retiredCount} retirados</Chip>}</div>
-          </div>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}><button className="btn btn-secondary" onClick={() => setEvalOpen(o => !o)} aria-expanded={evalOpen}>{Icon.org()}Evaluar organización</button><Link className="btn btn-secondary" to="/equipo/nuevo">{Icon.arrow()}Nuevo agente especializado</Link><button className="btn btn-primary" disabled title="Requiere autorización de ejecución y presupuesto aprobado">Activar equipo</button></div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div className="section-title">
+        <div><h2 className="h2">Organización de la empresa y del proyecto</h2><p className="med lede-2l">Quién reporta a quién. Ningún agente consume créditos hasta que autorices su trabajo.</p>
+          <p className="small muted" style={{ margin: '4px 0 0' }}>{agents.length} agentes · {agents.filter(a => a.scope === 'workspace').length} de la empresa · {agents.filter(a => a.scope === 'project').length} del proyecto{agents.some(isRetired) ? ` · ${agents.filter(isRetired).length} retirados` : ''}</p></div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn btn-secondary btn-sm" onClick={() => setEvalOpen(o => !o)} aria-expanded={evalOpen}>{Icon.org()}Evaluar organización</button>
+          <Link className="btn btn-ghost btn-sm" to="/equipo/nuevo" title="Formulario con todos los campos (requiere proveedor de API)">Formulario completo de agente</Link>
         </div>
-        {evalOpen && <OrgEvaluationPanel slug={ws.slug} defaultProjectId={status.project?.id ?? null} onClose={() => setEvalOpen(false)} />}
-        <Disclosure title="Más información">
-          <p className="sm13 med" style={{ lineHeight: 1.5, maxWidth: '78ch' }}>Ningún agente llama a modelos ni consume créditos hasta que lo actives y autorices su ejecución. Selecciona un agente para revisar o editar su configuración. Los agentes retirados se conservan y se pueden reactivar.</p>
-        </Disclosure>
+      </div>
+      {evalOpen && <OrgEvaluationPanel slug={ws.slug} defaultProjectId={status.project?.id ?? null} onClose={() => setEvalOpen(false)} />}
+      <Disclosure title="Más información">
+        <p className="sm13 med" style={{ lineHeight: 1.5, maxWidth: '78ch' }}>Ningún agente llama a modelos ni consume créditos hasta que autorices su trabajo. Abre un agente para revisar o editar su configuración; sus ajustes avanzados (modelo, límites, capacidades) están en su panel › Configuración.</p>
+      </Disclosure>
 
-        <section className="card" aria-labelledby="team-now">
-          <div className="card-h"><div><div className="h3" id="team-now">Trabajando ahora</div><div className="small muted">Según el estado de cada agente</div></div><Chip xs dot={active ? 'ok' : ''}>{active} activos</Chip></div>
-          <div className="card-b">
-            {activeAgents.length > 0
-              ? <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>{activeAgents.map(a => (
-                <button key={a.id} className="btn btn-secondary" style={{ height: 'auto', padding: '6px 12px' }} onClick={() => navigate(`/equipo/${a.id}`)}>
-                  <Avatar initials={a.template.initials} ws={a.scope === 'workspace'} />
-                  <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start' }}><span>{a.config.name}</span><span className="small muted">{a.template.role}</span></span>
-                  <span className="dot dot-ok" aria-hidden="true" />
-                </button>))}</div>
-              : <p className="sm13 muted">Ningún agente está activo ahora; todos están configurados pero inactivos.</p>}
-          </div>
-        </section>
+      <section className="card">
+        <div className="card-h"><div className="h3">Estructura organizativa</div><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone="accent" xs>Empresa</Chip><Chip xs>Proyecto</Chip><Chip xs>Retirado</Chip></div></div>
+        <div ref={orgBox} className="card-b org-scroll" tabIndex={0} aria-label="Organigrama (desplázate para ver todo)">
+          <ul className="org"><li>
+            <div className="onode-owner"><span className="avatar" style={{ width: 28, height: 28 }}>{Icon.user(13)}</span><span style={{ display: 'flex', flexDirection: 'column' }}><span style={{ fontWeight: 600, fontSize: 13, color: 'var(--color-text)' }}>Tú</span><span className="small muted">Propietario de la empresa</span></span></div>
+            <Children parentKey="owner" />
+          </li></ul>
+        </div>
+      </section>
 
-        <section className="card">
-          <div className="card-h"><div className="h3">Estructura organizativa</div><div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone="accent" xs>Espacio</Chip><Chip xs>Proyecto</Chip><Chip xs dot="">Inactivo</Chip><Chip xs>Retirado</Chip></div></div>
-          <div className="card-b" style={{ overflowX: 'auto', padding: '24px 18px 28px' }}>
-            <ul className="org"><li>
-              <div className="onode-owner"><span className="avatar" style={{ width: 28, height: 28 }}>{Icon.user(13)}</span><span style={{ display: 'flex', flexDirection: 'column' }}><span style={{ fontWeight: 600, fontSize: 13, color: '#1A1B1E' }}>Tú</span><span className="small muted">Propietario del espacio</span></span></div>
-              <Children parentKey="owner" />
-            </li></ul>
-          </div>
-        </section>
+      {status.project && <GauntletProposal slug={ws.slug} projectId={status.project.id} onCreated={() => void reload()} />}
 
-        {status.project && <GauntletProposal slug={ws.slug} projectId={status.project.id} onCreated={() => void reload()} />}
-
-        <section className="card">
-          <div className="card-h"><div className="h3">Relaciones y configuración</div><span className="small muted">Editable desde cada agente</span></div>
-          <div style={{ overflowX: 'auto' }}><table className="tbl">
-            <thead><tr><th>Agente</th><th>Rol</th><th>Ámbito</th><th>Reporta a</th><th>Modelo preferido</th><th>Esfuerzo</th><th>Estado</th></tr></thead>
-            <tbody>{agents.map(a => { const m = model(a); const ws = a.scope === 'workspace'; return <tr key={a.id} style={isRetired(a) ? { opacity: .6 } : undefined}>
-              <td><button className="lnk" onClick={() => navigate(`/equipo/${a.id}`)}>{a.config.name}</button></td><td className="med">{a.template.role}</td>
-              <td><Chip tone={ws ? 'accent' : ''} xs>{ws ? 'Espacio' : 'Proyecto'}</Chip></td>
-              <td className="med">{a.template.reportsTo === 'owner' ? 'Tú (propietario)' : byKey(a.template.reportsTo)?.config.name ?? a.template.reportsTo}</td>
-              <td className="mono" style={{ fontSize: 12 }}>{m?.name ?? a.config.model}</td><td className="med">{m?.supportsEffort ? EFFORT_LABELS[a.config.effort] : 'no aplica'}</td>
-              <td>{isRetired(a) ? <Chip xs>{retiredLabel(a)}</Chip> : <Chip xs dot={a.status === 'active' ? 'ok' : ''}>{a.status === 'active' ? 'Activo' : 'Inactivo'}</Chip>}</td></tr>; })}</tbody>
-          </table></div>
-        </section>
-      </main>
-    </Shell>
+      <section className="card">
+        <div className="card-h"><div className="h3">Relaciones y configuración</div><span className="small muted">Se edita en el panel de cada agente</span></div>
+        <div style={{ overflowX: 'auto' }}><table className="tbl tbl-cards">
+          <thead><tr><th>Agente</th><th>Rol</th><th>Ámbito</th><th>Reporta a</th><th>Modelo preferido</th><th>Esfuerzo</th><th>Estado</th></tr></thead>
+          <tbody>{agents.map(a => { const m = model(a); const company = a.scope === 'workspace'; return <tr key={a.id} className={isRetired(a) ? 'row-retired' : undefined}>
+            <td data-label="Agente"><button className="lnk" onClick={() => onOpen(a.id, 'configuracion')}>{a.config.name}</button></td><td data-label="Rol" className="med">{a.template.role}</td>
+            <td data-label="Ámbito"><Chip tone={company ? 'accent' : ''} xs>{company ? 'Empresa' : 'Proyecto'}</Chip></td>
+            <td data-label="Reporta a" className="med">{a.template.reportsTo === 'owner' ? 'Tú (propietario)' : byKey(a.template.reportsTo)?.config.name ?? a.template.reportsTo}</td>
+            <td data-label="Modelo" className="mono" style={{ fontSize: 12 }}>{m?.name ?? a.config.model}</td><td data-label="Esfuerzo" className="med">{m?.supportsEffort ? EFFORT_LABELS[a.config.effort] : 'no aplica'}</td>
+            <td data-label="Estado">{stateChip(a)}</td></tr>; })}</tbody>
+        </table></div>
+      </section>
+    </div>
   );
 }

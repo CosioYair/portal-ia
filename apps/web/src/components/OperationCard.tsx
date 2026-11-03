@@ -27,7 +27,7 @@ export function OperationCard({ msgId, action, onResolved }: { msgId: string; ac
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <strong>{pv.title}</strong><Chip xs tone={st.tone}>{st.label}</Chip>
       </div>
-      <div className="mono small" style={{ whiteSpace: 'pre-wrap', background: '#FAF9F6', border: '1px solid #EEECE6', borderRadius: 8, padding: 8, maxHeight: 220, overflow: 'auto' }}>{pv.details.join('\n')}</div>
+      <div className="mono small" style={{ whiteSpace: 'pre-wrap', background: 'var(--color-surface-alt)', border: '1px solid var(--color-divider)', borderRadius: 8, padding: 8, maxHeight: 220, overflow: 'auto' }}>{pv.details.join('\n')}</div>
       {pv.excluded.length > 0 && <div className="small muted">Queda fuera: {pv.excluded.join(' · ')}</div>}
       {pv.blockers.map((b, i) => <Notice key={i} kind="warn">{b}</Notice>)}
       {action.status === 'pending' && <>

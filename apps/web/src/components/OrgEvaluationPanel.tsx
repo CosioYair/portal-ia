@@ -274,7 +274,7 @@ export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: 
       {app?.reappliedAt && <Chip xs tone="ok">Aplicada de nuevo{(app.reapplyCount ?? 0) > 1 ? ` (${app.reapplyCount} veces)` : ''} · {when(app.reappliedAt)}</Chip>}
       {p.decision === 'accepted' && !app && <span className="small muted">Sin cambios aplicados: la propuesta no traía configuración.</span>}
       {app && app.changes.length > 0 && <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{app.changes.map(c => <li key={`${c.op}-${c.agentId}`}>
-        {OP[c.op]}: {app.status === 'reverted' && c.op === 'create' ? `${c.agentName} (eliminado al deshacer)` : <Link className="lnk" to={`/equipo/${c.agentId}`}>{c.agentName}</Link>} <span className="mono muted">({c.agentKey})</span>
+        {OP[c.op]}: {app.status === 'reverted' && c.op === 'create' ? `${c.agentName} (eliminado al deshacer)` : <Link className="lnk" to={`/oficina/agente/${encodeURIComponent(c.agentId)}/configuracion`}>{c.agentName}</Link>} <span className="mono muted">({c.agentKey})</span>
       </li>)}</ul>}
       {app?.warnings?.length ? <div className="small muted">⚠ {app.warnings.join(' ')}</div> : null}
       {app?.status === 'applied' && (undoing === p.id
@@ -355,7 +355,7 @@ export function OrgEvaluationPanel({ slug, defaultProjectId, onClose }: { slug: 
           {isNew && !skipBrief && <Notice kind="info">Esta empresa o proyecto aún no tiene historial o repositorio: añade el contexto inicial para que la evaluación tenga base.</Notice>}
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <span className="small muted">Contexto inicial (objetivos, producto, equipo, restricciones)</span>
-            <textarea className="input" rows={isNew ? 5 : 3} maxLength={BL.initialContext} value={initialContext} onChange={e => setInitialContext(e.target.value)} disabled={skipBrief || running || starting} style={isNew && !skipBrief ? { borderColor: 'var(--warn, #c98a00)' } : undefined} />
+            <textarea className="input" rows={isNew ? 5 : 3} maxLength={BL.initialContext} value={initialContext} onChange={e => setInitialContext(e.target.value)} disabled={skipBrief || running || starting} style={isNew && !skipBrief ? { borderColor: 'var(--warn, var(--color-warn))' } : undefined} />
           </label>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             <label className="small muted" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>

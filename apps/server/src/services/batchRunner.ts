@@ -159,12 +159,12 @@ export function checkTeam(slug: string, projectId: string, members: { agentId: s
   return Array.from(new Set(members.map(m => m.agentId))).map((id): BatchAgentCheck => {
     const roles = Array.from(new Set(members.filter(m => m.agentId === id).map(m => m.role ?? 'implementer')));
     const a = agents.get(id);
-    if (!a) return { agentId: id, name: 'Agente eliminado', roles, backend: 'api', source: 'api', label: '—', allowed: false, ready: false, problem: 'Un agente del equipo ya no existe.', fix: { label: 'Equipo de IA', href: '/equipo' }, viaFallback: false };
+    if (!a) return { agentId: id, name: 'Agente eliminado', roles, backend: 'api', source: 'api', label: '—', allowed: false, ready: false, problem: 'Un agente del equipo ya no existe.', fix: { label: 'Organización de la Oficina', href: '/oficina/organizacion' }, viaFallback: false };
     const backend = agentBackend(a); const source = batchSourceOf(backend); const name = a.config.name;
     const providerId = a.config.provider as ProviderId; const api = backendLabel('api', null, providerId);
     const apiReady = !!providersRepo.credential(providerId) && providersRepo.get(providerId)?.status === 'connected';
     const base = { agentId: id, name, roles, backend, source, label: backendLabel(backend, billing, providerId), allowed: auth.backends.includes(source), viaFallback: false };
-    const agentLink = { label: `Origen de «${name}» (Equipo de IA)`, href: `/equipo/${id}` };
+    const agentLink = { label: `Origen de «${name}» (su panel en la Oficina)`, href: `/oficina/agente/${encodeURIComponent(id)}/configuracion` };
     if (!base.allowed) return { ...base, ready: false, fix: agentLink, problem: source === 'api'
       ? `«${name}» usa ${api} (facturable) y este lote no autoriza la API.`
       : source === 'codex' ? `«${name}» usa Codex: los lotes aún no se ejecutan con Codex (ningún lote lo autoriza). Cambia su arnés a Claude Code o la API para esta historia; no se usará otro en su lugar.`

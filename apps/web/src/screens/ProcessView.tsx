@@ -11,6 +11,7 @@ import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Chip, Icon, KV, Notice } from '../components/ui.tsx';
+import { EmptyState, Tile, WorkTabs } from '../components/kit.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { StoryResult } from '../components/StoryResult.tsx';
 import { DelegationResultView } from '../components/DelegationResultView.tsx';
@@ -87,7 +88,7 @@ function ProcessViewOf({ processId }: { processId: string }) {
 
   // En curso: hasta ahora (hora del servidor), aunque el paso conserve el final de una llamada anterior (continuación).
   const stepTime = (s: ProcessStep) => { const sec = Math.round((stepDurationMs(s, serverNow()) ?? 0) / 1000); return sec < 60 ? `${sec} s` : `${Math.floor(sec / 60)} min ${sec % 60} s`; };
-  const stepChip = (s: ProcessStep) => s.status === 'done' ? <Chip tone="ok" xs dot="ok">completado</Chip> : s.status === 'running' ? <Chip tone="warn" xs dot="pulse">en curso</Chip> : s.status === 'failed' ? <Chip tone="err" xs dot="err">error</Chip> : s.status === 'skipped' ? <Chip xs>omitido</Chip> : <Chip xs dot="">pendiente</Chip>;
+  const stepChip = (s: ProcessStep) => s.status === 'done' ? <Chip tone="ok" xs dot="ok">completado</Chip> : s.status === 'running' ? <Chip tone="working" xs dot="pulse">en curso</Chip> : s.status === 'failed' ? <Chip tone="err" xs dot="err">error</Chip> : s.status === 'skipped' ? <Chip xs>omitido</Chip> : <Chip xs dot="">pendiente</Chip>;
 
   return (
     <Shell crumb={<>Actividad / {proc.title}</>}>
@@ -115,10 +116,10 @@ function ProcessViewOf({ processId }: { processId: string }) {
           {proc.kind === 'story_execution' && !proc.archivedAt && (proc.status === 'failed' || proc.status === 'cancelled' || proc.status === 'budget_exceeded') && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             {!!proc.steps[1]?.outputMd && !proc.result?.applied && <button className="btn btn-primary btn-sm" onClick={recover} disabled={fixBusy !== null}>{fixBusy === 'recover' ? <span className="spin spin-light" /> : Icon.check()}Recuperar el resultado (sin IA)</button>}
             <button className="btn btn-secondary btn-sm" onClick={retry} disabled={fixBusy !== null}>{fixBusy === 'retry' ? <span className="spin" /> : Icon.arrow()}Volver a ejecutar la historia</button>
-            {fixErr && <span className="sm13" style={{ color: '#9A1F18' }}>{fixErr}</span>}
+            {fixErr && <span className="sm13" style={{ color: 'var(--color-err-text)' }}>{fixErr}</span>}
           </div>}
         </div></Notice></div>}
-        {proc.status === 'pending_authorization' && !proc.archivedAt && <section className="card" id="sec-authorize" tabIndex={-1} style={{ borderColor: '#F0C66B', background: '#FFFBF0' }}>
+        {proc.status === 'pending_authorization' && !proc.archivedAt && <section className="card" id="sec-authorize" tabIndex={-1} style={{ borderColor: 'var(--color-flow-waiting)', background: 'var(--color-warn-bg-soft)' }}>
           <div className="card-h"><div><div className="h3">Autorizar este proceso</div><div className="small muted">Consume IA. Nada se ha gastado todavía. Costo estimado ≈ {fmtUsd(proc.estimatedUsd)}.</div></div><Chip tone="warn" xs>requiere tu autorización</Chip></div>
           <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {authErr && <Notice kind="err">{authErr}</Notice>}
@@ -142,9 +143,9 @@ function ProcessViewOf({ processId }: { processId: string }) {
           <div id="sec-steps" tabIndex={-1} style={{ flex: '999 1 520px', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
             {proc.steps.map((s, i) => (
               <section key={s.id} className="card">
-                <button className="card-h" style={{ width: '100%', background: 'transparent', border: 0, borderBottom: open === s.id ? '1px solid #EEECE6' : 0, font: 'inherit', cursor: 'pointer', textAlign: 'left', borderRadius: 10 }} onClick={() => setOpen(open === s.id ? null : s.id)} aria-expanded={open === s.id}>
+                <button className="card-h" style={{ width: '100%', background: 'transparent', border: 0, borderBottom: open === s.id ? '1px solid var(--color-divider)' : 0, font: 'inherit', cursor: 'pointer', textAlign: 'left', borderRadius: 10 }} onClick={() => setOpen(open === s.id ? null : s.id)} aria-expanded={open === s.id}>
                   <div style={{ display: 'flex', gap: 12, alignItems: 'center', minWidth: 0 }}>
-                    <span className="ili-ic" style={s.status === 'done' ? { background: '#E3F1EF', color: '#0B5652' } : undefined}>{s.status === 'done' ? Icon.check() : s.status === 'running' ? <span className="spin" /> : <span className="mono">{i + 1}</span>}</span>
+                    <span className="ili-ic" style={s.status === 'done' ? { background: 'var(--color-accent-soft)', color: 'var(--color-accent-hover)' } : undefined}>{s.status === 'done' ? Icon.check() : s.status === 'running' ? <span className="spin" /> : <span className="mono">{i + 1}</span>}</span>
                     <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}><span className="h3">{s.title}</span><span className="small muted">{s.agentName}{s.role ? ` · ${s.role === 'planner' ? 'planifica' : s.role === 'implementer' ? 'implementa' : s.role === 'reviewer' ? 'revisa' : 'consulta'}` : ''}</span></span>
                   </div>
                   <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>{s.startedAt && <span className="small muted mono">{stepTime(s)}</span>}{stepChip(s)}</span>
@@ -170,7 +171,7 @@ function ProcessViewOf({ processId }: { processId: string }) {
           <aside style={{ flex: '1 1 280px', maxWidth: 360, display: 'flex', flexDirection: 'column', gap: 16 }}>
             <section className="card card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div className="h3">Presupuesto</div>
-              <div style={{ height: 8, background: '#EEECE6', borderRadius: 999, overflow: 'hidden' }}><div style={{ width: `${pct}%`, height: '100%', background: pct >= 90 ? '#D93025' : pct >= 70 ? '#E39B1C' : '#0F6E6A', transition: 'width .3s' }} /></div>
+              <div style={{ height: 8, background: 'var(--color-divider)', borderRadius: 999, overflow: 'hidden' }}><div style={{ width: `${pct}%`, height: '100%', background: pct >= 90 ? 'var(--color-err)' : pct >= 70 ? 'var(--color-warn)' : 'var(--color-accent)', transition: 'width .3s' }} /></div>
               <KV k="Gastado"><span className="mono">{fmtUsd(proc.spentUsd)}</span></KV>
               <KV k="Autorizado"><span className="mono">{fmtUsd(proc.budgetUsd)}</span></KV>
               <KV k="Estimado inicial"><span className="mono">≈ {fmtUsd(proc.estimatedUsd)}</span></KV>
@@ -208,10 +209,10 @@ export function ProcessList() {
   return (
     <Shell crumb="Actividad">
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}><div><div className="eyebrow">Actividad</div><h1 className="h1" style={{ fontSize: 26 }}>Procesos del proyecto</h1></div><Link className="btn btn-ghost btn-sm" to="/archivo">Archivo histórico</Link></div>
+        <header className="page-head"><div className="page-head-main"><Tile icon={Icon.activity()} tone="work" size="lg" /><div className="page-head-text"><div className="eyebrow">Trabajo · Actividad</div><h1 className="h1">Procesos del proyecto</h1><p className="lede lede-2l">Cada ejecución, evaluación y encargo, con sus pasos, costo y siguiente paso.</p></div><div className="page-head-actions"><Link className="btn btn-ghost btn-sm" to="/archivo">Archivo histórico</Link></div></div><WorkTabs /></header>
         <section className="card">
           <div className="card-h"><div className="h3">Procesos</div><span className="small muted">{list?.length ?? 0} en total</span></div>
-          {list && list.length === 0 && <div className="card-b"><p className="muted sm13">Aún no hay procesos. La evaluación inicial se lanza desde el panel; las historias, desde el backlog.</p></div>}
+          {list && list.length === 0 && <EmptyState art="chart" title="Aún no hay procesos.">La evaluación inicial se lanza desde el Resumen; las historias, desde el Backlog.</EmptyState>}
           {list && list.length > 0 && <div className="card-b filter-group" role="group" aria-label="Filtrar por estado">
             {PROCESS_FILTERS.map(f => <button key={f.key} type="button" className={`btn btn-sm ${filter === f.key ? 'btn-primary' : 'btn-secondary'}`} aria-pressed={filter === f.key} onClick={() => setFilter(f.key)}>{f.label} ({countOf(f.key)})</button>)}
           </div>}
@@ -232,7 +233,7 @@ function TeamBackends({ slug, processId, refreshKey }: { slug: string; processId
   if (!b || !b.team.some(t => t.backend !== 'api')) return null;
   return <div className="card card-b" style={{ display: 'flex', flexDirection: 'column', gap: 6 }} data-team-backends>
     <div className="h3" style={{ fontSize: 14 }}>Backends del equipo {b.ready ? <Chip xs tone="ok">listos</Chip> : <Chip xs tone="warn">falta algo</Chip>}</div>
-    {b.team.map(t => <div key={t.agentId} className="small" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><strong>{t.name}</strong><span className="muted">{t.roles.join(', ')}</span><Chip xs tone={t.ready ? (t.backend === 'api' ? '' : 'ok') : 'warn'}>{t.label}</Chip>{t.reason && <span style={{ color: '#7A4A00' }}>{t.reason}</span>}</div>)}
+    {b.team.map(t => <div key={t.agentId} className="small" style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><strong>{t.name}</strong><span className="muted">{t.roles.join(', ')}</span><Chip xs tone={t.ready ? (t.backend === 'api' ? '' : 'ok') : 'warn'}>{t.label}</Chip>{t.reason && <span style={{ color: 'var(--color-warn-text)' }}>{t.reason}</span>}</div>)}
     <div className="help">Sin consola conectada, «tu consola» no avanza. No se cambia de backend ni se usa la API sin tu autorización{b.fallback === 'api' ? ' (tienes autorizada la API como alternativa)' : ''}.</div>
   </div>;
 }

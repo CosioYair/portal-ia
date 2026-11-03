@@ -1,87 +1,116 @@
-/* Oficina de agentes: planta por departamentos, puestos, tira de agentes, barra de órdenes, panel del agente y asistente
-   de creación. Solo tokens (tokens.css): sin colores, radios ni duraciones escritos a mano. */
+/* Oficina de agentes (Portal IA 2.0): cifras que filtran la planta, «te necesita», salas por departamento con su tono,
+   puestos con estado REAL (icono + texto + borde), departamentos, organización y lista. Panel del agente y asistente de
+   creación más abajo. Solo tokens (tokens.css). El tono de cada sala sale de su `hue` guardado (--dept-h, local). */
 
-.office { display: flex; flex-direction: column; gap: 16px; }
-.office-head { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: flex-end; }
-.office-head h1 { margin: 0; }
-.office-counts { display: flex; gap: 8px; flex-wrap: wrap; }
-.office-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.seg { display: inline-flex; border: 1px solid var(--color-border-strong); border-radius: var(--radius); overflow: hidden; background: var(--color-surface); }
-.seg button { appearance: none; border: 0; background: transparent; padding: 0 12px; height: 32px; font: inherit; font-size: 13px; color: var(--color-text-med); cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
-.seg button[aria-pressed="true"] { background: var(--color-text); color: var(--color-on-dark); }
-.seg button:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+.office { display: flex; flex-direction: column; gap: 20px; }
+.office-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 899px) { .office-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.office-kpis .stat { padding: 10px 14px; }
+.office-live { font-size: 12px; color: var(--color-text-muted); display: inline-flex; gap: 6px; align-items: center; }
+
+/* Menú «Nuevo agente ▾» */
+.menu { position: relative; display: inline-flex; }
+.menu-list { position: absolute; right: 0; top: calc(100% + 6px); z-index: 25; min-width: 260px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius); box-shadow: var(--shadow-raise); padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+.menu-item { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: var(--radius-sm); color: var(--color-text); text-decoration: none; font-weight: 500; font-size: 13.5px; }
+.menu-item span { font-weight: 400; font-size: 12px; color: var(--color-text-muted); }
+.menu-item:hover, .menu-item:focus-visible { background: var(--color-accent-soft); }
+.menu-item:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+
+/* «Te necesita» */
+.needs { display: flex; flex-direction: column; }
+.needs-row { display: flex; gap: 12px; align-items: center; padding: 10px 16px; border-top: 1px solid var(--color-divider); }
+.needs-row:first-child { border-top: 0; }
+.needs-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.needs-text strong { font-size: 13.5px; }
+.needs-text span { font-size: 12.5px; color: var(--color-text-med); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Barra de órdenes */
-.cmd-bar { display: flex; gap: 8px; align-items: stretch; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: 8px; }
-.cmd-bar .input { flex: 1; min-width: 0; }
-.cmd-route { font-size: 12.5px; color: var(--color-text-muted); padding: 2px 4px 0; min-height: 18px; }
+.cmd-bar { display: flex; gap: 8px; align-items: stretch; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); padding: 8px; box-shadow: var(--shadow-card); }
+.cmd-bar .input { flex: 1; min-width: 0; border-color: var(--color-control-border); }
+.cmd-bar .input:hover { border-color: var(--color-border); }
+.cmd-route { font-size: 12.5px; color: var(--color-text-muted); padding: 4px 4px 0; min-height: 18px; }
 
-/* Planta */
-.office-floor { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px; align-items: start; }
-.room { position: relative; border: 1px solid var(--color-border-strong); border-radius: var(--radius-card); overflow: hidden;
-  background-color: var(--color-office-floor);
-  background-image: linear-gradient(45deg, var(--color-office-tile) 25%, transparent 25%, transparent 75%, var(--color-office-tile) 75%), linear-gradient(45deg, var(--color-office-tile) 25%, transparent 25%, transparent 75%, var(--color-office-tile) 75%);
-  background-size: 28px 28px; background-position: 0 0, 14px 14px; }
-.room-wall { background: var(--color-office-wall); border-bottom: 3px solid var(--color-office-desk); padding: 10px 12px; display: flex; gap: 10px; align-items: center; justify-content: space-between; }
-.room-sign { display: inline-flex; align-items: center; gap: 8px; background: var(--color-office-sign); color: var(--color-on-dark); border-radius: var(--radius-badge); padding: 4px 10px; font-weight: 600; font-size: 13px; }
-.room-sign .swatch { width: 10px; height: 10px; border-radius: var(--radius-xs); }
-.room-meta { font-size: 12px; color: var(--color-text-med); display: flex; gap: 8px; align-items: center; }
-.room-purpose { padding: 6px 12px 0; font-size: 12.5px; color: var(--color-text-med); }
-.room-desks { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 10px; padding: 12px; }
-.room-empty { margin: 12px; padding: 10px 12px; font-size: 13px; color: var(--color-text-med); background: var(--color-surface); border-radius: var(--radius); }
-.room-actions { display: flex; gap: 6px; padding: 0 12px 12px; flex-wrap: wrap; }
-.room-plant { position: absolute; right: 10px; bottom: 8px; width: 14px; height: 18px; border-radius: var(--radius-xs) var(--radius-xs) 0 0; background: var(--color-office-plant); opacity: .7; pointer-events: none; }
+/* Planta: salas con su tono (cabecera clara, muestra intensa y etiqueta oscura; contraste comprobado en todo el círculo) */
+.office-floor { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; align-items: start; }
+.room { position: relative; border: 1px solid var(--color-border); border-radius: var(--radius-card); overflow: hidden; background: oklch(97.5% .018 var(--dept-h, 270)); box-shadow: var(--shadow-card); }
+.room-wall { background: oklch(93.5% .04 var(--dept-h, 270)); padding: 12px 14px; display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.room-sign { display: inline-flex; align-items: center; gap: 8px; color: var(--color-text); font-weight: 600; font-size: 14.5px; margin: 0; }
+.room-sign .swatch { width: 10px; height: 10px; border-radius: var(--radius-bar); background: oklch(56% .13 var(--dept-h, 270)); flex: none; }
+.room-meta { font-size: 12px; color: var(--color-text-med); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.room-purpose { padding: 8px 14px 0; font-size: 12.5px; color: var(--color-text-med); }
+.room-desks { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 10px; padding: 12px 14px; }
+.room-empty { margin: 12px 14px; padding: 12px; font-size: 13px; color: var(--color-text-med); background: var(--color-surface); border: 1px dashed var(--color-border-strong); border-radius: var(--radius); }
+.room-actions { display: flex; gap: 6px; padding: 0 10px 12px; flex-wrap: wrap; }
 
-.desk { appearance: none; position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 6px 8px; border-radius: var(--radius); border: 1px solid transparent; background: var(--color-surface); box-shadow: var(--shadow-desk); cursor: pointer; font: inherit; color: var(--color-text); text-align: center; min-height: 128px; transition: border-color var(--dur-fast), transform var(--dur-fast); }
-.desk:hover { border-color: var(--color-border-hover); transform: translateY(-1px); }
+/* Puesto: figura, nombre, papel, estado (icono + texto + borde), actividad real y cuántas cosas te esperan */
+.desk { appearance: none; position: relative; display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 8px; border-radius: var(--radius); border: 1px solid var(--color-border); background: var(--color-surface); font: inherit; color: inherit; cursor: pointer; text-align: center; min-width: 0; transition: border-color var(--dur-fast), box-shadow var(--dur-fast), transform var(--dur-fast); }
+.desk:hover { border-color: var(--color-border-hover); box-shadow: var(--shadow-raise); transform: translateY(-1px); }
 .desk:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
-.desk[aria-current="true"] { border-color: var(--color-accent); box-shadow: 0 0 0 2px var(--color-accent-soft); }
-.desk-name { font-size: 12.5px; font-weight: 600; line-height: 1.2; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.desk[aria-current="true"] { border-color: var(--color-primary); box-shadow: 0 0 0 2px var(--color-accent-soft); }
+.desk[data-state="working"] { border-color: var(--color-working-border); }
+.desk[data-state="attention"] { border-color: var(--color-attention-border); }
+.desk[data-state="unavailable"] { border: 1px dashed var(--color-blocked-border); }
+.desk[data-state="retired"] { border: 1px dashed var(--color-retired-border); background: var(--color-surface-alt); }
+.desk[data-state="retired"] .desk-name, .desk[data-state="retired"] .desk-role { color: var(--color-text-muted); }
+.desk > span:last-child { width: 100%; min-width: 0; }
+.desk-name { font-size: 12.5px; font-weight: 600; line-height: 1.2; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .desk-role { font-size: 11px; color: var(--color-text-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 100%; }
-.desk-state { font-size: 11px; display: inline-flex; gap: 4px; align-items: center; color: var(--color-text-med); }
-.desk-retired { opacity: .7; }
+.desk-state { font-size: 11px; font-weight: 600; display: inline-flex; gap: 4px; align-items: center; padding: 1px 8px; border-radius: var(--radius-pill); background: var(--color-idle-bg); color: var(--color-idle-text); }
+.desk[data-state="working"] .desk-state { background: var(--color-working-bg); color: var(--color-working-text); }
+.desk[data-state="attention"] .desk-state { background: var(--color-attention-bg); color: var(--color-attention-text); }
+.desk[data-state="queued"] .desk-state { background: var(--color-queued-bg); color: var(--color-queued-text); }
+.desk[data-state="unavailable"] .desk-state { background: var(--color-blocked-bg); color: var(--color-blocked-text); }
+.desk[data-state="retired"] .desk-state { background: transparent; color: var(--color-text-muted); }
+.desk-activity { font-size: 11px; color: var(--color-text-med); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.desk-ext { font-size: 10.5px; color: var(--color-text-muted); }
+.desk-needs { position: absolute; top: 6px; left: 6px; min-width: 20px; height: 20px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--color-attention); color: var(--color-on-dark); font-size: 11px; font-weight: 700; display: grid; place-items: center; }
 
-.state-badge { position: absolute; top: 4px; right: 4px; width: 20px; height: 20px; border-radius: var(--radius-pill); display: grid; place-items: center; border: 1px solid var(--color-surface); }
-.state-badge-attention { background: var(--color-warn); color: var(--color-office-ink); animation: officePulse var(--dur-loop) ease-in-out infinite; }
-.state-badge-working { background: var(--color-accent); color: var(--color-on-dark); }
-.state-badge-queued { background: var(--color-warn-bg); color: var(--color-warn-text); border-color: var(--color-warn-border); }
-.state-badge-unavailable { background: var(--color-surface-muted); color: var(--color-err-text); border-color: var(--color-err-border); }
+.state-badge { position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border-radius: var(--radius-pill); display: grid; place-items: center; border: 1px solid var(--color-surface); }
+.state-badge-attention { background: var(--color-attention-bg); color: var(--color-attention-text); border-color: var(--color-attention-border); }
+.state-badge-working { background: var(--color-working); color: var(--color-on-dark); }
+.state-badge-queued { background: var(--color-surface); color: var(--color-queued-text); border-color: var(--color-queued-border); }
+.state-badge-unavailable { background: var(--color-blocked-bg); color: var(--color-blocked-text); border-color: var(--color-blocked-border); }
 .state-badge-retired { background: var(--color-surface-muted); color: var(--color-text-muted); }
 
-.fig-working .fig-arm-l { animation: officeType var(--dur-loop) steps(2) infinite; }
-.fig-working .fig-arm-r { animation: officeType var(--dur-loop) steps(2) infinite reverse; }
-.fig-working .fig-screen { animation: officeGlow var(--dur-loop) ease-in-out infinite; }
+/* Solo se anima lo que el servidor dice que trabaja; tres ciclos y queda fijo (WCAG 2.2.2), y nada con «reducir movimiento». */
+.fig-working .fig-arm-l { animation: officeType var(--dur-loop) steps(2) 3; }
+.fig-working .fig-arm-r { animation: officeType var(--dur-loop) steps(2) 3 reverse; }
+.fig-working .fig-screen { animation: officeGlow var(--dur-loop) ease-in-out 3; }
 @keyframes officeType { 0% { transform: translateY(0); } 100% { transform: translateY(-1px); } }
 @keyframes officeGlow { 0%, 100% { opacity: 1; } 50% { opacity: .7; } }
-@keyframes officePulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.12); } }
 
-/* Vista compacta (también la vista accesible por defecto en pantallas pequeñas) */
+/* Departamentos */
+.dept-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+.dept-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-top: 4px solid oklch(56% .13 var(--dept-h, 270)); }
+.dept-faces { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+/* Organización: organigrama con desplazamiento propio (no desborda la pantalla) */
+.org-scroll { overflow-x: auto; padding: 24px 18px 28px; }
+.org-scroll:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
+.onode-retired { border-style: dashed; background: var(--color-surface-alt); }
+.onode-missing { visibility: hidden; }
+.row-retired td { color: var(--color-text-muted); }
+
+/* Lista (también tarjetas en móvil) */
 .office-list { width: 100%; border-collapse: collapse; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); overflow: hidden; }
-.office-list th, .office-list td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--color-divider); font-size: 13px; vertical-align: middle; }
+.office-list th, .office-list td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--color-divider); font-size: 13px; vertical-align: middle; }
 .office-list th { font-size: 12px; color: var(--color-text-muted); font-weight: 600; background: var(--color-surface-alt); }
 .office-list tr:last-child td { border-bottom: 0; }
 .office-list button.lnk { font-weight: 600; }
-
-/* Tira de agentes */
-/* Pegada al pie de la columna de contenido; deja sitio a la derecha para el botón flotante del Asistente. */
-.agent-strip { position: sticky; bottom: 0; z-index: 3; display: flex; gap: 6px; align-items: center; padding: 8px 150px 8px 12px; margin-top: 8px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); overflow-x: auto; }
-.agent-strip-label { font-size: 12px; color: var(--color-text-muted); white-space: nowrap; padding-right: 6px; }
-.strip-agent { appearance: none; border: 1px solid var(--color-border); background: var(--color-surface-alt); border-radius: var(--radius-pill); padding: 2px 10px 2px 2px; display: inline-flex; gap: 6px; align-items: center; font: inherit; font-size: 12.5px; cursor: pointer; white-space: nowrap; color: var(--color-text); }
-.strip-agent:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
-.strip-agent[aria-current="true"] { border-color: var(--color-accent); background: var(--color-accent-soft); }
-.strip-dot { width: 8px; height: 8px; border-radius: var(--radius-pill); background: var(--color-border-strong); }
-.strip-dot-working { background: var(--color-accent); }
-.strip-dot-attention { background: var(--color-warn-text); }
-.strip-dot-queued { background: var(--color-text-muted); }
-.strip-dot-unavailable { background: var(--color-err-text); }
+@media (max-width: 767px) {
+  .office-floor { grid-template-columns: minmax(0, 1fr); }
+  .room-desks { grid-template-columns: minmax(0, 1fr); }
+  .room-desks .desk { flex-direction: row; text-align: left; gap: 10px; padding: 10px 12px; }
+  .room-desks .desk .state-badge { position: static; order: 9; margin-left: auto; }
+  .room-desks .desk .desk-needs { position: static; order: 10; }
+  .office-list thead { display: none; }
+  .office-list, .office-list tbody, .office-list tr, .office-list td { display: block; width: 100%; }
+  .office-list tr { padding: 8px 0; border-bottom: 1px solid var(--color-divider); }
+  .office-list td { border: 0; padding: 4px 12px; }
+  .office-list td[data-label]::before { content: attr(data-label) " · "; color: var(--color-text-muted); font-size: 12px; }
+}
 
 /* Panel del agente */
-/* El panel y los diálogos se montan en <body> (por encima de los botones flotantes): heredan aquí la tipografía del Portal. */
-.agent-panel, .os-portal { font-family: var(--font-sans); color: var(--color-text); font-size: 14px; line-height: 1.45; }
-.agent-panel, .agent-panel *, .os-portal, .os-portal * { box-sizing: border-box; }
-/* Los diálogos van por encima del panel del agente (y Escape solo cierra el de arriba); los avisos, por encima de todo. */
-.os-portal { z-index: 70; }
-.toast { z-index: 80; }
 .agent-panel { position: fixed; top: 0; right: 0; bottom: 0; width: min(580px, 100vw); z-index: 60; background: var(--color-surface); box-shadow: var(--shadow-panel); display: flex; flex-direction: column; animation: fadeIn var(--dur-enter) ease-out; }
 .agent-panel-head { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px 10px; border-bottom: 1px solid var(--color-divider); }
 .agent-panel-head .who { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
@@ -91,7 +120,10 @@
 .agent-panel-tabs [role="tab"] { appearance: none; border: 0; background: transparent; padding: 10px 10px 9px; font: inherit; font-size: 13px; color: var(--color-text-med); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; display: inline-flex; gap: 6px; align-items: center; }
 .agent-panel-tabs [role="tab"][aria-selected="true"] { color: var(--color-text); border-bottom-color: var(--color-accent); font-weight: 600; }
 .agent-panel-tabs [role="tab"]:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
-.tab-count { min-width: 18px; height: 18px; border-radius: var(--radius-pill); background: var(--color-warn-bg); color: var(--color-warn-text); font-size: 11px; display: inline-grid; place-items: center; padding: 0 5px; }
+.agent-panel-scrim { position: fixed; inset: 0; z-index: 59; background: var(--color-scrim); animation: fadeIn var(--dur-enter) ease-out; }
+.agent-panel-sub { padding: 8px 16px 0; }
+.agent-panel-sub .seg { flex-wrap: wrap; }
+.agent-panel-head .state-pill { align-self: center; }
 .agent-panel-body { flex: 1; overflow-y: auto; padding: 14px 16px 24px; display: flex; flex-direction: column; gap: 14px; }
 
 .chat-log { display: flex; flex-direction: column; gap: 10px; }
@@ -140,13 +172,6 @@
 .diff-add { color: var(--color-ok-text); }
 .diff-del { color: var(--color-err-text); }
 
-.harness-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
-.harness-card { appearance: none; text-align: left; font: inherit; color: inherit; border: 1px solid var(--color-border-strong); border-radius: var(--radius-card); background: var(--color-surface); padding: 12px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
-.harness-card[aria-pressed="true"] { border-color: var(--color-accent); box-shadow: 0 0 0 2px var(--color-accent-soft); }
-.harness-card:disabled { cursor: not-allowed; background: var(--color-surface-muted); }
-.harness-card:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
-.cap-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
-.cap-list li { display: flex; gap: 6px; align-items: flex-start; }
 
 /* Asistente de creación */
 .wizard { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
@@ -172,3 +197,4 @@
 /* Agente externo (referencia gestionada): su carpeta original es la fuente. */
 .desk-ext { font-size: 10px; padding: 0 6px; border-radius: var(--radius-pill); border: 1px solid var(--color-border); color: var(--color-text-med); align-self: center; }
 .agent-panel .lnk:disabled { opacity: .5; cursor: not-allowed; text-decoration: none; }
+@media (min-width: 1280px) { .agent-panel { width: min(580px, 46vw); } }

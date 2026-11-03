@@ -19,7 +19,7 @@ export const Icon = {
   warn: () => svg(<><path d="M8 2.5l6 10.5H2z" {...S} strokeLinejoin="round" /><path d="M8 6.5v3M8 11.2h.01" {...R} /></>),
   git: () => svg(<><circle cx="5" cy="3.5" r="1.75" {...S} /><circle cx="5" cy="12.5" r="1.75" {...S} /><circle cx="11.5" cy="6" r="1.75" {...S} /><path d="M5 5.25v5.5M11.5 7.75c0 2.25-3.5 2-6.5 3" {...S} /></>),
   user: (size = 14) => svg(<><circle cx="8" cy="5.5" r="2.5" {...S} /><path d="M2.75 13.5c.75-2.75 2.75-4 5.25-4s4.5 1.25 5.25 4" {...S} strokeLinecap="round" /></>, size),
-  updown: () => svg(<path d="M5 6.5L8 3.5l3 3M5 9.5l3 3 3-3" {...R} />, 14, '#686B72'),
+  updown: () => svg(<path d="M5 6.5L8 3.5l3 3M5 9.5l3 3 3-3" {...R} />, 14, 'var(--color-text-muted)'),
   x: (size = 12) => svg(<path d="M4 4l8 8M12 4l-8 8" {...R} />, size),
   folder: () => svg(<path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12z" {...S} strokeLinejoin="round" />),
   folderUp: () => svg(<><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5h4.5A1.5 1.5 0 0 1 14 6v6a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12z" {...S} strokeLinejoin="round" /><path d="M8 11V7.5M6.25 9.25 8 7.5l1.75 1.75" {...R} /></>),
@@ -48,7 +48,25 @@ export const Icon = {
   stateRunning: () => svg(<><circle cx="8" cy="8" r="6.25" {...L} /><path d="M8 4.75A3.25 3.25 0 0 1 11.25 8" {...L} /></>),
   stateDone: () => svg(<><circle cx="8" cy="8" r="6.25" {...L} /><path d="M5 8.3l2 2 4-4.5" {...L} /></>),
   stateError: () => svg(<><circle cx="8" cy="8" r="6.25" {...L} /><path d="M5.75 5.75l4.5 4.5M10.25 5.75l-4.5 4.5" {...L} /></>),
-  stateBlocked: () => svg(<><circle cx="8" cy="8" r="6.25" {...L} /><path d="M3.6 12.4l8.8-8.8" {...L} /></>)
+  stateBlocked: () => svg(<><circle cx="8" cy="8" r="6.25" {...L} /><path d="M3.6 12.4l8.8-8.8" {...L} /></>),
+  // Portal IA 2.0 · iconos de navegación y acciones (mismo trazo L).
+  building: (size = 16) => svg(<><path d="M2.75 14.25h10.5M4 14.25V3.25A1 1 0 0 1 5 2.25h6a1 1 0 0 1 1 1v11" {...L} /><path d="M6.5 5h.01M9.5 5h.01M6.5 7.75h.01M9.5 7.75h.01M7 14.25v-3h2v3" {...L} /></>, size),
+  sparkles: (size = 16) => svg(<><path d="M7 2.25l1.2 3.05 3.05 1.2-3.05 1.2L7 10.75 5.8 7.7 2.75 6.5 5.8 5.3z" {...L} /><path d="M12 9.75l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6z" {...L} /></>, size),
+  bell: (size = 16) => svg(<><path d="M4 11.25V7.5a4 4 0 0 1 8 0v3.75l1.25 1.5H2.75z" {...L} /><path d="M6.5 13.75a1.6 1.6 0 0 0 3 0" {...L} /></>, size),
+  gauge: (size = 16) => svg(<><path d="M2.5 11.5a5.75 5.75 0 1 1 11 0" {...L} /><path d="M8 10.25l2.5-3.5M4.25 11.5h7.5" {...L} /></>, size),
+  kanban: (size = 16) => svg(<><rect x="2.25" y="2.75" width="11.5" height="10.5" rx="1.75" {...L} /><path d="M6 2.75v10.5M10 2.75v10.5M3.75 5.25h1M7.5 5.25h1M7.5 7.5h1M11.25 5.25h1" {...L} /></>, size),
+  search: (size = 16) => svg(<><circle cx="7.25" cy="7.25" r="4.5" {...L} /><path d="m10.6 10.6 3.15 3.15" {...L} /></>, size),
+  plus: (size = 16) => svg(<path d="M8 3.25v9.5M3.25 8h9.5" {...L} />, size),
+  download: (size = 16) => svg(<path d="M8 2.75v7.5M5 7.5 8 10.5l3-3M2.75 12.25v1h10.5v-1" {...L} />, size),
+  chat: (size = 16) => svg(<path d="M3.25 3.25h9.5a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H7.5l-3 2.5v-2.5H3.25a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1z" {...L} />, size),
+  chevD: (size = 14) => svg(<path d="M3.5 6 8 10.5 12.5 6" {...L} />, size),
+  menu: (size = 16) => svg(<path d="M2.75 4.5h10.5M2.75 8h10.5M2.75 11.5h10.5" {...L} />, size),
+  layers: (size = 16) => svg(<><path d="M8 2.25 13.75 5.5 8 8.75 2.25 5.5z" {...L} /><path d="m2.25 8.5 5.75 3.25 5.75-3.25M2.25 11 8 14.25 13.75 11" {...L} /></>, size),
+  history: (size = 16) => svg(<><path d="M2.6 6.25A5.75 5.75 0 1 1 2.25 8M2.25 3.25v3h3" {...L} /><path d="M8 5v3.25l2 1.25" {...L} /></>, size),
+  sliders: (size = 16) => svg(<><path d="M2.75 4.5h6M11.75 4.5h1.5M2.75 11.5h1.5M7.25 11.5h6" {...L} /><circle cx="10.25" cy="4.5" r="1.5" {...L} /><circle cx="5.75" cy="11.5" r="1.5" {...L} /></>, size),
+  shield: (size = 16) => svg(<><path d="M8 1.75l5 2v4c0 3-2.25 5.25-5 6.5-2.75-1.25-5-3.5-5-6.5v-4z" {...L} /><path d="M5.75 8l1.6 1.6 2.9-3.1" {...L} /></>, size),
+  bolt: (size = 16) => svg(<path d="M9 1.75 3.75 9h4l-1 5.25L12.25 7h-4z" {...L} />, size),
+  external: (size = 14) => svg(<path d="M9.25 2.75h4v4M13.25 2.75 7.5 8.5M11.5 9.5v3.25a.75.75 0 0 1-.75.75h-7a.75.75 0 0 1-.75-.75v-7A.75.75 0 0 1 3.25 5H6.5" {...L} />, size)
 };
 
 /** HU-168 · Estados comunes del Portal. Siempre se comunican con icono y texto, nunca solo con color. */
@@ -81,8 +99,8 @@ export function Wordmark({ provisional }: { provisional?: boolean }) {
   return <div className="wordmark"><span className="mark" aria-hidden="true" /><span>Portal IA</span>{provisional && <span className="chip chip-soon chip-xs">nombre provisional</span>}</div>;
 }
 
-export function Chip({ tone = '', xs, dot, children, className = '' }: { tone?: '' | 'accent' | 'ok' | 'warn' | 'err' | 'soon'; xs?: boolean; dot?: '' | 'ok' | 'warn' | 'err' | 'pulse'; children: ReactNode; className?: string }) {
-  return <span className={`chip ${tone ? 'chip-' + tone : ''} ${xs ? 'chip-xs' : ''} ${className}`}>{dot !== undefined && <span className={`dot ${dot === 'pulse' ? 'dot-warn dot-pulse' : dot ? 'dot-' + dot : ''}`} aria-hidden="true" />}{children}</span>;
+export function Chip({ tone = '', xs, dot, children, className = '' }: { tone?: '' | 'accent' | 'ok' | 'warn' | 'err' | 'soon' | 'working'; xs?: boolean; dot?: '' | 'ok' | 'warn' | 'err' | 'pulse'; children: ReactNode; className?: string }) {
+  return <span className={`chip ${tone ? 'chip-' + tone : ''} ${xs ? 'chip-xs' : ''} ${className}`}>{dot !== undefined && <span className={`dot ${dot === 'pulse' ? 'dot-working dot-pulse' : dot ? 'dot-' + dot : ''}`} aria-hidden="true" />}{children}</span>;
 }
 
 export function Notice({ kind, children }: { kind: 'info' | 'ok' | 'warn' | 'err'; children: ReactNode }) {
@@ -98,19 +116,19 @@ export function DraftNote({ status, onDiscard, stale }: { status: 'idle' | 'rest
   if (stale) return <div className="small muted" data-testid="draft-stale" role="status">Hay un borrador tuyo de una versión anterior ({new Date(stale.at).toLocaleString()}). <button type="button" className="lnk small" onClick={stale.recover}>Recuperarlo</button> · <button type="button" className="lnk small" onClick={stale.discard}>Descartarlo</button></div>;
   const text = status === 'restored' ? 'Borrador recuperado' : status === 'saved' ? 'Borrador guardado' : status === 'unsaved' ? 'Cambios sin guardar' : status === 'error' ? 'No se pudo guardar; tus cambios siguen en esta pantalla' : null;
   if (!text) return null;
-  return <div className="small muted" data-testid="draft-status" role="status" style={{ color: status === 'error' ? 'var(--err, #B42318)' : undefined }}>{text}{status === 'restored' && onDiscard ? <> · <button type="button" className="lnk small" onClick={onDiscard}>Descartar borrador</button></> : null}</div>;
+  return <div className="small muted" data-testid="draft-status" role="status" style={{ color: status === 'error' ? 'var(--color-err-text)' : undefined }}>{text}{status === 'restored' && onDiscard ? <> · <button type="button" className="lnk small" onClick={onDiscard}>Descartar borrador</button></> : null}</div>;
 }
 
 export function Stepper({ s1, s2, s3 }: { s1: string; s2: string; s3: string }) {
   return <nav className="stepper" aria-label="Progreso de la configuración">
     <div className={`step ${s1}`}><span className="step-n mono">1</span><span>Proveedor de IA</span></div>
-    <div className={`step ${s2}`}><span className="step-n mono">2</span><span>Espacio interno</span></div>
+    <div className={`step ${s2}`}><span className="step-n mono">2</span><span>Empresa interna</span></div>
     <div className={`step ${s3}`}><span className="step-n mono">3</span><span>Equipo inicial</span></div>
   </nav>;
 }
 
 export function Empty({ icon, title, hint, style }: { icon: ReactNode; title: string; hint: string; style?: React.CSSProperties }) {
-  return <div className="empty" style={style}><span className="empty-ic">{icon}</span><div style={{ fontWeight: 500, color: '#1A1B1E' }}>{title}</div><div className="sm13" style={{ maxWidth: '46ch' }}>{hint}</div></div>;
+  return <div className="empty" style={style}><span className="empty-ic">{icon}</span><div style={{ fontWeight: 500, color: 'var(--color-text)' }}>{title}</div><div className="sm13" style={{ maxWidth: '46ch' }}>{hint}</div></div>;
 }
 
 export function KV({ k, children }: { k: string; children: ReactNode }) {

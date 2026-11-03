@@ -207,7 +207,7 @@ async function detectNow(s: CodexSettings, model: string | null): Promise<CodexD
 /** ¿Puede ESTE agente ejecutar con Codex ahora? (sin efectos; con la última detección). */
 export function codexGate(agent: Agent, det: CodexDetection | null = lastCodexDetection(), s: CodexSettings = getCodexSettings()): { ok: true } | { ok: false; reason: string } {
   if ((agent.config.backend ?? 'api') !== 'codex') return { ok: false, reason: 'El agente no usa Codex.' };
-  if (!s.enabled || !s.authorizedAt) return { ok: false, reason: 'Codex no está habilitado (Oficina → Arneses). No se ha usado ningún otro arnés en su lugar.' };
+  if (!s.enabled || !s.authorizedAt) return { ok: false, reason: 'Codex no está habilitado (Ajustes › Motores de IA). No se ha usado ningún otro arnés en su lugar.' };
   if (!det?.installed) return { ok: false, reason: 'No se encontró la CLI de Codex.' };
   if (det.billing !== 'subscription') return { ok: false, reason: det.problems[0] ?? 'Codex no está verificado con tu sesión de ChatGPT.' };
   if (!det.restricted) return { ok: false, reason: det.problems.find(p => /herramientas/.test(p)) ?? 'Codex no está verificado en modo restringido.' };

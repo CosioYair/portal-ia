@@ -145,6 +145,13 @@ export async function registerAction(slug: string, agentId: string, messageId: s
   return getAction(slug, agentId, id)!;
 }
 
+/** Acciones del chat que esperan tu «Sí, hazlo», por agente (cuentan en «te necesita» y en Decisiones). */
+export function pendingActionCounts(slug: string): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const r of ensure(slug).prepare(`SELECT agent_id, COUNT(*) AS n FROM agent_actions WHERE status = 'proposed' GROUP BY agent_id`).all() as any[]) out.set(r.agent_id, Number(r.n));
+  return out;
+}
+
 export function getAction(slug: string, agentId: string, id: string): AgentAction | null {
   const r = ensure(slug).prepare(`SELECT * FROM agent_actions WHERE id = ? AND agent_id = ?`).get(id, agentId) as any; return r ? map(r) : null;
 }
@@ -207,7 +214,7 @@ async function runAction(slug: string, a: Agent, id: string, ownerMessageId: str
         title: act.payload.titulo, criterion: 'Verificado con pruebas y en el Portal en marcha; la conversación de origen recibe el resultado.',
         description: `${said ? `Lo que pidió el propietario: «${said.slice(0, 3000)}»\n\n` : ''}Descripción del agente: ${act.payload.descripcion}\n\nComponente probable: ${act.payload.componente || 'por determinar'}.\nOrigen: conversación con «${a.config.name}» (agente ${a.id}, mensaje ${ownerMessageId ?? '—'}).${proof}\n\nEl agente no modifica el Portal: esta historia sigue el proceso de desarrollo del Portal (análisis, implementación aislada, pruebas, revisión y tu aprobación).`
       });
-      patch(slug, id, { status: 'done', result: { backlogItemId: it.id, storyId: it.storyId, projectId: proj.id, projectName: proj.name, summary: `Historia ${it.storyId} creada en «${proj.name}».` }, link: '/backlog' });
+      patch(slug, id, { status: 'done', result: { backlogItemId: it.id, storyId: it.storyId, projectId: proj.id, projectName: proj.name, summary: `Historia ${it.storyId} creada en «${proj.name}».` }, link: `/empresa/${encodeURIComponent(slug)}/proyecto/${encodeURIComponent(proj.id)}/historias/${encodeURIComponent(it.id)}` });
     } else if (act.kind === 'procesar_documentos') {
       const atts = (act.payload.adjuntos as string[]).map(x => attachmentPath(slug, a.id, x));
       const zips = atts.filter(x => x.att.kind === 'zip'); const pdfs = atts.filter(x => x.att.kind === 'pdf');

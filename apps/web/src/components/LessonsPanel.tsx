@@ -57,7 +57,7 @@ export function LessonsPanel({ projectId }: { projectId: string }) {
           {cur.rootCause && <div><div className="eyebrow" style={{ marginBottom: 4 }}>Causa raíz</div><div className="sm13">{cur.rootCause}</div></div>}
           {cur.correctiveAction && <div><div className="eyebrow" style={{ marginBottom: 4 }}>Acción correctiva</div><div className="sm13">{cur.correctiveAction}</div></div>}
           <div><div className="eyebrow" style={{ marginBottom: 4 }}>Lección (texto que se inyecta en el prompt)</div>
-            {cur.status === 'validated' || cur.status === 'rejected' || cur.status === 'obsolete' ? <div className="sm13" style={{ padding: 10, background: '#FAF9F6', borderRadius: 8 }}>{cur.lessonText ?? '—'}</div>
+            {cur.status === 'validated' || cur.status === 'rejected' || cur.status === 'obsolete' ? <div className="sm13" style={{ padding: 10, background: 'var(--color-surface-alt)', borderRadius: 8 }}>{cur.lessonText ?? '—'}</div>
               : <textarea className="input" style={{ minHeight: 80 }} value={text} onChange={e => setText(e.target.value)} placeholder="Escríbela tú o pide una propuesta al Coordinador (una llamada de IA, con tu autorización)." />}
           </div>
           {cur.status === 'validated' && <div className="small muted">Medición: {cur.usedCount ? <>inyectada en {cur.usedCount} paso(s); {cur.recurrenceCount ? `el mismo error volvió a ocurrir ${cur.recurrenceCount} vez/veces con ella presente.` : 'sin reincidencias: por ahora el error no se ha repetido con ella presente.'}</> : 'aún sin medir: ninguna historia la ha usado desde que se validó.'}</div>}

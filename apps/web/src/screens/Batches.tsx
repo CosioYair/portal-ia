@@ -11,7 +11,9 @@ import { Shell } from '../components/Shell.tsx';
 import { GAUNTLET_MODE } from '../components/Gauntlet.tsx';
 import { BatchStoryPicker, STATUS_LABEL } from '../components/BatchStoryPicker.tsx';
 import { Chip, DraftNote, Icon, Notice } from '../components/ui.tsx';
+import { EmptyState, Tile, WorkTabs } from '../components/kit.tsx';
 import { draftKey, useDraft, usePersistentState } from '../lib/persist.ts';
+import { officeHome } from '../lib/routes.ts';
 
 const STATUS: Record<BatchView['status'], { label: string; tone: '' | 'ok' | 'warn' | 'err' | 'accent' }> = {
   running: { label: 'en marcha', tone: 'accent' }, paused: { label: 'en pausa', tone: 'warn' }, completed: { label: 'terminado', tone: 'ok' }, cancelled: { label: 'cancelado', tone: '' }, revoked: { label: 'autorización revocada', tone: 'err' }
@@ -53,18 +55,21 @@ export function Batches() {
   useLive(c => c.ws === ws.slug && (c.entity === 'batch' || (c.entity === 'process' && c.kind !== 'progress')) && (!c.projectId || c.projectId === projectId), () => load(), { minMs: 1500 });
   const active = list?.find(b => b.status === 'running' || b.status === 'paused');
   return (
-    <Shell crumb="Ejecución continua">
+    <Shell crumb="Lotes">
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <div><div className="eyebrow">Backlog</div><h1 className="h1" style={{ fontSize: 26 }}>Ejecución continua</h1>
-            <div className="sm13 muted" style={{ maxWidth: '75ch' }}>Autorizas una vez un alcance acotado (historias, presupuesto, límites, Gauntlet, qué operaciones git) y el coordinador del lote, sin IA, las ejecuta en orden seguro, integra de una en una y te deja cada historia lista para <strong>tu aceptación</strong>, que es distinta de QA.</div></div>
-          {!creating && <button className="btn btn-primary" onClick={() => setCreating(true)} disabled={!!active} title={active ? 'Ya hay un lote activo en este proyecto' : undefined}>{Icon.activity()}Nuevo lote</button>}
-        </div>
+        <header className="page-head"><div className="page-head-main">
+          <Tile icon={Icon.layers(22)} tone="work" size="lg" />
+          <div className="page-head-text"><div className="eyebrow">Trabajo · ejecución continua</div><h1 className="h1">Lotes</h1>
+            <p className="lede lede-2l">Varias historias seguidas con una sola autorización; cada una queda lista para tu aceptación.</p>
+            </div>
+          {!creating && <div className="page-head-actions"><button className="btn btn-primary" onClick={() => setCreating(true)} disabled={!!active} title={active ? 'Ya hay un lote activo en este proyecto' : undefined}>{Icon.activity()}Nuevo lote</button></div>}
+        </div><WorkTabs /></header>
+        <details className="disclosure"><summary className="disclosure-summary"><span className="disclosure-marker" aria-hidden="true" /><span className="disclosure-text"><span className="disclosure-title">Cómo funciona un lote</span></span></summary><div className="sm13 muted" style={{ maxWidth: '75ch', padding: '0 0 8px 24px' }}>Autorizas una vez un alcance acotado (historias, presupuesto, límites, Gauntlet, qué operaciones git) y el coordinador del lote, sin IA, las ejecuta en orden seguro, integra de una en una y te deja cada historia lista para <strong>tu aceptación</strong>, que es distinta de QA.</div></details>
         {creating && <BatchWizard onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void load(); }} />}
         {active && !creating && <Notice kind="info">Lote activo: <Link to={`/lotes/${active.id}`}><strong>{active.title}</strong></Link> · {STATUS[active.status].label}{active.reason ? ` · ${active.reason}` : ''}</Notice>}
         <section className="card">
           <div className="card-h"><div className="h3">Lotes del proyecto</div></div>
-          {!list ? <div className="card-b"><span className="spin" /></div> : !list.length ? <div className="card-b small muted">Todavía no hay lotes. Crea uno con las historias pendientes que quieras ejecutar seguidas.</div> :
+          {!list ? <div className="card-b"><span className="spin" /></div> : !list.length ? <EmptyState art="board" title="Todavía no hay lotes">Un lote ejecuta seguidas las historias pendientes que elijas, con una sola autorización y límites que fijas tú.</EmptyState> :
             <div style={{ overflowX: 'auto' }}><table className="tbl"><thead><tr><th>Lote</th><th>Estado</th><th>Historias</th><th>Para tu revisión</th><th>Gasto</th><th>Creado</th></tr></thead><tbody>
               {list.map(b => <tr key={b.id}><td><Link className="lnk" to={`/lotes/${b.id}`}>{b.title}</Link></td><td><Chip xs tone={STATUS[b.status].tone}>{STATUS[b.status].label}</Chip></td><td className="mono">{b.items.length}</td><td className="mono">{b.lifecycle.readyForOwner}</td><td className="mono">{fmtUsd(b.budget.spent)} / {fmtUsd(b.auth.totalBudgetUsd)}</td><td className="small">{when(b.createdAt)}</td></tr>)}
             </tbody></table></div>}
@@ -195,7 +200,7 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
 
             <div className="bw-section" data-testid="batch-sources">
               <div className="eyebrow">2 · Equipo y orígenes de ejecución</div>
-              <div className="small muted">El origen es de cada agente (se cambia en <Link className="lnk" to="/equipo">Equipo de IA</Link>). Aquí autorizas qué orígenes puede usar este lote; nunca cambia de origen por su cuenta.</div>
+              <div className="small muted">El origen es de cada agente (se cambia en el panel de cada agente, en la <Link className="lnk" to={officeHome()}>Oficina</Link>). Aquí autorizas qué orígenes puede usar este lote; nunca cambia de origen por su cuenta.</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {(['claude_code', 'api'] as const).map(b => <label key={b} className="ck"><input className="cb" type="checkbox" checked={req.backends!.includes(b)} onChange={e => set({ backends: e.target.checked ? [...req.backends!, b] : req.backends!.filter(x => x !== b), ...(b === 'api' && !e.target.checked ? { apiFallback: false } : {}) })} />
                   <span><strong>{b === 'api' ? 'API del proveedor (facturable, en USD)' : 'Claude Code (tu suscripción)'}</strong>{preview ? <span className="muted"> · {usedBy(b).length ? `lo usan: ${usedBy(b).join(', ')}` : 'ningún agente del lote lo usa'}</span> : null}</span></label>)}
@@ -332,16 +337,16 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
   useEffect(() => { if (b?.status !== 'running') return; const t = setInterval(() => { void load(); }, 20_000); return () => clearInterval(t); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.slug, batchId, b?.status]);
   const act = async (fn: () => Promise<BatchView>, ok: string) => { setBusy(true); latest.bump(); try { setB(await fn()); flash(ok); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
-  if (!b) return <Shell crumb="Ejecución continua"><main className="page">{err ? <Notice kind="err">{err}</Notice> : <span className="spin" />}</main></Shell>;
+  if (!b) return <Shell crumb="Lotes"><main className="page">{err ? <Notice kind="err">{err}</Notice> : <span className="spin" />}</main></Shell>;
   // «En marcha» solo si algo avanza: si todo espera tu decisión, se dice.
   const idle = b.status === 'running' && !batchMoving(b.items);
   const st = idle ? { label: 'espera tu decisión', tone: 'warn' as const } : STATUS[b.status]; const closed = b.status === 'cancelled' || b.status === 'revoked';
   const pct = (n: number) => `${Math.min(100, Math.round((n / Math.max(0.0001, b.auth.totalBudgetUsd)) * 100))}%`;
   return (
-    <Shell crumb={`Ejecución continua / ${b.title}`}>
+    <Shell crumb={b.title}>
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 18 }} data-testid="batch-detail">
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
-          <div><div className="eyebrow"><Link className="lnk" to="/lotes">Ejecución continua</Link></div><h1 className="h1" style={{ fontSize: 24 }}>{b.title}</h1>
+          <div><div className="eyebrow"><Link className="lnk" to="/lotes">Trabajo · Lotes</Link></div><h1 className="h1" style={{ fontSize: 24 }}>{b.title}</h1>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}><Chip tone={st.tone}>{st.label}</Chip><Chip xs>Gauntlet {GAUNTLET_MODE[b.auth.gauntlet.mode].label.toLowerCase()}</Chip><Chip xs>{b.auth.concurrency} a la vez</Chip><Chip xs>integrar {b.auth.git.merge ? (b.auth.git.integration === 'on_acceptance' ? 'al aceptar' : 'al terminar') : 'no'}</Chip>{b.auth.git.activate && <Chip xs>activar sí</Chip>}<Chip xs>publicar {b.auth.git.publish ? 'sí' : 'no'}</Chip></div></div>
           {!closed && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {b.status === 'running' && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => act(() => api.batchControl(ws.slug, b.id, 'pause'), 'Lote en pausa')}>Pausar</button>}
@@ -390,7 +395,7 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
         <section className="card card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{(Object.keys(b.summary) as BatchItemState[]).filter(k => b.summary[k]).map(k => <Chip key={k} xs tone={TONE[k]}>{b.summary[k]} {b.items.find(i => i.state === k)?.label}</Chip>)}</div>
           <div className="small">Gasto {fmtUsd(b.budget.spent)} · reservado {fmtUsd(b.budget.reserved)} · disponible {fmtUsd(b.budget.remaining)} de {fmtUsd(b.auth.totalBudgetUsd)} (máx. {fmtUsd(b.auth.perStoryBudgetUsd)} por historia) · suscripción {b.subscriptionCalls}/{b.auth.maxSubscriptionCalls} llamadas</div>
-          <div style={{ height: 6, background: '#EEECE6', borderRadius: 4, overflow: 'hidden', display: 'flex' }} aria-hidden><span style={{ width: pct(b.budget.spent), background: '#1F6F5C' }} /><span style={{ width: pct(b.budget.reserved), background: '#9CC7B9' }} /></div>
+          <div style={{ height: 6, background: 'var(--color-divider)', borderRadius: 4, overflow: 'hidden', display: 'flex' }} aria-hidden><span style={{ width: pct(b.budget.spent), background: 'var(--color-ok-text)' }} /><span style={{ width: pct(b.budget.reserved), background: 'var(--color-flow-run-mid)' }} /></div>
         </section>
         {GROUPS.map(gr => { const rank = new Map((b.integrationPlan?.order ?? []).map((x, k) => [x, k])); const its = b.items.filter(i => gr.states.includes(i.state)).sort((x, y) => (rank.get(x.itemId) ?? 1e6) - (rank.get(y.itemId) ?? 1e6) || x.order - y.order); if (!its.length) return null; return (
           <section key={gr.label} className="card">
@@ -439,7 +444,7 @@ function ItemCard({ slug, b, it, picked, onPick, checks, onChecks, onChange, bus
   const pvOther = pvOpen && !!it.evidence?.head && it.preview!.commit.slice(0, 7) !== it.evidence.head.slice(0, 7);
   const revision = pvOpen && !pvOther ? it.preview!.commit : it.evidence?.head ?? null;
   return (
-    <div id={`item-${it.storyId}`} style={{ border: '1px solid #E4E2DC', borderRadius: 10, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }} data-testid={`batch-item-${it.storyId}`}>
+    <div id={`item-${it.storyId}`} style={{ border: '1px solid var(--color-border-soft)', borderRadius: 10, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 6 }} data-testid={`batch-item-${it.storyId}`}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         {it.state === 'awaiting_acceptance' && <input className="cb" type="checkbox" checked={picked} onChange={e => onPick(e.target.checked)} aria-label={`Seleccionar ${it.storyId}`} />}
         <span className="mono small">{it.storyId}</span><strong className="sm13" style={{ flex: 1 }}>{it.title}</strong>
@@ -556,7 +561,7 @@ function PreviewPanel({ slug, it }: { slug: string; it: BatchItemView }) {
   const start = async () => { setBusy(true); try { await api.startPreview(slug, p.id); flash(`${it.storyId}: preparando la vista previa (aislada, sin IA)`); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   const stop = async () => { if (!pv) return; setBusy(true); try { await api.stopPreview(slug, p.id, pv.id); flash('Vista previa detenida'); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   return (
-    <div className="small" data-testid={`preview-${it.storyId}`} style={{ border: '1px dashed #D8D4CA', borderRadius: 8, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 4 }}>
+    <div className="small" data-testid={`preview-${it.storyId}`} style={{ border: '1px dashed var(--color-border-strong)', borderRadius: 8, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div><strong>Revisión que decides:</strong> commit <span className="mono" data-testid={`head-${it.storyId}`}>{ev.head}</span> · verificación {ev.commands.map(c => `${c.command} ${c.ok ? '✓' : '✗'}`).join(' · ')}{ev.commands.some(c => c.isolation === 'docker') ? ' (sandbox Docker)' : ''} · QA: {ev.qa?.why ?? 'sin revisión'}</div>
       {running && pv ? <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
         {pv.status === 'ready' && pv.url ? <><Chip xs tone="ok">vista previa lista</Chip><a className="lnk" href={pv.url} target="_blank" rel="noopener noreferrer" data-testid={`preview-open-${it.storyId}`}>Abrir vista previa ↗</a></> : <><span className="spin" /> preparándose: compila y arranca el candidato sin red ni IA…</>}

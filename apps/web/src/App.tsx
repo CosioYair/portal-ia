@@ -1,32 +1,40 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
+import { lazy, startTransition, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import { useEntryRecorder } from './lib/nav.ts';
 import { Navigate, Route, Routes, useLocation, useNavigate, useNavigationType, useParams } from 'react-router-dom';
 import type { Project, ProviderView, Workspace } from '@portal-ia/domain';
 import { api, type BootstrapStatus } from './lib/api.ts';
-import { AppContext, type Toast } from './lib/store.ts';
+import { AppContext, type SelectGo, type Toast } from './lib/store.ts';
 import { Welcome } from './screens/Welcome.tsx';
 import { ProviderSetup } from './screens/ProviderSetup.tsx';
-import { Initialization } from './screens/Initialization.tsx';
 import { Dashboard } from './screens/Dashboard.tsx';
-import { Team } from './screens/Team.tsx';
-import { AgentDetail } from './screens/AgentDetail.tsx';
-import { AgentCreate } from './screens/AgentCreate.tsx';
-import { ProcessList, ProcessView } from './screens/ProcessView.tsx';
-import { StoryWorkspace } from './screens/StoryWorkspace.tsx';
-import { Knowledge } from './screens/Knowledge.tsx';
 import { Backlog } from './screens/Backlog.tsx';
-import { Phase } from './screens/Phase.tsx';
-import { Archive } from './screens/Archive.tsx';
 import { Assistant } from './screens/Assistant.tsx';
 import { Budgets } from './screens/Budgets.tsx';
-import { BatchDetail, Batches } from './screens/Batches.tsx';
 import { CompanyHome } from './screens/CompanyHome.tsx';
 import { Icon, Spinner } from './components/ui.tsx';
-import { InboxLauncher, InboxScreen } from './screens/InboxScreen.tsx';
+import { InboxScreen } from './screens/InboxScreen.tsx';
+import { AssistantDock } from './components/AssistantDock.tsx';
+import { AttentionWatcher } from './components/AttentionWatcher.tsx';
+import { openUi, useUiEvent } from './lib/uiBus.ts';
+import { officeHome } from './lib/routes.ts';
 // La oficina y el asistente de creación se cargan aparte (no engordan la carga del resto de pantallas).
 const Office = lazy(() => import('./screens/Office.tsx').then(m => ({ default: m.Office })));
 const AgentWizard = lazy(() => import('./screens/AgentWizard.tsx').then(m => ({ default: m.AgentWizard })));
-const lazyScreen = (el: ReactElement) => <Suspense fallback={<div className="app" style={{ display: 'grid', placeItems: 'center' }}><Spinner /></div>}>{el}</Suspense>;
+// Portal IA 2.0: también aparte Ajustes y la búsqueda (Ctrl+K), que se carga la primera vez que se abre.
+const Settings = lazy(() => import('./screens/Settings.tsx').then(m => ({ default: m.Settings })));
+const CommandPalette = lazy(() => import('./components/CommandPalette.tsx').then(m => ({ default: m.CommandPalette })));
+// Y las pantallas de detalle y las menos frecuentes: el primer pintado solo carga el marco, la Oficina y el Resumen.
+const Initialization = lazy(() => import('./screens/Initialization.tsx').then(m => ({ default: m.Initialization })));
+const AgentDetail = lazy(() => import('./screens/AgentDetail.tsx').then(m => ({ default: m.AgentDetail })));
+const AgentCreate = lazy(() => import('./screens/AgentCreate.tsx').then(m => ({ default: m.AgentCreate })));
+const ProcessList = lazy(() => import('./screens/ProcessView.tsx').then(m => ({ default: m.ProcessList })));
+const ProcessView = lazy(() => import('./screens/ProcessView.tsx').then(m => ({ default: m.ProcessView })));
+const StoryWorkspace = lazy(() => import('./screens/StoryWorkspace.tsx').then(m => ({ default: m.StoryWorkspace })));
+const Knowledge = lazy(() => import('./screens/Knowledge.tsx').then(m => ({ default: m.Knowledge })));
+const Phase = lazy(() => import('./screens/Phase.tsx').then(m => ({ default: m.Phase })));
+const Archive = lazy(() => import('./screens/Archive.tsx').then(m => ({ default: m.Archive })));
+const Batches = lazy(() => import('./screens/Batches.tsx').then(m => ({ default: m.Batches })));
+const BatchDetail = lazy(() => import('./screens/Batches.tsx').then(m => ({ default: m.BatchDetail })));
 
 const SEL_KEY = 'portal-ia.seleccion';
 type Selection = { ws: string; project: string | null };
@@ -47,7 +55,7 @@ const histSel = (): Selection | null => { const k = (window.history.state as { k
  * Atrás/Adelante vuelven a la empresa y al proyecto con los que se abrió esa pantalla (antes mostraban la pantalla
  * anterior con la empresa de la última). Se anota al LLEGAR a cada entrada: cambiar de empresa navega a otra.
  */
-function SelectionHistory({ sel, workspaces, select }: { sel: Selection | null; workspaces: Workspace[]; select: (ws: string, pid?: string | null) => Promise<void> }) {
+function SelectionHistory({ sel, workspaces, select }: { sel: Selection | null; workspaces: Workspace[]; select: (ws: string, pid?: string | null, go?: SelectGo) => Promise<string | null> }) {
   const { key } = useLocation(); const type = useNavigationType();
   const current = useRef(sel); current.current = sel;
   useEffect(() => {
@@ -92,11 +100,11 @@ function ScrollMemory() {
 }
 
 /** Ruta profunda /empresa/:slug/proyecto/:pid/<destino>: fija la selección y redirige a la pantalla. */
-function SelectRoute({ select }: { select: (ws: string, pid?: string | null) => Promise<void> }) {
+function SelectRoute({ select }: { select: (ws: string, pid?: string | null, go?: SelectGo) => Promise<string | null> }) {
   const { slug, pid, '*': rest } = useParams();
-  const navigate = useNavigate(); const { search, hash } = useLocation();
+  const { search, hash } = useLocation();
   // El enlace directo manda sobre la selección guardada; se conservan su pestaña (#…) y sus parámetros (?…).
-  useEffect(() => { select(slug!, pid ?? null).then(() => navigate('/' + (rest || 'panel') + search + hash, { replace: true })); // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { void select(slug!, pid ?? null, { to: () => '/' + ((rest ?? '').replace(/^[/\\]+/, '') || (pid ? 'panel' : 'oficina')) + search + hash, replace: true }); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, pid]);
   return <div className="app" style={{ display: 'grid', placeItems: 'center' }}><Spinner /></div>;
 }
@@ -133,11 +141,15 @@ export default function App() {
   useEffect(() => { void refresh(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const select = useCallback(async (ws: string, projectId?: string | null) => {
-    const ps = await loadProjects(ws); setProjects(ps);
+  const select = useCallback(async (ws: string, projectId?: string | null, go?: SelectGo) => {
+    const ps = await loadProjects(ws);
     const pid = projectId && ps.some(p => p.id === projectId) ? projectId : ps[0]?.id ?? null;
-    const next = { ws, project: pid }; setSel(next); writeSel(next);
-  }, [loadProjects]);
+    const next = { ws, project: pid }; writeSel(next);
+    // La selección y el destino van en la misma transición: las rutas (con clave empresa:proyecto) se montan una sola vez,
+    // ya en su destino; nunca la pantalla anterior con identificadores de otra empresa.
+    startTransition(() => { setProjects(ps); setSel(next); if (go) navigate(go.to(pid), { replace: go.replace }); });
+    return pid;
+  }, [loadProjects, navigate]);
 
   const flash = useCallback((message: string, tone: Toast['tone'] = 'ok') => { setToast({ message, tone }); window.setTimeout(() => setToast(null), 2800); }, []);
 
@@ -163,44 +175,73 @@ export default function App() {
   const connected = providers.find(p => p.status === 'connected') ?? null;
   const ready = status.initialized && !!status.workspace;
   // La oficina es la portada: la empresa, sus departamentos y sus agentes de un vistazo (el Panel sigue en /panel).
-  const home = ready ? '/oficina' : connected ? '/configuracion/inicializar' : '/configuracion/proveedor';
+  const home = ready ? officeHome() : connected ? '/configuracion/inicializar' : '/configuracion/proveedor';
   const guard = (el: ReactElement) => ready ? (status.project ? el : <CompanyHome />) : <Navigate to={home} replace />;
+  // Oficina, Decisiones, Asistente y Ajustes son de la EMPRESA: funcionan aunque todavía no tenga proyectos.
+  const company = (el: ReactElement) => ready ? el : <Navigate to={home} replace />;
 
   return (
     <AppContext.Provider value={{ status, providers, connected, refresh, flash, navigate, workspaces, projects, select, refreshStructure }}>
       <div className="app">
         {toast && <div className="toast" role="status">{toast.tone === 'ok' ? Icon.okc() : Icon.alert()} {toast.message}</div>}
-        {ready && <InboxLauncher />}
+        {ready && <AttentionWatcher />}
+        {ready && <AssistantDock />}
+        {ready && <PaletteHost />}
         <ScrollMemory />
         <SelectionHistory sel={sel} workspaces={workspaces} select={select} />
-        <Routes>
-          <Route path="/" element={ready ? <Navigate to="/oficina" replace /> : <Welcome />} />
+        <Suspense fallback={<div className="app" style={{ display: 'grid', placeItems: 'center' }}><Spinner /></div>}>
+        <Routes key={`${status.workspace?.slug ?? ''}:${status.project?.id ?? ''}`}>
+          <Route path="/" element={ready ? <Navigate to={officeHome()} replace /> : <Welcome />} />
           <Route path="/configuracion/proveedor" element={<ProviderSetup />} />
           <Route path="/configuracion/inicializar" element={connected ? <Initialization /> : <Navigate to="/configuracion/proveedor" replace />} />
           <Route path="/empresa/:slug/proyecto/:pid/*" element={<SelectRoute select={select} />} />
           <Route path="/empresa/:slug/*" element={<SelectRoute select={select} />} />
-          <Route path="/asistente" element={ready ? <Assistant /> : <Navigate to={home} replace />} />
+          <Route path="/asistente" element={company(<Assistant />)} />
           <Route path="/panel" element={guard(<Dashboard />)} />
-          <Route path="/oficina" element={guard(lazyScreen(<Office />))} />
-          <Route path="/oficina/nuevo-agente" element={guard(lazyScreen(<AgentWizard />))} />
-          <Route path="/oficina/agente/:agentId/:tab?" element={guard(lazyScreen(<Office />))} />
-          <Route path="/equipo" element={guard(<Team />)} />
+          <Route path="/oficina" element={company(<Office />)} />
+          <Route path="/oficina/organizacion" element={company(<Office view="organizacion" />)} />
+          <Route path="/oficina/departamentos" element={company(<Office view="departamentos" />)} />
+          <Route path="/oficina/lista" element={company(<Office view="lista" />)} />
+          <Route path="/oficina/nuevo-agente" element={guard(<AgentWizard />)} />
+          <Route path="/oficina/agente/:agentId/:tab?" element={company(<Office />)} />
+          {/* «Equipo de IA» es ahora Oficina › Organización (se conservan ?… y #…); su ficha avanzada sigue en /equipo/:id. */}
+          <Route path="/equipo" element={<Redirect to="/oficina/organizacion" />} />
           <Route path="/equipo/nuevo" element={guard(<AgentCreate />)} />
           <Route path="/equipo/:agentId" element={guard(<AgentDetail />)} />
           <Route path="/actividad" element={guard(<ProcessList />)} />
           <Route path="/procesos/:processId" element={guard(<ProcessView />)} />
           <Route path="/historias/:storyId" element={guard(<StoryWorkspace />)} />
           <Route path="/conocimiento" element={guard(<Knowledge />)} />
-          <Route path="/presupuestos" element={guard(<Budgets />)} />
+          <Route path="/presupuestos" element={company(<Budgets />)} />
           <Route path="/backlog" element={guard(<Backlog />)} />
           <Route path="/lotes" element={guard(<Batches />)} />
           <Route path="/lotes/:batchId" element={guard(<BatchDetail />)} />
           <Route path="/etapa" element={guard(<Phase />)} />
           <Route path="/archivo" element={guard(<Archive />)} />
-          <Route path="/autorizaciones" element={ready ? <InboxScreen /> : <Navigate to={home} replace />} />
+          <Route path="/autorizaciones" element={company(<InboxScreen />)} />
+          <Route path="/decisiones" element={<Redirect to="/autorizaciones" />} />
+          <Route path="/ajustes" element={company(<Settings />)} />
           <Route path="*" element={<Navigate to={home} replace />} />
         </Routes>
+        </Suspense>
       </div>
     </AppContext.Provider>
   );
+}
+
+/** Redirección que conserva los parámetros (?…) y el ancla (#…) del enlace antiguo. */
+function Redirect({ to }: { to: string }) {
+  const { search, hash } = useLocation();
+  return <Navigate to={to + search + hash} replace />;
+}
+
+/** Búsqueda (Ctrl+K o el botón de la barra): un solo atajo para toda la aplicación; se carga al abrirla por primera vez. */
+function PaletteHost() {
+  const [open, setOpen] = useState(false);
+  useUiEvent('palette', useCallback(() => setOpen(true), []));
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openUi('palette'); } };
+    window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  return open ? <Suspense fallback={null}><CommandPalette onClose={() => setOpen(false)} /></Suspense> : null;
 }

@@ -17,13 +17,23 @@ import { osApi, type AgentPanel as Panel, type Department, type FolderStatus, ty
 
 /**
  * Panel de un agente: todo lo suyo en un sitio, sin navegar por seis pantallas.
- *  Chat · Solicitudes · Trabajo · Archivos · Memoria · Configuración.
+ *  Chat · Trabajo · Para revisar (Solicitudes) · Memoria · Ajustes (Configuración, Archivos).
  * Cada acción que gasta (un mensaje, un encargo) lo dice antes; nada se autoriza solo.
  */
 const BASE_TABS = [['chat', 'Chat'], ['solicitudes', 'Solicitudes'], ['trabajo', 'Trabajo'], ['archivos', 'Archivos'], ['memoria', 'Memoria'], ['configuracion', 'Configuración']] as const;
 /** Agente externo (su carpeta original es la fuente): Documentos, Origen y Mejoras; «Archivos» es su carpeta original (en Origen). */
 const EXTERNAL_TABS = [['chat', 'Chat'], ['documentos', 'Documentos'], ['solicitudes', 'Solicitudes'], ['trabajo', 'Trabajo'], ['mejoras', 'Mejoras'], ['origen', 'Origen'], ['memoria', 'Memoria'], ['configuracion', 'Configuración']] as const;
 type Tab = typeof BASE_TABS[number][0] | typeof EXTERNAL_TABS[number][0];
+/**
+ * Portal IA 2.0: las pestañas se agrupan en cinco (Chat · Trabajo · Para revisar · Memoria · Ajustes). Cada nombre antiguo
+ * sigue siendo una ruta válida (/oficina/agente/:id/documentos, …/mejoras, …/origen): abre su grupo con esa vista elegida.
+ */
+type Group = 'chat' | 'trabajo' | 'revisar' | 'memoria' | 'ajustes';
+const GROUP_OF: Record<Tab, Group> = { chat: 'chat', trabajo: 'trabajo', documentos: 'trabajo', solicitudes: 'revisar', mejoras: 'revisar', memoria: 'memoria', configuracion: 'ajustes', archivos: 'ajustes', origen: 'ajustes' };
+const GROUP_LABEL: Record<Group, string> = { chat: 'Chat', trabajo: 'Trabajo', revisar: 'Para revisar', memoria: 'Memoria', ajustes: 'Ajustes' };
+const GROUP_ORDER: Group[] = ['chat', 'trabajo', 'revisar', 'memoria', 'ajustes'];
+/** Vista con la que se abre cada grupo (va primera en su selector). */
+const GROUP_FIRST: Record<Group, Tab> = { chat: 'chat', trabajo: 'trabajo', revisar: 'solicitudes', memoria: 'memoria', ajustes: 'configuracion' };
 
 export function AgentPanel({ slug, agentId, tab, office, departments, projects, onTab, onClose, onChanged }: { slug: string; agentId: string; tab: string; office: OfficeAgent | null; departments: Department[]; projects: { id: string; name: string }[]; onTab: (t: Tab) => void; onClose: () => void; onChanged: () => void }) {
   const [p, setP] = useState<Panel | null>(null); const [error, setError] = useState<string | null>(null);
@@ -35,23 +45,37 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
   // Sin «documentos/» en su carpeta no hay banco de documentos.
   const TABS: readonly (readonly [Tab, string])[] = external ? EXTERNAL_TABS.filter(t => t[0] !== 'documentos' || p?.external?.hasOutputs !== false) : BASE_TABS;
   const improvements = p?.office?.attention.filter(a => a.kind === 'improvement').length ?? 0;
-  const current = (TABS.some(t => t[0] === tab) ? tab : external && tab === 'archivos' ? 'origen' : 'chat') as Tab;
+  const now = (TABS.some(t => t[0] === tab) ? tab : external && tab === 'archivos' ? 'origen' : 'chat') as Tab;
+  const GROUPS = GROUP_ORDER.filter(g => TABS.some(t => GROUP_OF[t[0]] === g));
+  const membersOf = (g: Group) => TABS.filter(t => GROUP_OF[t[0]] === g).sort((a, b) => Number(b[0] === GROUP_FIRST[g]) - Number(a[0] === GROUP_FIRST[g]));
+  const current: Group = GROUP_OF[now];
+  // Por debajo de 1280 px el panel tapa casi toda la pantalla: es modal (fondo, foco atrapado, Esc cierra). En pantallas
+  // anchas va al lado: el contenido se aparta (body.has-agent-panel), así nada enfocable queda debajo del panel.
+  const [modal, setModal] = useState(() => typeof window !== 'undefined' && window.innerWidth < 1280);
+  useEffect(() => { const r = () => setModal(window.innerWidth < 1280); window.addEventListener('resize', r); return () => window.removeEventListener('resize', r); }, []);
+  useEffect(() => { if (modal) return; document.body.classList.add('has-agent-panel'); return () => document.body.classList.remove('has-agent-panel'); }, [modal]);
   const hue = departments.find(d => d.slug === (office?.departmentSlug ?? p?.office?.departmentSlug))?.hue ?? 200;
   const ref = useRef<HTMLDivElement>(null);
   // El foco va al panel al abrir OTRO agente (no en cada render: si no, se lo quitaría a la pestaña que eliges con el teclado).
   const closeRef = useRef(onClose); closeRef.current = onClose;
   useEffect(() => { ref.current?.focus(); }, [agentId]);
-  useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key !== 'Escape') return; const el = document.activeElement as HTMLElement | null; if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && (el as HTMLInputElement).value) return; closeRef.current(); }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, []);
+  useEffect(() => { const k = (e: KeyboardEvent) => { if (e.key !== 'Escape' || e.defaultPrevented) return; const el = document.activeElement as HTMLElement | null; if (el && el !== document.body && !ref.current?.contains(el)) return; /* Esc de otro diálogo (búsqueda, Asistente) no cierra este */ if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) && (el as HTMLInputElement).value) return; closeRef.current(); }; window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k); }, []);
   const onTabKey = (e: RKeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) return;
     e.preventDefault();
-    const i = TABS.findIndex(t => t[0] === current); const n = e.key === 'Home' ? 0 : e.key === 'End' ? TABS.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : TABS.length - 1)) % TABS.length;
-    onTab(TABS[n][0]); requestAnimationFrame(() => (document.getElementById(`tab-${TABS[n][0]}`) as HTMLButtonElement | null)?.focus());
+    const i = GROUPS.indexOf(current); const n = e.key === 'Home' ? 0 : e.key === 'End' ? GROUPS.length - 1 : (i + (e.key === 'ArrowRight' ? 1 : GROUPS.length - 1)) % GROUPS.length;
+    onTab(membersOf(GROUPS[n])[0][0]); requestAnimationFrame(() => (document.getElementById(`tab-${GROUPS[n]}`) as HTMLButtonElement | null)?.focus());
+  };
+  const onTrap = (e: RKeyboardEvent<HTMLElement>) => {
+    if (!modal || e.key !== 'Tab' || !ref.current) return;
+    const f = [...ref.current.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex="0"]')].filter(x => x.offsetParent !== null);
+    if (!f.length) return; const a = f[0]; const z = f[f.length - 1];
+    if (e.shiftKey && (document.activeElement === a || document.activeElement === ref.current)) { e.preventDefault(); z.focus(); } else if (!e.shiftKey && document.activeElement === z) { e.preventDefault(); a.focus(); }
   };
   const refresh = () => { void load(); onChanged(); };
   const requests = p?.office?.attention.length ?? 0;
   // En el nivel raíz del documento: por encima de los botones flotantes (Asistente, Autorizaciones) y de cualquier contexto de apilamiento.
-  return createPortal(<aside className="agent-panel" role="dialog" aria-modal="false" aria-labelledby="agent-panel-title" tabIndex={-1} ref={ref}>
+  return createPortal(<>{modal && <div className="agent-panel-scrim" onClick={onClose} aria-hidden="true" />}<aside className="agent-panel" role="dialog" aria-modal={modal} aria-labelledby="agent-panel-title" tabIndex={-1} ref={ref} onKeyDown={onTrap}>
     <div className="agent-panel-head">
       <AgentFigure id={agentId} hue={hue} state={p?.office?.state ?? office?.state ?? 'idle'} size={56} />
       <div className="who">
@@ -60,7 +84,7 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
           <Chip xs>{p?.agent.template.role ?? office?.role}</Chip>
           <Chip xs tone="accent">{p?.department?.name ?? office?.department}</Chip>
           <Chip xs>{p?.office?.harnessLabel ?? office?.harnessLabel}</Chip>
-          {p?.office && <Chip xs tone={p.office.state === 'attention' ? 'warn' : p.office.state === 'working' ? 'ok' : ''}>{STATE_TEXT[p.office.state]}</Chip>}
+          {p?.office && <span className={`state-pill state-${p.office.state}`}>{STATE_TEXT[p.office.state]}</span>}
           {p?.office?.integration && <Chip xs tone={p.office.integration === 'integrated' ? 'ok' : 'soon'}>{INTEGRATION_LABEL[p.office.integration]}</Chip>}
         </div>
         {p?.office?.activity && <span className="small muted">{p.office.activity}</span>}
@@ -68,26 +92,30 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
       <button type="button" className="xbtn" onClick={onClose} aria-label="Cerrar el panel">{Icon.x(16)}</button>
     </div>
     <div className="agent-panel-tabs" role="tablist" aria-label="Secciones del agente" onKeyDown={onTabKey}>
-      {TABS.map(([id, label]) => <button key={id} id={`tab-${id}`} role="tab" type="button" aria-selected={current === id} aria-controls={`tp-${id}`} tabIndex={current === id ? 0 : -1} onClick={() => onTab(id)}>
-        {label}{id === 'solicitudes' && requests > 0 && <span className="tab-count">{requests}</span>}{id === 'memoria' && (p?.memory.proposed.length ?? 0) > 0 && <span className="tab-count">{p!.memory.proposed.length}</span>}{id === 'mejoras' && improvements > 0 && <span className="tab-count" aria-label="mejoras pendientes de tu aprobación">{improvements}</span>}
+      {GROUPS.map(id => <button key={id} id={`tab-${id}`} role="tab" type="button" aria-selected={current === id} aria-controls={`tp-${id}`} tabIndex={current === id ? 0 : -1} onClick={() => { if (current !== id) onTab(membersOf(id)[0][0]); }}>
+        {GROUP_LABEL[id]}{id === 'revisar' && requests > 0 && <><span className="tab-count" aria-hidden="true">{requests}</span><span className="sr-only"> ({requests} pendiente{requests === 1 ? '' : 's'})</span></>}{id === 'memoria' && (p?.memory.proposed.length ?? 0) > 0 && <span className="tab-count">{p!.memory.proposed.length}</span>}
       </button>)}
     </div>
+    {membersOf(current).length > 1 && <div className="agent-panel-sub"><div className="seg" role="group" aria-label={`Vistas de ${GROUP_LABEL[current]}`}>
+      {membersOf(current).map(([id, label]) => <button key={id} type="button" aria-pressed={now === id} onClick={() => onTab(id)}>{label}{id === 'mejoras' && improvements > 0 && <span className="tab-count" aria-label="mejoras pendientes de tu aprobación">{improvements}</span>}</button>)}
+    </div></div>}
     {error && <div style={{ padding: 12 }}><Notice kind="err">{error}</Notice></div>}
     {!p && !error && <div style={{ padding: 24 }}><Spinner /></div>}
     {p && <div role="tabpanel" tabIndex={0} id={`tp-${current}`} aria-labelledby={`tab-${current}`} style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
-      {current === 'chat' && <ChatTab slug={slug} p={p} projects={projects} onChanged={refresh} />}
-      {current !== 'chat' && <div className="agent-panel-body">
-        {current === 'solicitudes' && <RequestsTab p={p} onTab={onTab} />}
-        {current === 'trabajo' && <WorkTab slug={slug} p={p} projects={projects} onChanged={refresh} />}
-        {current === 'archivos' && <FilesTab slug={slug} p={p} onChanged={refresh} />}
-        {current === 'documentos' && <DocumentsTab slug={slug} p={p} onChanged={refresh} onTab={onTab} />}
-        {current === 'origen' && <OriginTab slug={slug} p={p} onChanged={refresh} />}
-        {current === 'mejoras' && <ImprovementsTab slug={slug} p={p} onChanged={refresh} onTab={onTab} />}
-        {current === 'memoria' && <MemoryTab slug={slug} p={p} onChanged={refresh} />}
-        {current === 'configuracion' && <ConfigTab slug={slug} p={p} departments={departments} onChanged={refresh} />}
+      {now === 'chat' && p.agent.key === 'ws-asistente' && <div style={{ padding: '10px 16px 0' }}><Notice kind="info">Este es el Asistente de Empresa. Sus conversaciones con propuestas y reparto de trabajo están en <Link className="lnk" to="/asistente">Asistente</Link> y en «Pedir»; aquí hablas con él como con cualquier agente.</Notice></div>}
+      {now === 'chat' && <ChatTab slug={slug} p={p} projects={projects} onChanged={refresh} />}
+      {now !== 'chat' && <div className="agent-panel-body">
+        {now === 'solicitudes' && <RequestsTab p={p} onTab={onTab} />}
+        {now === 'trabajo' && <WorkTab slug={slug} p={p} projects={projects} onChanged={refresh} />}
+        {now === 'archivos' && <FilesTab slug={slug} p={p} onChanged={refresh} />}
+        {now === 'documentos' && <DocumentsTab slug={slug} p={p} onChanged={refresh} onTab={onTab} />}
+        {now === 'origen' && <OriginTab slug={slug} p={p} onChanged={refresh} />}
+        {now === 'mejoras' && <ImprovementsTab slug={slug} p={p} onChanged={refresh} onTab={onTab} />}
+        {now === 'memoria' && <MemoryTab slug={slug} p={p} onChanged={refresh} />}
+        {now === 'configuracion' && <ConfigTab slug={slug} p={p} departments={departments} onChanged={refresh} />}
       </div>}
     </div>}
-  </aside>, document.body);
+  </aside></>, document.body);
 }
 
 // ---------------------------------------------------------------- Solicitudes
@@ -105,6 +133,7 @@ function RequestsTab({ p, onTab }: { p: Panel; onTab: (t: Tab) => void }) {
         {a.kind === 'folder' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('archivos')}>Revisar en Archivos</button>}
         {a.kind === 'improvement' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('mejoras')}>Revisar en Mejoras</button>}
         {a.kind === 'source' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('origen')}>Revisar en Origen</button>}
+        {a.kind === 'action' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('chat')}>Revisar en el Chat</button>}
       </div>
     </div>)}
     <Link className="btn btn-ghost btn-sm" to="/autorizaciones" style={{ alignSelf: 'flex-start' }}>{Icon.authorization()} Todas las decisiones pendientes</Link>
@@ -305,10 +334,10 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
         <select id="cfg-dep" className="input" style={{ maxWidth: 240, height: 32 }} value={dep} onChange={e => setDep(e.target.value)}>{departments.map(d => <option key={d.slug} value={d.name}>{d.name}</option>)}</select>
         <button className="btn btn-secondary btn-sm" disabled={busy || dep === p.department?.name} onClick={() => void move()}>Mover</button>
       </div>
-      <Link className="lnk small" to={`/equipo/${p.agent.id}`}>Configuración avanzada (modelo, herramientas, límites, capacidades)</Link>
+      <Link className="lnk small" to={`/equipo/${encodeURIComponent(p.agent.id)}`}>Ajustes avanzados (modelo, herramientas, límites, capacidades)</Link>
     </section>
     <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }} aria-labelledby="harness-h">
-      <div className="h3" id="harness-h">Cómo trabaja (arnés)</div>
+      <div className="h3" id="harness-h">Motor de IA (cómo trabaja)</div>
       {!opts ? <Spinner /> : <>
         <p className="small">Ahora trabaja con <strong>{opts.currentLabel}</strong>. {opts.continuity}</p>
         <details className="small muted"><summary style={{ cursor: 'pointer' }}>Detalles técnicos</summary>Modelo: <span className="mono">{opts.model}</span></details>

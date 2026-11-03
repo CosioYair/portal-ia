@@ -300,8 +300,12 @@ test('chat → mejorar el Portal: historia en el backlog del proyecto del Portal
   assert.equal(m.content, 'Entendido.'); const a0 = m.actions[0];
   assert.equal(a0.kind, 'mejorar_portal'); assert.equal(a0.status, 'proposed', 'nada se crea sin tu confirmación'); assert.equal(a0.needsConfirmation, true);
   assert.equal(backlogRepo(S).listAll(proj.id).length, n0);
+  // Portal IA 2.0: la acción propuesta pide tu atención en la Oficina (y en Decisiones) hasta que la confirmas; no se decide allí.
+  const asks = async () => ((await inject('GET', `${W}/office`)).json.agents.find((x: any) => x.id === agentId)?.attention ?? []).filter((x: any) => x.kind === 'action');
+  const before = await asks(); assert.equal(before.length, 1); assert.match(before[0].label, /1 acción\(es\) del chat esperan tu «Sí, hazlo»/); assert.equal(before[0].processId, undefined);
   const c = await inject('POST', `${A}/actions/${a0.id}/confirm`, { authorized: true }); assert.equal(c.status, 200, JSON.stringify(c.json));
-  const a = c.json; assert.equal(a.status, 'done', a.error); assert.equal(a.link, '/backlog');
+  assert.deepEqual(await asks(), [], 'confirmada, deja de pedir atención');
+  const a = c.json; assert.equal(a.status, 'done', a.error); assert.match(a.link, /^\/empresa\/[^/]+\/proyecto\/[^/]+\/historias\/[^/]+$/, 'enlaza a la historia en su proyecto, aunque el seleccionado sea otro');
   const items = backlogRepo(S).listAll(proj.id); assert.equal(items.length, n0 + 1);
   const it = items.find(x => x.id === a.result.backlogItemId)!;
   assert.match(it.description, /Lo que pidió el propietario: «Tu importación de ZIP solo reconoció 10 documentos/, 'con sus palabras, no la paráfrasis del agente');

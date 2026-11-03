@@ -5,7 +5,8 @@ import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { BACKLOG_STATUS, fmtUsd } from '../lib/labels.ts';
 import { Shell } from '../components/Shell.tsx';
-import { Chip, Empty, Icon, Notice } from '../components/ui.tsx';
+import { Chip, Icon, Notice } from '../components/ui.tsx';
+import { EmptyState, Tile, WorkTabs } from '../components/kit.tsx';
 import { Disclosure } from '../components/Disclosure.tsx';
 
 const PROC_STATUS: Record<string, string> = { running: 'en ejecución', done: 'completado', pending_authorization: 'pendiente de autorización', failed: 'con errores', cancelled: 'cancelado', budget_exceeded: 'presupuesto agotado' };
@@ -36,20 +37,22 @@ export function Archive() {
   return (
     <Shell crumb="Archivo histórico">
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', alignItems: 'flex-start' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div className="eyebrow">Archivo histórico</div>
-            <h1 className="h1" style={{ fontSize: 26 }}>Trabajo de etapas anteriores</h1>
+        <header className="page-head"><div className="page-head-main">
+          <Tile icon={Icon.history(22)} tone="work" size="lg" />
+          <div className="page-head-text">
+            <div className="eyebrow">Trabajo · Archivo histórico</div>
+            <h1 className="h1">Trabajo de etapas anteriores</h1>
             <p className="med lede-2l" style={{ maxWidth: '78ch', lineHeight: 1.55 }}>Historias y procesos archivados al iniciar una etapa. Es registro histórico; una historia puede volver al backlog.</p>
-            <Disclosure title="Más información">
-              <p className="sm13 med" style={{ lineHeight: 1.5, maxWidth: '78ch' }}>Lo archivado no aparece en el backlog, la actividad ni la bandeja, y no admite acciones. Lo implementado está en la rama principal; esto describe lo que se planificó o se intentó.</p>
-            </Disclosure>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip>{data?.stories.length ?? 0} historias</Chip><Chip>{data?.processes.length ?? 0} procesos</Chip>{data && data.transitions.length > 0 && <Chip tone="accent">{data.transitions.length} etapa(s) registrada(s)</Chip>}</div>
           </div>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}><Link className="btn btn-ghost" to="/etapa">Etapas</Link><Link className="btn btn-secondary" to="/backlog">Volver al backlog</Link></div>
-        </div>
+          <div className="page-head-actions"><Link className="btn btn-ghost" to="/etapa">Etapas</Link></div>
+        </div><WorkTabs /></header>
+        <Disclosure title="Más información">
+          <p className="sm13 med" style={{ lineHeight: 1.5, maxWidth: '78ch' }}>Lo archivado no aparece en el backlog, la actividad ni la bandeja, y no admite acciones. Lo implementado está en la rama principal; esto describe lo que se planificó o se intentó.</p>
+        </Disclosure>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip>{data?.stories.length ?? 0} historias</Chip><Chip>{data?.processes.length ?? 0} procesos</Chip>{data && data.transitions.length > 0 && <Chip tone="accent">{data.transitions.length} etapa(s) registrada(s)</Chip>}</div>
 
-        {data && data.stories.length === 0 && data.processes.length === 0 && <section className="card card-b"><Empty icon={Icon.book()} title="No hay nada archivado" hint="Cuando inicies una etapa nueva, el trabajo activo de la anterior aparecerá aquí." /></section>}
+
+        {data && data.stories.length === 0 && data.processes.length === 0 && <section className="card"><EmptyState art="books" title="No hay nada archivado">Cuando inicies una etapa nueva, el trabajo activo de la anterior aparecerá aquí.</EmptyState></section>}
 
         {data && (data.stories.length > 0 || data.processes.length > 0) && <>
           <input className="input" value={q} onChange={e => setQ(e.target.value)} placeholder="Buscar por id o texto…" aria-label="Buscar en el archivo" style={{ maxWidth: 360 }} />

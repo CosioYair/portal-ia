@@ -29,12 +29,12 @@ export function harnessAvailability(id: ExecutionBackend, provider: ProviderId |
   }
   if (id === 'codex') {
     const s = getCodexSettings(); const d = lastCodexDetection();
-    if (!d) return { id, state: 'not_installed', available: false, reason: 'Codex aún no se ha comprobado (Oficina → Arneses → Comprobar Codex).', detail: null };
+    if (!d) return { id, state: 'not_installed', available: false, reason: 'Codex aún no se ha comprobado (Ajustes › Motores de IA → Comprobar Codex).', detail: null };
     if (!d.installed) return { id, state: 'not_installed', available: false, reason: d.problems[0] ?? 'No se encontró la CLI de Codex.', detail: null };
     const detail = `Codex ${d.version ?? ''} · ${d.auth === 'chatgpt' ? 'sesión de ChatGPT' : d.auth === 'api_key' ? 'clave de API' : 'sin sesión'}`.trim();
     if (d.billing !== 'subscription') return { id, state: 'blocked', available: false, reason: d.problems[0] ?? 'Codex no tiene una sesión de ChatGPT.', detail };
     if (!d.restricted) return { id, state: 'blocked', available: false, reason: d.problems.find(p => /herramientas/.test(p)) ?? 'Codex no está verificado en modo restringido.', detail };
-    if (!s.enabled || !s.authorizedAt) return { id, state: 'disabled', available: false, reason: 'Codex está listo pero no habilitado: habilítalo en Oficina → Arneses.', detail };
+    if (!s.enabled || !s.authorizedAt) return { id, state: 'disabled', available: false, reason: 'Codex está listo pero no habilitado: habilítalo en Ajustes › Motores de IA.', detail };
     return { id, state: 'ready', available: true, reason: null, detail };
   }
   const connected = (['anthropic', 'openai'] as ProviderId[]).filter(p => providersRepo.get(p)?.status === 'connected' && (!provider || p === provider));

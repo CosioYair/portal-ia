@@ -4,6 +4,7 @@ import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Chip, Empty, Icon } from '../components/ui.tsx';
+import { EmptyState, PageHeader } from '../components/kit.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { LessonsPanel } from '../components/LessonsPanel.tsx';
 import { authorsOf, filterGroups, groupByTitle, groupOf, KIND_LABELS, kindsOf } from '../lib/knowledgeIndex.ts';
@@ -49,15 +50,20 @@ export function Knowledge() {
   return (
     <Shell crumb="Conocimiento">
       <main style={{ display: 'flex', flexDirection: 'column', flex: 1 }}>
-        <div style={{ display: 'flex', gap: 6, padding: '12px 24px 0', borderBottom: '1px solid #E5E3DC' }}>
-          <button className={`btn btn-sm ${tab === 'docs' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => openTab('docs')}>Documentos</button>
-          <button className={`btn btn-sm ${tab === 'lessons' ? 'btn-primary' : 'btn-ghost'}`} onClick={() => openTab('lessons')}>Lecciones de la organización</button>
+        <div className="page" style={{ paddingBottom: 0 }}>
+          <PageHeader icon={Icon.book()} tone="knowledge" eyebrow={`${status.project?.name ?? 'Proyecto'} · Conocimiento`} title="Conocimiento"
+            description="Documentos que analizan y deciden los agentes, y lecciones que se proponen, validan y reutilizan.">
+            <div className="section-tabs" role="group" aria-label="Vistas del conocimiento">
+              <button type="button" className={`section-tab${tab === 'docs' ? ' is-active' : ''}`} aria-pressed={tab === 'docs'} onClick={() => openTab('docs')}>Documentos</button>
+              <button type="button" className={`section-tab${tab === 'lessons' ? ' is-active' : ''}`} aria-pressed={tab === 'lessons'} onClick={() => openTab('lessons')}>Lecciones de la organización</button>
+            </div>
+          </PageHeader>
         </div>
         {tab === 'lessons' && <div className="page" style={{ maxWidth: 'none' }}><LessonsPanel projectId={projectId} /></div>}
         {tab === 'docs' && <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'stretch', flex: 1 }}>
-        <aside style={{ flex: '1 1 280px', maxWidth: 340, borderRight: '1px solid #E5E3DC', padding: '16px 12px 24px', background: '#FAF9F6', display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <aside style={{ flex: '1 1 280px', maxWidth: 340, borderRight: '1px solid var(--color-border)', padding: '16px 12px 24px', background: 'var(--color-surface-alt)', display: 'flex', flexDirection: 'column', gap: 2 }}>
           <div className="side-sec">Documentos del proyecto</div>
-          {docs && docs.length === 0 && <Empty icon={Icon.book()} title="Sin documentos" hint="Los agentes guardarán aquí sus análisis y decisiones cuando ejecuten procesos autorizados." style={{ padding: '32px 8px' }} />}
+          {docs && docs.length === 0 && <EmptyState art="books" title="Sin documentos">Los agentes guardarán aquí sus análisis y decisiones cuando ejecuten procesos autorizados.</EmptyState>}
           {docs && docs.length > 0 && <div className="kn-filters">
             <label className="sr-only" htmlFor="kn-q">Buscar en título y contenido</label>
             <input id="kn-q" className="input kn-input" type="search" placeholder="Buscar en título y contenido" value={text} onChange={e => setText(e.target.value)} />
@@ -104,7 +110,7 @@ export function Knowledge() {
                 </ul>
               </details></div>}
             <div className="card-b" style={{ maxWidth: 860 }}><Markdown text={doc.body} /></div>
-          </article> : <div className="card card-b"><p className="muted sm13">Selecciona un documento. Si aún no hay ninguno, lanza la evaluación inicial desde el panel.</p></div>}
+          </article> : <div className="card card-b"><p className="muted sm13">Selecciona un documento. Si aún no hay ninguno, lanza la evaluación inicial desde el Resumen.</p></div>}
         </div>
         </div>}
       </main>
