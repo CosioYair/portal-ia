@@ -22,9 +22,9 @@ import { systemStatus } from './system.ts';
 import { repoStatus } from './repoStatus.ts';
 import { phaseContext } from './operationalPhase.ts';
 import { CAPABILITIES, reviewDetails, type CapabilityPreview, type CapabilityResult } from './capabilities.ts';
-import { onPlanChange } from './projectMaintenance.ts';
+import { getPlan, onPlanChange } from './projectMaintenance.ts';
 import { factLines, REVIEW_PENDING_POINTER, reviewFactsBlock, withoutReviewFacts } from './reviewFacts.ts';
-import type { MaintenancePlan } from '@portal-ia/domain';
+import type { MaintenanceItem, MaintenancePlan } from '@portal-ia/domain';
 import { agentBackend, agentCaller, claudeCodeGate } from './claudeCode/backend.ts';
 import { codexGate } from './harness/codex.ts';
 import { lastDetection } from './claudeCode/detect.ts';
@@ -589,7 +589,12 @@ function linkPlans(m: AssistantMessage, conversationId: string | null) {
 }
 /** Debajo de la respuesta, la foto real de cada revisión preparada en este turno (ver reviewFacts.ts). */
 export function withReviewFacts(reply: string, actions: AssistantAction[]): string {
-  const blocks = actions.filter(x => x.type === 'propose_operation' && x.status === 'pending' && x.operation?.preview.reviewPath).map(x => reviewFactsBlock(x.operation!.preview.target.projectName, x.operation!.preview.details));
+  const blocks = actions.filter(x => x.type === 'propose_operation' && x.status === 'pending' && x.operation?.preview.reviewPath).map(x => {
+    const pv = x.operation!.preview;
+    let items: MaintenanceItem[] = [];
+    try { if (pv.planId) items = getPlan(pv.target.workspace, pv.planId).items; } catch { /* sin plan legible: solo las cifras */ }
+    return reviewFactsBlock(pv.target.projectName, pv.details, new Date(), items);
+  });
   // Ya pendiente (sin tarjeta nueva): cómo seguir con la que ya hay.
   if (!blocks.length && actions.some(x => x.type === 'info' && x.reviewPath)) blocks.push(REVIEW_PENDING_POINTER);
   return blocks.length ? `${reply}\n\n${blocks.join('\n\n')}` : reply;

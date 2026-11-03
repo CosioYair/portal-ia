@@ -509,6 +509,7 @@ test('«Revisar de nuevo» tras una ejecución parcial: la tarjeta sigue a la nu
   assert.equal(local.length, 1); assert.match(local[0].detail!, /ya puede proponer/);
 });
 
+const hintText = () => CAPABILITIES.reconcile_project.promptHint;
 test('el Asistente presenta la revisión con los datos reales del Portal y los pasos exactos (sin «Autorizar» inventado)', async () => {
   const conv = conversationsRepo.create('Datos reales', S, project.id);
   const acts = await prepareOperations([{ type: 'request_operation', capability: 'reconcile_project', company: S, project: project.id }], { conversationId: conv.id, workspaceSlug: S, projectId: project.id } as any);
@@ -517,6 +518,14 @@ test('el Asistente presenta la revisión con los datos reales del Portal y los p
   assert.match(out, /^Te preparo la revisión\./); assert.match(out, /Datos reales de la revisión \(al prepararla, /); assert.match(out, /no se había ejecutado nada; el estado actual está en la tarjeta/);
   for (const d of pv.details.filter(d => /^(Ya integrado|Requiere tu decisión|Protegido)/.test(d))) assert.ok(out.includes(d), `incluye «${d}»`);
   assert.match(out, /«Abrir la revisión para elegir y autorizar»/); assert.match(out, /autoriza una sola vez/);
+  // Los objetivos reales, con las opciones que de verdad ofrecen: lo protegido no aparece como elegible.
+  const plan0 = getPlan(S, pv.planId!);
+  assert.match(out, /\*\*Requiere tu decisión\*\* \(todo empieza en «Conservar»\)/); assert.match(out, /\*\*Protegido\*\* \(no se puede elegir\)/);
+  const { reasonHead } = await import('../src/services/reviewFacts.ts');
+  for (const it of plan0.items.filter(i => i.category === 'protected').slice(0, 5)) assert.ok(out.includes(reasonHead(it.reason)), `motivo de «${it.name}»`);
+  const keepOnly = plan0.items.find(i => i.category === 'decision' && i.options.length === 1);
+  if (keepOnly) assert.match(out, /solo se puede conservar/);
+  assert.match(hintText(), /qué opciones tendrá cada historia, rama o carpeta concreta/);
   assert.ok(pv.details.filter(d => /^(Remoto|Fuera)/.test(d)).every(d => out.includes(d)), 'remoto y fuera del alcance también');
   assert.equal(withoutReviewFacts(out), 'Te preparo la revisión.', 'el historial del modelo no arrastra la foto');
   // Nada que limpiar: no se dan pasos que no aplican.
@@ -532,4 +541,20 @@ test('el Asistente presenta la revisión con los datos reales del Portal y los p
   assert.equal(withReviewFacts('Hola.', [{ type: 'info', status: 'done', label: 'x' } as any]), 'Hola.', 'sin revisión preparada no se añade nada');
   const hint = CAPABILITIES.reconcile_project.promptHint;
   assert.match(hint, /NO tiene botón «Autorizar»/); assert.match(hint, /no las inventes/);
+});
+
+test('propuesta agrupada: cada objetivo con sus opciones reales y lo protegido con su motivo', async () => {
+  const mk = (o: any) => ({ kind: 'local_branch', category: 'decision', status: '', reason: '', options: [{ id: 'keep', label: 'Conservar' }], defaultOption: 'keep', fingerprint: '', consequences: '', recovery: null, ...o });
+  const lines = (await import('../src/services/reviewFacts.ts')).proposalLines([
+    mk({ id: 's1', kind: 'story', name: 'HU-1 · Uno', story: { storyId: 'HU-1' }, options: [{ id: 'keep', label: 'Conservar' }, { id: 'discard', label: 'Cancelar (no se hará)' }] }),
+    mk({ id: 'b1', name: 'feat/x', options: [{ id: 'keep', label: 'Conservar' }, { id: 'archive_delete_local', label: 'Guardar copia y borrar' }] }),
+    mk({ id: 'k1', name: 'raro', reason: 'Sus commits no están en este equipo: no se puede saber si están en main.', options: [{ id: 'keep', label: 'Conservar' }] }),
+    mk({ id: 'p1', category: 'protected', name: 'portal-ia/hu-9', reason: 'Protegida por el lote «Sprint 3: pagos» (en pausa): no se puede borrar mientras el lote siga abierto.' }),
+    mk({ id: 'p3', category: 'protected', name: 'portal-ia/hu-8', reason: 'Protegida por el lote «Sprint 3: cobros» (en pausa): no se puede borrar mientras el lote siga abierto.' }),
+    mk({ id: 'p2', category: 'protected', name: 'main', reason: 'Es la rama principal: nunca se borra.' }),
+    mk({ id: 'b2', kind: 'batch', category: 'protected', name: 'Lote *urgente* _v2_', reason: 'Un lote en marcha no se cierra desde aquí.' })
+  ] as any);
+  assert.deepEqual(lines, ['**Requiere tu decisión** (todo empieza en «Conservar»):', '- HU-1 → conservar o cancelar (no se hará)', '- `feat/x` → conservar o guardar copia y borrar', '- `raro` → solo se puede conservar (Sus commits no están en este equipo)',
+    '**Protegido** (no se puede elegir):', '- Protegida por el lote «`Sprint 3: pagos`» (en pausa): `portal-ia/hu-9`', '- Protegida por el lote «`Sprint 3: cobros`» (en pausa): `portal-ia/hu-8`', '- Es la rama principal: `main`', '- Un lote en marcha no se cierra desde aquí: lote `Lote *urgente* _v2_`'],
+    'títulos con «: » no cortan ni mezclan grupos; los nombres van como código');
 });

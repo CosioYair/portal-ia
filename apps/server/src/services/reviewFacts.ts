@@ -1,3 +1,5 @@
+import type { MaintenanceItem } from '@portal-ia/domain';
+
 /**
  * Datos reales de una revisión preparada en un turno del Asistente (operación con plan): el modelo escribe ANTES de que el
  * Portal la calcule, así que debajo de su respuesta van las cifras de la vista previa (sin IA) y cómo seguir exactamente.
@@ -11,8 +13,46 @@ export const REVIEW_PENDING_POINTER = '**Cómo seguir:** la revisión ya está p
 /** Líneas de la vista previa que son cifras (no el repositorio ni la advertencia final). */
 export const factLines = (details: string[]) => details.filter(d => !/^(Repositorio:|Nada se ejecuta)/.test(d));
 
-export function reviewFactsBlock(projectName: string, details: string[], at = new Date()): string {
+// Lo que viene del repositorio o lo escribió alguien (ramas, títulos, carpetas) va como código: el chat no tiene escapes y
+// «_x_» o «**x**» en un nombre se convertirían en formato.
+const code = (t: string) => `\`${t.replace(/`/g, "'")}\``;
+const shortName = (i: MaintenanceItem) => i.kind === 'story' && i.story?.storyId ? i.story.storyId : i.kind === 'batch' ? `lote ${code(i.name)}` : code(i.name);
+const names = (l: MaintenanceItem[], max = 10) => `${l.slice(0, max).map(shortName).join(', ')}${l.length > max ? ` y ${l.length - max} más` : ''}`;
+const groupBy = <K extends string>(l: MaintenanceItem[], key: (i: MaintenanceItem) => K) => { const m = new Map<K, MaintenanceItem[]>(); for (const i of l) m.set(key(i), [...(m.get(key(i)) ?? []), i]); return [...m.entries()]; };
+/** El motivo hasta su primer «: » o «. » FUERA de «…» (un título con «: » no lo corta), con lo citado como código. */
+export function reasonHead(reason: string): string {
+  let depth = 0; let end = reason.length;
+  for (let i = 0; i < reason.length; i++) {
+    const c = reason[i];
+    if (c === '«') depth++; else if (c === '»') depth = Math.max(0, depth - 1);
+    else if (depth === 0 && (c === ':' || c === '.') && reason[i + 1] === ' ') { end = i; break; }
+  }
+  return reason.slice(0, end).replace(/\.$/, '').replace(/«([^»]*)»/g, (_m, t: string) => `«${code(t)}»`);
+}
+
+/**
+ * Qué propone la revisión objetivo a objetivo, con las opciones que de verdad ofrece cada uno (no lo que el modelo suponga):
+ * lo que requiere decisión agrupado por sus opciones, y lo protegido agrupado por su motivo.
+ */
+export function proposalLines(items: MaintenanceItem[]): string[] {
+  const out: string[] = [];
+  const decision = items.filter(i => i.category === 'decision');
+  if (decision.length) {
+    out.push('**Requiere tu decisión** (todo empieza en «Conservar»):');
+    // Las que solo se pueden conservar, con su motivo (si no, parecerían protegidas sin explicación).
+    for (const [opts, l] of groupBy(decision, i => i.options.filter(o => o.id !== 'keep').map(o => o.label).join(' o ') || `solo conservar|${reasonHead(i.reason)}`)) out.push(`- ${names(l)} → ${opts.startsWith('solo conservar|') ? `solo se puede conservar (${opts.slice('solo conservar|'.length)})` : `conservar o ${opts.toLowerCase()}`}`);
+  }
+  const prot = items.filter(i => i.category === 'protected');
+  if (prot.length) {
+    out.push('**Protegido** (no se puede elegir):');
+    for (const [why, l] of groupBy(prot, i => reasonHead(i.reason))) out.push(`- ${why}: ${names(l)}`);
+  }
+  return out;
+}
+
+export function reviewFactsBlock(projectName: string, details: string[], at = new Date(), items: MaintenanceItem[] = []): string {
   const facts = factLines(details);
+  const proposal = proposalLines(items);
   const hhmm = at.toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
   const nothing = facts.some(d => /^Ya integrado — seguro: nada$/.test(d)) && facts.some(d => /^Requiere tu decisión: nada$/.test(d));
   const remoteChecked = facts.some(d => /^Remoto: (.*comprobado en vivo\)|El repositorio no tiene remoto configurado\.)$/.test(d)); // sin remoto, no hay nada que comprobar
@@ -21,7 +61,9 @@ export function reviewFactsBlock(projectName: string, details: string[], at = ne
     : nothing
     ? '**No hay nada que limpiar ahora:** todo está al día o protegido.'
     : '**Cómo seguir** (mientras esté pendiente): en la tarjeta, pulsa «Abrir la revisión para elegir y autorizar». Lo seguro viene marcado y lo demás en «Conservar»; cambia lo que quieras objetivo a objetivo y autoriza una sola vez lo elegido. Solo cerrar o cancelar historias o cerrar un lote te pide motivo. Lo protegido (main, lo que está en uso o lo que protege un lote abierto) no se puede elegir.';
-  return `${REVIEW_FACTS_HEADING} (al prepararla, ${hhmm})\n\nCalculados por el Portal para «${projectName}», sin IA. En ese momento no se había ejecutado nada; el estado actual está en la tarjeta.\n\n${facts.map(d => `- ${d}`).join('\n')}\n\n${next}`;
+  // Cada título en su párrafo y su lista debajo (el chat solo reconoce una lista tras una línea en blanco).
+  const detail = proposal.length ? `\n${proposal.map(l => l.startsWith('**') ? `\n${l}\n` : l).join('\n')}` : '';
+  return `${REVIEW_FACTS_HEADING} (al prepararla, ${hhmm})\n\nCalculados por el Portal para «${projectName}», sin IA. En ese momento no se había ejecutado nada; el estado actual está en la tarjeta.\n\n${facts.map(d => `- ${d}`).join('\n')}${detail}\n\n${next}`;
 }
 
 /** El mensaje sin la foto de la revisión (para el historial del modelo y de los agentes del equipo). */
