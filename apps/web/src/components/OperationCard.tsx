@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, type AssistantAction, type AssistantMessage } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
-import { OwnerPairing, useOwner } from './OwnerPairing.tsx';
+import { useOwner } from './OwnerPairing.tsx';
 
 const STATUS: Record<AssistantAction['status'], { label: string; tone: '' | 'ok' | 'warn' | 'err' }> = {
   pending: { label: 'Pendiente de tu autorización', tone: 'warn' }, running: { label: 'Ejecutando…', tone: 'warn' },
@@ -37,9 +37,9 @@ export function OperationCard({ msgId, action, onResolved }: { msgId: string; ac
       {action.status === 'pending' && pv.reviewPath && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <Link className="btn btn-primary btn-sm" to={pv.reviewPath}>Abrir la revisión para elegir y autorizar {Icon.arrow()}</Link>
         {owner === true && <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => decide('reject')}>Rechazar</button>}
-        <span className="small muted">Nada se ejecuta hasta que elijas y autorices en la revisión.{owner === false ? ' Para rechazarla o autorizarla, vincula allí este navegador como propietario.' : ''}</span>
+        <span className="small muted">Nada se ejecuta hasta que elijas y autorices en la revisión.{owner === false ? ' Para autorizarla o rechazarla, vincula este navegador como propietario («Vincular este navegador»).' : ''}</span>
       </div>}
-      {action.status === 'pending' && !pv.reviewPath && owner === false && <OwnerPairing compact what="autorizar o rechazar esta operación" />}
+      {action.status === 'pending' && !pv.reviewPath && owner === false && <div className="small muted">Para autorizarla o rechazarla, vincula este navegador como propietario («Vincular este navegador»).</div>}
       {action.status === 'pending' && !pv.reviewPath && owner === true && <>
         <label className="ck small"><input className="cb" type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} /><span>Autorizo esta operación tal como se describe arriba (sin forzar y sin otras ramas).</span></label>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>

@@ -7,7 +7,7 @@ import type { OrgApplication, OrgBriefAttachment, OrgChange, OrgDecision, OrgEva
 import type { ClaudeCodeRun, ClaudeCodeStatusView, ClaudeCodeUsage, ClaudeCodeUsageReport, ClaudeCodeWorkerView, ClaudeCodeWorkspaceView, ExecutionBackend } from '@portal-ia/domain';
 import type { Assignment, AssistantConversation, ConversationArtifact, ConversationDecision, ConversationStage } from '@portal-ia/domain';
 import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
-import { ownerToken, setOwnerToken } from './owner.ts';
+import { ownerNeeded, ownerToken, setOwnerToken } from './owner.ts';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public body?: any) { super(message); }
@@ -55,7 +55,8 @@ async function request<T>(url: string, init0?: RequestInit): Promise<T> {
   // clic en el mismo botón antiguo también se rechaza hasta que la pantalla se actualiza y lo enseña).
   if (res.ok) noteVersions(body);
   // La sesión ya no vale (caducó o se cerró): la pantalla vuelve a ofrecer vincular este navegador.
-  if (res.status === 401 && body?.code === 'owner_required' && owner) setOwnerToken(null);
+  // Hace falta la sesión del propietario: la de este navegador ya no vale (se olvida) o no la tiene; el aviso global se abre.
+  if (res.status === 401 && body?.code === 'owner_required') { if (owner) setOwnerToken(null); ownerNeeded(); }
   if (!res.ok) throw new ApiError(res.status, body?.error ?? body?.lastError?.message ?? `Error ${res.status}`, body);
   return body as T;
 }
@@ -251,11 +252,11 @@ export const api = {
   agentStats: (slug: string, id: string) => request<{ steps: number; done: number; failed: number; costUsd: number; byRole: Record<string, number>; lastAt: string | null }>(`/api/workspaces/${slug}/agents/${id}/stats`),
   repoStatus: (slug: string, projectId: string) => request<RepoStatus & { portalRoot: string }>(`/api/workspaces/${slug}/projects/${projectId}/repository/status`),
   repoInitMain: (slug: string, projectId: string) => request<{ mainBranch: string; from: string }>(`/api/workspaces/${slug}/projects/${projectId}/repository/init-main`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
-  repoSetRemote: (slug: string, projectId: string, url: string) => request<{ remote: string; url: string }>(`/api/workspaces/${slug}/projects/${projectId}/repository/remote`, { method: 'POST', body: JSON.stringify({ authorized: true, url }) }),
+  repoSetRemote: (slug: string, projectId: string, url: string, expectedUrl: string | null) => request<{ remote: string; url: string }>(`/api/workspaces/${slug}/projects/${projectId}/repository/remote`, { method: 'POST', body: JSON.stringify({ authorized: true, url, expectedUrl }) }),
   repoNormalizeEol: (slug: string, projectId: string) => request<{ commit: string | null; files: number }>(`/api/workspaces/${slug}/projects/${projectId}/repository/normalize-eol`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
-  repoPublishMain: (slug: string, projectId: string) => request<{ remote: string; url: string | null; branches: string[] }>(`/api/workspaces/${slug}/projects/${projectId}/repository/publish-main`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
+  repoPublishMain: (slug: string, projectId: string, expectedMain: string, expectedRemoteUrl: string | null) => request<{ remote: string; url: string | null; branches: string[] }>(`/api/workspaces/${slug}/projects/${projectId}/repository/publish-main`, { method: 'POST', body: JSON.stringify({ authorized: true, expectedMain, expectedRemoteUrl }) }),
   systemStatus: () => request<SystemStatus>('/api/system/status'),
-  systemUpdate: (opts: { install?: boolean; restart?: boolean; interruptRunning?: boolean } = {}) => request<{ update: NonNullable<SystemStatus['update']>; install: boolean }>('/api/system/update', { method: 'POST', body: JSON.stringify({ authorized: true, ...opts }) }),
+  systemUpdate: (opts: { install?: boolean; restart?: boolean; interruptRunning?: boolean; expectedHead: string | null }) => request<{ update: NonNullable<SystemStatus['update']>; install: boolean }>('/api/system/update', { method: 'POST', body: JSON.stringify({ authorized: true, ...opts }) }),
   delegationEstimate: (slug: string, body: { projectId?: string | null; agent?: string; request: string }) => request<AssessmentEstimate & { leadAgentId: string; teamSize: number }>(`/api/workspaces/${slug}/delegations/estimate`, { method: 'POST', body: JSON.stringify(body) }),
   createDelegation: (slug: string, body: { projectId?: string | null; agent?: string; request: string }) => request<Process>(`/api/workspaces/${slug}/delegations`, { method: 'POST', body: JSON.stringify(body) }),
   applyBacklogOps: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/backlog-ops/apply`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
@@ -321,8 +322,8 @@ export const api = {
     request<BudgetBalance>(`/api/budgets/${level}/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ workspace, limitUsd, authorized: true }) }),
   // HU-009 / HU-137 · bandeja de autorizaciones
   inbox: (slug: string) => request<PendingDecision[]>(`/api/workspaces/${slug}/inbox`),
-  decideInbox: (slug: string, kind: PendingDecisionKind, processId: string, verdict: DecisionVerdict, reason?: string) =>
-    request<InboxDecisionResult>(`/api/workspaces/${slug}/inbox/${kind}/${processId}/decision`, { method: 'POST', body: JSON.stringify({ verdict, reason: reason?.trim() ? reason.trim() : undefined }) }),
+  decideInbox: (slug: string, kind: PendingDecisionKind, processId: string, verdict: DecisionVerdict, reason?: string, seenVersion?: string) =>
+    request<InboxDecisionResult>(`/api/workspaces/${slug}/inbox/${kind}/${processId}/decision`, { method: 'POST', body: JSON.stringify({ verdict, reason: reason?.trim() ? reason.trim() : undefined, seenVersion }) }),
   // HU-161 · una autorización vigente por historia: historial (vigente + superadas) y restauración reversible sin costo.
   storyDecisions: (slug: string, storyId: string) => request<StoryDecisionHistory>(`/api/workspaces/${slug}/stories/${encodeURIComponent(storyId)}/decisions`),
   restoreSuperseded: (slug: string, processId: string) =>

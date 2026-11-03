@@ -126,9 +126,8 @@ lote siga abierto, sus ramas y carpetas de trabajo no se pueden borrar.
 
 ## 6. Límites conocidos
 
-- Preparar, ejecutar, reanudar y rechazar una revisión, y decidir las operaciones del Asistente, exigen la **sesión del
-  propietario** (sección 10). El resto de las API del Portal escuchan solo en `127.0.0.1` y siguen sin sesión de usuario:
-  un programa local o una página de otro puerto local podría invocarlas (es anterior a esta función).
+- Todo cambio en el Portal exige la **sesión del propietario** (sección 10 y `docs/identidad-propietario.md`): también
+  preparar, ejecutar, reanudar y rechazar una revisión y decidir las operaciones del Asistente.
 - El Portal usa las credenciales de git del equipo: si no tienen permiso para borrar ramas en GitHub, la operación se
   detiene con el permiso exacto que falta; el Portal no pide ni guarda credenciales nuevas.
 - Las reglas de protección de GitHub mandan: una rama protegida allí no se borra desde aquí.
@@ -245,10 +244,8 @@ Límites (no cambian con esto):
   (otras páginas del navegador, otros usuarios del equipo, los agentes del Portal, que solo tienen sus herramientas MCP).
 - Si el Portal está apagado y otra aplicación ocupa su puerto (4310) y abres esa dirección, esa aplicación podría leer la
   sesión de este navegador: si ocurre, «Cerrar todas las sesiones».
-- El resto de la API sigue sin sesión (es anterior): p. ej. rechazar una iteración en Decisiones borra su rama sin
-  integrar, cerrar un lote, cancelar un encargo o una historia, publicar main o cambiar el remoto del proyecto. Nada de eso
-  ejecuta ni cambia una revisión (lo que cambie el repositorio o el backlog se omite al ejecutar), pero son efectos
-  parecidos por otro camino. Ampliar la sesión a esas acciones es el siguiente paso recomendado.
+- Desde la ampliación a todo el Portal (`docs/identidad-propietario.md`), ninguna otra ruta alcanza efectos parecidos
+  sin la sesión: rechazar iteraciones, cerrar lotes, publicar main, cambiar el remoto o reiniciar también la exigen.
 - Permisos de Windows de la carpeta: si la carpeta del Portal hereda de `C:\` «Usuarios autentificados: Modificar»,
   cualquier otra cuenta del equipo (p. ej. las del sandbox de Codex, `CodexSandboxOffline`/`CodexSandboxOnline`) podría
   escribir su código o sus datos y saltarse cualquier comprobación local. Se corrige quitando la herencia y dejando solo

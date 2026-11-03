@@ -17,6 +17,7 @@ import { AssistantDock } from './components/AssistantDock.tsx';
 import { AttentionWatcher } from './components/AttentionWatcher.tsx';
 import { openUi, useUiEvent } from './lib/uiBus.ts';
 import { officeHome } from './lib/routes.ts';
+import { OwnerDialogHost } from './components/OwnerPairing.tsx';
 // La oficina y el asistente de creación se cargan aparte (no engordan la carga del resto de pantallas).
 const Office = lazy(() => import('./screens/Office.tsx').then(m => ({ default: m.Office })));
 const AgentWizard = lazy(() => import('./screens/AgentWizard.tsx').then(m => ({ default: m.AgentWizard })));
@@ -188,6 +189,7 @@ export default function App() {
         {ready && <AttentionWatcher />}
         {ready && <AssistantDock />}
         {ready && <PaletteHost />}
+        <OwnerDialogHost />
         <ScrollMemory />
         <SelectionHistory sel={sel} workspaces={workspaces} select={select} />
         <Suspense fallback={<div className="app" style={{ display: 'grid', placeItems: 'center' }}><Spinner /></div>}>

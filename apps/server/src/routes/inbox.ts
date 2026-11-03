@@ -6,7 +6,7 @@ import { decide, InboxError, listPendingDecisions, listStoryDecisionHistory, res
 
 const slugParams = z.object({ slug: z.string().min(1) });
 const decisionParams = z.object({ slug: z.string().min(1), kind: z.enum(PENDING_DECISION_KINDS), processId: z.string().min(1) });
-const decisionBody = z.object({ verdict: z.enum(['approve', 'deny']), reason: z.string().max(2000).optional() });
+const decisionBody = z.object({ verdict: z.enum(['approve', 'deny']), reason: z.string().max(2000).optional(), seenVersion: z.string().max(200).optional() });
 const storyParams = z.object({ slug: z.string().min(1), id: z.string().min(1) });
 const restoreParams = z.object({ slug: z.string().min(1), processId: z.string().min(1) });
 const restoreBody = z.object({ authorized: z.literal(true) });
@@ -42,7 +42,9 @@ export async function inboxRoutes(app: FastifyInstance) {
     if (!body.success) return reply.code(400).send({ error: 'La decisión debe ser «approve» o «deny»' });
     if (!workspacesRepo.get(params.data.slug)) return reply.code(404).send({ error: 'Empresa no encontrada' });
     try {
-      return await decide(app, params.data.slug, params.data.kind, params.data.processId, body.data.verdict, body.data.reason);
+      // Las acciones internas van por su ruta con las credenciales de quien decide (la política del propietario ya las validó).
+      const auth = Object.fromEntries(['x-portal-owner'].flatMap(k => typeof req.headers[k] === 'string' ? [[k, req.headers[k] as string]] : []));
+      return await decide(app, params.data.slug, params.data.kind, params.data.processId, body.data.verdict, body.data.reason, auth, body.data.seenVersion);
     } catch (e) { return fail(reply, e); }
   });
 

@@ -85,7 +85,7 @@ export function PendingDecisionCard({ decision, onResolved, superseded = null, o
   async function send(verdict: DecisionVerdict) {
     setState({ phase: 'sending', verdict });
     try {
-      await api.decideInbox(decision.workspaceSlug, decision.kind, decision.processId, verdict, verdict === 'deny' && decision.kind === 'apply_diff' ? reason : undefined);
+      await api.decideInbox(decision.workspaceSlug, decision.kind, decision.processId, verdict, verdict === 'deny' && decision.kind === 'apply_diff' ? reason : undefined, decision.processVersion);
       setState({ phase: 'resolved', verdict });
       onResolved?.(decision, verdict);
     } catch (e) {

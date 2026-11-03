@@ -49,7 +49,7 @@ fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: 'perf',
 fs.writeFileSync(path.join(repo, 'package-lock.json'), JSON.stringify({ name: 'perf', version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: 'perf', version: '1.0.0' } } }));
 execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm Base', { cwd: repo, env: { ...process.env, GIT_AUTHOR_DATE: '2026-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-01-01T00:00:00Z' } });
 projectsRepo(S).setRepository(project.id, repo, 'main');
-const { buildApp } = await import('../src/app.ts');
+const { buildApp } = await import('./fixtures/owner-app.ts'); // con el propietario vinculado (todo cambio lo exige)
 const app = await buildApp();
 after(async () => { await app.close(); });
 const runs: string[] = [];

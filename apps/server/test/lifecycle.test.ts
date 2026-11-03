@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-lifecycle-'));
 const { isProcessAlive } = await import('../src/services/lifecycle.ts');
@@ -16,7 +17,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(here, '../../..');
 const FIXTURE = path.join(here, 'fixtures', 'lifecycle-server.ts');
 
-interface Fixture { proc: ChildProcess; port: number; trackedPid: number; untrackedPid: number }
+interface Fixture { proc: ChildProcess; port: number; trackedPid: number; untrackedPid: number; owner: string }
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -49,7 +50,7 @@ async function startFixture(extraEnv: Record<string, string> = {}): Promise<Fixt
         if (!line.trim().startsWith('{')) continue;
         try {
           const info = JSON.parse(line);
-          if (info.ready) { clearTimeout(timer); resolve({ proc, port, trackedPid: info.trackedPid, untrackedPid: info.untrackedPid }); return; }
+          if (info.ready) { clearTimeout(timer); resolve({ proc, port, trackedPid: info.trackedPid, untrackedPid: info.untrackedPid, owner: info.owner }); return; }
         } catch { /* línea parcial */ }
       }
     });
@@ -86,7 +87,11 @@ async function assertFullyStopped(fx: Fixture): Promise<void> {
   assert.equal(await canBind(fx.port), true, 'el puerto sigue ocupado');
 }
 
-const restart = (port: number, body: unknown) => fetch(`http://127.0.0.1:${port}/api/system/restart`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+// Reiniciar exige la sesión del propietario (la del servidor de prueba, vinculada en su proceso).
+// …y el commit que se ve (reiniciar carga el código en disco: solo si es ese).
+// (null si esta copia no es un repositorio git, p. ej. una exportación: entonces el Portal tampoco tiene commit)
+const HEAD = (() => { try { return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; } })();
+const restart = (fx: Fixture, body: Record<string, unknown>) => fetch(`http://127.0.0.1:${fx.port}/api/system/restart`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-portal-owner': fx.owner }, body: JSON.stringify(Object.keys(body).length ? { expectedHead: HEAD, ...body } : body) });
 
 test('reiniciar sin supervisor: apaga todo, libera el puerto y devuelve los comandos exactos', async t => {
   const fx = await startFixture();
@@ -94,11 +99,11 @@ test('reiniciar sin supervisor: apaga todo, libera el puerto y devuelve los coma
   assert.ok(isProcessAlive(fx.trackedPid) && isProcessAlive(fx.untrackedPid));
   assert.equal(await canBind(fx.port), false, 'el puerto debería estar ocupado mientras el servidor corre');
 
-  const rejected = await restart(fx.port, {});
+  const rejected = await restart(fx, {});
   assert.equal(rejected.status, 400, 'sin confirmación explícita no se reinicia');
   assert.equal(fx.proc.exitCode, null);
 
-  const res = await restart(fx.port, { confirm: true });
+  const res = await restart(fx, { confirm: true });
   assert.equal(res.status, 202);
   const outcome = await res.json() as { mode: string; port: number; cwd: string; commands: string[] };
   assert.equal(outcome.mode, 'shutdown');
@@ -122,7 +127,7 @@ test('reiniciar con conexiones keep-alive y una petición colgada abiertas no re
   await once(hung, 'connect');
   hung.write('GET /api/health HTTP/1.1\r\nHost: localhost\r\n'); // petición incompleta: nunca termina
 
-  const res = await restart(fx.port, { confirm: true });
+  const res = await restart(fx, { confirm: true });
   assert.equal(res.status, 202);
   assert.equal(await waitExit(fx.proc, 8000), 0);
   agent.destroy(); hung.destroy();
@@ -132,7 +137,7 @@ test('reiniciar con conexiones keep-alive y una petición colgada abiertas no re
 test('con supervisor declarado el modo es «restarting» y el proceso sale con el código convenido (75)', async t => {
   const fx = await startFixture({ PORTAL_SUPERVISED: '1' });
   t.after(() => cleanup(fx));
-  const res = await restart(fx.port, { confirm: true });
+  const res = await restart(fx, { confirm: true });
   assert.equal(res.status, 202);
   const outcome = await res.json() as { mode: string; commands: string[] };
   assert.equal(outcome.mode, 'restarting');

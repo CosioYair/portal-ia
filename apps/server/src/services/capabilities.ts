@@ -69,13 +69,14 @@ function resolveProject(company: string, project: string): { slug: string; proje
  * Publicar la rama principal del repositorio AUTORIZADO de un proyecto (el mismo servicio que el botón «Publicar main»
  * del Panel): `git push -u <remoto> <main>`, nunca forzado y nunca otra rama. Queda en la auditoría (política git_push).
  */
-export async function publishProjectMain(slug: string, projectId: string): Promise<{ remote: string; url: string | null; branches: string[] }> {
+/** Publica main; con `commit`, exactamente ese commit (el que se autorizó), aunque main haya avanzado después. */
+export async function publishProjectMain(slug: string, projectId: string, commit: string | null = null): Promise<{ remote: string; url: string | null; branches: string[] }> {
   const repo = projectsRepo(slug).repository(projectId);
   if (!repo) throw err(409, 'El proyecto no tiene repositorio registrado.');
   const st = await repoStatus(repo.path);
   if (!st.mainBranch) throw err(409, 'El repositorio no tiene rama principal (main). Créala primero.');
   requirePolicy('git_push', { slug, projectId, authorized: true });
-  return pushBranches(repo.path, [st.mainBranch]);
+  return pushBranches(repo.path, [st.mainBranch], commit ? { [st.mainBranch]: commit } : {});
 }
 
 const publishMain: Capability<{ company: string; project: string }> = {
@@ -109,13 +110,15 @@ const publishMain: Capability<{ company: string; project: string }> = {
     details.push('Orden exacta: git push -u <remoto> <main> · sin --force · ninguna otra rama.');
     const excluded = st.storyBranches.filter(b => b !== st.mainBranch).map(b => `${b} (rama de historia: no se publica)`);
     // Lo que se autoriza es ESTE main: si recibe otros commits antes de autorizar, la tarjeta ya no vale.
-    const fingerprint = st.mainBranch ? await git(cwd, ['rev-parse', st.mainBranch]).then(x => x.trim()).catch(() => null) : null;
+    // …y a ESE remoto: con otro remoto (o sin él) la tarjeta tampoco vale.
+    const sha = st.mainBranch ? await git(cwd, ['rev-parse', st.mainBranch]).then(x => x.trim()).catch(() => null) : null;
+    const fingerprint = sha ? `${sha}@${st.remote ?? ''} ${st.remoteUrl ?? ''}` : null;
     return { ...base, ok: !blockers.length, details, blockers, excluded, fingerprint };
   },
   async execute(p) {
     const pv = await publishMain.preview(p);
     if (!pv.ok) throw err(409, `No se publica: ${pv.blockers.join(' ')}`);
-    const res = await publishProjectMain(pv.target.workspace, pv.target.projectId);
+    const res = await publishProjectMain(pv.target.workspace, pv.target.projectId, pv.fingerprint?.split('@')[0] ?? null);
     const repo = projectsRepo(pv.target.workspace).repository(pv.target.projectId)!;
     const after = await repoStatus(repo.path);
     const remoteHead = await git(repoRoot(repo.path), ['rev-parse', '--short', `${res.remote}/${after.mainBranch}`]).then(s => s.trim()).catch(() => null);

@@ -684,7 +684,8 @@ async function integrateAcceptedNow(slug: string, id: string, itemId: string) {
 async function publishIfAuthorized(slug: string, id: string, itemId: string, pid: string, repoPath: string, m: Process) {
   const b = getBatch(slug, id); if (!b.auth.git.publish) return;
   requirePolicy('git_push', { slug, processId: pid, projectId: b.projectId, authorized: true });
-  const pushed = await pushBranches(repoPath, [m.result!.applied!.branch, m.result!.merged!.into]);
+  // Hasta la integración de ESTA historia (su commit), no lo que main tenga después.
+  const mg = m.result!.merged!; const pushed = await pushBranches(repoPath, [m.result!.applied!.branch, mg.into], /^[0-9a-f]{40}$/.test(mg.commit ?? '') ? { [mg.into]: mg.commit } : {});
   const procs = processesRepo(slug); procs.setResult(pid, { ...procs.get(pid)!.result!, published: { ...pushed, pushedAt: now() } });
   setItem(slug, id, itemId, {}, `publicada en ${pushed.remote} (pre-autorizado en el lote).`, 'integration');
 }

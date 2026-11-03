@@ -23,7 +23,7 @@ const { runBootstrap } = await import('../src/routes/bootstrap.ts');
 const { knowledgeRepo, projectsRepo, workspaceDb } = await import('../src/db/workspace.ts');
 const { orgEvaluationsRepo } = await import('../src/db/orgEvaluationSchema.ts');
 const { createCompany, createProject } = await import('../src/services/companies.ts');
-const { buildApp } = await import('../src/app.ts');
+const { buildApp } = await import('./fixtures/owner-app.ts'); // con el propietario vinculado (todo cambio lo exige)
 const { resetMockCalls } = await import('@portal-ia/ai-adapters');
 const adapters = await import('@portal-ia/ai-adapters');
 

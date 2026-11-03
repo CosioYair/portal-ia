@@ -128,7 +128,7 @@ test('publishMain con la rama local main eliminada devuelve un error accionable 
 });
 
 test('API: GET de estado y POST fuera de main responden con motivo claro (409) sin escribir', { skip }, async () => {
-  const { buildApp } = await import('../src/app.ts');
+  const { buildApp } = await import('./fixtures/owner-app.ts'); // con el propietario vinculado (todo cambio lo exige)
   const { REPO_ROOT } = await import('../src/config.ts');
   const app = await buildApp();
   const status = await app.inject({ method: 'GET', url: '/api/portal/integration/status' });

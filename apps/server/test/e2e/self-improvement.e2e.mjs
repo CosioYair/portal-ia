@@ -42,14 +42,18 @@ fs.symlinkSync(path.join(SRC_REPO, 'node_modules'), path.join(repo, 'node_module
 npm(['run', 'build', '--workspace', 'apps/web'], { cwd: repo });
 const port = await freePort();
 const script = path.join(work, 'mock-script.json'); const mockLog = path.join(work, 'mock-log.jsonl');
-const env = { ...process.env, PORTAL_PORT: String(port), PORTAL_DATA_DIR: dataDir, PORTAL_MOCK_PROVIDER: '1', PORTAL_MOCK_SCRIPT: script, PORTAL_MOCK_LOG: mockLog, LOG_LEVEL: 'warn' };
+// El código para vincular al propietario se escribe en esta carpeta de trabajo (no en el perfil real).
+const ownerCodeFile = path.join(work, 'codigo-propietario.txt');
+const env = { ...process.env, PORTAL_PORT: String(port), PORTAL_DATA_DIR: dataDir, PORTAL_MOCK_PROVIDER: '1', PORTAL_MOCK_SCRIPT: script, PORTAL_MOCK_LOG: mockLog, PORTAL_OWNER_CODE_FILE: ownerCodeFile, LOG_LEVEL: 'warn' };
 if (!IS_WIN && !env.PORTAL_PLAYWRIGHT) env.PORTAL_PLAYWRIGHT = '/opt/npm-tools/node_modules/playwright/index.mjs';
 delete env.PORTAL_SANDBOX; delete env.PORTAL_ALLOW_FOREIGN_REPO;
 const serverLog = fs.createWriteStream(path.join(OUT, 'server.log'));
 let sup = spawn(process.execPath, ['scripts/portal-start.mjs'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
 sup.stdout.pipe(serverLog); sup.stderr.pipe(serverLog);
 const base = `http://127.0.0.1:${port}`;
-const api = async (method, p, body) => { const r = await fetch(base + p, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined }); const text = await r.text(); let j = null; try { j = text ? JSON.parse(text) : null; } catch { j = { raw: text }; } return { status: r.status, body: j }; };
+// Todo cambio exige la sesión del propietario: la prueba se vincula como él (código del archivo) y la envía siempre.
+let owner = '';
+const api = async (method, p, body) => { const r = await fetch(base + p, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(owner ? { 'x-portal-owner': owner } : {}) }, body: body ? JSON.stringify(body) : undefined }); const text = await r.text(); let j = null; try { j = text ? JSON.parse(text) : null; } catch { j = { raw: text }; } return { status: r.status, body: j }; };
 const waitHealth = async (prevStartedAt = null, tries = 120) => { for (let i = 0; i < tries; i++) { try { const r = await api('GET', '/api/system/status'); if (r.status === 200 && r.body.startedAt !== prevStartedAt) return r.body; } catch { /* arrancando */ } await sleep(1000); } throw new Error('el Portal no arrancó'); };
 const waitProcess = async (slug, id, tries = 600) => { for (let i = 0; i < tries; i++) { const r = await api('GET', `/api/workspaces/${slug}/processes/${id}`); if (r.body.status !== 'running' && r.body.status !== 'pending_authorization') return r.body; await sleep(1000); } throw new Error('proceso no terminó'); };
 
@@ -74,6 +78,9 @@ const setScript = (impl) => fs.writeFileSync(script, JSON.stringify({ markers: [
 let slug = 'portal-ia', projectId = null, prevStarted = null;
 try {
   let sys = await waitHealth(); prevStarted = sys.startedAt;
+  await api('POST', '/api/owner/pairing', {});
+  owner = (await api('POST', '/api/owner/pair', { code: fs.readFileSync(ownerCodeFile, 'utf8').match(/\b([A-Z2-9]{4}(?:-[A-Z2-9]{4}){4})\b/)?.[1] ?? '' })).body?.token ?? '';
+  step('0-propietario', !!owner, 'vinculado como propietario (código de un solo uso del archivo, nunca por la API)');
   step('0-arranque', sys.version != null, `Portal copia arrancado en ${base}, commit ${sys.startCommit}, sandbox ${sys.sandbox?.available}`);
   // Proveedor simulado + espacio interno + repositorio = carpeta de esta instalación
   await api('PUT', '/api/providers/anthropic/credential', { apiKey: 'sk-ant-SIMULADO-no-real-000000000' });
@@ -276,7 +283,7 @@ try {
 } finally {
   fs.writeFileSync(path.join(OUT, 'results.json'), JSON.stringify({ at: new Date().toISOString(), base, repo, provider: 'simulado (PORTAL_MOCK_PROVIDER=1)', results }, null, 2));
   if (browser) await browser.close();
-  try { await api('POST', '/api/system/restart', { confirm: true }); } catch { /* ya parado */ }
+  try { const st = (await api('GET', '/api/system/status')).body; await api('POST', '/api/system/restart', { confirm: true, expectedHead: st?.headCommit ?? null }); } catch { /* ya parado */ }
   // Windows no tiene señales: kill() terminaría solo el supervisor y dejaría el servidor huérfano (puerto y archivos abiertos).
   await sleep(1500); try { if (IS_WIN) execFileSync('taskkill', ['/PID', String(sup.pid), '/T', '/F'], { stdio: 'ignore' }); else sup.kill('SIGTERM'); } catch { /* ya parado */ }
   if (!keep) { await sleep(1000); try { fs.rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 }); } catch (e) { console.log('no se pudo borrar la copia temporal', work, e.message); } } else console.log('copia conservada en', work);

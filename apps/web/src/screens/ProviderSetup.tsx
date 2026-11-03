@@ -7,6 +7,7 @@ import { Chip, Icon, KV, Notice, Stepper, Wordmark } from '../components/ui.tsx'
 import { ClaudeCodePanel } from '../components/ClaudeCodePanel.tsx';
 import { Shell } from '../components/Shell.tsx';
 import { Disclosure } from '../components/Disclosure.tsx';
+import { OwnerBar } from '../components/OwnerPairing.tsx';
 
 const CONN: Record<ProviderView['status'], { label: string; tone: '' | 'warn' | 'ok' | 'err'; dot: '' | 'pulse' | 'ok' | 'err' }> = {
   not_configured: { label: 'Sin configurar', tone: '', dot: '' },
@@ -42,7 +43,7 @@ export function ProviderSetup() {
       const v = await api.verify(providerId);
       await refresh();
       if (v.status === 'connected') flash(`Conexión con ${v.name} verificada · ${v.models.length} modelos disponibles`);
-    } catch (e: any) { setLocalError(e.message); }
+    } catch (e: any) { if (e?.body?.code !== 'owner_required') setLocalError(e.message); }
     finally { setBusy(null); }
   };
 
@@ -199,6 +200,7 @@ export function ProviderSetup() {
         <Stepper s1="is-active" s2="" s3="" />
         <div className="muted small mono">consumo de IA en este paso · 0 tokens</div>
       </header>
+      <OwnerBar />
       <main className="setup-main" style={{ display: 'flex', flexWrap: 'wrap', gap: 24, maxWidth: 1200, alignItems: 'flex-start', paddingTop: 40 }}>{columns}</main>
     </div>
   );

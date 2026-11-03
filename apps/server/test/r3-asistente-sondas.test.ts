@@ -21,7 +21,7 @@ const { runBootstrap } = await import('../src/routes/bootstrap.ts');
 const { projectsRepo } = await import('../src/db/workspace.ts');
 const { assignmentsRepo } = await import('../src/db/assignments.ts');
 const { createAssignment } = await import('../src/services/assignments.ts');
-const { buildApp } = await import('../src/app.ts');
+const { buildApp } = await import('./fixtures/owner-app.ts'); // con el propietario vinculado (todo cambio lo exige)
 
 providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');
 providersRepo.setConnected('anthropic', ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5'].map(id => classifyModel('anthropic', id)));

@@ -24,7 +24,7 @@ const { agentsRepo, knowledgeRepo, processesRepo, workspaceDb } = await import('
 const { orgEvaluationsRepo } = await import('../src/db/orgEvaluationSchema.ts');
 const { createCompany, createProject } = await import('../src/services/companies.ts');
 const { composeTeam, RETIRED_REASON } = await import('../src/services/teamComposer.ts');
-const { buildApp } = await import('../src/app.ts');
+const { buildApp } = await import('./fixtures/owner-app.ts'); // con el propietario vinculado (todo cambio lo exige)
 const adapters = await import('@portal-ia/ai-adapters');
 
 providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');

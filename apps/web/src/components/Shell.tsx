@@ -14,6 +14,7 @@ import { useLive, useLiveConnection } from '../lib/live.ts';
 import { useBack } from '../lib/nav.ts';
 import { officeHome, SECTIONS, sectionOf, sectionRoot, type IconName, type Section } from '../lib/routes.ts';
 import { attentionTotal, openUi, useAttention } from '../lib/uiBus.ts';
+import { OwnerBar } from './OwnerPairing.tsx';
 
 /** Diálogo mínimo para crear empresa o proyecto (operación local, sin IA). */
 export function CreateDialog({ kind, onClose }: { kind: 'company' | 'project'; onClose: () => void }) {
@@ -179,6 +180,7 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
         </header>
         {stale && <div className="sf-conn" role="alert" aria-label="Interfaz desactualizada" style={{ margin: '8px 24px 0' }}>{Icon.warn()}<span>Hay una versión nueva del Portal: esta pestaña usa la interfaz anterior y algunas acciones podrían no funcionar. </span><button className="btn btn-primary btn-sm" onClick={() => window.location.reload()}>Recargar</button></div>}
         <SystemBar />
+        <OwnerBar />
         <div id="contenido" tabIndex={-1} className="content-main">{children}</div>
       </div>
       {dialog && <CreateDialog kind={dialog} onClose={() => setDialog(null)} />}

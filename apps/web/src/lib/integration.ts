@@ -1,4 +1,5 @@
 import type { IntegrationStatus } from '@portal-ia/domain';
+import { noteOwnerResponse, ownerHeaders } from './owner.ts';
 
 /** Fallo accionable devuelto por el backend (409): motivo del bloqueo o causa + solución. */
 export interface IntegrationFailure {
@@ -23,10 +24,11 @@ export async function integrateBranch(branch: string): Promise<IntegrateOutcome>
   try {
     const r = await fetch('/api/portal/integration', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...ownerHeaders() },
       body: JSON.stringify({ branch })
     });
     const data = await r.json().catch(() => ({}));
+    noteOwnerResponse(r.status, data);
     if (r.ok) return { ok: true, into: data.into, commit: data.commit, remote: data.remote };
     if (r.status === 409) return { ok: false, failure: data as IntegrationFailure };
     return { ok: false, failure: { code: 'HTTP_ERROR', cause: (data as { error?: string }).error ?? `El servidor respondió ${r.status}.`, solution: 'Vuelve a intentarlo en unos segundos.' } };

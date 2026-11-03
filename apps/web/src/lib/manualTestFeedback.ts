@@ -1,4 +1,5 @@
 import type { ManualTestFeedbackView, ManualTestStepFeedback, ManualTestStepResult } from '@portal-ia/domain';
+import { noteOwnerResponse, ownerHeaders } from './owner.ts';
 
 export interface StepFeedbackPayload { result: ManualTestStepResult | null; comment: string; }
 
@@ -18,8 +19,8 @@ export async function getManualTestFeedback(slug: string, processId: string): Pr
 
 export async function saveManualTestStepFeedback(slug: string, processId: string, stepKey: string, payload: StepFeedbackPayload): Promise<{ item: ManualTestStepFeedback | null }> {
   const r = await fetch(`${base(slug, processId)}/${encodeURIComponent(stepKey)}`, {
-    method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload)
+    method: 'PUT', headers: { 'content-type': 'application/json', ...ownerHeaders() }, body: JSON.stringify(payload)
   });
-  if (!r.ok) throw new Error(await readError(r));
+  if (!r.ok) { const body = await r.clone().json().catch(() => null); noteOwnerResponse(r.status, body); throw new Error(await readError(r)); }
   return r.json() as Promise<{ item: ManualTestStepFeedback | null }>;
 }

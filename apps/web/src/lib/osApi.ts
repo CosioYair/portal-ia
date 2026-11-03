@@ -1,5 +1,6 @@
 import type { Agent, Capability, DocumentBatch, DocumentJob, ExecutionBackend, ExternalFileChange, ExternalGrants, ExternalLayout, ExternalProvenance, HarnessCapability, HarnessDescriptor, ImprovementProposal, IntegrationState, Lesson, Process, PortableFiles, PortableKnowledge, PortableSkill, ProviderId } from '@portal-ia/domain';
 import { ApiError, apiRequest as request } from './api.ts';
+import { noteOwnerResponse, ownerHeaders } from './owner.ts';
 
 /** Cliente del «sistema operativo de agentes» (apps/server/src/routes/agentsOs.ts). */
 export type OfficeState = 'working' | 'queued' | 'attention' | 'unavailable' | 'idle' | 'retired';
@@ -58,11 +59,12 @@ const J = (body: unknown) => JSON.stringify(body);
 function streamUpload<T>(url: string, file: File, onProgress?: (fraction: number) => void, signal?: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest(); x.open('PUT', url); x.setRequestHeader('Content-Type', 'application/octet-stream');
+    for (const [k, v] of Object.entries(ownerHeaders())) x.setRequestHeader(k, v); // subir es un cambio: con la sesión del propietario
     if (onProgress) x.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
     x.onload = () => {
       let body: any = null; try { body = x.responseText ? JSON.parse(x.responseText) : null; } catch { /* respuesta no JSON */ }
       if (x.status >= 200 && x.status < 300) resolve(body as T);
-      else reject(new ApiError(x.status, body?.error ?? (x.status === 413 ? 'El archivo supera el tamaño permitido.' : `Error ${x.status}`), body));
+      else { noteOwnerResponse(x.status, body); reject(new ApiError(x.status, body?.error ?? (x.status === 413 ? 'El archivo supera el tamaño permitido.' : `Error ${x.status}`), body)); }
     };
     x.onerror = () => reject(new ApiError(0, 'No se pudo contactar con el servidor del Portal.', { code: 'unreachable' }));
     x.onabort = () => reject(new ApiError(0, 'Subida cancelada.', { code: 'aborted' }));

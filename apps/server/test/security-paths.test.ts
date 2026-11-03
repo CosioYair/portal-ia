@@ -17,7 +17,7 @@ process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-s
 process.env.LOG_LEVEL = 'warn';
 const bridge = await import('../src/services/claudeCode/bridge.ts');
 const { readRepoFile, safeRelPath, writablePath: wp } = await import('../src/services/repoWrite.ts');
-const { buildApp } = await import('../src/app.ts');
+const { buildApp } = await import('./fixtures/owner-app.ts'); // con el propietario vinculado (todo cambio lo exige)
 const app = await buildApp();
 after(async () => { await app.close(); });
 

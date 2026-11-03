@@ -32,7 +32,7 @@ const { anthropicAdapter, openaiAdapter, ProviderRequestError, resetMockCalls } 
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
 const { agentsRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
-const { buildApp } = await import('../src/app.ts');
+const { buildApp } = await import('./fixtures/owner-app.ts'); // con el propietario vinculado (todo cambio lo exige)
 const { addManualItem } = await import('../src/services/backlog.ts');
 const { createStoryProcess, runStory } = await import('../src/services/storyExecution.ts');
 const { newPipeline, pickConsultant } = await import('../src/services/storyPipeline.ts');

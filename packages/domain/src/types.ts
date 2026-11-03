@@ -1075,6 +1075,8 @@ export interface RepoStatus {
   /** Commits de main por delante / por detrás de origin/main según las referencias locales; -1 = main nunca publicada; null = sin remoto. */
   aheadOfRemote: number | null; behindRemote: number | null;
   headCommit: string | null;
+  /** Commit completo de la rama principal: lo que se publica. Publicar exige que siga siendo el que viste. */
+  mainCommit?: string | null;
   storyBranches: string[];
 }
 
@@ -1315,6 +1317,8 @@ export interface PendingDecision {
   supersededCount: number;
   /** Qué ocurre al denegar; null si el proceso original no tiene una acción de denegar (la decisión solo se puede aprobar o dejar pendiente). */
   denyEffect: string | null;
+  /** Versión del proceso que muestra esta decisión: decidir la devuelve y, si el proceso cambió desde entonces, no se hace nada. */
+  processVersion?: string;
 }
 
 /** HU-161 · Decisión de una iteración anterior: no se puede aprobar, queda en el historial de la historia y se puede restaurar. */

@@ -29,7 +29,8 @@ export async function mergeStory(slug: string, id: string, opts: MergeOpts = {},
 }
 async function mergeStoryLocked(slug: string, id: string, opts: MergeOpts, log: (o: any, m: string) => void): Promise<Process> {
   const procs = processesRepo(slug); const proc = procs.get(id);
-  if (!proc?.result?.applied) throw fail(409, 'Primero aplica los cambios en la rama.');
+  if (!proc) throw fail(404, 'Proceso no encontrado en esta empresa.');
+  if (!proc.result?.applied) throw fail(409, 'Primero aplica los cambios en la rama.');
   if (proc.result.merged) throw fail(409, `Ya integrada en ${proc.result.merged.into}.`);
   if (proc.result.rejected) throw fail(409, `Esta iteración se descartó (${proc.result.rejected.reason}): no se integra.`);
   if (proc.backlogItemId && backlogRepo(slug).get(proc.backlogItemId)?.status === 'discarded') throw fail(409, 'La historia está cancelada (Descartadas): su código no se integra.');

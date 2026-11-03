@@ -246,7 +246,7 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
       if (r.assistant.actions.some(a => a.status === 'done' && (a.type === 'create_company' || a.type === 'create_project'))) await refreshStructure();
       const opened = r.assistant.actions.filter(a => a.type === 'open_decision' && a.status === 'done').length; const pend = r.assistant.actions.filter(a => a.status === 'pending').length; // al responder nada queda hecho: solo se abre o se propone
       if (opened || pend) flash([opened ? `${opened} decisión(es) abierta(s)` : '', pend ? `${pend} propuesta(s) esperan tu autorización` : ''].filter(Boolean).join(' · '));
-    } catch (e: any) { setError(e.message); setMsgs(m => m.filter(x => x.id !== 'tmp')); setText(t); setImages(all); }
+    } catch (e: any) { if (e?.body?.code !== 'owner_required') setError(e.message); setMsgs(m => m.filter(x => x.id !== 'tmp')); setText(t); setImages(all); }
     finally { setBusy(false); }
   };
   const replaceMsg = (m: AssistantMessage) => setMsgs(list => list.map(x => x.id === m.id ? m : x));

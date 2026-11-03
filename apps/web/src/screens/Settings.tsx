@@ -9,6 +9,8 @@ import { Chip, Icon } from '../components/ui.tsx';
 import { PageHeader, Tile } from '../components/kit.tsx';
 import { INTERNAL_SLUG } from '../lib/routes.ts';
 import { HarnessDialog } from '../components/HarnessDialog.tsx';
+import { OwnerStatus, useOwner } from '../components/OwnerPairing.tsx';
+import { ownerNeeded } from '../lib/owner.ts';
 
 /**
  * Ajustes (Portal IA 2.0): un sitio para lo que antes estaba repartido (proveedores en el pie del menú, motores en un
@@ -28,6 +30,7 @@ export function Settings() {
   useEffect(() => { void api.systemStatus().then(setSys).catch(() => undefined); }, []);
   // El Asistente de Empresa es uno para todo el Portal: el de la empresa interna (el que contesta en «Pedir»).
   useEffect(() => { void osApi.office(INTERNAL_SLUG, null).then(o => setAssistant(o.agents.find(a => a.key === 'ws-asistente') ?? null)).catch(() => undefined); }, []);
+  const owner = useOwner() === true;
   const card = (icon: ReactNode, title: string, scope: string, body: ReactNode, action: ReactNode) => <section className="card settings-card">
     <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}><Tile icon={icon} tone="settings" /><div style={{ flex: 1, minWidth: 0 }}><h2 className="h3" style={{ margin: 0 }}>{title}</h2><Chip xs>{scope}</Chip></div></div>
     <div className="small med">{body}</div>
@@ -52,6 +55,9 @@ export function Settings() {
         {card(Icon.building(), 'Empresas y proyectos', 'Todo el Portal',
           <>{workspaces.length} empresa{workspaces.length === 1 ? '' : 's'} (cada una aislada, con su propia base de datos) · {projects.length} proyecto{projects.length === 1 ? '' : 's'} en «{ws.name}». Crear no consume IA.</>,
           <><button type="button" className="btn btn-secondary btn-sm" onClick={() => setDialog('project')}>{Icon.plus()} Proyecto</button><button type="button" className="btn btn-ghost btn-sm" onClick={() => setDialog('company')}>{Icon.plus()} Empresa</button></>)}
+        {card(Icon.shield(), 'Propietario', 'Este navegador',
+          owner ? <>Este navegador está vinculado como propietario: puede hacer cambios (autorizar, integrar, cerrar, configurar). La sesión dura 7 días desde el último uso.</> : <>Sin vincular puedes consultarlo todo; para hacer cambios, vincula este navegador con un código de un solo uso (la vinculación dura 7 días desde el último uso).</>,
+          owner ? <OwnerStatus /> : <button type="button" className="btn btn-secondary btn-sm" onClick={() => ownerNeeded()}>Vincular este navegador</button>)}
         {card(Icon.gear(), 'Sistema', 'Este equipo',
           sys ? <>Portal IA {sys.version} · en marcha <span className="mono">{sys.startCommit ?? '—'}</span> · interfaz <span className="mono">{sys.buildCommit ?? '—'}</span>{sys.sandbox ? <> · sandbox: {sys.sandbox.detail}</> : null}. Cuando hay una actualización, la barra de sistema aparece arriba en todas las pantallas.</> : 'Cargando el estado del Portal…',
           <Link className="btn btn-ghost btn-sm" to="/panel">Repositorio (en el Resumen del proyecto)</Link>)}

@@ -21,7 +21,7 @@ const { createCompany } = await import('../src/services/companies.ts');
 const { consolidateDecisions, countStoriesWithMultipleCurrent, decisionsFromProcess, unmarkedDuplicates } = await import('../src/services/inbox.ts');
 const { iterateStory, storyContext, supersedePreviousIterations, threadRepo } = await import('../src/services/storyThread.ts');
 const { matches } = await import('../src/services/runtimeChecks.ts');
-const { buildApp } = await import('../src/app.ts');
+const { buildApp } = await import('./fixtures/owner-app.ts'); // con el propietario vinculado (todo cambio lo exige)
 
 providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');
 providersRepo.setConnected('anthropic', ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5'].map(id => classifyModel('anthropic', id)));

@@ -401,3 +401,11 @@ html { scroll-padding-top: 76px; }
 .mnt-problems { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
 .mnt-row-main .small, .mnt-row-main .med { overflow-wrap: anywhere; }
 @media (max-width: 767px) { .mnt-row, .mnt-group-h { padding-left: 14px; padding-right: 14px; } }
+
+/* Aviso «este navegador no está vinculado como propietario» (components/OwnerPairing.tsx): informativo, en todas las pantallas. */
+.owner-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 8px 24px 0; padding: 8px 12px; border: 1px solid var(--color-divider); border-radius: var(--radius); background: var(--color-surface-alt); color: var(--color-ink); font-size: 13px; line-height: 1.45; }
+.owner-bar > span { flex: 1 1 280px; min-width: 0; }
+.screen.setup > .owner-bar { margin: 8px auto 0; max-width: 1200px; width: calc(100% - 48px); }
+.toast { white-space: normal; width: max-content; max-width: calc(100vw - 32px); }
+.owner-bar-short { display: none; }
+@media (max-width: 600px) { .owner-bar-long { display: none; } .owner-bar-short { display: inline; } }

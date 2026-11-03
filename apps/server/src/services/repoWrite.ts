@@ -471,7 +471,11 @@ function mergeFailure(branch: string, target: string, e: any): Error {
 }
 
 /** Publica ramas en el remoto (git push -u). Usa las credenciales de git del equipo (gestor de credenciales / SSH). */
-export async function pushBranches(repoPath: string, branches: string[]): Promise<{ remote: string; url: string | null; branches: string[] }> {
+/**
+ * Publica ramas en el remoto, sin forzar. `exact` ata una rama a un commit concreto (el que se autorizó): se publica ESE
+ * commit en la rama del remoto, aunque la local haya avanzado después (otra integración, el lote).
+ */
+export async function pushBranches(repoPath: string, branches: string[], exact: Record<string, string | null | undefined> = {}): Promise<{ remote: string; url: string | null; branches: string[] }> {
   const cwd = repoRoot(repoPath);
   const { remote, url } = await remoteInfo(repoPath);
   if (!remote) throw Object.assign(new Error('El repositorio no tiene un remoto configurado. Añádelo con «git remote add origin <url>» y vuelve a intentarlo.'), { statusCode: 409 });
@@ -480,7 +484,9 @@ export async function pushBranches(repoPath: string, branches: string[]): Promis
     if (!(await git(cwd, ['branch', '--list', b])).trim()) throw Object.assign(new Error(`La rama «${b}» no existe en el repositorio local (quizá se borró o se renombró). Nada que publicar.`), { statusCode: 409 });
     // Sin «-u»: con más de un upstream registrado, «push -u» AÑADE otro cada vez y entonces «git push» sin argumentos falla
     // («multiple upstream branches»). El seguimiento se fija después reemplazando todos los valores (también sana los duplicados).
-    try { await execFileP('git', ['push', '--no-follow-tags', remote, `refs/heads/${b}:refs/heads/${b}`], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, timeout: 120_000 }); }
+    const sha = exact[b];
+    if (sha !== undefined && sha !== null && !/^[0-9a-f]{40}$/.test(sha)) throw Object.assign(new Error(`Commit no válido para publicar «${b}».`), { statusCode: 400 });
+    try { await execFileP('git', ['push', '--no-follow-tags', remote, `${sha ?? `refs/heads/${b}`}:refs/heads/${b}`], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, timeout: 120_000 }); }
     catch (e: any) { throw Object.assign(new Error(`git push ${remote} ${b} falló: ${(e.stderr || e.message || '').toString().trim().split('\n').slice(-3).join(' ')}. Si pide credenciales, inicia sesión en git (gestor de credenciales o SSH) y vuelve a intentarlo.`), { statusCode: 502 }); }
     await git(cwd, ['config', '--replace-all', `branch.${b}.remote`, remote]).catch(() => '');
     await git(cwd, ['config', '--replace-all', `branch.${b}.merge`, `refs/heads/${b}`]).catch(() => '');

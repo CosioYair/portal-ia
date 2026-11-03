@@ -23,7 +23,7 @@ export async function liveRoutes(app: FastifyInstance) {
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-store', connection: 'keep-alive', 'x-accel-buffering': 'no',
       'x-server-time': String(Date.now()),
-      ...(origin && /^http:\/\/(localhost|127\.0\.0\.1):\d+$/.test(origin) ? { 'access-control-allow-origin': origin } : {})
+      // Sin cabecera CORS: la interfaz es del mismo origen; otra página no puede leer este canal.
     });
     open++;
     const send = (m: LiveMessage) => res.write(`id: ${m.epoch}:${m.seq}\ndata: ${JSON.stringify(m)}\n\n`);

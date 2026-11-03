@@ -26,7 +26,7 @@ import { platform } from '../db/platform.ts';
  * datos (y usar git directamente con tus credenciales); esto protege frente a quien solo puede hacer peticiones HTTP.
  */
 export const OWNER_HEADER = 'x-portal-owner';
-const SESSION_MS = 7 * 24 * 3600_000; const CODE_MS = 5 * 60_000; const GROUPS = 5;
+const SESSION_MS = 7 * 24 * 3600_000; const MAX_LIFETIME_MS = 30 * 24 * 3600_000; const CODE_MS = 5 * 60_000; const GROUPS = 5;
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 símbolos sin I, O, 0 ni 1: 5 bits cada uno, sin sesgo (256 % 32 = 0)
 let pending: { code: string; hash: string; expiresAt: number } | null = null;
 
@@ -78,7 +78,7 @@ export function pairOwner(code: string, label: string | null = null): { token: s
   const t = Date.now();
   const given = normalize(code);
   const ok = !!pending && t < pending.expiresAt && given.length === GROUPS * 4 && crypto.timingSafeEqual(Buffer.from(sha(given)), Buffer.from(pending.hash));
-  if (!ok) throw fail(401, 'Código no válido o caducado: cópialo tal como aparece en su archivo o en la ventana del Portal (si pasaron 5 minutos, genera otro).', 'pairing_invalid');
+  if (!ok) throw fail(401, 'Código no válido o caducado: cópialo tal como aparece en el archivo o en la ventana del Portal (si pasaron 5 minutos, genera otro).', 'pairing_invalid');
   forgetCode();
   const token = crypto.randomBytes(32).toString('base64url');
   const expiresAt = new Date(t + SESSION_MS).toISOString();
@@ -93,12 +93,33 @@ function tokenOf(req: FastifyRequest): string | null {
   return typeof s === 'string' && /^[A-Za-z0-9_-]{40,64}$/.test(s) ? s : null;
 }
 export function isOwner(req: FastifyRequest): boolean {
+  if (ownerExempt()) return true;
   if (!ownPort(req)) return false;
   const token = tokenOf(req); if (!token) return false;
   ensure();
-  const r = platform.prepare('SELECT expires_at FROM owner_sessions WHERE token_hash = ?').get(sha(token)) as any;
-  return !!r && Date.parse(r.expires_at) > Date.now();
+  const h = sha(token); const r = platform.prepare('SELECT created_at, expires_at FROM owner_sessions WHERE token_hash = ?').get(h) as any;
+  const t = Date.now(); if (!r || Date.parse(r.expires_at) <= t) return false;
+  // Caducidad deslizante: usarla la renueva (como mucho una escritura al día) hasta 7 días sin usarla; y nunca más de 30
+  // días desde que se vinculó (entonces hay que vincular de nuevo). Si no se puede renovar ahora, la sesión sigue valiendo.
+  const cap = Date.parse(r.created_at) + MAX_LIFETIME_MS;
+  if (t >= cap) return false;
+  if (Date.parse(r.expires_at) - t < SESSION_MS - 24 * 3600_000) {
+    try { platform.prepare('UPDATE owner_sessions SET expires_at = ? WHERE token_hash = ?').run(new Date(Math.min(t + SESSION_MS, cap)).toISOString(), h); } catch { /* base ocupada: se renovará en otro uso */ }
+  }
+  return true;
 }
+/**
+ * Copia de un candidato en su vista previa (PORTAL_PREVIEW=1, proveedor de IA simulado, datos temporales y dentro del
+ * contenedor sin red: PORTAL_INSIDE_SANDBOX, que fija services/preview.ts; ver scripts/preview-runner.mjs): es el código del candidato con datos simulados, no tu Portal; ahí no
+ * hay nada del propietario que proteger y el código no se puede leer. Tu Portal (proveedor real o datos en data/) nunca lo
+ * cumple, aunque alguien fije PORTAL_PREVIEW.
+ */
+export function ownerExempt(): boolean {
+  if (process.env.PORTAL_PREVIEW !== '1' || process.env.PORTAL_MOCK_PROVIDER !== '1' || process.env.PORTAL_INSIDE_SANDBOX !== '1') return false;
+  const tmp = path.resolve(os.tmpdir()).toLowerCase(); return path.resolve(config.dataDir).toLowerCase().startsWith(tmp + path.sep);
+}
+// Si se aplica, que se vea: una copia así no protege nada (no debe ser nunca tu Portal).
+if (ownerExempt()) console.warn('[portal-ia] Copia de vista previa (PORTAL_PREVIEW=1, proveedor simulado, datos temporales): sin sesión de propietario.');
 export function revokeOwner(req: FastifyRequest) {
   const token = tokenOf(req); if (!token) return; ensure();
   platform.prepare('DELETE FROM owner_sessions WHERE token_hash = ?').run(sha(token));
@@ -109,32 +130,60 @@ export function revokeAllOwners(): number { ensure(); return Number(platform.pre
 export const pairingState = () => ({ file: codeFile() });
 
 /**
- * ¿La petición llega a la dirección del propio Portal (su puerto)? Solo cuando escucha en el equipo (lo normal): detrás de
- * un proxy o en la red (PORTAL_HOST no local, decisión explícita de quien lo configura) el Host no lleva su puerto.
+ * ¿La petición llega a la dirección del propio Portal (su puerto)? El puerto del Host debe ser aquel en el que la recibió
+ * el servidor (el de su conexión; sin conexión real, el configurado): por la interfaz de desarrollo (Vite en 5173, el
+ * puerto que usa en cualquier proyecto) el Host dice 5173 aunque llegue al 4310. Solo escuchando en el equipo (lo normal):
+ * detrás de un proxy o en la red (PORTAL_HOST no local, decisión explícita de quien lo configura) el Host no lleva su puerto.
  */
 const LOCAL_ONLY = /^(127\.\d+\.\d+\.\d+|localhost|::1)$/i.test(config.host);
+// Direcciones con las que el propietario publica este Portal a propósito (PORTAL_ALLOWED_HOSTS, p. ej. tras un proxy local):
+// también son la suya, pero EXACTAS (nombre y puerto tal como llegan en Host; un nombre sin puerto, solo sin puerto). Así
+// otra aplicación en otro puerto de ese nombre no puede vincular ni actuar.
+const OWN_HOSTS = (process.env.PORTAL_ALLOWED_HOSTS ?? '').split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
+const portHere = (req: FastifyRequest) => (req.socket as any)?.localPort || config.port;
 function ownPort(req: FastifyRequest): boolean {
   if (!LOCAL_ONLY) return true;
-  const m = String(req.headers.host ?? '').match(/:(\d+)$/);
-  return (m ? Number(m[1]) : 80) === config.port;
+  const host = String(req.headers.host ?? '').toLowerCase();
+  if (OWN_HOSTS.includes(host)) return true;
+  const m = host.match(/:(\d+)$/);
+  return (m ? Number(m[1]) : 80) === portHere(req);
 }
+const hasBody = (req: FastifyRequest) => Number(req.headers['content-length'] ?? 0) > 0 || !!req.headers['transfer-encoding'];
 /**
- * Formato y procedencia de las acciones del propietario: cuerpo JSON, la dirección del propio Portal y, si hay Origin,
- * el mismo. Si algo falla responde y devuelve false: no se toca nada.
+ * Formato y procedencia de los cambios: si llevan cuerpo, JSON o un archivo en flujo (application/octet-stream); nunca
+ * un formulario, texto o multipart, los tipos que otra página puede enviar sin permiso del navegador. La dirección del
+ * propio Portal y, si traen Origin, el mismo. Si algo falla responde y devuelve false: no se toca nada.
  */
 export function sameOriginJson(req: FastifyRequest, reply: FastifyReply): boolean {
-  if (!/^application\/json\s*(;|$)/i.test(String(req.headers['content-type'] ?? ''))) { reply.code(415).send({ error: 'Esta acción solo se acepta desde el Portal (JSON).', code: 'json_required' }); return false; }
-  if (!ownPort(req)) { reply.code(403).send({ error: `Vincula y decide desde la dirección del Portal (puerto ${config.port}); la interfaz de desarrollo u otra copia no pueden.`, code: 'foreign_port' }); return false; }
+  if (ownerExempt()) return true;
+  if (hasBody(req) && !/^application\/(json|octet-stream)\s*(;|$)/i.test(String(req.headers['content-type'] ?? ''))) { reply.code(415).send({ error: 'Esta acción solo se acepta desde el Portal (JSON o un archivo).', code: 'json_required' }); return false; }
+  if (!ownPort(req)) { reply.code(403).send({ error: `Haz los cambios desde la dirección del Portal (http://127.0.0.1:${portHere(req)}); la interfaz de desarrollo u otra copia no pueden.`, code: 'foreign_port' }); return false; }
   const origin = req.headers.origin;
   if (origin) { let same = false; try { same = new URL(origin).host === req.headers.host; } catch { same = false; } if (!same) { reply.code(403).send({ error: 'Esta acción solo se acepta desde el propio Portal.', code: 'foreign_origin' }); return false; } }
   return true;
 }
-/** Guardia de las acciones del propietario: lo anterior y una sesión válida. */
+/** Guardia de los cambios del propietario: lo anterior y una sesión válida. */
 export function requireOwner(req: FastifyRequest, reply: FastifyReply): boolean {
   if (!sameOriginJson(req, reply)) return false;
-  if (!isOwner(req)) { reply.code(401).send({ error: 'Para decidir aquí, vincula este navegador como propietario (código de un solo uso en un archivo de tu perfil o en la ventana del Portal).', code: 'owner_required' }); return false; }
+  if (!isOwner(req)) { reply.code(401).send({ error: 'Para hacer cambios, vincula este navegador como propietario (el código de un solo uso está en un archivo de tu perfil).', code: 'owner_required' }); return false; }
   return true;
 }
+
+/**
+ * Política del Portal: TODO cambio por la API (POST, PUT, PATCH, DELETE) exige la sesión del propietario, salvo estos,
+ * que tienen su propia identificación. Por la ruta registrada (no por la dirección escrita), así que ni mayúsculas, ni
+ * barras de más, ni una ruta nueva olvidada se la saltan. Leer no pide nada.
+ * - Vincular y desvincular este navegador: el código de un solo uso es la identificación (y exigen JSON y mismo origen).
+ * - El puente de los agentes (`/api/bridge/v1/*`, scripts/portal-mcp.mjs): un token por tarea o trabajador, con alcance.
+ * - Dos lecturas por POST: la vista previa de un lote y la estimación de un encargo (no guardan nada ni llaman a la IA).
+ */
+const OPEN_ROUTES: RegExp[] = [/^\/api\/owner\/(pairing|pair|logout)$/, /^\/api\/bridge\/v1\//,
+  // Lecturas que se piden por POST (calculan una vista previa con lo que envías; no guardan nada ni llaman a la IA).
+  /^\/api\/workspaces\/:slug\/projects\/:projectId\/batches\/preview$/, /^\/api\/workspaces\/:slug\/delegations\/estimate$/];
+const CHANGES = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+export const ownerPolicyApplies = (method: string, route: string | undefined) => !!route && route.startsWith('/api/') && CHANGES.has(method) && !OPEN_ROUTES.some(r => r.test(route));
+/** Las rutas que cambian algo sin la sesión del propietario (para revisarlas y probarlas). */
+export const ownerOpenRoutes = () => OPEN_ROUTES.map(r => r.source);
 
 /** Solo pruebas: olvida el código vigente. */
 export function resetPairingForTests() { forgetCode(); }

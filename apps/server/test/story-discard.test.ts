@@ -18,7 +18,7 @@ const { classifyModel } = await import('@portal-ia/domain');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
 const { backlogRepo, workspaceDb } = await import('../src/db/workspace.ts');
-const { buildApp } = await import('../src/app.ts');
+const { buildApp } = await import('./fixtures/owner-app.ts'); // con el propietario vinculado (todo cambio lo exige)
 const { createCompany, createProject } = await import('../src/services/companies.ts');
 const { addManualItem } = await import('../src/services/backlog.ts');
 

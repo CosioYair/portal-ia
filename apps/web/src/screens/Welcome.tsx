@@ -22,6 +22,7 @@ export function Welcome() {
             <span className="muted sm13">Unos dos minutos</span>
           </div>
           <div className="assure">{Icon.lock()}<span>Las credenciales se cifran en este equipo. No se realiza ninguna operación de IA con costo sin tu autorización explícita.</span></div>
+          <div className="assure">{Icon.shield()}<span>Antes de empezar, vincularás este navegador como propietario con un código de un solo uso que el Portal deja en un archivo de tu perfil: solo así se pueden hacer cambios.</span></div>
         </div>
         <aside className="card welcome-card">
           <OfficeBuilding size={260} className="welcome-art" />

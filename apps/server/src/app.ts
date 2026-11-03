@@ -31,6 +31,7 @@ import { agentsOsRoutes } from './routes/agentsOs.ts';
 import { externalAgentsRoutes } from './routes/externalAgents.ts';
 import { agentFilesRoutes } from './routes/agentFiles.ts';
 import { ownerRoutes } from './routes/owner.ts';
+import { ownerPolicyApplies, requireOwner } from './services/ownerSession.ts';
 import { VERSION } from './services/system.ts';
 
 /** Script principal del paquete de la interfaz que se sirve (p. ej. «index-BYW4Vz5N.js»), o null sin paquete construido. Se relee cada 10 s. */
@@ -51,7 +52,9 @@ export async function buildApp() {
 
   // El frontend de desarrollo (Vite, puerto 5173) habla con este backend; en producción se sirve desde aquí mismo.
   const ALLOWED_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/;
-  await app.register(cors, { origin: [ALLOWED_ORIGIN], exposedHeaders: ['x-server-time', 'x-portal-web'] });
+  // Sin CORS: la interfaz del Portal es siempre del MISMO origen (servida aquí o por el proxy de Vite), así que ninguna
+  // página de otro origen (otro puerto local incluido) puede leer las respuestas de la API: carpetas, conversaciones, código.
+  await app.register(cors, { origin: false });
   // Una petición que CAMBIA algo y llega desde otra página del navegador (otro origen que no es el del Portal ni su interfaz
   // de desarrollo: p. ej. la vista previa del código de un candidato, servida en 127.0.0.2) se rechaza. CORS solo impide
   // leer la respuesta; una petición «simple» (formulario, texto) llegaría igual. Sin cabecera Origin (herramientas, pruebas,
@@ -74,9 +77,12 @@ export async function buildApp() {
       return reply.code(200).type('text/html; charset=utf-8').header('cache-control', 'no-store').send(`<!doctype html><html lang="es"><head><meta charset="utf-8"><title>Portal IA en marcha</title></head><body style="font-family:system-ui,sans-serif;max-width:640px;margin:12vh auto;padding:0 20px;line-height:1.5"><h1 style="font-size:22px">Estás entrando en el Portal IA EN MARCHA</h1><p>Has llegado desde otra página (por ejemplo, una vista previa de un candidato). Lo que hagas aquí es real: aceptar, integrar o borrar afecta a tu Portal y a tus datos.</p><p><a href="${to.replace(/"/g, '%22').replace(/</g, '%3C')}">Continuar al Portal en marcha</a></p></body></html>`);
     }
     if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return;
-    const origin = req.headers.origin; if (!origin || ALLOWED_ORIGIN.test(origin)) return;
-    try { if (new URL(origin).host === req.headers.host && hostAllowed(req.headers.host)) return; } catch { /* origen no válido */ }
-    return reply.code(403).send({ error: 'Petición rechazada: viene de otra página que no es el Portal.', code: 'foreign_origin' });
+    const origin = req.headers.origin; let originOk = !origin || ALLOWED_ORIGIN.test(origin);
+    if (!originOk) { try { originOk = new URL(origin!).host === req.headers.host && hostAllowed(req.headers.host); } catch { /* origen no válido */ } }
+    if (!originOk) return reply.code(403).send({ error: 'Petición rechazada: viene de otra página que no es el Portal.', code: 'foreign_origin' });
+    // Todo cambio exige la sesión del propietario (salvo vincular y el puente de los agentes, con su propia identificación):
+    // ver services/ownerSession.ts. Se comprueba ANTES de leer el cuerpo, tomar arriendos o tocar nada.
+    if (ownerPolicyApplies(req.method, req.routeOptions?.url) && !requireOwner(req, reply)) return reply;
   });
   // Cada respuesta de la API lleva la hora del servidor (la interfaz mide con ella, no con el reloj del navegador, y sabe
   // cuándo habló por última vez con el servidor) y nunca se guarda en caché: recargar siempre muestra el estado real.
@@ -86,6 +92,12 @@ export async function buildApp() {
   app.addHook('onSend', async (req, reply, payload) => { const csp = reply.getHeader('content-security-policy'); reply.header('x-frame-options', 'DENY').header('content-security-policy', csp ? `${csp}; frame-ancestors 'none'` : "frame-ancestors 'none'"); if (req.url.startsWith('/api/')) { reply.header('x-server-time', String(Date.now())).header('cache-control', 'no-store'); const web = currentWebBundle(); if (web) reply.header('x-portal-web', web); } return payload; });
 
   app.get('/api/health', async () => ({ ok: true, name: 'portal-ia', version: VERSION, dataDir: config.dataDir, repoRoot: REPO_ROOT }));
+
+  // Inventario de las rutas registradas: la política del propietario se audita sobre él (test/politica-propietario.test.ts
+  // recorre TODAS las que cambian algo, también las que se añadan después).
+  const routeList: { method: string; url: string }[] = [];
+  app.addHook('onRoute', r => { for (const m of ([] as string[]).concat(r.method as string | string[])) routeList.push({ method: m, url: r.url }); });
+  app.decorate('routeList', routeList);
 
   registerArchivedGuard(app);
   await app.register(providerRoutes);
@@ -121,7 +133,9 @@ export async function buildApp() {
     // index.html y build-info.json nunca se cachean: tras reconstruir, el navegador debe ver la interfaz nueva (M2).
     await app.register(fastifyStatic, { root: config.webDist, prefix: '/', setHeaders: (res, filePath) => { if (/index\.html$|build-info\.json$/.test(filePath)) res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate'); } });
     app.setNotFoundHandler((req, reply) => {
-      if (req.url.startsWith('/api/')) return reply.code(404).send({ error: 'Ruta no encontrada' });
+      // La interfaz solo se sirve al pedirla (GET/HEAD): cualquier otra cosa a una ruta que no existe (p. ej. /API/… en
+      // mayúsculas) es 404, nunca una página con 200.
+      if (req.url.toLowerCase().startsWith('/api/') || (req.method !== 'GET' && req.method !== 'HEAD')) return reply.code(404).send({ error: 'Ruta no encontrada' });
       return reply.header('Cache-Control', 'no-cache, no-store, must-revalidate').sendFile('index.html');
     });
   }

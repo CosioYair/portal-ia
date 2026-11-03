@@ -505,9 +505,11 @@ Proceso: ${proc.id}`, { processId: proc.id });
     if (!proc?.result?.applied) return reply.code(409).send({ error: 'Primero aplica los cambios en la rama.' });
     const repo = projectsRepo(slug).repository(proc.projectId); if (!repo) return reply.code(409).send({ error: 'No hay repositorio registrado.' });
     const branches = [proc.result.applied.branch, ...(proc.result.merged ? [proc.result.merged.into] : [])];
+    // La rama principal se publica hasta la integración de ESTA historia (su commit), no lo que main tenga después.
+    const merged = proc.result.merged; const exact = merged && /^[0-9a-f]{40}$/.test(merged.commit ?? '') ? { [merged.into]: merged.commit } : {};
     try {
       requirePolicy('git_push', { slug, processId: id, projectId: proc.projectId, authorized: true });
-      const p = await pushBranches(repo.path, branches);
+      const p = await pushBranches(repo.path, branches, exact);
       procs.setResult(id, { ...proc.result, published: { ...p, pushedAt: new Date().toISOString() } });
       procs.logExecution({ projectId: proc.projectId, agentId: proc.steps[0]?.agentId ?? '', kind: 'repo_push', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() });
       app.log.info({ processId: id, remote: p.remote, branches }, 'ramas publicadas');

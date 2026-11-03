@@ -45,7 +45,7 @@ export function SystemBar() {
   const update = async () => {
     setPhase('updating'); setLog(''); setShowLog(true); mine.current = true;
     try {
-      const r = await api.systemUpdate({ restart: true, ...(running.length && interrupt ? { interruptRunning: true } : {}) });
+      const r = await api.systemUpdate({ restart: true, expectedHead: st?.headCommit ?? null, ...(running.length && interrupt ? { interruptRunning: true } : {}) });
       setOutcome(r.update.outcome ?? null);
       const manual = r.update.outcome?.mode === 'shutdown';
       // Seguir el log hasta que termine; luego esperar al reinicio (startedAt distinto) y recargar — o, sin supervisor, mostrar los comandos.

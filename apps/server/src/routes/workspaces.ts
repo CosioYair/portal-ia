@@ -128,9 +128,13 @@ export async function workspaceRoutes(app: FastifyInstance) {
   });
   app.post('/api/workspaces/:slug/projects/:projectId/repository/remote', async (req, reply) => {
     const r = await withRepo(req, reply); if (!r) return;
-    const body = z.object({ authorized: z.literal(true), url: z.string().trim().min(8).max(300) }).safeParse(req.body);
-    if (!body.success) return reply.code(400).send({ error: 'Se requiere la URL del remoto y autorización explícita.' });
-    try { const res = await setRemote(r.path, body.data.url); app.log.info({ path: r.path, url: res.url }, 'remoto configurado'); return res; } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    // Atado a lo que viste: el remoto que había (null si no había). Si cambió desde entonces, no se toca.
+    const body = z.object({ authorized: z.literal(true), url: z.string().trim().min(8).max(300), expectedUrl: z.string().max(300).nullable() }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'Se requiere la URL del remoto, el remoto que viste y autorización explícita.' });
+    try {
+      const now = (await repoStatus(r.path)).remoteUrl ?? null;
+      if (now !== body.data.expectedUrl) return reply.code(409).send({ error: `El remoto cambió desde que lo viste (ahora: ${now ?? 'ninguno'}): no se ha cambiado. Revisa y vuelve a intentarlo.`, code: 'stale_state' });
+      const res = await setRemote(r.path, body.data.url); app.log.info({ path: r.path, url: res.url }, 'remoto configurado'); return res; } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   app.post('/api/workspaces/:slug/projects/:projectId/repository/normalize-eol', async (req, reply) => {
     const r = await withRepo(req, reply); if (!r) return;
@@ -140,12 +144,15 @@ export async function workspaceRoutes(app: FastifyInstance) {
   });
   app.post('/api/workspaces/:slug/projects/:projectId/repository/publish-main', async (req, reply) => {
     const r = await withRepo(req, reply); if (!r) return;
-    const body = z.object({ authorized: z.literal(true) }).safeParse(req.body);
-    if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita.' });
+    // Atado a lo que viste: el commit exacto de main y el remoto. Si cualquiera cambió (otros commits, otro remoto), no se publica.
+    const body = z.object({ authorized: z.literal(true), expectedMain: z.string().regex(/^[0-9a-f]{40}$/), expectedRemoteUrl: z.string().max(300).nullable() }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita y el commit de main y el remoto que viste.' });
     try {
+      const st = await repoStatus(r.path);
+      if (st.mainCommit !== body.data.expectedMain || (st.remoteUrl ?? null) !== body.data.expectedRemoteUrl) return reply.code(409).send({ error: `«${st.mainBranch ?? 'main'}» o su remoto cambiaron desde que los viste (ahora ${st.mainCommit?.slice(0, 7) ?? '—'} → ${st.remoteUrl ?? 'sin remoto'}): no se ha publicado nada. Revisa y vuelve a publicar.`, code: 'stale_state' });
       // Mismo servicio que la capacidad «publish_main» del Asistente (con auditoría de la política git_push).
       const { slug, projectId } = req.params as any;
-      const res = await publishProjectMain(slug, projectId); app.log.info({ path: r.path, remote: res.remote }, 'main publicada'); return res;
+      const res = await publishProjectMain(slug, projectId, body.data.expectedMain); app.log.info({ path: r.path, remote: res.remote }, 'main publicada'); return res;
     } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
 

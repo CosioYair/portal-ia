@@ -3,6 +3,8 @@ import { DEFAULT_PIPELINE } from '@portal-ia/domain';
 import type { DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, PendingDecisionsSummary, Process, RestoreSupersededResult, StoryDecisionHistory, SupersededDecision } from '@portal-ia/domain';
 import { backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { ensureOpsParsed } from './delegation.ts';
+import { config } from '../config.ts';
+import { processVersion } from './revision.ts';
 
 /** Error con código HTTP para que la ruta lo traduzca tal cual. */
 export class InboxError extends Error {
@@ -37,7 +39,7 @@ function requestedBy(p: Process): string {
 export function decisionsFromProcess(slug: string, p: Process): PendingDecision[] {
   const make = (kind: PendingDecisionKind, createdAt: string, extra: Pick<PendingDecision, 'estimatedCost' | 'impact' | 'approveEffect' | 'denyEffect'>): PendingDecision => ({
     id: `${kind}:${p.id}`, kind, title: p.title, workspaceSlug: slug, projectId: p.projectId, processId: p.id, requestedBy: requestedBy(p), createdAt,
-    storyId: p.backlogItemId ?? null, iteration: null, supersededCount: 0, ...extra
+    storyId: p.backlogItemId ?? null, iteration: null, supersededCount: 0, ...extra, processVersion: processVersion(p)
   });
 
   if (p.status === 'pending_authorization') {
@@ -209,8 +211,12 @@ export function assertNotSuperseded(slug: string, p: Process): void {
 
 type Call = { status: number; body: Record<string, any> | null };
 
-async function call(app: FastifyInstance, method: 'GET' | 'POST', url: string, payload?: unknown): Promise<Call> {
-  const res = await app.inject({ method, url, payload: payload as any });
+/**
+ * Llamada interna a la API del Portal. Decidir aquí ejecuta la misma acción que su pantalla, por su misma ruta (con sus
+ * comprobaciones): con las credenciales del propietario que decidió (`auth`), sin otra vía ni otra identidad.
+ */
+async function call(app: FastifyInstance, method: 'GET' | 'POST', url: string, payload?: unknown, auth: Record<string, string> = {}): Promise<Call> {
+  const res = await app.inject({ method, url, payload: (payload ?? (method === 'POST' ? {} : undefined)) as any, headers: { host: `127.0.0.1:${config.port}`, ...auth } });
   let body: Record<string, any> | null = null;
   try { body = res.body ? JSON.parse(res.body) : null; } catch { body = null; }
   return { status: res.statusCode, body };
@@ -272,11 +278,13 @@ export async function summarizePendingDecisions(app: FastifyInstance, slug: stri
  * (autorizar, cancelar, aplicar, rechazar, integrar, publicar, aplicar propuestas al backlog), de modo que
  * validaciones, auditoría y efectos son idénticos. Solo comprueba antes que la decisión siga pendiente.
  */
-export async function decide(app: FastifyInstance, slug: string, kind: PendingDecisionKind, processId: string, verdict: DecisionVerdict, reason?: string): Promise<InboxDecisionResult> {
+export async function decide(app: FastifyInstance, slug: string, kind: PendingDecisionKind, processId: string, verdict: DecisionVerdict, reason?: string, auth: Record<string, string> = {}, seenVersion?: string): Promise<InboxDecisionResult> {
   const p = await fetchProcess(app, slug, processId);
   if (!p) throw new InboxError(404, 'El proceso no existe.');
   const current = decisionsFromProcess(slug, p).find(d => d.kind === kind);
   if (!current) throw new InboxError(409, 'Esta decisión ya no está pendiente: el proceso cambió de estado.');
+  // Se decide sobre lo que viste: si el proceso cambió desde entonces (otra pestaña, el lote, el equipo), no se hace nada.
+  if (seenVersion && seenVersion !== ((p as any).version ?? processVersion(p))) throw new InboxError(409, 'Esta decisión cambió desde que la viste (el proceso avanzó): no se ha hecho nada. Revísala de nuevo.');
   const superseded = supersededMessage(slug, p);
   if (superseded) throw new InboxError(409, superseded);
   if (verdict === 'deny' && current.denyEffect === null) throw new InboxError(400, 'Esta decisión no se puede denegar desde aquí: el proceso original tampoco tiene esa acción.');
@@ -286,22 +294,22 @@ export async function decide(app: FastifyInstance, slug: string, kind: PendingDe
   switch (kind) {
     case 'process_authorization':
       res = verdict === 'approve'
-        ? await call(app, 'POST', `${base}/authorize`, { budgetUsd: authorizationBudget(p), authorized: true, ...(p.kind === 'story_execution' ? { pipeline: DEFAULT_PIPELINE } : {}) })
-        : await call(app, 'POST', `${base}/cancel`);
+        ? await call(app, 'POST', `${base}/authorize`, { budgetUsd: authorizationBudget(p), authorized: true, ...(p.kind === 'story_execution' ? { pipeline: DEFAULT_PIPELINE } : {}) }, auth)
+        : await call(app, 'POST', `${base}/cancel`, {}, auth);
       break;
     case 'apply_diff':
       res = verdict === 'approve'
-        ? await call(app, 'POST', `${base}/apply`, { authorized: true })
-        : await call(app, 'POST', `${base}/reject`, { reason });
+        ? await call(app, 'POST', `${base}/apply`, { authorized: true }, auth)
+        : await call(app, 'POST', `${base}/reject`, { reason }, auth);
       break;
     case 'integrate':
-      res = await call(app, 'POST', `${base}/merge`, { authorized: true });
+      res = await call(app, 'POST', `${base}/merge`, { authorized: true }, auth);
       break;
     case 'publish':
-      res = await call(app, 'POST', `${base}/publish`, { authorized: true });
+      res = await call(app, 'POST', `${base}/publish`, { authorized: true }, auth);
       break;
     case 'backlog_proposal':
-      res = await call(app, 'POST', `${base}/backlog-ops/apply`, { authorized: true });
+      res = await call(app, 'POST', `${base}/backlog-ops/apply`, { authorized: true }, auth);
       break;
   }
   if (res.status < 200 || res.status >= 300) {

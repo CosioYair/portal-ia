@@ -32,7 +32,8 @@ export async function repoStatus(repoPath: string): Promise<RepoStatus> {
     else { ahead = -1; } // la rama principal nunca se publicó
   }
   const headCommit = hasCommits ? await git(cwd, ['rev-parse', '--short', 'HEAD']).catch(() => null) : null;
-  return { path: cwd, isGit, isPortalRuntime, branch, mainBranch: main, hasMain, hasCommits, dirty: dirtyFiles > 0, dirtyFiles, eolOnly, remote, remoteUrl: url, aheadOfRemote: ahead, behindRemote: behind, headCommit, storyBranches: all.filter(b => b.startsWith('portal-ia/')) };
+  const mainCommit = main ? await git(cwd, ['rev-parse', '--verify', '-q', `refs/heads/${main}`]).then(x => x.trim() || null).catch(() => null) : null;
+  return { path: cwd, isGit, isPortalRuntime, branch, mainBranch: main, hasMain, hasCommits, dirty: dirtyFiles > 0, dirtyFiles, eolOnly, remote, remoteUrl: url, aheadOfRemote: ahead, behindRemote: behind, headCommit, mainCommit, storyBranches: all.filter(b => b.startsWith('portal-ia/')) };
 }
 
 /** Crea la rama principal `main` a partir de la rama activa (repositorios que nacieron sin main) y la deja activa. */

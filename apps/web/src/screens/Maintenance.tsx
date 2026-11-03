@@ -6,7 +6,8 @@ import { useApp } from '../lib/store.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Chip, Icon, Notice, Spinner } from '../components/ui.tsx';
 import { EmptyState, PageHeader, Stat, Tile, type Tone } from '../components/kit.tsx';
-import { OwnerPairing, OwnerStatus, useOwner } from '../components/OwnerPairing.tsx';
+import { useOwner } from '../components/OwnerPairing.tsx';
+import { ownerNeeded } from '../lib/owner.ts';
 
 /**
  * Revisión del proyecto: ramas (del remoto y locales), carpetas de trabajo, historias y lotes frente a main. Revisar es
@@ -46,7 +47,6 @@ export function Maintenance() {
   const prevStatus = useRef<string | null>(null);
   const owner = useOwner(); const isOwner = owner === true;
   const [others, setOthers] = useState<MaintenancePlan[]>([]); // otras revisiones pendientes del proyecto (al ejecutar una, las demás dejan de valer)
-  const paired = () => { flash('Navegador vinculado: ya puedes decidir aquí'); requestAnimationFrame(() => (document.getElementById('mnt-confirm-h') ?? document.querySelector<HTMLElement>('main h1'))?.focus()); };
 
   // Sin id: la última revisión del proyecto (o ninguna). Con id: esa.
   useEffect(() => {
@@ -160,13 +160,11 @@ export function Maintenance() {
       <div className="sr-only" role="status" aria-live="polite">{announce}</div>
       <PageHeader icon={Icon.git()} tone="project" eyebrow={`${ws.name} · ${plan?.projectName ?? project.name}`} title="Revisión del proyecto"
         description="Ramas, carpetas de trabajo y backlog frente a main. Revisar no cambia nada; solo se ejecuta lo que elijas y autorices."
-        actions={<button type="button" className="btn btn-secondary" onClick={() => void review()} disabled={busy !== null || plan?.status === 'running' || !isOwner} aria-describedby={owner === false ? 'mnt-owner' : undefined}>{busy === 'review' ? <span className="spin" /> : Icon.history()}{plan ? 'Revisar de nuevo' : 'Revisar ahora'}</button>} />
-      {owner === false && <OwnerPairing id="mnt-owner" what="preparar, ejecutar o rechazar una revisión" onPaired={paired} />}
-      {owner === true && <OwnerStatus />}
+        actions={<button type="button" className="btn btn-secondary" onClick={() => isOwner ? void review() : ownerNeeded()} disabled={busy !== null || plan?.status === 'running'}>{busy === 'review' ? <span className="spin" /> : Icon.history()}{plan ? 'Revisar de nuevo' : 'Revisar ahora'}</button>} />
       {others.length > 0 && <Notice kind="info">Hay {others.length === 1 ? 'otra revisión pendiente' : `${others.length} revisiones pendientes más`} de este proyecto ({others.map((o, i) => <span key={o.id}>{i ? ', ' : ''}<Link className="lnk" to={`/mantenimiento/${o.id}`}>{o.intent?.kind === 'close_stage' ? 'cierre de etapa' : 'revisión'} del {new Date(o.createdAt).toLocaleString('es')}{o.createdBy === 'assistant' || o.source ? ', pedida al Asistente' : ''}</Link></span>)}). Al ejecutar una, las demás dejan de valer.</Notice>}
       {error && <Notice kind="err">{error}</Notice>}
       {loading && <Spinner />}
-      {!loading && !plan && <div className="card"><EmptyState art="gears" title="Aún no hay ninguna revisión" action={<button type="button" className="btn btn-primary" onClick={() => void review()} disabled={busy !== null || !isOwner} aria-describedby={owner === false ? 'mnt-owner' : undefined}>{Icon.history()}Revisar ahora</button>}>
+      {!loading && !plan && <div className="card"><EmptyState art="gears" title="Aún no hay ninguna revisión" action={<button type="button" className="btn btn-primary" onClick={() => isOwner ? void review() : ownerNeeded()} disabled={busy !== null}>{Icon.history()}Revisar ahora</button>}>
         Compara cada rama (en el remoto y en este equipo), cada carpeta de trabajo y cada historia abierta con main, y te propone qué cerrar o limpiar. No cambia nada hasta que lo autorices.
       </EmptyState></div>}
       {plan && <>
@@ -248,10 +246,10 @@ export function Maintenance() {
             {showErrors && missingReason.length > 0 && <Notice kind="warn">Falta el motivo en {missingReason.length} objetivo(s): {missingReason.map(i => i.name).join(' · ')}.</Notice>}
             <label className="ck"><input className="cb" type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} disabled={!selected.length} /><span>Autorizo exactamente estas {selected.length} acción(es) sobre «{plan.projectName}»{plan.intent?.kind === 'close_stage' && common.trim() ? <> con el motivo «{common.trim()}»</> : null}. Justo antes de ejecutar se comprueba de nuevo el estado real; lo que haya cambiado no se toca. Nada se fuerza.</span></label>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              <button type="button" className="btn btn-primary" disabled={!consent || !selected.length || busy !== null || !isOwner} aria-describedby={owner === false ? 'mnt-owner-needed' : undefined} onClick={() => void run()}>{busy === 'run' ? <span className="spin spin-light" /> : Icon.check()}{plan.status === 'partial' ? 'Reanudar lo elegido' : 'Ejecutar lo elegido'}</button>
-              {plan.status === 'proposed' && <button type="button" className="btn btn-ghost" disabled={busy !== null || !isOwner} aria-describedby={owner === false ? 'mnt-owner-needed' : undefined} onClick={() => void reject()}>Rechazar la revisión</button>}
+              <button type="button" className="btn btn-primary" disabled={!consent || !selected.length || busy !== null} aria-describedby={owner === false ? 'mnt-owner-needed' : undefined} onClick={() => isOwner ? void run() : ownerNeeded()}>{busy === 'run' ? <span className="spin spin-light" /> : Icon.check()}{plan.status === 'partial' ? 'Reanudar lo elegido' : 'Ejecutar lo elegido'}</button>
+              {plan.status === 'proposed' && <button type="button" className="btn btn-ghost" disabled={busy !== null} aria-describedby={owner === false ? 'mnt-owner-needed' : undefined} onClick={() => isOwner ? void reject() : ownerNeeded()}>Rechazar la revisión</button>}
             </div>
-            {owner === false && <div id="mnt-owner-needed" className="small muted">Para autorizar o rechazar, vincula antes este navegador como propietario (arriba).</div>}
+            {owner === false && <div id="mnt-owner-needed" className="small muted">Para autorizar o rechazar hace falta vincular este navegador como propietario: al pulsar, se abre «Vincular este navegador».</div>}
           </div>
         </section>}
       </>}
