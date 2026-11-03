@@ -7,6 +7,7 @@ import type { OrgApplication, OrgBriefAttachment, OrgChange, OrgDecision, OrgEva
 import type { ClaudeCodeRun, ClaudeCodeStatusView, ClaudeCodeUsage, ClaudeCodeUsageReport, ClaudeCodeWorkerView, ClaudeCodeWorkspaceView, ExecutionBackend } from '@portal-ia/domain';
 import type { Assignment, AssistantConversation, ConversationArtifact, ConversationDecision, ConversationStage } from '@portal-ia/domain';
 import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
+import { ownerToken, setOwnerToken } from './owner.ts';
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public body?: any) { super(message); }
@@ -35,6 +36,8 @@ function withSeenVersion(url: string, init?: RequestInit): RequestInit | undefin
 async function request<T>(url: string, init0?: RequestInit): Promise<T> {
   const init = withSeenVersion(url, init0);
   const headers: Record<string, string> = init?.body ? { 'Content-Type': 'application/json' } : {};
+  // Sesión del propietario de este navegador (decidir revisiones y operaciones del Asistente).
+  const owner = ownerToken(); if (owner) headers['X-Portal-Owner'] = owner;
   // Las lecturas no pueden quedarse colgadas: un sondeo sin respuesta detendría la actualización de la pantalla.
   const isRead = !init?.method || init.method === 'GET';
   const sentAt = Date.now();
@@ -51,6 +54,8 @@ async function request<T>(url: string, init0?: RequestInit): Promise<T> {
   // Solo lo que la pantalla va a mostrar cuenta como «visto»: el estado que acompaña a un 409 «stale_view» no (un segundo
   // clic en el mismo botón antiguo también se rechaza hasta que la pantalla se actualiza y lo enseña).
   if (res.ok) noteVersions(body);
+  // La sesión ya no vale (caducó o se cerró): la pantalla vuelve a ofrecer vincular este navegador.
+  if (res.status === 401 && body?.code === 'owner_required' && owner) setOwnerToken(null);
   if (!res.ok) throw new ApiError(res.status, body?.error ?? body?.lastError?.message ?? `Error ${res.status}`, body);
   return body as T;
 }
@@ -339,6 +344,11 @@ export const api = {
   maintenancePlan: (slug: string, id: string) => request<MaintenancePlan>(`/api/workspaces/${slug}/maintenance/plans/${id}`),
   executeMaintenancePlan: (slug: string, id: string, selection: MaintenanceSelection[]) => request<MaintenancePlan>(`/api/workspaces/${slug}/maintenance/plans/${id}/execute`, { method: 'POST', body: JSON.stringify({ authorized: true, selection }) }),
   rejectMaintenancePlan: (slug: string, id: string) => request<MaintenancePlan>(`/api/workspaces/${slug}/maintenance/plans/${id}/reject`, { method: 'POST', body: '{}' }),
+  ownerSession: () => request<{ owner: boolean; file: string }>('/api/owner/session'),
+  requestOwnerCode: () => request<{ ok: true; expiresInSec: number; file: string | null; problem: string | null }>('/api/owner/pairing', { method: 'POST', body: '{}' }),
+  pairOwner: (code: string) => request<{ owner: true; token: string; expiresAt: string }>('/api/owner/pair', { method: 'POST', body: JSON.stringify({ code }) }),
+  ownerLogout: () => request<{ owner: false }>('/api/owner/logout', { method: 'POST', body: '{}' }),
+  ownerLogoutAll: () => request<{ owner: false; closed: number }>('/api/owner/logout-all', { method: 'POST', body: '{}' }),
   closeBatch: (slug: string, projectId: string, id: string, reason: string) => request<BatchView>(`/api/workspaces/${slug}/projects/${projectId}/batches/${id}/close`, { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) }),
   batchControl: (slug: string, id: string, action: 'pause' | 'resume' | 'cancel' | 'revoke', body: Record<string, unknown> = {}) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/${action}`, { method: 'POST', body: JSON.stringify(action === 'resume' ? { ...body, authorized: true } : body) }),
   /** `revisions`: commit que tenías delante al decidir (p. ej. el de la vista previa): si cambió, el servidor no lo aplica. */

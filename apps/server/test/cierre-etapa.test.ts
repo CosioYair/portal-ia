@@ -110,7 +110,8 @@ projectsRepo(S).setRepository(project.id, repo, 'main');
 
 const app = await buildApp();
 after(async () => { stopBatchScheduler(); await app.close(); });
-const inject = async (method: string, url: string, payload?: unknown) => { const r = await app.inject({ method: method as any, url, payload: payload as any }); return { status: r.statusCode, json: r.json() as any }; };
+const OWNER = await (await import('./fixtures/owner.ts')).ownerHeaders(); // decidir revisiones y operaciones exige la sesión del propietario
+const inject = async (method: string, url: string, payload?: unknown) => { const r = await app.inject({ method: method as any, url, payload: (payload ?? (method === 'POST' ? {} : undefined)) as any, headers: OWNER }); return { status: r.statusCode, json: r.json() as any }; };
 const waitDone = async (id: string) => { for (let i = 0; i < 400; i++) { const p = (await inject('GET', `${W}/maintenance/plans/${id}`)).json; if (p.status !== 'running') return p; await new Promise(r => setTimeout(r, 50)); } throw new Error('no terminó'); };
 const remoteHeads = () => g(repo, 'ls-remote', '--heads', 'origin').split('\n').filter(Boolean).map(l => l.split('refs/heads/')[1]).sort();
 const REASON = 'Cierre de etapa: se adopta main como línea base oficial.';

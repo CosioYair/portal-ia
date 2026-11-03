@@ -134,11 +134,16 @@ export function recoverInterruptedPlans(): number {
   }
   return n;
 }
+/** Todas las revisiones pendientes del proyecto (sin el límite de la lista: muchas revisiones nuevas no esconden una pendiente). */
+export function pendingPlans(slug: string, projectId: string): MaintenancePlan[] {
+  return (ensure(slug).prepare(`SELECT id FROM maintenance_plans WHERE project_id = ? AND status = 'proposed' ORDER BY created_at DESC`).all(projectId) as any[]).map(r => load(slug, r.id)).filter((p): p is MaintenancePlan => !!p);
+}
 export function listPlans(slug: string, projectId: string): MaintenancePlan[] {
   return (ensure(slug).prepare('SELECT id FROM maintenance_plans WHERE project_id = ? ORDER BY created_at DESC LIMIT 20').all(projectId) as any[]).map(r => getPlan(slug, r.id));
 }
 export function setPlanSource(slug: string, id: string, source: NonNullable<MaintenancePlan['source']>) {
-  const p = load(slug, id); if (p && !p.source) save(slug, { ...p, source });
+  // Una revisión que preparó el propietario nunca pasa a la tarjeta de una conversación (cualquiera puede escribir al Asistente).
+  const p = load(slug, id); if (p && !p.source && p.createdBy !== 'owner') save(slug, { ...p, source });
 }
 
 // ------------------------------------------------------------------------------------------------------------ revisión
@@ -567,9 +572,10 @@ const signature = (p: Pick<MaintenancePlan, 'repo' | 'items' | 'counts' | 'inten
  * Revisión de solo lectura → plan persistido (no ejecuta nada ni pide autorización); las anteriores sin ejecutar del proyecto
  * quedan sustituidas. Con `reuseMinutes` (el Asistente), si hay una reciente sin ejecutar que mostraría exactamente lo mismo
  * (main, remoto, cada objetivo) y no es de otra conversación, se reutiliza. Con `from` («Revisar de nuevo»), la tarjeta de la
- * conversación que la propuso pasa a la revisión nueva (si la anterior no llegó a ejecutar nada).
+ * conversación que la propuso pasa a la revisión nueva (si la anterior no llegó a ejecutar nada). `owner`: la pide el
+ * propietario con su sesión (la ruta HTTP); sin ella no se sustituye un cierre de etapa pendiente.
  */
-export async function createPlan(slug: string, projectId: string, opts: { reuseMinutes?: number; conversationId?: string | null; from?: string | null; closeStage?: { reason: string; source?: 'owner' | 'assistant' } | null } = {}): Promise<MaintenancePlan> {
+export async function createPlan(slug: string, projectId: string, opts: { reuseMinutes?: number; conversationId?: string | null; from?: string | null; closeStage?: { reason: string; source?: 'owner' | 'assistant' } | null; owner?: boolean } = {}): Promise<MaintenancePlan> {
   const project = projectsRepo(slug).list().find(p => p.id === projectId);
   if (!project) throw err(404, 'Proyecto no encontrado en esta empresa.', 'not_found');
   const inv = await inventory(slug, projectId);
@@ -577,9 +583,9 @@ export async function createPlan(slug: string, projectId: string, opts: { reuseM
   const t = now();
   const draft: MaintenancePlan = {
     id: crypto.randomUUID(), workspace: slug, projectId, projectName: project.name, createdAt: t, updatedAt: t, status: 'proposed',
-    repo: { path: inv.cwd, mainBranch: inv.main, mainSha: inv.mainSha, remote: inv.remote, remoteUrl: inv.remoteUrl, remoteAvailable: !!inv.remoteHeads, remoteError: inv.remote ? inv.remoteError : 'El repositorio no tiene remoto configurado.' },
+    repo: { path: inv.cwd, mainBranch: inv.main, mainSha: inv.mainSha, remote: inv.remote, remoteUrl: inv.remoteUrl, remoteAvailable: !!inv.remoteHeads, remoteError: inv.remote ? inv.remoteError : 'El repositorio no tiene remoto configurado.', pushDiffers: inv.pushDiffers },
     counts: { remoteBranches: inv.remoteHeads?.size ?? 0, localBranches: inv.local.size, worktrees: inv.worktrees.length, openStories: inv.stories.filter(s => OPEN_STORY(s.status)).length, openBatches: items.filter(i => i.kind === 'batch').length },
-    items, source: null, execution: null
+    items, source: null, execution: null, createdBy: opts.owner ? 'owner' : 'assistant'
   };
   // Cierre de etapa: pedido ahora, o heredado de la revisión que se repite («Revisar de nuevo»).
   const fromPlan = opts.from ? load(slug, opts.from) : null;
@@ -588,8 +594,10 @@ export async function createPlan(slug: string, projectId: string, opts: { reuseM
   if (stage) { draft.intent = stage; draft.prepared = prepareStageClosure(items, stage.reason); }
   if (opts.reuseMinutes) {
     const sig = signature(draft);
+    // Sin la sesión del propietario solo se reutiliza lo de esta misma conversación (o lo que preparó el Asistente y aún no
+    // tiene tarjeta), nunca una revisión que preparó el propietario.
     const recent = listPlans(slug, projectId).find(p => p.status === 'proposed' && Date.now() - Date.parse(p.createdAt) < opts.reuseMinutes! * 60_000
-      && (!p.source || (!!opts.conversationId && p.source.conversationId === opts.conversationId)) && signature(p) === sig);
+      && (opts.owner || p.createdBy !== 'owner') && (!p.source || (!!opts.conversationId && p.source.conversationId === opts.conversationId)) && signature(p) === sig);
     if (recent) return recent;
   }
   const from = opts.from ? load(slug, opts.from) : null;
@@ -600,8 +608,11 @@ export async function createPlan(slug: string, projectId: string, opts: { reuseM
   const plan = save(slug, draft);
   // La anterior pierde su tarjeta antes de caducar (así la tarjeta no dice «sustituida»: pasa a la nueva).
   if (carry && from) save(slug, { ...from, source: null, ...(from.status === 'proposed' ? { status: 'stale' as const, supersededBy: plan.id } : {}) });
+  // Sin la sesión del propietario (el Asistente: cualquiera puede escribirle, y en cualquier conversación) no se sustituye
+  // NADA: la revisión nueva queda al lado de las pendientes (la pantalla avisa de que hay varias; al ejecutar una, las
+  // demás dejan de valer). Solo el propietario sustituye («Revisar ahora» / «Revisar de nuevo»).
   const mine = carry?.conversationId ?? opts.conversationId ?? null;
-  for (const r of ensure(slug).prepare(`SELECT id FROM maintenance_plans WHERE project_id = ? AND status = 'proposed' AND id <> ?`).all(projectId, plan.id) as any[]) {
+  if (opts.owner) for (const r of ensure(slug).prepare(`SELECT id FROM maintenance_plans WHERE project_id = ? AND status = 'proposed' AND id <> ?`).all(projectId, plan.id) as any[]) {
     const old = load(slug, r.id); if (!old) continue;
     if (old.source && old.source.conversationId && old.source.conversationId !== mine) continue; // la tarjeta de otra conversación no se anula por esta
     save(slug, { ...old, status: 'stale', supersededBy: plan.id });
@@ -685,8 +696,10 @@ async function runPlan(slug: string, plan: MaintenancePlan): Promise<void> {
   const todo = ex.selection.filter(s => s.option !== 'keep' && !ex.outcomes.some(o => o.itemId === s.itemId && (o.status === 'done' || o.status === 'noop')));
   // Estado real JUSTO ANTES de ejecutar: si main o el repositorio cambiaron, el plan caduca entero; si un objetivo cambió, ese no se toca.
   let inv = await inventory(slug, projectId);
-  if (inv.mainSha !== plan.repo.mainSha || inv.cwd !== plan.repo.path) {
-    for (const s of todo) record({ itemId: s.itemId, option: s.option, status: 'skipped', message: inv.cwd !== plan.repo.path ? 'No se ejecutó: el proyecto apunta ahora a otro repositorio. Revisa de nuevo.' : `No se ejecutó: main cambió desde la revisión (${plan.repo.mainSha?.slice(0, 7)} → ${inv.mainSha?.slice(0, 7)}). Revisa de nuevo.` }, s.itemId);
+  // También el remoto: con otra dirección (o un pushurl distinto) las mismas ramas serían de OTRO repositorio.
+  const remoteMoved = inv.remote !== plan.repo.remote || inv.remoteUrl !== plan.repo.remoteUrl || inv.pushDiffers !== !!plan.repo.pushDiffers;
+  if (inv.mainSha !== plan.repo.mainSha || inv.cwd !== plan.repo.path || remoteMoved) {
+    for (const s of todo) record({ itemId: s.itemId, option: s.option, status: 'skipped', message: inv.cwd !== plan.repo.path ? 'No se ejecutó: el proyecto apunta ahora a otro repositorio. Revisa de nuevo.' : remoteMoved && inv.mainSha === plan.repo.mainSha ? `No se ejecutó: el remoto cambió desde la revisión (${plan.repo.remote ?? '—'} ${plan.repo.remoteUrl ?? ''} → ${inv.remote ?? '—'} ${inv.remoteUrl ?? ''}${inv.pushDiffers ? ', con otra dirección de publicación' : ''}). Revisa de nuevo.` : `No se ejecutó: main cambió desde la revisión (${plan.repo.mainSha?.slice(0, 7)} → ${inv.mainSha?.slice(0, 7)}). Revisa de nuevo.` }, s.itemId);
     const cur = load(slug, plan.id)!; save(slug, { ...cur, status: 'stale', execution: { ...cur.execution!, finishedAt: now() } });
     return;
   }

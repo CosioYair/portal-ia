@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, type AssistantAction, type AssistantMessage } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
+import { OwnerPairing, useOwner } from './OwnerPairing.tsx';
 
 const STATUS: Record<AssistantAction['status'], { label: string; tone: '' | 'ok' | 'warn' | 'err' }> = {
   pending: { label: 'Pendiente de tu autorización', tone: 'warn' }, running: { label: 'Ejecutando…', tone: 'warn' },
@@ -11,12 +12,14 @@ const STATUS: Record<AssistantAction['status'], { label: string; tone: '' | 'ok'
 
 /**
  * Operación del Portal propuesta por el Asistente: muestra exactamente qué se hará (vista previa calculada en el servidor),
- * qué queda fuera y qué lo impide. Solo se ejecuta al autorizarla aquí; rechazarla no cambia nada.
+ * qué queda fuera y qué lo impide. Solo se ejecuta al autorizarla aquí; rechazarla no cambia nada. Decidir exige que
+ * este navegador esté vinculado como propietario.
  */
 export function OperationCard({ msgId, action, onResolved }: { msgId: string; action: AssistantAction; onResolved: (m: AssistantMessage) => void }) {
   const { flash } = useApp();
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState<'approve' | 'reject' | null>(null);
+  const owner = useOwner();
   const op = action.operation!; const pv = op.preview; const st = STATUS[action.status];
   const decide = async (decision: 'approve' | 'reject') => {
     setBusy(decision);
@@ -33,10 +36,11 @@ export function OperationCard({ msgId, action, onResolved }: { msgId: string; ac
       {pv.blockers.map((b, i) => <Notice key={i} kind="warn">{b}</Notice>)}
       {action.status === 'pending' && pv.reviewPath && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <Link className="btn btn-primary btn-sm" to={pv.reviewPath}>Abrir la revisión para elegir y autorizar {Icon.arrow()}</Link>
-        <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => decide('reject')}>Rechazar</button>
-        <span className="small muted">Nada se ejecuta hasta que elijas y autorices en la revisión.</span>
+        {owner === true && <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => decide('reject')}>Rechazar</button>}
+        <span className="small muted">Nada se ejecuta hasta que elijas y autorices en la revisión.{owner === false ? ' Para rechazarla o autorizarla, vincula allí este navegador como propietario.' : ''}</span>
       </div>}
-      {action.status === 'pending' && !pv.reviewPath && <>
+      {action.status === 'pending' && !pv.reviewPath && owner === false && <OwnerPairing compact what="autorizar o rechazar esta operación" />}
+      {action.status === 'pending' && !pv.reviewPath && owner === true && <>
         <label className="ck small"><input className="cb" type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} /><span>Autorizo esta operación tal como se describe arriba (sin forzar y sin otras ramas).</span></label>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn btn-primary btn-sm" disabled={!consent || busy !== null} onClick={() => decide('approve')}>{busy === 'approve' ? <span className="spin spin-light" /> : null}Autorizar y ejecutar</button>

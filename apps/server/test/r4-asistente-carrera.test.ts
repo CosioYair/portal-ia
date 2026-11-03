@@ -30,7 +30,8 @@ const S = 'portal-ia';
 const portal = projectsRepo(S).list()[0];
 const app = await buildApp();
 after(async () => { await app.close(); });
-const inject = async (method: string, u: string, payload?: unknown) => { const r = await app.inject({ method: method as any, url: u, payload: payload as any }); return { status: r.statusCode, body: r.body ? r.json() : null }; };
+const OWNER = await (await import('./fixtures/owner.ts')).ownerHeaders(); // decidir revisiones y operaciones exige la sesión del propietario
+const inject = async (method: string, u: string, payload?: unknown) => { const r = await app.inject({ method: method as any, url: u, payload: (payload ?? (method === 'POST' ? {} : undefined)) as any, headers: OWNER }); return { status: r.statusCode, body: r.body ? r.json() : null }; };
 const seen: { system: string; user: string }[] = [];
 const original = mockAdapter.complete.bind(mockAdapter);
 (mockAdapter as any).complete = async (k: string, o: any, req: any, s?: AbortSignal) => { seen.push({ system: String(req.system ?? ''), user: String(req.user ?? '') }); return original(k, o, req, s); };

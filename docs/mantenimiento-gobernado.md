@@ -126,9 +126,9 @@ lote siga abierto, sus ramas y carpetas de trabajo no se pueden borrar.
 
 ## 6. Límites conocidos
 
-- Las API del Portal escuchan solo en `127.0.0.1` y no tienen sesión de usuario: cualquier programa local (o una página
-  abierta en el navegador del mismo equipo que llame a `localhost`) podría invocarlas. Es anterior a esta función y afecta
-  a todo el Portal; la ejecución sigue exigiendo `authorized: true` y una selección concreta.
+- Preparar, ejecutar, reanudar y rechazar una revisión, y decidir las operaciones del Asistente, exigen la **sesión del
+  propietario** (sección 10). El resto de las API del Portal escuchan solo en `127.0.0.1` y siguen sin sesión de usuario:
+  un programa local o una página de otro puerto local podría invocarlas (es anterior a esta función).
 - El Portal usa las credenciales de git del equipo: si no tienen permiso para borrar ramas en GitHub, la operación se
   detiene con el permiso exacto que falta; el Portal no pide ni guarda credenciales nuevas.
 - Las reglas de protección de GitHub mandan: una rama protegida allí no se borra desde aquí.
@@ -201,3 +201,58 @@ fallaba. Ahora publica con refspec explícito y fija el seguimiento con `git con
 La revisión real de «Desarrollo del Portal» queda preparada en el Portal en marcha, sin ejecutar nada. El propietario la
 abre desde la conversación del Asistente (tarjeta «Revisión del proyecto» › «Abrir la revisión para elegir y autorizar»),
 desde Resumen › Repositorio › «Revisar ramas y backlog» o desde la búsqueda (Ctrl+K), elige objetivo a objetivo y autoriza.
+
+## 10. Identidad del propietario
+
+Antes, `authorized: true` era solo un campo del cuerpo: cualquier programa del equipo, o cualquier página abierta en otro
+puerto de `localhost`/`127.0.0.1`, podía ejecutar, reanudar o rechazar una revisión copiando la selección de su GET, y
+sustituirla o rechazarla por la tarjeta del chat. Ahora (`services/ownerSession.ts`, `routes/owner.ts`):
+
+- **Vincular este navegador** (una vez por navegador): en la revisión, o en la tarjeta de una operación, «Generar un
+  código». Es de un solo uso, vale 5 minutos y tiene 100 bits: adivinarlo es imposible, así que no hay límite de intentos
+  y nadie puede bloquearte la vinculación a base de fallos. El Portal lo deja **solo fuera de la API**: en
+  `%LOCALAPPDATA%\Portal IA\codigo-propietario-<puerto>.txt` (tu perfil: otros usuarios de Windows no lo abren; se crea
+  de nuevo cada vez y se borra al usarlo y al arrancar) y en la ventana donde se arrancó (`npm start`). Si el perfil no se
+  puede escribir, la pantalla lo dice y el código queda solo en esa ventana (nunca en la carpeta del Portal, que otros
+  usuarios de Windows pueden leer); `PORTAL_OWNER_CODE_FILE` fija otro archivo. Un Portal con datos en una carpeta
+  temporal (pruebas, entornos aislados) lo deja junto a sus datos. La pantalla muestra la ruta («Copiar ruta»; se abre
+  pegándola en Win+R) y acepta el código pegado con el texto de alrededor.
+- **Sesión**: secreto aleatorio de 32 bytes que la interfaz guarda en el almacenamiento de su origen (otro puerto no lo
+  lee; una cookie, en cambio, el navegador la enviaría a cualquier puerto del mismo host) y envía en `X-Portal-Owner`. El
+  servidor guarda solo su hash (`owner_sessions`); caduca en 7 días. «Desvincular» cierra la de este navegador y «Cerrar
+  todas las sesiones», todas.
+- **Solo en la dirección del Portal** (su puerto, 4310): la interfaz de desarrollo (5173, el puerto que usa Vite en
+  cualquier proyecto) u otra copia no vinculan ni deciden (403 `foreign_port`): otra aplicación servida en ese puerto
+  podría leer la sesión guardada. Para vincular hace falta la interfaz construida (`npm run build`) servida por el Portal.
+  Escuchando en la red o detrás de un proxy (`PORTAL_HOST` no local) no se comprueba el puerto.
+- **Peticiones protegidas**: `POST …/maintenance/plans` (preparar, también «Revisar de nuevo» y el cierre de etapa),
+  `…/execute` (ejecutar y reanudar), `…/reject` y `POST /api/assistant/messages/:id/operations/:opId/:decision`. Exigen
+  cuerpo JSON (un formulario o texto de otra página: 415), el mismo origen si traen `Origin` (otra página local: 403) y la
+  sesión (401 `owner_required`). Sin ella no se toca nada: ni el documento del plan ni una referencia.
+- **El Asistente** (cualquiera puede escribirle, en cualquier conversación) sigue preparando revisiones desde el chat,
+  pero sin sesión **no sustituye ninguna**: la nueva queda al lado de las pendientes; nunca reutiliza ni enlaza a una
+  conversación una revisión que preparó el propietario (`createdBy: 'owner'`); y si en la conversación hay un **cierre de
+  etapa** pendiente, remite a él en vez de preparar otro. Solo el propietario sustituye («Revisar ahora» / «Revisar de
+  nuevo»). Si hay varias revisiones pendientes del proyecto, la pantalla lo avisa; al ejecutar una, las demás dejan de valer.
+- Con sesión, el servidor sigue comprobando lo de siempre: objetivos que existen en el plan, opción válida para cada uno,
+  nada protegido, motivo cuando cierra trabajo; justo antes de ejecutar, main, el repositorio y **el remoto** (nombre,
+  dirección y dirección de publicación: con otra, las mismas ramas serían de otro repositorio) —si cambiaron, todo se
+  omite y la revisión caduca— y la huella de cada objetivo; lo terminado, rechazado o caducado no se repite (409).
+
+Límites (no cambian con esto):
+- Un programa que se ejecuta con **tu** usuario de Windows y puede leer tus archivos podría leer el código o la base de
+  datos (y usar git directamente con tus credenciales); esto protege frente a quien solo puede hacer peticiones HTTP
+  (otras páginas del navegador, otros usuarios del equipo, los agentes del Portal, que solo tienen sus herramientas MCP).
+- Si el Portal está apagado y otra aplicación ocupa su puerto (4310) y abres esa dirección, esa aplicación podría leer la
+  sesión de este navegador: si ocurre, «Cerrar todas las sesiones».
+- El resto de la API sigue sin sesión (es anterior): p. ej. rechazar una iteración en Decisiones borra su rama sin
+  integrar, cerrar un lote, cancelar un encargo o una historia, publicar main o cambiar el remoto del proyecto. Nada de eso
+  ejecuta ni cambia una revisión (lo que cambie el repositorio o el backlog se omite al ejecutar), pero son efectos
+  parecidos por otro camino. Ampliar la sesión a esas acciones es el siguiente paso recomendado.
+- Permisos de Windows de la carpeta: si la carpeta del Portal hereda de `C:\` «Usuarios autentificados: Modificar»,
+  cualquier otra cuenta del equipo (p. ej. las del sandbox de Codex, `CodexSandboxOffline`/`CodexSandboxOnline`) podría
+  escribir su código o sus datos y saltarse cualquier comprobación local. Se corrige quitando la herencia y dejando solo
+  a tu usuario, SYSTEM y Administradores (decisión del propietario: no lo cambia el Portal).
+
+Pruebas: `test/seguridad-propietario.test.ts` (negativas con repositorio real; cada guardia tiene una prueba que falla si
+se quita) y aceptación en navegador real con una página atacante en otro puerto local.

@@ -43,7 +43,8 @@ const S = INTERNAL_WORKSPACE.slug;
 const project = projectsRepo(S).list()[0];
 const app = await buildApp();
 after(async () => { await app.close(); });
-const inject = (method: string, url: string, payload?: unknown) => app.inject({ method: method as any, url, payload: payload as any });
+const OWNER = await (await import('./fixtures/owner.ts')).ownerHeaders(); // decidir revisiones y operaciones exige la sesión del propietario
+const inject = (method: string, url: string, payload?: unknown) => app.inject({ method: method as any, url, payload: (payload ?? (method === 'POST' ? {} : undefined)) as any, headers: OWNER });
 
 // Repositorio con remoto «bare» local: 2 commits por publicar y una rama de historia que NO debe publicarse.
 const git = (cwd: string, cmd: string) => execSync(`git ${cmd}`, { cwd, encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();

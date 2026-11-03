@@ -115,6 +115,8 @@ npm start           # backend en http://127.0.0.1:4310 sirviendo también la int
 ```
 Abre **http://127.0.0.1:4310**.
 
+Para decidir revisiones del proyecto y operaciones del Asistente, vincula el navegador una vez como propietario («Vincula este navegador como propietario» › «Generar un código»): el código de un solo uso aparece en `%LOCALAPPDATA%\Portal IA\codigo-propietario-4310.txt` y en esta ventana, nunca en la página. Solo en la dirección del Portal (4310), no en la de desarrollo (5173). Detalle: `docs/mantenimiento-gobernado.md` §10.
+
 **Modo desarrollo** (recarga en caliente, dos procesos):
 ```bash
 npm run dev:server  # terminal 1 · backend con recarga

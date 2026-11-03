@@ -75,11 +75,15 @@ export interface MaintenancePlan {
   createdAt: string;
   updatedAt: string;
   status: MaintenancePlanStatus;
-  repo: { path: string; mainBranch: string | null; mainSha: string | null; remote: string | null; remoteUrl: string | null; remoteAvailable: boolean; remoteError: string | null };
+  repo: { path: string; mainBranch: string | null; mainSha: string | null; remote: string | null; remoteUrl: string | null; remoteAvailable: boolean; remoteError: string | null;
+    /** El remoto publica en otra dirección (pushurl) al revisar: si cambia antes de ejecutar, la revisión caduca. */
+    pushDiffers?: boolean };
   counts: { remoteBranches: number; localBranches: number; worktrees: number; openStories: number; openBatches: number };
   items: MaintenanceItem[];
   /** Conversación del Asistente que lo propuso (para mostrar allí el resultado). */
   source: { messageId: string; operationId: string; conversationId?: string | null } | null;
+  /** Quién la preparó: el propietario (con su sesión, en la pantalla) o el Asistente (desde el chat). Antiguas: sin dato. */
+  createdBy?: 'owner' | 'assistant' | null;
   /** «Revisar de nuevo» tras una ejecución parcial: lo que ya hizo la revisión anterior (la tarjeta cuenta ambas). */
   continuesFrom?: { planId: string; done: number } | null;
   /** Cierre de etapa decidido por el propietario: la revisión llega con lo que se puede cerrar ya elegido (sin autorizar nada). */

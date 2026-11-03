@@ -30,6 +30,7 @@ import { liveRoutes } from './routes/live.ts';
 import { agentsOsRoutes } from './routes/agentsOs.ts';
 import { externalAgentsRoutes } from './routes/externalAgents.ts';
 import { agentFilesRoutes } from './routes/agentFiles.ts';
+import { ownerRoutes } from './routes/owner.ts';
 import { VERSION } from './services/system.ts';
 
 /** Script principal del paquete de la interfaz que se sirve (p. ej. «index-BYW4Vz5N.js»), o null sin paquete construido. Se relee cada 10 s. */
@@ -45,7 +46,7 @@ export async function buildApp() {
   const app = Fastify({
     bodyLimit: 25 * 1024 * 1024, // adjuntos (imágenes) del asistente
     forceCloseConnections: true, // HU-144: al cerrar, no esperar a conexiones keep-alive/SSE (el puerto debe liberarse)
-    logger: { level: process.env.LOG_LEVEL ?? 'info', redact: ['req.headers.authorization', 'req.body.apiKey'] }
+    logger: { level: process.env.LOG_LEVEL ?? 'info', redact: ['req.headers.authorization', 'req.headers["x-portal-owner"]', 'req.body.apiKey', 'req.body.code'] }
   });
 
   // El frontend de desarrollo (Vite, puerto 5173) habla con este backend; en producción se sirve desde aquí mismo.
@@ -105,6 +106,7 @@ export async function buildApp() {
   await app.register(metricsRoutes);
   await app.register(gauntletRoutes);
   await app.register(batchRoutes);
+  await app.register(ownerRoutes);
   await app.register(maintenanceRoutes);
   await app.register(previewRoutes);
   await app.register(assignmentRoutes);

@@ -6,12 +6,14 @@ import { useApp } from '../lib/store.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Chip, Icon, Notice, Spinner } from '../components/ui.tsx';
 import { EmptyState, PageHeader, Stat, Tile, type Tone } from '../components/kit.tsx';
+import { OwnerPairing, OwnerStatus, useOwner } from '../components/OwnerPairing.tsx';
 
 /**
  * Revisión del proyecto: ramas (del remoto y locales), carpetas de trabajo, historias y lotes frente a main. Revisar es
  * de solo lectura. El propietario elige objetivo a objetivo (lo seguro viene marcado; lo que requiere decisión, en
  * «Conservar»; lo protegido no se puede elegir), ve el estado final esperado y autoriza exactamente esas acciones. Tras
  * ejecutar: primero lo que falló o no se tocó, la verificación independiente y cómo recuperar lo borrado.
+ * Preparar, ejecutar y rechazar exigen que este navegador esté vinculado como propietario (consultar, no).
  */
 const CATS: { id: MaintenanceCategory; tone: Tone; icon: () => ReactNode; hint: string }[] = [
   { id: 'safe', tone: 'ok', icon: () => Icon.check(), hint: 'Todo su contenido ya está en main: cerrarlo o borrarlo no pierde nada.' },
@@ -42,6 +44,9 @@ export function Maintenance() {
   const [undo, setUndo] = useState<{ prev: Record<string, MaintenanceOptionId>; count: number; of: string } | null>(null);
   const resultsRef = useRef<HTMLHeadingElement>(null); const rejectedRef = useRef<HTMLDivElement>(null);
   const prevStatus = useRef<string | null>(null);
+  const owner = useOwner(); const isOwner = owner === true;
+  const [others, setOthers] = useState<MaintenancePlan[]>([]); // otras revisiones pendientes del proyecto (al ejecutar una, las demás dejan de valer)
+  const paired = () => { flash('Navegador vinculado: ya puedes decidir aquí'); requestAnimationFrame(() => (document.getElementById('mnt-confirm-h') ?? document.querySelector<HTMLElement>('main h1'))?.focus()); };
 
   // Sin id: la última revisión del proyecto (o ninguna). Con id: esa.
   useEffect(() => {
@@ -50,6 +55,12 @@ export function Maintenance() {
       .then(p => { if (live) setPlan(p); }).catch(e => { if (live) setError(e.message); }).finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
   }, [ws.slug, project.id, planId]);
+  useEffect(() => {
+    if (!plan || (plan.status !== 'proposed' && plan.status !== 'partial')) { setOthers([]); return; }
+    let live = true;
+    api.maintenancePlans(ws.slug, project.id).then(l => { if (live) setOthers(l.filter(p => p.id !== plan.id && p.status === 'proposed')); }).catch(() => undefined);
+    return () => { live = false; };
+  }, [ws.slug, project.id, plan?.id, plan?.status]); // eslint-disable-line react-hooks/exhaustive-deps
   // Selección: sin ejecutar, lo seguro con su acción y lo demás en «Conservar». Ya ejecutada, lo que se eligió de verdad;
   // al reanudar, solo vuelve marcado lo que falló o no se tocó (lo que dejaste fuera sigue fuera).
   useEffect(() => {
@@ -149,10 +160,13 @@ export function Maintenance() {
       <div className="sr-only" role="status" aria-live="polite">{announce}</div>
       <PageHeader icon={Icon.git()} tone="project" eyebrow={`${ws.name} · ${plan?.projectName ?? project.name}`} title="Revisión del proyecto"
         description="Ramas, carpetas de trabajo y backlog frente a main. Revisar no cambia nada; solo se ejecuta lo que elijas y autorices."
-        actions={<button type="button" className="btn btn-secondary" onClick={() => void review()} disabled={busy !== null || plan?.status === 'running'}>{busy === 'review' ? <span className="spin" /> : Icon.history()}{plan ? 'Revisar de nuevo' : 'Revisar ahora'}</button>} />
+        actions={<button type="button" className="btn btn-secondary" onClick={() => void review()} disabled={busy !== null || plan?.status === 'running' || !isOwner} aria-describedby={owner === false ? 'mnt-owner' : undefined}>{busy === 'review' ? <span className="spin" /> : Icon.history()}{plan ? 'Revisar de nuevo' : 'Revisar ahora'}</button>} />
+      {owner === false && <OwnerPairing id="mnt-owner" what="preparar, ejecutar o rechazar una revisión" onPaired={paired} />}
+      {owner === true && <OwnerStatus />}
+      {others.length > 0 && <Notice kind="info">Hay {others.length === 1 ? 'otra revisión pendiente' : `${others.length} revisiones pendientes más`} de este proyecto ({others.map((o, i) => <span key={o.id}>{i ? ', ' : ''}<Link className="lnk" to={`/mantenimiento/${o.id}`}>{o.intent?.kind === 'close_stage' ? 'cierre de etapa' : 'revisión'} del {new Date(o.createdAt).toLocaleString('es')}{o.createdBy === 'assistant' || o.source ? ', pedida al Asistente' : ''}</Link></span>)}). Al ejecutar una, las demás dejan de valer.</Notice>}
       {error && <Notice kind="err">{error}</Notice>}
       {loading && <Spinner />}
-      {!loading && !plan && <div className="card"><EmptyState art="gears" title="Aún no hay ninguna revisión" action={<button type="button" className="btn btn-primary" onClick={() => void review()} disabled={busy !== null}>{Icon.history()}Revisar ahora</button>}>
+      {!loading && !plan && <div className="card"><EmptyState art="gears" title="Aún no hay ninguna revisión" action={<button type="button" className="btn btn-primary" onClick={() => void review()} disabled={busy !== null || !isOwner} aria-describedby={owner === false ? 'mnt-owner' : undefined}>{Icon.history()}Revisar ahora</button>}>
         Compara cada rama (en el remoto y en este equipo), cada carpeta de trabajo y cada historia abierta con main, y te propone qué cerrar o limpiar. No cambia nada hasta que lo autorices.
       </EmptyState></div>}
       {plan && <>
@@ -234,9 +248,10 @@ export function Maintenance() {
             {showErrors && missingReason.length > 0 && <Notice kind="warn">Falta el motivo en {missingReason.length} objetivo(s): {missingReason.map(i => i.name).join(' · ')}.</Notice>}
             <label className="ck"><input className="cb" type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} disabled={!selected.length} /><span>Autorizo exactamente estas {selected.length} acción(es) sobre «{plan.projectName}»{plan.intent?.kind === 'close_stage' && common.trim() ? <> con el motivo «{common.trim()}»</> : null}. Justo antes de ejecutar se comprueba de nuevo el estado real; lo que haya cambiado no se toca. Nada se fuerza.</span></label>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              <button type="button" className="btn btn-primary" disabled={!consent || !selected.length || busy !== null} onClick={() => void run()}>{busy === 'run' ? <span className="spin spin-light" /> : Icon.check()}{plan.status === 'partial' ? 'Reanudar lo elegido' : 'Ejecutar lo elegido'}</button>
-              {plan.status === 'proposed' && <button type="button" className="btn btn-ghost" disabled={busy !== null} onClick={() => void reject()}>Rechazar la revisión</button>}
+              <button type="button" className="btn btn-primary" disabled={!consent || !selected.length || busy !== null || !isOwner} aria-describedby={owner === false ? 'mnt-owner-needed' : undefined} onClick={() => void run()}>{busy === 'run' ? <span className="spin spin-light" /> : Icon.check()}{plan.status === 'partial' ? 'Reanudar lo elegido' : 'Ejecutar lo elegido'}</button>
+              {plan.status === 'proposed' && <button type="button" className="btn btn-ghost" disabled={busy !== null || !isOwner} aria-describedby={owner === false ? 'mnt-owner-needed' : undefined} onClick={() => void reject()}>Rechazar la revisión</button>}
             </div>
+            {owner === false && <div id="mnt-owner-needed" className="small muted">Para autorizar o rechazar, vincula antes este navegador como propietario (arriba).</div>}
           </div>
         </section>}
       </>}

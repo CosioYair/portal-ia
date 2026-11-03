@@ -5,6 +5,7 @@ import { conversationsRepo } from '../db/conversations.ts';
 import { conversationDetail, createConversation, createStoriesFrom, decide, decideProposal, startArtifact, updateConversation } from '../services/conversations.ts';
 import { createCompany, createProject } from '../services/companies.ts';
 import { workspacesRepo } from '../db/platform.ts';
+import { requireOwner } from '../services/ownerSession.ts';
 
 export async function assistantRoutes(app: FastifyInstance) {
   // Conversaciones: la elegida (o la más reciente) con sus mensajes, decisiones, artefactos y encargos.
@@ -91,6 +92,8 @@ export async function assistantRoutes(app: FastifyInstance) {
   app.post('/api/assistant/messages/:id/operations/:opId/:decision', async (req, reply) => {
     const { id, opId, decision } = req.params as { id: string; opId: string; decision: string };
     if (decision !== 'approve' && decision !== 'reject') return reply.code(404).send({ error: 'Decisión no válida' });
+    // Autorizar o rechazar (una revisión del proyecto incluida) es del propietario: sin su sesión no se decide nada.
+    if (!requireOwner(req, reply)) return;
     if (decision === 'approve' && !z.object({ authorized: z.literal(true) }).strict().safeParse(req.body).success) return reply.code(403).send({ error: 'Ejecutar una operación del Portal requiere tu autorización explícita.' });
     try {
       const m = await decideOperation(id, opId, decision);
