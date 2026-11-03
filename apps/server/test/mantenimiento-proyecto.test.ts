@@ -93,12 +93,15 @@ test('revisión de solo lectura: clasificación verdadera de ramas, worktrees, h
   assert.equal(item(p, 'remote:portal-ia/hu-001').category, 'safe'); assert.equal(item(p, 'remote:portal-ia/hu-001').defaultOption, 'delete_remote');
   const un = item(p, 'remote:portal-ia/hu-002'); assert.equal(un.category, 'decision'); assert.equal(un.unique, 1); assert.equal(un.defaultOption, 'keep'); assert.match(un.uniqueCommits[0], /HU-002 sin integrar/);
   assert.equal(item(p, 'remote:main').category, 'protected'); assert.equal(item(p, 'local:main').category, 'protected');
-  assert.match(item(p, 'remote:portal-ia/hu-003').reason, /lote «Lote protegido»/); assert.equal(item(p, 'local:portal-ia/hu-003').category, 'protected');
+  // Rama de un lote en pausa: no es intocable, pero solo se puede elegir junto con cerrar ese lote en esta misma revisión.
+  const lb = item(p, 'local:portal-ia/hu-003');
+  assert.match(item(p, 'remote:portal-ia/hu-003').reason, /cerrar el lote «Lote protegido»/); assert.equal(lb.category, 'decision'); assert.equal(lb.defaultOption, 'keep');
+  assert.ok(([] as string[]).concat(lb.requires).includes(`batch:${batch.id}`), 'depende de cerrar el lote');
   assert.equal(item(p, 'local:portal-ia/hu-004').category, 'protected', 'rama de un proceso en curso');
   assert.equal(item(p, 'local:viejo-integrado').category, 'decision', 'no es rama de historia: integrada, pero decides tú'); assert.equal(item(p, 'local:viejo-integrado').defaultOption, 'keep');
   assert.ok(item(p, 'local:viejo-integrado').options.some((o: any) => o.id === 'delete_local'));
   const wt = p.items.find((i: any) => i.kind === 'worktree' && i.processId === wtProc.id); assert.equal(wt.category, 'safe');
-  assert.equal(item(p, 'local:portal-ia/hu-005').requires, wt.id, 'su rama exige retirar antes el worktree');
+  assert.deepEqual(([] as string[]).concat(item(p, 'local:portal-ia/hu-005').requires), [wt.id], 'su rama exige retirar antes el worktree');
   assert.equal(p.items.find((i: any) => i.kind === 'worktree' && /otra-herramienta/.test(i.name)).category, 'outside');
   assert.equal(item(p, 'local:ajena').category, 'protected');
   assert.equal(item(p, `story:${sDone.id}`).category, 'safe'); assert.equal(item(p, `story:${sDone.id}`).defaultOption, 'close_done');
@@ -285,7 +288,9 @@ test('cancelar una historia con trabajo sin integrar: esa iteración ya no se of
   workspaceDb(S).prepare(`UPDATE processes SET status = 'done' WHERE id = ?`).run(pr.id);
   backlogRepo(S).setStatus(s.id, 'review', pr.id);
   const p = await plan();
-  assert.equal(item(p, 'local:portal-ia/hu-040').category, 'protected', 'pendiente de integrar: su rama no se toca');
+  const br = item(p, 'local:portal-ia/hu-040');
+  assert.equal(br.category, 'decision', 'pendiente de integrar: solo junto con cancelar su historia'); assert.equal(br.defaultOption, 'keep');
+  assert.ok(([] as string[]).concat(br.requires).includes(`story:${s.id}`)); assert.match(br.reason, /Solo si en esta misma revisión también eliges: cancelar/);
   await inject('POST', `${W}/maintenance/plans/${p.id}/execute`, { authorized: true, selection: [{ itemId: `story:${s.id}`, option: 'discard', reason: 'Ya no se quiere' }] });
   assert.equal((await waitDone(p.id)).status, 'done');
   assert.ok(processesRepo(S).get(pr.id)!.result!.rejected, 'la iteración queda descartada');

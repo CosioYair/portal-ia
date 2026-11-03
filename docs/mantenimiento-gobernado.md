@@ -167,7 +167,36 @@ y datos temporales. Lo encontrado y corregido, con su prueba de regresión en `t
   actualizaciones ven la limpieza en curso; una ejecución por plan y proyecto.
 
 
-## 8. Cómo terminar la limpieza real
+## 8. Cierre de etapa (una sola autorización)
+
+Cuando el propietario decide cerrar una etapa (adoptar main como línea base y descartar todo el trabajo antiguo), la
+revisión puede llegar ya preparada: `closeStage: { reason }` en la capacidad `reconcile_project` del Asistente o en
+`POST …/maintenance/plans`. El plan guarda la intención y una **selección preparada** con el motivo; no autoriza nada:
+ejecutar sigue exigiendo que el propietario marque «Autorizo exactamente estas N acciones» y pulse «Ejecutar lo elegido».
+
+Para que una sola autorización baste, la revisión resuelve dependencias en la misma ejecución:
+- Lo que solo protegía un **lote en pausa** (sus ramas y carpetas) o una **iteración pendiente** es elegible «si en esta
+  misma revisión también eliges» cerrar el lote, cancelar la historia o descartar la iteración (`requires`). Se ejecuta en
+  orden (historias y encargos → iteraciones → lote → carpetas → ramas locales → ramas del remoto) y, si lo que libera no se
+  hizo, se omite. Lo demás sigue protegido sin excepción: main, lo que está en marcha, carpetas bloqueadas, de otra
+  empresa o de otra herramienta.
+- **Iteraciones sueltas**: aplicadas sin integrar ni descartar, con su historia ya cerrada (o sin historia ni encargo
+  abiertos): se pueden descartar (`result.rejected`), lo que libera su carpeta y su rama.
+- **Encargos** abiertos del proyecto: aceptar si su trabajo ya está en main (con motivo si falta un paso de la regla de
+  cierre) o cancelar con motivo; en marcha, protegidos.
+- **Elementos de lote** de historias ya hechas que seguían «pendientes de aceptación»: aceptarlos solo lo anota en el lote.
+- Cancelar una historia **deniega** también sus iteraciones que esperaban autorización (como «Denegar» en Decisiones).
+
+La selección preparada elige, para cada objetivo, su cierre verdadero: borrar lo integrado; guardar copia
+(`refs/portal-ia/archivo/<plan>/…`) y borrar lo no integrado; aceptar o cerrar como hecho lo que está en main (con
+constancia de lo que faltaba); cancelar lo no implementado o no integrado; cerrar el lote. **Nunca** elige carpetas con
+cambios sin guardar ni lo que dependa de ellas.
+
+**Publicar main y «multiple upstream branches».** `pushBranches` publicaba con `git push -u`; con dos upstreams ya
+registrados en `branch.main.merge`, cada `push -u` AÑADÍA otro (comprobado con git 2.47) y `git push` sin argumentos
+fallaba. Ahora publica con refspec explícito y fija el seguimiento con `git config --replace-all` (sana los duplicados).
+
+## 9. Cómo terminar la limpieza real
 
 La revisión real de «Desarrollo del Portal» queda preparada en el Portal en marcha, sin ejecutar nada. El propietario la
 abre desde la conversación del Asistente (tarjeta «Revisión del proyecto» › «Abrir la revisión para elegir y autorizar»),

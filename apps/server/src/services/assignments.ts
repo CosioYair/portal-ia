@@ -177,11 +177,12 @@ function recordKnowledge(slug: string, a: Assignment, p: Process) {
  * Aceptación del propietario (distinta de QA): la MISMA regla de cierre que una historia (integrado en la rama
  * principal, activo y verificado en ejecución si es el propio Portal, prueba manual hecha). No integra ni publica.
  */
-export async function acceptAssignment(slug: string, id: string, note: string | null): Promise<Assignment> {
+/** Aceptar (listo para revisar). Si le falta un paso de la regla de cierre, solo con el motivo del propietario (queda en la nota). */
+export async function acceptAssignment(slug: string, id: string, note: string | null, opts: { ownerReason?: string | null } = {}): Promise<Assignment> {
   const a = syncAssignment(slug, id); if (!a) throw fail(404, 'Encargo no encontrado.', 'not_found');
   if (a.status !== 'ready_for_review') throw fail(409, `Solo se acepta un encargo listo para revisar (está ${ASSIGNMENT_STATUS_LABEL[a.status]}).`, 'invalid_state');
   const blocker = await closingBlocker(slug, a.processId ? processesRepo(slug).get(a.processId) : undefined, 'encargo');
-  if (blocker) throw fail(409, blocker.error, blocker.code);
+  if (blocker && (opts.ownerReason ?? '').trim().length < 3) throw fail(409, blocker.error, blocker.code);
   return assignmentsRepo(slug).update(id, x => { x.status = 'accepted'; x.reason = note; x.events.push({ at: monotonicNow(), kind: 'accepted', message: `Aceptado por el propietario${note ? `: ${note}` : ''}. Integrar en main sigue siendo una decisión aparte.` }); });
 }
 
@@ -211,11 +212,11 @@ export async function requestAssignmentChanges(slug: string, id: string, note: s
 }
 
 /** Cancelar el encargo (no borra nada: el proceso y su worktree se conservan para consulta). */
-export function cancelAssignment(slug: string, id: string): Assignment {
+export function cancelAssignment(slug: string, id: string, reason: string | null = null): Assignment {
   const a = assignmentsRepo(slug).get(id); if (!a) throw fail(404, 'Encargo no encontrado.', 'not_found');
   const p = a.processId ? processesRepo(slug).get(a.processId) : undefined;
   if (p?.status === 'running') throw fail(409, 'El encargo está en marcha: cancela su proceso primero (se detiene entre pasos).', 'running');
-  const out = assignmentsRepo(slug).update(id, x => { x.status = 'cancelled'; x.events.push({ at: monotonicNow(), kind: 'cancelled', message: 'Cancelado por el propietario.' }); });
+  const out = assignmentsRepo(slug).update(id, x => { x.status = 'cancelled'; if (reason) x.reason = reason; x.events.push({ at: monotonicNow(), kind: 'cancelled', message: `Cancelado por el propietario${reason ? `: ${reason}` : '.'}` }); });
   if (p?.status === 'pending_authorization') processesRepo(slug).finish(p.id, 'cancelled', 'Encargo cancelado por el propietario.');
   return out;
 }

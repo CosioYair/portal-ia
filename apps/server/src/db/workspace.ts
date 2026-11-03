@@ -32,7 +32,7 @@ function hasOpenDecisionRow(r: { status: string; result_json?: string | null }):
   if (r.status !== 'done' || !r.result_json) return false;
   let res: ExecutionResult;
   try { res = JSON.parse(r.result_json) as ExecutionResult; } catch { return false; }
-  if (res.applied) return !(res.merged && res.published);
+  if (res.applied) return !res.rejected && !(res.merged && res.published);
   return !res.rejected && Array.isArray(res.changes) && res.changes.some(c => !c.error);
 }
 
@@ -235,7 +235,7 @@ export function projectsRepo(slug: string) {
     knowledgeCount(projectId: string): number { return (db.prepare(`SELECT COUNT(*) AS n FROM knowledge WHERE project_id = ?`).get(projectId) as any).n; },
     usageToday(): UsageToday {
       const day = new Date().toISOString().slice(0, 10);
-      const r = db.prepare(`SELECT COUNT(*) AS calls, SUM(CASE WHEN status <> 'done' THEN 1 ELSE 0 END) AS failed, COALESCE(SUM(tokens_in + tokens_out),0) AS tokens, COALESCE(SUM(cost_usd),0) AS cost FROM execution_history WHERE substr(started_at,1,10) = ?`).get(day) as any;
+      const r = db.prepare(`SELECT COUNT(*) AS calls, SUM(CASE WHEN status <> 'done' THEN 1 ELSE 0 END) AS failed, COALESCE(SUM(tokens_in + tokens_out),0) AS tokens, COALESCE(SUM(cost_usd),0) AS cost FROM execution_history WHERE substr(started_at,1,10) = ? AND kind NOT LIKE 'policy:%' AND kind NOT LIKE 'maintenance:%'`).get(day) as any;
       const p = db.prepare(`SELECT COUNT(*) AS n, SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running FROM processes WHERE substr(created_at,1,10) = ? OR status = 'running'`).get(day) as any;
       return { processes: p.n ?? 0, tokens: r.tokens, costUsd: r.cost, running: p.running ?? 0, calls: r.calls ?? 0, failedCalls: r.failed ?? 0 };
     }

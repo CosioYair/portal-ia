@@ -478,8 +478,12 @@ export async function pushBranches(repoPath: string, branches: string[]): Promis
   for (const b of branches) {
     if (!/^[A-Za-z0-9._\/-]{1,80}$/.test(b)) throw Object.assign(new Error(`Nombre de rama no válido: ${b}`), { statusCode: 400 });
     if (!(await git(cwd, ['branch', '--list', b])).trim()) throw Object.assign(new Error(`La rama «${b}» no existe en el repositorio local (quizá se borró o se renombró). Nada que publicar.`), { statusCode: 409 });
-    try { await execFileP('git', ['push', '-u', remote, b], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, timeout: 120_000 }); }
+    // Sin «-u»: con más de un upstream registrado, «push -u» AÑADE otro cada vez y entonces «git push» sin argumentos falla
+    // («multiple upstream branches»). El seguimiento se fija después reemplazando todos los valores (también sana los duplicados).
+    try { await execFileP('git', ['push', '--no-follow-tags', remote, `refs/heads/${b}:refs/heads/${b}`], { cwd, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }, timeout: 120_000 }); }
     catch (e: any) { throw Object.assign(new Error(`git push ${remote} ${b} falló: ${(e.stderr || e.message || '').toString().trim().split('\n').slice(-3).join(' ')}. Si pide credenciales, inicia sesión en git (gestor de credenciales o SSH) y vuelve a intentarlo.`), { statusCode: 502 }); }
+    await git(cwd, ['config', '--replace-all', `branch.${b}.remote`, remote]).catch(() => '');
+    await git(cwd, ['config', '--replace-all', `branch.${b}.merge`, `refs/heads/${b}`]).catch(() => '');
   }
   return { remote, url, branches };
 }

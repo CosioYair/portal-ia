@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { MAINTENANCE_CATEGORY_LABEL, type MaintenanceCategory, type MaintenanceItem, type MaintenanceOptionId, type MaintenanceOutcome, type MaintenancePlan } from '@portal-ia/domain';
+import { MAINTENANCE_CATEGORY_LABEL, requiresOf, type MaintenanceCategory, type MaintenanceItem, type MaintenanceOptionId, type MaintenanceOutcome, type MaintenancePlan } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { Shell } from '../components/Shell.tsx';
@@ -19,10 +19,10 @@ const CATS: { id: MaintenanceCategory; tone: Tone; icon: () => ReactNode; hint: 
   { id: 'protected', tone: 'idle', icon: () => Icon.lock(), hint: 'Main, lo que está en uso o lo que protege un lote abierto: no se puede elegir.' },
   { id: 'outside', tone: 'idle', icon: () => Icon.external(), hint: 'No lo creó el Portal: no lo gestiona.' }
 ];
-const KIND_ORDER: MaintenanceItem['kind'][] = ['story', 'batch', 'remote_branch', 'local_branch', 'worktree'];
+const KIND_ORDER: MaintenanceItem['kind'][] = ['story', 'assignment', 'iteration', 'batch', 'remote_branch', 'local_branch', 'worktree'];
 const OUTCOME_LABEL: Record<MaintenanceOutcome['status'], string> = { done: 'Ejecutado', noop: 'Ya estaba así', failed: 'Con error', skipped: 'Sin tocar', started: 'Interrumpido' };
 const COLLAPSE_AT = 8;
-const REASON_LABEL: Partial<Record<MaintenanceOptionId, (n: string) => string>> = { discard: n => `Motivo de la cancelación de «${n}»`, close_done: n => `Motivo para cerrar «${n}» como hecha`, accept: n => `Motivo para aceptar «${n}»`, close_batch: n => `Motivo para cerrar el lote «${n}»` };
+const REASON_LABEL: Partial<Record<MaintenanceOptionId, (n: string) => string>> = { discard_iteration: n => `Motivo para descartar la «${n}»`, cancel_assignment: n => `Motivo para cancelar el encargo «${n}»`, accept_assignment: n => `Motivo para aceptar el encargo «${n}»`, discard: n => `Motivo de la cancelación de «${n}»`, close_done: n => `Motivo para cerrar «${n}» como hecha`, accept: n => `Motivo para aceptar «${n}»`, close_batch: n => `Motivo para cerrar el lote «${n}»` };
 /** Acciones que se pueden elegir en bloque en «Requiere tu decisión»: solo borrar ramas YA integradas (nada que se pierda). */
 const BULK_DECISION: MaintenanceOptionId[] = ['delete_local', 'delete_remote'];
 
@@ -38,6 +38,8 @@ export function Maintenance() {
   const [consent, setConsent] = useState(false);
   const [showErrors, setShowErrors] = useState(false);
   const [announce, setAnnounce] = useState('');
+  const [common, setCommon] = useState(''); // cierre de etapa: el motivo común que adoptas al autorizar
+  const [undo, setUndo] = useState<{ prev: Record<string, MaintenanceOptionId>; count: number; of: string } | null>(null);
   const resultsRef = useRef<HTMLHeadingElement>(null); const rejectedRef = useRef<HTMLDivElement>(null);
   const prevStatus = useRef<string | null>(null);
 
@@ -53,7 +55,13 @@ export function Maintenance() {
   useEffect(() => {
     if (!plan) return;
     const ex = plan.execution;
-    if (!ex) setChoice(Object.fromEntries(plan.items.filter(i => i.category === 'safe' || i.category === 'decision').map(i => [i.id, i.defaultOption])));
+    if (!ex && plan.prepared?.length) {
+      // Cierre de etapa: la selección preparada (lo demás en «Conservar») con su motivo; nada se ejecuta sin tu autorización.
+      setChoice(Object.fromEntries([...plan.items.filter(i => i.category === 'safe' || i.category === 'decision').map(i => [i.id, 'keep' as MaintenanceOptionId]), ...plan.prepared.map(s => [s.itemId, s.option] as const)]));
+      setReasons(Object.fromEntries(plan.prepared.filter(s => s.reason).map(s => [s.itemId, s.reason!])));
+      setCommon(plan.intent?.reason ?? '');
+    }
+    else if (!ex) setChoice(Object.fromEntries(plan.items.filter(i => i.category === 'safe' || i.category === 'decision').map(i => [i.id, i.defaultOption])));
     else {
       const out = new Map(ex.outcomes.map(o => [o.itemId, o.status]));
       setChoice(Object.fromEntries(ex.selection.map(s => [s.itemId, s.option !== 'keep' && (plan.status !== 'partial' || ['failed', 'started', undefined].includes(out.get(s.itemId))) ? s.option : 'keep'])));
@@ -88,9 +96,26 @@ export function Maintenance() {
   const selected = useMemo(() => plan && editable ? plan.items.filter(i => !isDone(i.id) && choice[i.id] && choice[i.id] !== 'keep') : [], [plan, choice, editable]); // eslint-disable-line react-hooks/exhaustive-deps
   const missingReason = selected.filter(i => i.options.find(o => o.id === choice[i.id])?.needsReason && (reasons[i.id] ?? '').trim().length < 3);
   // Elegir una rama que sigue abierta en su carpeta de trabajo elige también retirar la carpeta (si no, se omitiría).
-  const pick = (it: MaintenanceItem, o: MaintenanceOptionId) => setChoice(ch => ({ ...ch, [it.id]: o,
-    ...(o !== 'keep' && it.requires && plan?.items.some(x => x.id === it.requires && x.category === 'safe') ? { [it.requires]: 'remove_worktree' as const } : {}),
-    ...(o === 'keep' && it.kind === 'worktree' ? Object.fromEntries((plan?.items ?? []).filter(x => x.requires === it.id).map(x => [x.id, 'keep' as const])) : {}) }));
+  /** Elegir (pura): elegir algo elige su carpeta segura; dejarlo en «Conservar» deja también lo que depende de ello. */
+  const applyPick = (ch: Record<string, MaintenanceOptionId>, it: MaintenanceItem, o: MaintenanceOptionId) => {
+    const next: Record<string, MaintenanceOptionId> = { ...ch, [it.id]: o }; const cascaded: string[] = [];
+    if (o !== 'keep') { for (const r of requiresOf(it.requires)) { const x = plan?.items.find(i => i.id === r); if (x?.kind === 'worktree' && x.category === 'safe' && (next[r] ?? 'keep') === 'keep') next[r] = 'remove_worktree'; } }
+    else for (const stack = [it.id]; stack.length;) { const id = stack.pop()!; for (const x of plan?.items ?? []) if (requiresOf(x.requires).includes(id) && (next[x.id] ?? 'keep') !== 'keep') { next[x.id] = 'keep'; cascaded.push(x.id); stack.push(x.id); } }
+    return { next, cascaded };
+  };
+  const pick = (it: MaintenanceItem, o: MaintenanceOptionId) => {
+    if (o !== 'keep' && common.trim() && it.options.find(x => x.id === o)?.needsReason && !(reasons[it.id] ?? '').trim()) setReasons(rs => ({ ...rs, [it.id]: common.trim() }));
+    const { cascaded } = applyPick(choice, it, o);
+    if (cascaded.length) {
+      // Se anuncia y se puede deshacer (solo lo que cambió la cascada y el objetivo que la provocó).
+      const ids = [it.id, ...cascaded];
+      // Varias en el mismo gesto (p. ej. «Conservar todas»): se acumulan y «Deshacer» las restaura todas.
+      const prev = Object.fromEntries(ids.map(id => [id, choice[id] ?? 'keep'])) as Record<string, MaintenanceOptionId>;
+      setUndo(u => u ? { prev: { ...prev, ...u.prev }, count: u.count + cascaded.length, of: u.of === it.name ? it.name : 'varios objetivos' } : { prev, count: cascaded.length, of: it.name });
+      setAnnounce(`Al conservar «${it.name}» también pasan a «Conservar» ${cascaded.length} objetivo(s) que dependían de él.`);
+    }
+    setChoice(ch => applyPick(ch, it, o).next);
+  };
   const run = async () => {
     if (!plan) return;
     if (missingReason.length) { setShowErrors(true); requestAnimationFrame(() => (document.getElementById(`${missingReason[0].id}-reason`) as HTMLInputElement | null)?.focus()); return; }
@@ -104,10 +129,13 @@ export function Maintenance() {
     catch (e: any) { setError(e.message); } finally { setBusy(null); }
   };
 
-  const n = (k: MaintenanceItem['kind']) => selected.filter(i => i.kind === k).length;
-  const gone = (k: MaintenanceItem['kind']) => plan ? plan.items.filter(i => i.kind === k && isDone(i.id)).length : 0;
+  const n = (k: MaintenanceItem['kind']) => selected.filter(i => i.kind === k && (k !== 'story' || i.id.startsWith('story:'))).length;
+  const gone = (k: MaintenanceItem['kind']) => plan ? plan.items.filter(i => i.kind === k && (k !== 'story' || i.id.startsWith('story:')) && isDone(i.id)).length : 0;
+  const openOf = (k: MaintenanceItem['kind']) => plan ? plan.items.filter(i => i.kind === k && (i.category === 'safe' || i.category === 'decision' || i.category === 'protected')).length : 0;
   const remoteName = plan?.repo.remote ?? 'el remoto';
-  const kindLabel = (k: MaintenanceItem['kind']) => ({ remote_branch: `Ramas en ${remoteName}`, local_branch: 'Ramas en este equipo', worktree: 'Carpetas de trabajo', story: 'Historias', batch: 'Lotes' }[k]);
+  /** Qué hay que elegir para que algo que depende de ello se haga (mismo lenguaje que el servidor). */
+  const needAction = (x: MaintenanceItem) => x.kind === 'batch' ? `cerrar el lote «${x.name}»` : x.kind === 'story' ? `cancelar ${x.story?.storyId || x.name}` : x.kind === 'iteration' ? `descartar la ${x.name.charAt(0).toLowerCase()}${x.name.slice(1)}` : x.kind === 'worktree' ? `retirar «${x.name}»` : x.name;
+  const kindLabel = (k: MaintenanceItem['kind']) => ({ remote_branch: `Ramas en ${remoteName}`, local_branch: 'Ramas en este equipo', worktree: 'Carpetas de trabajo', story: 'Historias', batch: 'Lotes', iteration: 'Iteraciones sin integrar', assignment: 'Encargos' }[k]);
   const after = plan ? {
     remote: plan.repo.remoteAvailable ? `${Math.max(0, plan.counts.remoteBranches - n('remote_branch') - gone('remote_branch'))} rama(s) en ${remoteName}` : `ramas en el remoto sin comprobar`,
     local: `${Math.max(0, plan.counts.localBranches - n('local_branch') - gone('local_branch'))} en este equipo`,
@@ -136,6 +164,36 @@ export function Maintenance() {
         </div>
         <div className="small muted">Revisado el {new Date(plan.createdAt).toLocaleString('es-MX')}</div>
         {!plan.repo.remoteAvailable && <Notice kind="warn"><strong>El remoto no se pudo comprobar.</strong> {plan.repo.remoteError} Lo local se revisa igual; no se propone borrar nada en el remoto.</Notice>}
+        {plan.intent?.kind === 'close_stage' && editable && !plan.execution && (() => {
+          const sel = selected.map(i => ({ it: i, o: i.options.find(x => x.id === choice[i.id])! }));
+          const count = (ids: string[]) => sel.filter(x => ids.includes(x.o.id)).length;
+          const named = (ids: string[]) => sel.filter(x => ids.includes(x.o.id));
+          const link = (x: { it: MaintenanceItem }) => <a key={x.it.id} className="lnk" href={`#row-${x.it.id}`}>{x.it.kind === 'story' ? x.it.story?.storyId || x.it.name : x.it.kind === 'assignment' ? x.it.name.split(' · ')[0] : x.it.name}</a>;
+          const list = (label: string, xs: { it: MaintenanceItem }[]) => xs.length ? <li key={label}>{label} ({xs.length}): {xs.map((x, i) => <span key={x.it.id}>{i ? ', ' : ''}{link(x)}</span>)}</li> : null;
+          const prepared = new Map((plan.prepared ?? []).map(x => [x.itemId, x.option]));
+          const changed = (plan.items.some(i => (choice[i.id] ?? 'keep') !== (prepared.get(i.id) ?? 'keep')));
+          return <div className="card card-b mnt-stage" role="region" aria-labelledby="mnt-stage-h" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <h2 className="h3" id="mnt-stage-h" style={{ margin: 0 }}>Cierre de etapa: {selected.length} acción(es) elegidas{changed ? ` (preparadas: ${plan.prepared?.length ?? 0})` : ''}</h2>
+            <div className="small">Viene elegido todo lo que se puede cerrar o retirar; nunca carpetas con cambios sin guardar ni lo protegido. Nada se ejecuta hasta que marques la autorización y pulses «Ejecutar lo elegido».</div>
+            <ul className="small mnt-stage-list" style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {count(['delete_remote', 'delete_local']) > 0 && <li>Borrar ramas ya integradas en main ({count(['delete_remote', 'delete_local'])}): no se pierde nada.</li>}
+              {count(['archive_delete_remote', 'archive_delete_local']) > 0 && <li><strong>Guardar copia y borrar ramas con trabajo que no está en main ({count(['archive_delete_remote', 'archive_delete_local'])})</strong>: la copia queda en este equipo.</li>}
+              {count(['remove_worktree']) > 0 && <li>Retirar carpetas de trabajo sin cambios sin guardar ({count(['remove_worktree'])}).</li>}
+              {list('Cancelar historias', named(['discard']))}
+              {list('Cerrar como hechas o aceptar (su código está en main)', named(['accept', 'close_done']).filter(x => !x.o.needsReason))}
+              {list('Cerrar como hechas aunque les falta un paso de la regla de cierre (queda constancia de lo que faltaba)', named(['accept', 'close_done']).filter(x => x.o.needsReason))}
+              {list('Aceptar encargos (su trabajo está en main)', named(['accept_assignment']))}
+              {list('Cancelar encargos', named(['cancel_assignment']))}
+              {list('Descartar iteraciones sin integrar', named(['discard_iteration']))}
+              {list('Cerrar el lote', named(['close_batch']))}
+            </ul>
+            {(changed || undo) && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              {undo && <><span className="small">Al conservar «{undo.of}» también pasaron a «Conservar» {undo.count} objetivo(s) que dependían de él.</span><button type="button" className="btn btn-ghost btn-sm" onClick={() => { const prev = undo.prev; setChoice(ch => ({ ...ch, ...prev })); setUndo(null); setAnnounce('Deshecho.'); }}>Deshacer</button></>}
+              {changed && <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setChoice(Object.fromEntries([...plan.items.filter(i => i.category === 'safe' || i.category === 'decision').map(i => [i.id, 'keep' as MaintenanceOptionId]), ...(plan.prepared ?? []).map(x => [x.itemId, x.option] as const)])); setUndo(null); setAnnounce('Vuelve la selección preparada.'); }}>Volver a la selección preparada</button>}
+            </div>}
+            <label className="label" htmlFor="mnt-common">{plan.intent.source === 'assistant' ? 'Motivo propuesto por el Asistente (revísalo: al autorizar queda en el historial como tuyo)' : 'Motivo del cierre (queda en el historial)'}</label>
+            <input id="mnt-common" className="input" value={common} maxLength={300} onChange={e => { const prev = common; const next = e.target.value; setCommon(next); setReasons(rs => Object.fromEntries(Object.entries(rs).map(([k, v]) => [k, v === prev ? next : v]))); }} />
+          </div>; })()}
         {plan.status === 'stale' && <Notice kind="warn"><strong>Esta revisión caducó:</strong> {plan.supersededBy ? <>hay una más reciente (<Link className="lnk" to={`/mantenimiento/${plan.supersededBy}`}>abrirla</Link>)</> : 'el repositorio cambió desde que se hizo'} y no se ejecuta.{plan.supersededBy ? '' : ' Pulsa «Revisar de nuevo».'}</Notice>}
         {plan.status === 'rejected' && <div ref={rejectedRef} tabIndex={-1}><Notice kind="info">Rechazaste esta revisión: no se ejecutó nada.</Notice></div>}
         {plan.execution?.interrupted && plan.status === 'partial' && <Notice kind="warn">La ejecución se interrumpió (p. ej. un reinicio). Lo hecho está anotado; puedes reanudar lo que falta.</Notice>}
@@ -153,8 +211,7 @@ export function Maintenance() {
             const groupLabel = `${kindLabel(k).toLowerCase()} (${MAINTENANCE_CATEGORY_LABEL[c.id].toLowerCase()})`;
             const bulkOpts = c.id === 'decision' ? BULK_DECISION.map(id => ({ id, rows: pickables.filter(r => r.options.some(o => o.id === id)) })).filter(x => x.rows.length > 1).map(x => ({ ...x, label: x.rows[0].options.find(o => o.id === x.id)!.label })) : [];
             const bulk = editable && pickables.length > 1 && (c.id === 'safe' || bulkOpts.length > 0);
-            const body = <ul className="mnt-list" aria-labelledby={gid}>{rows.map(it => <Row key={it.id} it={it} done={isDone(it.id)} editable={editable} executed={!!plan.execution} choice={choice[it.id] ?? 'keep'} requiresChosen={!!it.requires && (choice[it.requires] ?? 'keep') !== 'keep'} reason={reasons[it.id] ?? ''} showError={showErrors}
-              requiresName={it.requires ? plan.items.find(x => x.id === it.requires)?.name ?? null : null}
+            const body = <ul className="mnt-list" aria-labelledby={gid}>{rows.map(it => <Row key={it.id} it={it} done={isDone(it.id)} editable={editable} executed={!!plan.execution} choice={choice[it.id] ?? 'keep'} requirements={requiresOf(it.requires).filter(r => plan.items.some(i => i.id === r)).map(r => { const x = plan.items.find(i => i.id === r)!; return { id: r, name: needAction(x), kind: x.kind, chosen: (choice[r] ?? 'keep') !== 'keep', done: isDone(r) }; })} reason={reasons[it.id] ?? ''} showError={showErrors}
               onChoice={o => pick(it, o)} onReason={r => setReasons(rs => ({ ...rs, [it.id]: r }))} outcome={outcomeOf.get(it.id)} />)}</ul>;
             return <div key={k} className="mnt-group">
               <div className="mnt-group-h"><h3 className="mnt-group-title" id={gid}>{kindLabel(k)} <span className="muted">({rows.length})</span></h3>
@@ -172,10 +229,10 @@ export function Maintenance() {
         {editable && <section className="card" aria-labelledby="mnt-confirm-h">
           <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <h2 className="h3" id="mnt-confirm-h" tabIndex={-1} style={{ margin: 0 }}>{selected.length ? `Se ejecutarán ${selected.length} acción(es)` : 'No hay nada elegido'}</h2>
-            {selected.length > 0 && <div className="small">{[n('story') && `${n('story')} historia(s)`, n('batch') && `${n('batch')} lote(s)`, n('remote_branch') && `${n('remote_branch')} rama(s) en ${remoteName}`, n('local_branch') && `${n('local_branch')} rama(s) de este equipo`, n('worktree') && `${n('worktree')} carpeta(s) de trabajo`].filter(Boolean).join(' · ')}</div>}
-            {after && <div className="mnt-after"><strong>Estado final esperado:</strong> {after.remote} · {after.local} · {after.wt} · {after.stories} · {after.batches}.</div>}
+            {selected.length > 0 && <div className="small">{[n('story') && `${n('story')} historia(s)`, selected.length - selected.filter(i => i.kind !== 'story' || i.id.startsWith('story:')).length > 0 && `${selected.length - selected.filter(i => i.kind !== 'story' || i.id.startsWith('story:')).length} aceptación(es) en su lote`, n('assignment') && `${n('assignment')} encargo(s)`, n('iteration') && `${n('iteration')} iteración(es)`, n('batch') && `${n('batch')} lote(s)`, n('remote_branch') && `${n('remote_branch')} rama(s) en ${remoteName}`, n('local_branch') && `${n('local_branch')} rama(s) de este equipo`, n('worktree') && `${n('worktree')} carpeta(s) de trabajo`].filter(Boolean).join(' · ')}</div>}
+            {after && <div className="mnt-after"><strong>Estado final esperado:</strong> {after.remote} · {after.local} · {after.wt} · {after.stories} · {after.batches}{openOf('assignment') ? ` · ${Math.max(0, openOf('assignment') - n('assignment') - gone('assignment'))} encargo(s) abiertos` : ''}{openOf('iteration') ? ` · ${Math.max(0, openOf('iteration') - n('iteration') - gone('iteration'))} iteración(es) sin integrar` : ''}.</div>}
             {showErrors && missingReason.length > 0 && <Notice kind="warn">Falta el motivo en {missingReason.length} objetivo(s): {missingReason.map(i => i.name).join(' · ')}.</Notice>}
-            <label className="ck"><input className="cb" type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} disabled={!selected.length} /><span>Autorizo exactamente estas {selected.length} acción(es) sobre «{plan.projectName}». Justo antes de ejecutar se comprueba de nuevo el estado real; lo que haya cambiado no se toca. Nada se fuerza.</span></label>
+            <label className="ck"><input className="cb" type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} disabled={!selected.length} /><span>Autorizo exactamente estas {selected.length} acción(es) sobre «{plan.projectName}»{plan.intent?.kind === 'close_stage' && common.trim() ? <> con el motivo «{common.trim()}»</> : null}. Justo antes de ejecutar se comprueba de nuevo el estado real; lo que haya cambiado no se toca. Nada se fuerza.</span></label>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
               <button type="button" className="btn btn-primary" disabled={!consent || !selected.length || busy !== null} onClick={() => void run()}>{busy === 'run' ? <span className="spin spin-light" /> : Icon.check()}{plan.status === 'partial' ? 'Reanudar lo elegido' : 'Ejecutar lo elegido'}</button>
               {plan.status === 'proposed' && <button type="button" className="btn btn-ghost" disabled={busy !== null} onClick={() => void reject()}>Rechazar la revisión</button>}
@@ -188,7 +245,7 @@ export function Maintenance() {
   </Shell>;
 }
 
-function Row({ it, done, editable, executed, choice, requiresChosen, reason, showError, requiresName, onChoice, onReason, outcome }: { it: MaintenanceItem; done: boolean; editable: boolean; executed: boolean; requiresChosen: boolean; choice: MaintenanceOptionId; reason: string; showError: boolean; requiresName: string | null; onChoice: (o: MaintenanceOptionId) => void; onReason: (r: string) => void; outcome?: MaintenanceOutcome }) {
+function Row({ it, done, editable, executed, choice, requirements, reason, showError, onChoice, onReason, outcome }: { it: MaintenanceItem; done: boolean; editable: boolean; executed: boolean; requirements: { id: string; name: string; kind: MaintenanceItem['kind'] | null; chosen: boolean; done: boolean }[]; choice: MaintenanceOptionId; reason: string; showError: boolean; onChoice: (o: MaintenanceOptionId) => void; onReason: (r: string) => void; outcome?: MaintenanceOutcome }) {
   const pickable = (it.category === 'safe' || it.category === 'decision') && editable && !done;
   const opt = it.options.find(o => o.id === choice);
   const branchy = it.kind === 'remote_branch' || it.kind === 'local_branch';
@@ -197,11 +254,14 @@ function Row({ it, done, editable, executed, choice, requiresChosen, reason, sho
   const storyLabel = it.story?.storyId || it.name;
   const asCheckbox = it.category === 'safe' && it.options.length === 2 && !!action;
   const asRadios = !asCheckbox && (it.category === 'safe' || it.category === 'decision') && it.options.length > 1;
+  const showDeps = pickable && !!opt && opt.id !== 'keep' && requirements.length > 0;
+  const describedBy = `${it.id}-why${showDeps ? ` ${it.id}-deps` : ''}`;
+  const depLink = (r: { id: string; name: string }) => <a key={r.id} className="lnk" href={`#row-${r.id}`}>{r.name}</a>;
   return <li className={`mnt-row mnt-${it.category}`} id={`row-${it.id}`}>
     <div className="mnt-row-main">
       <div className="mnt-row-h">
         {asCheckbox && action && pickable
-          ? <label className="ck"><input className="cb" type="checkbox" checked={choice !== 'keep'} onChange={e => onChoice(e.target.checked ? it.defaultOption : 'keep')} aria-label={`${action.label}: ${it.name}`} aria-describedby={`${it.id}-why`} /><span className={branchy ? 'mono' : undefined}>{it.name}</span></label>
+          ? <label className="ck"><input className="cb" type="checkbox" checked={choice !== 'keep'} onChange={e => onChoice(e.target.checked ? it.defaultOption : 'keep')} aria-label={`${action.label}: ${it.name}`} aria-describedby={describedBy} /><span className={branchy ? 'mono' : undefined}>{it.name}</span></label>
           : <span className={branchy ? 'mono mnt-name' : 'mnt-name'}>{it.name}</span>}
         <Chip xs tone={it.category === 'safe' ? 'ok' : it.category === 'decision' ? 'warn' : ''}>{it.status}</Chip>
         {it.sha && <span className="small mono muted">{it.sha}</span>}
@@ -212,13 +272,13 @@ function Row({ it, done, editable, executed, choice, requiresChosen, reason, sho
       {(it.uniqueCommits?.length ?? 0) > 0 && <details className="mnt-commits"><summary className="small">{it.unique} cambio(s) que no están en main</summary><ul className="small mono">{it.uniqueCommits!.map(c => <li key={c}>{c}</li>)}</ul></details>}
       {asRadios && <fieldset className="mnt-choices" disabled={!pickable}>
         <legend className="sr-only">Qué hacer con {it.name}</legend>
-        {it.options.map(o => <label key={o.id} className={`mnt-choice${o.destructive ? ' is-destructive' : ''}`}><input type="radio" className="sr-only" name={`opt-${it.id}`} checked={choice === o.id} onChange={() => onChoice(o.id)} aria-describedby={`${it.id}-why`} />{choice === o.id ? Icon.check() : null}<span>{o.label}</span></label>)}
+        {it.options.map(o => <label key={o.id} className={`mnt-choice${o.destructive ? ' is-destructive' : ''}`}><input type="radio" className="sr-only" name={`opt-${it.id}`} checked={choice === o.id} onChange={() => onChoice(o.id)} aria-describedby={describedBy} />{choice === o.id ? Icon.check() : null}<span>{o.label}</span></label>)}
       </fieldset>}
       {pickable && opt && opt.id !== 'keep' && asRadios && <div className="small">{opt.effect}</div>}
-      {pickable && opt && opt.id !== 'keep' && requiresName && (requiresChosen
-        ? <div className="small muted">También se retirará «{requiresName}» (la rama sigue abierta en ella).</div>
-        : <div className="small" style={{ color: 'var(--color-attention-text)' }}>Se omitirá: sigue abierta en «{requiresName}», que has dejado en «Conservar».</div>)}
-      {pickable && opt?.needsReason && <div><label className="label" htmlFor={`${it.id}-reason`}>{(REASON_LABEL[opt.id] ?? (n => `Motivo para «${n}»`))(it.kind === 'batch' ? it.name : storyLabel)} (queda en el historial)</label>
+      {showDeps && (requirements.every(r => r.chosen || r.done)
+        ? <div className="small muted" id={`${it.id}-deps`}>{requirements.length === 1 && requirements[0].kind === 'worktree' ? <>También se retirará {depLink(requirements[0])} (la rama sigue abierta en ella).</> : <>Antes se hará (está elegido): {requirements.map((r, i) => <span key={r.id}>{i ? ' · ' : ''}{depLink(r)}{r.done ? ' (ya hecho)' : ''}</span>)}.</>}</div>
+        : <div className="small" id={`${it.id}-deps`} style={{ color: 'var(--color-attention-text)' }}>{requirements.length === 1 && requirements[0].kind === 'worktree' ? <>Se omitirá: sigue abierta en {depLink(requirements[0])}, que has dejado en «Conservar».</> : <>Se omitirá: para hacerlo hay que elegir también {requirements.filter(r => !r.chosen && !r.done).map((r, i) => <span key={r.id}>{i ? ' · ' : ''}{depLink(r)}</span>)}.</>}</div>)}
+      {pickable && opt?.needsReason && <div><label className="label" htmlFor={`${it.id}-reason`}>{(REASON_LABEL[opt.id] ?? (n => `Motivo para «${n}»`))(it.kind === 'batch' || it.kind === 'iteration' ? it.name : it.kind === 'assignment' ? it.name.split(' · ')[0] : storyLabel)} (queda en el historial)</label>
         <input id={`${it.id}-reason`} className="input" required value={reason} maxLength={300} aria-invalid={reasonBad || undefined} aria-describedby={reasonBad ? `${it.id}-reason-err` : undefined} onChange={e => onReason(e.target.value)} placeholder="Ej.: sustituida por el rediseño 2.0" />
         {reasonBad && <div className="small" id={`${it.id}-reason-err`} style={{ color: 'var(--color-err-text)' }}>Escribe el motivo (al menos 3 caracteres).</div>}</div>}
       {outcome && outcome.status !== 'started' && <div className="small"><strong>{outcome.status === 'done' ? 'Resultado:' : outcome.status === 'failed' ? 'Error:' : outcome.status === 'noop' ? 'Nada que hacer:' : 'No se tocó:'}</strong> {outcome.message}</div>}

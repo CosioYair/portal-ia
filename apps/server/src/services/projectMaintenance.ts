@@ -2,10 +2,12 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import type { Batch, BacklogItem, MaintenanceItem, MaintenanceOption, MaintenanceOutcome, MaintenancePlan, MaintenanceRun, MaintenanceSelection, Process } from '@portal-ia/domain';
+import { ASSIGNMENT_STATUS_LABEL, requiresOf, type AssignmentStatus, type Batch, type BacklogItem, type MaintenanceItem, type MaintenanceOption, type MaintenanceOptionId, type MaintenanceOutcome, type MaintenancePlan, type MaintenanceRun, type MaintenanceSelection, type Process } from '@portal-ia/domain';
 import { backlogRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
 import { workspacesRepo } from '../db/platform.ts';
 import { batchesRepo } from '../db/batches.ts';
+import { assignmentsRepo } from '../db/assignments.ts';
+import { acceptAssignment, cancelAssignment } from './assignments.ts';
 import { git, remoteInfo, repoRoot } from './repoWrite.ts';
 import { withRepoLock } from './repoLock.ts';
 import { requirePolicy } from './executionPolicy.ts';
@@ -47,6 +49,8 @@ const ACTIVE_PROC = (p?: Process | null) => !!p && (p.status === 'running' || p.
 const PENDING_INTEGRATION = (p?: Process | null) => !!p?.result?.applied && !p.result.merged && !p.result.rejected;
 /** Estados de un elemento de lote que «Cancelar» admite (batchRunner.cancelItem; «running» queda protegido antes). */
 const CANCELLABLE_ITEM = ['queued', 'waiting_dependency', 'needs_owner', 'blocked'];
+/** Encargos que siguen abiertos (los aceptados, cancelados o fallidos ya están cerrados). */
+const OPEN_ASSIGNMENT: AssignmentStatus[] = ['draft', 'pending_authorization', 'running', 'needs_owner', 'ready_for_review', 'changes_requested'];
 const busyProjects = new Set<string>(); // una ejecución a la vez por proyecto (dos revisiones distintas no compiten)
 
 /** Avisos de cambio de estado de un plan (p. ej. la tarjeta del Asistente que lo propuso). */
@@ -266,10 +270,20 @@ const O = {
   closeDone: (force: boolean) => ({ id: 'close_done', label: force ? 'Cerrar como hecha (con tu motivo)' : 'Cerrar como hecha', effect: force ? 'Su código está en main, pero le falta un paso de la regla de cierre: se cierra como hecha con tu motivo (queda en el historial).' : 'Cumple la regla de cierre (integrada, activa y probada): queda completada.', destructive: false, needsReason: force } as MaintenanceOption),
   discardMerged: { id: 'discard', label: 'Cancelar (no se hará)', effect: 'Ojo: su código YA está en main. Cancelarla solo la quita del backlog («Descartadas», con tu motivo); el código sigue en main.', destructive: true, needsReason: true } as MaintenanceOption,
   discard: { id: 'discard', label: 'Cancelar (no se hará)', effect: 'La historia pasa a «Descartadas» con tu motivo; su historial se conserva. Su trabajo sin integrar, si lo hay, sigue en su rama y ya no se ofrece integrarlo.', destructive: true, needsReason: true } as MaintenanceOption,
+  discardIteration: { id: 'discard_iteration', label: 'Descartar la iteración', effect: 'La iteración queda descartada con tu motivo: no se integrará y su carpeta y su rama dejan de estar reservadas (se pueden retirar en esta misma revisión).', destructive: true, needsReason: true } as MaintenanceOption,
+  acceptAssignment: (force: boolean) => ({ id: 'accept_assignment', label: force ? 'Aceptar con tu motivo' : 'Aceptar', effect: force ? 'Su trabajo está en main, pero le falta un paso de la regla de cierre: se acepta con tu motivo (queda en el historial).' : 'Su trabajo está en main y cumple la regla de cierre: queda aceptado.', destructive: false, needsReason: force } as MaintenanceOption),
+  cancelAssignment: { id: 'cancel_assignment', label: 'Cancelar el encargo', effect: 'El encargo queda cancelado con tu motivo (no se borra nada; si su proceso espera autorización, también se cancela).', destructive: true, needsReason: true } as MaintenanceOption,
   closeBatch: { id: 'close_batch', label: 'Cerrar el lote', effect: 'El lote se cierra con tu motivo (sin IA): si todo lo suyo está integrado queda completado; si no, sus historias sin terminar quedan canceladas EN EL LOTE. No se pierde código (lo integrado sigue en main y lo demás en sus ramas) y cada historia sigue en el backlog con su estado, para decidirla en una revisión posterior.', destructive: true, needsReason: true } as MaintenanceOption
 };
 
-/** Clasifica el inventario en objetivos. Determinista y sin IA: la misma entrada da el mismo plan. */
+/**
+ * Clasifica el inventario en objetivos. Determinista y sin IA: la misma entrada da el mismo plan.
+ *
+ * Primero lo que se decide (historias, encargos, iteraciones sueltas, lotes) y después carpetas y ramas, que pueden
+ * depender de ello: una rama del lote en pausa, o la carpeta de una iteración que nadie integrará, no son intocables si en
+ * esta MISMA revisión eliges también cerrar el lote, cancelar la historia o descartar la iteración («requires»). Lo que no
+ * depende de una decisión tuya (main, lo que está en marcha, lo bloqueado, lo de otra empresa o herramienta) sigue protegido.
+ */
 async function classify(slug: string, inv: Inventory): Promise<MaintenanceItem[]> {
   const items: MaintenanceItem[] = [];
   const procs = processesRepo(slug);
@@ -292,89 +306,11 @@ async function classify(slug: string, inv: Inventory): Promise<MaintenanceItem[]
   const protectedNames = new Set([inv.main, inv.registered, 'main', 'master', inv.current, inv.remoteDefault].filter(Boolean) as string[]);
   const batchLabel = (b: Batch) => `«${b.title}» (${b.status === 'paused' ? 'en pausa' : 'en marcha'})`;
   const keepItem = (base: any, id: string, category: MaintenanceItem['category'], status: string, reason: string, fingerprint: string) => items.push({ ...base, id, category, status, reason, options: [O.keep], defaultOption: 'keep', consequences: 'Se conserva.', recovery: null, fingerprint });
-
-  /** Por qué una rama no se puede tocar ahora (o null). */
-  const branchGuard = (name: string): string | null => {
-    if (protectedNames.has(name)) return name === inv.current && name !== inv.main ? 'Es la rama activa del repositorio.' : 'Es la rama principal: nunca se borra.';
-    if (inv.foreignBranches.has(name)) return 'La usa otra empresa del Portal que tiene registrado este mismo repositorio.';
-    const ps = procsOfBranch.get(name) ?? [];
-    if (ps.some(ACTIVE_PROC)) return 'Su proceso está en curso o esperando autorización.';
-    const b = batchBranches.get(name) ?? ps.map(p => batchOfProcess.get(p.id)).find(Boolean);
-    if (b) return `Protegida por el lote ${batchLabel(b)}: no se puede borrar mientras el lote siga abierto.`;
-    if (ps.some(PENDING_INTEGRATION)) return 'Tiene una iteración aplicada pendiente de revisar o integrar: decídelo en su historia (integrar o «Devolver a pendiente»).';
-    return null;
-  };
-  /** Rama de historia creada por el Portal (sus ramas «ya integradas» se proponen borrar; las demás, a tu elección). */
-  const isStoryBranch = (name: string) => (procsOfBranch.get(name) ?? []).length > 0 || /^portal-ia\//.test(name);
-  /** Se propone borrarla sola: rama de historia ya integrada (su proceso la integró) o con commits propios ya en main. Una rama igual a main sin historia integrada puede ser recién creada: decide tú. */
-  const autoDelete = (name: string, sha: string) => (procsOfBranch.get(name) ?? []).some(p => !!p.result?.merged) || (isStoryBranch(name) && sha !== inv.mainSha);
+  const assignments = assignmentsRepo(slug).list(inv.projectId);
 
   if (!inv.main) return [{ id: 'repo:main', kind: 'local_branch', name: 'Rama principal', category: 'protected', status: 'No se pudo determinar', reason: 'El repositorio no tiene la rama registrada ni main/master: sin una base segura no se propone limpiar ramas.', options: [O.keep], defaultOption: 'keep', consequences: 'No se toca nada.', recovery: null, fingerprint: '-' }];
 
-  // Carpetas de trabajo (worktrees): las del Portal se pueden retirar si su proceso no está activo ni pendiente de integrar.
-  for (const w of inv.worktrees) {
-    const p = getProc(w.processId);
-    const s = storyOf(p);
-    const base = { kind: 'worktree' as const, name: w.managed ? `Carpeta de trabajo de ${s?.storyId || w.branch || path.basename(w.path)}` : path.basename(w.path), story: storyRef(s), processId: w.processId, worktree: w.path, sha: (w.head ?? '').slice(0, 7) || null };
-    const id = `worktree:${w.path}`;
-    if (!w.managed) { keepItem(base, id, 'outside', 'De otra herramienta', `No la creó el Portal (rama ${w.branch ?? 'sin rama'}): no la gestiona ni la borra.`, `${w.branch}`); continue; }
-    const guard = w.locked ? 'Está bloqueada (git worktree lock): no se retira.'
-      : w.processId && inv.foreignProcs.has(w.processId) ? 'Es de otra empresa del Portal que tiene registrado este mismo repositorio.'
-      : ACTIVE_PROC(p) ? 'Su proceso está en curso o esperando autorización.'
-      : p && batchOfProcess.get(p.id) ? `Protegida por el lote ${batchLabel(batchOfProcess.get(p.id)!)}.`
-      : PENDING_INTEGRATION(p) ? 'Su iteración está aplicada y pendiente de revisar o integrar: la carpeta hace falta para verificarla o integrarla.' : null;
-    if (guard) { keepItem(base, id, 'protected', 'En uso', guard, `${w.branch}:${w.head}:${p?.status ?? '-'}`); continue; }
-    // Estado de la carpeta sin bloquear su índice (--no-optional-locks) y viendo TODO lo no guardado; si no se puede leer, no se toca.
-    let dirty: number | null = 0;
-    try { dirty = (await git(w.path, ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all'])).split('\n').filter(Boolean).length; } catch { dirty = null; }
-    // Commits hechos en la carpeta que no están en ninguna rama (HEAD separado): se perderían.
-    const orphan = w.head && await hasObject(inv.cwd, w.head) ? parseInt(await git(inv.cwd, ['rev-list', '--count', w.head, '--not', '--branches', '--tags', '--remotes']).catch(() => 'NaN'), 10) : 0;
-    const fp = `${w.branch}@${w.head}:${dirty}:${orphan}:${p?.status ?? '-'}`;
-    if (dirty === null || !Number.isFinite(orphan)) { keepItem(base, id, 'decision', 'No se pudo comprobar su estado', 'No se pudo leer si tiene cambios sin guardar: se conserva.', fp); continue; }
-    if (orphan > 0) { keepItem(base, id, 'decision', `Tiene ${orphan} commit(s) que no están en ninguna rama`, 'Retirarla los perdería: guárdalos antes en una rama.', fp); continue; }
-    items.push({ ...base, id, category: dirty ? 'decision' : 'safe', status: dirty ? `Tiene ${dirty} archivo(s) sin guardar en un commit` : 'Carpeta de trabajo inactiva',
-      reason: dirty ? 'Retirarla borraría cambios que no están en ningún commit.' : `El proceso${s ? ` de ${s.storyId}` : ''} terminó; la rama ${w.branch ?? '—'} conserva todo su contenido.`,
-      options: [O.keep, O.removeWorktree(dirty > 0)], defaultOption: dirty ? 'keep' : 'remove_worktree',
-      consequences: dirty ? `Se perderían ${dirty} archivo(s) sin guardar.` : 'Desaparece la carpeta (también lo que git ignora, como dependencias instaladas o .env locales); la rama queda.', recovery: 'Se puede volver a crear desde su rama si hiciera falta.', fingerprint: fp });
-  }
-
-  // Ramas locales (frente al main local).
-  for (const [name, sha] of inv.local) {
-    const ps = procsOfBranch.get(name) ?? []; const s = ps.map(storyOf).find(Boolean) ?? null;
-    const u = await uniqueOf(inv.cwd, `refs/heads/${inv.main}`, sha);
-    const wt = wtByBranch.get(name);
-    const base = { kind: 'local_branch' as const, name, sha: sha.slice(0, 7), unique: u.count, uniqueCommits: u.commits, story: storyRef(s), processId: ps[0]?.id ?? null, worktree: wt?.path ?? null };
-    const id = `local:${name}`;
-    const guard = branchGuard(name) ?? (wt && !wt.managed ? 'Está abierta en una carpeta de trabajo de otra herramienta.' : null);
-    if (guard) { keepItem(base, id, 'protected', name === inv.current && name !== inv.main ? 'Rama activa' : protectedNames.has(name) ? 'Rama principal' : 'En uso', guard, sha); continue; }
-    const requires = wt?.managed ? `worktree:${wt.path}` : null;
-    // Sigue abierta en una carpeta de trabajo: si esa carpeta está protegida, la rama también; si retirarla es una decisión
-    // (cambios sin guardar, commits sueltos), la rama nunca viene marcada: elegirla no debe elegir perder esos cambios.
-    const wtItem = requires ? items.find(i => i.id === requires) : null;
-    if (wtItem?.category === 'protected') { keepItem(base, id, 'protected', 'En uso', `Sigue abierta en «${wtItem.name}», que está protegida: ${wtItem.reason}`, sha); continue; }
-    const wtSafe = !wtItem || wtItem.category === 'safe';
-    if (u.count === 0) {
-      const auto = autoDelete(name, sha) && wtSafe; // una rama larga o recién creada (= main) no se propone borrar sola
-      items.push({ ...base, id, category: auto ? 'safe' : 'decision', status: 'Ya integrada en main', reason: auto ? 'Rama de una historia y todo su contenido está en main: borrarla no pierde nada.' : !wtSafe ? `Todo su contenido está en main, pero sigue abierta en «${wtItem!.name}», que tiene cambios sin guardar: decide primero qué hacer con esa carpeta.` : 'Todo su contenido está en main, pero no es una rama de historia (puede ser de larga vida o recién creada): decide tú.', options: [O.keep, O.deleteLocal], defaultOption: auto ? 'delete_local' : 'keep', consequences: 'Desaparece la rama de este equipo; el código sigue en main.', recovery: `Se puede restaurar (git branch -- ${name} ${sha.slice(0, 10)}).`, requires, fingerprint: sha });
-    } else items.push({ ...base, id, category: 'decision', status: u.count === null ? 'No se pudo comprobar' : `Contiene ${u.count} cambio(s) que no están en main`, reason: u.count === null ? 'No se pudo comparar con main.' : 'Es trabajo sin integrar: revísalo antes de decidir.', options: u.count === null ? [O.keep] : [O.keep, O.archiveLocal], defaultOption: 'keep', consequences: 'Con «Guardar copia y borrar», la rama deja de verse pero su trabajo queda guardado en este equipo.', recovery: 'Se puede restaurar desde la copia (se indica al ejecutar).', requires, fingerprint: sha });
-  }
-
-  // Ramas del remoto: integradas solo si su contenido está en el main del REMOTO y en el local (así no se pierde en el remoto).
-  if (inv.remoteHeads && inv.remote) for (const [name, sha] of inv.remoteHeads) {
-    const ps = procsOfBranch.get(name) ?? []; const s = ps.map(storyOf).find(Boolean) ?? null;
-    const u = await uniqueOf(inv.cwd, `refs/heads/${inv.main}`, sha);
-    const inRemoteMain = await contains(inv.cwd, inv.remoteMainSha, sha);
-    const base = { kind: 'remote_branch' as const, name: `${inv.remote}/${name}`, sha: sha.slice(0, 7), unique: u.count, uniqueCommits: u.commits, story: storyRef(s), processId: ps[0]?.id ?? null };
-    const id = `remote:${name}`;
-    const guard = branchGuard(name) ?? (inv.pushDiffers ? `${inv.remote} publica en una dirección distinta de la que se lee (pushurl): no se borra nada en él.` : null);
-    if (guard) { keepItem(base, id, 'protected', name === inv.current && name !== inv.main ? 'Rama activa' : protectedNames.has(name) ? 'Rama principal' : 'En uso', guard, sha); continue; }
-    if (u.count === 0 && inRemoteMain) {
-      const auto = autoDelete(name, sha);
-      items.push({ ...base, id, category: auto ? 'safe' : 'decision', status: 'Ya integrada en main', reason: auto ? `Rama de una historia y todo su contenido está en main (también en ${inv.remote}): borrarla no pierde nada.` : 'Todo su contenido está en main, pero no es una rama de historia (puede ser de larga vida): decide tú.', options: [O.keep, O.deleteRemote(inv.remote)], defaultOption: auto ? 'delete_remote' : 'keep', consequences: `Desaparece de ${inv.remote}; el código sigue en main.`, recovery: `Se puede restaurar (git push ${inv.remote} ${sha.slice(0, 10)}:refs/heads/${name}).`, fingerprint: sha });
-    } else if (u.count === 0) items.push({ ...base, id, category: 'decision', status: `Integrada en main, pero main no está publicado en ${inv.remote}`, reason: `Su contenido está en tu main local pero no en el de ${inv.remote}: si la borras ahora, en ${inv.remote} no quedaría. Publica main primero.`, options: [O.keep], defaultOption: 'keep', consequences: 'Se conserva.', recovery: null, fingerprint: sha });
-    else items.push({ ...base, id, category: 'decision', status: u.count === null ? 'No se pudo comprobar su contenido' : `Contiene ${u.count} cambio(s) que no están en main`, reason: u.count === null ? 'Sus commits no están en este equipo: no se puede saber si están en main.' : 'Es trabajo sin integrar: revísalo antes de decidir.', options: u.count === null ? [O.keep] : [O.keep, O.archiveRemote(inv.remote)], defaultOption: 'keep', consequences: `Con «Guardar copia y borrar», desaparece de ${inv.remote}; su trabajo queda guardado en este equipo.`, recovery: 'Se puede restaurar desde la copia (se indica al ejecutar).', fingerprint: sha });
-  }
-
+  // ---------------------------------------------------------------------------------- 1. Lo que se decide
   // Historias abiertas: estado verdadero según su proceso, su lote y main (comprobado con git).
   for (const s of inv.stories.filter(x => OPEN_STORY(x.status))) {
     const bi = batchItemOfStory.get(s.id);
@@ -384,7 +320,9 @@ async function classify(slug: string, inv: Inventory): Promise<MaintenanceItem[]
     const fp = `${s.status}:${p?.id ?? '-'}:${p?.status ?? '-'}:${p?.result?.merged?.commit ?? '-'}:${bi?.item.state ?? '-'}:${s.lastProcessId ?? '-'}`;
     const merged = !!p?.result?.merged && await contains(inv.cwd, `refs/heads/${inv.main}`, p.result.merged.commit);
     const branch = p?.result?.applied?.branch ?? null;
-    if (ACTIVE_PROC(p) || s.status === 'in_progress' || bi?.item.state === 'running') { keepItem(base, id, 'protected', 'En curso', 'Tiene un proceso en curso: no se cancela ni se oculta.', fp); continue; }
+    // En curso de verdad (ejecutándose): protegida. Una iteración que solo espera autorización no lo está: cancelar la historia
+    // la deniega, igual que «Denegar» en Decisiones.
+    if (p?.status === 'running' || s.status === 'in_progress' || bi?.item.state === 'running') { keepItem(base, id, 'protected', 'En curso', 'Tiene un proceso en curso: no se cancela ni se oculta.', fp); continue; }
     if (bi) {
       const st = bi.item.state;
       // Una iteración más reciente de la historia, lanzada fuera del lote y aún viva: el lote no la conoce; se decide allí.
@@ -404,7 +342,7 @@ async function classify(slug: string, inv: Inventory): Promise<MaintenanceItem[]
       }
       if (st === 'rejected') { keepItem(base, id, 'decision', 'No la aceptaste en el lote', `Decídelo en el lote «${bi.batch.title}» (iterar o cancelar).`, fp); continue; }
       if (CANCELLABLE_ITEM.includes(st)) items.push({ ...base, id, category: 'decision', status: merged ? 'Integrada en main; el lote espera tu decisión' : branch ? 'Sus cambios solo están en su rama' : 'No llegó a implementarse', reason: `${inBatch}: ${st === 'needs_owner' ? 'necesita tu decisión' : 'pendiente'}.${merged ? ' Si el trabajo está bien, acéptala en el lote en vez de cancelarla.' : ''}`,
-        options: [O.keep, merged ? O.discardMerged : O.discard], defaultOption: 'keep', consequences: 'Cancelarla la quita de las pendientes del lote y del backlog (queda en «Descartadas» con tu motivo).', recovery: 'Su historial y su rama se conservan.', fingerprint: fp });
+        options: [O.keep, merged ? O.discardMerged : O.discard], defaultOption: 'keep', consequences: 'Cancelarla la quita de las pendientes del lote y del backlog (queda en «Descartadas» con tu motivo); si tiene una iteración esperando autorización, se deniega.', recovery: 'Su historial y su rama se conservan.', fingerprint: fp });
       else keepItem(base, id, 'decision', 'Se decide en su lote', `Su estado en el lote «${bi.batch.title}» se decide allí, o cierra el lote y vuelve a revisar.`, fp);
       continue;
     }
@@ -417,7 +355,42 @@ async function classify(slug: string, inv: Inventory): Promise<MaintenanceItem[]
     // Pendiente (también una que reabriste aunque una iteración anterior llegara a main): nunca se ofrece como hecha.
     items.push({ ...base, id, category: 'decision', status: s.status === 'pending' && merged ? 'Reabierta (pendiente)' : branch && !merged ? `Sus cambios solo están en la rama ${branch}` : 'No se ha implementado',
       reason: s.status === 'pending' && merged ? 'La devolviste a pendiente: no se cierra como hecha.' : branch && !merged ? 'Su trabajo no está en main.' : 'No tiene cambios en main.',
-      options: [O.keep, merged ? O.discardMerged : O.discard], defaultOption: 'keep', consequences: 'Cancelarla la quita del backlog activo (queda en «Descartadas» con tu motivo); nunca se marca como hecha.', recovery: 'Su historial se conserva.', fingerprint: fp });
+      options: [O.keep, merged ? O.discardMerged : O.discard], defaultOption: 'keep', consequences: 'Cancelarla la quita del backlog activo (queda en «Descartadas» con tu motivo); nunca se marca como hecha. Si tiene una iteración esperando autorización, se deniega.', recovery: 'Su historial se conserva.', fingerprint: fp });
+  }
+
+  // Historias ya hechas que un lote (abierto o cerrado) sigue mostrando «pendientes de tu aceptación»: aceptarlas solo lo
+  // anota en el lote (su código ya está en main; no integra nada). Las descartadas nunca (aceptar las marcaría hechas).
+  for (const b of inv.batches.filter(x => x.status !== 'running' && x.projectId === inv.projectId)) for (const it of b.items) {
+    if (it.state !== 'awaiting_acceptance') continue;
+    const s = storyById.get(it.itemId) ?? backlogRepo(slug).get(it.itemId) ?? null;
+    if (!s || s.status !== 'done') continue;
+    const p = getProc(it.followedProcessId ?? it.processId);
+    if (!p?.result?.merged || !await contains(inv.cwd, `refs/heads/${inv.main}`, p.result.merged.commit)) continue;
+    const blocker = await closingBlocker(slug, p, 'historia');
+    items.push({ kind: 'story', id: `batchitem:${b.id}:${it.itemId}`, name: `${s.storyId ?? ''} · ${s.title}`, category: 'decision', status: `Hecha; el lote «${b.title}» aún la muestra pendiente de aceptación`,
+      reason: `Su código ya está en main: aceptarla en el lote solo lo anota (no integra nada).${blocker ? ` Falta: ${blocker.error}` : ''}`, story: storyRef(s), processId: p.id, batchId: b.id,
+      options: [O.keep, O.accept(!!blocker)], defaultOption: 'keep', consequences: 'El lote la anota como aceptada; la historia sigue hecha.', recovery: 'Su historial se conserva.', fingerprint: `${b.status}:${it.state}:${s.status}:${p.id}` });
+  }
+
+  // Encargos abiertos del proyecto: aceptar (si su trabajo ya está en main) o cancelar; en marcha, protegidos.
+  for (const a of assignments) {
+    if (!OPEN_ASSIGNMENT.includes(a.status)) continue;
+    const p = a.processId ? getProc(a.processId) : null;
+    const base = { kind: 'assignment' as const, name: `${a.code} · ${a.title}`, processId: p?.id ?? null };
+    const id = `assignment:${a.id}`;
+    const fp = `${a.status}:${p?.id ?? '-'}:${p?.status ?? '-'}:${p?.result?.merged?.commit ?? '-'}`;
+    if (a.status === 'running' || p?.status === 'running') { keepItem(base, id, 'protected', 'En marcha', 'Un encargo en marcha no se cierra desde aquí.', fp); continue; }
+    if (a.status === 'ready_for_review') {
+      const merged = !!p?.result?.merged && await contains(inv.cwd, `refs/heads/${inv.main}`, p.result.merged.commit);
+      const blocker = merged ? await closingBlocker(slug, p ?? undefined, 'encargo') : null;
+      items.push({ ...base, id, category: 'decision', status: merged ? (blocker ? 'Integrado en main; falta un paso' : 'Integrado en main; listo para aceptar') : 'Listo para tu revisión (no está en main)',
+        reason: merged ? (blocker ? `Falta: ${blocker.error}` : 'Su trabajo ya está en main.') : 'Su trabajo no está en main.',
+        options: merged ? [O.keep, O.acceptAssignment(!!blocker), O.cancelAssignment] : [O.keep, O.cancelAssignment], defaultOption: 'keep',
+        consequences: merged ? 'Aceptarlo lo cierra (es verdad: su trabajo está en main) y deja constancia de lo que faltaba, si faltaba algo.' : 'Cancelarlo lo cierra sin integrar nada.', recovery: 'Su historial y su proceso se conservan.', fingerprint: fp });
+      continue;
+    }
+    items.push({ ...base, id, category: 'decision', status: `Encargo ${ASSIGNMENT_STATUS_LABEL[a.status]}`, reason: 'Sigue abierto: si ya no hace falta, cancélalo (queda en el historial).',
+      options: [O.keep, O.cancelAssignment], defaultOption: 'keep', consequences: 'Queda cancelado; si su proceso espera autorización, también.', recovery: 'Su historial se conserva.', fingerprint: fp });
   }
 
   // Lotes abiertos de este proyecto: protegidos salvo que elijas cerrarlos (con motivo).
@@ -427,14 +400,167 @@ async function classify(slug: string, inv: Inventory): Promise<MaintenanceItem[]
     const base = { kind: 'batch' as const, name: b.title, batchId: b.id };
     if (b.status === 'running') { keepItem(base, `batch:${b.id}`, 'protected', 'En marcha', 'Un lote en marcha no se cierra desde aquí.', fp); continue; }
     const pending = b.items.filter(i => !['accepted', 'cancelled', 'postponed', 'rejected'].includes(i.state));
-    items.push({ ...base, id: `batch:${b.id}`, category: 'decision', status: `En pausa · ${pending.length} historia(s) sin cerrar`, reason: 'Está protegido: solo se cierra si lo eliges. Mientras siga abierto, sus ramas y carpetas de trabajo no se tocan.',
+    items.push({ ...base, id: `batch:${b.id}`, category: 'decision', status: `En pausa · ${pending.length} historia(s) sin cerrar`, reason: 'Está protegido: solo se cierra si lo eliges. Mientras siga abierto, sus ramas y carpetas de trabajo no se tocan (salvo que en esta misma revisión lo cierres).',
       options: [O.keep, O.closeBatch], defaultOption: 'keep', consequences: 'Cerrarlo no pierde código (main y las ramas siguen); lo no terminado queda cancelado en el lote y sus historias siguen en el backlog.', recovery: 'Sus eventos e historias quedan en el historial.', fingerprint: fp });
+  }
+
+  // Iteraciones que nadie va a integrar: aplicadas sin integrar ni descartar, con su historia ya cerrada (o sin historia ni
+  // encargo abiertos) y fuera de un lote abierto. Mientras sigan así, su carpeta y su rama están «en uso».
+  const candidates = new Map<string, Process>(inv.processes.map(p => [p.id, p]));
+  for (const w of inv.worktrees) { const p = getProc(w.processId); if (p) candidates.set(p.id, p); }
+  for (const p of candidates.values()) {
+    if (p.projectId !== inv.projectId || !PENDING_INTEGRATION(p) || ACTIVE_PROC(p) || batchOfProcess.has(p.id) || inv.foreignProcs.has(p.id)) continue;
+    const s = storyOf(p); if (s && OPEN_STORY(s.status)) continue; // la decide su historia
+    const a = p.assignmentId ? assignmentsRepo(slug).get(p.assignmentId) ?? null : null; if (a && OPEN_ASSIGNMENT.includes(a.status)) continue; // la decide su encargo
+    const branch = p.result!.applied!.branch ?? null; const wt = inv.worktrees.find(w => w.processId === p.id);
+    if (!wt && !(branch && inv.local.has(branch))) continue; // nada que liberar
+    items.push({ kind: 'iteration', id: `iteration:${p.id}`, name: `Iteración de ${s?.storyId || a?.code || p.title}`, category: 'decision',
+      status: s ? `Aplicada sin integrar; ${s.storyId} ya está ${s.status === 'done' ? 'hecha' : 'cerrada'}` : 'Aplicada sin integrar; sin historia ni encargo abiertos',
+      reason: `Nadie la va a integrar, pero ${wt ? 'su carpeta de trabajo' : 'su rama'}${branch ? ` (${branch})` : ''} sigue reservada para ella. Descartarla libera su carpeta y su rama, que se pueden retirar en esta misma revisión.`,
+      story: storyRef(s), processId: p.id, options: [O.keep, O.discardIteration], defaultOption: 'keep',
+      consequences: 'La iteración queda descartada (no se integrará); su historial se conserva.', recovery: 'Su rama se conserva hasta que elijas borrarla o guardar una copia.', fingerprint: `${p.status}:${p.result?.applied?.commit ?? '-'}:${p.archivedAt ?? '-'}` });
+  }
+
+  // ---------------------------------------------------------------------------------- 2. Carpetas y ramas
+  const needLabel = (id: string) => { const it = items.find(i => i.id === id); if (!it) return id;
+    return it.kind === 'batch' ? `cerrar el lote «${it.name}»` : it.kind === 'story' ? `cancelar ${it.story?.storyId || it.name}` : it.kind === 'iteration' ? `descartar la iteración de ${it.name.replace(/^Iteración de /, '')}` : it.kind === 'worktree' ? `retirar «${it.name}»` : it.name; };
+  /** Un lote en pausa que se puede cerrar en esta revisión deja de proteger lo suyo si eliges cerrarlo. */
+  const batchNeed = (b: Batch) => b.status === 'paused' && items.some(i => i.id === `batch:${b.id}` && i.options.some(o => o.id === 'close_batch')) ? `batch:${b.id}` : null;
+  /** Qué decisión libera una iteración aplicada sin integrar: cancelar su historia abierta o descartar la iteración suelta. */
+  const releaseOf = (p: Process): string | null => {
+    const s = storyOf(p);
+    if (s && OPEN_STORY(s.status)) { const it = items.find(i => i.id === `story:${s.id}`); return it?.options.some(o => o.id === 'discard') ? it.id : null; }
+    return items.some(i => i.id === `iteration:${p.id}`) ? `iteration:${p.id}` : null;
+  };
+  type Guard = { hard: string | null; needs: string[] };
+  /** Con dependencias: elegible solo si en esta revisión también eliges lo que la libera (por defecto, «Conservar»). */
+  const withNeeds = (g: Guard, item: MaintenanceItem): MaintenanceItem => {
+    if (!g.needs.length) return item;
+    const needs = [...new Set(g.needs)];
+    return { ...item, category: item.category === 'safe' ? 'decision' : item.category, defaultOption: 'keep', requires: [...new Set([...requiresOf(item.requires), ...needs])], reason: `Solo si en esta misma revisión también eliges: ${needs.map(needLabel).join(' · ')}. ${item.reason}` };
+  };
+
+  // Carpetas de trabajo (worktrees): las del Portal se pueden retirar si su proceso no está activo; las de un lote en pausa o
+  // de una iteración pendiente, solo junto con la decisión que las libera.
+  for (const w of inv.worktrees) {
+    const p = getProc(w.processId);
+    const s = storyOf(p);
+    const base = { kind: 'worktree' as const, name: w.managed ? `Carpeta de trabajo de ${s?.storyId || w.branch || path.basename(w.path)}` : path.basename(w.path), story: storyRef(s), processId: w.processId, worktree: w.path, sha: (w.head ?? '').slice(0, 7) || null };
+    const id = `worktree:${w.path}`;
+    if (!w.managed) { keepItem(base, id, 'outside', 'De otra herramienta', `No la creó el Portal (rama ${w.branch ?? 'sin rama'}): no la gestiona ni la borra.`, `${w.branch}`); continue; }
+    const g: Guard = { hard: null, needs: [] };
+    if (w.locked) g.hard = 'Está bloqueada (git worktree lock): no se retira.';
+    else if (w.processId && inv.foreignProcs.has(w.processId)) g.hard = 'Es de otra empresa del Portal que tiene registrado este mismo repositorio.';
+    else if (ACTIVE_PROC(p)) g.hard = 'Su proceso está en curso o esperando autorización.';
+    else {
+      const b = p ? batchOfProcess.get(p.id) : undefined;
+      if (b) { const n = batchNeed(b); if (n) g.needs.push(n); else g.hard = `Protegida por el lote ${batchLabel(b)}.`; }
+      if (!g.hard && PENDING_INTEGRATION(p)) { const r = releaseOf(p!); if (r) g.needs.push(r); else g.hard = 'Su iteración está aplicada y pendiente de revisar o integrar: la carpeta hace falta para verificarla o integrarla.'; }
+    }
+    if (g.hard) { keepItem(base, id, 'protected', 'En uso', g.hard, `${w.branch}:${w.head}:${p?.status ?? '-'}`); continue; }
+    // Estado de la carpeta sin bloquear su índice (--no-optional-locks) y viendo TODO lo no guardado; si no se puede leer, no se toca.
+    let dirty: number | null = 0;
+    try { dirty = (await git(w.path, ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all'])).split('\n').filter(Boolean).length; } catch { dirty = null; }
+    // Commits hechos en la carpeta que no están en ninguna rama (HEAD separado): se perderían.
+    const orphan = w.head && await hasObject(inv.cwd, w.head) ? parseInt(await git(inv.cwd, ['rev-list', '--count', w.head, '--not', '--branches', '--tags', '--remotes']).catch(() => 'NaN'), 10) : 0;
+    const fp = `${w.branch}@${w.head}:${dirty}:${orphan}:${p?.status ?? '-'}`;
+    if (dirty === null || !Number.isFinite(orphan)) { keepItem(base, id, 'decision', 'No se pudo comprobar su estado', 'No se pudo leer si tiene cambios sin guardar: se conserva.', fp); continue; }
+    if (orphan > 0) { keepItem(base, id, 'decision', `Tiene ${orphan} commit(s) que no están en ninguna rama`, 'Retirarla los perdería: guárdalos antes en una rama.', fp); continue; }
+    items.push(withNeeds(g, { ...base, id, category: dirty ? 'decision' : 'safe', status: dirty ? `Tiene ${dirty} archivo(s) sin guardar en un commit` : 'Carpeta de trabajo inactiva',
+      reason: dirty ? 'Retirarla borraría cambios que no están en ningún commit.' : `El proceso${s ? ` de ${s.storyId}` : ''} terminó; la rama ${w.branch ?? '—'} conserva todo su contenido.`,
+      options: [O.keep, O.removeWorktree(dirty > 0)], defaultOption: dirty ? 'keep' : 'remove_worktree',
+      consequences: dirty ? `Se perderían ${dirty} archivo(s) sin guardar.` : 'Desaparece la carpeta (también lo que git ignora, como dependencias instaladas o .env locales); la rama queda.', recovery: 'Se puede volver a crear desde su rama si hiciera falta.', fingerprint: fp }));
+  }
+
+  /** Por qué una rama no se puede tocar ahora («hard») o de qué decisiones de esta revisión depende («needs»). */
+  const branchGuard = (name: string): Guard => {
+    if (protectedNames.has(name)) return { hard: name === inv.current && name !== inv.main ? 'Es la rama activa del repositorio.' : 'Es la rama principal: nunca se borra.', needs: [] };
+    if (inv.foreignBranches.has(name)) return { hard: 'La usa otra empresa del Portal que tiene registrado este mismo repositorio.', needs: [] };
+    const ow = wtByBranch.get(name); if (ow && !ow.managed) return { hard: 'Está abierta en una carpeta de trabajo de otra herramienta.', needs: [] };
+    const ps = procsOfBranch.get(name) ?? [];
+    if (ps.some(ACTIVE_PROC)) return { hard: 'Su proceso está en curso o esperando autorización.', needs: [] };
+    const needs: string[] = [];
+    const b = batchBranches.get(name) ?? ps.map(p => batchOfProcess.get(p.id)).find(Boolean);
+    if (b) { const n = batchNeed(b); if (!n) return { hard: `Protegida por el lote ${batchLabel(b)}: no se puede borrar mientras el lote siga abierto.`, needs: [] }; needs.push(n); }
+    for (const p of ps.filter(PENDING_INTEGRATION)) { const r = releaseOf(p); if (!r) return { hard: 'Tiene una iteración aplicada pendiente de revisar o integrar: decídelo en su historia (integrar o «Devolver a pendiente»).', needs: [] }; needs.push(r); }
+    return { hard: null, needs };
+  };
+  /** Rama de historia creada por el Portal (sus ramas «ya integradas» se proponen borrar; las demás, a tu elección). */
+  const isStoryBranch = (name: string) => (procsOfBranch.get(name) ?? []).length > 0 || /^portal-ia\//.test(name);
+  /** Se propone borrarla sola: rama de historia ya integrada (su proceso la integró) o con commits propios ya en main. Una rama igual a main sin historia integrada puede ser recién creada: decide tú. */
+  const autoDelete = (name: string, sha: string) => (procsOfBranch.get(name) ?? []).some(p => !!p.result?.merged) || (isStoryBranch(name) && sha !== inv.mainSha);
+  const protectedLabel = (name: string) => name === inv.current && name !== inv.main ? 'Rama activa' : protectedNames.has(name) ? 'Rama principal' : 'En uso';
+
+  // Ramas locales (frente al main local).
+  for (const [name, sha] of inv.local) {
+    const ps = procsOfBranch.get(name) ?? []; const s = ps.map(storyOf).find(Boolean) ?? null;
+    const u = await uniqueOf(inv.cwd, `refs/heads/${inv.main}`, sha);
+    const wt = wtByBranch.get(name);
+    const base = { kind: 'local_branch' as const, name, sha: sha.slice(0, 7), unique: u.count, uniqueCommits: u.commits, story: storyRef(s), processId: ps[0]?.id ?? null, worktree: wt?.path ?? null, portalBranch: isStoryBranch(name) };
+    const id = `local:${name}`;
+    const g = branchGuard(name);
+    if (!g.hard && wt && !wt.managed) g.hard = 'Está abierta en una carpeta de trabajo de otra herramienta.';
+    if (g.hard) { keepItem(base, id, 'protected', protectedLabel(name), g.hard, sha); continue; }
+    const wtId = wt?.managed ? `worktree:${wt.path}` : null;
+    // Sigue abierta en una carpeta de trabajo: si esa carpeta está protegida, la rama también; si retirarla es una decisión
+    // (cambios sin guardar, commits sueltos) o depende de otra, la rama nunca viene marcada.
+    const wtItem = wtId ? items.find(i => i.id === wtId) : null;
+    if (wtItem?.category === 'protected') { keepItem(base, id, 'protected', 'En uso', `Sigue abierta en «${wtItem.name}», que está protegida: ${wtItem.reason}`, sha); continue; }
+    const wtSafe = !wtItem || wtItem.category === 'safe';
+    const wtDirty = !!wtItem && /sin guardar/.test(wtItem.status);
+    if (wtItem && !wtSafe && requiresOf(wtItem.requires).length) g.needs.push(wtId!); // carpeta condicionada: la rama también
+    const requires = wtId ? [wtId] : [];
+    if (u.count === 0) {
+      const story = autoDelete(name, sha);
+      const auto = story && wtSafe; // una rama larga o recién creada (= main) no se propone borrar sola
+      const reason = wtDirty ? `Todo su contenido está en main, pero sigue abierta en «${wtItem!.name}», que tiene cambios sin guardar: decide primero qué hacer con esa carpeta.` : story ? 'Rama de una historia y todo su contenido está en main: borrarla no pierde nada.' : 'Todo su contenido está en main, pero no es una rama de historia (puede ser de larga vida o recién creada): decide tú.';
+      items.push(withNeeds(g, { ...base, id, category: auto ? 'safe' : 'decision', status: 'Ya integrada en main', reason, options: [O.keep, O.deleteLocal], defaultOption: auto ? 'delete_local' : 'keep', consequences: 'Desaparece la rama de este equipo; el código sigue en main.', recovery: `Se puede restaurar (git branch -- ${name} ${sha.slice(0, 10)}).`, requires, fingerprint: sha }));
+    } else items.push(withNeeds(g, { ...base, id, category: 'decision', status: u.count === null ? 'No se pudo comprobar' : `Contiene ${u.count} cambio(s) que no están en main`, reason: u.count === null ? 'No se pudo comparar con main.' : 'Es trabajo sin integrar: revísalo antes de decidir.', options: u.count === null ? [O.keep] : [O.keep, O.archiveLocal], defaultOption: 'keep', consequences: 'Con «Guardar copia y borrar», la rama deja de verse pero su trabajo queda guardado en este equipo.', recovery: 'Se puede restaurar desde la copia (se indica al ejecutar).', requires, fingerprint: sha }));
+  }
+
+  // Ramas del remoto: integradas solo si su contenido está en el main del REMOTO y en el local (así no se pierde en el remoto).
+  if (inv.remoteHeads && inv.remote) for (const [name, sha] of inv.remoteHeads) {
+    const ps = procsOfBranch.get(name) ?? []; const s = ps.map(storyOf).find(Boolean) ?? null;
+    const u = await uniqueOf(inv.cwd, `refs/heads/${inv.main}`, sha);
+    const inRemoteMain = await contains(inv.cwd, inv.remoteMainSha, sha);
+    const base = { kind: 'remote_branch' as const, name: `${inv.remote}/${name}`, sha: sha.slice(0, 7), unique: u.count, uniqueCommits: u.commits, story: storyRef(s), processId: ps[0]?.id ?? null, portalBranch: isStoryBranch(name) };
+    const id = `remote:${name}`;
+    const g = branchGuard(name);
+    if (!g.hard && inv.pushDiffers) g.hard = `${inv.remote} publica en una dirección distinta de la que se lee (pushurl): no se borra nada en él.`;
+    if (g.hard) { keepItem(base, id, 'protected', protectedLabel(name), g.hard, sha); continue; }
+    if (u.count === 0 && inRemoteMain) {
+      const auto = autoDelete(name, sha);
+      items.push(withNeeds(g, { ...base, id, category: auto ? 'safe' : 'decision', status: 'Ya integrada en main', reason: auto ? `Rama de una historia y todo su contenido está en main (también en ${inv.remote}): borrarla no pierde nada.` : 'Todo su contenido está en main, pero no es una rama de historia (puede ser de larga vida): decide tú.', options: [O.keep, O.deleteRemote(inv.remote)], defaultOption: auto ? 'delete_remote' : 'keep', consequences: `Desaparece de ${inv.remote}; el código sigue en main.`, recovery: `Se puede restaurar (git push ${inv.remote} ${sha.slice(0, 10)}:refs/heads/${name}).`, fingerprint: sha }));
+    } else if (u.count === 0) items.push({ ...base, id, category: 'decision', status: `Integrada en main, pero main no está publicado en ${inv.remote}`, reason: `Su contenido está en tu main local pero no en el de ${inv.remote}: si la borras ahora, en ${inv.remote} no quedaría. Publica main primero.`, options: [O.keep], defaultOption: 'keep', consequences: 'Se conserva.', recovery: null, fingerprint: sha });
+    else items.push(withNeeds(g, { ...base, id, category: 'decision', status: u.count === null ? 'No se pudo comprobar su contenido' : `Contiene ${u.count} cambio(s) que no están en main`, reason: u.count === null ? 'Sus commits no están en este equipo: no se puede saber si están en main.' : 'Es trabajo sin integrar: revísalo antes de decidir.', options: u.count === null ? [O.keep] : [O.keep, O.archiveRemote(inv.remote)], defaultOption: 'keep', consequences: `Con «Guardar copia y borrar», desaparece de ${inv.remote}; su trabajo queda guardado en este equipo.`, recovery: 'Se puede restaurar desde la copia (se indica al ejecutar).', fingerprint: sha }));
   }
   return items;
 }
 
+/**
+ * Cierre de etapa (decisión del propietario): lo que se puede cerrar o retirar viene ya elegido con su motivo, para una
+ * sola autorización. Nunca carpetas con cambios sin guardar (ni lo que dependa de ellas), nunca lo protegido; lo integrado
+ * se cierra como hecho (con constancia de lo que faltaba), lo no integrado se cancela y su trabajo se guarda antes de
+ * borrar su rama. No autoriza nada: es la propuesta que el propietario revisa y confirma.
+ */
+const STAGE_PREFERENCE: MaintenanceOptionId[] = ['delete_remote', 'delete_local', 'archive_delete_remote', 'archive_delete_local', 'remove_worktree', 'accept', 'close_done', 'accept_assignment', 'discard', 'cancel_assignment', 'discard_iteration', 'close_batch'];
+export function prepareStageClosure(items: MaintenanceItem[], reason: string): MaintenanceSelection[] {
+  const chosen = new Map<string, MaintenanceSelection>();
+  for (const it of items) {
+    if (it.category !== 'safe' && it.category !== 'decision') continue;
+    if (it.kind === 'worktree' && /sin guardar/.test(it.status)) continue;
+    // Solo ramas del Portal (de historias o de sus procesos): una rama que no creó (gh-pages, develop…) se queda en «Conservar».
+    if ((it.kind === 'local_branch' || it.kind === 'remote_branch') && !it.portalBranch) continue;
+    const opt = STAGE_PREFERENCE.find(id => it.options.some(o => o.id === id && !(o.id === 'discard' && o.effect === O.discardMerged.effect))); if (!opt) continue; // lo que ya está en main no se «cancela»
+    chosen.set(it.id, { itemId: it.id, option: opt, reason: it.options.find(o => o.id === opt)!.needsReason ? reason : null });
+  }
+  // Lo que depende de algo que no se eligió (p. ej. una carpeta con cambios sin guardar) tampoco: se omitiría al ejecutar.
+  for (let again = true; again;) { again = false; for (const it of items) if (chosen.has(it.id) && requiresOf(it.requires).some(r => items.some(i => i.id === r) && !chosen.has(r))) { chosen.delete(it.id); again = true; } }
+  return [...chosen.values()];
+}
+
 /** Lo que ve el propietario en una revisión: si coincide, revisar otra vez daría lo mismo. */
-const signature = (p: Pick<MaintenancePlan, 'repo' | 'items' | 'counts'>) => JSON.stringify([p.repo.path, p.repo.mainSha, p.repo.remoteAvailable, p.counts,
+const signature = (p: Pick<MaintenancePlan, 'repo' | 'items' | 'counts' | 'intent'>) => JSON.stringify([p.repo.path, p.repo.mainSha, p.repo.remoteAvailable, p.counts, p.intent?.reason ?? null,
   p.items.map(i => [i.id, i.category, i.status, i.fingerprint, i.defaultOption, i.options.map(o => `${o.id}${o.needsReason ? '!' : ''}`).join()])]);
 
 /**
@@ -443,7 +569,7 @@ const signature = (p: Pick<MaintenancePlan, 'repo' | 'items' | 'counts'>) => JSO
  * (main, remoto, cada objetivo) y no es de otra conversación, se reutiliza. Con `from` («Revisar de nuevo»), la tarjeta de la
  * conversación que la propuso pasa a la revisión nueva (si la anterior no llegó a ejecutar nada).
  */
-export async function createPlan(slug: string, projectId: string, opts: { reuseMinutes?: number; conversationId?: string | null; from?: string | null } = {}): Promise<MaintenancePlan> {
+export async function createPlan(slug: string, projectId: string, opts: { reuseMinutes?: number; conversationId?: string | null; from?: string | null; closeStage?: { reason: string; source?: 'owner' | 'assistant' } | null } = {}): Promise<MaintenancePlan> {
   const project = projectsRepo(slug).list().find(p => p.id === projectId);
   if (!project) throw err(404, 'Proyecto no encontrado en esta empresa.', 'not_found');
   const inv = await inventory(slug, projectId);
@@ -455,6 +581,11 @@ export async function createPlan(slug: string, projectId: string, opts: { reuseM
     counts: { remoteBranches: inv.remoteHeads?.size ?? 0, localBranches: inv.local.size, worktrees: inv.worktrees.length, openStories: inv.stories.filter(s => OPEN_STORY(s.status)).length, openBatches: items.filter(i => i.kind === 'batch').length },
     items, source: null, execution: null
   };
+  // Cierre de etapa: pedido ahora, o heredado de la revisión que se repite («Revisar de nuevo»).
+  const fromPlan = opts.from ? load(slug, opts.from) : null;
+  const fromIntent = fromPlan && fromPlan.projectId === projectId ? fromPlan.intent ?? null : null;
+  const stage = opts.closeStage?.reason?.trim() ? { kind: 'close_stage' as const, reason: opts.closeStage.reason.replace(/\s+/g, ' ').trim().slice(0, 300), source: opts.closeStage.source ?? 'owner' } : fromIntent;
+  if (stage) { draft.intent = stage; draft.prepared = prepareStageClosure(items, stage.reason); }
   if (opts.reuseMinutes) {
     const sig = signature(draft);
     const recent = listPlans(slug, projectId).find(p => p.status === 'proposed' && Date.now() - Date.parse(p.createdAt) < opts.reuseMinutes! * 60_000
@@ -486,7 +617,7 @@ export function rejectPlan(slug: string, id: string): MaintenancePlan {
 }
 
 // ------------------------------------------------------------------------------------------------------------ ejecución
-const ORDER: Record<string, number> = { story: 0, batch: 1, worktree: 2, local_branch: 3, remote_branch: 4 };
+const ORDER: Record<string, number> = { story: 0, assignment: 0, iteration: 1, batch: 2, worktree: 3, local_branch: 4, remote_branch: 5 };
 
 /**
  * Ejecuta SOLO la selección del propietario (autorización explícita). Valida la selección contra el plan, bloquea el
@@ -536,6 +667,9 @@ export function executePlan(slug: string, id: string, selection: MaintenanceSele
 
 /** ¿El objetivo ya está como se quería? (para reanudar tras una interrupción sin repetir ni dar por falso lo hecho). */
 function reached(slug: string, it: MaintenanceItem, option: string): boolean {
+  if (it.id.startsWith('batchitem:')) { const [, bId, sId] = it.id.split(':'); return batchesRepo(slug).get(bId)?.items.find(i => i.itemId === sId)?.state === 'accepted'; }
+  if (it.kind === 'assignment') { const st = assignmentsRepo(slug).get(it.id.slice('assignment:'.length))?.status; return option === 'cancel_assignment' ? st === 'cancelled' : st === 'accepted'; }
+  if (it.kind === 'iteration') return !!processesRepo(slug).get(it.id.slice('iteration:'.length))?.result?.rejected;
   if (it.kind === 'story') { const st = backlogRepo(slug).get(it.story!.id)?.status; return option === 'discard' ? st === 'discarded' : st === 'done'; }
   if (it.kind === 'batch') { const b = batchesRepo(slug).get(it.batchId!); return !!b && !OPEN_BATCH(b); }
   return false;
@@ -558,10 +692,13 @@ async function runPlan(slug: string, plan: MaintenancePlan): Promise<void> {
   }
   let fresh = await classify(slug, inv);
   const doneHere = new Set<string>();
+  /** Hecho en ejecuciones anteriores de este mismo plan (al reanudar tras una interrupción o un fallo). */
+  const priorDone = new Set(ex.outcomes.filter(o => o.status === 'done' || o.status === 'noop').map(o => o.itemId));
   const sameFingerprint = (planned: MaintenanceItem, cur: MaintenanceItem) => {
     if (planned.kind !== 'batch') return planned.fingerprint === cur.fingerprint;
     // Un lote cambia por las acciones de esta misma revisión sobre sus historias: esas se descuentan.
-    const strip = (f: string) => { const [st, list = ''] = f.split('|'); return `${st}|${list.split(',').filter(x => x && !doneHere.has(`story:${x.split('=')[0]}`)).join(',')}`; };
+    const acted = new Set([...doneHere, ...priorDone].filter(x => x.startsWith('story:') || x.startsWith('batchitem:')).map(x => x.split(':').pop()!));
+    const strip = (f: string) => { const [st, list = ''] = f.split('|'); return `${st}|${list.split(',').filter(x => x && !acted.has(x.split('=')[0])).join(',')}`; };
     return strip(planned.fingerprint) === strip(cur.fingerprint);
   };
   const ordered = [...todo].sort((a, b) => (ORDER[plan.items.find(i => i.id === a.itemId)!.kind] ?? 9) - (ORDER[plan.items.find(i => i.id === b.itemId)!.kind] ?? 9));
@@ -579,18 +716,28 @@ async function runPlan(slug: string, plan: MaintenancePlan): Promise<void> {
       if (!cur) {
         // Ya no existe: para una rama o una carpeta es el estado buscado (nada que hacer); para lo demás, no se toca.
         if (planned.kind === 'remote_branch' || planned.kind === 'local_branch' || planned.kind === 'worktree') { record({ itemId: s.itemId, option: s.option, status: 'noop', message: 'Ya no existía: nada que hacer.' }, planned.name); doneHere.add(s.itemId); }
-        else record({ itemId: s.itemId, option: s.option, status: reached(slug, planned, s.option) ? 'noop' : 'skipped', message: reached(slug, planned, s.option) ? 'Ya estaba así: nada que hacer.' : 'Ya no está abierta: no se tocó.' }, planned.name);
+        else { const ok = reached(slug, planned, s.option); record({ itemId: s.itemId, option: s.option, status: ok ? 'noop' : 'skipped', message: ok ? 'Ya estaba así: nada que hacer.' : 'Ya no está abierta: no se tocó.' }, planned.name); if (ok) doneHere.add(s.itemId); }
         continue;
       }
       if (!sameFingerprint(planned, cur)) { record({ itemId: s.itemId, option: s.option, status: 'skipped', message: 'Cambió desde la revisión (otro commit, otro estado o un proceso nuevo): no se tocó. Revisa de nuevo.' }, planned.name); continue; }
-      if (planned.requires && !doneHere.has(planned.requires) && fresh.some(i => i.id === planned.requires)) { record({ itemId: s.itemId, option: s.option, status: 'skipped', message: 'Sigue abierta en su carpeta de trabajo: elige también «Retirar la carpeta de trabajo».' }, planned.name); continue; }
+      const missing = [...new Set([...requiresOf(planned.requires), ...requiresOf(cur.requires)])].filter(r => !doneHere.has(r) && fresh.some(i => i.id === r));
+      if (missing.length) { record({ itemId: s.itemId, option: s.option, status: 'skipped', message: missing.every(r => r.startsWith('worktree:')) ? 'Sigue abierta en su carpeta de trabajo: elige también «Retirar la carpeta de trabajo».' : `Depende de algo que no se hizo en esta revisión: ${missing.map(r => plan.items.find(i => i.id === r)?.name ?? fresh.find(i => i.id === r)?.name ?? r).join(' · ')}.` }, planned.name); continue; }
       if (cur.category === 'protected' || cur.category === 'outside') { record({ itemId: s.itemId, option: s.option, status: 'skipped', message: `Ahora está protegido: ${cur.reason}` }, planned.name); continue; }
+      if (planned.kind === 'batch') {
+        const mine = ordered.filter(x => x.itemId !== s.itemId && plan.items.find(i => i.id === x.itemId)?.batchId === planned.batchId).map(x => x.itemId);
+        const bad = mine.filter(id => !doneHere.has(id));
+        if (bad.length) { record({ itemId: s.itemId, option: s.option, status: 'skipped', message: `No se cerró: no se completó lo elegido para sus historias (${bad.map(id => plan.items.find(i => i.id === id)?.story?.storyId || id).join(', ')}). Revísalo y reanuda.` }, planned.name); continue; }
+      }
       if (!cur.options.some(o => o.id === s.option)) { record({ itemId: s.itemId, option: s.option, status: 'skipped', message: 'La acción elegida ya no es válida para su estado actual.' }, planned.name); continue; }
       record({ itemId: s.itemId, option: s.option, status: 'started', message: 'En curso…' }, planned.name);
       const res = await act(slug, plan, inv, cur, s);
       record({ itemId: s.itemId, option: s.option, status: res.noop ? 'noop' : 'done', message: res.message, recovery: res.recovery ?? null, archiveRef: res.archiveRef ?? null }, planned.name); doneHere.add(s.itemId);
     } catch (e: any) {
-      record({ itemId: s.itemId, option: s.option, status: 'failed', message: e?.statusCode && e.statusCode !== 500 ? e.message : 'git rechazó la operación.' }, planned.name);
+      // Mensajes propios del Portal tal cual; la salida en bruto de git (rutas, URLs) se resume: el resultado llega al chat y al modelo.
+      const raw = String(e?.message ?? '');
+      const gitish = /^git /.test(raw) || /fatal:|error:|warning:|hint:|usage:/i.test(raw);
+      if (!e?.statusCode || e.statusCode === 500) console.error(`[mantenimiento ${plan.id.slice(0, 8)}] ${s.itemId}: ${raw}`);
+      record({ itemId: s.itemId, option: s.option, status: 'failed', message: e?.statusCode && e.statusCode !== 500 && !gitish ? raw : gitish ? 'git rechazó la operación.' : 'Error interno inesperado (el detalle queda en el registro del servidor).' }, planned.name);
     }
   }
   // Verificación independiente: se vuelve a mirar el remoto, las ramas, las copias, las carpetas y el backlog.
@@ -606,12 +753,31 @@ async function runPlan(slug: string, plan: MaintenancePlan): Promise<void> {
     if (it.kind === 'local_branch') { const name = it.id.slice('local:'.length); verification.push(after.local.has(name) ? `✗ ${name} sigue en este equipo` : `✓ ${name} ya no está en este equipo`); }
     if ((o.option === 'archive_delete_local' || o.option === 'archive_delete_remote') && o.archiveRef) verification.push(await gitOk(after.cwd, ['rev-parse', '--verify', '--quiet', o.archiveRef]) ? `✓ copia guardada: ${o.archiveRef}` : `✗ falta la copia ${o.archiveRef}`);
     if (it.kind === 'worktree') verification.push(after.worktrees.some(w => w.path === it.worktree) ? `✗ ${it.name} sigue registrada` : `✓ ${it.name}: retirada`);
-    if (it.kind === 'story') { const st = backlogRepo(slug).get(it.story!.id)?.status ?? '?'; const want = o.option === 'discard' ? 'discarded' : 'done'; verification.push(`${st === want ? '✓' : '✗'} ${it.story?.storyId}: ${STATUS_ES[st] ?? st}`); }
+    if (it.id.startsWith('batchitem:')) { const [, bId, sId] = it.id.split(':'); const st = batchesRepo(slug).get(bId)?.items.find(i => i.itemId === sId)?.state; verification.push(`${st === 'accepted' ? '✓' : '✗'} ${it.story?.storyId}: ${st === 'accepted' ? 'aceptada en su lote' : `en su lote, ${st ?? '?'}`}`); }
+    else if (it.kind === 'story') { const st = backlogRepo(slug).get(it.story!.id)?.status ?? '?'; const want = o.option === 'discard' ? 'discarded' : 'done'; verification.push(`${st === want ? '✓' : '✗'} ${it.story?.storyId}: ${STATUS_ES[st] ?? st}`); }
+    if (it.kind === 'assignment') { const a = assignmentsRepo(slug).get(it.id.slice('assignment:'.length)); const want = o.option === 'cancel_assignment' ? 'cancelled' : 'accepted'; verification.push(`${a?.status === want ? '✓' : '✗'} ${a?.code ?? it.name}: ${a ? ASSIGNMENT_STATUS_LABEL[a.status] : '?'}`); }
+    if (it.kind === 'iteration') { const q = processesRepo(slug).get(it.id.slice('iteration:'.length)); verification.push(`${q?.result?.rejected ? '✓' : '✗'} ${it.name}: ${q?.result?.rejected ? 'descartada' : 'sigue pendiente'}`); }
     if (it.kind === 'batch') { const b = batchesRepo(slug).get(it.batchId!); verification.push(`${b && !OPEN_BATCH(b) ? '✓' : '✗'} lote «${it.name}»: ${STATUS_ES[b?.status ?? ''] ?? b?.status ?? '?'}`); }
   }
   const bad = verification.filter(v => v.startsWith('✗'));
   const failed = outs.some(o => o.status === 'failed' || o.status === 'skipped' || o.status === 'started') || bad.length > 0;
   save(slug, { ...last, status: failed ? 'partial' : 'done', execution: { ...last.execution!, outcomes: outs, finishedAt: now(), verification } });
+}
+
+/**
+ * Al cerrar una historia (hecha, aceptada o cancelada) no queda nada suyo esperando en Decisiones: sus iteraciones que
+ * esperaban autorización se deniegan (como «Denegar») y, si se cancela, las que dejaron cambios sin integrar se descartan.
+ */
+function settleStoryProcesses(slug: string, projectId: string, storyId: string, reason: string, discarded: boolean) {
+  for (const q of processesRepo(slug).list(projectId)) {
+    if (q.backlogItemId !== storyId) continue;
+    if (q.status === 'pending_authorization') {
+      processesRepo(slug).finish(q.id, 'cancelled', `Denegada al ${discarded ? 'cancelar' : 'cerrar'} la historia en la revisión del proyecto: ${reason}`);
+      threadRepo(slug).add({ backlogItemId: storyId, role: 'system', agentId: null, agentName: null, content: `Su iteración que esperaba autorización se denegó al ${discarded ? 'cancelar' : 'cerrar'} la historia en la revisión del proyecto (sin consumir IA). Motivo: ${reason}`, processId: q.id, costUsd: 0, tokens: 0, proposals: null } as any);
+      continue;
+    }
+    if (discarded && q.result && !q.result.merged && !q.result.rejected && (q.result.applied || (q.result.changes ?? []).length)) processesRepo(slug).setResult(q.id, { ...q.result, rejected: { at: now(), reason: `Historia cancelada: ${reason}` } });
+  }
 }
 
 /** Una operación del catálogo, con su política (auditoría) y el servicio existente del Portal. */
@@ -684,6 +850,7 @@ async function act(slug: string, plan: MaintenancePlan, inv: Inventory, it: Main
       const blocker = await closingBlocker(slug, p, 'historia');
       if (blocker && reason.length < 3) throw err(409, `Ya no cumple la regla de cierre (${blocker.error}): revisa de nuevo y, si quieres aceptarla igual, indica tu motivo.`);
       await acceptItems(slug, it.batchId!, [it.story!.id], `Aceptada en la revisión del proyecto (${tag})${blocker ? `. Faltaba: ${blocker.error} Motivo del propietario: ${reason}` : reason ? `: ${reason}` : '.'}`);
+      settleStoryProcesses(slug, projectId, it.story!.id, reason, false);
       return { message: 'Aceptada en su lote: completada.' };
     }
     case 'close_done': {
@@ -693,6 +860,7 @@ async function act(slug: string, plan: MaintenancePlan, inv: Inventory, it: Main
       const blocker = await closingBlocker(slug, p, 'historia');
       if (blocker && reason.length < 3) throw err(400, 'Falta el motivo para cerrarla sin cumplir toda la regla de cierre.');
       backlogRepo(slug).setStatus(it.story!.id, 'done', p.id);
+      settleStoryProcesses(slug, projectId, it.story!.id, reason, false);
       threadRepo(slug).add({ backlogItemId: it.story!.id, role: 'system', agentId: null, agentName: null, content: `Cerrada como hecha en la revisión del proyecto (${tag}). Integrada en main (${p.result.merged.commit.slice(0, 7)}).${blocker ? ` Faltaba: ${blocker.error} Motivo del propietario: ${reason}` : ''}`, processId: p.id, costUsd: 0, tokens: 0, proposals: null } as any);
       return { message: blocker ? 'Completada con tu motivo (constancia de lo que faltaba).' : 'Completada (cumple la regla de cierre).' };
     }
@@ -700,12 +868,40 @@ async function act(slug: string, plan: MaintenancePlan, inv: Inventory, it: Main
       requirePolicy('backlog_maintenance', { slug, projectId, authorized: true });
       if (it.batchId) cancelItem(slug, it.batchId, it.story!.id, { tick: batchesRepo(slug).get(it.batchId)?.status === 'running' });
       discardStory(slug, it.story!.id, `${reason} (${tag})`, { allowUnmergedBranch: true });
+      settleStoryProcesses(slug, projectId, it.story!.id, `${reason} (${tag})`, true);
       return { message: 'Cancelada: queda en «Descartadas» con tu motivo.' };
     }
     case 'close_batch': {
       requirePolicy('backlog_maintenance', { slug, projectId, authorized: true });
       const b = await closeBatch(slug, it.batchId!, `${reason} (${tag})`);
       return { message: `Lote cerrado (${b.status === 'completed' ? 'completado' : 'cancelado'}).` };
+    }
+    case 'discard_iteration': {
+      requirePolicy('backlog_maintenance', { slug, projectId, authorized: true });
+      const pid = it.id.slice('iteration:'.length); const q = processesRepo(slug).get(pid);
+      if (!q?.result?.applied) throw err(404, 'La iteración ya no existe.');
+      if (q.projectId !== projectId) throw err(409, 'La iteración es de otro proyecto: no se toca.');
+      if (q.result.rejected) return { message: 'Ya estaba descartada.', noop: true };
+      if (q.result.merged) throw err(409, 'Se integró mientras tanto: no se descarta.');
+      processesRepo(slug).setResult(pid, { ...q.result, rejected: { at: now(), reason: `${reason} (${tag})` } });
+      if (q.backlogItemId) threadRepo(slug).add({ backlogItemId: q.backlogItemId, role: 'system', agentId: null, agentName: null, content: `Iteración descartada en la revisión del proyecto (${tag}): ${reason}. No se integrará; su carpeta y su rama dejan de estar reservadas.`, processId: pid, costUsd: 0, tokens: 0, proposals: null } as any);
+      return { message: 'Iteración descartada: no se integrará.' };
+    }
+    case 'accept_assignment': {
+      requirePolicy('backlog_maintenance', { slug, projectId, authorized: true });
+      const q = it.processId ? processesRepo(slug).get(it.processId) : undefined;
+      if (!q?.result?.merged || !await contains(cwd, `refs/heads/${inv.main}`, q.result.merged.commit)) throw err(409, 'Su trabajo no está en main: no se acepta como hecho.');
+      const blocker = await closingBlocker(slug, q, 'encargo');
+      if (blocker && reason.length < 3) throw err(409, `Ya no cumple la regla de cierre (${blocker.error}): indica tu motivo.`);
+      await acceptAssignment(slug, it.id.slice('assignment:'.length), `Aceptado en la revisión del proyecto (${tag})${blocker ? `. Faltaba: ${blocker.error} Motivo del propietario: ${reason}` : reason ? `: ${reason}` : '.'}`, { ownerReason: blocker ? reason : null });
+      return { message: blocker ? 'Aceptado con tu motivo (constancia de lo que faltaba).' : 'Aceptado.' };
+    }
+    case 'cancel_assignment': {
+      requirePolicy('backlog_maintenance', { slug, projectId, authorized: true });
+      cancelAssignment(slug, it.id.slice('assignment:'.length), `${reason} (${tag})`);
+      const ap = it.processId ? processesRepo(slug).get(it.processId) : undefined;
+      if (ap?.result && !ap.result.merged && !ap.result.rejected && (ap.result.applied || (ap.result.changes ?? []).length)) processesRepo(slug).setResult(ap.id, { ...ap.result, rejected: { at: now(), reason: `Encargo cancelado: ${reason}` } });
+      return { message: 'Encargo cancelado (queda en el historial).' };
     }
     default: throw err(400, 'Acción no admitida.');
   }

@@ -591,9 +591,9 @@ function linkPlans(m: AssistantMessage, conversationId: string | null) {
 export function withReviewFacts(reply: string, actions: AssistantAction[]): string {
   const blocks = actions.filter(x => x.type === 'propose_operation' && x.status === 'pending' && x.operation?.preview.reviewPath).map(x => {
     const pv = x.operation!.preview;
-    let items: MaintenanceItem[] = [];
-    try { if (pv.planId) items = getPlan(pv.target.workspace, pv.planId).items; } catch { /* sin plan legible: solo las cifras */ }
-    return reviewFactsBlock(pv.target.projectName, pv.details, new Date(), items);
+    let items: MaintenanceItem[] = []; let stage: { reason: string; prepared: number; source?: 'owner' | 'assistant'; selection?: { itemId: string; option: string }[] } | null = null;
+    try { if (pv.planId) { const plan = getPlan(pv.target.workspace, pv.planId); items = plan.items; if (plan.intent?.kind === 'close_stage') stage = { reason: plan.intent.reason, prepared: plan.prepared?.length ?? 0, source: plan.intent.source, selection: plan.prepared ?? [] }; } } catch { /* sin plan legible: solo las cifras */ }
+    return reviewFactsBlock(pv.target.projectName, pv.details, new Date(), items, stage);
   });
   // Ya pendiente (sin tarjeta nueva): cómo seguir con la que ya hay.
   if (!blocks.length && actions.some(x => x.type === 'info' && x.reviewPath)) blocks.push(REVIEW_PENDING_POINTER);
