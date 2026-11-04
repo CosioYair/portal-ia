@@ -14,7 +14,8 @@ import { agentsRepo, processesRepo } from '../db/workspace.ts';
 export type PolicyOp =
   | 'read_repo' | 'write_worktree' | 'sandbox_exec' | 'install_deps' | 'host_typecheck_min'
   | 'git_merge' | 'git_push' | 'restart_portal' | 'delete_worktree' | 'runtime_check' | 'ai_call' | 'phase_transition'
-  | 'agent_script' | 'agent_files_write' | 'git_branch_delete' | 'git_remote_branch_delete' | 'backlog_maintenance';
+  | 'agent_script' | 'agent_files_write' | 'git_branch_delete' | 'git_remote_branch_delete' | 'backlog_maintenance'
+  | 'document_files_delete';
 
 export type PolicyLevel = 'local' | 'auth' | 'external';
 
@@ -35,7 +36,8 @@ const OPS: Record<PolicyOp, { level: PolicyLevel; tool: string | null; label: st
   phase_transition: { level: 'auth', tool: null, label: 'Inicio de etapa: archivo reversible del trabajo activo' },
   git_branch_delete: { level: 'auth', tool: null, label: 'Borrado de una rama local (revisión del proyecto)' },
   git_remote_branch_delete: { level: 'external', tool: null, label: 'Borrado de una rama en el remoto (revisión del proyecto, sin forzar)' },
-  backlog_maintenance: { level: 'auth', tool: null, label: 'Cierre o cancelación de historias y lotes (revisión del proyecto)' }
+  backlog_maintenance: { level: 'auth', tool: null, label: 'Cierre o cancelación de historias y lotes (revisión del proyecto)' },
+  document_files_delete: { level: 'auth', tool: null, label: 'Eliminación de archivos locales de documentos (lote o documento)' }
 };
 
 export interface PolicyContext {

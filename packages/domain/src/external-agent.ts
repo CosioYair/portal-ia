@@ -120,6 +120,40 @@ export interface DocumentVersion {
 export interface DocumentJob {
   id: string; agentId: string; title: string; slug: string; status: DocumentJobStatus; inputName: string; inputSha256: string; pages: number | null;
   source: 'upload' | 'zip' | 'attachment'; versions: DocumentVersion[]; error: string | null; createdAt: string; updatedAt: string; batchId?: string | null;
+  /** Presencia en disco: 'removed' = eliminado desde el Portal (queda como histórico); 'missing' = falta en disco. */
+  presence?: DocumentPresence; missingOnDisk?: boolean; removal?: RemovalRecord | null;
+}
+
+// ---------------------------------------------------------------- Eliminación autorizada (borrado blando con histórico)
+
+/**
+ * Presencia de un lote o documento:
+ * - present: sus archivos están en la carpeta del agente;
+ * - missing: el Portal lo registró, pero ya no está en disco (el propietario lo borró a mano). Se puede quitar de la lista;
+ * - removed: se eliminó desde el Portal con autorización. La fila se conserva como histórico y nunca se borra de la base.
+ */
+export type DocumentPresence = 'present' | 'missing' | 'removed';
+export const PRESENCE_LABEL: Record<DocumentPresence, string> = { present: 'En disco', missing: 'Falta en disco', removed: 'Eliminado (histórico)' };
+
+/** Registro histórico de una eliminación. Vive en la base y en «documentos/HISTORIAL.md», fuera de la carpeta borrada. */
+export interface RemovalRecord {
+  id: string; agentId: string; kind: 'batch' | 'document'; targetId: string; batchId: string | null; name: string;
+  /** Carpeta borrada, relativa a la carpeta del agente. */
+  folder: string;
+  /** Se conserva el SHA-256 de cada PDF afectado, aunque su archivo ya no exista. */
+  sha256: string[];
+  /** Motivo por documento (rechazos, fallos o exclusiones) en el momento de eliminarlo. */
+  reasons: { name: string; reason: string }[];
+  files: number; freedBytes: number;
+  /** true si ya faltaba en disco al eliminarlo: no se borró nada, solo se quitó de la lista. */
+  missingOnDisk: boolean;
+  reason: string | null; removedBy: string; removedAt: string;
+}
+
+/** Vista previa de una eliminación: no borra nada. `token` identifica exactamente lo mostrado (si cambia, 409). */
+export interface RemovalPreview {
+  kind: 'batch' | 'document'; id: string; name: string; folder: string; exists: boolean; files: number; sample: string[];
+  freedBytes: number; keeps: string[]; warning: string; token: string; blockedBy: string | null;
 }
 
 // ---------------------------------------------------------------- Lotes de documentos (un ZIP con muchos PDF)
@@ -130,6 +164,8 @@ export type DocumentBatchItemState = 'pending' | 'queued' | 'processing' | 'pass
 export interface DocumentBatchItem {
   idx: number; entryName: string; sha256: string | null; size: number; outcome: 'accepted' | 'duplicate' | 'rejected'; reason: string | null;
   jobId: string | null; state: DocumentBatchItemState; version: number | null;
+  /** Documento eliminado desde el Portal: cuenta en `counts.removed`, aparte del total. */
+  removed?: boolean; missingOnDisk?: boolean;
   /** Word aprobado: `docx` relativo a «documentos/» (manifiesto, entregable); `docxRel` relativo a la carpeta del documento (descarga). */
   docx: string | null; docxRel: string | null; error: string | null;
 }
@@ -139,12 +175,15 @@ export interface DocumentBatchCounts {
   pending: number; queued: number; processing: number; passed: number; rejectedQa: number; failed: number; cancelled: number;
   /** PDF de este lote cuyo contenido (SHA-256) ya se convirtió en OTRO lote: volver a procesarlos gasta conversiones del tope diario. */
   reprocessed?: number;
+  /** Documentos eliminados desde el Portal. No entran en `total`: total = listos + rechazados + fallidos + excluidos (+ por hacer). */
+  removed?: number;
 }
 export interface DocumentBatch {
   id: string; agentId: string; name: string; slug: string; sourceName: string; sourceSha256: string; status: DocumentBatchStatus;
   createdAt: string; updatedAt: string; startedAt: string | null; finishedAt: string | null; plan: ScriptPlan | null; summary: string | null;
   summaryBy: string | null; deliverable: string | null; manifest: string | null; error: string | null; waiting: string | null; calls: number;
   counts: DocumentBatchCounts; items: DocumentBatchItem[];
+  presence?: DocumentPresence; missingOnDisk?: boolean; removal?: RemovalRecord | null;
 }
 export const BATCH_ITEM_LABEL: Record<DocumentBatchItemState, string> = {
   pending: 'Pendiente', queued: 'En cola', processing: 'Convirtiendo…', passed: 'Listo', rejected_qa: 'No pasó las comprobaciones', failed: 'Falló', cancelled: 'Cancelado', excluded: 'Excluido'
