@@ -41,12 +41,19 @@ test('«Pedir» siempre tiene efecto: abre, trae al frente y enfoca, o enfoca la
   const dock = read('components/AssistantDock.tsx');
   assert.match(dock, /useUiEvent\('assistant'/);
   assert.match(dock, /askAction\(\{ onAssistantPage, open \}\)/);
-  // En /asistente se enfoca la caja de la pantalla completa: el selector debe existir de verdad en Assistant.tsx.
-  assert.match(dock, /querySelector<HTMLTextAreaElement>\('\.assist-page textarea'\)/);
-  assert.ok(!dock.includes("'.assist textarea'"), 'no existe ningún elemento con la clase .assist');
+  // En /asistente se enfoca la caja de la pantalla completa: la clase del selector que usa AssistantDock se lee del
+  // propio código y debe existir de verdad en el JSX de Assistant.tsx, envolviendo a AssistantChat (que tiene la textarea).
+  const sel = dock.match(/action === 'focus-fullscreen'\)[^;]*?querySelector<HTMLTextAreaElement>\('\.([\w-]+) textarea'\)/);
+  assert.ok(sel, 'en /asistente «Pedir» enfoca una textarea con un selector «.clase textarea»');
+  const cls = sel[1];
   const full = read('screens/Assistant.tsx');
-  assert.ok(full.includes('className="page assist-page"'), 'la pantalla completa lleva la clase assist-page');
-  assert.ok(full.includes('<AssistantChat '), 'la caja de mensaje (AssistantChat) está dentro de .assist-page');
+  const open = full.match(new RegExp(`<(\\w+)\\s+className="(?:[^"]*\\s)?${esc(cls)}(?:\\s[^"]*)?"`));
+  assert.ok(open, `la clase .${cls} del selector no aparece en ningún className de screens/Assistant.tsx`);
+  const start = open.index ?? 0;
+  const end = full.indexOf(`</${open[1]}>`, start);
+  assert.ok(end > start, `el elemento .${cls} se cierra en Assistant.tsx`);
+  assert.ok(full.slice(start, end).includes('<AssistantChat '), `la caja de mensaje (AssistantChat) está dentro de .${cls}`);
+  assert.ok(read('components/AssistantChat.tsx').includes('<textarea'), 'AssistantChat contiene la textarea que se enfoca');
   assert.match(dock, /setFront\(true\); setFocusTick\(t => t \+ 1\)/);
   assert.match(dock, /\}, \[open, focusTick\]\);/, 'el foco se repite al pulsar «Pedir» con el panel abierto');
   assert.match(dock, /dock-behind/);
