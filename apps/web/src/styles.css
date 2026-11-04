@@ -149,11 +149,13 @@ button.chip:hover{border-color:var(--color-border-hover)}
 @media (max-width:720px){.setup-top{padding:14px 20px}.setup-main{padding:28px 20px 72px}.page{padding:20px}.top{padding:8px 20px}.h1{font-size:26px}.stepper{display:none}}
 
 /* Asistente flotante (dock) */
-.dock{position:fixed;right:16px;bottom:72px;z-index:30;width:min(540px,calc(100vw - 32px));height:calc(100vh - 88px);display:flex;flex-direction:column;background:var(--color-surface);border:1px solid var(--color-border);border-radius:14px;box-shadow:var(--shadow-dock);overflow:hidden;animation:fadeUp .2s ease both}
+.dock{position:fixed;right:16px;bottom:72px;z-index:65;width:min(540px,calc(100vw - 32px));height:calc(100vh - 88px);display:flex;flex-direction:column;background:var(--color-surface);border:1px solid var(--color-border);border-radius:14px;box-shadow:var(--shadow-dock);overflow:hidden;animation:fadeUp .2s ease both}
 .dock-h{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:12px 14px;border-bottom:1px solid var(--color-divider);background:var(--color-surface-alt)}
 .dock .card{border:0;border-radius:0;box-shadow:none}
-/* Con el dock abierto, el contenido deja sitio en pantallas anchas para no quedar tapado */
-
+/* EN-004 · Capas (lib/dockLayer.ts): el Asistente (65) queda sobre el panel de agente (60) y su fondo (59), y bajo los
+   diálogos .os-portal (70), la búsqueda Ctrl+K (80) y los avisos (90). Si el usuario trabaja en el panel de agente, el
+   Asistente cede (58) y «Pedir» lo trae otra vez al frente. La reserva de espacio (has-dock) está en system.css. */
+.dock.dock-behind{z-index:58}
 .dock.dock-wide{width:min(1100px,calc(100vw - 32px))}
 .dock .card{min-width:0}
 .dock .md pre,.dock pre{max-width:100%;overflow:auto}
