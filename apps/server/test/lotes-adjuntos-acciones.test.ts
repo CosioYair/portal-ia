@@ -132,7 +132,7 @@ test('lote: un ZIP con 26 PDF (y lo que no es PDF) queda ENTERO registrado; nada
   assert.equal((await inject('GET', `${A}/documents`)).json.jobs.filter((j: any) => j.batchId === batchId).length, 27, 'el primer lote no cambia');
   // El mismo PDF dos veces DENTRO de un ZIP: un documento, y la copia queda como repetida (no como «nuevo»).
   const twice = (await upload(`${A}/documents/upload`, 'Repetido.zip', zip([{ name: 'uno.pdf', data: PDF('REPETIDO-DENTRO') }, { name: 'copias/uno (copia).pdf', data: PDF('REPETIDO-DENTRO') }]))).json.batch;
-  assert.deepEqual(twice.items.map((i: any) => i.outcome), ['accepted', 'duplicate']); assert.equal(twice.items[0].jobId, twice.items[1].jobId);
+  assert.deepEqual(twice.items.map((i: any) => i.outcome), ['accepted', 'duplicate']); assert.equal(twice.items[1].state, 'excluded'); assert.equal(twice.items[1].jobId ?? null, null); assert.ok(twice.items[0].jobId);
   assert.match(twice.items[1].reason, /repetido dentro del ZIP/);
 });
 

@@ -149,9 +149,10 @@ test('(c) repetido dentro del mismo ZIP: no crea otro documento y su motivo figu
   const b = (await upload(`${A}/documents/upload`, 'Repetido.zip', zip([{ name: 'uno.pdf', data: PDF('DENTRO-1') }, { name: 'copias/uno (copia).pdf', data: PDF('DENTRO-1') }]))).json.batch;
   const [first, copy] = b.items;
   assert.equal(first.outcome, 'accepted');
-  assert.ok(copy.outcome === 'duplicate' || copy.state === 'excluded', `la copia no es «nueva»: ${copy.outcome}/${copy.state}`);
+  assert.equal(copy.state, 'excluded', `la copia queda excluida: ${copy.outcome}/${copy.state}`);
   assert.match(copy.reason, /repetido dentro del ZIP: mismo contenido que «uno\.pdf»/);
-  assert.ok(copy.jobId === first.jobId || copy.jobId == null, 'no se crea un segundo documento');
+  assert.equal(copy.jobId ?? null, null, 'no se crea un segundo documento ni hereda el del original');
+  assert.equal(b.counts.excluded, 1); assert.equal(b.counts.duplicates, 1);
   assert.equal((await docs()).jobs.filter((j: any) => j.batchId === b.id).length, 1);
   const doc = manifest(b).documentos.find((d: any) => d.entrada === 'copias/uno (copia).pdf');
   assert.match(doc.motivo, /repetido dentro del ZIP/);
@@ -196,7 +197,10 @@ test('(e) los conteos cuadran al recibir, en marcha y al terminar; cada document
   assert.ok(seen >= 1);
   const done = await batchOf(b.id);
   assert.ok(addsUp(done.counts), JSON.stringify(done.counts));
-  assert.equal(done.counts.passed, 6); assert.equal(done.counts.failed, 1); assert.equal(done.counts.excluded, 2);
+  assert.equal(done.counts.passed, 5); assert.equal(done.counts.failed, 1); assert.equal(done.counts.excluded, 3);
+  assert.equal(done.counts.duplicates, 1);
+  const rep = done.items.find((i: any) => i.entryName === 'otra/US-20.pdf');
+  assert.equal(rep.state, 'excluded'); assert.equal(rep.jobId ?? null, null); assert.match(rep.reason, /repetido dentro del ZIP/);
   for (const it of done.items.filter((i: any) => i.state !== 'passed')) assert.ok(it.reason || it.error, `sin motivo: ${it.entryName}`);
   const man = manifest(done);
   assert.equal(man.documentos.length, 9);

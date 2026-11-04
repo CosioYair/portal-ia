@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { slugify, type DocumentBatch, type DocumentBatchCounts, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ScriptPlan } from '@portal-ia/domain';
+import { batchCountsAddUp, batchCountsSum, slugify, type DocumentBatch, type DocumentBatchCounts, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ScriptPlan } from '@portal-ia/domain';
 import { agentsRepo } from '../db/workspace.ts';
 import { recordAgentEvent } from './agentEvents.ts';
 import { changed } from './live.ts';
@@ -206,16 +206,19 @@ async function extractEntries(slug: string, agentId: string, id: string, by: str
       // cuenta como aceptado. Si otra entrada ya lo usa, es una copia repetida dentro del ZIP.
       const sameBatch = r.outcome === 'duplicate' && r.job.batchId === id;
       const own = sameBatch && !db.items(id).some(x => x.job_id === r.job.id && x.idx !== it.idx);
-      const reason = r.outcome !== 'duplicate' || own ? null : `repetido dentro del ZIP: mismo contenido que «${r.job.inputName}»`;
-      db.settleItem(id, it.idx, { sha: r.job.inputSha256, outcome: own ? 'accepted' : r.outcome, reason, job_id: r.job.id, state: 'pending' });
+      if (r.outcome === 'duplicate' && !own) {
+        // Copia repetida dentro del mismo ZIP: queda EXCLUIDA con su motivo, sin trabajo propio y fuera de la cola (no
+        // hereda el estado del documento original ni cuenta como «listo»).
+        db.settleItem(id, it.idx, { sha: r.job.inputSha256, outcome: 'duplicate', reason: `repetido dentro del ZIP: mismo contenido que «${r.job.inputName}»`, job_id: null, state: 'excluded' });
+      } else db.settleItem(id, it.idx, { sha: r.job.inputSha256, outcome: 'accepted', reason: null, job_id: r.job.id, state: 'pending' });
       if (++done % 10 === 0) changed({ ws: slug, entity: 'agent', id: agentId, kind: 'progress' });
     }
     if (stopped) { db.patch(id, { error: stopped }); return; }
     const v = batchView(slug, agentId, id)!;
-    appendHistory(s.root, `${s.layout.outputs}/${b.slug}`, zones, `Lote recibido: «${b.source_name}» — total ${v.counts.detected} archivo(s): ${v.counts.pending + v.counts.queued + v.counts.processing} PDF por procesar, ${v.counts.passed} listos, ${v.counts.rejectedQa} rechazados, ${v.counts.failed} fallidos, ${v.counts.cancelled} cancelados, ${v.counts.excluded} excluidos${v.counts.duplicates ? ` (${v.counts.duplicates} repetidos dentro del ZIP)` : ''}. Cada motivo figura en el manifiesto.`);
+    appendHistory(s.root, `${s.layout.outputs}/${b.slug}`, zones, `Lote recibido: «${b.source_name}» — total ${v.counts.total} archivo(s): ${v.counts.pending + v.counts.queued + v.counts.processing} PDF por procesar, ${v.counts.passed} listos, ${v.counts.rejectedQa} rechazados, ${v.counts.failed} fallidos, ${v.counts.cancelled} cancelados, ${v.counts.excluded} excluidos${v.counts.duplicates ? ` (${v.counts.duplicates} repetidos dentro del ZIP, excluidos)` : ''}. Cada motivo figura en el manifiesto.`);
     if (b.error && /importación se interrumpió|No se pudieron registrar/.test(b.error)) db.patch(id, { error: null });
     writeManifest(slug, agentId, id);
-    recordAgentEvent(slug, agentId, 'document_job', { batchId: id, action: 'batch_received', name: b.source_name, total: v.counts.detected, detected: v.counts.detected, accepted: v.counts.accepted, duplicates: v.counts.duplicates, excluded: v.counts.excluded }, by);
+    recordAgentEvent(slug, agentId, 'document_job', { batchId: id, action: 'batch_received', name: b.source_name, total: v.counts.total, detected: v.counts.detected, accepted: v.counts.accepted, duplicates: v.counts.duplicates, excluded: v.counts.excluded }, by);
   } finally {
     importing.delete(id); waitingNote.delete(id);
     changed({ ws: slug, entity: 'agent', id: agentId });
@@ -302,7 +305,7 @@ export function batchView(slug: string, agentId: string, id: string, jobsById?: 
   const c = (st: DocumentBatchItemState) => items.filter(i => i.state === st).length;
   const counts: DocumentBatchCounts = {
     // total = items.length: cada elemento cuenta en un solo estado; `duplicates` es informativo y no se suma.
-      ...({ total: items.length } as { total: number }),
+      total: items.length,
       detected: items.length, accepted: items.filter(i => i.outcome === 'accepted').length, duplicates: items.filter(i => i.outcome === 'duplicate' || (i.state === 'excluded' && /^repetido dentro del ZIP/.test(i.reason ?? ''))).length, excluded: c('excluded'),
     pending: c('pending'), queued: c('queued'), processing: c('processing'), passed: c('passed'), rejectedQa: c('rejected_qa'), failed: c('failed'), cancelled: c('cancelled')
   };
@@ -591,10 +594,10 @@ async function finishIn(slug: string, agentId: string, id: string, status0: 'com
 
 function portalBatchSummary(v: DocumentBatch): string {
   const c = v.counts;
-  return [`Lote «${v.sourceName}»: ${c.detected} archivo(s) detectados — ${c.passed} listos, ${c.rejectedQa} no pasaron las comprobaciones, ${c.failed} fallaron, ${c.cancelled} cancelados, ${c.excluded} excluidos${c.pending ? `, ${c.pending} sin procesar` : ''}${c.duplicates ? ` (${c.duplicates} ya se habían recibido antes)` : ''}.`,
+  return [`Lote «${v.sourceName}»: ${c.total} archivo(s) detectados — ${c.passed} listos, ${c.rejectedQa} no pasaron las comprobaciones, ${c.failed} fallaron, ${c.cancelled} cancelados, ${c.excluded} excluidos${c.pending ? `, ${c.pending} sin procesar` : ''}${c.duplicates ? ` (${c.duplicates} repetidos dentro del ZIP, excluidos)` : ''}.`,
     c.failed || c.rejectedQa ? 'Lo que falló puede reintentarse sin repetir lo aprobado.' : '',
-    `Total ${c.detected} = ${c.passed} listos + ${c.rejectedQa} rechazados + ${c.failed} fallidos + ${c.cancelled} cancelados + ${c.excluded} excluidos + ${c.pending + c.queued + c.processing} pendientes.`,
-    c.detected === c.passed + c.rejectedQa + c.failed + c.cancelled + c.excluded + c.pending + c.queued + c.processing ? '' : 'Aviso: los conteos no cuadran; revisa el manifiesto, que tiene el motivo de cada documento.',
+    `Total ${c.total} = ${c.passed} listos + ${c.rejectedQa} rechazados + ${c.failed} fallidos + ${c.cancelled} cancelados + ${c.excluded} excluidos + ${c.pending + c.queued + c.processing} pendientes.`,
+    batchCountsAddUp(c) ? '' : `Aviso: los conteos no cuadran (suma ${batchCountsSum(c)} de ${c.total}); revisa el manifiesto, que tiene el motivo de cada documento.`,
     'Resumen automático del Portal.'].filter(Boolean).join(' ');
 }
 

@@ -134,7 +134,8 @@ export interface DocumentBatchItem {
   docx: string | null; docxRel: string | null; error: string | null;
 }
 export interface DocumentBatchCounts {
-  detected: number; accepted: number; duplicates: number; excluded: number;
+  /** total = listos + rechazados + fallidos + cancelados + excluidos + pendientes (cada elemento en un solo estado). */
+  total: number; detected: number; accepted: number; duplicates: number; excluded: number;
   pending: number; queued: number; processing: number; passed: number; rejectedQa: number; failed: number; cancelled: number;
 }
 export interface DocumentBatch {
