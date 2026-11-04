@@ -30,7 +30,7 @@ dos protecciones se mantienen, pero ya no con un número fijo que descarta archi
 | Descompresión de todo a la vez | Directorio central leído del disco; cada entrada se extrae de una en una con tope de salida y CRC |
 | 10 PDF; el resto «omitido» | Hasta 500 PDF por lote; si el ZIP supera un límite **no se acepta nada** y se explica cómo dividirlo |
 | ZIP original descartado | ZIP original guardado en `documentos/<lote>/origen/` |
-| Trabajos sueltos | Un lote con un registro por entrada del ZIP (aceptada, ya recibida o excluida con su motivo) |
+| Trabajos sueltos | Un lote independiente con un registro por entrada del ZIP (aceptada o excluida con su motivo) |
 | Sin cola | Cola global acotada (1 conversión a la vez por defecto) con espera si falta memoria |
 
 ## Lotes de documentos
@@ -49,13 +49,48 @@ dos protecciones se mantienen, pero ya no con un número fijo que descarta archi
    algo no cabe: 413/507 con el motivo y la salida («divídelo en ZIP de hasta 500 PDF») y **no se escribe nada**.
 5. Se guarda el ZIP original (`documentos/<lote>/origen/<nombre>.zip`, sin reemplazar nada) y se crea el lote.
 6. Cada PDF se extrae (CRC comprobado, cabecera `%PDF-`) y se registra como documento propio en
-   `documentos/<lote>/<documento>/original/`, con su `HISTORIAL.md`. El mismo contenido (SHA-256) ya recibido antes
-   **no se duplica**: la entrada queda como «ya recibido» y apunta a su documento. Dos PDF con el mismo nombre en carpetas
-   distintas del ZIP tienen carpetas distintas.
+   `documentos/<lote>/<documento>/original/`, con su `HISTORIAL.md`. La duplicidad se decide **por SHA-256 y solo dentro
+   del mismo lote** (ver «Independencia de los lotes»). Dos PDF con el mismo nombre en carpetas distintas del ZIP tienen
+   carpetas distintas.
 7. `MANIFIESTO.json` del lote: cada entrada con su resultado, su motivo, su documento y, cuando esté listo, su Word
    (asociación PDF↔DOCX determinista por entrada).
 
 Nada se reorganiza: los documentos que ya existían siguen donde estaban; un lote nuevo solo añade su carpeta.
+
+### Independencia de los lotes (HU-177)
+
+**Causa encontrada en el código**: `registerPdf` (`documentBatches.ts`) llamaba a `jobs.bySha(agentId, sha)`, que
+buscaba en **todos** los trabajos del agente sin mirar el lote. Un PDF que ya había llegado en cualquier lote anterior se
+marcaba como «duplicado», se reutilizaba el trabajo antiguo y en el lote nuevo se quedaba con 0 versiones y el mensaje
+«ya recibido antes como «nombre»». El nombre del mensaje no era la causa: el criterio ya era el SHA, pero se aplicaba
+fuera del lote.
+
+Regla actual:
+
+- **Nombre repetido no es un error.** Mismo nombre con contenido distinto → documento nuevo con su propia carpeta.
+- **Duplicidad = mismo SHA-256 dentro del mismo lote.** `bySha(agentId, sha, batchId)` filtra por `batch_id`. El mismo
+  PDF que llegó en otro lote crea en este lote **un trabajo nuevo**, con su carpeta, sus versiones y su historial. El
+  registro del lote anterior no cambia.
+- **Carpetas sin sobrescritura**: `uniqueSlug(agentId, base, carpeta)` devuelve `base`, `base-2`, `base-3`… si ya existe
+  un trabajo o una carpeta con ese nombre. Dos lotes recibidos a la vez no comparten ni sobrescriben carpetas ni trabajos.
+- **Repetido dentro del mismo ZIP**: queda «excluido» con el motivo «repetido dentro del ZIP: mismo contenido que «X»» y
+  nunca entra en la cola.
+- **PDF suelto** (sin lote): no cambia. El mismo contenido reutiliza su documento.
+- **Coste**: volver a convertir un PDF que ya se convirtió en otro lote gasta conversiones del tope diario. «Procesar el
+  lote» siempre pide tu confirmación.
+
+### Conteos del lote
+
+Cada documento del lote cuenta en **un solo estado**, y siempre se cumple:
+
+`total = listos + rechazados + fallidos + cancelados + excluidos + pendientes`
+
+En «pendientes» entran también los que están en cola y en proceso, así que los conteos cuadran también con el lote en
+marcha. `total` es el número de archivos del lote. Los registros antiguos sin `total` usan `detected`. `duplicates` es
+solo informativo y **no se suma**. La comprobación es pura y sin IO: `batchCountsAddUp` / `batchCountsSum`
+(`packages/domain/src/batch.ts`). Todo documento que no esté listo tiene su motivo. Las cifras de las capturas
+(11 + 4 + 10 = 25 con 13 aceptados; «27 de 28 · 3 excluidos») venían de contar los duplicados de otros lotes aparte de
+los estados.
 
 ### Procesamiento (cola acotada)
 
@@ -144,8 +179,8 @@ del Portal.
 ## Robustez de los lotes
 
 - La cola nunca se queda parada: si el agente está ocupado (p. ej. con un documento suelto) se vuelve a mirar cada 2 s.
-- Un lote termina cuando no le queda nada PROPIO en cola ni en curso: un PDF que convierte otro lote o una conversión
-  manual no lo deja «en marcha» para siempre, y el mismo documento se convierte una sola vez.
+- Un lote termina cuando no le queda nada PROPIO en cola ni en curso: una conversión manual no lo deja «en marcha» para
+  siempre. Cada lote tiene sus propios trabajos y no comparte documentos con otros lotes.
 - Preparar (plan, comprobaciones) es exclusivo: doble «Procesar» → 409; cancelar mientras se prepara gana (el lote
   queda cancelado y no se pide el resumen al agente). Los cambios de estado son condicionales.
 - Cerrar un lote nunca tumba el Portal: entregable, historial, manifiesto y registro se intentan uno a uno y lo que
@@ -162,8 +197,9 @@ del Portal.
 1. Oficina → PDF Word Fiel → pestaña **Documentos**.
 2. Arrastra el ZIP a la zona «Dar PDF o un ZIP con PDF» (o «Elegir PDF o ZIP…»). Verás el progreso de la subida y luego
    «revisando el archivo en el servidor…».
-3. Lee el resumen: cuántos archivos hay, cuántos PDF nuevos, cuántos ya estaban recibidos (los 10 que entraron con el
-   límite anterior aparecen como «ya recibidos» y no se duplican) y qué se excluyó y por qué («Ver el detalle»).
+3. Lee el resumen: cuántos archivos hay (total), cuántos PDF se aceptaron y qué se excluyó y por qué («Ver el detalle»).
+   Los PDF que ya llegaron en un lote anterior se aceptan en este lote con su propia carpeta y se vuelven a convertir.
+   El lote anterior no cambia.
 4. Abre el lote y pulsa **Procesar el lote**; lee el aviso (programa en este equipo, de uno en uno, 2 consultas a tu
    suscripción en total) y confirma. Puedes pausar, reanudar o cancelar.
 5. Al terminar: **Descargar los Word aprobados (ZIP)**, el resumen y el manifiesto. Revisa los que «No pasaron las
