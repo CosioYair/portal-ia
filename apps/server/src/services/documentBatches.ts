@@ -463,7 +463,7 @@ export async function startBatch(slug: string, agentId: string, id: string, opts
       const v = batchView(slug, agentId, id)!; const named = v.items.filter(i => i.jobId);
       waitingNote.set(id, 'Preparando el plan del lote (una consulta a tu suscripción)…'); changed({ ws: slug, entity: 'agent', id: agentId, kind: 'progress' });
       try {
-        plan = await planScript(slug, a, `- Lote «${b.source_name}»: ${named.length} PDF (nombres: ${named.slice(0, 20).map(i => cleanName(i.entryName.split('/').pop() ?? '').slice(0, 80)).join(', ')}${named.length > 20 ? '…' : ''}). El mismo plan se aplicará a cada PDF por separado, cada uno con su comprobación.\n`, null);
+        plan = await planScript(slug, a, `- Lote «${b.source_name}» (carpeta propia «${b.slug}»): ${named.length} PDF (nombres: ${named.slice(0, 20).map(i => cleanName(i.entryName.split('/').pop() ?? '').slice(0, 80)).join(', ')}${named.length > 20 ? '…' : ''}). El mismo plan se aplicará a cada PDF por separado, cada uno con su comprobación.\n`, null);
       } finally { recordModelCall(slug, agentId); }
       batchesDb(slug).patch(id, { plan_json: JSON.stringify(plan), addCalls: 1 });
     }
