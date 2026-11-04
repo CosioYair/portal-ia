@@ -307,6 +307,7 @@ export function batchView(slug: string, agentId: string, id: string, jobsById?: 
     // total = items.length: cada elemento cuenta en un solo estado; `duplicates` es informativo y no se suma.
       total: items.length,
       detected: items.length, accepted: items.filter(i => i.outcome === 'accepted').length, duplicates: items.filter(i => i.outcome === 'duplicate' || (i.state === 'excluded' && /^repetido dentro del ZIP/.test(i.reason ?? ''))).length, excluded: c('excluded'),
+    reprocessed: items.filter(i => { if (!i.sha256 || !i.jobId || i.state === 'excluded') return false; const other = jobs.bySha(agentId, i.sha256); return !!other && other.id !== i.jobId && (other.batchId ?? null) !== id; }).length,
     pending: c('pending'), queued: c('queued'), processing: c('processing'), passed: c('passed'), rejectedQa: c('rejected_qa'), failed: c('failed'), cancelled: c('cancelled')
   };
   return {

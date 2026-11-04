@@ -137,6 +137,8 @@ export interface DocumentBatchCounts {
   /** total = listos + rechazados + fallidos + cancelados + excluidos + pendientes (cada elemento en un solo estado). */
   total: number; detected: number; accepted: number; duplicates: number; excluded: number;
   pending: number; queued: number; processing: number; passed: number; rejectedQa: number; failed: number; cancelled: number;
+  /** PDF de este lote cuyo contenido (SHA-256) ya se convirtió en OTRO lote: volver a procesarlos gasta conversiones del tope diario. */
+  reprocessed?: number;
 }
 export interface DocumentBatch {
   id: string; agentId: string; name: string; slug: string; sourceName: string; sourceSha256: string; status: DocumentBatchStatus;

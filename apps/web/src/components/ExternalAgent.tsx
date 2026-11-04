@@ -166,7 +166,7 @@ export function DocumentsTab({ slug, p, onChanged, onTab }: { slug: string; p: P
       const f = ok[k]; setUpload({ name: f.name, progress: 0, n: k + 1, of: ok.length }); setSaid(`Subiendo «${f.name}»${ok.length > 1 ? ` (${k + 1} de ${ok.length})` : ''}.`);
       try {
         const r = await osApi.uploadDocumentFile(slug, p.agent.id, f, fr => setUpload({ name: f.name, progress: fr, n: k + 1, of: ok.length }));
-        if (r.kind === 'zip') { setIntake(r.batch); setOpenBatch(r.batch.id); const n = (r.batch.counts as { total?: number }).total ?? r.batch.counts.detected; setSaid(`«${f.name}» recibido: ${n} archivo(s) en el lote.`); flash(`ZIP recibido: ${n} archivo(s) en el lote`); }
+        if (r.kind === 'zip') { setIntake(r.batch); setOpenBatch(r.batch.id); const n = r.batch.counts.total; setSaid(`«${f.name}» recibido: ${n} archivo(s) en el lote.`); flash(`ZIP recibido: ${n} archivo(s) en el lote`); }
         else { if (r.jobs[0]) setOpen(r.jobs[0].id); setSaid(`«${f.name}» recibido.`); flash(r.jobs.some(j => j.duplicate) ? 'Ese PDF ya estaba recibido: se reutiliza su trabajo (no se duplica).' : 'PDF recibido'); }
       } catch (e: any) { problems.push(`«${f.name}»: ${e.message}`); setSaid(`No se pudo subir «${f.name}».`); }
     }
@@ -238,7 +238,7 @@ function BatchCard({ slug, agentId, b, jobsById, queue, open, onToggle, busy, ca
   act: (fn: () => Promise<unknown>, ok: string) => Promise<boolean>; jobCard: (j: DocumentJob) => ReactNode }) {
   const [confirm, setConfirm] = useState<BatchConfirm>(null); const [filter, setFilter] = useState<BatchFilter>('all'); const [doc, setDoc] = useState<string | null>(null);
   const st = BATCH_STATUS[b.status]; const c = b.counts;
-  const total = (c as { total?: number }).total ?? c.detected; const addsUp = batchCountsAddUp(c); const done = c.passed + c.rejectedQa + c.failed + c.cancelled; const todo = c.pending + c.queued + c.processing;
+  const total = c.total; const addsUp = batchCountsAddUp(c); const done = c.passed + c.rejectedQa + c.failed + c.cancelled; const todo = c.pending + c.queued + c.processing;
   const retryable = c.failed + c.cancelled;
   // La confirmación sigue a la vista mientras se prepara (el plan puede tardar un minuto) y se cierra al terminar.
   const a = (action: 'start' | 'pause' | 'resume' | 'retry' | 'cancel', msg: string, body: { includeRejected?: boolean; items?: number[] } = {}) => act(() => osApi.batchAction(slug, agentId, b.id, action, body), msg).finally(() => setConfirm(null));
@@ -263,7 +263,7 @@ function BatchCard({ slug, agentId, b, jobsById, queue, open, onToggle, busy, ca
       {b.waiting && <Notice kind="info">{b.waiting}</Notice>}
       {b.error && <Notice kind="warn">{b.error}</Notice>}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }} aria-live="polite">
-        {confirm === 'start' || confirm === 'resume' ? <><span className="small">{todo ? COST(todo) : 'No queda nada por convertir: el lote se cierra (sin consultas a tu suscripción).'}</span>
+        {confirm === 'start' || confirm === 'resume' ? <><span className="small">{todo ? COST(todo) : 'No queda nada por convertir: el lote se cierra (sin consultas a tu suscripción).'}{todo > 0 && (c.reprocessed ?? 0) > 0 ? ` Atención: ${c.reprocessed} PDF ya se procesaron en otro lote y se volverán a convertir (cuentan para el tope diario de conversiones).` : ''}</span>
           {yes(todo ? 'Sí, procesar' : 'Sí, cerrarlo', () => void a(confirm, confirm === 'start' ? 'Lote en marcha: se convierte de uno en uno' : 'Lote reanudado'), busy || !canRun)}{no}</>
           : confirm === 'cancel' ? <><span className="small">No empezará ningún documento más; el que esté en curso termina. Lo ya convertido se conserva y cancelar no consulta a nadie.</span>
             {yes('Sí, cancelar', () => void a('cancel', 'Lote cancelado'), busy)}{no}</>
