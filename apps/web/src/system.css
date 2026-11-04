@@ -286,7 +286,9 @@ a.arow:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 body, .agent-panel, .os-portal, .dock { font-family: var(--font-sans); color: var(--color-text); }
 .agent-panel, .os-portal { font-size: 14px; line-height: 1.45; }
 .agent-panel, .agent-panel *, .os-portal, .os-portal *, .dock, .dock * { box-sizing: border-box; }
-/* Capas: barra superior 15 · cajón 59/60 · panel del agente 59/60 · diálogos 70 · búsqueda 80 · avisos 90. */
+/* Capas (EN-004, lib/dockLayer.ts): barra superior 15 · cajón 59/60 (dentro de .shell, que crea su propio contexto con
+   z-index 0) · panel del agente 59/60 · panel del Asistente .dock 65 (.dock-behind 58 si cede al panel de agente)
+   · diálogos .os-portal 70 · búsqueda 80 · avisos 90. */
 .os-portal { z-index: 70; }
 .toast { z-index: 90; }
 
@@ -359,8 +361,24 @@ html { scroll-padding-top: 76px; }
 .notice .btn { white-space: normal; height: auto; min-height: 32px; padding-top: 6px; padding-bottom: 6px; text-align: left; }
 /* Panel del agente al lado (≥1280 px): el contenido (barra superior incluida) deja su ancho libre; nada queda debajo. */
 @media (min-width: 1280px) { body.has-agent-panel .content { padding-right: min(580px, 46vw); } }
-/* Panel «Pedir» en escritorio: el contenido deja su ancho libre (nada enfocable queda debajo). */
-@media (min-width: 768px) { body.has-dock .content { padding-right: calc(min(540px, 100vw - 32px) + 24px); } body.has-dock-wide .content { padding-right: calc(min(1100px, 100vw - 32px) + 24px); } }
+/* Panel «Pedir» (EN-004): el contenido deja libre el ancho del panel (ancho + 16 px de margen + 8 px de separación),
+   para que nada enfocable quede debajo. Se aplica solo mientras el panel se ve, porque <body> lleva has-dock o
+   has-dock-wide únicamente en ese caso. Escritorio (≥1024 px) y tableta (768-1023 px, menú en rail) usan la misma
+   fórmula, en estrecho y en ancho. La reserva no pasa del ancho de su columna (100 % = área de la rejilla), así que
+   en tableta no aparece desplazamiento horizontal. */
+@media (min-width: 768px) {
+  body.has-dock .content { padding-right: min(calc(min(540px, 100vw - 32px) + 24px), 100%); }
+  body.has-dock-wide .content { padding-right: min(calc(min(1100px, 100vw - 32px) + 24px), 100%); }
+}
+/* Panel de agente y Asistente a la vez (≥1280 px): se reserva el mayor de los dos anchos. */
+@media (min-width: 1280px) {
+  body.has-agent-panel.has-dock .content { padding-right: max(min(580px, 46vw), min(calc(min(540px, 100vw - 32px) + 24px), 100%)); }
+  body.has-agent-panel.has-dock-wide .content { padding-right: max(min(580px, 46vw), min(calc(min(1100px, 100vw - 32px) + 24px), 100%)); }
+}
+/* Móvil: el panel ocupa toda la pantalla (aria-modal, con el foco atrapado) y no se reserva espacio. */
+@media (max-width: 767px) {
+  body.has-dock .content, body.has-dock-wide .content { padding-right: 0; }
+}
 /* Chips de disponibilidad dentro de las tarjetas de Motores de IA: a su tamaño, no como barras. */
 .harness-card .chip { align-self: flex-start; }
 /* Migas en móvil: la pantalla actual nunca se recorta; encoge primero la empresa. */

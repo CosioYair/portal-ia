@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import type { AssistantInfo } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { setAssistantPending, useUiEvent } from '../lib/uiBus.ts';
+import { askAction, bodyClass, canYield, dockVisible, isAssistantPath } from '../lib/dockLayer.ts';
 import { Icon } from './ui.tsx';
 import { AssistantChat } from './AssistantChat.tsx';
 
@@ -21,16 +22,52 @@ export function AssistantDock() {
   const opener = useRef<Element | null>(null); const panel = useRef<HTMLDivElement>(null);
   useEffect(() => { try { localStorage.setItem('portal-ia.dock.wide', wide ? '1' : '0'); } catch { /* sin almacenamiento */ } }, [wide]);
   useEffect(() => { try { localStorage.setItem('portal-ia.dock', open ? '1' : '0'); } catch { /* sin almacenamiento */ } }, [open]);
-  const onAssistantPage = loc.pathname.startsWith('/asistente') || loc.pathname.endsWith('/asistente');
+  const onAssistantPage = isAssistantPath(loc.pathname);
+  // EN-004: «front» es falso cuando el usuario trabaja en el panel de agente (el Asistente cede y queda detrás);
+  // «focusTick» hace que «Pedir» enfoque aunque el panel ya estuviera abierto.
+  const [front, setFront] = useState(true); const [focusTick, setFocusTick] = useState(0);
+  // Móvil (<768 px): el panel es aria-modal y atrapa el foco; se recalcula al cambiar el tamaño de la ventana.
+  const [mobile, setMobile] = useState(() => typeof window !== 'undefined' && window.matchMedia?.('(max-width: 767px)').matches === true);
+  useEffect(() => {
+    const mq = window.matchMedia?.('(max-width: 767px)'); if (!mq) return;
+    const on = () => setMobile(mq.matches); on();
+    mq.addEventListener('change', on); return () => mq.removeEventListener('change', on);
+  }, []);
+  const visible = dockVisible({ open, onAssistantPage, yielded: !front });
   useUiEvent('assistant', useCallback(() => {
-    if (onAssistantPage) { (document.querySelector('.assist textarea, textarea') as HTMLTextAreaElement | null)?.focus(); return; }
-    opener.current = document.activeElement; setOpen(true);
-  }, [onAssistantPage]));
-  // Al abrir, el foco va al panel; al cerrar, vuelve a donde estaba. Esc cierra.
-  useEffect(() => { if (open) requestAnimationFrame(() => (panel.current?.querySelector<HTMLElement>('textarea') ?? panel.current?.querySelector<HTMLElement>('button'))?.focus()); }, [open]);
-  const close = () => { setOpen(false); (opener.current as HTMLElement | null)?.focus?.(); };
+    const action = askAction({ onAssistantPage, open });
+    if (action === 'focus-fullscreen') { document.querySelector<HTMLTextAreaElement>('.assist-page textarea')?.focus(); return; }
+    if (action === 'open') opener.current = document.activeElement;
+    setOpen(true); setFront(true); setFocusTick(t => t + 1);
+  }, [onAssistantPage, open]));
+  // Al abrir (o al pulsar «Pedir» con el panel ya abierto), el foco va al panel; al cerrar, vuelve a donde estaba. Esc cierra.
+  useEffect(() => {
+    if (!open) return;
+    const id = requestAnimationFrame(() => (panel.current?.querySelector<HTMLElement>('textarea') ?? panel.current?.querySelector<HTMLElement>('button'))?.focus());
+    return () => cancelAnimationFrame(id);
+  }, [open, focusTick]);
+  const close = () => { setOpen(false); setFront(true); (opener.current as HTMLElement | null)?.focus?.(); };
   const onPending = useCallback((n: number) => setAssistantPending(n), []);
-  useEffect(() => { if (!open) return; document.body.classList.add(wide ? 'has-dock-wide' : 'has-dock'); return () => document.body.classList.remove('has-dock', 'has-dock-wide'); }, [open, wide]);
+  // La reserva de espacio existe solo mientras el panel se ve: se quita al cerrar, en /asistente, al ceder y al desmontar.
+  useEffect(() => {
+    const c = bodyClass({ visible, wide }); if (c) document.body.classList.add(c);
+    return () => document.body.classList.remove('has-dock', 'has-dock-wide');
+  }, [visible, wide]);
+  // Capas junto al panel de agente: pulsar o enfocar dentro de él hace que el Asistente ceda; dentro del Asistente, lo trae
+  // al frente. Si el panel de agente desaparece, el Asistente vuelve al frente.
+  useEffect(() => {
+    if (!open || onAssistantPage) return;
+    const onIn = (e: Event) => {
+      const t = e.target as Element | null; if (!t || typeof t.closest !== 'function') return;
+      // Por debajo de 1280 px el panel de agente es modal (con fondo): el Asistente no cede, para no quedar atrapado bajo él.
+      if (t.closest('.agent-panel')) { if (canYield({ agentModal: !!document.querySelector('.agent-panel-scrim') })) setFront(false); }
+      else if (t.closest('.dock')) setFront(true);
+    };
+    document.addEventListener('pointerdown', onIn, true); document.addEventListener('focusin', onIn, true);
+    const mo = new MutationObserver(() => { if (!document.querySelector('.agent-panel') || document.querySelector('.agent-panel-scrim')) setFront(true); });
+    mo.observe(document.body, { childList: true, attributes: true, attributeFilter: ['class'] });
+    return () => { document.removeEventListener('pointerdown', onIn, true); document.removeEventListener('focusin', onIn, true); mo.disconnect(); };
+  }, [open, onAssistantPage]);
   useEffect(() => {
     if (!open) return;
     const k = (e: KeyboardEvent) => { if (e.key !== 'Escape' || e.defaultPrevented) return; const el = document.activeElement as HTMLElement | null; if (el?.closest('.agent-panel, .cmdk, .modal, .side-open')) return; close(); };
@@ -39,9 +76,9 @@ export function AssistantDock() {
   if (onAssistantPage) return null; // la pantalla completa ya lo muestra
   // Se monta en <body> (portal) para que position:fixed sea relativo a la ventana y no a un contenedor animado.
   return createPortal(<>
-    {open && <div ref={panel} className={`dock${wide ? ' dock-wide' : ''}`} role="dialog" aria-label="Asistente de Empresa" aria-modal={window.innerWidth < 768 || undefined} onKeyDown={e => {
+    {open && <div ref={panel} className={`dock${wide ? ' dock-wide' : ''}${front ? '' : ' dock-behind'}`} role="dialog" aria-label="Asistente de Empresa" aria-modal={mobile || undefined} onKeyDown={e => {
       if (e.key === 'Escape') { e.stopPropagation(); close(); return; }
-      if (e.key !== 'Tab' || window.innerWidth >= 768 || !panel.current) return;
+      if (e.key !== 'Tab' || !mobile || !panel.current) return;
       const f = [...panel.current.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled])')].filter(x => x.offsetParent !== null);
       if (!f.length) return; const a = f[0]; const z = f[f.length - 1];
       if (e.shiftKey && document.activeElement === a) { e.preventDefault(); z.focus(); } else if (!e.shiftKey && document.activeElement === z) { e.preventDefault(); a.focus(); }
