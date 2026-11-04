@@ -12,6 +12,7 @@ import { REPO_ROOT } from '../config.ts';
 import { agentsRepo, workspaceDb } from '../db/workspace.ts';
 import { agentBackend, agentCaller } from './claudeCode/backend.ts';
 import { requirePolicy } from './executionPolicy.ts';
+import { reconcileWithDisk, removalsById, removedIds } from './documentRemoval.ts';
 import { backupFiles, DEPS_KEY, diffSnapshots, identityZones, markEvaluating, safePath, safeWrite, scanExternal, sha256Text, snapshotHash, sourcesRepo, type SnapshotFiles } from './externalAgents.ts';
 import { recordAgentEvent } from './agentEvents.ts';
 import { changed } from './live.ts';
@@ -81,6 +82,14 @@ function ensure(slug: string) {
   // 0.19 (aditivo): cada trabajo puede pertenecer a un lote.
   const cols = (db.prepare(`PRAGMA table_info(document_jobs)`).all() as any[]).map(c => c.name);
   if (!cols.includes('batch_id')) db.exec(`ALTER TABLE document_jobs ADD COLUMN batch_id TEXT`);
+  // HU-177 (aditivo): borrado blando. Las filas eliminadas se conservan como histórico (documentRemoval.ts).
+  const addCols = (table: string, wanted: string[]) => {
+    const have = (db.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(c => c.name);
+    for (const c of wanted) if (!have.includes(c)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${c} TEXT`);
+  };
+  addCols('document_jobs', ['removed_at', 'removal_id']);
+  addCols('document_batches', ['removed_at', 'removal_id']);
+  addCols('document_batch_items', ['removed_at']);
   return db;
 }
 export const documentsDb = ensure;
@@ -101,8 +110,8 @@ export function jobsDb(slug: string) {
      */
     bySha(agentId: string, sha: string, batchId?: string | null): DocumentJob | null {
       const r = batchId
-        ? db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ? AND batch_id = ? ORDER BY created_at, id LIMIT 1`).get(agentId, sha, batchId) as any
-        : db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ? ORDER BY (batch_id IS NOT NULL), created_at, id LIMIT 1`).get(agentId, sha) as any;
+        ? db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ? AND batch_id = ? AND removed_at IS NULL ORDER BY created_at, id LIMIT 1`).get(agentId, sha, batchId) as any
+        : db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ? AND removed_at IS NULL ORDER BY (batch_id IS NOT NULL), created_at, id LIMIT 1`).get(agentId, sha) as any;
       return r ? mapJob(r) : null;
     },
     /**
@@ -254,7 +263,82 @@ export const reserveRun = (slug: string, agentId: string, jobId: string) => { co
 export const releaseRun = (slug: string, agentId: string) => { running.delete(runKey(slug, agentId)); };
 export const documentJobsRunning = () => [...running.entries()].map(([k, jobId]) => { const i = k.lastIndexOf(':'); return { slug: k.slice(0, i), agentId: k.slice(i + 1), jobId }; });
 
-export function listJobs(slug: string, agentId: string): DocumentJob[] {
+/**
+ * Documentos del agente cruzados con el disco. Por defecto se ocultan los eliminados desde el Portal; con
+ * `includeRemoved` se devuelven como histórico, con su registro de eliminación. Lo que el Portal registró pero ya no
+ * está en disco se marca como «falta en disco» y no se crea ni se borra nada.
+ */
+export function listJobs(slug: string, agentId: string, opts: { includeRemoved?: boolean } = {}): DocumentJob[] {
+  const all = listJobsAll(slug, agentId);
+  const gone = removedIds(slug, agentId).jobs;
+  const missing = reconcileWithDisk(slug, agentId).jobs;
+  const recs = gone.size ? removalsById(slug, agentId) : null;
+  const out: DocumentJob[] = [];
+  for (const j of all) {
+    const rid = gone.get(j.id);
+    if (rid !== undefined) {
+      if (opts.includeRemoved) out.push({ ...j, presence: 'removed', missingOnDisk: false, removal: recs?.get(rid) ?? null });
+      continue;
+    }
+    const miss = missing.has(j.id);
+    out.push({ ...j, presence: miss ? 'missing' : 'present', missingOnDisk: miss, removal: null });
+  }
+  return out;
+}
+
+/**
+ * Diagnóstico del intento anterior, para corregirlo al reintentar: comprobaciones no superadas, métricas de doc_qa,
+ * plan usado y error. Devuelve null si la última versión pasó o si no hubo intento anterior. No incluye contenido del
+ * documento: igual que en el feedback, se omite `qa_error`.
+ */
+export function retryDiagnosis(job: DocumentJob): string | null {
+  const last = job.versions[job.versions.length - 1] ?? null;
+  if (last?.passed) return null;
+  if (!last && !job.error) return null;
+  const parts: string[] = [];
+  if (last) {
+    const failed = Object.entries(last.gates ?? {}).filter(([, ok]) => !ok).map(([g]) => g);
+    parts.push(failed.length ? `La v${last.n} no superó estas comprobaciones: ${failed.join(', ')}.` : `La v${last.n} no pasó las comprobaciones.`);
+    const m = Object.entries(last.metrics ?? {}).filter(([k]) => k !== 'qa_error').slice(0, 30).map(([k, v]) => `${k}=${String(v).slice(0, 60)}`);
+    if (m.length) parts.push(`Métricas de doc_qa: ${m.join('; ')}.`);
+    if (last.plan?.script) parts.push(`Plan anterior: ${last.plan.script} ${(last.plan.args ?? []).join(' ')}.`);
+  }
+  if (job.error) parts.push(`Error: ${job.error.slice(0, 600)}`);
+  return parts.join('\n').slice(0, 2000);
+}
+
+const RETRY_TAG = 'Reintento corregido';
+/**
+ * Tras una corrección que pasó la QA, propone lo aprendido: el error, la causa y la corrección. Se añade a la memoria
+ * del agente con el mecanismo de propuestas existente y queda pendiente de que el propietario la apruebe; no se aplica
+ * sola. No hace llamadas al modelo.
+ */
+function proposeRetryLearning(slug: string, a: Agent, job: DocumentJob, v: DocumentVersion, diagnosis: string): ImprovementProposal | null {
+  const repo = sourcesRepo(slug); const s = repo.get(a.id); if (!s) return null;
+  const props = proposalsDb(slug);
+  if (props.list(a.id).some(p => p.state === 'proposed' && p.jobId === job.id && p.feedback.startsWith(RETRY_TAG))) return null;
+  const files = (repo.files(a.id) ?? {}) as SnapshotFiles;
+  const canon = new Map(Object.keys(files).map(k => [k.toLowerCase(), k] as const));
+  const mem = s.layout.memory && files[s.layout.memory] !== undefined ? s.layout.memory : (canon.get('memoria/aprendizajes.md') ?? null);
+  const date = new Date().toISOString().slice(0, 10);
+  const lesson = `## Aprendizaje ${date}: reintento corregido\n\n- Documento: «${job.inputName}» (SHA-256 ${job.inputSha256.slice(0, 12)}…), versión v${v.n} aprobada por la QA del Portal.\n- Error anterior: ${diagnosis.replace(/\n+/g, ' ').slice(0, 900)}\n- Corrección que pasó las pruebas: ${v.plan.script} ${v.plan.args.join(' ')}.${v.plan.reason ? ` Motivo: ${v.plan.reason.slice(0, 300)}` : ''}\n- Regla: ante este mismo fallo, aplica esta corrección desde el primer intento.`;
+  const summary = 'Anotar en la memoria el error, su causa y la corrección que pasó las pruebas.';
+  const change: ProposalChange = mem
+    ? { path: mem, kind: 'append', content: lesson, previous: files[mem] ?? null, summary }
+    : { path: 'memoria/APRENDIZAJES.md', kind: 'replace', content: `# Aprendizajes del agente\n\n${lesson}\n`, previous: null, summary };
+  const p: ImprovementProposal = {
+    id: crypto.randomUUID(), agentId: a.id, jobId: job.id, feedback: `${RETRY_TAG}: ${diagnosis}`.slice(0, 4000), classification: 'needs_validation',
+    reason: 'La corrección del reintento pasó las comprobaciones del Portal. Se propone recordarla para no repetir el error. Requiere tu aprobación.',
+    summary: `Aprendizaje del reintento de «${job.inputName}» (v${v.n})`.slice(0, 600), changes: [change], state: 'proposed', createdAt: now(),
+    decidedAt: null, appliedAt: null, backupDir: null, error: null, evidence: { jobId: job.id, version: v.n, gates: v.gates ?? null }, baseRevision: s.revision
+  };
+  props.insert(p);
+  recordAgentEvent(slug, a.id, 'improvement_proposed', { proposalId: p.id, classification: p.classification, changes: p.changes.map(c => ({ path: c.path, kind: c.kind })), jobId: job.id, source: 'retry' }, 'portal');
+  changed({ ws: slug, entity: 'agent', id: a.id });
+  return p;
+}
+
+function listJobsAll(slug: string, agentId: string): DocumentJob[] {
   const jobs = jobsDb(slug);
   // Un trabajo «procesando» que ya no está en marcha (reinicio del Portal) queda como fallido y se puede repetir.
   for (const j of jobs.list(agentId)) if (j.status === 'processing' && running.get(`${slug}:${agentId}`) !== j.id) jobs.update(j.id, { status: 'failed', error: 'Interrumpido por un reinicio del Portal. El original y las versiones anteriores siguen en su carpeta: vuelve a procesarlo.' });
@@ -287,7 +371,14 @@ export function callerFor(slug: string, a: Agent, title: string) {
   return c;
 }
 
-export interface ProcessOptions { authorized: boolean; feedback?: string | null; by?: string; plan?: ScriptPlan | null; reportMode?: 'agent' | 'portal'; batchId?: string | null }
+export interface ProcessOptions {
+  authorized: boolean; feedback?: string | null; by?: string; plan?: ScriptPlan | null; reportMode?: 'agent' | 'portal'; batchId?: string | null;
+  /**
+   * Diagnóstico del intento anterior. Si no se indica, se calcula a partir del documento (rechazado o fallido); con null
+   * se desactiva. Con él, el agente vuelve a planificar sabiendo qué falló y, si la corrección pasa, se propone lo aprendido.
+   */
+  diagnosis?: string | null;
+}
 
 export async function startProcessing(slug: string, agentId: string, jobId: string, opts: ProcessOptions): Promise<DocumentJob> {
   if (!opts.authorized) throw err('Procesar ejecuta scripts del agente en este equipo y usa tu suscripción: confírmalo.', 403);
@@ -320,7 +411,40 @@ export async function startProcessing(slug: string, agentId: string, jobId: stri
  * CORTA fuera de la carpeta del agente y se borra al terminar: dentro de `documentos/…/revisiones/vN/` los perfiles de
  * LibreOffice superan el límite de ruta de Windows y LibreOffice se cierra al arrancar. Las evidencias sí van al agente.
  */
+/**
+ * Una versión del documento. Si hubo un intento anterior que no pasó, se hace UNA corrección (sin reintentos en bucle):
+ * el agente vuelve a planificar con el diagnóstico y, si la nueva versión pasa la QA, se crea una propuesta de
+ * aprendizaje pendiente. Si vuelve a fallar, el motivo queda en el documento.
+ */
 export async function processVersion(slug: string, a: Agent, jobId: string, tc: Toolchain, opts: ProcessOptions): Promise<void> {
+  const job = jobsDb(slug).get(jobId);
+  const diagnosis = opts.diagnosis === undefined ? (job ? retryDiagnosis(job) : null) : (opts.diagnosis?.trim() || null);
+  // Solo se vuelve a planificar si la comprobación RECHAZÓ el último Word (o si llega un diagnóstico explícito). Un fallo
+  // transitorio del script o de lectura se reintenta con el plan del lote: no gasta otra llamada al modelo.
+  // Una conversión que no terminó (script con error o tiempo agotado) también se guarda con passed=false, pero con
+  // gates.conversion_completada=false: eso NO es un rechazo de la QA y no justifica volver a planificar.
+  const lastV = job && job.versions.length > 0 ? job.versions[job.versions.length - 1] : null;
+  const rejectedByQa = !!lastV && lastV.passed === false && lastV.gates?.conversion_completada !== false;
+  if (!job || !diagnosis || (opts.diagnosis === undefined && !rejectedByQa)) return processVersionOnce(slug, a, jobId, tc, opts);
+  // En un lote (trae su plan) solo se replanifica si la última versión la rechazó la QA; un fallo de ejecución se reintenta con el plan del lote (sin llamadas).
+  const last = job.versions.length ? job.versions[job.versions.length - 1] : null;
+  if (opts.plan && !(last && !last.passed && last.gates?.conversion_completada !== false)) return processVersionOnce(slug, a, jobId, tc, opts);
+  const before = job.versions.length;
+  let plan = opts.plan ?? null;
+  if (jobsDb(slug).usageToday(a.id).calls < MODEL_CALLS_PER_DAY) {
+    try {
+      plan = await planScript(slug, a, `PDF «${job.inputName}» (${job.pages ?? '?'} páginas). REINTENTO: el intento anterior no pasó las comprobaciones del Portal.`, `Corrige el fallo del intento anterior (elige script u opciones que lo eviten):\n${diagnosis}`);
+    } catch { /* se mantiene el plan anterior; si vuelve a fallar, el motivo queda en el documento */ }
+    finally { recordModelCall(slug, a.id, 'reintento'); }
+  }
+  const feedback = [opts.feedback ?? null, `Corrección del intento anterior: ${diagnosis}`].filter(Boolean).join('\n\n').slice(0, 4000);
+  await processVersionOnce(slug, a, jobId, tc, { ...opts, plan, feedback });
+  const after = jobsDb(slug).get(jobId);
+  const v = after?.versions[after.versions.length - 1];
+  if (!after || after.versions.length <= before || !v?.passed) return;
+  try { proposeRetryLearning(slug, a, after, v, diagnosis); } catch { /* la versión ya está guardada; la propuesta es opcional */ }
+}
+async function processVersionOnce(slug: string, a: Agent, jobId: string, tc: Toolchain, opts: ProcessOptions): Promise<void> {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'pia-'));
   try { await processVersionIn(slug, a, jobId, tc, opts, work); }
   finally { try { fs.rmSync(work, { recursive: true, force: true }); } catch { /* temporal del sistema */ } }

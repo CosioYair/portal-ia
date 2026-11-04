@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { BATCH_ITEM_LABEL, FEEDBACK_LABEL, INTEGRATION_LABEL, batchCountsAddUp, type DocumentBatch, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ExecutionBackend, type ExternalGrants, type ImprovementProposal } from '@portal-ia/domain';
+import { BATCH_ITEM_LABEL, FEEDBACK_LABEL, INTEGRATION_LABEL, PRESENCE_LABEL, batchCountsAddUp, type RemovalPreview, type RemovalRecord, type DocumentBatch, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ExecutionBackend, type ExternalGrants, type ImprovementProposal } from '@portal-ia/domain';
 import { Chip, Icon, Notice, Spinner } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
 import { FolderPicker } from './FolderPicker.tsx';
@@ -7,6 +7,87 @@ import { useApp } from '../lib/store.ts';
 import { useLive } from '../lib/live.ts';
 import { osApi, type AgentPanel as Panel, type DocumentQueue, type ExternalPreview, type SourceStatus } from '../lib/osApi.ts';
 import { fmtBytes } from './AgentChat.tsx';
+import { api, ApiError } from '../lib/api.ts';
+
+// ---------------------------------------------------------------- Eliminación autorizada (HU-177)
+
+/**
+ * Botón «Eliminar…» de un lote o de un documento. Muestra la vista previa del servidor: archivos, bytes, lo que se
+ * conserva y el aviso de que no se puede deshacer. Solo borra cuando el propietario marca la autorización explícita.
+ * Si el elemento ya falta en disco, ofrece quitarlo de la lista; queda en el histórico.
+ */
+function RemovalControl({ slug, agentId, kind, id, missing, busy, removedCount, total }: { slug: string; agentId: string; kind: 'batch' | 'document'; id: string; missing: boolean; busy: boolean; removedCount?: number; total?: number }) {
+  const { flash } = useApp();
+  const [pv, setPv] = useState<RemovalPreview | null>(null); const [loading, setLoading] = useState(false); const [working, setWorking] = useState(false);
+  const [auth, setAuth] = useState(false); const [reason, setReason] = useState(''); const [error, setError] = useState<string | null>(null);
+  const close = () => { setPv(null); setAuth(false); setReason(''); setError(null); };
+  const open = async () => {
+    setLoading(true); setError(null); setAuth(false);
+    try { setPv(kind === 'batch' ? await api.batchRemovalPreview(slug, agentId, id) : await api.documentRemovalPreview(slug, agentId, id)); } catch (e: any) { setError(e.message); } finally { setLoading(false); }
+  };
+  const confirm = async () => {
+    if (!pv || !auth || pv.blockedBy) return;
+    setWorking(true); setError(null);
+    try {
+      const o = { previewToken: pv.token, reason: reason.trim() || null };
+      const r: RemovalRecord = kind === 'batch' ? await api.removeDocumentBatch(slug, agentId, id, o) : await api.removeDocument(slug, agentId, id, o);
+      flash(r.missingOnDisk ? `«${r.name}» se quitó de la lista (ya faltaba en disco). Queda en el histórico.` : `«${r.name}» eliminado de tu equipo: ${r.files} archivo(s), ${fmtBytes(r.freedBytes)} liberados. Queda en el histórico.`);
+      close();
+    } catch (e: any) {
+      setError(e.message);
+      // El contenido cambió desde la vista previa: se vuelve a mostrar lo que hay ahora antes de autorizar otra vez.
+      if (e instanceof ApiError && e.body?.code === 'preview_changed') void open();
+    } finally { setWorking(false); }
+  };
+  return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+      {missing && <Chip xs tone="warn">{PRESENCE_LABEL.missing}</Chip>}
+      {missing && <span className="small muted" style={{ flex: 1 }}>Lo borraste fuera del Portal: puedes quitarlo de la lista y quedará en el histórico.</span>}
+      {removedCount ? <span className="small muted">{removedCount} documento(s) eliminado(s), aparte del total de {total ?? 0}</span> : null}
+      {!pv && <button type="button" className="btn btn-ghost btn-sm" disabled={busy || loading || working} onClick={() => void open()}>{loading ? 'Revisando…' : missing ? 'Quitar de la lista…' : 'Eliminar…'}</button>}
+    </div>
+    {error && <Notice kind="err">{error}</Notice>}
+    {pv && <div className="card" role="dialog" aria-label={kind === 'batch' ? 'Confirmar eliminación del lote' : 'Confirmar eliminación del documento'} style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div className="small"><strong>{kind === 'batch' ? 'Eliminar el lote' : 'Eliminar el documento'} «{pv.name}»</strong> · <code>{pv.folder}</code></div>
+      {pv.blockedBy && <Notice kind="warn">{pv.blockedBy}</Notice>}
+      <Notice kind={pv.exists ? 'warn' : 'info'}>{pv.warning}</Notice>
+      {pv.exists && <div className="small">Se liberan <strong>{fmtBytes(pv.freedBytes)}</strong> en {pv.files} archivo(s).</div>}
+      {pv.sample.length > 0 && <details><summary className="small" style={{ cursor: 'pointer' }}>Ver los archivos que se borran ({pv.files}{pv.sample.length < pv.files ? `; se muestran ${pv.sample.length}` : ''})</summary>
+        <ul className="small mono" style={{ margin: '4px 0 0', paddingLeft: 18, maxHeight: 200, overflow: 'auto' }}>{pv.sample.map(f => <li key={f}>{f}</li>)}</ul></details>}
+      <div className="small"><strong>Se conserva:</strong></div>
+      <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{pv.keeps.map((k, i) => <li key={i}>{k}</li>)}</ul>
+      <input className="input" value={reason} maxLength={500} onChange={e => setReason(e.target.value)} placeholder="Motivo (opcional, queda en el histórico)" aria-label="Motivo de la eliminación" />
+      <label className="ck small"><input className="cb" type="checkbox" checked={auth} disabled={!!pv.blockedBy || working} onChange={e => setAuth(e.target.checked)} />
+        <span>{pv.exists ? 'Autorizo eliminar estos archivos de mi equipo' : 'Autorizo quitarlo de la lista (queda en el histórico)'}</span></label>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button type="button" className="btn btn-primary btn-sm" disabled={!auth || working || !!pv.blockedBy} onClick={() => void confirm()}>{working ? 'Eliminando…' : pv.exists ? 'Eliminar de mi equipo' : 'Quitar de la lista'}</button>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={working} onClick={close}>Cancelar</button>
+      </div>
+    </div>}
+  </div>;
+}
+
+/** Interruptor «Mostrar eliminados (histórico)»: fecha, quién, bytes liberados, SHA-256 y motivos. Se lee del servidor. */
+function RemovedHistory({ slug, agentId }: { slug: string; agentId: string }) {
+  const [show, setShow] = useState(false); const [list, setList] = useState<RemovalRecord[] | null>(null); const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => api.agentDocuments(slug, agentId, true).then(r => { setList(r.removals ?? []); setError(null); }).catch(e => setError(e.message)), [slug, agentId]);
+  useEffect(() => { if (show) void load(); }, [show, load]);
+  useLive(c => show && c.ws === slug && c.entity === 'agent' && c.id === agentId && c.kind !== 'progress', () => void load(), { minMs: 1500 });
+  return <section style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    <label className="ck small"><input className="cb" type="checkbox" checked={show} onChange={e => setShow(e.target.checked)} /><span>Mostrar eliminados (histórico)</span></label>
+    {show && error && <Notice kind="err">{error}</Notice>}
+    {show && !list && !error && <Spinner />}
+    {show && list && list.length === 0 && <p className="small muted">Todavía no se ha eliminado nada.</p>}
+    {show && list && list.map(r => <div key={r.id} className="card" style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div className="small" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <Chip xs>{PRESENCE_LABEL.removed}</Chip><strong>{r.kind === 'batch' ? 'Lote' : 'Documento'} «{r.name}»</strong>
+        <span className="muted">{new Date(r.removedAt).toLocaleString('es-MX')} · por {r.removedBy}</span></div>
+      <div className="small muted"><code>{r.folder}</code> · {r.missingOnDisk ? 'ya faltaba en disco (solo se quitó de la lista)' : `${r.files} archivo(s), ${fmtBytes(r.freedBytes)} liberados`}{r.reason ? ` · Motivo: ${r.reason}` : ''}</div>
+      {r.sha256.length > 0 && <details><summary className="small" style={{ cursor: 'pointer' }}>SHA-256 conservados ({r.sha256.length})</summary><ul className="small mono" style={{ margin: 0, paddingLeft: 18 }}>{r.sha256.map(s => <li key={s}>{s}</li>)}</ul></details>}
+      {r.reasons.length > 0 && <details><summary className="small" style={{ cursor: 'pointer' }}>Motivos por documento ({r.reasons.length})</summary><ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{r.reasons.map((x, i) => <li key={i}><strong>{x.name}</strong>: {x.reason}</li>)}</ul></details>}
+    </div>)}
+  </section>;
+}
 
 /**
  * Agentes externos (referencia gestionada): importar sin copiar, banco de documentos, origen e integración, mejoras.
@@ -206,6 +287,7 @@ export function DocumentsTab({ slug, p, onChanged, onTab }: { slug: string; p: P
     {intake && <IntakeSummary b={intake} onClose={() => { setIntake(null); requestAnimationFrame(() => chooseBtn.current?.focus()); }} />}
     {data.batches.length > 0 && <div className="h3">Lotes</div>}
     {data.batches.map(b => <BatchCard key={b.id} slug={slug} agentId={p.agent.id} b={b} jobsById={jobsById} queue={data.queue} open={openBatch === b.id} onToggle={() => setOpenBatch(openBatch === b.id ? null : b.id)} busy={busy} canRun={canRun} act={act} jobCard={jobCard} />)}
+    <RemovedHistory slug={slug} agentId={p.agent.id} />
     {(data.batches.length > 0 || loose.length > 0) && <div className="h3">Documentos sueltos</div>}
     {data.jobs.length === 0 && <p className="small muted">Aún no hay documentos.</p>}
     {loose.map(jobCard)}
@@ -250,6 +332,7 @@ function BatchCard({ slug, agentId, b, jobsById, queue, open, onToggle, busy, ca
   const yes = (label: string, onClick: () => void, disabled: boolean) => <button className="btn btn-primary btn-sm" autoFocus disabled={disabled} onClick={onClick}>{busy ? 'Un momento…' : label}</button>;
   const no = <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setConfirm(null)}>No</button>;
   return <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
+    <RemovalControl slug={slug} agentId={agentId} kind="batch" id={b.id} missing={b.presence === 'missing' || !!b.missingOnDisk} busy={busy} removedCount={b.counts.removed ?? 0} total={b.counts.total} />
     <button type="button" className="lnk" style={{ textAlign: 'left', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }} onClick={onToggle} aria-expanded={open}>
       {Icon.folder()} <strong className="wrap-any">{b.sourceName}</strong> <Chip xs tone={st.tone}>{st.text}</Chip><span className="small muted">{total} en total: {c.passed} listos · {c.rejectedQa} rechazados · {c.failed} fallidos{c.cancelled ? ` · ${c.cancelled} cancelados` : ''} · {c.excluded} excluidos{c.pending + c.queued + c.processing ? ` · ${c.pending + c.queued + c.processing} pendientes` : ''}</span>{!addsUp && <Chip xs tone="warn">Los conteos no cuadran: revisa el manifiesto</Chip>}
     </button>
@@ -311,6 +394,7 @@ function JobCard({ slug, agentId, job, open, onToggle, busy, canRun, onProcess, 
   const [confirm, setConfirm] = useState<null | 'run' | 'fix' | 'feedback'>(null); const [fb, setFb] = useState(''); const [fix, setFix] = useState(''); const [sending, setSending] = useState(false);
   const COST = 'Hará dos consultas a tu suscripción de Claude (decidir y redactar el informe) y ejecutará el programa del agente en este equipo; puede tardar unos minutos.';
   return <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <RemovalControl slug={slug} agentId={agentId} kind="document" id={job.id} missing={job.presence === 'missing' || !!job.missingOnDisk} busy={busy || job.status === 'processing'} />
     <button type="button" className="lnk" style={{ textAlign: 'left', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }} onClick={onToggle} aria-expanded={open}>
       {Icon.file()} <strong>{job.title}</strong> <Chip xs tone={st.tone}>{st.text}</Chip>{job.pages ? <span className="small muted">{job.pages} páginas</span> : null}<span className="small muted">{job.versions.length} versión(es)</span>
     </button>

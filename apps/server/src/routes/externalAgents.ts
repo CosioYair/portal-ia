@@ -9,6 +9,7 @@ import path from 'node:path';
 import { applyProposal, BATCH_LIMITS, classifyFeedback, detectToolchain, documentJobsRunning, jobFile, jobsDb, listJobs, listProposals, rejectProposal, startProcessing, versionEvidence } from '../services/documentJobs.ts';
 import { batchFile, buildDeliverable, cancelBatch, documentQueueStatus, listBatches, pauseBatch, receiveFile, resumeBatch, retryBatch, startBatch } from '../services/documentBatches.ts';
 import { acceptOctetStream, streamToTemp, uploadName } from './uploads.ts';
+import { listRemovals, previewRemoval, removeBatch, removeDocument } from '../services/documentRemoval.ts';
 
 /**
  * Agentes externos (referencia gestionada) y su banco de trabajo de documentos. Ver docs/agentes-externos.md.
@@ -66,8 +67,38 @@ export async function externalAgentsRoutes(app: FastifyInstance) {
   // ---------- Documentos
   app.get(`${W}/agents/:id/documents`, async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
-    try { const jobs = listJobs(slug, id); const batches = listBatches(slug, id, jobs); return { jobs, batches, running: documentJobsRunning(), proposals: listProposals(slug, id), queue: documentQueueStatus(), limits: BATCH_LIMITS }; } catch (e) { return err(reply, e); }
+    const includeRemoved = /^(1|true)$/i.test(String((req.query as any)?.includeRemoved ?? ''));
+    try {
+      // Los lotes se calculan con todos los documentos (también los eliminados); la lista solo muestra el histórico si se pide.
+      const all = listJobs(slug, id, { includeRemoved: true });
+      const batches = listBatches(slug, id, all, { includeRemoved });
+      const jobs = includeRemoved ? all : all.filter(j => j.presence !== 'removed');
+      return { jobs, batches, running: documentJobsRunning(), proposals: listProposals(slug, id), queue: documentQueueStatus(), limits: BATCH_LIMITS, ...(includeRemoved ? { removals: listRemovals(slug, id) } : {}) };
+    } catch (e) { return err(reply, e); }
   });
+
+  // ---------- Eliminación autorizada (borrado blando con histórico; ver services/documentRemoval.ts)
+  // Sin authorized:true se delega igualmente para que requirePolicy responda 403 y lo deje auditado; no se borra nada.
+  const REMOVE = z.object({ authorized: z.boolean().optional(), reason: z.string().trim().max(500).nullable().optional(), previewToken: z.string().max(128).nullable().optional() });
+  app.get(`${W}/agents/:id/batches/:batchId/removal-preview`, async (req, reply) => {
+    const { slug, id, batchId } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
+    try { return previewRemoval(slug, id, { batchId }); } catch (e) { return err(reply, e); }
+  });
+  app.get(`${W}/agents/:id/documents/:jobId/removal-preview`, async (req, reply) => {
+    const { slug, id, jobId } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
+    try { return previewRemoval(slug, id, { jobId }); } catch (e) { return err(reply, e); }
+  });
+  const removeRoute = (kind: 'batch' | 'document') => async (req: any, reply: FastifyReply) => {
+    const { slug, id, batchId, jobId } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
+    const b = REMOVE.safeParse(req.body ?? {}); if (!b.success) return reply.code(400).send({ error: 'Datos de eliminación no válidos.', issues: b.error.issues });
+    const o = { authorized: b.data.authorized === true, reason: b.data.reason ?? null, previewToken: b.data.previewToken ?? null };
+    try { return kind === 'batch' ? removeBatch(slug, id, batchId, o) : removeDocument(slug, id, jobId, o); } catch (e) { return err(reply, e); }
+  };
+  app.delete(`${W}/agents/:id/batches/:batchId`, removeRoute('batch'));
+  app.delete(`${W}/agents/:id/documents/:jobId`, removeRoute('document'));
+  // Equivalentes por POST para clientes o proxies que descartan el cuerpo de un DELETE.
+  app.post(`${W}/agents/:id/batches/:batchId/remove`, removeRoute('batch'));
+  app.post(`${W}/agents/:id/documents/:jobId/remove`, removeRoute('document'));
   // Compatibilidad (JSON con base64, archivos pequeños): mismo camino que la subida en flujo.
   app.post(`${W}/agents/:id/documents`, { bodyLimit: 90 * 1024 * 1024 }, async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
