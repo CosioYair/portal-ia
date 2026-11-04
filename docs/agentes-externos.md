@@ -8,8 +8,10 @@ que concedes y el registro de todo lo que hace con ella.
 
 Código: `packages/domain/src/external-agent.ts`, `apps/server/src/services/externalAgents.ts`,
 `apps/server/src/services/documentJobs.ts`, `apps/server/src/routes/externalAgents.ts`,
+`apps/server/src/services/documentRemoval.ts` (eliminación y conciliación con el disco),
 `apps/web/src/components/ExternalAgent.tsx`, herramientas en `apps/server/tools/`. Pruebas:
-`apps/server/test/agentes-externos.test.ts`.
+`apps/server/test/agentes-externos.test.ts`, `apps/server/test/lotes-independientes.test.ts`,
+`apps/server/test/documentos-eliminacion.test.ts`.
 
 ## Contrato y compatibilidad con estructuras existentes
 
@@ -109,6 +111,51 @@ instrucciones o memoria), o **no aplicable**. Las propuestas:
 La siguiente ejecución usa la habilidad nueva (cada versión guarda la revisión de la habilidad y el script que usó): así se
 comprueba que la mejora cambió el comportamiento.
 
+### Reintento que corrige y aprende
+
+Cuando reintentas un documento rechazado o fallido, el agente recibe el **diagnóstico del intento anterior**: motivo, puertas
+de la QA que fallaron y error. Con ese diagnóstico vuelve a planificar la conversión (una llamada al modelo, dentro del
+tope diario). El diagnóstico también queda como corrección en la nueva versión. Si la nueva versión **pasa** las
+comprobaciones, el Portal crea una **propuesta de aprendizaje** con el error, la causa y la corrección, usando el mismo
+mecanismo de propuestas de la pestaña Mejoras. Queda **pendiente de tu aprobación**: no se aplica sola. Si vuelve a
+fallar, el motivo queda en el documento y no se reintenta en bucle: como máximo hay **un reintento automático por documento
+y petición**. La conversión con IA sigue exigiendo tu autorización, con aviso de costo.
+
+## Eliminar lotes y documentos (liberar espacio)
+
+En la pestaña Documentos, cada lote y cada documento tiene **Eliminar**. Antes de borrar nada se muestra una **vista
+previa** (`removal-preview`) que no toca el disco. Indica la carpeta, el número de archivos con una muestra, los bytes que se
+liberan, lo que se conserva y un aviso de que **en disco no se puede deshacer**. El botón solo se habilita al marcar
+«Autorizo eliminar estos archivos de mi equipo». La vista previa lleva un `token`: si el contenido cambió antes de confirmar
+(409), hay que revisarla de nuevo.
+
+- **Qué se borra**: la carpeta del lote o del documento dentro de `documentos/`: PDF de origen (y el ZIP del lote), Word de
+  `versiones/`, evidencias de `revisiones/`, y el `MANIFIESTO.json` y el `HISTORIAL.md` **de esa carpeta**. Al borrar un lote
+  se borra solo su carpeta; los demás lotes no se tocan.
+- **Qué se conserva**: la fila en la base, que nunca se borra (borrado blando, queda como «Eliminado (histórico)»).
+  También el registro de la eliminación (`document_removals`: fecha, quién, archivos, bytes liberados, motivo), el SHA-256
+  de cada PDF, el motivo de cada documento que no quedó listo, las versiones registradas, el feedback y las propuestas, es
+  decir, el aprendizaje del agente. Además se añade una línea en `documentos/HISTORIAL.md`, fuera de la carpeta borrada.
+- **Autorización y auditoría**: exige `authorized: true` y la sesión del propietario. Pasa por la política
+  `document_files_delete` (nivel auth) y queda en `execution_history` como `policy:document_files_delete:granted|denied`.
+- **Límites**: solo se borra dentro de `documentos/` del agente. Se rechazan las rutas que recorren carpetas y los enlaces
+  simbólicos. Si el lote o el documento se está procesando o está en cola: 409 (páusalo o cancélalo antes). Si un archivo
+  está abierto y no se puede borrar: 409, y la lista no cambia.
+- **Conteos**: un documento eliminado de un lote cuenta aparte (`counts.removed`) y no entra en el total.
+  El total sigue siendo listos + rechazados + fallidos + excluidos (+ por hacer). Los totales los da el servidor.
+- **Volver a subir**: un SHA-256 eliminado no bloquea: volver a subir ese PDF crea un documento nuevo, porque la duplicidad
+  se decide solo frente a lo que sigue presente.
+
+Por defecto la lista oculta lo eliminado; el interruptor «Mostrar eliminados (histórico)» (`?includeRemoved=1`) lo muestra
+junto con el registro de eliminaciones.
+
+### Conciliación con el disco
+
+Cada vez que se pide la lista, el Portal comprueba si existe la carpeta de cada lote y de cada documento presentes (con
+`existsSync`, sin leer su contenido). Lo que borraste a mano aparece como **«Falta en disco»**. La conciliación **no crea
+ni borra nada** por su cuenta. Quitar un elemento de la lista es una eliminación autorizada con 0 bytes, que queda en el
+histórico con la marca «ya faltaba en disco».
+
 ## Conversor editable de PDF Word Fiel (kit `pdf-word/convertir_editable.py`, habilidad 0.5.0)
 
 Texto real con sus fuentes, tamaños y colores; tablas nativas con sus filetes; columnas y listas con sangría francesa;
@@ -138,7 +185,9 @@ Escritura sin permiso (403), recorridos y enlaces (rechazados), entradas de ZIP 
 (versión registrada como fallida), Word no editable o con páginas como imagen (rechazado por la QA), arnés caído (falla con
 su motivo; nunca otro arnés ni la API), límites (uno a la vez, tope diario), mejora sin aprobación o con cambios externos
 pendientes (409), aprendizaje inválido (se descarta lo inseguro), importación duplicada (409), reinicio a mitad (el trabajo
-queda «falló» y se puede repetir; el original y las versiones anteriores siguen en su carpeta).
+queda «falló» y se puede repetir; el original y las versiones anteriores siguen en su carpeta), eliminación sin autorización
+(403, nada borrado), eliminación de algo en proceso, que cambió desde la vista previa o con un archivo abierto (409), archivo
+borrado a mano («Falta en disco», se puede quitar de la lista).
 
 ## API
 
@@ -146,7 +195,10 @@ queda «falló» y se puede repetir; el original y las versiones anteriores sigu
 `POST …/source/adopt` · `PUT …/source/grants` · `POST …/source/restore` · `GET|POST …/agents/:id/documents` ·
 `PUT …/documents/upload?name=` · `POST …/batches/:batchId/start|pause|resume|retry|cancel|deliverable` ·
 `POST …/documents/:jobId/process` · `GET …/documents/:jobId/file?path=` · `GET …/documents/:jobId/versions/:n/evidence` ·
-`POST …/agents/:id/feedback` · `POST …/proposals/:pid/apply|reject`.
+`POST …/agents/:id/feedback` · `POST …/proposals/:pid/apply|reject` ·
+`GET …/documents?includeRemoved=1` · `GET …/batches/:batchId/removal-preview` · `GET …/documents/:jobId/removal-preview` ·
+`DELETE …/batches/:batchId` y `DELETE …/documents/:jobId` (equivalentes: `POST …/batches/:batchId/remove`,
+`POST …/documents/:jobId/remove`), con cuerpo `{ authorized: true, reason?, previewToken? }`.
 
 Esquema de datos 0.18 (copia automática antes de migrar): `agent_sources`, `agent_source_revisions`, `document_jobs`,
 `improvement_proposals` (aditivas). 0.19: lotes, adjuntos del chat y acciones (ver
