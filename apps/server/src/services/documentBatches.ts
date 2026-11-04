@@ -15,6 +15,7 @@ import {
 import { cleanName } from './agentAttachments.ts';
 import { listZip, readZipEntry, sha256FileAsync, writeZip } from './zipFile.ts';
 import { requirePolicy } from './executionPolicy.ts';
+import { reconcileWithDisk, registerRemovalBusyProbe, removalsById, removedIds } from './documentRemoval.ts';
 
 /**
  * Lotes de documentos: un ZIP con muchos PDF → UN lote con un elemento por archivo, procesado por una cola acotada.
@@ -293,7 +294,45 @@ function recover(slug: string, r: Row): Row {
   return db.get(r.id)!;
 }
 
+/**
+ * Vista del lote con los eliminados aparte. Un documento eliminado sale de su estado y del total y suma en
+ * `counts.removed`, así que total = listos + rechazados + fallidos + cancelados + excluidos + por hacer. Su Word no
+ * entra en el entregable ni en el manifiesto. Un lote eliminado entero conserva sus cifras como histórico.
+ */
 export function batchView(slug: string, agentId: string, id: string, jobsById?: Map<string, DocumentJob>): DocumentBatch | null {
+  ensureRemovalProbe();
+  const v = batchViewRaw(slug, agentId, id, jobsById);
+  return v ? withRemovals(slug, v) : v;
+}
+const COUNT_KEY: Record<DocumentBatchItemState, keyof DocumentBatchCounts> = {
+  pending: 'pending', queued: 'queued', processing: 'processing', passed: 'passed', rejected_qa: 'rejectedQa', failed: 'failed', cancelled: 'cancelled', excluded: 'excluded'
+};
+function withRemovals(slug: string, v: DocumentBatch): DocumentBatch {
+  const db = documentsDb(slug);
+  const b = db.prepare(`SELECT removed_at FROM document_batches WHERE id = ?`).get(v.id) as any;
+  if (b?.removed_at) return { ...v, items: v.items.map(i => ({ ...i, removed: true })), counts: { ...v.counts, removed: v.items.length } };
+  const gone = new Set((db.prepare(`SELECT idx FROM document_batch_items WHERE batch_id = ? AND removed_at IS NOT NULL`).all(v.id) as any[]).map(r => Number(r.idx)));
+  if (!gone.size) return { ...v, counts: { ...v.counts, removed: 0 } };
+  const c: DocumentBatchCounts = { ...v.counts };
+  const dec = (k: keyof DocumentBatchCounts) => { c[k] = Math.max(0, Number(c[k] ?? 0) - 1); };
+  const items = v.items.map(i => {
+    if (!gone.has(i.idx)) return i;
+    dec('total'); dec(COUNT_KEY[i.state]);
+    if (i.outcome === 'accepted') dec('accepted');
+    if (i.outcome === 'duplicate') dec('duplicates');
+    return { ...i, removed: true, docx: null, docxRel: null };
+  });
+  c.removed = gone.size;
+  return { ...v, counts: c, items };
+}
+let removalProbe = false;
+/** Indica a documentRemoval qué lotes están ahora en memoria (en marcha, importándose o cerrándose) para negar el borrado con 409. */
+function ensureRemovalProbe() {
+  if (removalProbe) return; removalProbe = true;
+  registerRemovalBusyProbe((_slug, _agentId, batchId) => batchId && (live.has(batchId) || starting.has(batchId) || importing.has(batchId) || finishing.has(batchId))
+    ? 'El lote se está procesando o cerrando: espera a que termine, o páusalo o cancélalo antes de eliminarlo.' : null);
+}
+function batchViewRaw(slug: string, agentId: string, id: string, jobsById?: Map<string, DocumentJob>): DocumentBatch | null {
   const db = batchesDb(slug); const r0 = db.get(id); if (!r0 || r0.agent_id !== agentId) return null;
   const r = recover(slug, r0);
   const jobs = jobsDb(slug); const mine = inflight.get(id);
@@ -318,7 +357,31 @@ export function batchView(slug: string, agentId: string, id: string, jobsById?: 
 }
 
 /** Lotes del agente (los 50 más recientes); los «en marcha» se revisan todos, también los más antiguos. */
-export function listBatches(slug: string, agentId: string, jobs?: DocumentJob[]): DocumentBatch[] {
+/**
+ * Lotes cruzados con el disco. Lo eliminado se oculta por defecto (con `includeRemoved` aparece como histórico con su
+ * registro). Lo que falta en disco se marca y no se crea ni se borra nada. Los documentos eliminados de un lote solo se
+ * listan en el histórico; los conteos que da el servidor ya los cuentan aparte.
+ */
+export function listBatches(slug: string, agentId: string, jobs?: DocumentJob[], opts: { includeRemoved?: boolean } = {}): DocumentBatch[] {
+  ensureRemovalProbe();
+  const all = listBatchesAll(slug, agentId, jobs);
+  const gone = removedIds(slug, agentId).batches;
+  const disk = reconcileWithDisk(slug, agentId);
+  const recs = gone.size ? removalsById(slug, agentId) : null;
+  const out: DocumentBatch[] = [];
+  for (const b of all) {
+    const rid = gone.get(b.id);
+    if (rid !== undefined) {
+      if (opts.includeRemoved) out.push({ ...b, presence: 'removed', missingOnDisk: false, removal: recs?.get(rid) ?? null });
+      continue;
+    }
+    const miss = disk.batches.has(b.id);
+    const items = b.items.filter(i => opts.includeRemoved || !i.removed).map(i => i.jobId && disk.jobs.has(i.jobId) && !i.removed ? { ...i, missingOnDisk: true } : i);
+    out.push({ ...b, items, presence: miss ? 'missing' : 'present', missingOnDisk: miss, removal: null });
+  }
+  return out;
+}
+function listBatchesAll(slug: string, agentId: string, jobs?: DocumentJob[]): DocumentBatch[] {
   const db = batchesDb(slug);
   const byId = new Map((jobs ?? jobsDb(slug).list(agentId)).map(j => [j.id, j])); // una lectura de los documentos, no una por entrada
   for (const id of db.runningIds(agentId)) batchView(slug, agentId, id, byId);
@@ -510,7 +573,25 @@ export async function resumeBatch(slug: string, agentId: string, id: string, opt
 }
 
 /** Reintenta solo lo que falló (y, si se pide, lo que no pasó las comprobaciones). Lo aprobado nunca se repite. */
+/**
+ * Reintento del lote. No vuelve a procesar lo eliminado. Cada documento rechazado o fallido se reintenta una sola vez
+ * con el diagnóstico del intento anterior (processVersion). Si la corrección pasa la QA, se propone lo aprendido,
+ * pendiente de aprobación.
+ */
 export async function retryBatch(slug: string, agentId: string, id: string, opts: { authorized: boolean; includeRejected?: boolean; items?: number[]; by?: string }) {
+  ensureRemovalProbe();
+  const db = documentsDb(slug);
+  const b = db.prepare(`SELECT agent_id, removed_at FROM document_batches WHERE id = ?`).get(id) as any;
+  if (b && b.agent_id === agentId && b.removed_at) throw err('Este lote se eliminó: queda solo como histórico y no se puede reintentar.', 409, { code: 'already_removed' });
+  const gone = new Set((db.prepare(`SELECT idx FROM document_batch_items WHERE batch_id = ? AND removed_at IS NOT NULL`).all(id) as any[]).map(r => Number(r.idx)));
+  if (!gone.size) return retryBatchOnce(slug, agentId, id, opts);
+  const eligible = (db.prepare(`SELECT idx, state FROM document_batch_items WHERE batch_id = ? AND removed_at IS NULL`).all(id) as any[])
+    .filter(r => r.state === 'failed' || r.state === 'cancelled' || (opts.includeRejected && r.state === 'rejected_qa')).map(r => Number(r.idx));
+  const items = (opts.items ?? eligible).filter(i => !gone.has(i));
+  if (!items.length) throw err('No queda nada que reintentar en este lote: lo fallido se eliminó.', 409);
+  return retryBatchOnce(slug, agentId, id, { ...opts, items });
+}
+async function retryBatchOnce(slug: string, agentId: string, id: string, opts: { authorized: boolean; includeRejected?: boolean; items?: number[]; by?: string }) {
   if (!opts.authorized) throw err('Reintentar ejecuta los programas del agente: confírmalo.', 403);
   const b = batchOr(slug, agentId, id);
   busyGuard(id); if (importing.has(id)) throw err('Aún se están registrando los PDF del ZIP: espera a que termine.', 409);
