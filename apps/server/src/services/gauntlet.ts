@@ -1,4 +1,4 @@
-import { DEFAULT_GAUNTLET, decideGauntlet, decidePlanReview, gauntletSignature, parsePlanReview, planReviewWanted, resolveGauntlet, GAUNTLET_SCHEMA, GAUNTLET_TEMPLATE, gauntletOverhead, isRetired, normalizeGauntlet, recommendGauntlet, type Agent, type GauntletConfig, type GauntletFinding, type GauntletRound, type GauntletState, type IssueSeverity, type PipelineConfig, type PlanReviewGap, type PlanReviewRound, type PlanReviewState, type Process, type StoryPlan } from '@portal-ia/domain';
+import { DEFAULT_GAUNTLET, decideGauntlet, verificationPassed, decidePlanReview, gauntletSignature, parsePlanReview, planReviewWanted, resolveGauntlet, GAUNTLET_SCHEMA, GAUNTLET_TEMPLATE, gauntletOverhead, isRetired, normalizeGauntlet, recommendGauntlet, type Agent, type GauntletConfig, type GauntletFinding, type GauntletRound, type GauntletState, type IssueSeverity, type PipelineConfig, type PlanReviewGap, type PlanReviewRound, type PlanReviewState, type Process, type StoryPlan, type ReasoningEffort, clampEffort } from '@portal-ia/domain';
 import { settingsRepo, providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { buildAgentConfig } from '../routes/bootstrap.ts';
@@ -90,7 +90,7 @@ export function syncEvaluatorStep(slug: string, processId: string, g: GauntletCo
  * Aprobación organizativa del propietario: crea el Evaluador Gauntlet en el proyecto a partir de la plantilla
  * propuesta (versionada), con su capacidad, herramientas mínimas (solo lectura) y su jefe (Coordinador del proyecto).
  */
-export function createEvaluator(slug: string, projectId: string, opts: { model?: string | null; effort?: 'low' | 'medium' | 'high' | null } = {}): Agent {
+export function createEvaluator(slug: string, projectId: string, opts: { model?: string | null; effort?: ReasoningEffort | null } = {}): Agent {
   const project = projectsRepo(slug).get(projectId); if (!project) throw fail(404, 'Proyecto no encontrado.', 'not_found');
   const existing = projectEvaluator(slug, projectId); if (existing) throw fail(409, `El proyecto ya tiene su Evaluador Gauntlet (${existing.config.name}).`, 'exists');
   const agents = agentsRepo(slug);
@@ -100,7 +100,7 @@ export function createEvaluator(slug: string, projectId: string, opts: { model?:
   if (!prow || prow.status !== 'connected') throw fail(409, 'Conecta el proveedor antes de crear agentes.', 'no_provider');
   const models = (() => { try { return JSON.parse((prow as any).models_json ?? '[]'); } catch { return []; } })();
   const config = buildAgentConfig(GAUNTLET_TEMPLATE, provider, models, qa?.config.model ?? (prow as any).default_model ?? null);
-  if (opts.model) config.model = opts.model; if (opts.effort) config.effort = opts.effort;
+  if (opts.model) config.model = opts.model; if (opts.effort) { config.effort = clampEffort(config.provider, config.model, opts.effort); config.effortApplied = true; }
   // Mismo origen de ejecución que QA (p. ej. Claude Code): no se cambia de origen facturable sin decisión del propietario.
   if (qa?.config.backend) config.backend = qa.config.backend;
   const a = agents.createFromTemplate(GAUNTLET_TEMPLATE, projectId, config);
@@ -119,7 +119,7 @@ export function gauntletPrompt(ctx: StoryRunCtx, proc: Process, cfg: PipelineCon
   const r = proc.result!; const item = ctx.item;
   const criteria = Array.from(new Set([...(ctx.plan?.acceptance ?? []), ...(item.criterion ? [item.criterion] : [])].map(c => c.trim()).filter(Boolean)));
   const verifs = sinceApplied(r);
-  const evidence = cfg.commands.map(c => { const v = verifs.filter(x => x.command === c).at(-1); return v ? `- ${c}: ${v.exitCode === 0 ? 'en verde' : `FALLA (código ${v.exitCode})`} · ${v.isolation ?? '?'}\n${clip(verificationEvidence(v), 1200).split('\n').map(l => `  ${l}`).join('\n')}` : `- ${c}: sin ejecutar sobre este commit`; }).join('\n');
+  const evidence = cfg.commands.map(c => { const v = verifs.filter(x => x.command === c).at(-1); return v ? `- ${c}: ${v.exitCode === 0 ? 'en verde' : verificationPassed(v) ? `en verde frente a la base (solo fallan ${v.triage!.preexisting.length} prueba(s) que ya fallaban sin la historia, con el mismo error)` : `FALLA (código ${v.exitCode})`} · ${v.isolation ?? '?'}\n${clip(verificationEvidence(v), 1200).split('\n').map(l => `  ${l}`).join('\n')}` : `- ${c}: sin ejecutar sobre este commit`; }).join('\n');
   const deliverables = r.manifest ? r.manifest.deliverables.map(d => `- ${d.path} (${d.kind}): ${d.status}${d.planned ? '' : ' · fuera del plan'}`).join('\n') : (ctx.plan?.filesToChange ?? []).map(f => `- ${f}`).join('\n');
   const diff = r.changes.filter(c => !c.error).map(c => `## ${c.path} (${c.action})\n\`\`\`diff\n${clip(c.diff ?? "", 12_000)}\n\`\`\``).join('\n\n');
   const claims = [r.userFacing ? `Para el propietario: ${clip(r.userFacing, 1500)}` : '', r.manualTest?.steps?.length ? `Prueba manual propuesta:\n${r.manualTest.steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}` : ''].filter(Boolean).join('\n');

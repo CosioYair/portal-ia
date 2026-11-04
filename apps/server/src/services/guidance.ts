@@ -1,4 +1,4 @@
-import { verificationsForApplied, type Process, type ProcessGuidance } from '@portal-ia/domain';
+import { verificationPassed, verificationsForApplied, type Process, type ProcessGuidance } from '@portal-ia/domain';
 import { revisionStatus } from './revision.ts';
 import { runtimeVerified } from './runtimeChecks.ts';
 import { DEPS_MISSING_EXIT } from './sandbox.ts';
@@ -87,12 +87,12 @@ function describePhase(p: Process, opts: GuidanceOptions): ProcessGuidance {
     const lastInstall = since.filter(v => v.command === 'install').at(-1);
     const noDeps = (v: (typeof since)[number]) => v.exitCode === DEPS_MISSING_EXIT && v.isolation === 'docker';
     const installedAfter = (v: (typeof since)[number]) => !!lastInstall && lastInstall.exitCode === 0 && lastInstall.startedAt > v.startedAt;
-    const failed = ['typecheck', 'test', 'build'].map(lastOf).filter(v => v && v.exitCode !== null && v.exitCode !== 0 && !(noDeps(v) && installedAfter(v))) as typeof since;
+    const failed = ['typecheck', 'test', 'build'].map(lastOf).filter(v => v && v.exitCode !== null && !verificationPassed(v) && !(noDeps(v) && installedAfter(v))) as typeof since;
     const depsMissing = failed.filter(noDeps);
     if (depsMissing.length) return { phase: step(4, `Aplicado en ${r.applied.branch} · faltan las dependencias del sandbox`), next: 'El sandbox Docker aún no tiene las dependencias (Linux) de este package-lock. En Verificar, marca «Permitir red solo para install» y pulsa «npm ci (install)» una vez; después repite typecheck, test y build (sin red).', tone: 'warn', settled: false };
     if (failed.length) return { phase: step(4, `Aplicado en ${r.applied.branch} · verificación FALLÓ (${failed.map(v => v.command).join(', ')})`), next: 'Lee la salida de la verificación. Corrige con una nueva iteración de la historia (el equipo recibe el error) o rechaza el diff; no se integra código que no compila.', tone: 'err', settled: false };
     const need = opts.isPortalRepo ? ['typecheck', 'test', 'build'] : ['typecheck'];
-    const missing = need.filter(c => !(lastOf(c)?.exitCode === 0));
+    const missing = need.filter(c => !verificationPassed(lastOf(c)));
     if (missing.length) return { phase: step(4, `Aplicado en ${r.applied.branch} · falta verificar (${missing.join(', ')})`), next: `Ejecuta ${missing.join(', ')} desde el proceso (en sandbox${opts.isPortalRepo ? '; el Portal exige test y build en Docker/WSL2' : ''}) y, en verde, pulsa «Integrar en la rama principal».`, tone: 'warn', settled: false };
     // Verificado, pero la fase y el siguiente paso dicen lo mismo que «Problema actual»: QA por commit, conflictos con main
     // o una decisión pendiente (antes decía «Pulsa Integrar» aunque QA no hubiera revisado el candidato).

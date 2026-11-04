@@ -16,7 +16,7 @@ export const KNOWLEDGE_LABELS: Record<string, string> = {
   history: 'Historial de ejecución',
   memory: 'Memoria persistente del espacio'
 };
-export const EFFORT_LABELS: Record<string, string> = { low: 'Bajo', medium: 'Medio', high: 'Alto' };
+export const EFFORT_LABELS: Record<string, string> = { low: 'Bajo', medium: 'Medio', high: 'Alto', xhigh: 'Muy alto', max: 'Máximo' };
 export const INIT_STEP_LABELS: Record<string, { title: string; sub: string }> = {
   workspace: { title: 'Crear el espacio interno «Portal IA»', sub: 'Espacio aislado de futuras empresas y clientes, con base de datos local propia.' },
   project: { title: 'Crear el proyecto «Desarrollo del Portal»', sub: 'Proyecto interno dedicado a construir la plataforma.' },

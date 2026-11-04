@@ -3,7 +3,7 @@ import { PIPELINE_LIMITS } from '@portal-ia/domain';
 
 export interface TeamLine { agentName: string; role: string; model: string; effort?: string | null; tools?: string[] }
 
-const EFFORT: Record<string, string> = { low: 'bajo', medium: 'medio', high: 'alto' };
+const EFFORT: Record<string, string> = { low: 'bajo', medium: 'medio', high: 'alto', xhigh: 'muy alto', max: 'máximo' };
 const CMD: Record<string, string> = { typecheck: 'typecheck', test: 'pruebas', build: 'compilación' };
 
 /**

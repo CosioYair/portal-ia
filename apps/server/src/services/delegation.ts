@@ -6,7 +6,7 @@ import { filesIn } from './diagnostics.ts';
 import { readRepoFile } from './repoWrite.ts';
 import { CONSULT_EVIDENCE_CHARS, filesContext } from './storyPipeline.ts';
 import type { Agent, AssessmentEstimate, BacklogItem, BacklogOp, DelegationResult, ModelInfo, Process, ProviderId } from '@portal-ia/domain';
-import { PORTAL_CAPABILITIES } from '@portal-ia/domain';
+import { PORTAL_CAPABILITIES, EFFORT_THINKING_TOKENS } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
@@ -157,7 +157,7 @@ export function estimateDelegation(slug: string, projectId: string | null, agent
   const chosen = teamIds ? teamIds.map(id => activeAgents(slug).find(a => a.id === id)).filter((a): a is Agent => !!a && a.id !== lead.id && a.key !== 'ws-asistente') : null;
   const team = purpose === 'task' ? [] : (chosen ?? teamOf(slug, lead)).filter(a => a.id !== challenger?.id).slice(0, chosen ? MAX_DEPARTMENT_CONSULTS : MAX_CONSULTS);
   const ctxTok = estimateTokens(contextFor(slug, projectId) + request) + 600;
-  const price = (a: Agent, inTok: number, outTok: number) => { const p = estimatePricing(a.config.provider, a.config.model); const think = a.config.effort === 'high' ? 6000 : a.config.effort === 'medium' ? 2500 : 0; return (inTok * p.inPerM + (outTok + think) * p.outPerM) / 1_000_000; };
+  const price = (a: Agent, inTok: number, outTok: number) => { const p = estimatePricing(a.config.provider, a.config.model); const think = EFFORT_THINKING_TOKENS[a.config.effort]; return (inTok * p.inPerM + (outTok + think) * p.outPerM) / 1_000_000; };
   // Encargo directo a un agente: UNA llamada (su entregable), sin validación previa ni consultas.
   if (purpose === 'task') {
     const steps = [{ agentId: lead.id, agentName: lead.config.name, title: TASK_TITLE, model: lead.config.model, estimatedUsd: price(lead, ctxTok, TOKENS.synthesis) }];

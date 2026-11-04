@@ -30,6 +30,7 @@ const { runBootstrap } = await import('../src/routes/bootstrap.ts');
 const { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
 const { buildApp } = await import('./fixtures/owner-app.ts'); // con el propietario vinculado (todo cambio lo exige)
 const { sandboxDeps } = await import('../src/services/verification.ts');
+const { isBaselineWorktree } = await import('../src/services/baseline.ts'); // la línea base (la prueba sin la historia) pasa
 const { recoverInterruptedProcesses } = await import('../src/services/interruptions.ts');
 const { saveUsageReport, acknowledgeUsageReport } = await import('../src/services/claudeCode/usage.ts');
 
@@ -168,7 +169,7 @@ test('otra ejecución sobre una versión aplicada sin integrar exige confirmar s
   const a = await define('Crear el archivo EN seis');
   // La primera ejecución se aplica pero su test falla y no hay correcciones: espera tu decisión con la versión aplicada.
   const run0 = sandboxDeps.run;
-  sandboxDeps.run = async (wt, root, command, o) => { const r = await run0(wt, root, command, o); return command === 'test' ? { ...r, exitCode: 1, output: 'not ok 1 - falla' } : r; };
+  sandboxDeps.run = async (wt, root, command, o) => { const r = await run0(wt, root, command, o); return command === 'test' && !isBaselineWorktree(wt) ? { ...r, exitCode: 1, output: 'not ok 1 - falla' } : r; };
   let x: any;
   try {
     assert.equal((await inject('POST', `${W}/assignments/${a.id}/authorize`, { authorized: true, budgetUsd: 2, maxCorrections: 0 })).statusCode, 200);

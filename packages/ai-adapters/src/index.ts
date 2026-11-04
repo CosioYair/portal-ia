@@ -1,4 +1,4 @@
-import { classifyModel, sortModels, type ModelInfo, type ProviderError, type ProviderId } from '@portal-ia/domain';
+import { classifyModel, sortModels, type ModelInfo, type ProviderError, type ProviderId, type ReasoningEffort } from '@portal-ia/domain';
 import { isMockProvider, mockAdapter } from './mock.ts';
 
 /**
@@ -17,7 +17,7 @@ export interface CompletionRequest {
   /** Un único turno de usuario basta para los procesos de evaluación. */
   user: string;
   maxTokens: number;
-  effort: 'low' | 'medium' | 'high';
+  effort: ReasoningEffort;
   supportsEffort: boolean;
   /** Imágenes adjuntas al turno de usuario (base64 sin prefijo). */
   images?: { mediaType: string; data: string }[];
@@ -131,13 +131,13 @@ export function anthropicThinking(model: string, supportsEffort = true): 'adapti
   return major >= 4 ? 'budget' : 'none';
 }
 /** Margen de salida reservado al razonamiento (además del texto pedido), por esfuerzo. */
-const ADAPTIVE_HEADROOM = { low: 4000, medium: 12000, high: 20000 } as const;
-const BUDGET_TOKENS = { low: 0, medium: 3000, high: 8000 } as const;
+const ADAPTIVE_HEADROOM: Record<ReasoningEffort, number> = { low: 4000, medium: 12000, high: 20000, xhigh: 32000, max: 48000 };
+const BUDGET_TOKENS: Record<ReasoningEffort, number> = { low: 0, medium: 3000, high: 8000, xhigh: 8000, max: 8000 };
 /**
  * Tokens de salida que una llamada puede consumir ADEMÁS del texto pedido (razonamiento oculto). El motor lo usa para
  * estimar el costo antes de llamar y para no confundir «sin texto» con «sin gasto».
  */
-export function reasoningHeadroom(provider: ProviderId | string, model: string, effort: 'low' | 'medium' | 'high', supportsEffort: boolean): number {
+export function reasoningHeadroom(provider: ProviderId | string, model: string, effort: ReasoningEffort, supportsEffort: boolean): number {
   if (provider !== 'anthropic' || isMockProvider()) return 0;
   const mode = anthropicThinking(model, supportsEffort);
   if (mode === 'adaptive') return ADAPTIVE_HEADROOM[effort];
@@ -207,7 +207,7 @@ export const openaiAdapter: ProviderAdapter = {
     // https://platform.openai.com/docs/api-reference/chat — POST /v1/chat/completions
     const userContent: any = req.images?.length ? [...req.images.map(im => ({ type: 'image_url', image_url: { url: `data:${im.mediaType};base64,${im.data}` } })), { type: 'text', text: req.user }] : req.user;
     const body: any = { model: req.model, messages: [{ role: 'system', content: req.system }, ...(req.history ?? []), { role: 'user', content: userContent }], max_completion_tokens: req.maxTokens };
-    if (req.supportsEffort) body.reasoning_effort = req.effort;
+    if (req.supportsEffort) body.reasoning_effort = req.effort === 'xhigh' || req.effort === 'max' ? 'high' : req.effort;
     if (req.responseSchema) body.response_format = { type: 'json_schema', json_schema: { name: req.responseSchema.name, schema: req.responseSchema.schema, strict: true } };
     const post = (b: any) => fetchJson('https://api.openai.com/v1/chat/completions', { method: 'POST', headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' }, body: JSON.stringify(b) }, signal, req.timeoutMs ?? COMPLETE_TIMEOUT_MS, req.onProgress);
     let j: any;

@@ -124,7 +124,7 @@ export function agentWork(slug: string, agentId: string, limit = 40) {
 /** Memoria del agente: verificada (la que usa) y propuesta (pendiente de que la verifiques). */
 export function agentMemory(slug: string, agentId: string) {
   const all = lessonsRepo(slug).listForAgent(agentId);
-  return { verified: all.filter(l => l.status === 'validated'), proposed: all.filter(l => l.status === 'proposed' || l.status === 'detected'), retired: all.filter(l => l.status === 'rejected' || l.status === 'obsolete').slice(-20) };
+  return { verified: all.filter(l => l.status === 'validated'), proposed: all.filter(l => l.status === 'proposed' || l.status === 'detected'), retired: all.filter(l => l.status === 'rejected' || l.status === 'obsolete' || l.status === 'refuted').slice(-20) };
 }
 
 export const activeOfficeAgents = (slug: string): Agent[] => agentsRepo(slug).list().filter(a => !isRetired(a.template));

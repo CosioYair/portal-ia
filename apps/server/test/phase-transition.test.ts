@@ -235,7 +235,9 @@ test('los agentes y el asistente reciben la línea base (los 8 temas); una histo
   for (const k of ['etapa', 'implementacion', 'organizacion', 'leccion'] as const) assert.ok(a.markers.includes(MARKERS[k]), `asistente · recibe «${k}»`);
 
   clearLog();
-  const ask = await json('POST', `${W}/stories/${created.body.id}/messages`, { text: '¿Cómo se verifica esto en el sandbox?', ask: true, authorized: true, maxUsd: 0.5 });
+  // Preguntar al equipo razona con el esfuerzo del agente y responde con la evidencia (antes, esfuerzo bajo fijo): su
+  // estimación por la API es mayor (con la suscripción de Claude Code, 0 USD). El tope sigue siendo explícito.
+  const ask = await json('POST', `${W}/stories/${created.body.id}/messages`, { text: '¿Cómo se verifica esto en el sandbox?', ask: true, authorized: true, maxUsd: 1 });
   assert.equal(ask.status, 201, JSON.stringify(ask.body));
   assert.ok(calls()[0].markers.includes(MARKERS.etapa) && calls()[0].markers.includes(MARKERS.implementacion), 'chat de la historia · recibe la etapa');
 });

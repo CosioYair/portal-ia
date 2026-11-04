@@ -591,7 +591,7 @@ export interface BatchItemView extends BatchItem {
   /** Preparación apilada: sobre qué versión de su dependencia y si la dependencia cambió desde entonces. */
   stackInfo?: { storyId: string; commit: string; dependencyHead: string | null; moved: boolean; invalid: string | null } | null;
   /** Evidencia del commit actual del candidato: verificación por comando y QA (por commit). */
-  evidence?: { head: string; verifiedHead: boolean; commands: { command: string; ok: boolean; isolation: string | null }[]; qa: { state: string; coversHead: boolean; why: string } | null } | null;
+  evidence?: { head: string; verifiedHead: boolean; commands: { command: string; ok: boolean; isolation: string | null }[]; /** Lo que la línea base dejó pasar (aceptar el lote lo confirma). */ notes?: string[]; qa: { state: string; coversHead: boolean; why: string } | null } | null;
   /** Última vista previa del candidato (en marcha o como evidencia) y si ya no corresponde al commit actual. */
   preview?: (PreviewRecord & { live: boolean; outdated: boolean }) | null;
   process: {

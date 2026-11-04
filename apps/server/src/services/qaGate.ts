@@ -1,6 +1,7 @@
 import type { DeliveryCheck, ExternalCorrection, ProposedChange, QaFinding, QaVerdictKind, ReviewVerdict, StoryManifest, StoryPlan, VerificationRun } from '@portal-ia/domain';
-import { qaSeverity } from '@portal-ia/domain';
+import { qaSeverity, verificationPassed } from '@portal-ia/domain';
 import { diagnosticsFor, filesIn, tailOf } from './diagnostics.ts';
+import { triageText } from './testTriage.ts';
 
 /**
  * Puerta de QA con evidencia real (pipeline autorizado). QA recibe el criterio, el plan, el diff, los archivos y el
@@ -32,10 +33,13 @@ export const zeroTests = (output: string) => /^#\s*tests\s+0\b/m.test(output) ||
 
 /** Resultado de un comando para QA: estado, duración y, si falló, los diagnósticos y la cola de la salida. */
 export function verificationEvidence(v: VerificationRun): string {
-  const head = `- ${v.command}: ${v.exitCode === 0 ? 'OK' : v.exitCode === null ? 'NO TERMINÓ (tiempo agotado)' : `FALLÓ (código ${v.exitCode})`} · ${v.isolation} · ${Math.round(v.durationMs / 1000)} s`;
+  const accepted = v.exitCode !== 0 && verificationPassed(v);
+  const head = `- ${v.command}: ${v.exitCode === 0 ? 'OK' : v.exitCode === null ? 'NO TERMINÓ (tiempo agotado)' : accepted ? `OK FRENTE A LA BASE (código ${v.exitCode}: solo fallan pruebas que ya fallaban sin esta historia, con el mismo error)` : `FALLÓ (código ${v.exitCode})`} · ${v.isolation} · ${Math.round(v.durationMs / 1000)} s`;
   if (v.exitCode === 0) return head;
+  const triage = v.triage ? `\n  Línea base (mismo «test» sin la historia, en el mismo sandbox):\n${triageText(v.triage).split('\n').map(l => `    ${l}`).join('\n')}` : '';
+  if (accepted) return `${head}${triage}`;
   const d = diagnosticsFor(v);
-  return `${head}\n${d.slice(0, 12).map(x => `  · ${x.file ? `${x.file}${x.line ? `:${x.line}` : ''} ` : ''}${x.code ? `${x.code} ` : ''}${x.text}`).join('\n')}\n  Salida (final):\n${tailOf(v.output, 15).split('\n').map(l => `    ${l}`).join('\n')}`;
+  return `${head}${triage}\n${d.slice(0, 12).map(x => `  · ${x.file ? `${x.file}${x.line ? `:${x.line}` : ''} ` : ''}${x.code ? `${x.code} ` : ''}${x.text}`).join('\n')}\n  Salida (final):\n${tailOf(v.output, 15).split('\n').map(l => `    ${l}`).join('\n')}`;
 }
 
 /** Lo que dicen las pruebas en verde (cuántas pasaron), para que QA distinga «compila» de «está probado». */
@@ -44,7 +48,7 @@ export function testsEvidence(verifications: VerificationRun[]): string {
   if (!t) return '';
   const pass = t.output.match(/^#\s*pass\s+(\d+)/m)?.[1] ?? t.output.match(/(\d+)\s+(?:passed|passing|pruebas? (?:ok|correctas?))/i)?.[1];
   const files = Array.from(new Set(Array.from(t.output.matchAll(/([\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?)/g)).map(m => m[1]))).slice(0, 12);
-  return `- test: ${t.exitCode === 0 ? 'OK' : 'FALLÓ'}${pass ? ` · ${pass} prueba(s) correctas` : ''}${files.length ? ` · archivos: ${files.join(', ')}` : ''}`;
+  return `- test: ${t.exitCode === 0 ? 'OK' : verificationPassed(t) ? 'OK FRENTE A LA BASE (solo fallos preexistentes)' : 'FALLÓ'}${pass ? ` · ${pass} prueba(s) correctas` : ''}${files.length ? ` · archivos: ${files.join(', ')}` : ''}`;
 }
 
 /**
@@ -80,6 +84,7 @@ ${g ? `# Comprobación determinista previa (sin IA)\n${g.ok ? '- Sin problemas o
   const lastRound = m?.rounds.length ? m.rounds.length - 1 : -1;
   const disputes = (m?.units ?? []).filter(u => u.round === lastRound && u.disputed);
   const ext = input.external?.length ? `# Correcciones externas registradas por el propietario (hechas fuera del equipo de agentes; el diff las incluye)\n${input.external.map(x => `- commit ${x.commit} sobre ${x.previousCommit}: ${x.files.join(', ')}${x.note ? ` — ${x.note}` : ''}`).join('\n')}\nEvalúalas con el mismo rigor: que las registrara el propietario no las aprueba.\n` : '';
+  const updated = m?.testUpdates?.length ? `# Pruebas que YA existían y la historia modificó (la línea base demostró que pasan sin ella y fallan con ella)\n${m.testUpdates.map(u => `- ${u.path}: ${u.reason}`).join('\n')}\nComprueba en el diff que cada cambio solo adapta la prueba al comportamiento que un criterio de aceptación EXIGE cambiar; si debilita la prueba o el criterio no lo pide, recházalo con evidencia.\n` : '';
   const disputed = disputes.length ? `# El equipo discute estos hallazgos sin cambiar el código (decide con la evidencia; si tiene razón, no vuelvas a pedirlo)\n${disputes.map(u => `- «${(u.findings ?? [])[0]?.text ?? u.title}»: ${u.disputed}`).join('\n')}\n` : '';
   return `Evalúa la implementación con la EVIDENCIA real de este proceso (no solo con el diff). Eres la puerta de calidad: tu veredicto decide si se entrega al propietario o vuelve al Desarrollador.
 # Criterio de aceptación
@@ -92,7 +97,7 @@ ${input.consultText}# Archivos modificados
 ${files || '(ninguno)'}
 # Verificación automática en sandbox (sobre el worktree con los cambios aplicados)
 ${ran}
-${input.tests ? `${input.tests}\n` : ''}${checks}${manifest}${prev}${ext}${disputed}${sameList}${input.attempts.length ? `# Intentos anteriores y correcciones\n${input.attempts.map(a => `- ${a}`).join('\n')}\n` : ''}# Diff
+${input.tests ? `${input.tests}\n` : ''}${checks}${manifest}${updated}${prev}${ext}${disputed}${sameList}${input.attempts.length ? `# Intentos anteriores y correcciones\n${input.attempts.map(a => `- ${a}`).join('\n')}\n` : ''}# Diff
 ${diffs || '(vacío)'}
 
 Reglas:
@@ -130,9 +135,10 @@ export const actionableFindings = (v: ReviewVerdict) => (v.findings ?? []).filte
  */
 export function enforceQaGate(v: ReviewVerdict, required: string[], verifications: VerificationRun[]): ReviewVerdict {
   const last = (c: string) => verifications.filter(x => x.command === c).at(-1);
-  const failed = required.filter(c => { const r = last(c); return r && r.exitCode !== 0 && r.exitCode !== null && r.isolation !== 'unavailable' && r.exitCode !== 86; });
+  // «test» con solo fallos preexistentes demostrados frente a la base cuenta como superada (verificationPassed).
+  const failed = required.filter(c => { const r = last(c); return r && !verificationPassed(r) && r.exitCode !== null && r.isolation !== 'unavailable' && r.exitCode !== 86; });
   // Un «test» en verde que no ejecutó ninguna prueba cuenta como verificación que falta, no como evidencia.
-  const missing = required.filter(c => { const r = last(c); return !r || r.exitCode !== 0 || (c === 'test' && zeroTests(r.output)); }).filter(c => !failed.includes(c));
+  const missing = required.filter(c => { const r = last(c); return !r || !verificationPassed(r) || (c === 'test' && zeroTests(r.output)); }).filter(c => !failed.includes(c));
   const env = missing.some(c => { const r = last(c); return r && (r.isolation === 'unavailable' || r.exitCode === 86 || r.exitCode === null); });
   let out: ReviewVerdict = { ...v, findings: [...(v.findings ?? [])] };
   if (failed.length && out.verdict === 'approved') {

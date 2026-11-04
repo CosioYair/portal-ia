@@ -19,7 +19,7 @@ import { ProviderRequestError } from '@portal-ia/ai-adapters';
  * exponencial (2 s, 8 s…). Un plazo agotado NO se reintenta solo (la llamada pudo facturarse entera): se pausa y decide
  * el propietario. Errores de credencial, permisos o petición no se reintentan.
  */
-const THINKING: Record<string, number> = { high: 8000, medium: 3000, low: 0 };
+const THINKING: Record<string, number> = { max: 48000, xhigh: 32000, high: 8000, medium: 3000, low: 0 };
 export const TIMEOUT_LIMITS = { minMs: 90_000, maxMs: 10 * 60_000, marginMs: 60_000, tokensPerSec: 25 } as const;
 
 export function callTimeoutMs(maxTokens: number, effort: string | null | undefined, overrideSec?: number | null): number {

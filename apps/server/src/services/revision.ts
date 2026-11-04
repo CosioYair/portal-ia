@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { gauntletReviewed, verificationsForApplied, type Process, type RevisionStatus } from '@portal-ia/domain';
+import { gauntletReviewed, verificationPassed, verificationsForApplied, type Process, type RevisionStatus } from '@portal-ia/domain';
 
 /**
  * Qué cubre de verdad la aprobación de QA, por COMMIT (sin IA). Antes cada pantalla leía un campo distinto (el veredicto
@@ -23,7 +23,7 @@ export function revisionStatus(p: Process): RevisionStatus | null {
   const verdict = r.review?.verdict ?? (r.review ? (r.review.approve ? 'approved' : 'rejected') : null);
   const qaCommit = pl?.lastQaCommit ?? r.manifest?.reviewedCommit ?? null;
   const cand = r.integration?.state === 'candidate' && same(r.integration.commit, head) ? r.integration : null;
-  const verifiedHead = !!r.applied && (pl?.config.commands ?? ['typecheck']).every(c => verificationsForApplied(r).some(v => v.command === c && v.exitCode === 0));
+  const verifiedHead = !!r.applied && (pl?.config.commands ?? ['typecheck']).every(c => verificationsForApplied(r).some(v => v.command === c && verificationPassed(v)));
   const storyFiles = new Set([...(r.changes ?? []).filter(c => !c.error).map(c => c.path), ...(r.plan?.filesToChange ?? []), ...(r.plan?.filesToRead ?? []), ...(r.manifest?.deliverables ?? []).map(d => d.path)]);
   const overlap = cand ? cand.files.filter(f => storyFiles.has(f) || SHARED.test(f)) : [];
   const candidate = cand ? { commit: cand.commit!, previous: cand.previousCommit, target: cand.target, targetHead: cand.targetHead, resolvedBy: cand.resolvedBy, conflicts: cand.conflicts, overlap } : null;

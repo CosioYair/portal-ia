@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { IssueSeverity, Process } from '@portal-ia/domain';
-import { qaSeverity, verificationsForApplied } from '@portal-ia/domain';
+import { mergeAcknowledgementsOf, qaSeverity, verificationPassed, verificationsForApplied } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, KV, Notice } from './ui.tsx';
@@ -22,15 +22,16 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
   const [gitErr, setGitErr] = useState<string | null>(null);
   const isPortalRepo = slug === 'portal-ia';
   const fresh = verificationsForApplied(r, 1000);
-  const okV = (c: string) => fresh.some(v => v.command === c && v.exitCode === 0);
+  const okV = (c: string) => fresh.some(v => v.command === c && verificationPassed(v));
   const canMerge = isPortalRepo ? okV('typecheck') && okV('test') && okV('build') : okV('typecheck');
   // 86 (Docker sin dependencias) es un bloqueo del entorno, no un fallo del código: no cuenta como «falló».
-  const lastFailed = ['typecheck', 'build', 'test'].map(c => r.verifications.filter(v => v.command === c).at(-1)).filter(v => v && v.exitCode !== 0 && v.exitCode !== 86).map(v => v!.command).join(', ');
+  const lastFailed = ['typecheck', 'build', 'test'].map(c => r.verifications.filter(v => v.command === c).at(-1)).filter(v => v && !verificationPassed(v) && v.exitCode !== 86).map(v => v!.command).join(', ');
   const [sandbox, setSandbox] = useState<{ available: string; detail: string } | null>(null);
   const [allowNet, setAllowNet] = useState(false);
   useEffect(() => { if (r.applied && !r.merged) api.systemSandbox().then(setSandbox).catch(() => setSandbox(null)); }, [r.applied, r.merged]);
   const isoLabel = (i?: string) => i === 'docker' ? 'sandbox Docker' : i === 'wsl' ? 'sandbox WSL2' : i === 'linux-ns' ? 'sandbox Linux (namespaces)' : i === 'host-min' ? 'verificación mínima (tsc)' : i === 'unavailable' ? 'sin sandbox · no ejecutado' : '';
-  const merge = async () => { if (!authGit) return; setBusy('merge'); setGitErr(null); try { const p = await api.mergeProcess(slug, proc.id); onChange(p); flash(`Rama integrada en ${p.result?.merged?.into} · commit ${p.result?.merged?.commit}`); } catch (e: any) { setGitErr(e.message); } finally { setBusy(null); } };
+  const ack = mergeAcknowledgementsOf(proc);
+  const merge = async () => { if (!authGit) return; setBusy('merge'); setGitErr(null); try { const p = await api.mergeProcess(slug, proc.id, false, { expectedCommit: r.applied?.commit ?? null, acknowledge: { preexisting: ack.preexisting.length > 0, testUpdates: ack.testUpdates.length > 0 } }); onChange(p); flash(`Rama integrada en ${p.result?.merged?.into} · commit ${p.result?.merged?.commit}`); } catch (e: any) { setGitErr(e.message); } finally { setBusy(null); } };
   const publish = async () => { if (!authGit) return; setBusy('publish'); setGitErr(null); try { const p = await api.publishProcess(slug, proc.id); onChange(p); flash(`Publicado en ${p.result?.published?.remote}: ${p.result?.published?.branches.join(', ')}`); } catch (e: any) { setGitErr(e.message); } finally { setBusy(null); } };
 
   const apply = async () => { if (!authApply) return; setBusy('apply'); setErr(null); try { const p = await api.applyChanges(slug, proc.id, branch.trim() || undefined); onChange(p); flash(`Cambios aplicados en la rama ${p.result?.applied?.branch} · commit ${p.result?.applied?.commit}`); } catch (e: any) { setErr(e.message); } finally { setBusy(null); setAuthApply(false); } };
@@ -119,8 +120,9 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
             <label className="ck small" style={{ marginLeft: 4 }}><input className="cb" type="checkbox" checked={allowNet} onChange={e => setAllowNet(e.target.checked)} /><span>Permitir red <strong>solo para install</strong> (revisa antes el diff de package.json)</span></label>
           </div></div></details>}
           {r.verifications.map((v, i) => <div key={i} className="card" style={{ background: 'var(--color-surface-alt)' }}>
-            <div className="card-h" style={{ padding: '10px 14px' }}><span className="mono sm13">{v.command}{v.isolation ? <span className="muted"> · {isoLabel(v.isolation)}</span> : null}</span><Chip tone={v.exitCode === 0 ? 'ok' : v.exitCode === null || (v.exitCode === 86 && v.isolation === 'docker') ? 'warn' : 'err'} xs>{v.exitCode === 0 ? 'correcto' : v.exitCode === null ? 'no terminó · tiempo agotado' : v.exitCode === 86 && v.isolation === 'docker' ? 'bloqueado · faltan dependencias' : v.isolation === 'unavailable' ? 'no ejecutado · sin sandbox' : `falló · código ${v.exitCode ?? '?'}`} · {(v.durationMs / 1000).toFixed(1)} s</Chip></div>
-            <details open={i === r.verifications.length - 1 && v.exitCode !== 0 && v.exitCode !== 86}><summary className="small muted" style={{ cursor: 'pointer', padding: '6px 14px' }}>{lastLine(v.output).slice(0, 160) || 'Ver la salida'}</summary>
+            <div className="card-h" style={{ padding: '10px 14px' }}><span className="mono sm13">{v.command}{v.isolation ? <span className="muted"> · {isoLabel(v.isolation)}</span> : null}</span><Chip tone={v.exitCode === 0 ? 'ok' : verificationPassed(v) ? 'warn' : v.exitCode === null || (v.exitCode === 86 && v.isolation === 'docker') ? 'warn' : 'err'} xs>{v.exitCode === 0 ? 'correcto' : verificationPassed(v) ? `correcto frente a la base · ${v.triage!.preexisting.length} fallo(s) ya existían sin la historia` : v.exitCode === null ? 'no terminó · tiempo agotado' : v.exitCode === 86 && v.isolation === 'docker' ? 'bloqueado · faltan dependencias' : v.isolation === 'unavailable' ? 'no ejecutado · sin sandbox' : `falló · código ${v.exitCode ?? '?'}`} · {(v.durationMs / 1000).toFixed(1)} s</Chip></div>
+            {v.triage && !v.triage.unavailable ? <p className="small" style={{ margin: 0, padding: '6px 14px' }}>Línea base ({v.triage.baseCommit.slice(0, 7)}, sin la historia): {v.triage.preexisting.length} fallo(s) ya existían con el mismo error{v.triage.introduced.length + v.triage.changed.length ? ` · ${v.triage.introduced.length + v.triage.changed.length} los causa la historia` : ''}{v.triage.preexisting.length ? ` — ${v.triage.preexisting.map(t => `«${t.name}»`).join(', ')}` : ''}.</p> : v.triage?.unavailable ? <p className="small muted" style={{ margin: 0, padding: '6px 14px' }}>Sin línea base: {v.triage.unavailable}.</p> : null}
+            <details open={i === r.verifications.length - 1 && !verificationPassed(v) && v.exitCode !== 86}><summary className="small muted" style={{ cursor: 'pointer', padding: '6px 14px' }}>{lastLine(v.output).slice(0, 160) || 'Ver la salida'}</summary>
             <pre className="mono" style={{ margin: 0, padding: '10px 14px', fontSize: 12, maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{v.output || '(sin salida)'}</pre></details>
           </div>)}
         </div></section>}
@@ -133,7 +135,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
           {r.published && <KV k="Publicación"><span className="mono">{r.published.branches.join(', ')} → {r.published.url ?? r.published.remote}</span></KV>}
           {gitErr && <Notice kind="err"><strong>No se pudo completar.</strong> {gitErr}</Notice>}
           {!r.merged && !canMerge ? <p className="sm13 muted" style={{ margin: 0 }}>Se habilita cuando la verificación esté en verde. {lastFailed ? `Ahora falla ${lastFailed}: arriba tienes el problema y cómo corregirlo.` : 'Arriba, en el estado de la historia, tienes el siguiente paso.'}</p> : <>
-          <label className="ck"><input className="cb" type="checkbox" checked={authGit} onChange={e => setAuthGit(e.target.checked)} /><span>Autorizo <strong>integrar</strong> la rama <span className="mono">{r.applied.branch}</span> en la rama principal del repositorio (merge con commit) y/o <strong>publicarla</strong> en el remoto configurado (<span className="mono">git push</span>, con las credenciales git de este equipo).</span></label>
+          <label className="ck"><input className="cb" type="checkbox" checked={authGit} onChange={e => setAuthGit(e.target.checked)} /><span>Autorizo <strong>integrar</strong> la rama <span className="mono">{r.applied.branch}</span> en la rama principal del repositorio (merge con commit) y/o <strong>publicarla</strong> en el remoto configurado (<span className="mono">git push</span>, con las credenciales git de este equipo).{!r.merged && ack.preexisting.length > 0 ? <> Confirmo que «test» pasa solo frente a la base: ya fallaban en main sin este cambio {ack.preexisting.join(', ')}.</> : null}{!r.merged && ack.testUpdates.length > 0 ? <> Confirmo que modificó pruebas que ya existían por el cambio de comportamiento (revisé su diff): {ack.testUpdates.join(', ')}.</> : null}</span></label>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {!r.merged && <button className="btn btn-primary btn-sm" onClick={merge} disabled={!authGit || busy !== null || !canMerge} title={canMerge ? '' : 'Primero verifica en sandbox'}>{busy === 'merge' ? <span className="spin spin-light" /> : Icon.git()}{busy === 'merge' ? 'Integrando…' : 'Integrar en la rama principal'}</button>}
             {!r.merged && !canMerge && <span className="small muted" style={{ alignSelf: 'center' }}>{lastFailed ? `La última verificación falló (${lastFailed}); corrige con una nueva iteración o rechaza el diff.` : isPortalRepo ? 'Para integrar el Portal hacen falta typecheck, test y build en verde en sandbox tras aplicar.' : 'Para integrar hace falta que «npm run typecheck» pase en Verificación.'}</span>}

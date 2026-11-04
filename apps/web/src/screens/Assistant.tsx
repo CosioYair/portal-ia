@@ -42,7 +42,7 @@ export function Assistant() {
           </div>
         </div>
         <AssistantChat onInfo={setInfo} onPending={onPending} initialText={draft} />
-        {info && <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }} className="small muted"><KV k="Cada envío">1 llamada real al modelo del asistente</KV><KV k="Cambios locales">sin IA; los confirmas tú en la tarjeta</KV><KV k="Ejecutar / encargos / historias">el asistente propone; tú autorizas en la tarjeta</KV></div>}
+        {info && <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }} className="small muted"><KV k="Cada envío">1 llamada real al modelo del asistente</KV><KV k="Cambios locales">sin IA; los confirmas tú en la tarjeta</KV><KV k="Ejecutar / encargos / historias">el asistente lo prepara, lo ejecuta por el Portal y lo supervisa; tú autorizas en la tarjeta</KV></div>}
       </main>
     </Shell>
   );

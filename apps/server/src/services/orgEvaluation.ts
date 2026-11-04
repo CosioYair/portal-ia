@@ -1,6 +1,6 @@
 import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import type { Agent, DelegationResult, ModelInfo, OrgDecision, OrgEvaluation, OrgEvaluationBrief, OrgEvaluationStatus, OrgProposal, Process, ProviderId } from '@portal-ia/domain';
-import { ORG_ACTION_LABEL, ORG_BRIEF_REQUIRED_MESSAGE, ORG_TARGET_LABEL, briefIsEmpty, briefLimitError, briefToMarkdown, departmentOf, isRetired, normalizeOrgBrief, parseOrgProposals } from '@portal-ia/domain';
+import { ORG_ACTION_LABEL, ORG_BRIEF_REQUIRED_MESSAGE, ORG_TARGET_LABEL, briefIsEmpty, briefLimitError, briefToMarkdown, departmentOf, isRetired, normalizeOrgBrief, parseOrgProposals, EFFORT_THINKING_TOKENS } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
@@ -116,7 +116,7 @@ export function buildOrgContext(slug: string, projectId: string | null, brief?: 
 
 function price(a: Agent, inTok: number, outTok: number): number {
   const p = estimatePricing(a.config.provider, a.config.model);
-  const think = a.config.effort === 'high' ? 6000 : a.config.effort === 'medium' ? 2500 : 0;
+  const think = EFFORT_THINKING_TOKENS[a.config.effort];
   return (inTok * p.inPerM + (outTok + think) * p.outPerM) / 1_000_000;
 }
 

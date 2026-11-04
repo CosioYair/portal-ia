@@ -32,7 +32,7 @@ import { ASSIGNMENT_OPEN, ASSIGNMENT_STATUS_LABEL, backendLabel, PORTAL_CAPABILI
 import { monotonicNow } from '../clock.ts';
 import { conversationsRepo, decisionsRepo } from '../db/conversations.ts';
 import { createConversation, getConversation, ledgerForPrompt, proposeDecisions, recomputeStage, updateConversation } from './conversations.ts';
-import { createAssignment } from './assignments.ts';
+import { createAssignment, onAssignmentResult } from './assignments.ts';
 import { assignmentsRepo } from '../db/assignments.ts';
 
 /**
@@ -90,6 +90,8 @@ export const assistantRepo = {
     changed({ ws: null, entity: 'assistant', id: conversationId });
     return { ...m, id, createdAt: ts };
   },
+  /** Mensajes con alguna acción «en marcha» (recuperación tras un reinicio). */
+  withRunningActions(): AssistantMessage[] { return (platform.prepare(`SELECT id FROM assistant_messages WHERE actions_json LIKE '%"status":"running"%'`).all() as any[]).map(r => this.get(r.id)).filter((m): m is AssistantMessage => !!m); },
   updateActions(id: string, actions: AssistantAction[]) { platform.prepare(`UPDATE assistant_messages SET actions_json = ? WHERE id = ?`).run(JSON.stringify(actions), id); changed({ ws: null, entity: 'assistant', id: null }); },
   get(id: string): AssistantMessage | undefined { const r = platform.prepare(`SELECT * FROM assistant_messages WHERE id = ?`).get(id); return r ? mapMsg(r) : undefined; },
   /** «Limpiar» archiva conversaciones; nunca borra mensajes ni decisiones (el registro es duradero). */
@@ -218,13 +220,26 @@ async function platformSnapshot(scope: { workspaceSlug: string | null; projectId
   return lines.join('\n');
 }
 
+/**
+ * Cómo trabaja el Asistente cuando el propietario dice «haz esto»: ejecuta por los mecanismos autorizados del Portal (no
+ * una consola sin límites, y nunca «no puedo» cuando el Portal tiene la vía). Ver docs/autonomia-asistente.md.
+ */
+const AUTONOMY_GUIDE = `# Autonomía (cuando te pide que hagas algo)
+1. Entiende la intención y di en una frase qué vas a hacer y con quién (el equipo responsable del proyecto).
+2. Si tienes herramientas portal_* (lectura del repositorio), úsalas antes: archivos, funciones y pruebas reales.
+3. Decide la vía: responderlo tú (información), una operación del catálogo (git, revisión, run_checks para ejecutar las pruebas de verdad), o un ENCARGO al equipo (cambios de código, de cualquier tamaño). Historias del backlog SOLO si él las pide o aprueba esa opción.
+4. Lo que gasta o cambia algo lo autoriza él en la tarjeta (presupuesto, llamadas a la suscripción, Gauntlet); no le pidas permisos que el Portal no exige ni le mandes a hacerlo a mano.
+5. Tras ejecutarse, informa con el estado REAL: qué se hizo, evidencia (diff, typecheck/pruebas/compilación en el sandbox, QA, Gauntlet) y el siguiente paso exacto (integrar en main, reconstruir y reiniciar, publicar). Después de integrar, puedes proponer run_checks para comprobar main (prueba main, no la rama).
+6. Si algo excede lo que el Portal puede hacer hoy, di exactamente qué falta y ofrece la acción concreta (normalmente, un encargo que lo desarrolle).
+A «¿puedes cambiar el código del Portal sin una historia?» la respuesta es SÍ: con un encargo que tú preparas y supervisas; el equipo lo implementa aislado y él lo integra. Tú no escribes archivos ni ejecutas órdenes directamente: lo haces a través de esos mecanismos, y nunca presentas como hecho algo que no ha ocurrido.`;
+
 const ACTION_SCHEMA = `# Acciones
 Escribe tu respuesta en markdown breve y, si procede, termina con UN bloque:
 \`\`\`actions
 [ ...acciones JSON... ]
 \`\`\`
-Qué propones según lo que pida el propietario (esta tabla manda sobre cualquier otra indicación, también sobre tu especialización). Tú solo propones: cada tarjeta la autoriza o la confirma él.
-- Orden directa de cambiar código («arregla», «corrige», «implementa», «añade», «encárgate», «hazlo»; no para limpiar ramas ni reconciliar el backlog, que son operaciones del catálogo) → ENCARGO de desarrollo EN-n, sin historia y de cualquier tamaño ("size" lo expresa); no lo conviertas en historia ni en análisis salvo que él lo pida:
+Qué haces según lo que pida el propietario (esta tabla manda sobre cualquier otra indicación, también sobre tu especialización). Tú preparas, ejecutas por los mecanismos del Portal y supervisas; él autoriza en la tarjeta lo que gasta o cambia algo (antes de autorizar no se ejecuta nada).
+- Orden directa de cambiar código («arregla», «corrige», «implementa», «añade», «encárgate», «hazlo»; no para limpiar ramas ni reconciliar el backlog, que son operaciones del catálogo) → ENCARGO de desarrollo EN-n, sin historia y de cualquier tamaño ("size" lo expresa). Es TU forma de cambiar código: el equipo responsable lo implementa en un worktree aislado, lo verifica en el sandbox (typecheck, pruebas, compilación), QA y Gauntlet lo revisan, y el resultado (diff y evidencia) vuelve a esta conversación para que él lo integre. No lo conviertas en historia ni en análisis salvo que él lo pida:
   {"type":"propose_assignment","company"?:slug,"project"?:slug,"title":string,"request":string (la petición tal cual),"objective":string,"criteria":string[] (comprobables),"outOfScope":string[],"size":"S"|"M"|"L"}
   Si la conversación no tiene proyecto, indica company y project (si hay duda, pregúntalo). Queda en borrador hasta que él lo autoriza (presupuesto, llamadas a la suscripción, Gauntlet).
 - Pide historias o cambiar el backlog → cambios que confirma con un clic:
@@ -236,12 +251,13 @@ Qué propones según lo que pida el propietario (esta tabla manda sobre cualquie
 - Pide estudiar, evaluar, replantear, repriorizar, proponer, redactar, auditar u organizar, SIN cambiar código → ANÁLISIS delegado (documento en Conocimiento con propuestas al backlog que aplica él; nunca cambia código):
   {"type":"delegate_task","company":slug,"project":slug|null,"agent":clave o nombre,"request":string completo}. Responsable: asuntos de un proyecto → pj-coordinador; organización o varias áreas → ws-gestor; agentes → ws-onboarding; o el que él nombre.
 - Crear empresa o proyecto: {"type":"create_company","name":string} · {"type":"create_project","company":slug,"name":string,"description":string,"objectives":string[]}
-- Operación git del catálogo (la ejecuta el Portal con el MISMO servicio que su botón, solo cuando él pulsa «Autorizar» en la tarjeta):
+- Operación del catálogo (git, revisión del proyecto o run_checks; la ejecuta el Portal con su servicio, solo cuando él pulsa «Autorizar» en la tarjeta):
 ${Object.values(CAPABILITIES).map(c => `  ${c.promptHint}`).join('\n')}
-  Operación del Portal que el catálogo NO tiene (y no es un cambio de código de un proyecto): {"type":"request_operation","capability":nombre_propuesto,"purpose":para qué la necesita} → el Portal no la ejecuta: le ofrece crear la historia para desarrollarla (nunca shell, nada forzado ni saltos de permisos).
-Mejorar algo que ya existe («mejora…», «haz que…», «quiero que funcione así», «propón mejoras y aplícalas», «arregla el flujo de…») también es un ENCARGO directo: investiga, concreta objetivo y criterios comprobables y propónlo; no crees historias salvo que pida historias o el alcance sea un conjunto grande de entregas independientes, y no lo conviertas en análisis salvo que pida SOLO un estudio sin cambios.
+  Operación del Portal que el catálogo NO tiene (y no es un cambio de código de un proyecto): {"type":"request_operation","capability":nombre_propuesto,"purpose":para qué la necesita} → el Portal no la ejecuta: le propone desarrollarla con un ENCARGO (sin historia; nunca shell, nada forzado ni saltos de permisos).
+Mejorar algo que ya existe («mejora…», «haz que…», «quiero que funcione así», «propón mejoras y aplícalas», «arregla el flujo de…») también es un ENCARGO directo: investiga, concreta objetivo y criterios comprobables y propónlo; no crees historias salvo que las pida (si el alcance es un conjunto grande de entregas independientes, pregúntale si prefiere historias), y no lo conviertas en análisis salvo que pida SOLO un estudio sin cambios.
 Si tienes herramientas portal_* (lectura del repositorio del proyecto), úsalas antes de proponer un encargo de código: cita en el objetivo y los criterios los archivos y funciones reales que has visto (sin inventar ninguno) y di qué no has podido comprobar.
-Si pide algo de esta tabla, propónlo (no le mandes a otra pantalla ni digas que no puedes). Si pide una operación del Portal que no existe, pídela como operación propuesta (arriba); si es un cambio de código de un proyecto, es un encargo. Nunca inventes operaciones ni órdenes de shell. El equipo SÍ puede modificar el código del propio Portal IA.`;
+Si pide algo de esta tabla, hazlo (no le mandes a otra pantalla ni digas que no puedes). Si pide una operación del Portal que no existe, pídela como operación propuesta (arriba); si es un cambio de código de un proyecto, es un encargo. Nunca inventes operaciones ni órdenes de shell. El equipo SÍ puede modificar el código del propio Portal IA.
+${AUTONOMY_GUIDE}`;
 
 const CONVERSATION_GUIDE = `# Cómo trabajar en esta conversación (intención → acción)
 - Pregunta informativa («explica», «por qué falló», «cómo funciona»): responde y ya está; distingue hechos verificados (del estado real), interpretaciones, supuestos y recomendaciones. No propongas ejecutar nada.
@@ -465,10 +481,14 @@ ${await platformSnapshot({ workspaceSlug: conv.workspaceSlug, projectId: conv.pr
     // Con un proyecto fijado (y autorizado para Claude Code), el Asistente lee su repositorio con el puente de SOLO lectura
     // (las mismas rutas protegidas que los agentes: nunca .env, data/, credenciales): investiga antes de proponer. Carril
     // propio: no espera detrás del trabajo de los lotes.
-    const reads = !!conv.workspaceSlug && !!conv.projectId && info.backend !== 'api' && claudeCodeGate(conv.workspaceSlug, a, conv.projectId).ok;
-    const caller = agentCaller(reads ? conv.workspaceSlug! : INTERNAL_WORKSPACE.slug, a, reads ? conv.projectId : null, 'Asistente', null, null, { interactive: true });
+    // Sin proyecto fijado, el del propio Portal (su repositorio es el que suele pedir cambiar): la misma lectura protegida.
+    const readScope = conv.workspaceSlug && conv.projectId ? { slug: conv.workspaceSlug, projectId: conv.projectId } : !conv.workspaceSlug || conv.workspaceSlug === INTERNAL_WORKSPACE.slug ? (p => p ? { slug: INTERNAL_WORKSPACE.slug, projectId: p.id } : null)(portalProject()) : null;
+    const reads = !!readScope && info.backend !== 'api' && claudeCodeGate(readScope.slug, a, readScope.projectId).ok;
+    const caller = agentCaller(reads ? readScope!.slug : INTERNAL_WORKSPACE.slug, a, reads ? readScope!.projectId : null, 'Asistente', null, null, { interactive: true });
+    // Qué repositorio leen sus herramientas (para no citar archivos de otro proyecto en un encargo).
+    const readsWhat = reads ? `\n\n# Lectura del repositorio\nTus herramientas portal_* leen SOLO el repositorio de «${projectsRepo(readScope!.slug).get(readScope!.projectId)?.name ?? readScope!.projectId}» (${readScope!.slug}); para otro proyecto no tienes lectura en esta conversación.` : '';
     const res = caller
-      ? await caller.complete({ ...req, images: images.length ? images : undefined, user: prompt })
+      ? await caller.complete({ ...req, system: req.system + readsWhat, images: images.length ? images : undefined, user: prompt })
       : await getAdapter(providerId)!.complete(decryptSecret(cred!.ciphertext), { workspaceId: prow.workspace_id }, req);
     const cost = caller ? 0 : costUsd(providerId, a.config.model, res.inputTokens, res.outputTokens);
     processesRepo(INTERNAL_WORKSPACE.slug).logExecution({ projectId: '', agentId: a.id, kind: 'assistant_chat', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
@@ -574,13 +594,41 @@ export async function decideOperation(messageId: string, operationId: string, de
       throw Object.assign(new Error(why), { statusCode: 409 });
     }
   }
-  try {
-    const result = await cap.execute(cap.params.parse(op.params));
-    save({ status: 'done', detail: result.summary, operation: { ...op, decidedAt, result } });
-  } catch (e: any) {
-    save({ status: 'failed', detail: `No se completó: ${e.message}`, operation: { ...op, decidedAt, result: { summary: 'Fallida', details: [String(e.message)] } } });
+  const run = async () => {
+    try {
+      const result = await cap.execute(cap.params.parse(op.params), op.preview);
+      save({ status: 'done', detail: result.summary, operation: { ...op, decidedAt, result } });
+    } catch (e: any) {
+      save({ status: 'failed', detail: `No se completó: ${e.message}`, operation: { ...op, decidedAt, result: { summary: 'Fallida', details: [String(e.message)] } } });
+    }
+  };
+  if (cap.background) {
+    // Tarda minutos: la petición vuelve ya y la tarjeta recibe el resultado real al terminar.
+    save({ status: 'running', detail: 'En marcha con tu autorización. El resultado real aparecerá en esta tarjeta al terminar.', operation: { ...op, decidedAt } });
+    backgroundOps.add(operationId);
+    void run().finally(() => backgroundOps.delete(operationId));
+    return assistantRepo.get(messageId)!;
   }
+  await run();
   return assistantRepo.get(messageId)!;
+}
+
+// El resultado de un encargo vuelve a la conversación que lo propuso: sin IA, solo lo que el proceso registró.
+onAssignmentResult((conversationId, markdown) => { if (getConversation(conversationId)) assistantRepo.add({ role: 'assistant', content: markdown, actions: [], attachments: [], tokensIn: 0, tokensOut: 0, costUsd: 0, model: null }, conversationId); });
+
+/** Operaciones lanzadas en segundo plano en ESTE proceso del servidor (para distinguir las que cortó un reinicio). */
+const backgroundOps = new Set<string>();
+/**
+ * Al arrancar: una operación «en marcha» que ya no corre (la cortó un reinicio) se cierra con la verdad: no terminó y
+ * hay que pedirla de nuevo. Nunca se da por hecha ni se relanza sola.
+ */
+export function recoverInterruptedOperations(): number {
+  let n = 0;
+  for (const m of assistantRepo.withRunningActions()) {
+    const next = m.actions.map(x => x.type === 'propose_operation' && x.status === 'running' && x.operation && !backgroundOps.has(x.operation.id) ? (n++, { ...x, status: 'failed' as const, detail: 'Interrumpida por un reinicio del Portal antes de terminar: no hay resultado. Pídela de nuevo si la necesitas.', operation: { ...x.operation, result: { summary: 'Interrumpida', details: ['El Portal se reinició mientras se ejecutaba; nada se da por hecho.'] } } }) : x);
+    if (next.some((x, i) => x !== m.actions[i])) assistantRepo.updateActions(m.id, next);
+  }
+  return n;
 }
 
 /** Cada revisión propuesta en el chat recuerda su tarjeta: el resultado de ejecutarla se muestra en la conversación. */
@@ -650,7 +698,7 @@ export function noteOperationOutcome(plan: MaintenancePlan) {
 
 /**
  * El modelo pidió una operación que el catálogo no tiene: en vez de «no puedo», una tarjeta con lo que falta y la
- * propuesta de desarrollarla como historia del Portal (se crea solo si el propietario la confirma; no concede permisos
+ * propuesta de desarrollarla con un encargo del Portal (borrador: se ejecuta solo si el propietario lo autoriza; no concede permisos
  * ni ejecuta nada). La conversación queda enlazada en la historia para retomarla cuando la capacidad exista.
  */
 /** Nunca se propone desarrollar: shell, ejecutar código, forzar, publicar fuera de main, credenciales, saltarse permisos o historia. */
@@ -662,21 +710,30 @@ const SAFE_VERBS = new Set(['list', 'show', 'view', 'get', 'export', 'import', '
   'listar', 'mostrar', 'ver', 'exportar', 'importar', 'crear', 'agregar', 'anadir', 'actualizar', 'editar', 'renombrar', 'archivar', 'cerrar', 'reconciliar', 'revisar', 'resumir', 'informar', 'programar', 'notificar', 'sincronizar', 'etiquetar', 'mover', 'comparar', 'estimar', 'generar', 'planificar', 'priorizar', 'asignar', 'enlazar', 'buscar', 'analizar', 'auditar', 'contar', 'medir', 'traducir', 'adjuntar', 'restaurar', 'pausar', 'reanudar']);
 /**
  * El modelo pidió una operación que el catálogo no tiene: en vez de «no puedo», una tarjeta con lo que falta y la
- * propuesta de desarrollarla como historia del Portal (se crea solo si el propietario la confirma; no concede permisos ni
+ * propuesta de desarrollarla con un encargo del Portal (borrador: se ejecuta solo si el propietario lo autoriza; no concede permisos ni
  * ejecuta nada). Solo en conversaciones de Portal IA (es un cambio del propio Portal) y nunca para lo prohibido.
  */
+/** Proyecto del espacio interno cuyo repositorio es el del propio Portal (el que está en marcha). */
+function portalProject() {
+  return projectsRepo(INTERNAL_WORKSPACE.slug).list().find(p => { const r = projectsRepo(INTERNAL_WORKSPACE.slug).repository(p.id); return r && path.resolve(r.path) === path.resolve(REPO_ROOT); }) ?? null;
+}
+
 function missingCapability(capability: string, purpose: string, scope: ActionScope): AssistantAction[] {
   const clean = capability.trim().slice(0, 60);
   const info: AssistantAction = { type: 'info', status: 'failed', label: `Operación no disponible: «${clean}»`, detail: 'El catálogo de operaciones del Portal no la tiene todavía.' };
   const tokens = clean.toLowerCase().split(/[_\-\s.]+/);
   if (!/^[a-z][a-z0-9_]{2,50}$/i.test(clean) || !SAFE_VERBS.has(tokens[0]) || tokens.some(t => UNSAFE_TOKENS.has(t) || DEV_BLOCK.has(t))) return [{ ...info, detail: 'El Portal no ofrece ni propone desarrollar órdenes de shell, ejecución de código, borrados genéricos, operaciones forzadas, publicar fuera de main ni acceso a credenciales o permisos. Si necesitas algo concreto (p. ej. limpiar ramas), pídelo así y el Asistente usará una operación gobernada del catálogo.' }];
   if (scope.workspaceSlug && scope.workspaceSlug !== INTERNAL_WORKSPACE.slug) return [{ ...info, detail: 'Desarrollarla es un cambio del propio Portal: pídelo en una conversación de la empresa Portal IA.' }];
-  const portal = projectsRepo(INTERNAL_WORKSPACE.slug).list().find(p => { const r = projectsRepo(INTERNAL_WORKSPACE.slug).repository(p.id); return r && path.resolve(r.path) === path.resolve(REPO_ROOT); }) ?? projectsRepo(INTERNAL_WORKSPACE.slug).list()[0];
+  const portal = portalProject() ?? projectsRepo(INTERNAL_WORKSPACE.slug).list()[0];
   if (!portal) return [info];
   const title = `Capacidad del Asistente: ${clean.replace(/[_-]+/g, ' ')}`;
+  // Ni historia automática ni duplicados: si ya hay un encargo abierto o una historia viva para lo mismo, se dice cuál.
   const dup = backlogRepo(INTERNAL_WORKSPACE.slug).list(portal.id).find(b => b.title === title && b.status !== 'discarded');
   if (dup) return [{ ...info, detail: `Ya existe la historia ${dup.storyId} «${dup.title}» (${dup.status}) para desarrollarla.` }];
+  const open = assignmentsRepo(INTERNAL_WORKSPACE.slug).list(portal.id).find(x => x.title === title && !['accepted', 'cancelled'].includes(x.status));
+  if (open) return [{ ...info, detail: `Ya hay un encargo para desarrollarla: ${open.code} «${open.title}» (${ASSIGNMENT_STATUS_LABEL[open.status]}).` }];
   const why = purpose.trim().slice(0, 300);
-  const description = `El Asistente necesitó la operación «${clean}» y no existe en el catálogo (apps/server/src/services/capabilities.ts).${why ? `\nPara qué (palabras del modelo, revísalo): ${why}` : ''}\nConversación de origen: ${scope.conversationId ?? '—'}.\nDebe seguir el patrón del catálogo: parámetros validados, vista previa de solo lectura, autorización explícita del propietario, política de ejecución y verificación del resultado.`;
-  return [{ ...info, detail: `${info.detail} Puedes pedir que se desarrolle (abajo); cuando esté activa, vuelve a esta conversación y pídela otra vez.` }, { type: 'propose_local', status: 'pending', label: `Crear la historia «${title}» en Portal IA › ${portal.name}`, detail: `No ejecuta nada ni concede permisos.${why ? ` Motivo indicado: «${why}»` : ''}`, local: { op: 'add_backlog_item', params: { company: INTERNAL_WORKSPACE.slug, project: portal.id, title, criterion: `El Asistente puede proponer «${clean}» como operación del catálogo y el propietario la autoriza; la conversación ${scope.conversationId ?? ''} se puede retomar.`, description } } }];
+  const request = `El Asistente necesitó la operación «${clean}» y no existe en el catálogo (apps/server/src/services/capabilities.ts).${why ? ` Para qué (palabras del modelo, revísalo): ${why}` : ''} Conversación de origen: ${scope.conversationId ?? '—'}.`;
+  const a = createAssignment(INTERNAL_WORKSPACE.slug, portal.id, { request, title, objective: `Añadir «${clean}» al catálogo de operaciones del Asistente siguiendo su patrón: parámetros validados, vista previa de solo lectura, autorización explícita del propietario, política de ejecución y verificación del resultado.`, criteria: [`El Asistente puede proponer «${clean}» como operación del catálogo y solo se ejecuta cuando el propietario la autoriza en la tarjeta.`, 'La vista previa muestra exactamente qué hará y qué lo impide; con el estado cambiado no se ejecuta.', 'Pruebas automáticas de la operación (incluida una negativa sin autorización) en verde en el sandbox.'], outOfScope: ['Órdenes de shell, ejecución de código arbitrario o saltarse permisos.'], size: 'M', conversationId: scope.conversationId ?? null });
+  return [{ ...info, detail: `${info.detail} La desarrolla el equipo con un encargo (abajo, sin historia): se ejecuta solo si lo autorizas; cuando esté integrada y activa, vuelve a pedirla aquí.` }, { type: 'propose_assignment', status: 'pending', label: `Encargo ${a.code}: ${a.title}`, detail: 'Borrador para desarrollar la operación (sin historia). Revísalo y autorízalo: hasta entonces no se ejecuta nada.', assignmentId: a.id, workspaceSlug: INTERNAL_WORKSPACE.slug, projectId: portal.id }];
 }

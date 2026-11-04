@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { agentFoldersRepo, syncAgentFolder } from '../services/agentFolders.ts';
 import { recordAgentEvent } from '../services/agentEvents.ts';
 import { affectedWork } from '../services/harness/index.ts';
-import { backendLabel, type ClaudeCodeStatusView, type ClaudeCodeWorkspaceView } from '@portal-ia/domain';
+import { backendLabel, effortLevelsFor, type Agent, type ClaudeCodeStatusView, type ClaudeCodeWorkspaceView } from '@portal-ia/domain';
 import { claudeCodeWorkersRepo, providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { agentBackend, BRIDGE_SCRIPT, getBridgeUrl, runningClaudeCode, teamReadiness } from '../services/claudeCode/backend.ts';
@@ -13,10 +13,31 @@ import {
   claimTask, createWorker, disconnectWorker, isDenied, listTaskFiles, listTasks, readTaskFile, reportBlocker, reportProgress, scopeFor, searchTaskFiles, taskDiff,
   submitResult, taskContext, taskFor, taskKnowledge, touchWorker, workerView, type BridgeScope, type BridgeTask
 } from '../services/claudeCode/bridge.ts';
-import { runCliTask } from '../services/claudeCode/cli.ts';
+import { cliEffort, runCliTask } from '../services/claudeCode/cli.ts';
 import { cliCommandFor, detectClaudeCode, lastDetection, verifiedDetection } from '../services/claudeCode/detect.ts';
 import { acknowledgeUsageReport, subscriptionGate } from '../services/claudeCode/usage.ts';
 import { getClaudeCodeSettings, saveClaudeCodeSettings } from '../services/claudeCode/settings.ts';
+
+/**
+ * Lo que se pasa DE VERDAD al arnés para este agente, desde lo guardado hasta la orden (sin ejecutar nada ni llamar al
+ * modelo): arnés, modelo, esfuerzo configurado, si el modelo lo admite, si ESTA CLI lo admite (su ayuda) y qué se envía.
+ */
+function invocationOf(agent: Agent) {
+  const harness = agentBackend(agent); const det = lastDetection();
+  const modelLevels = effortLevelsFor(agent.config.provider, agent.config.model);
+  const configured = agent.config.effort;
+  if (harness !== 'claude-code') return { harness, model: agent.config.model, effort: configured, modelLevels, cli: null, effortPassed: null, note: harness === 'api' ? `Por la API: output_config.effort = «${configured}» (solo si el modelo lo admite).` : 'Este arnés no recibe el esfuerzo del Portal.' };
+  const passed = det && agent.config.effortApplied ? cliEffort(det, configured) : null;
+  // Una comprobación guardada por una versión anterior del Portal no leyó la ayuda: no se sabe (no es «no lo admite»).
+  const unknown = !!det && det.effortLevels === undefined;
+  const note = !det ? 'Claude Code aún no se ha comprobado en este Portal (Ajustes › Claude Code › Comprobar): no se sabe qué admite la CLI instalada.'
+    : !modelLevels.includes(configured) ? `${agent.config.model} no admite «${configured}»: elige uno de ${modelLevels.join(', ')}.`
+    : !agent.config.effortApplied ? `El nivel guardado («${configured}») aún no se aplica a Claude Code: se eligió antes de que el Portal pudiera pasarlo, y la CLI usa su esfuerzo predeterminado. Elige el nivel y guarda para aplicarlo.`
+    : passed ? `Se invoca: claude --model ${agent.config.model} --effort ${passed} (Claude Code ${det.version ?? '?'}, ${det.billing === 'subscription' ? 'tu suscripción' : `facturación ${det.billing}`}).`
+    : unknown ? `La última comprobación de Claude Code es anterior a esta versión y no dice si admite --effort. Cada ejecución lo comprueba y pasa «--effort ${configured}» si la CLI lo admite; para verlo aquí, Ajustes › Claude Code › Comprobar.`
+    : `Claude Code ${det.version ?? '?'} no anuncia «--effort ${configured}» en su ayuda: se invoca sin --effort y usa su esfuerzo predeterminado. Actualiza Claude Code para aplicarlo.`;
+  return { harness, model: agent.config.model, effort: configured, modelLevels, cli: det ? { version: det.version, billing: det.billing, effortLevels: det.effortLevels ?? [], checkedAt: det.checkedAt } : null, effortPassed: passed, note };
+}
 
 /**
  * Conector «Claude Code — Local».
@@ -222,7 +243,7 @@ export async function claudeCodeRoutes(app: FastifyInstance) {
       backend: agentBackend(agent), status: claudeCodeStatus(),
       projects: agent.projectId ? [{ id: agent.projectId, authorized: authorized.includes(agent.projectId) }] : projectsRepo(slug).list().map(p => ({ id: p.id, authorized: authorized.includes(p.id) })),
       limits: { maxConcurrent: s.maxConcurrent, maxDurationSec: s.maxDurationSec, maxTurns: s.maxTurns, repoRead: s.repoRead, fallback: s.fallback },
-      usage: runs.usageByAgent(id), runs: runs.byAgent(id, 10),
+      usage: runs.usageByAgent(id), runs: runs.byAgent(id, 10), invocation: invocationOf(agent),
       consoles: claudeCodeWorkersRepo.list(slug).map(workerView).filter(w => !w.revokedAt && w.agentIds.includes(id)).map(w => ({ id: w.id, name: w.name, connected: w.connected, expired: w.expired }))
     };
   });

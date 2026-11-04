@@ -44,7 +44,7 @@ const WIZARD = z.object({
   responsibilities: z.array(z.string().trim().min(1).max(300)).max(30).default([]), deliverables: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
   department: z.string().trim().min(2).max(60), departmentPurpose: z.string().max(400).nullable().optional(),
   scope: z.enum(['workspace', 'project']), projectId: z.string().nullable(),
-  harness: HARNESS, model: z.string().trim().min(1).max(120), provider: z.enum(['anthropic', 'openai']).nullable().optional(), effort: z.enum(['low', 'medium', 'high']).default('medium'),
+  harness: HARNESS, model: z.string().trim().min(1).max(120), provider: z.enum(['anthropic', 'openai']).nullable().optional(), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'),
   tools: z.array(z.string().max(40)).max(12).default([]), knowledge: z.array(z.string().max(40)).max(8).default([]), capabilities: z.array(CAP).max(6).default([]),
   autonomy: z.enum(['ask', 'within_scope']).default('ask'), instructions: z.string().max(20_000).nullable().optional(),
   skills: z.array(SKILL).max(20).default([]), references: z.array(REF).max(20).default([]), initials: z.string().max(2).nullable().optional(),
@@ -272,7 +272,7 @@ export async function agentsOsRoutes(app: FastifyInstance) {
   });
   app.post('/api/workspaces/:slug/agents/import', async (req, reply) => {
     const { slug } = req.params as any; if (!guard(slug, reply)) return;
-    const b = z.object({ path: z.string().min(1).max(1024), hash: z.string().length(64), department: z.string().trim().min(2).max(60), scope: z.enum(['workspace', 'project']), projectId: z.string().nullable(), harness: HARNESS, model: z.string().trim().min(1).max(120), provider: z.enum(['anthropic', 'openai']).nullable().optional(), effort: z.enum(['low', 'medium', 'high']).default('medium'), tools: z.array(z.string().max(40)).max(12).default([]), knowledge: z.array(z.string().max(40)).max(8).default([]), capabilities: z.array(CAP).max(6).nullable().optional(), autonomy: z.enum(['ask', 'within_scope']).default('ask'), authorized: z.boolean() }).safeParse(req.body);
+    const b = z.object({ path: z.string().min(1).max(1024), hash: z.string().length(64), department: z.string().trim().min(2).max(60), scope: z.enum(['workspace', 'project']), projectId: z.string().nullable(), harness: HARNESS, model: z.string().trim().min(1).max(120), provider: z.enum(['anthropic', 'openai']).nullable().optional(), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'), tools: z.array(z.string().max(40)).max(12).default([]), knowledge: z.array(z.string().max(40)).max(8).default([]), capabilities: z.array(CAP).max(6).nullable().optional(), autonomy: z.enum(['ask', 'within_scope']).default('ask'), authorized: z.boolean() }).safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: 'Datos de importación no válidos.', issues: b.error.issues });
     try { const { path: p, hash, ...grant } = b.data; return reply.code(201).send(await importConfirm(slug, p, hash, grant as any)); } catch (e) { return err(reply, e); }
   });

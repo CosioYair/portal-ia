@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { Agent, AgentConfig, ClaudeCodeStatusView, ExecutionBackend, ProviderId } from '@portal-ia/domain';
-import { backendLabel, CAPABILITIES, KNOWLEDGE, TOOLS } from '@portal-ia/domain';
+import { backendLabel, CAPABILITIES, KNOWLEDGE, TOOLS, EFFORT_LEVELS, effortLevelsFor, clampEffort } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS, KNOWLEDGE_LABELS, TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
@@ -57,6 +57,10 @@ export function AgentDetail() {
 
   const prov = useMemo(() => providers.find(p => p.id === cfg?.provider), [providers, cfg?.provider]);
   const model = prov?.models.find(m => m.id === cfg?.model);
+  // Niveles que admite el modelo (xhigh y max no existen en todos). Con Claude Code el esfuerzo lo recibe la CLI aunque el
+  // catálogo de la API no esté conectado; con la API, solo si el modelo del catálogo lo admite.
+  const effortLevels: string[] = cfg ? effortLevelsFor(cfg.provider, cfg.model) : [];
+  const effortAdjustable = agent?.config.backend === 'claude-code' || !!model?.supportsEffort;
   const byKey = (k: string) => agents.find(a => a.key === k);
   const nameOf = (k: string) => byKey(k)?.config.name ?? k;
   const openKey = (k: string) => { const a = byKey(k); if (a) navigate(`/equipo/${a.id}`); };
@@ -67,7 +71,7 @@ export function AgentDetail() {
   const save = async () => {
     if (!dirty || !cfg) return;
     setSaving(true);
-    try { await api.updateAgentConfig(ws.slug, agent.id, cfg); await load(); discardDraft(); flash(`Configuración de ${cfg.name} guardada`); }
+    try { await api.updateAgentConfig(ws.slug, agent.id, cfg); await load(); discardDraft(); api.agentClaudeCode(ws.slug, agent.id).then(setAgentCc).catch(() => undefined); flash(`Configuración de ${cfg.name} guardada`); }
     catch (e: any) { flash(e.message, 'err'); } finally { setSaving(false); }
   };
   const applyBackend = async () => {
@@ -157,7 +161,7 @@ export function AgentDetail() {
                     {providers.map(p => <option key={p.id} value={p.id} disabled={p.status !== 'connected'}>{p.name} · {p.status === 'connected' ? 'conectado' : 'no conectado'}</option>)}
                   </select></div>
                 <div><label className="label" htmlFor="ag-model">Modelo</label>
-                  <select id="ag-model" className="input mono" value={cfg.model} onChange={e => edit({ model: e.target.value, fallbacks: cfg.fallbacks.filter(f => f !== e.target.value) })}>
+                  <select id="ag-model" className="input mono" value={cfg.model} onChange={e => edit({ model: e.target.value, fallbacks: cfg.fallbacks.filter(f => f !== e.target.value), effort: clampEffort(cfg.provider, e.target.value, cfg.effort) })}>
                     {(prov?.models ?? []).map(m => <option key={m.id} value={m.id}>{m.name}  ·  {m.id}</option>)}
                   </select>
                   <div className="help">{model ? `${model.description} ${model.supportsEffort ? 'Admite esfuerzo de razonamiento ajustable.' : 'No admite ajuste de esfuerzo.'}` : 'Modelo no disponible en el proveedor conectado.'}</div></div>
@@ -198,9 +202,10 @@ export function AgentDetail() {
             <section className="card"><div className="card-h"><div className="h3">Esfuerzo de razonamiento</div></div>
               <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div className="seg seg-lg" role="group" aria-label="Esfuerzo de razonamiento">
-                  {(['low', 'medium', 'high'] as const).map(k => <button key={k} aria-pressed={cfg.effort === k} disabled={!model?.supportsEffort} onClick={() => edit({ effort: k })}>{EFFORT_LABELS[k]}</button>)}
+                  {EFFORT_LEVELS.map(k => { const ok = effortAdjustable && effortLevels.includes(k); return <button key={k} aria-pressed={cfg.effort === k} disabled={!ok} title={ok ? undefined : `${cfg.model} no admite este nivel`} onClick={() => edit({ effort: k, effortApplied: true })}>{EFFORT_LABELS[k]}</button>; })}
                 </div>
-                <div className="help">{model?.supportsEffort ? `${model.name} admite esfuerzo ajustable. Un esfuerzo mayor mejora el razonamiento y aumenta el consumo de tokens.` : `${model?.name ?? 'El modelo'} no admite ajuste de esfuerzo; se usará su comportamiento predeterminado.`}</div>
+                <div className="help">{effortAdjustable ? `${model?.name ?? cfg.model} admite: ${effortLevels.map(k => EFFORT_LABELS[k].toLowerCase()).join(', ')}${EFFORT_LEVELS.some(k => !effortLevels.includes(k)) ? ` (no admite: ${EFFORT_LEVELS.filter(k => !effortLevels.includes(k)).map(k => EFFORT_LABELS[k].toLowerCase()).join(', ')})` : ''}. Un esfuerzo mayor mejora el razonamiento, pero tarda más y consume más (Muy alto y Máximo, notablemente más de tu suscripción con Claude Code).` : `${model?.name ?? 'El modelo'} no admite ajuste de esfuerzo; se usará su comportamiento predeterminado.`}</div>
+                {agentCc?.invocation && <div className="small" role="status" style={{ padding: '8px 10px', background: 'var(--color-surface-alt)', borderRadius: 8 }}><strong>Invocación real:</strong> {agentCc.invocation.note}{dirty && mine.effort ? ' (al guardar se aplicará el nivel elegido)' : ''}</div>}
               </div></section>
 
             <section className="card"><div className="card-h"><div className="h3">Límites de gasto</div></div>

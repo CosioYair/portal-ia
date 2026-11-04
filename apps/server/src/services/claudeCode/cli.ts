@@ -31,6 +31,8 @@ export interface CliTaskOptions {
   cli: CliCommand;
   detection: ClaudeCodeDetection;
   model: string;
+  /** Esfuerzo configurado del agente: se pasa con `--effort` solo si esta CLI lo admite con ese nivel. */
+  effort?: string | null;
   system: string;
   prompt: string;
   history?: { role: 'user' | 'assistant'; content: string }[];
@@ -90,10 +92,15 @@ export const ccError = (code: 'usage_limit' | 'call_cap' | 'backend_unavailable'
 /** Uso de una ejecución que terminó sin respuesta útil (p. ej. turnos agotados): se registra igual (consumió la suscripción). */
 export interface CliFailedUsage { inputTokens: number; outputTokens: number; numTurns: number | null; apiEquivalentUsd: number | null; durationMs: number; tools: Record<string, number>; maxTurns: number | null }
 
-export function buildArgs(o: Pick<CliTaskOptions, 'detection' | 'model' | 'schema' | 'maxTurns'>, files: { system: string; mcp: string | null }, mcpTools: string[]): string[] {
+/** El esfuerzo que se pasará de verdad a la CLI: el configurado, si ESTA versión lo anuncia en su ayuda; si no, ninguno. */
+export const cliEffort = (d: Pick<ClaudeCodeDetection, 'effortLevels'>, effort: string | null | undefined): string | null => effort && (d.effortLevels ?? []).includes(effort) ? effort : null;
+
+export function buildArgs(o: Pick<CliTaskOptions, 'detection' | 'model' | 'schema' | 'maxTurns' | 'effort'>, files: { system: string; mcp: string | null }, mcpTools: string[]): string[] {
   const args = ['--restricted', '-p', '--output-format', 'stream-json', '--verbose', '--model', o.model, '--system-prompt-file', files.system,
     '--tools', '', '--permission-mode', 'dontAsk', '--max-turns', String(Math.max(1, Math.floor(o.maxTurns))),
     '--no-session-persistence', '--disable-slash-commands', '--strict-mcp-config'];
+  const effort = cliEffort(o.detection, o.effort);
+  if (effort) args.push('--effort', effort);
   if (o.detection.capabilities.includes('permission-prompts')) args.push('--permission-prompts', 'none');
   if (files.mcp) args.push('--mcp-config', files.mcp, '--allowedTools', mcpTools.join(','));
   if (o.schema) args.push('--json-schema', JSON.stringify(o.schema.schema));

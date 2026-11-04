@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CAPABILITIES, KNOWLEDGE, TOOLS, definitionToFiles, filesToDefinition, slugify, type Agent, type AgentConfig, type Capability, type ExecutionBackend, type PortableFiles, type PortableKnowledge, type PortableSkill, type ProviderId } from '@portal-ia/domain';
+import { CAPABILITIES, KNOWLEDGE, TOOLS, definitionToFiles, filesToDefinition, slugify, type Agent, type AgentConfig, type Capability, type ExecutionBackend, type PortableFiles, type PortableKnowledge, type PortableSkill, type ProviderId, type ReasoningEffort, clampEffort } from '@portal-ia/domain';
 import { config, REPO_ROOT } from '../config.ts';
 import { agentsRepo, projectsRepo } from '../db/workspace.ts';
 import { departmentsRepo } from './departments.ts';
@@ -23,7 +23,7 @@ export interface WizardInput {
   name: string; role: string; summary: string; responsibilities: string[]; deliverables: string[];
   department: string; departmentPurpose?: string | null;
   scope: 'workspace' | 'project'; projectId: string | null;
-  harness: ExecutionBackend; model: string; provider?: ProviderId | null; effort: 'low' | 'medium' | 'high';
+  harness: ExecutionBackend; model: string; provider?: ProviderId | null; effort: ReasoningEffort;
   tools: string[]; knowledge: string[]; capabilities: Capability[]; autonomy: 'ask' | 'within_scope';
   instructions?: string | null; skills?: PortableSkill[]; references?: PortableKnowledge[];
   initials?: string | null; authorized: boolean;
@@ -55,7 +55,7 @@ export async function createAgentFromWizard(slug: string, i: WizardInput, source
   while (agents.keyExists(key)) key = `${key.replace(/-\d+$/, '')}-${n++}`;
   const cfg: AgentConfig = {
     name: i.name.trim(), specialization: i.summary.trim(), responsibilities: i.responsibilities.map(r => r.trim()).filter(Boolean).slice(0, 30),
-    provider, model: i.model, fallbacks: [], effort: i.effort,
+    provider, model: i.model, fallbacks: [], effort: clampEffort(provider, i.model, i.effort), effortApplied: true,
     tools: Object.fromEntries(i.tools.map(t => [t, true])), knowledge: Object.fromEntries(i.knowledge.map(k => [k, true])),
     monthlyLimitUsd: i.harness === 'api' ? 20 : 0, perTaskAuthUsd: i.harness === 'api' ? 2 : 0, capabilities: i.capabilities, backend: i.harness
   };

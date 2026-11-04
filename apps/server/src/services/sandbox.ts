@@ -8,6 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { Isolation, VerificationRun } from '@portal-ia/domain';
 import { scanSecrets } from './repoWrite.ts';
+import { testDigest } from './testTriage.ts';
 
 const execFileP = promisify(execFile);
 const IS_WIN = process.platform === 'win32';
@@ -198,8 +199,10 @@ export function failureBlocks(mid: string, max = 10_000): string {
  * la evidencia de qué pruebas se ejecutaron (HU-155: sin ellas, una prueba nueva que sí se ejecutó parecía no haberse
  * ejecutado y abría una corrección pagada).
  */
+/** Las claves que pudieran aparecer en una salida, redactadas (sin recortar nada). */
+export const redactSecrets = (s: string) => s.replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, 'sk-ant-…').replace(/\bsk-[A-Za-z0-9]{20,}\b/g, 'sk-…');
 export const clipSandboxOutput = (s: string) => {
-  const t = s.replace(/sk-ant-[A-Za-z0-9_-]{8,}/g, 'sk-ant-…').replace(/\bsk-[A-Za-z0-9]{20,}\b/g, 'sk-…');
+  const t = redactSecrets(s);
   if (t.length <= 40_000) return t;
   const mid = t.slice(15_000, -15_000); const fails = failureBlocks(mid);
   // Solo los nombres, con tope (la salida va en los encargos): si no caben todos, se dice, y su ausencia no cuenta como evidencia.
@@ -249,7 +252,9 @@ async function runUnguarded(worktree: string, repoRoot: string, command: string,
   const script = COMMANDS[command];
   if (!script) throw Object.assign(new Error(`Comando no permitido: ${command}`), { statusCode: 400 });
   const startedAt = new Date().toISOString(); const t0 = Date.now(); const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
-  const finish = (code: number | null, output: string, isolation: Isolation): VerificationRun => ({ command, exitCode: code, output: redact(output) + (scanSecrets(output) ? '\n[aviso: la salida contenía un posible secreto; se ha redactado]' : ''), startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - t0, isolation });
+  // «test»: el resumen (fallos, cuenta, pruebas en verde) sale de la salida COMPLETA, antes de recortarla para guardarla:
+  // el triaje frente a la base no puede depender de lo que el recorte dejó ver (testTriage.ts).
+  const finish = (code: number | null, output: string, isolation: Isolation): VerificationRun => ({ command, exitCode: code, output: redact(output) + (scanSecrets(output) ? '\n[aviso: la salida contenía un posible secreto; se ha redactado]' : ''), startedAt, finishedAt: new Date().toISOString(), durationMs: Date.now() - t0, isolation, ...(command === 'test' ? { tests: testDigest(redactSecrets(output), [worktree]) } : {}) });
   const st = await detectSandbox();
   if (st.available === 'docker') {
     // Dependencias Linux en un volumen propio: los node_modules del equipo (binarios de Windows, enlaces con rutas C:\…) no sirven dentro.

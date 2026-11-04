@@ -40,6 +40,7 @@ const { addManualItem } = await import('../src/services/backlog.ts');
 const { createStoryProcess, runStory } = await import('../src/services/storyExecution.ts');
 const { estimateCallUsd, newPipeline } = await import('../src/services/storyPipeline.ts');
 const { sandboxDeps } = await import('../src/services/verification.ts');
+const { isBaselineWorktree } = await import('../src/services/baseline.ts'); // la línea base (la prueba sin la historia) pasa
 const { runCliTask } = await import('../src/services/claudeCode/cli.ts');
 const { cliCommandFor, resetDetectionCache } = await import('../src/services/claudeCode/detect.ts');
 const { claudeCodeComplete, setBridgeUrl } = await import('../src/services/claudeCode/backend.ts');
@@ -641,7 +642,7 @@ async function maxTurnsStory(title: string, focusedOk: boolean) {
   ] });
   sandboxDeps.detect = async () => ({ available: 'docker', docker: true, wsl: false, detail: 'simulado', checkedAt: new Date().toISOString() });
   sandboxDeps.run = async (wt, _root, command) => {
-    const t = new Date().toISOString(); const ok = command !== 'test' || /corregido/.test(fs.readFileSync(path.join(wt, 'src/a.ts'), 'utf8'));
+    const t = new Date().toISOString(); const ok = command !== 'test' || isBaselineWorktree(wt) || /corregido/.test(fs.readFileSync(path.join(wt, 'src/a.ts'), 'utf8'));
     return { command, exitCode: ok ? 0 : 1, output: ok ? `${command} ok` : "TAP version 13\nnot ok 1 - a vale 2 y está corregido\n  ---\n  location: '/work/test/a.test.ts:1:1'\n  failureType: 'testCodeFailure'\n  error: 'falta la corrección en src/a.ts'\n  ...\n# tests 1\n# pass 0\n# fail 1", startedAt: t, finishedAt: new Date().toISOString(), durationMs: 5, isolation: 'docker' };
   };
   assert.equal((await inject('PUT', `${W}/claude-code/projects`, { authorized: true, projectIds: [project.id] })).statusCode, 200);

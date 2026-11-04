@@ -1,7 +1,7 @@
 import { documentJobsRunning } from './documentJobs.ts';
 import { retireSource } from './externalAgents.ts';
 import type { Agent, AgentConfig, AgentCreateInput, AgentDraftResult, ModelInfo, ProviderId, Scope } from '@portal-ia/domain';
-import { CAPABILITIES, KNOWLEDGE, TOOLS, pickByTier } from '@portal-ia/domain';
+import { CAPABILITIES, KNOWLEDGE, TOOLS, pickByTier, clampEffort } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
@@ -122,7 +122,7 @@ Responde SOLO con un objeto JSON con esta forma exacta:
     const config: Partial<AgentConfig> = {
       name: typeof j.name === 'string' ? j.name : undefined, specialization: typeof j.specialization === 'string' ? j.specialization : undefined,
       responsibilities: Array.isArray(j.responsibilities) ? j.responsibilities.filter((x: any) => typeof x === 'string').slice(0, 8) : undefined,
-      provider: providerId, model, effort: ['low', 'medium', 'high'].includes(j.effort) ? j.effort : 'medium', tools, knowledge,
+      provider: providerId, model, effort: clampEffort(providerId, model, ['low', 'medium', 'high', 'xhigh', 'max'].includes(j.effort) ? j.effort : 'medium'), tools, knowledge,
       monthlyLimitUsd: typeof j.monthlyLimitUsd === 'number' ? j.monthlyLimitUsd : 20, perTaskAuthUsd: typeof j.perTaskAuthUsd === 'number' ? j.perTaskAuthUsd : 2, fallbacks: [],
       capabilities: Array.isArray(j.capabilities) ? j.capabilities.filter((c: any) => CAPABILITIES.some(k => k.id === c)).slice(0, 3) : ['consultar']
     };

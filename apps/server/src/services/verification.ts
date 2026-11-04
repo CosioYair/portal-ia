@@ -44,7 +44,8 @@ export async function runVerification(slug: string, id: string, command: VerifyC
   const cur = procs.get(id)!;
   procs.setResult(id, { ...cur.result!, verifications: [...cur.result!.verifications, run] });
   procs.logExecution({ projectId: proc.projectId, agentId: qa?.agentId ?? '', kind: `verify:${command}:${run.isolation}`, status: run.exitCode === 0 ? 'done' : 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: run.startedAt });
-  // Faltar dependencias (86) es un problema del entorno, no del código: no genera lección.
-  if (run.exitCode !== 0 && run.isolation !== 'unavailable' && run.exitCode !== DEPS_MISSING_EXIT) recordDetections(slug, id, repo.path);
+  // Faltar dependencias (86) es un problema del entorno, no del código: no genera lección. «test» tampoco aquí: antes se
+  // separa lo que ya fallaba sin la historia (línea base); una lección nunca nace de un fallo que la historia no causó.
+  if (run.exitCode !== 0 && run.isolation !== 'unavailable' && run.exitCode !== DEPS_MISSING_EXIT && command !== 'test') recordDetections(slug, id, repo.path);
   return run;
 }

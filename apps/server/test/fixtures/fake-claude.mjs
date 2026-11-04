@@ -21,6 +21,15 @@ const opt = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] 
 const a = args.filter(x => x !== '--restricted');
 
 if (a[0] === '--version') { log({ kind: 'version' }); console.log(`${sc.version ?? '2.1.311'} (Claude Code)`); process.exit(0); }
+// Ayuda: el fragmento real de 2.1.311 para --effort y --model (el Portal lee de aquí los niveles que admite `--effort`).
+// `sc.effortLevels: null` simula una CLI sin --effort; una lista, otra versión con otros niveles.
+if (a[0] === '--help') {
+  log({ kind: 'help' });
+  const levels = sc.effortLevels === null ? null : (sc.effortLevels ?? ['low', 'medium', 'high', 'xhigh', 'max']);
+  console.log(['Usage: claude [options] [command] [prompt]', '', 'Options:', ...(levels ? ['  --effort <level>                      Effort level for the current session', `                                        (${levels.join(', ')})`] : []),
+    '  --model <model>                       Model for the current session. Provide', "                                        an alias for the latest model (e.g.", "                                        'fable', 'opus', or 'sonnet') or a", "                                        model's full name."].join('\n'));
+  process.exit(0);
+}
 if (a[0] === 'auth' && a[1] === 'status') {
   log({ kind: 'auth' });
   const auth = sc.auth ?? 'subscription';

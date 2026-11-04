@@ -10,7 +10,7 @@ import { config, REPO_ROOT } from '../../config.ts';
 import { agentsRepo, claudeCodeRunsRepo, processesRepo, projectsRepo } from '../../db/workspace.ts';
 import { readRepoFile, repoRoot } from '../repoWrite.ts';
 import { connectedWorkersFor, registerJobTask, setProgressListener, submitTerminalTask, type BridgeUse } from './bridge.ts';
-import { BRIDGE_SCRIPT, ccError, runCliTask, type CliEvent, type CliFailedUsage } from './cli.ts';
+import { BRIDGE_SCRIPT, ccError, cliEffort, runCliTask, type CliEvent, type CliFailedUsage } from './cli.ts';
 export { BRIDGE_SCRIPT };
 import { cliCommandFor, findCli, lastDetection, verifiedDetection } from './detect.ts';
 import { getClaudeCodeSettings, projectAuthorized } from './settings.ts';
@@ -201,7 +201,7 @@ export interface ClaudeCodeCompletion extends CompletionResult { backendLabel: s
 /** Presupuesto de llamadas a herramientas del puente por ejecución: deja turnos para responder (no sube el límite de turnos). */
 export const toolBudget = (maxTurns: number) => Math.max(4, 2 * (maxTurns - 2));
 /** Herramientas del puente con los límites REALES de la ejecución: cuántos turnos, cuántas llamadas y cuándo responder. */
-export const readHint = (maxTurns: number) => `
+export const readHint = (maxTurns: number, interactive = false) => `
 
 # Herramientas del Portal (solo lectura)
 El contexto de arriba ya trae lo que el equipo conoce (plan y archivos): úsalo primero. Solo si falta algo imprescindible,
@@ -212,7 +212,7 @@ Límites de esta ejecución: ${maxTurns} turnos en total y como máximo ${toolBu
 lecturas o búsquedas independientes a la vez, en el mismo turno. Responde antes de agotar los turnos (a más tardar en el
 turno ${Math.max(1, maxTurns - 1)}) con lo que tengas, marcando lo que no pudiste comprobar; si el Portal te dice «presupuesto
 agotado», responde ya.
-No puedes escribir archivos ni ejecutar órdenes: entrega los cambios en el formato pedido; el Portal los valida y los aplica.`;
+${interactive ? 'Estas herramientas son de solo lectura: úsalas para investigar antes de proponer. Los cambios de código los ejecuta el equipo con un encargo que tú preparas y el propietario autoriza (worktree aislado, sandbox, QA, Gauntlet); las pruebas reales, con la operación run_checks. No digas que no puedes cambiar código: di cómo lo harás.' : 'No puedes escribir archivos ni ejecutar órdenes: entrega los cambios en el formato pedido; el Portal los valida y los aplica.'}`;
 
 /** Marca de una respuesta recuperada sin herramientas (la ven quien la recibe y el propietario). */
 export const RECOVERED_NOTE = '_(Respuesta recuperada sin herramientas tras agotar los turnos de Claude Code: puede tener puntos sin comprobar.)_\n';
@@ -310,7 +310,9 @@ async function claudeCodeRun(t: ExecutionTarget, req: CompletionRequest, signal:
     await acquireSlot(s.maxConcurrent, signal, n => say(lane === 'interactive' ? 'En cola: el Asistente termina otra respuesta. Nada se ha enviado y el plazo aún no corre.' : `En cola: ${n} ejecución(es) de Claude Code en curso (máximo ${s.maxConcurrent}). Nada se ha enviado y el plazo de la llamada aún no corre.`, 'queued'), lane);
     // Tope de llamadas: comprobado y registrado en el mismo tramo síncrono (sin «await» entre medias): sin carreras.
     const cap = callCapCheck(t.slug, t.processId); if (!cap.ok) { releaseSlot(lane); throw ccError('call_cap', cap.detail); }
-    const run = runs.start({ mode: 'cli', projectId: t.projectId, processId: t.processId, stepId: t.stepId, agentId: t.agent.id, agentName: t.agent.config.name, model: req.model, billing: det.billing, authMethod: det.authMethod, subscriptionType: det.subscriptionType });
+    // Esfuerzo: el que eligió el propietario para este agente (no el fijo de una llamada interna); si no lo eligió, el predeterminado de la CLI.
+    const wanted = t.agent.config.effortApplied && req.effort === t.agent.config.effort ? req.effort : null;
+    const run = runs.start({ mode: 'cli', projectId: t.projectId, processId: t.processId, stepId: t.stepId, agentId: t.agent.id, agentName: t.agent.config.name, model: req.model, effort: cliEffort(det, wanted), billing: det.billing, authMethod: det.authMethod, subscriptionType: det.subscriptionType });
     const job = tools && s.repoRead && readRoot ? registerJobTask({ ...base, mode: 'cli', system: '', prompt: '', schema: null, readRoot, runId: run.id, toolBudget: toolBudget(s.maxTurns) }) : null;
     liveListeners.set(run.id, m => say(m));
     const started = Date.now();
@@ -324,7 +326,7 @@ async function claudeCodeRun(t: ExecutionTarget, req: CompletionRequest, signal:
     try {
       say(`Enviando el encargo a Claude Code · ${label}`, 'sending');
       const r = await runCliTask({
-        cli, detection: det, model: req.model, system: job ? req.system + readHint(s.maxTurns) : req.system, prompt: req.user, history: req.history, images: req.images,
+        cli, detection: det, model: req.model, effort: wanted, system: job ? req.system + readHint(s.maxTurns, !!t.interactive) : req.system, prompt: req.user, history: req.history, images: req.images,
         schema: req.responseSchema ?? null, maxTurns: tools ? s.maxTurns : RECOVERY_TURNS, timeoutMs, signal, onEvent, overageAccepted,
         mcp: job ? { command: process.execPath, args: [BRIDGE_SCRIPT], env: { PORTAL_URL: bridgeUrl, PORTAL_BRIDGE_TOKEN: job.token, PORTAL_BRIDGE_MODE: 'job' }, tools: JOB_TOOLS.map(n => `mcp__portal__${n}`) } : null
       });

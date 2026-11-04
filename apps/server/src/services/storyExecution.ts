@@ -1,7 +1,7 @@
 import { agentCaller, completeWith, RECOVERED_NOTE } from './claudeCode/backend.ts';
 import type { Agent, AssessmentEstimate, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, Process, ProcessStep, ProviderId, ReviewVerdict, RuntimeCheck, StoryPlan, TeamOverride, TeamRole } from '@portal-ia/domain';
 import { composeTeam, orderedMembers, type StoryText } from './teamComposer.ts';
-import { injectLessons, recordDetections } from './lessons.ts';
+import { injectLessons, recordDetections, recordLessonOutcomes } from './lessons.ts';
 import { practicesFor } from './agentTemplates.ts';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -20,7 +20,7 @@ export { parseFileBlocks, parseRuntimeChecks } from './devOutput.ts';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
+import { INTERNAL_WORKSPACE, EFFORT_THINKING_TOKENS } from '@portal-ia/domain';
 import { setWorkStatus, workItemOf, type WorkItem } from './workItems.ts';
 import { REPO_ROOT } from '../config.ts';
 import { expandHome } from '../routes/fs.ts';
@@ -150,7 +150,7 @@ export function estimateWork(slug: string, projectId: string, item: StoryText, o
   const steps = plan.map(s => {
     const p = estimatePricing(s.agent.config.provider, s.agent.config.model);
     const inTok = Math.ceil(ctxChars / 3.5) + 2000 + (s.role === 'implementer' ? 20000 : s.role === 'reviewer' ? 12000 : 0);
-    const outTok = s.maxTokens * (s.role === 'implementer' ? 0.7 : 0.6) + (s.agent.config.effort === 'high' ? 6000 : s.agent.config.effort === 'medium' ? 2500 : 0);
+    const outTok = s.maxTokens * (s.role === 'implementer' ? 0.7 : 0.6) + EFFORT_THINKING_TOKENS[s.agent.config.effort];
     return { agentId: s.agent.id, agentName: s.agent.config.name, title: s.title, model: s.agent.config.model, estimatedUsd: (inTok * p.inPerM + outTok * p.outPerM) / 1_000_000, role: s.role, reason: s.reason };
   });
   const estimatedUsd = steps.reduce((a, s) => a + s.estimatedUsd, 0);
@@ -452,6 +452,7 @@ Responde SOLO con JSON: {"approve": boolean, "summary": string, "issues": string
     log({ processId, status: finalStatus, pipeline: procs.get(processId)?.result?.pipeline?.state, spent: procs.get(processId)?.spentUsd.toFixed(4) }, 'historia finalizada');
     // M4: detección determinista de errores objetivos (sin IA) → lecciones «detectadas» con evidencia.
     try { const ls = recordDetections(slug, processId, repo.path); if (ls.length) log({ processId, lessons: ls.map(l => l.detector) }, 'lecciones detectadas'); } catch (e: any) { log({ err: e.message }, 'detección de lecciones fallida'); }
+    try { const o = recordLessonOutcomes(slug, processId, repo.path); if (o.held.length || o.recurred.length) log({ processId, held: o.held.length, recurred: o.recurred.length, refuted: o.refuted.length }, 'lecciones medidas en una tarea posterior'); } catch (e: any) { log({ err: e.message }, 'medición de lecciones fallida'); }
   }
 }
 

@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { agentFoldersRepo, syncAgentFolder } from '../services/agentFolders.ts';
 import { harnessModels } from '../services/harness/index.ts';
 import { publishProjectMain } from '../services/capabilities.ts';
-import { KNOWLEDGE, TOOLS, type AgentConfig, type AgentCreateInput } from '@portal-ia/domain';
+import { effortLevelsFor, KNOWLEDGE, TOOLS, type AgentConfig, type AgentCreateInput } from '@portal-ia/domain';
 import { createAgent, deleteAgent, draftAgent, estimateDraft } from '../services/agentFactory.ts';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, projectsRepo } from '../db/workspace.ts';
@@ -21,7 +21,8 @@ const agentConfigSchema = z.object({
   provider: z.enum(['anthropic', 'openai']),
   model: z.string().min(1).max(120),
   fallbacks: z.array(z.string().min(1).max(120)).max(10),
-  effort: z.enum(['low', 'medium', 'high']),
+  effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']),
+  effortApplied: z.boolean().optional(),
   tools: z.record(z.string(), z.boolean()),
   knowledge: z.record(z.string(), z.boolean()),
   monthlyLimitUsd: z.number().min(0).max(100000),
@@ -196,6 +197,11 @@ export async function workspaceRoutes(app: FastifyInstance) {
       for (const f of cfg.fallbacks) if (!models.some(m => m.id === f)) return reply.code(400).send({ error: `Modelo alternativo no disponible: ${f}` });
     }
     cfg.fallbacks = cfg.fallbacks.filter(f => f !== cfg.model);
+    // Esfuerzo: solo un nivel que el modelo admite de verdad (xhigh y max no existen en todos; nunca se inventa compatibilidad).
+    // Elegido por el propietario: también se pasa a Claude Code (antes no se pasaba y la CLI usaba su predeterminado).
+    cfg.effortApplied = cfg.effort !== agent.config.effort || (req.body as any)?.effortApplied === true || !!agent.config.effortApplied;
+    const levels = effortLevelsFor(cfg.provider, cfg.model);
+    if (!levels.includes(cfg.effort)) return reply.code(400).send({ error: `El modelo «${cfg.model}» no admite el esfuerzo «${cfg.effort}». Admite: ${levels.join(', ')}.`, code: 'effort_unsupported', levels });
     for (const k of Object.keys(cfg.tools)) if (!TOOLS.some(t => t.id === k)) return reply.code(400).send({ error: `Herramienta desconocida: ${k}` });
     for (const k of Object.keys(cfg.knowledge)) if (!KNOWLEDGE.some(t => t.id === k)) return reply.code(400).send({ error: `Fuente de conocimiento desconocida: ${k}` });
     const updated = agents.updateConfig(id, cfg);

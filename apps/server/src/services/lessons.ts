@@ -3,8 +3,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { findingKey } from '@portal-ia/domain';
-import type { Lesson, LessonEvidence, LessonStatus, ModelInfo, Process, ProviderId, TeamRole } from '@portal-ia/domain';
+import { findingKey, verificationPassed } from '@portal-ia/domain';
+import type { Lesson, LessonEvidence, LessonProof, LessonStatus, ModelInfo, Process, ProviderId, TeamRole } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, workspaceDb } from '../db/workspace.ts';
@@ -35,10 +35,13 @@ export function ensureLessonsTable(slug: string) {
   // validación, pero fuera de las listas e inyecciones de siempre (agent_id NULL en todas las lecciones existentes).
   const cols = (db.prepare(`PRAGMA table_info(lessons)`).all() as any[]).map(c => c.name);
   if (!cols.includes('agent_id')) db.exec(`ALTER TABLE lessons ADD COLUMN agent_id TEXT`);
+  // Demostración por tareas posteriores (aprendida / refutada): columnas nuevas, las lecciones existentes empiezan sin pruebas.
+  if (!cols.includes('proof_json')) db.exec(`ALTER TABLE lessons ADD COLUMN proof_json TEXT NOT NULL DEFAULT '[]'`);
+  if (!cols.includes('proven_at')) db.exec(`ALTER TABLE lessons ADD COLUMN proven_at TEXT`);
   return db;
 }
 
-const map = (r: any): Lesson => ({ id: r.id, projectId: r.project_id, role: r.role, tags: JSON.parse(r.tags || '[]'), status: r.status, version: r.version, parentId: r.parent_id, title: r.title, detector: r.detector, evidence: JSON.parse(r.evidence_json), rootCause: r.root_cause, correctiveAction: r.corrective_action, lessonText: r.lesson_text, source: r.source, usedCount: r.used_count, recurrenceCount: r.recurrence_count, promotedTo: r.promoted_to, createdAt: r.created_at, updatedAt: r.updated_at, validatedAt: r.validated_at, agentId: r.agent_id ?? null });
+const map = (r: any): Lesson => ({ id: r.id, projectId: r.project_id, role: r.role, tags: JSON.parse(r.tags || '[]'), status: r.status, version: r.version, parentId: r.parent_id, title: r.title, detector: r.detector, evidence: JSON.parse(r.evidence_json), rootCause: r.root_cause, correctiveAction: r.corrective_action, lessonText: r.lesson_text, source: r.source, usedCount: r.used_count, recurrenceCount: r.recurrence_count, promotedTo: r.promoted_to, createdAt: r.created_at, updatedAt: r.updated_at, validatedAt: r.validated_at, agentId: r.agent_id ?? null, proof: JSON.parse(r.proof_json || '[]'), provenAt: r.proven_at ?? null });
 
 export function lessonsRepo(slug: string) {
   const db = ensureLessonsTable(slug);
@@ -70,6 +73,13 @@ export function lessonsRepo(slug: string) {
     },
     bumpUsed(ids: string[]) { const st = db.prepare(`UPDATE lessons SET used_count = used_count + 1 WHERE id = ?`); for (const id of ids) st.run(id); },
     bumpRecurrence(id: string) { db.prepare(`UPDATE lessons SET recurrence_count = recurrence_count + 1, updated_at = ? WHERE id = ?`).run(now(), id); },
+    /** Añade la evidencia de una tarea posterior (una por proceso) y, si la demuestra por primera vez, la marca aprendida. */
+    addProof(id: string, p: LessonProof) {
+      const cur = this.get(id); if (!cur || (cur.proof ?? []).some(x => x.processId === p.processId)) return cur;
+      const proof = [...(cur.proof ?? []), p].slice(-20);
+      db.prepare(`UPDATE lessons SET proof_json = ?, proven_at = COALESCE(proven_at, ?), updated_at = ? WHERE id = ?`).run(JSON.stringify(proof), p.result === 'held' ? p.at : null, now(), id);
+      return this.get(id);
+    },
     /** Nueva versión de una lección validada (la anterior queda «obsoleta» con enlace). */
     newVersion(id: string, patch: { lessonText?: string | null; rootCause?: string | null; correctiveAction?: string | null; role?: string | null; tags?: string[] }): Lesson {
       const cur = this.get(id)!;
@@ -104,7 +114,7 @@ export function detectInProcess(slug: string, proc: Process, repoPath: string | 
     if (!referenced) out.push({ detector: 'unused_module', title: `Módulo nuevo sin importar: ${c.path}`, role: 'implementer', tags: ['wiring', 'implementar'], evidence: ev(c.path, `Se creó ${c.path} pero ningún otro archivo del diff ni del repositorio menciona «${base}».`), dedupeKey: key('unused_module', c.path) });
   }
   if (r?.review && !r.review.approve) out.push({ detector: 'qa_rejected', title: 'QA no aprobó el diff', role: 'implementer', tags: ['qa', 'implementar'], evidence: ev(null, `${r.review.summary} · ${r.review.issues.slice(0, 3).join(' · ')}`), dedupeKey: key('qa_rejected', null) });
-  const lastV = ['typecheck', 'test', 'build'].map(c => (r?.verifications ?? []).filter(v => v.command === c).at(-1)).filter(v => v && v.exitCode !== 0 && v.isolation !== 'unavailable');
+  const lastV = ['typecheck', 'test', 'build'].map(c => (r?.verifications ?? []).filter(v => v.command === c).at(-1)).filter(v => v && !verificationPassed(v) && v.isolation !== 'unavailable');
   for (const v of lastV) out.push({ detector: 'verification_failed', title: `Verificación fallida: ${v!.command}`, role: 'implementer', tags: ['verify', v!.command, 'implementar'], evidence: ev(null, v!.output.slice(-600)), dedupeKey: key(`verification_failed:${v!.command}`, null) });
   if (extra.updateFailedLog) out.push({ detector: 'activation_failed', title: 'Activación fallida (reconstruir y reiniciar)', role: 'implementer', tags: ['activation', 'build'], evidence: ev(null, extra.updateFailedLog.slice(-600)), dedupeKey: key('activation_failed', null) });
   for (const x of r?.runtimeChecks?.results ?? []) if (x.status === 'fail') out.push({ detector: 'runtime_failed', title: `Comprobación en ejecución fallida: ${x.check.kind} ${x.check.path}`, role: 'implementer', tags: ['runtime', x.check.kind], evidence: ev(x.check.path, x.detail), dedupeKey: key(`runtime_failed:${x.check.kind}:${x.check.path}`, null) });
@@ -186,6 +196,39 @@ export function recordDetections(slug: string, processId: string, repoPath: stri
   return created;
 }
 
+/** Reincidencias seguidas (sin una tarea demostrada en medio) que retiran una lección de los prompts. */
+export const REFUTE_AFTER = 2;
+
+/**
+ * Tras una tarea, cada lección validada que llevaba inyectada recibe su evidencia (LessonProof). Solo cuentan tareas
+ * POSTERIORES a la que la originó. «Aprendida» = una tarea así terminó verificada sin repetir su error; si el error vuelve
+ * a ocurrir con ella presente REFUTE_AFTER veces seguidas, queda «refutada»: deja de inyectarse (una lección equivocada no
+ * se queda como conocimiento permanente) y el propietario la revisa. Sin IA.
+ */
+export function recordLessonOutcomes(slug: string, processId: string, repoPath: string | null): { held: string[]; recurred: string[]; refuted: string[] } {
+  const out = { held: [] as string[], recurred: [] as string[], refuted: [] as string[] };
+  const proc = processesRepo(slug).get(processId);
+  if (!proc || proc.kind !== 'story_execution') return out;
+  const used = new Set(proc.steps.flatMap(s => s.lessonsUsed ?? []));
+  if (!used.size) return out;
+  const repo = lessonsRepo(slug);
+  const fired = new Set(detectInProcess(slug, proc, repoPath).map(d => d.detector));
+  // Solo con la tarea TERMINADA y verificada hay conclusión: una pausa con un fallo pendiente aún puede corregirse (no es una reincidencia).
+  const verified = proc.result?.pipeline?.state === 'verified';
+  if (!verified) return out;
+  for (const id of used) {
+    const l = repo.get(id); if (!l || l.status !== 'validated' || l.evidence.processId === processId) continue;
+    const recurred = fired.has(l.detector) || l.tags.some(t => fired.has(t));
+    if (!recurred && !verified) continue; // sin conclusión: ni terminó verificada ni repitió el error
+    const after = repo.addProof(id, { processId, processTitle: proc.title, result: recurred ? 'recurred' : 'held', detail: recurred ? `El mismo error («${l.detector}») volvió a ocurrir con la lección inyectada.` : 'Terminó verificada sin repetir el error de la lección.', at: now() });
+    if (!after) continue;
+    (recurred ? out.recurred : out.held).push(id);
+    const tail: LessonProof[] = []; for (const x of [...(after.proof ?? [])].reverse()) { if (x.result === 'held') break; tail.push(x); }
+    if (recurred && tail.length >= REFUTE_AFTER) { repo.update(id, { status: 'refuted' }); out.refuted.push(id); }
+  }
+  return out;
+}
+
 // ---------- 2 · Propuesta (IA, autorizada) ----------
 export function estimatePropose(slug: string, lessonId: string): { agentId: string; agentName: string; model: string; estimatedUsd: number } {
   const l = lessonsRepo(slug).get(lessonId); if (!l) throw Object.assign(new Error('Lección no encontrada'), { statusCode: 404 });
@@ -228,7 +271,8 @@ export function validateLesson(slug: string, id: string, patch: { lessonText?: s
   const repo = lessonsRepo(slug); const l = repo.get(id); if (!l) throw Object.assign(new Error('Lección no encontrada'), { statusCode: 404 });
   const text = (patch.lessonText ?? l.lessonText ?? '').trim();
   if (text.length < 10) throw Object.assign(new Error('La lección necesita un texto (≥ 10 caracteres) que se inyectará en los prompts.'), { statusCode: 400 });
-  if (l.status === 'validated') return repo.newVersion(id, { lessonText: text, rootCause: patch.rootCause ?? l.rootCause, correctiveAction: patch.correctiveAction ?? l.correctiveAction, role: patch.role === undefined ? l.role : patch.role, tags: patch.tags ?? l.tags });
+  // Una retirada (refutada) que corriges es una versión NUEVA: empieza sin pruebas (la anterior conserva su historial).
+  if (l.status === 'validated' || l.status === 'refuted') return repo.newVersion(id, { lessonText: text, rootCause: patch.rootCause ?? l.rootCause, correctiveAction: patch.correctiveAction ?? l.correctiveAction, role: patch.role === undefined ? l.role : patch.role, tags: patch.tags ?? l.tags });
   return repo.update(id, { status: 'validated', lessonText: text, rootCause: patch.rootCause ?? l.rootCause, correctiveAction: patch.correctiveAction ?? l.correctiveAction, role: patch.role === undefined ? l.role : patch.role, tags: patch.tags ?? l.tags, validatedAt: now(), source: l.source === 'detector' ? 'owner' : l.source })!;
 }
 export function setLessonStatus(slug: string, id: string, status: 'rejected' | 'obsolete'): Lesson {

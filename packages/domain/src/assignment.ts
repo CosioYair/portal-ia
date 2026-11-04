@@ -31,7 +31,7 @@ export interface AssignmentOutcome {
   commit: string | null;
   worktree: string | null;
   /** Últimas verificaciones del commit aplicado (comando y código de salida). */
-  verifications: { command: string; exitCode: number | null; isolation: string | null }[];
+  verifications: { command: string; exitCode: number | null; isolation: string | null; triage?: import('./types.ts').BaselineTriage | null }[];
   qa: string | null;
   gauntlet: { mode: string; status: string; rounds: number; openFindings: number } | null;
   /** Agentes que trabajaron (nombre y papel). */

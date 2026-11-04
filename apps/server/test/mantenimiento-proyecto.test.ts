@@ -29,7 +29,7 @@ const { threadRepo } = await import('../src/services/storyThread.ts');
 const { CAPABILITIES } = await import('../src/services/capabilities.ts');
 const { prepareOperations, truthfulReply, withReviewFacts, assistantRepo } = await import('../src/services/assistant.ts');
 const { reviewFactsBlock, withoutReviewFacts, REVIEW_PENDING_POINTER } = await import('../src/services/reviewFacts.ts');
-const { recoverInterruptedPlans, setPlanSource, getPlan } = await import('../src/services/projectMaintenance.ts');
+const { recoverInterruptedPlans, setPlanSource, getPlan, explainRemoteError } = await import('../src/services/projectMaintenance.ts');
 const { conversationsRepo } = await import('../src/db/conversations.ts');
 const { stopBatchScheduler } = await import('../src/services/batchRunner.ts');
 
@@ -187,14 +187,17 @@ test('estado cambiado: si main avanza el plan caduca entero; si una rama cambia,
 
 test('el remoto rechaza (rama protegida o sin permiso): se explica, no se fuerza y se puede reintentar', async () => {
   g(repo, 'checkout', '-qb', 'portal-ia/hu-010'); commit(repo, 'e.txt', 'HU-010'); g(repo, 'checkout', '-q', 'main'); g(repo, 'merge', '-q', '--ff-only', 'portal-ia/hu-010'); g(repo, 'push', '-q', 'origin', 'main', 'portal-ia/hu-010');
-  const hook = path.join(bare, 'hooks', 'pre-receive');
-  fs.writeFileSync(hook, '#!/bin/sh\necho "GH006: Protected branch update failed" >&2\nexit 1\n'); fs.chmodSync(hook, 0o755);
+  // El remoto no deja borrar (como una rama protegida), sin gancho ejecutable: en el sandbox Linux /tmp no permite ejecutar,
+  // el gancho no corría y la prueba fallaba en main, cargándose a cualquier historia verificada allí (HU-177).
+  g(bare, 'config', 'receive.denyDeletes', 'true');
+  // El mensaje de GitHub (regla de rama protegida) se explica igual; se comprueba sin depender de ganchos.
+  assert.match(explainRemoteError('remote: error: GH006: Protected branch update failed for refs/heads/main.'), /protege esta rama/);
   const p = await plan();
   await inject('POST', `${W}/maintenance/plans/${p.id}/execute`, { authorized: true, selection: [{ itemId: 'remote:portal-ia/hu-010', option: 'delete_remote' }] });
   const f = await waitDone(p.id);
   assert.equal(f.status, 'partial'); assert.equal(f.execution.outcomes[0].status, 'failed'); assert.match(f.execution.outcomes[0].message, /protege esta rama/);
   assert.ok(remoteHeads().includes('portal-ia/hu-010'));
-  fs.unlinkSync(hook);
+  g(bare, 'config', 'receive.denyDeletes', 'false');
   assert.equal((await inject('POST', `${W}/maintenance/plans/${p.id}/execute`, { authorized: true, selection: [{ itemId: 'remote:portal-ia/hu-010', option: 'delete_remote' }] })).status, 200, 'reintentar lo que falló');
   const f2 = await waitDone(p.id); assert.equal(f2.status, 'done'); assert.ok(!remoteHeads().includes('portal-ia/hu-010'));
 });
@@ -248,9 +251,17 @@ test('el Asistente: la capacidad prepara la revisión (sin ejecutar) y lo que fa
   await assert.rejects(() => CAPABILITIES.reconcile_project.execute({ company: S, project: project.id }), /pantalla/);
   const generic = await prepareOperations([{ type: 'request_operation', capability: 'borrar_todo', purpose: 'limpiar' }], { conversationId: 'conv-1', workspaceSlug: null, projectId: null } as any);
   assert.ok(generic.every(a => a.type === 'info'), 'un borrado genérico nunca se propone desarrollar');
+  // Lo que falta se propone desarrollar con un ENCARGO en borrador (sin historia: solo se crean si el propietario las pide).
+  const stories = backlogRepo(S).list(project.id).length;
   const missing = await prepareOperations([{ type: 'request_operation', capability: 'exportar_backlog', purpose: 'compartirlo' }], { conversationId: 'conv-1', workspaceSlug: null, projectId: null } as any);
-  assert.equal(missing[0].type, 'info'); assert.equal(missing[1].type, 'propose_local'); assert.equal(missing[1].local!.op, 'add_backlog_item');
-  assert.match(String(missing[1].local!.params.description), /conv-1/, 'la historia enlaza la conversación para retomarla');
+  assert.equal(missing[0].type, 'info'); assert.equal(missing[1].type, 'propose_assignment'); assert.equal(missing[1].status, 'pending');
+  const { assignmentsRepo } = await import('../src/db/assignments.ts');
+  const en = assignmentsRepo(S).get(missing[1].assignmentId!)!;
+  assert.equal(en.status, 'draft', 'borrador: no se ejecuta nada hasta que lo autorizas'); assert.equal(en.conversationId, 'conv-1', 'enlaza la conversación para retomarla');
+  assert.match(en.request, /conv-1/); assert.ok(en.criteria.length >= 2);
+  assert.equal(backlogRepo(S).list(project.id).length, stories, 'no se crea ninguna historia');
+  const again = await prepareOperations([{ type: 'request_operation', capability: 'exportar_backlog', purpose: 'otra vez' }], { conversationId: 'conv-1', workspaceSlug: null, projectId: null } as any);
+  assert.equal(again.length, 1); assert.match(again[0].detail ?? '', new RegExp(`Ya hay un encargo para desarrollarla: ${en.code}`), 'sin duplicados');
 });
 
 test('copias que nunca se sobrescriben: rama local con un commit más que la del remoto', async () => {

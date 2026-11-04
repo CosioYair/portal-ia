@@ -9,6 +9,8 @@ import type { Assignment, AssistantConversation, ConversationArtifact, Conversat
 import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
 import { ownerNeeded, ownerToken, setOwnerToken } from './owner.ts';
 
+/** Invocación real del arnés de un agente (lo que se le pasa de verdad, calculado en el servidor sin ejecutar nada). */
+export interface AgentInvocation { harness: ExecutionBackend; model: string; effort: string; modelLevels: string[]; cli: { version: string | null; billing: string; effortLevels: string[]; checkedAt: string } | null; effortPassed: string | null; note: string }
 export class ApiError extends Error {
   constructor(public status: number, message: string, public body?: any) { super(message); }
 }
@@ -87,7 +89,7 @@ export type ConversationArtifactView = ConversationArtifact & {
   deliverable: string | null; challenge: { agentName: string; text: string } | null; consulted: { agentName: string; question: string; answer: string }[];
   backlogOps: { op: string; title?: string; criterion?: string; estimate?: string | null; dependsOn?: string | null }[]; opsApplied: { summary: string[] } | null;
 };
-export type AssignmentView = Assignment & { statusLabel: string; process: { id: string; status: string; spentUsd: number; budgetUsd: number | null; estimatedUsd: number | null; steps: number; resumable?: boolean; ownerRound?: boolean; question?: string | null; pipeline: { state: string; phase: string | null; reason: string | null; corrections: number } | null } | null };
+export type AssignmentView = Assignment & { statusLabel: string; process: { id: string; status: string; spentUsd: number; budgetUsd: number | null; estimatedUsd: number | null; steps: number; resumable?: boolean; ownerRound?: boolean; question?: string | null; pipeline: { state: string; phase: string | null; reason: string | null; corrections: number } | null; changes?: { path: string; action: string; before: number; after: number }[]; applied?: { branch: string; commit: string } | null; merged?: { commit: string; into: string; mergedAt: string } | null; checks?: { command: string; exitCode: number | null; isolation: string | null; passed: boolean; preexisting: number }[]; qa?: string | null; gauntlet?: string | null; ack?: { preexisting: string[]; testUpdates: string[] } } | null };
 export interface ConversationDetailView { conversation: AssistantConversation; stage: ConversationStage; decisions: ConversationDecision[]; artifacts: ConversationArtifactView[]; assignments: AssignmentView[]; next: string }
 export interface UsageGateView { report: ClaudeCodeUsageReport | null; ok: boolean; reason: string | null; warning: string | null }
 export interface AssignmentAuthPreview {
@@ -149,7 +151,7 @@ export const api = {
   claudeCodeDetect: () => request<ClaudeCodeStatusView>('/api/claude-code/detect', { method: 'POST' }),
   claudeCodeSettings: (patch: Record<string, unknown>) => request<ClaudeCodeStatusView>('/api/claude-code/settings', { method: 'PUT', body: JSON.stringify(patch) }),
   claudeCodeSmokeTest: () => request<{ ok: boolean; answer: string; authMethod: string | null; subscriptionType: string | null; apiKeySource: string | null; tokensIn: number; tokensOut: number; apiEquivalentUsd: number | null; durationMs: number; apiBudgetChargedUsd: number }>('/api/claude-code/smoke-test', { method: 'POST', body: JSON.stringify({ authorized: true }) }),
-  agentClaudeCode: (slug: string, id: string) => request<{ backend: ExecutionBackend; status: ClaudeCodeStatusView; projects: { id: string; authorized: boolean }[]; limits: { maxConcurrent: number; maxDurationSec: number; maxTurns: number; repoRead: boolean; fallback: 'none' | 'api' }; usage: ClaudeCodeUsage; runs: ClaudeCodeRun[]; consoles: { id: string; name: string; connected: boolean; expired: boolean }[] }>(`/api/workspaces/${slug}/agents/${id}/claude-code`),
+  agentClaudeCode: (slug: string, id: string) => request<{ backend: ExecutionBackend; status: ClaudeCodeStatusView; projects: { id: string; authorized: boolean }[]; limits: { maxConcurrent: number; maxDurationSec: number; maxTurns: number; repoRead: boolean; fallback: 'none' | 'api' }; usage: ClaudeCodeUsage; runs: ClaudeCodeRun[]; consoles: { id: string; name: string; connected: boolean; expired: boolean }[]; invocation?: AgentInvocation }>(`/api/workspaces/${slug}/agents/${id}/claude-code`),
   decideAssistantOperation: (messageId: string, operationId: string, decision: 'approve' | 'reject') => request<{ message: AssistantMessage }>(`/api/assistant/messages/${messageId}/operations/${operationId}/${decision}`, { method: 'POST', body: JSON.stringify(decision === 'approve' ? { authorized: true } : {}) }),
   processBackends: (slug: string, id: string) => request<ProcessBackends>(`/api/workspaces/${slug}/processes/${id}/backends`),
   claudeCodeFix: (slug: string, id: string, fix: { authorizeProject: boolean; switchToManaged: string[] }) => request<ProcessBackends>(`/api/workspaces/${slug}/processes/${id}/claude-code/fix`, { method: 'POST', body: JSON.stringify({ authorized: true, ...fix }) }),
@@ -270,7 +272,8 @@ export const api = {
   acceptPlan: (slug: string, processId: string, addBudgetUsd = 0) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/accept-plan`, { method: 'POST', body: JSON.stringify({ authorized: true, addBudgetUsd }) }),
   convertToAnalysis: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/convert-to-analysis`, { method: 'POST', body: JSON.stringify({}) }),
   retryProcess: (slug: string, processId: string, skipQa = false) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/retry`, { method: 'POST', body: JSON.stringify({ skipQa }) }),
-  mergeProcess: (slug: string, processId: string, skipVerification = false) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/merge`, { method: 'POST', body: JSON.stringify({ authorized: true, skipVerification }) }),
+  /** `expectedCommit`: el commit que viste; `acknowledge`: confirmas lo que la línea base dejó pasar (ver mergeAcknowledgementsOf). */
+  mergeProcess: (slug: string, processId: string, skipVerification = false, opts: { expectedCommit?: string | null; acknowledge?: { preexisting?: boolean; testUpdates?: boolean } } = {}) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/merge`, { method: 'POST', body: JSON.stringify({ authorized: true, skipVerification, ...(opts.expectedCommit ? { expectedCommit: opts.expectedCommit } : {}), ...(opts.acknowledge ? { acknowledge: opts.acknowledge } : {}) }) }),
   publishProcess: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/publish`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   applyChanges: (slug: string, processId: string, branch?: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/apply`, { method: 'POST', body: JSON.stringify({ authorized: true, branch }) }),
   verifyProcess: (slug: string, processId: string, command: 'install' | 'typecheck' | 'test' | 'build', allowNetwork = false) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/verify`, { method: 'POST', body: JSON.stringify({ authorized: true, command, allowNetwork }) }),

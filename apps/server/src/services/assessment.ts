@@ -1,3 +1,4 @@
+import { EFFORT_THINKING_TOKENS } from '@portal-ia/domain';
 import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import type { Agent, AssessmentEstimate, Process, ProviderId } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
@@ -66,7 +67,7 @@ export function estimateAssessment(slug: string, projectId: string): AssessmentE
   const steps = resolveAgents(slug, projectId).map((s, i) => {
     const p = estimatePricing(s.agent.config.provider, s.agent.config.model);
     const inTok = (i === 3 ? 1500 : ctxTokens) + i * 2500; // los pasos posteriores incluyen los resultados anteriores
-    const outTok = s.maxTokens * 0.8 + (s.agent.config.effort === 'high' ? 6000 : s.agent.config.effort === 'medium' ? 2500 : 0);
+    const outTok = s.maxTokens * 0.8 + EFFORT_THINKING_TOKENS[s.agent.config.effort];
     const estimatedUsd = (inTok * p.inPerM + outTok * p.outPerM) / 1_000_000;
     return { agentId: s.agent.id, agentName: s.agent.config.name, title: s.title, model: s.agent.config.model, estimatedUsd };
   });

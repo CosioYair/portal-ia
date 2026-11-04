@@ -38,7 +38,7 @@ export async function gauntletRoutes(app: FastifyInstance) {
   // Aprobación organizativa del propietario: crea el Evaluador Gauntlet en el proyecto (plantilla versionada, jefe: Coordinador).
   app.post('/api/workspaces/:slug/projects/:projectId/gauntlet/evaluator', async (req, reply) => {
     const { slug, projectId } = req.params as any; if (!guard(slug, projectId, reply)) return;
-    const body = z.object({ authorized: z.literal(true), model: z.string().min(1).max(120).optional(), effort: z.enum(['low', 'medium', 'high']).optional() }).safeParse(req.body ?? {});
+    const body = z.object({ authorized: z.literal(true), model: z.string().min(1).max(120).optional(), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional() }).safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: 'Añadir un agente a la organización exige tu aprobación explícita.', code: 'authorization_required' });
     try {
       const a = createEvaluator(slug, projectId, body.data);

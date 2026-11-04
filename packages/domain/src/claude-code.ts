@@ -53,6 +53,8 @@ export interface ClaudeCodeDetection {
   problems: string[];
   /** Funciones de la CLI comprobadas por su versión. */
   capabilities: string[];
+  /** Niveles que acepta `--effort` según la ayuda de ESTA CLI (vacío/ausente: la CLI no admite elegir el esfuerzo). */
+  effortLevels?: string[];
   /** Sonda SIN llamada al modelo con la configuración exacta de una ejecución gestionada (mensaje en blanco). */
   probe?: ClaudeCodeProbe | null;
 }
@@ -126,6 +128,8 @@ export interface ClaudeCodeRun {
   agentId: string;
   agentName: string;
   model: string;
+  /** Esfuerzo que se pasó a la CLI (`--effort`); null = no se pasó (la CLI usó su predeterminado). */
+  effort?: string | null;
   status: ClaudeCodeRunStatus;
   /** Origen de facturación comprobado al empezar (terminal: no verificable por el Portal). */
   billing: ClaudeCodeBilling;

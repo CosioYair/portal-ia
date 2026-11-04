@@ -41,7 +41,7 @@ export function OperationCard({ msgId, action, onResolved }: { msgId: string; ac
       </div>}
       {action.status === 'pending' && !pv.reviewPath && owner === false && <div className="small muted">Para autorizarla o rechazarla, vincula este navegador como propietario («Vincular este navegador»).</div>}
       {action.status === 'pending' && !pv.reviewPath && owner === true && <>
-        <label className="ck small"><input className="cb" type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} /><span>Autorizo esta operación tal como se describe arriba (sin forzar y sin otras ramas).</span></label>
+        <label className="ck small"><input className="cb" type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} /><span>Autorizo esta operación tal como se describe arriba{action.operation?.capability === 'publish_main' ? ' (sin forzar y sin otras ramas)' : action.operation?.capability === 'run_checks' ? ' (en el sandbox, sin red ni IA; no cambia nada)' : ''}.</span></label>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn btn-primary btn-sm" disabled={!consent || busy !== null} onClick={() => decide('approve')}>{busy === 'approve' ? <span className="spin spin-light" /> : null}Autorizar y ejecutar</button>
           <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => decide('reject')}>Rechazar</button>

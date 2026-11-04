@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import { addQueuedMs, queuedMsOf } from './capacity.ts';
 import path from 'node:path';
-import { backendLabel, batchSourceOf, promptSections, verificationsForApplied } from '@portal-ia/domain';
-import type { Agent, AgentBlocker, AgentFailureKind, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
+import { backendLabel, batchSourceOf, promptSections, verificationPassed, verificationsForApplied } from '@portal-ia/domain';
+import type { Agent, AgentBlocker, AgentFailureKind, BaselineTriage, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError, reasoningHeadroom } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
@@ -13,7 +13,7 @@ import { diagnosticsFor, filesIn } from './diagnostics.ts';
 import { failingTests, testRunSummary } from './failureDiagnosis.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall, withWatchdog } from './providerCalls.ts';
-import { injectLessons, recordDetections } from './lessons.ts';
+import { injectLessons, recordDetections, recordLessonOutcomes } from './lessons.ts';
 import { gauntletStage, toCorrection } from './gauntlet.ts';
 import { callMetricsRepo, promptHash } from '../db/callMetrics.ts';
 import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, testsEvidence, verificationEvidence } from './qaGate.ts';
@@ -711,6 +711,8 @@ export function bumpFailure(list: PipelineStatus['failures'], signature: string,
   return f ? list.map(x => x === f ? { ...x, count: x.count + 1 } : x) : [...list, { signature, count: 1, label }];
 }
 export function verificationSignature(v: VerificationRun): string {
+  // Con línea base: solo lo que es de la historia (los heredados delante hacían iguales fallos distintos).
+  if (v.triage && !v.triage.unavailable) return `${v.command}|${[...v.triage.introduced, ...v.triage.changed].map(t => `${t.file ?? ""}:${t.name}`.slice(0, 80)).sort().join(",")}`;
   const d = diagnosticsFor(v);
   return `${v.command}|${d.slice(0, 3).map(x => `${x.file ?? ''}:${x.code ?? ''}:${x.text.slice(0, 40)}`).join(',') || v.output.trim().split('\n').slice(-2).join(' ').slice(0, 80)}`;
 }
@@ -751,7 +753,8 @@ export async function verifyStage(ctx: StoryRunCtx, cfg: PipelineConfig): Promis
     checkCancelled(ctx);
     const r = processesRepo(ctx.slug).get(ctx.processId)!.result!;
     const last = sinceApplied(r).filter(v => v.command === cmd).at(-1);
-    if (last?.exitCode === 0) continue;
+    // En verde, o «test» con solo fallos preexistentes demostrados frente a la base (triaje): superada.
+    if (verificationPassed(last)) continue;
     if (last && last.exitCode !== null && last.exitCode !== DEPS_MISSING_EXIT && last.isolation !== 'unavailable') return last; // ya falló (al reanudar)
     // Al reanudar tras «faltan dependencias» (86) no se repite esa comprobación: se va directo a instalar (si está autorizado).
     const blockedByDeps = last?.exitCode === DEPS_MISSING_EXIT && last.isolation === 'docker';
@@ -785,6 +788,37 @@ export async function verifyStage(ctx: StoryRunCtx, cfg: PipelineConfig): Promis
  * fallar, el pipeline sigue con esa ejecución. HU-155: dos pruebas inestables del propio Portal costaron tres correcciones
  * pagadas y el equipo acabó modificándolas fuera del plan. true = se repitió (el pipeline vuelve a empezar la vuelta).
  */
+/**
+ * «test» falla: antes de pagar una corrección, ¿qué fallos son de la historia? Se compara con su base, en el mismo sandbox
+ * y sin IA (services/baseline.ts). La ejecución queda anotada con el triaje; si solo hay fallos preexistentes, queda
+ * aceptada (no se gasta ninguna corrección y la revisión lo señala con la evidencia).
+ */
+export async function triageAgainstBase(ctx: StoryRunCtx, failed: VerificationRun): Promise<{ accepted: boolean; run: VerificationRun; rerun?: boolean }> {
+  if (failed.command !== 'test' || failed.exitCode === 0 || failed.exitCode === null) return { accepted: false, run: failed };
+  if (failed.triage) return { accepted: failed.triage.accepted, run: failed };
+  const { triageRun, triageText } = await import('./baseline.ts');
+  const r = processesRepo(ctx.slug).get(ctx.processId)!.result!; const p = pipelineOf(ctx.slug, ctx.processId);
+  const once = !!r.applied && (p.evidenceReruns ?? []).includes(r.applied.commit);
+  const res = await triageRun(ctx.slug, ctx.processId, failed, { noRerun: once });
+  if (res.needsFreshRun && r.applied) {
+    // Proceso de una versión anterior: su salida guardada está recortada y no tiene el resumen completo. Se repite UNA vez.
+    updatePipeline(ctx.slug, ctx.processId, { evidenceReruns: [...(p.evidenceReruns ?? []), r.applied.commit].slice(-20) });
+    emit(ctx, 'verify', 'La evidencia guardada de «test» está recortada (de una versión anterior del Portal): se repite «test» una vez, sin IA, para tener la salida completa antes de decidir qué corregir.', { phase: 'verifying' });
+    await runVerification(ctx.slug, ctx.processId, 'test', false);
+    return { accepted: false, run: failed, rerun: true };
+  }
+  const triage = res.triage; if (!triage) return { accepted: false, run: failed };
+  if (res.fresh) {
+    const mine = triage.introduced.length + triage.changed.length;
+    if (triage.unavailable) emit(ctx, 'verify', `No se pudo comparar con la base (${triage.unavailable}): todos los fallos cuentan como de la historia.`, { phase: 'verifying' });
+    else if (triage.accepted) emit(ctx, 'environment', `«test»: los ${triage.preexisting.length} fallo(s) ya ocurren en la base ${triage.baseCommit.slice(0, 7)}, sin esta historia y con el mismo error: no los causó ella. No se gasta ninguna corrección; se sigue y quedan señalados en la revisión (integrar exigirá que lo confirmes; conviene corregirlos aparte).`, { detail: triageText(triage) });
+    else emit(ctx, 'verify', `«test»: ${mine} fallo(s) son de esta historia (comparados con la base ${triage.baseCommit.slice(0, 7)})${triage.preexisting.length ? `; otros ${triage.preexisting.length} ya fallaban sin ella y no se tocan` : ''}.`, { phase: 'verifying', detail: triageText(triage) });
+    // Lección (sin IA) solo de lo que la historia causó: con todo preexistente, nada que aprender de ella.
+    if (!triage.accepted) { try { recordDetections(ctx.slug, ctx.processId, ctx.repoPath); } catch { /* sin lección */ } }
+  }
+  return { accepted: triage.accepted, run: { ...failed, triage } };
+}
+
 export async function retryForeignFailure(ctx: StoryRunCtx, failed: VerificationRun): Promise<boolean> {
   const r = processesRepo(ctx.slug).get(ctx.processId)!.result!; const p = pipelineOf(ctx.slug, ctx.processId);
   // Solo pruebas CANCELADAS y la causa no está en la evidencia (HU-159): no es un fallo de la implementación. Se repite
@@ -798,14 +832,16 @@ export async function retryForeignFailure(ctx: StoryRunCtx, failed: Verification
     return true;
   }
   if (failed.command !== 'test' || !r.applied || (p.flakeRetries ?? []).includes(r.applied.commit)) return false;
-  const files = failingTests(failed).map(f => f.file);
+  // Con línea base, solo cuentan los fallos de la historia (los preexistentes ya están separados).
+  const t = failed.triage && !failed.triage.unavailable ? failed.triage : null;
+  const files = (t ? [...t.introduced, ...t.changed] : failingTests(failed)).map(f => f.file);
   if (!files.length || files.some(f => !f)) return false;
   // De la historia: lo que su diff cambia AHORA y lo planificado (un archivo tocado fuera del plan y ya restaurado no lo es).
   const story = new Set([...r.changes.filter(c => !c.error).map(c => c.path), ...(r.manifest?.deliverables.filter(d => d.planned).map(d => d.path) ?? r.plan?.filesToChange ?? [])]);
   if (files.some(f => story.has(f!))) return false;
   const list = Array.from(new Set(files)).join(', ');
   updatePipeline(ctx.slug, ctx.processId, { flakeRetries: [...(p.flakeRetries ?? []), r.applied.commit].slice(-20) });
-  emit(ctx, 'verify', `Solo fallan pruebas que esta historia no toca (${list}): se repite «test» una vez, sin IA, para descartar una prueba inestable antes de pagar una corrección.`, { phase: 'verifying' });
+  emit(ctx, 'verify', t ? `Las pruebas que fallan pasan en la base pero la historia no toca sus archivos (${list}): se repite «test» una vez, sin IA, para descartar una prueba inestable antes de pagar una corrección.` : `Solo fallan pruebas que esta historia no toca (${list}): se repite «test» una vez, sin IA, para descartar una prueba inestable antes de pagar una corrección.`, { phase: 'verifying' });
   const again = await runVerification(ctx.slug, ctx.processId, 'test', false);
   if (again.exitCode === 0) emit(ctx, 'environment', `«test» pasó al repetirlo: era una prueba inestable ajena a la historia (${list}). No se corrige nada ni se gasta en IA; conviene estabilizarla aparte.`);
   return true;
@@ -916,7 +952,9 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
     const r = processesRepo(ctx.slug).get(ctx.processId)!.result!;
     if (!r.applied) { await applyInWorktree(ctx); continue; }
     if (cfg.autoVerify) {
-      const failed = await verifyStage(ctx, cfg);
+      let failed = await verifyStage(ctx, cfg);
+      // Línea base (sin IA): lo que ya fallaba sin la historia no se le cobra; si solo hay eso, se sigue sin corregir nada.
+      if (failed) { const t = await triageAgainstBase(ctx, failed); if (t.rerun || t.accepted) continue; failed = t.run; }
       // Solo fallan pruebas ajenas a la historia: se repite «test» una vez (sin IA) antes de pagar una corrección.
       if (failed && await retryForeignFailure(ctx, failed)) continue;
       // Verificación en verde: antes de QA, ¿las pruebas nuevas se ejecutaron de verdad? (sin IA)
@@ -929,7 +967,7 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
         if (count > cfg.maxIdenticalFailures) throw new PipelinePause('repeated_failure', `El mismo fallo de ${failed.command} se repitió ${count} veces tras corregirlo: el equipo se detiene para no gastar más. Revisa el diagnóstico.`);
         if (p.corrections >= cfg.maxCorrections) throw new PipelinePause('limit', `${failed.command} sigue fallando y se alcanzó el máximo de correcciones autorizadas (${cfg.maxCorrections}). Lo hecho se conserva.`);
         emit(ctx, 'verify', FAIL_MSG[failed.command] ?? `${failed.command} falla. El equipo está preparando una corrección.`, { phase: 'correcting', detail: verificationEvidence(failed).split('\n').slice(0, 6).join(' ') });
-        if (units) { units.startRound(ctx, cfg, 'verification', units.verificationFindings(failed)); continue; }
+        if (units) { units.startRound(ctx, cfg, 'verification', units.verificationFindings(failed), { testUpdatable: units.behaviorTests(ctx, failed) }); continue; }
         const d = diagnosticsFor(failed);
         if (!await correct(ctx, cfg, `La verificación «${failed.command}» falla en el sandbox:\n${verificationEvidence(failed)}`, Array.from(new Set([...d.map(x => x.file).filter(Boolean) as string[], ...filesIn(failed.output)])))) ineffectiveCorrection(ctx);
         continue;
@@ -1073,5 +1111,6 @@ export async function resumeStory(slug: string, processId: string, log: (o: any,
     log({ processId, state: fin.pipeline?.state, spent: procs.get(processId)?.spentUsd.toFixed(4) }, 'pipeline de la historia detenido');
     // Detección determinista (sin IA) también al reanudar: bloqueos, negativas, plazos, verificaciones fallidas.
     try { const ls = recordDetections(slug, processId, repo.path); if (ls.length) log({ processId, lessons: ls.map(l => l.detector) }, 'lecciones detectadas'); } catch (e: any) { log({ err: e.message }, 'detección de lecciones fallida'); }
+    try { const o = recordLessonOutcomes(slug, processId, repo.path); if (o.held.length || o.recurred.length) log({ processId, held: o.held.length, recurred: o.recurred.length, refuted: o.refuted.length }, 'lecciones medidas en una tarea posterior'); } catch (e: any) { log({ err: e.message }, 'medición de lecciones fallida'); }
   }
 }

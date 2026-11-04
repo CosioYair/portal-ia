@@ -1,7 +1,7 @@
 import { Component, useEffect, useState, type ReactNode } from 'react';
 import { useLive } from '../lib/live.ts';
 import { Link } from 'react-router-dom';
-import { STAGE_LABEL, type AssistantConversation, type ConversationDecision, type Project } from '@portal-ia/domain';
+import { INTERNAL_WORKSPACE, STAGE_LABEL, type AssistantConversation, type ConversationDecision, type Project } from '@portal-ia/domain';
 import { api, type AssignmentAuthPreview, type AssignmentView, type AssistantAction, type AssistantMessage, type ConversationArtifactView, type ConversationDetailView, type UsageGateView } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
@@ -24,6 +24,10 @@ export class CardBoundary extends Component<{ children: ReactNode }, { error: st
 }
 
 const GMODE: Record<string, string> = { off: 'sin Gauntlet', standard: 'estándar', deep: 'profundo', auto: 'automático' };
+const QA_TXT: Record<string, string> = { approved: 'aprobada', rejected: 'rechazada', unable_to_verify: 'no pudo verificar', blocked_environment: 'bloqueada por el entorno' };
+const GAUNTLET_TXT: Record<string, string> = { pending: 'en curso', passed: 'superado', passed_with_findings: 'superado con observaciones', stopped: 'detenido con brechas', skipped: 'omitido', waived: 'dispensado por ti' };
+/** Estado de una verificación del sandbox en palabras (no solo ✓/✗: «bloqueado» o «no terminó» no son fallos del código). */
+const checkTxt = (v: { command: string; exitCode: number | null; isolation: string | null; passed: boolean; preexisting: number }) => `${v.command} ${v.exitCode === 0 ? '✓' : v.passed ? `✓ sin fallos nuevos (${v.preexisting} ya fallaba${v.preexisting === 1 ? '' : 'n'} antes de este cambio)` : v.exitCode === 86 ? 'bloqueado (faltan dependencias)' : v.exitCode === null ? 'no terminó' : v.isolation === 'unavailable' ? 'sin sandbox' : '✗ falla'}`;
 const DECISION_TONE: Record<ConversationDecision['status'], '' | 'ok' | 'warn' | 'err'> = { open: 'warn', approved: 'ok', rejected: 'err', deferred: '' };
 const DECISION_LABEL: Record<ConversationDecision['status'], string> = { open: 'abierta', approved: 'aprobada', rejected: 'rechazada', deferred: 'aplazada' };
 const ARTIFACT_LABEL = { proposal: 'Propuesta', team_review: 'Revisión del equipo', stories: 'Borradores de historias' } as const;
@@ -193,7 +197,7 @@ export function ConversationPanel({ detail, compact, onChanged }: { detail: Conv
       {!scoped && <Notice kind="info">Para preparar propuestas, historias o encargos, elige arriba la <strong>empresa y el proyecto</strong> de esta conversación.</Notice>}
       {detail.decisions.map(d => <CardBoundary key={d.id}><DecisionRow conversationId={c.id} d={d} onChanged={onChanged} /></CardBoundary>)}
       {detail.artifacts.map(a => <CardBoundary key={a.id}><ArtifactCard conversationId={c.id} a={a} onChanged={onChanged} /></CardBoundary>)}
-      {detail.assignments.map(x => <CardBoundary key={x.id}><AssignmentCard slug={c.workspaceSlug!} assignmentId={x.id} initial={x} onChanged={onChanged} /></CardBoundary>)}
+      {detail.assignments.map(x => <CardBoundary key={x.id}><AssignmentCard slug={c.workspaceSlug!} assignmentId={x.id} initial={x} onChanged={onChanged} review={false} /></CardBoundary>)}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button type="button" className="btn btn-ghost btn-sm" disabled={busy || !canPropose} title={canPropose ? 'Lo redacta el equipo y otro especialista lo cuestiona (pide tu autorización antes de gastar)' : 'Cierra antes las decisiones abiertas y aprueba al menos una (con empresa y proyecto elegidos)'} onClick={() => void start('proposal')}>{proposals.length ? 'Nueva versión de la propuesta' : 'Preparar propuesta'}</button>
         <button type="button" className="btn btn-ghost btn-sm" disabled={busy || !scoped || !ready || live('team_review')} title="Revisión de la propuesta por el equipo (pide tu autorización)" onClick={() => void start('team_review')}>Consultar al equipo</button>
@@ -204,7 +208,8 @@ export function ConversationPanel({ detail, compact, onChanged }: { detail: Conv
 }
 
 /** Encargo de desarrollo (sin historia): borrador → autorizar (presupuesto, tope de suscripción) → progreso → revisar. */
-export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slug: string; assignmentId: string; initial?: AssignmentView | null; onChanged?: () => void }) {
+/** `review`: la revisión e integración (archivos, verificación, «Integrar en main») se muestran en UN sitio: la tarjeta del chat. */
+export function AssignmentCard({ slug, assignmentId, initial, onChanged, review = true }: { slug: string; assignmentId: string; initial?: AssignmentView | null; onChanged?: () => void; review?: boolean }) {
   const { flash } = useApp();
   const [a, setA] = useState<AssignmentView | null>(initial ?? null);
   const [pre, setPre] = useState<AssignmentAuthPreview | null>(null);
@@ -216,6 +221,8 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
   const setBudget = (v: string) => cardDraft.set(d => ({ ...d, budget: v })); const setCalls = (v: string) => cardDraft.set(d => ({ ...d, calls: v }));
   const setMode = (v: '' | 'off' | 'standard' | 'deep') => cardDraft.set(d => ({ ...d, mode: v })); const setNote = (v: string) => cardDraft.set(d => ({ ...d, note: v }));
   const [ok, setOk] = useState(false); const [discard, setDiscard] = useState(false); const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
+  const [mergeOk, setMergeOk] = useState(false); // «Integro…» nunca se guarda ni viene marcada
+  const [mergeErr, setMergeErr] = useState<{ msg: string; code: string | null } | null>(null);
   const load = () => api.assignment(slug, assignmentId).then(setA).catch(e => setErr(e.message));
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, assignmentId]);
@@ -266,15 +273,31 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged }: { slu
         {pre.discardBranch && <label className="ck small"><input className="cb" type="checkbox" checked={discard} onChange={e => setDiscard(e.target.checked)} /><span>Para ejecutar otra versión, descarto la anterior, aplicada sin integrar (su worktree y la rama <span className="mono">{pre.discardBranch}</span>).</span></label>}
         <div><button type="button" className="btn btn-primary btn-sm" disabled={!ok || busy || !!pre.missing || !pre.subscription.ok || budget === '' || !(Number(budget) >= 0) || !(Number(calls) >= 1) || (!!pre.discardBranch && !discard)} onClick={() => void act(() => api.authorizeAssignment(slug, a.id, { budgetUsd: Number(budget), maxSubscriptionCalls: Math.floor(Number(calls)), ...(mode ? { gauntlet: { mode } } : {}), ...(pre.discardBranch ? { discardApplied: discard } : {}) }), `${a.code} en marcha`)}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}Autorizar y ejecutar</button></div>
       </div>}
+      {/* Revisión sin salir del chat: qué cambió (archivos), la evidencia del sandbox y la integración (servicio de siempre). */}
+      {review && a.process && (a.process.changes?.length ?? 0) > 0 && a.status !== 'running' && <div className="small" style={{ display: 'flex', flexDirection: 'column', gap: 6 }} data-testid={`assignment-review-${a.code}`}>
+        <div><strong>Qué cambió</strong>{a.process.applied ? <> · rama <span className="mono">{a.process.applied.branch}</span> · commit <span className="mono">{a.process.applied.commit.slice(0, 7)}</span></> : null}</div>
+        <ul style={{ margin: 0, paddingLeft: 18 }}>{a.process.changes!.slice(0, 10).map(c => <li key={c.path}><span className="mono">{c.path}</span> <span className="muted">({c.action === 'create' ? 'nuevo' : c.action === 'delete' ? 'eliminado' : `${c.before}→${c.after} líneas`})</span></li>)}</ul>
+        {a.process.changes!.length > 10 && <div className="muted">y {a.process.changes!.length - 10} archivo(s) más</div>}
+        {(a.process.checks?.length ?? 0) > 0 && <div><strong>Verificación en el sandbox:</strong> {a.process.checks!.map(checkTxt).join(' · ')}{a.process.qa ? ` · QA: ${QA_TXT[a.process.qa] ?? a.process.qa}` : ''}{a.process.gauntlet ? ` · Gauntlet: ${GAUNTLET_TXT[a.process.gauntlet] ?? a.process.gauntlet}` : ''}</div>}
+        {(a.process.ack?.testUpdates.length ?? 0) > 0 && <Notice kind="warn">Modificó pruebas que ya existían porque comprobaban el comportamiento que cambia: {a.process.ack!.testUpdates.join(', ')}. Revisa su diff antes de integrar.</Notice>}
+        {link && <Link className="lnk" to={link}>Ver el diff completo y el registro del proceso</Link>}
+        {a.process.merged ? <Notice kind="ok">Integrado en <span className="mono">{a.process.merged.into}</span> (commit <span className="mono">{a.process.merged.commit.slice(0, 7)}</span>).{slug === INTERNAL_WORKSPACE.slug ? ' Para verlo en marcha: «Reconstruir y reiniciar» en la barra superior.' : ''}</Notice>
+          : a.status === 'ready_for_review' && a.process.applied && <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <label className="ck" style={{ flex: 1, minWidth: 220 }}><input className="cb" type="checkbox" checked={mergeOk} onChange={e => setMergeOk(e.target.checked)} /><span>Integro en la rama principal exactamente el commit verificado <span className="mono">{a.process.applied.commit.slice(0, 7)}</span>.{(a.process.ack?.preexisting.length ?? 0) > 0 ? <> Confirmo que «test» pasa solo frente a la base: ya fallaban antes de este cambio {a.process.ack!.preexisting.join(', ')}.</> : null}{(a.process.ack?.testUpdates.length ?? 0) > 0 ? <> Confirmo las pruebas existentes modificadas (revisé su diff).</> : null}</span></label>
+            <button type="button" className="btn btn-primary btn-sm" disabled={!mergeOk || busy} onClick={() => void (async () => { setBusy(true); setMergeErr(null); try { await api.mergeProcess(slug, a.process!.id, false, { expectedCommit: a.process!.applied!.commit, acknowledge: { preexisting: (a.process!.ack?.preexisting.length ?? 0) > 0, testUpdates: (a.process!.ack?.testUpdates.length ?? 0) > 0 } }); flash(`${a.code} integrado`); setMergeOk(false); await load(); onChanged?.(); } catch (e: any) { setMergeErr({ msg: e.message, code: e?.body?.code ?? null }); } finally { setBusy(false); } })()}>Integrar en main</button>
+          </div>}
+        {mergeErr && <Notice kind="warn"><span>{mergeErr.msg}{link && ['integration_candidate_required', 'merge_conflict', 'stale_commit', 'verification_failed', 'ack_required'].includes(mergeErr.code ?? '') ? <> · <Link className="lnk" to={link}>Abrir el proceso para resolverlo (preparar el candidato con main, conflictos o verificación)</Link></> : null}</span></Notice>}
+        {a.process.merged && a.status === 'ready_for_review' && <div className="small muted">Para «Aceptar» falta lo mismo que para cerrar una historia{slug === INTERNAL_WORKSPACE.slug ? ': activarlo («Reconstruir y reiniciar»), comprobarlo en ejecución y la prueba manual (en el proceso)' : ': la prueba manual (en el proceso)'}; si falta algo, «Aceptar» te dirá exactamente qué.</div>}
+      </div>}
       {a.status === 'ready_for_review' && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void act(() => api.acceptAssignment(slug, a.id, null), `${a.code} aceptado`)}>Aceptar</button>
+          <button type="button" className={`btn ${a.process?.merged ? 'btn-primary' : 'btn-secondary'} btn-sm`} disabled={busy} onClick={() => void act(() => api.acceptAssignment(slug, a.id, null), `${a.code} aceptado`)}>Aceptar</button>
           <label className="sr" htmlFor={`en-${a.id}`}>Qué cambiar</label>
           <input id={`en-${a.id}`} className="input" style={{ flex: 1, minWidth: 180, height: 30 }} value={note} onChange={e => setNote(e.target.value)} placeholder="Qué cambiar (para pedir cambios)" />
           {/* Con entrega incremental, los cambios van sobre su rama y se aplican YA con la misma autorización (un clic). */}
-          <button type="button" className="btn btn-ghost btn-sm" disabled={busy || note.trim().length < 3 || (!a.process?.ownerRound && !discard)} onClick={() => void act(async () => { await api.requestAssignmentChanges(slug, a.id, note.trim(), discard); if (a.process?.ownerRound) await api.continueProcess(slug, a.process.id, {}); }, a.process?.ownerRound ? 'Cambios pedidos: el equipo los aplica sobre su rama' : 'Cambios pedidos: autoriza la siguiente iteración')}>Pedir cambios</button>
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy || note.trim().length < 3 || (!a.process?.ownerRound && !a.process?.merged && !discard)} onClick={() => void act(async () => { await api.requestAssignmentChanges(slug, a.id, note.trim(), discard); if (a.process?.ownerRound) await api.continueProcess(slug, a.process.id, {}); }, a.process?.ownerRound ? 'Cambios pedidos: el equipo los aplica sobre su rama' : 'Cambios pedidos: autoriza la siguiente iteración')}>Pedir cambios</button>
         </div>
-        {a.process?.ownerRound ? <div className="small muted">Los cambios se aplican sobre su rama (no se descarta lo hecho) con la misma autorización.</div> : <label className="ck small"><input className="cb" type="checkbox" checked={discard} onChange={e => setDiscard(e.target.checked)} /><span>Para pedir cambios, descarto esta versión (su worktree y su rama sin integrar).</span></label>}
+        {a.process?.merged ? <div className="small muted">Ya está integrado: pedir cambios prepara otra ejecución sobre main con tu nota (no se descarta nada).</div> : a.process?.ownerRound ? <div className="small muted">Los cambios se aplican sobre su rama (no se descarta lo hecho) con la misma autorización.</div> : <label className="ck small"><input className="cb" type="checkbox" checked={discard} onChange={e => setDiscard(e.target.checked)} /><span>Para pedir cambios, descarto esta versión (su worktree y su rama sin integrar).</span></label>}
         <div className="small muted">Aceptar exige lo mismo que cerrar una historia (aplicado, verificado, probado); integrar en main sigue siendo una decisión aparte. Pedir cambios descarta esta versión (su rama sin integrar) y prepara otra ejecución desde main con tu nota, que autorizas aparte.</div>
       </div>}
       {['draft', 'changes_requested', 'needs_owner', 'failed', 'ready_for_review'].includes(a.status) && <div><button type="button" className="lnk small" disabled={busy} onClick={() => void act(() => api.cancelAssignment(slug, a.id), `${a.code} cancelado`)}>cancelar el encargo</button></div>}

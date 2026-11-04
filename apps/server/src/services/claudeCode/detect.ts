@@ -135,6 +135,11 @@ export async function detectClaudeCode(settings: ClaudeCodeSettings, opts: { pro
       if (versionAtLeast(d.version, '2.1.259')) d.capabilities.push('permission-prompts');
       if (versionAtLeast(d.version, '2.1.181')) d.capabilities.push('rate-limit-events');
       d.capabilities.push('stream-json', 'json-schema', 'strict-mcp-config', 'tools-restriction');
+      // `--effort`: solo si la ayuda de ESTA CLI lo anuncia, con los niveles que lista (p. ej. «(low, medium, high, xhigh, max)»).
+      const h = await runCapture(cli, ['--help'], { cwd, timeoutMs: 20_000 }).catch(() => null);
+      const levels = h ? effortLevelsFromHelp(h.stdout) : [];
+      // Ayuda leída: la lista (vacía = esta CLI no admite --effort). Sin ayuda, queda sin dato (no se afirma nada).
+      if (h) { d.effortLevels = levels; if (levels.length) d.capabilities.push('effort'); }
       if (d.billing === 'subscription') {
         // La sonda (sin modelo) se repite al comprobar a mano o al activar; en cada ejecución se reutiliza la última
         // correcta de la MISMA CLI y versión, y el «init» de la propia ejecución se vuelve a comprobar antes del encargo.
@@ -158,3 +163,10 @@ export async function verifiedDetection(settings: ClaudeCodeSettings, maxAgeMs =
 /** Para la interfaz: la última conocida (en memoria o guardada), sin ejecutar nada. */
 export function lastDetection(): ClaudeCodeDetection | null { return cached?.detection ?? savedDetection(); }
 export function resetDetectionCache() { cached = null; }
+
+/** Niveles de `--effort` que anuncia la ayuda de la CLI (vacío si no lo admite). Sin llamar al modelo. */
+export function effortLevelsFromHelp(help: string): string[] {
+  const i = help.search(/--effort\b/); if (i < 0) return [];
+  const m = help.slice(i, i + 400).match(/\(([a-z]+(?:\s*,\s*[a-z]+)+)\)/i);
+  return m ? m[1].split(/\s*,\s*/).map(x => x.trim().toLowerCase()).filter(x => /^(low|medium|high|xhigh|max)$/.test(x)) : [];
+}

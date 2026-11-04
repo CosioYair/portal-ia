@@ -1,9 +1,10 @@
 import { agentCaller, completeWith } from './claudeCode/backend.ts';
+import { iterationEvidence } from './storyEvidence.ts';
 import { processVersion } from './revision.ts';
 import { changed } from './live.ts';
 import crypto from 'node:crypto';
 import type { BacklogItem, ModelInfo, Process, ProviderId, StoryContext, StoryIterationState, StoryMessage, StoryTask, TeamMember } from '@portal-ia/domain';
-import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
+import { INTERNAL_WORKSPACE, EFFORT_THINKING_TOKENS } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
@@ -136,7 +137,7 @@ export function estimateAsk(slug: string, itemId: string, agentId?: string | nul
   if (!agent) throw Object.assign(new Error('No hay Coordinador en el proyecto.'), { statusCode: 409 });
   if (agent.projectId && agent.projectId !== item.projectId) throw Object.assign(new Error('Ese agente pertenece a otro proyecto.'), { statusCode: 403 });
   const p = estimatePricing(agent.config.provider, agent.config.model);
-  return { agentId: agent.id, agentName: agent.config.name, model: agent.config.model, estimatedUsd: (6000 * p.inPerM + 1200 * p.outPerM) / 1_000_000 };
+  return { agentId: agent.id, agentName: agent.config.name, model: agent.config.model, estimatedUsd: (9000 * p.inPerM + (2500 + EFFORT_THINKING_TOKENS[agent.config.effort]) * p.outPerM) / 1_000_000 };
 }
 
 function contextForPrompt(ctx: StoryContext): string {
@@ -156,6 +157,8 @@ function contextForPrompt(ctx: StoryContext): string {
     r?.manualTest ? `Prueba manual: ${r.manualTest.checks.filter(Boolean).length}/${r.manualTest.steps.length} marcados. Pasos: ${r.manualTest.steps.map((s, i) => `${i + 1}. ${s}`).join(' | ')}` : '',
     fails.length ? `Feedback del propietario en la prueba: ${fails.map(f => `paso ${f.index + 1} ${f.result.toUpperCase()}${f.comment ? `: ${f.comment}` : ''}`).join(' · ')}` : '',
     last?.guidance?.flow?.issue ? `# Problema actual de la iteración\n${issueForPrompt(last.guidance.flow.issue, last)}` : '',
+    // La evidencia real (fallos con su error, línea base, correcciones intentadas y su resultado), no solo títulos.
+    last ? (e => e ? `# Evidencia de la iteración (sandbox, línea base y correcciones)\n${e}` : '')(iterationEvidence(last)) : '',
     ctx.tasks.length ? `Tareas: ${ctx.tasks.map(t => `[${t.status === 'done' ? 'x' : ' '}] ${t.title}${t.assigneeName ? ` (${t.assigneeName})` : ''}`).join(' · ')}` : '',
     ctx.lessons.length ? `Lecciones detectadas en esta historia: ${ctx.lessons.map(l => `${l.title} [${l.status}]`).join(' · ')}` : '',
     ctx.team.length ? `Equipo: ${ctx.team.map(m => `${m.agentName} (${m.role})`).join(', ')}` : ''
@@ -176,7 +179,7 @@ export async function askTeam(slug: string, itemId: string, text: string, opts: 
   if (!cc && (!cred || prow.status !== 'connected')) throw Object.assign(new Error('El proveedor no está conectado.'), { statusCode: 409 });
   const models: ModelInfo[] = JSON.parse(prow.models_json);
   const history = ctx.messages.slice(-10).map(m => `${m.role === 'owner' ? 'Propietario' : m.agentName ?? 'Agente'}: ${m.content.slice(0, 1200)}`).join('\n');
-  const system = `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} del proyecto «${ctx.project.name}» en Portal IA. Conversas con el propietario dentro del espacio de UNA historia. Responde en español, breve y concreto, en markdown. No ejecutas nada: si hace falta trabajo, propón tareas o una nueva iteración. Si propones cambiar el criterio de aceptación o crear tareas, termina con UN bloque:
+  const system = `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} del proyecto «${ctx.project.name}» en Portal IA. Conversas con el propietario dentro del espacio de UNA historia. Responde en español, breve y concreto, en markdown. No ejecutas nada: si hace falta trabajo, propón tareas o una nueva iteración. Basa tu respuesta en la EVIDENCIA (pruebas que fallan con su error, línea base, correcciones ya intentadas): di la causa probable citándola, separa lo que la historia rompió de lo que ya fallaba sin ella, y no propongas repetir una corrección que ya falló sin cambiar de enfoque. Si propones cambiar el criterio de aceptación o crear tareas, termina con UN bloque:
 \`\`\`proposals
 {"tasks":[{"title":string,"assignee":"nombre de agente del equipo o null"}],"criterion":string|null,"iterate":boolean,"iterationNote":string|null}
 \`\`\`
@@ -186,7 +189,7 @@ export async function askTeam(slug: string, itemId: string, text: string, opts: 
   const startedAt = now();
   try {
     requirePolicy('ai_call', { slug, agentId: agent.id, projectId: ctx.item.projectId, authorized: true });
-    const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user: userPrompt, maxTokens: 1500, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
+    const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user: userPrompt, maxTokens: 2500, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
     const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
     processesRepo(slug).logExecution({ projectId: ctx.item.projectId, agentId: agent.id, kind: 'story_chat', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
     const m = res.text.match(/```proposals\s*([\s\S]*?)```/i); let proposals: any = null;
@@ -307,6 +310,8 @@ export async function iterateStory(slug: string, itemId: string, note: string | 
     fails.length ? `Resultado de la prueba manual anterior:\n${fails.map(f => `- Paso ${f.index + 1} (${f.result}): ${f.text}${f.comment ? ` → ${f.comment}` : ''}`).join('\n')}` : '',
     open.length ? `Tareas abiertas:\n${open.map(t => `- ${t.title}${t.assigneeName ? ` (${t.assigneeName})` : ''}`).join('\n')}` : '',
     prev?.result?.review && !prev.result.review.approve ? `Observaciones de QA anteriores: ${prev.result.review.issues.slice(0, 6).join(' · ')}` : '',
+    // HU-177: la iteración nueva repetía lo ya intentado; ahora recibe qué falló, qué ya fallaba sin la historia y qué se probó.
+    (e => e ? `Evidencia de la iteración anterior (fallos reales, línea base y correcciones intentadas):\n${e}` : '')(iterationEvidence(prev)),
     ctx.messages.slice(-6).length ? `Conversación reciente:\n${ctx.messages.slice(-6).map(m => `- ${m.role === 'owner' ? 'Propietario' : m.agentName}: ${m.content.slice(0, 400)}`).join('\n')}` : ''
   ].filter(Boolean).join('\n\n');
   const cur = backlog.get(item.id)!;

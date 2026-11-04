@@ -1,6 +1,6 @@
 import type { FlowAction, FlowActionId, FlowIssue, FlowIssueDetail, FlowStage, FlowStageKey, FlowStageStatus, Isolation, IssueSeverity, Process, StoryFlow, VerificationRun, WorktreeDrift, BranchIntegration } from '@portal-ia/domain';
 import { revisionStatus, reviewStageText } from './revision.ts';
-import { GAUNTLET_LIMITS, gauntletReviewed, verificationsForApplied } from '@portal-ia/domain';
+import { GAUNTLET_LIMITS, gauntletReviewed, verificationPassed, verificationsForApplied } from '@portal-ia/domain';
 import { filesIn, parseBuildErrors, parseFailingTests, parseTypeScriptErrors, qaSeverity, tailOf } from './diagnostics.ts';
 import { deliveryProgress } from './storyUnits.ts';
 import { runtimeVerified } from './runtimeChecks.ts';
@@ -221,9 +221,9 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
     const since = sinceApplied(p); const lastOf = (c: string) => since.filter(v => v.command === c).at(-1);
     set('execute', valid ? (delivery && !delivery.levels.complete ? 'warning' : 'done') : 'blocked', valid ? (delivery ? `${delivery.delivered} de ${delivery.total} entregables` : `${valid} archivo(s)`) : 'Sin cambios aplicables todavía');
     if (r.applied) set('apply', 'done', `${r.applied.branch} · ${r.applied.commit}`);
-    const verifyFailed = pl.config.commands.map(lastOf).find(v => v && v.exitCode !== 0 && v.exitCode !== null && v.exitCode !== DEPS_MISSING_EXIT && v.isolation !== 'unavailable');
-    const verifyOk = r.applied && pl.config.commands.every(c => lastOf(c)?.exitCode === 0);
-    if (verifyOk) set('verify', 'done', pl.config.commands.map(c => `${c}: ok`).join(' · '));
+    const verifyFailed = pl.config.commands.map(lastOf).find(v => v && !verificationPassed(v) && v.exitCode !== null && v.exitCode !== DEPS_MISSING_EXIT && v.isolation !== 'unavailable');
+    const verifyOk = r.applied && pl.config.commands.every(c => verificationPassed(lastOf(c)));
+    if (verifyOk) set('verify', 'done', pl.config.commands.map(c => `${c}: ${lastOf(c)?.exitCode === 0 ? 'ok' : `ok frente a la base (${lastOf(c)?.triage?.preexisting.length ?? 0} fallo(s) preexistentes)`}`).join(' · '));
     const rev = revisionStatus(p);
     if (r.review?.verdict && rev) set('review', rev.qa.state === 'approved' ? (rev.qa.coversHead ? 'done' : 'warning') : rev.qa.state === 'rejected' ? 'rejected' : 'blocked', rev.qa.state === 'rejected' ? `${reviewStageText(rev)} · ${(r.review.findings ?? []).length} hallazgo(s)` : reviewStageText(rev));
     const stageOf: Record<string, FlowStageKey> = { budget: !r.applied ? 'execute' : verifyOk ? 'review' : 'verify', subscription_limit: !r.applied ? 'execute' : verifyOk ? 'review' : 'verify', call_cap: !r.applied ? 'execute' : verifyOk ? 'review' : 'verify', network: 'verify', environment: 'verify', duration: !r.applied ? 'execute' : 'verify', limit: verifyFailed ? 'verify' : 'review', repeated_failure: verifyFailed ? 'verify' : 'review', qa: 'review', no_changes: 'execute', refusal: 'execute', cancelled: !r.applied ? 'execute' : 'verify', missing_information: 'execute', permission: !r.applied ? 'execute' : 'verify', unsupported: 'execute', provider_refusal: 'execute', provider_timeout: !r.applied ? 'execute' : verifyOk ? 'review' : 'verify', provider_error: !r.applied ? 'execute' : verifyOk ? 'review' : 'verify', interrupted: !r.applied ? 'execute' : verifyOk ? 'review' : 'verify', unknown: !r.applied ? 'execute' : 'verify', too_large: 'execute', incomplete: 'execute', plan: 'execute', disagreement: 'review', gauntlet: 'review', external: verifyOk ? 'review' : 'verify', integration: verifyOk ? 'integrate' : 'verify', integration_conflict: 'integrate' };
@@ -420,12 +420,12 @@ export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
     const lastInstall = lastOf('install');
     const noDeps = (v?: VerificationRun) => !!v && v.exitCode === DEPS_MISSING_EXIT && v.isolation === 'docker' && !(lastInstall?.exitCode === 0 && lastInstall.startedAt > v.startedAt);
     const blockedDeps = need.filter(c => noDeps(lastOf(c)));
-    const failed = need.map(lastOf).filter((v): v is VerificationRun => !!v && v.exitCode !== null && v.exitCode !== 0 && v.exitCode !== DEPS_MISSING_EXIT && v.isolation !== 'unavailable');
+    const failed = need.map(lastOf).filter((v): v is VerificationRun => !!v && v.exitCode !== null && !verificationPassed(v) && v.exitCode !== DEPS_MISSING_EXIT && v.isolation !== 'unavailable');
     const timedOut = need.map(lastOf).filter((v): v is VerificationRun => !!v && v.exitCode === null);
-    const ok = need.filter(c => lastOf(c)?.exitCode === 0);
+    const ok = need.filter(c => verificationPassed(lastOf(c)));
     const missing = need.filter(c => !ok.includes(c));
     const unavailable = opts.sandbox === 'unavailable' || need.some(c => lastOf(c)?.isolation === 'unavailable');
-    const summary = need.map(c => { const v = lastOf(c); return `${c}: ${!v ? '—' : v.exitCode === 0 ? 'ok' : v.exitCode === null ? 'no terminó' : noDeps(v) ? 'sin dependencias' : v.isolation === 'unavailable' ? 'sin sandbox' : 'falló'}`; }).join(' · ');
+    const summary = need.map(c => { const v = lastOf(c); return `${c}: ${!v ? '—' : v.exitCode === 0 ? 'ok' : verificationPassed(v) ? 'ok frente a la base' : v.exitCode === null ? 'no terminó' : noDeps(v) ? 'sin dependencias' : v.isolation === 'unavailable' ? 'sin sandbox' : 'falló'}`; }).join(' · ');
     // Un fallo real del código (se ejecutó y falló) tiene prioridad sobre los requisitos del entorno de lo que falta.
     if (failed.length) {
       set('verify', 'failed', summary);

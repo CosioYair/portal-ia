@@ -174,6 +174,8 @@ export function workspaceDb(slug: string): DatabaseSync {
     duration_ms INTEGER, num_turns INTEGER, tokens_in INTEGER, tokens_out INTEGER, api_equivalent_usd REAL, error TEXT, rate_limit_json TEXT, progress TEXT
   );
   `);
+  // Esfuerzo que se pasó de verdad a la CLI (aditivo: las ejecuciones anteriores quedan sin dato).
+  if (!(db.prepare(`PRAGMA table_info(claude_code_runs)`).all() as any[]).some(c => c.name === 'effort')) db.exec(`ALTER TABLE claude_code_runs ADD COLUMN effort TEXT`);
   // Índices (aditivos, idempotentes): sin ellos cada proceso leía TODA la tabla de pasos (decenas de MB) y una lista de
   // procesos o la bandeja bloqueaban el servidor varios segundos. No cambian datos; una versión anterior los ignora.
   db.exec(`
@@ -490,16 +492,16 @@ export function backlogRepo(slug: string) {
 export function claudeCodeRunsRepo(slug: string) {
   const db = workspaceDb(slug);
   const map = (r: any): ClaudeCodeRun => ({
-    id: r.id, mode: r.mode, projectId: r.project_id, processId: r.process_id, stepId: r.step_id, agentId: r.agent_id, agentName: r.agent_name, model: r.model,
+    id: r.id, mode: r.mode, projectId: r.project_id, processId: r.process_id, stepId: r.step_id, agentId: r.agent_id, agentName: r.agent_name, model: r.model, effort: r.effort ?? null,
     status: r.status, billing: r.billing, authMethod: r.auth_method, subscriptionType: r.subscription_type, startedAt: r.started_at, finishedAt: r.finished_at,
     durationMs: r.duration_ms, numTurns: r.num_turns, tokensIn: r.tokens_in, tokensOut: r.tokens_out, apiEquivalentUsd: r.api_equivalent_usd, error: r.error,
     rateLimit: r.rate_limit_json ? JSON.parse(r.rate_limit_json) : null, progress: r.progress
   });
   return {
-    start(r: Pick<ClaudeCodeRun, 'mode' | 'projectId' | 'processId' | 'stepId' | 'agentId' | 'agentName' | 'model' | 'billing' | 'authMethod' | 'subscriptionType'>): ClaudeCodeRun {
+    start(r: Pick<ClaudeCodeRun, 'mode' | 'projectId' | 'processId' | 'stepId' | 'agentId' | 'agentName' | 'model' | 'billing' | 'authMethod' | 'subscriptionType'> & { effort?: string | null }): ClaudeCodeRun {
       const id = uuid();
-      db.prepare(`INSERT INTO claude_code_runs (id, mode, project_id, process_id, step_id, agent_id, agent_name, model, status, billing, auth_method, subscription_type, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)`)
-        .run(id, r.mode, r.projectId, r.processId, r.stepId, r.agentId, r.agentName, r.model, r.billing, r.authMethod, r.subscriptionType, now());
+      db.prepare(`INSERT INTO claude_code_runs (id, mode, project_id, process_id, step_id, agent_id, agent_name, model, effort, status, billing, auth_method, subscription_type, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)`)
+        .run(id, r.mode, r.projectId, r.processId, r.stepId, r.agentId, r.agentName, r.model, r.effort ?? null, r.billing, r.authMethod, r.subscriptionType, now());
       return this.get(id)!;
     },
     progress(id: string, text: string) { db.prepare(`UPDATE claude_code_runs SET progress = ? WHERE id = ?`).run(text.slice(0, 500), id); },

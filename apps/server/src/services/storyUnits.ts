@@ -3,7 +3,7 @@ import { revisionStatus } from './revision.ts';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { gauntletReviewed, verificationsForApplied } from '@portal-ia/domain';
+import { gauntletReviewed, verificationPassed, verificationsForApplied } from '@portal-ia/domain';
 import type { Agent, CheckState, CompletenessGate, Deliverable, DeliverableKind, DeliveryCheck, DeliveryProgress, DevOutputAssessment, IssueSeverity, PipelineConfig, Process, ProposedChange, QaFinding, StoryManifest, StoryPlan, VerificationRun, WorkUnit } from '@portal-ia/domain';
 import { estimatePricing } from '@portal-ia/ai-adapters';
 import { processesRepo } from '../db/workspace.ts';
@@ -12,6 +12,7 @@ import { diagnosticsFor, filesIn } from './diagnostics.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { applyChanges, changesSinceBase, commitInWorktree, hashText, mainBranch, readRepoFile, safeRelPath } from './repoWrite.ts';
 import { diagnoseFailure, diagnosisPrompt, failingTests, staleCorrectionUnits } from './failureDiagnosis.ts';
+import { isPreexisting, SENSITIVE_TEST, triageText, weakensTest } from './testTriage.ts';
 import { verificationEvidence, zeroTests } from './qaGate.ts';
 import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
 import { agentHeadroom, apiFallbackFor, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, retryForeignFailure, stepCall, storyRunContext, updatePipeline, updateResult, verifyStage, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
@@ -102,7 +103,8 @@ function newUnit(ctx: StoryRunCtx, agent: Agent, id: string, u: Pick<WorkUnit, '
     id, kind: u.kind, title: u.title.slice(0, 160), purpose: u.purpose.slice(0, 600), files: u.files, acceptance: u.acceptance ?? relevantAcceptance(plan?.acceptance ?? [], `${u.purpose} ${u.files.join(' ')}`), dependsOn: u.dependsOn,
     agentId: agent.id, agentName: agent.config.name, role: 'implementer', status: 'pending', attempts: 0, continuations: 0, repairs: 0,
     estimatedOutputTokens: u.estimatedOutputTokens, estimatedUsd: unitUsd(agent, 2500 + Math.ceil(ctxChars / 3.5), u.estimatedOutputTokens), subscription: viaSubscription(ctx, agent), costUsd: 0, stepIds: [],
-    source: u.source ?? 'plan', findings: u.findings, round: u.round, error: null, startedAt: null, finishedAt: null
+    source: u.source ?? 'plan', findings: u.findings, round: u.round, error: null, startedAt: null, finishedAt: null,
+    ...(u.testUpdatable?.length ? { testUpdatable: u.testUpdatable } : {})
   };
 }
 
@@ -255,8 +257,37 @@ function verificationDiagnosis(ctx: StoryRunCtx, man: StoryManifest, unit: WorkU
   const run = runs[i];
   const previous = runs.slice(0, i).filter(v => v.command === run.command && v.exitCode !== 0 && v.exitCode !== null).slice(-5);
   const storyCreated = (r.changes ?? []).filter(c => !c.error && c.action === 'create').map(c => c.path);
-  const d = diagnoseFailure({ root: worktreeOf(ctx), run, previous, storyCreated, planned: man.deliverables.filter(x => x.planned).map(x => x.path), unitFiles: unit.files });
+  const d = diagnoseFailure({ root: worktreeOf(ctx), run, previous, storyCreated, planned: man.deliverables.filter(x => x.planned).map(x => x.path), unitFiles: unit.files, exclude: t => isPreexisting(t, run.triage), updatable: unit.testUpdatable });
   return diagnosisPrompt(d, worktreeOf(ctx));
+}
+
+/**
+ * Intentos anteriores sobre los mismos archivos: QUÉ se cambió (el diff real de su commit) y QUÉ pasó después (la
+ * verificación siguiente). HU-177: cada corrección recibía solo títulos de eventos y repetía lo que ya había fallado.
+ */
+function previousAttempts(ctx: StoryRunCtx, man: StoryManifest, unit: WorkUnit): string {
+  const wt = worktreeOf(ctx); if (!wt) return '';
+  const r = resultOf(ctx); const runs = r.verifications ?? [];
+  const prior = man.units.filter(u => u.id !== unit.id && u.kind === 'correction' && (u.commits?.length ?? 0) > 0 && u.files.some(f => unit.files.includes(f) || (unit.findings ?? []).some(x => x.file === f))).slice(-3);
+  const out = prior.map(u => {
+    const commit = u.commits!.at(-1)!;
+    let diff = ''; try { diff = execFileSync('git', ['show', '--format=', '--unified=3', commit], { cwd: wt, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000, maxBuffer: 8 << 20 }); } catch { diff = '(diff no disponible)'; }
+    // Lo que pasó después: la primera verificación de «test» posterior a ese commit (sin los fallos preexistentes).
+    const done = u.finishedAt ?? null;
+    const after = runs.find(v => v.command === 'test' && (v.commit === commit || (!!done && v.startedAt > done)));
+    const still = after ? failingTests(after, 40).filter(t => t.kind !== 'cancelled' && !isPreexisting(t, after.triage)).map(t => `«${t.name}»`) : [];
+    const outcome = !after ? 'aún no se había verificado' : verificationPassed(after) ? '«test» pasó después' : still.length ? `después seguían fallando: ${still.slice(0, 6).join(', ')}` : `«test» siguió fallando (código ${after.exitCode})`;
+    return `## ${u.title} (commit ${commit.slice(0, 7)}) — resultado: ${outcome}\n\`\`\`diff\n${clip(diff, 3_500)}\n\`\`\``;
+  });
+  return out.length ? `# Intentos anteriores sobre estos archivos: lo que se cambió y lo que pasó (NO lo repitas; si no funcionó, cambia de enfoque)\n${out.join('\n')}\n` : '';
+}
+
+/** Línea base del último «test» que falló: qué ya fallaba sin la historia y qué rompió ella (con las pruebas actualizables). */
+function baselineSection(ctx: StoryRunCtx, unit: WorkUnit): string {
+  const r = resultOf(ctx); const last = (r.verifications ?? []).filter(v => v.command === 'test' && v.exitCode !== 0 && (!r.applied?.commit || !v.commit || v.commit === r.applied.commit)).at(-1);
+  const text = triageText(last?.triage); if (!text) return '';
+  const upd = unit.testUpdatable ?? [];
+  return `# Línea base: «test» ejecutado SIN tus cambios (commit de partida, mismo sandbox)\n${text}\n${upd.length ? `# Pruebas existentes que comprueban un comportamiento que esta historia cambia\n${upd.map(f => `- ${f}`).join('\n')}\nPasan sin la historia y fallan con ella. Decide con los criterios de aceptación: si la historia cambia ESE comportamiento a propósito, actualiza la prueba (patch) para que compruebe el comportamiento nuevo y explica en === RESUMEN === qué criterio lo exige (QA y el propietario verán la prueba modificada); si no, la rompiste tú: corrige el código y deja la prueba como está.\n` : ''}`;
 }
 
 function correctionPrompt(ctx: StoryRunCtx, man: StoryManifest, unit: WorkUnit, strategy: string | null): string {
@@ -264,10 +295,12 @@ function correctionPrompt(ctx: StoryRunCtx, man: StoryManifest, unit: WorkUnit, 
   const p = pipelineOf(ctx.slug, ctx.processId);
   const tries = attemptsSummary(p).slice(-4);
   const diagnosis = unit.source === 'verification' ? verificationDiagnosis(ctx, man, unit) : '';
-  return `Corrige la implementación de esta historia: corrección dirigida («${unit.title}»). Tus cambios ya están aplicados en el worktree y se conservan; NO rehagas lo que funciona ni reescribas archivos enteros: usa patch con fragmentos EXACTOS del contenido actual que se muestra. Corrige SOLO lo de abajo.
+  const baseline = unit.source === 'verification' ? baselineSection(ctx, unit) : '';
+  const previous = previousAttempts(ctx, man, unit);
+  return `Corrige la implementación de esta historia: corrección dirigida («${unit.title}»). Tus cambios ya están aplicados en el worktree y se conservan; NO rehagas lo que funciona ni reescribas archivos enteros: usa patch con fragmentos EXACTOS del contenido actual que se muestra. Corrige SOLO lo de abajo. Antes de cambiar nada, identifica la causa con la evidencia (prueba, valor esperado y obtenido, código que lo produce) y dila en === RESUMEN ===.
 # Qué hay que corregir (evidencia real)
-${(unit.findings ?? []).map(f => `- [${f.severity}] ${f.text}${f.file ? ` (${f.file})` : ''}${f.evidence ? `\n  evidencia: ${clip(f.evidence, 1_500).split('\n').join('\n  ')}` : ''}${f.expected ? `\n  esperado: ${f.expected}` : ''}`).join('\n')}
-${diagnosis ? `${diagnosis}\n` : ''}${strategy ? `# Qué cambia en este intento\n${strategy}\n` : ''}${tries.length ? `# Intentos anteriores (no repitas lo que ya falló)\n${tries.map(t => `- ${t}`).join('\n')}\n` : ''}# Criterios de aceptación de la historia
+${(unit.findings ?? []).map(f => `- [${f.severity}] ${f.text}${f.file ? ` (${f.file})` : ''}${f.evidence ? `\n  evidencia: ${clip(f.evidence, 6_000).split('\n').join('\n  ')}` : ''}${f.expected ? `\n  esperado: ${f.expected}` : ''}`).join('\n')}
+${baseline}${diagnosis ? `${diagnosis}\n` : ''}${strategy ? `# Qué cambia en este intento\n${strategy}\n` : ''}${previous || (tries.length ? `# Intentos anteriores (no repitas lo que ya falló)\n${tries.map(t => `- ${t}`).join('\n')}\n` : '')}${ctx.iterText ? `# Contexto de la iteración (lo que ya se intentó en iteraciones anteriores)\n${clip(ctx.iterText, 4_000)}\n` : ''}# Criterios de aceptación de la historia
 ${(ctx.plan?.acceptance ?? []).map(a => `- ${a}`).join('\n') || `- ${ctx.item.criterion || '(los de la historia)'}`}
 # Plan del Coordinador (resumen)
 ${ctx.plan ? ctx.plan.summary : '(sin plan)'}
@@ -278,7 +311,7 @@ ${(unit.maxTurns ?? 0) > 0 ? relatedContext(ctx, unit) : ''}
 FORMATO DE RESPUESTA:
 ${PATCH_ONLY_FORMAT}
 ${DROP_FORMAT}
-${unit.source === 'qa' || unit.source === 'gauntlet' ? `(si un hallazgo ${unit.source === 'qa' ? 'de QA' : 'del Evaluador'} es incorrecto, no inventes cambios: responde solo con === RESUMEN === y === SIN CAMBIOS === seguido de la evidencia concreta —archivo:línea, fragmento o salida—; ${unit.source === 'qa' ? 'QA' : 'el Evaluador'} lo volverá a evaluar una vez)` : '(es un fallo objetivo del sandbox o de la comprobación previa: corrígelo; si la causa está en otro archivo, parchea ese archivo. Una prueba que ya existía y no está en el plan no se modifica para que pase. Si la comprobación exige algo que contradice el criterio de aceptación o el código real, no la debilites ni inventes: responde solo con === RESUMEN === y === SIN CAMBIOS === con la evidencia concreta y el propietario decide)'}`;
+${unit.source === 'qa' || unit.source === 'gauntlet' ? `(si un hallazgo ${unit.source === 'qa' ? 'de QA' : 'del Evaluador'} es incorrecto, no inventes cambios: responde solo con === RESUMEN === y === SIN CAMBIOS === seguido de la evidencia concreta —archivo:línea, fragmento o salida—; ${unit.source === 'qa' ? 'QA' : 'el Evaluador'} lo volverá a evaluar una vez)` : `(es un fallo objetivo del sandbox o de la comprobación previa: corrígelo; si la causa está en otro archivo, parchea ese archivo. Una prueba que ya existía y no está en el plan no se modifica para que pase${unit.testUpdatable?.length ? ' (salvo las listadas arriba como comportamiento que esta historia cambia, y solo si un criterio de aceptación lo exige)' : ''}; una que ya fallaba sin la historia (línea base) no es tuya: no la toques. Si la comprobación exige algo que contradice el criterio de aceptación o el código real, no la debilites ni inventes: responde solo con === RESUMEN === y === SIN CAMBIOS === con la evidencia concreta y el propietario decide)`}`;
 }
 
 /** Intento acotado tras agotar los turnos: el contenido de los archivos relacionados, para no tener que explorarlos. */
@@ -405,7 +438,7 @@ function mergeMeta(ctx: StoryRunCtx, unit: WorkUnit, meta: ParsedDevOutput) {
  * hacerla pasar cambiándola debilitaría la verificación (HU-155). Lo demás (otros entregables pendientes, archivos fuera
  * del plan) se acepta y se anota.
  */
-function scopeCheck(man: StoryManifest, unit: WorkUnit, s: Settled, base: ProposedChange[]): ProposedChange[] {
+function scopeCheck(man: StoryManifest, unit: WorkUnit, s: Settled, base: ProposedChange[], wt: string | null = null): ProposedChange[] {
   const full = new Set(s.raw.filter(c => c.action === 'create' || c.action === 'modify').map(c => clean(c.path)));
   return s.changes.map(c => {
     if (c.error) return c;
@@ -413,7 +446,13 @@ function scopeCheck(man: StoryManifest, unit: WorkUnit, s: Settled, base: Propos
     const prior = base.find(x => x.path === c.path);
     const existingTest = isTestEntry(c.path) && (c.before > 0 || c.action === 'delete') && prior?.action !== 'create' && !d?.planned;
     const restores = !!prior?.baseHash && c.content !== null && hashText(c.content.replace(/\r\n/g, '\n')) === prior.baseHash;
-    if (existingTest && !restores) return { ...c, error: `«${c.path}» es una prueba que ya existía y no está en el plan: no se modifica para que pase (debilitaría la verificación). Corrige el código que la rompe; si esta historia debe cambiar esa prueba, el propietario la añade al plan. Restaurar su contenido original sí se permite.` };
+    // Excepción con evidencia: la línea base demostró que esta prueba pasa sin la historia y falla con ella (comprueba un
+    // comportamiento que la historia cambia); se permite actualizarla y queda registrada para QA y el propietario.
+    const behavior = (unit.testUpdatable ?? []).includes(c.path) && c.action !== 'delete' && !SENSITIVE_TEST.test(c.path);
+    // Aun así, nunca para debilitarla (sin IA): ni skip/todo/only, ni menos casos, ni menos aserciones.
+    const weak = existingTest && behavior && !restores && c.content !== null && wt ? weakensTest(readRepoFile(wt, c.path, 400_000) ?? '', c.content) : null;
+    if (weak) return { ...c, error: `«${c.path}»: la actualización ${weak}; eso debilitaría la verificación. Adapta la prueba al comportamiento nuevo sin quitar comprobaciones, o corrige el código.` };
+    if (existingTest && !restores && !behavior) return { ...c, error: `«${c.path}» es una prueba que ya existía y no está en el plan: no se modifica para que pase (debilitaría la verificación). Corrige el código que la rompe; si esta historia debe cambiar esa prueba, el propietario la añade al plan. Restaurar su contenido original sí se permite.` };
     if (full.has(c.path) && c.before > 0 && d?.status === 'delivered' && d.unitId !== unit.id) return { ...c, error: `Ya se entregó en otra unidad (${d.unitId}): no se regenera un archivo terminado. Para cambiarlo, usa patch sobre su contenido actual.` };
     if (full.has(c.path) && unit.kind === 'correction' && c.before >= 60) return { ...c, error: `Una corrección no reescribe entero un archivo de ${c.before} líneas (regeneraría trabajo hecho y la respuesta puede cortarse): usa patch con fragmentos exactos.` };
     const stitched = (unit.continued?.[c.path] ?? 0) > 0;
@@ -426,7 +465,7 @@ function scopeCheck(man: StoryManifest, unit: WorkUnit, s: Settled, base: Propos
 /** Aplica lo válido de una unidad y actualiza el manifiesto con la evidencia (commit, líneas, descartes). */
 async function applyUnit(ctx: StoryRunCtx, unitId: string, s: Settled): Promise<{ files: string[]; dropped: string[]; problems: string[] }> {
   const man = manifestOf(ctx); const unit = unitOf(ctx, unitId); const label = unitLabel(man, unit);
-  const changes = scopeCheck(man, unit, s, (resultOf(ctx).changes ?? []).filter(c => !c.error));
+  const changes = scopeCheck(man, unit, s, (resultOf(ctx).changes ?? []).filter(c => !c.error), worktreeOf(ctx));
   const valid = changes.filter(c => !c.error);
   const { commit, files } = valid.length ? await commitUnit(ctx, unit, label, valid) : { commit: null, files: [] as string[] };
   const wt = worktreeOf(ctx);
@@ -445,9 +484,13 @@ async function applyUnit(ctx: StoryRunCtx, unitId: string, s: Settled): Promise<
     // Un descarte solo cuenta si cambia de verdad un entregable (no uno ya entregado).
     for (const dr of s.drops) { const d = m.deliverables.find(x => x.path === dr.path); if (d && d.status !== 'delivered' && d.status !== 'dropped') { d.status = 'dropped'; d.note = dr.reason; dropped.push(d.path); } }
     const u = m.units.find(x => x.id === unitId)!; u.applied = Array.from(new Set([...(u.applied ?? []), ...files])); if (dropped.length) u.dropped = Array.from(new Set([...(u.dropped ?? []), ...dropped]));
+    if (commit) u.commits = [...(u.commits ?? []), commit].slice(-5);
     if (dropped.length) m.gate = null;
     const flagged = changes.filter(c => c.error || c.warning).map(c => ({ path: c.path, error: c.error ?? null, warning: c.warning ?? null, unitId, at: now() }));
     if (flagged.length) m.rejected = [...(m.rejected ?? []), ...flagged].slice(-60);
+    // Pruebas existentes actualizadas por cambio de comportamiento (con la evidencia de la línea base): visibles para QA y para ti.
+    const updated = files.filter(f => (u.testUpdatable ?? []).includes(f));
+    if (updated.length) m.testUpdates = [...(m.testUpdates ?? []), ...updated.map(f => ({ path: f, unitId, commit, reason: `Pasa en la base y falla con la historia: ${(u.findings ?? []).map(x => clip(x.text, 200)).join(' · ')}. Resumen del equipo: ${clip(s.meta?.summary ?? '', 400) || '—'}`, at: now() }))].slice(-30);
   });
   mergeMeta(ctx, unit, s.meta);
   // Lo rechazado por las reglas de ámbito queda registrado (evidencia para el propietario y para las lecciones).
@@ -661,7 +704,8 @@ type Finding = NonNullable<WorkUnit['findings']>[number];
 export function verificationFindings(v: VerificationRun): Finding[] {
   // «test»: las CAUSAS (aserción, preparación de la suite con su pila, plazo), nunca los nombres de las pruebas que su
   // suite canceló (HU-159: la corrección apuntaba a una prueba cancelada y el `before` que fallaba quedaba fuera).
-  const causes = v.command === 'test' ? failingTests(v).filter(t => t.kind && t.kind !== 'cancelled') : [];
+  // Con línea base, tampoco las que ya fallaban sin la historia (HU-177: se corregía lo que la historia no había roto).
+  const causes = v.command === 'test' ? failingTests(v, 40).filter(t => t.kind && t.kind !== 'cancelled' && !isPreexisting(t, v.triage)).slice(0, 8) : [];
   const what = { hook: 'falla la preparación', timeout: 'plazo agotado en', assertion: 'falla', load: 'falla al cargar' } as Record<string, string>;
   const d = causes.length ? causes.map(t => ({ file: t.file, line: t.line, code: null, text: `${what[t.kind!] ?? 'falla'} «${t.name}»: ${t.message}` })) : diagnosticsFor(v);
   const ev = verificationEvidence(v);
@@ -672,10 +716,22 @@ export function verificationFindings(v: VerificationRun): Finding[] {
 }
 
 /**
+ * Pruebas que YA existían (no las creó ni las tocó la historia) y que la línea base demuestra que la historia hace fallar:
+ * pasan en la base y fallan con ella. Si comprueban un comportamiento que la historia cambia A PROPÓSITO, la corrección
+ * puede actualizarlas (con el motivo; QA y el propietario lo ven). HU-177: las pruebas de los lotes comprobaban justo el
+ * comportamiento que la historia debía cambiar y la regla «no se toca una prueba existente» hacía imposible terminar.
+ */
+export function behaviorTests(ctx: StoryRunCtx, v: VerificationRun): string[] {
+  const t = v.triage; if (!t || t.unavailable) return [];
+  const story = new Set((resultOf(ctx).changes ?? []).filter(c => !c.error).map(c => c.path));
+  return (t.updatableFiles ?? []).filter(f => isTestEntry(f) && !story.has(f) && !SENSITIVE_TEST.test(f));
+}
+
+/**
  * Agrupa hallazgos en unidades dirigidas: por archivo (como mucho 3 hallazgos y 6 unidades por ronda). Un entregable del
  * plan que no está en el worktree se ENTREGA (unidad de construcción), no se «parchea».
  */
-export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' | 'verification' | 'completeness' | 'gauntlet' | 'owner', findings: (Finding | QaFinding)[]) {
+export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' | 'verification' | 'completeness' | 'gauntlet' | 'owner', findings: (Finding | QaFinding)[], opts: { testUpdatable?: string[] } = {}) {
   const man = manifestOf(ctx); const wt = worktreeOf(ctx);
   // Un intercambio por hallazgo: si QA mantiene lo que el equipo ya discutió con evidencia, decide el propietario (sin bucle pagado).
   const persisting = source === 'qa' ? findings.filter(f => (man.disputes ?? []).some(d => sameFinding(d, { file: f.file ?? null, text: f.text }))) : [];
@@ -708,7 +764,7 @@ export function startRound(ctx: StoryRunCtx, cfg: PipelineConfig, source: 'qa' |
     const id = `r${round + 1}-${i + 1}`;
     return missing
       ? newUnit(ctx, ctx.dev, id, { kind: 'build', title: `Entregar ${base(g.file)}`, purpose: d!.purpose, files: [g.file], dependsOn: [], estimatedOutputTokens: d!.estimatedLines * TOKENS_PER_LINE + 400, source, findings: g.findings, round })
-      : newUnit(ctx, ctx.dev, id, { kind: 'correction', title: `${base(g.file)}: ${g.findings[0].text}`.slice(0, 120), purpose: g.findings.map(f => f.text).join(' · '), files: [g.file], dependsOn: [], estimatedOutputTokens: 1500, source, findings: g.findings, round });
+      : newUnit(ctx, ctx.dev, id, { kind: 'correction', title: `${base(g.file)}: ${g.findings[0].text}`.slice(0, 120), purpose: g.findings.map(f => f.text).join(' · '), files: [g.file], dependsOn: [], estimatedOutputTokens: 1500, source, findings: g.findings, round, ...(opts.testUpdatable?.includes(g.file) ? { testUpdatable: [g.file] } : {}) });
   });
   if (ownerFiles.length) units.push(newUnit(ctx, ctx.dev, `r${round + 1}-${units.length + 1}`, { kind: 'correction', title: `Cambios pedidos: ${general![0].text}`.slice(0, 120), purpose: general!.map(f => f.text).join(' · '), files: ownerFiles, dependsOn: [], estimatedOutputTokens: 3000, source, findings: general!.slice(0, 4), round }));
   saveManifest(ctx, m => { m.rounds.push({ at: now(), source, units: units.length, applied: 0 }); m.units.push(...units); for (const u of units) if (u.kind === 'build') { const d = m.deliverables.find(x => x.path === u.files[0]); if (d) { d.status = 'pending'; d.unitId = u.id; } } });
@@ -801,7 +857,11 @@ export function testDiscovered(wt: string, file: string): { ok: boolean; script:
     const pj = path.join(wt, dir, 'package.json');
     if (fs.existsSync(pj)) {
       let script = ''; try { script = String(JSON.parse(fs.readFileSync(pj, 'utf8'))?.scripts?.test ?? ''); } catch { return null; }
-      const tokens = script.split(/\s+/).map(t => t.replace(/^['"]|['"]$/g, '')).filter(t => t && !t.startsWith('-') && !t.includes('=') && (t.includes('/') || t.includes('*')) && !/^(node|npx|tsx|vitest|jest|mocha)$/.test(t));
+      // Un script ejecutor (`node scripts/run-tests.mjs`) no es un patrón de pruebas: él decide qué ejecuta. Antes se tomaba
+      // por patrón y TODA prueba nueva salía «no ejecutada» (HU-177 gastó una corrección en ello y llegó a tocar esta función).
+      const runner = (t: string) => !t.includes('*') && /\.[cm]?[jt]s$/i.test(t) && !isTestEntry(t);
+      const tokens = script.split(/\s+/).map(t => t.replace(/^['"]|['"]$/g, '')).filter(t => t && !t.startsWith('-') && !t.includes('=') && (t.includes('/') || t.includes('*')) && !/^(node|npx|tsx|vitest|jest|mocha)$/.test(t) && !runner(t));
+      // Sin patrones propios (solo un ejecutor): no se puede afirmar nada sin ejecutar; lo dice la ejecución real (testEvidence).
       if (!tokens.length) return null;
       const rel = dir === '.' ? file : path.posix.relative(dir, file);
       const checkable = tokens.filter(t => !/[{}?[\]!]/.test(t));
@@ -864,7 +924,7 @@ export function testFileExecuted(content: string | null, output: string | null):
 export function testEvidence(ctx: StoryRunCtx, cfg: PipelineConfig): { notRun: { path: string; detail: string }[]; run: VerificationRun | null } | null {
   const r = resultOf(ctx); const man = manifestOf(ctx); const wt = worktreeOf(ctx);
   if (!r.applied || !wt || man.testRun?.commit === r.applied.commit) return null;
-  const run = sinceApplied(r).filter(v => v.command === 'test' && v.exitCode === 0).at(-1) ?? null;
+  const run = sinceApplied(r).filter(v => v.command === 'test' && verificationPassed(v)).at(-1) ?? null;
   const tests = (r.changes ?? []).filter(c => !c.error && c.action !== 'delete' && isTestEntry(c.path)).map(c => c.path);
   const results = tests.map(p => ({ path: p, ...testFileExecuted(readRepoFile(wt, p, 200_000), cfg.commands.includes('test') ? run?.output ?? null : null) }));
   saveManifest(ctx, m => { m.testRun = { commit: r.applied!.commit, at: now(), results }; });
@@ -908,6 +968,7 @@ export function deliveryChecks(p: Process): DeliveryCheck[] {
     if (!v) return { name: cmd, state: 'undetermined' as CheckState, detail: 'aún no se ejecutó sobre el último commit' };
     if (v.exitCode === 0) return cmd === 'test' && zeroTests(v.output) ? { name: cmd, state: 'undetermined' as CheckState, detail: 'terminó sin ejecutar ninguna prueba' } : { name: cmd, state: 'passed' as CheckState, detail: `${v.isolation ?? 'sandbox'} · ${Math.round(v.durationMs / 1000)} s` };
     if (v.exitCode === null || v.exitCode === 86 || v.isolation === 'unavailable') return { name: cmd, state: 'undetermined' as CheckState, detail: 'el entorno no permitió completarla' };
+    if (verificationPassed(v)) return { name: cmd, state: 'passed' as CheckState, detail: `solo fallan ${v.triage!.preexisting.length} prueba(s) que ya fallaban en la base ${v.triage!.baseCommit.slice(0, 7)} sin esta historia (mismo error) · ${v.isolation ?? 'sandbox'}` };
     return { name: cmd, state: 'failed' as CheckState, detail: `código ${v.exitCode}` };
   });
   const man = r.manifest; const tr = man?.testRun && man.testRun.commit === r.applied?.commit ? man.testRun : null;

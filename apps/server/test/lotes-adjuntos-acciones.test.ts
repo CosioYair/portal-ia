@@ -450,13 +450,17 @@ test('lote: un fallo de disco al cerrar no tumba el Portal (queda anotado); «en
   const jobs = (await inject('GET', `${A}/documents`)).json.jobs;
   for (const it of b.items) assert.match(jobs.find((j: any) => j.id === it.jobId).slug, /\/documento-(entregables|origen)$/);
   const manifest = path.join(root, 'documentos', b.slug, 'MANIFIESTO.json');
-  fs.chmodSync(manifest, 0o444); // solo lectura: escribirlo falla (como un disco lleno o un archivo bloqueado)
+  // Escribirlo tiene que fallar (como un disco lleno o un archivo bloqueado) en Windows Y en Linux: una carpeta con su nombre.
+  // Antes se marcaba de solo lectura, lo que solo falla en Windows: en el sandbox Linux (escritura atómica con renombrado)
+  // el archivo se sustituía y la prueba fallaba en main, cargándose a cualquier historia (HU-177).
+  const original = fs.readFileSync(manifest);
+  fs.rmSync(manifest); fs.mkdirSync(manifest); fs.writeFileSync(path.join(manifest, 'ocupado'), '');
   try {
     await inject('POST', `${A}/batches/${b.id}/start`, { authorized: true });
     assert.ok(await until(async () => (await batchOf(b.id)).status === 'completed', 60_000));
     const done = await batchOf(b.id); assert.match(done.error ?? '', /manifiesto/); assert.ok(done.deliverable, 'lo demás sí se hizo');
     assert.equal((await inject('GET', '/api/health')).status, 200, 'el Portal sigue en pie');
-  } finally { fs.chmodSync(manifest, 0o666); }
+  } finally { fs.rmSync(manifest, { recursive: true, force: true }); fs.writeFileSync(manifest, original); }
   const d1 = (await inject('POST', `${A}/batches/${b.id}/deliverable`, {})).json.deliverable; const d2 = (await inject('POST', `${A}/batches/${b.id}/deliverable`, {})).json.deliverable;
   assert.equal(d1, d2, 'sin cambios no se crea otro ZIP'); assert.equal(fs.readdirSync(path.join(root, 'documentos', b.slug, 'entregables')).length, 1);
   const other = agentsRepo(S).list().find(a => a.id !== agentId)!;

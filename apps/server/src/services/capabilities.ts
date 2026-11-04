@@ -5,7 +5,7 @@ import { requirePolicy, type PolicyOp } from './executionPolicy.ts';
 import { repoStatus } from './repoStatus.ts';
 import { git, pushBranches, repoRoot } from './repoWrite.ts';
 import { createPlan, pendingPlans, rejectPlan, setPlanSource } from './projectMaintenance.ts';
-import type { MaintenanceItem, MaintenancePlan } from '@portal-ia/domain';
+import type { MaintenanceItem, MaintenancePlan, VerificationRun } from '@portal-ia/domain';
 
 /**
  * Operaciones del Portal que el Asistente puede PROPONER y el propietario autoriza en la conversación. Cada capacidad:
@@ -48,7 +48,10 @@ export interface Capability<P = any> {
   /** Empresa y proyecto afectados, SIN efectos: el alcance de la conversación se comprueba antes de la vista previa. */
   target?(p: P): { workspace: string; projectId: string };
   preview(p: P, ctx?: CapabilityContext): Promise<CapabilityPreview>;
-  execute(p: P): Promise<CapabilityResult>;
+  /** `approved`: la vista previa que autorizó el propietario (lo que se ejecuta es eso, no una vista nueva). */
+  execute(p: P, approved?: CapabilityPreview): Promise<CapabilityResult>;
+  /** Tarda minutos (p. ej. pruebas en el sandbox): al autorizar se lanza y la tarjeta muestra el resultado al terminar. */
+  background?: boolean;
   /** Operaciones con plan: enlazar el plan con su tarjeta del chat y rechazarlo desde ella (lanza si ya no se puede). */
   onLink?(preview: CapabilityPreview, source: { messageId: string; operationId: string; conversationId?: string | null }): void;
   onReject?(preview: CapabilityPreview): void;
@@ -181,4 +184,64 @@ const reconcileProject: Capability<{ company: string; project: string; closeStag
   async execute() { throw err(409, 'Esta revisión se autoriza en su pantalla, objetivo a objetivo (no desde la tarjeta).'); }
 };
 
-export const CAPABILITIES: Record<string, Capability> = { [publishMain.id]: publishMain, [reconcileProject.id]: reconcileProject };
+const CHECKS = ['typecheck', 'test', 'build'] as const;
+/**
+ * Ejecutar typecheck, pruebas y compilación DE VERDAD sobre «main» del proyecto, en el sandbox (el mismo que verifica las
+ * historias: sin red, contenedor de solo lectura), en un worktree temporal y desechable. Sin IA y sin cambiar nada: ni tu
+ * carpeta, ni ramas, ni otros worktrees. Es la forma de que el Asistente compruebe el estado real («¿pasan las pruebas?»,
+ * «¿se integró bien?») en vez de suponerlo. La autoriza el propietario (usa su equipo y Docker unos minutos).
+ */
+const runChecks: Capability<{ company: string; project: string; commands?: (typeof CHECKS[number])[] }> = {
+  id: 'run_checks',
+  label: 'Ejecutar typecheck, pruebas y compilación de main en el sandbox (sin IA, sin cambiar nada)',
+  policy: 'sandbox_exec',
+  params: z.object({ company: z.string().trim().min(1).max(120), project: z.string().trim().min(1).max(160), commands: z.array(z.enum(CHECKS)).min(1).max(3).optional() }),
+  promptHint: '{"type":"request_operation","capability":"run_checks","company":slug,"project":slug,"commands"?:["typecheck","test","build"]} → ejecuta DE VERDAD typecheck/test/build sobre «main» del proyecto en el sandbox (worktree temporal, sin red ni IA; no cambia nada) y devuelve el resultado con las pruebas que fallan. Úsala cuando pida «ejecuta las pruebas», «¿compila?», «¿quedó bien?», o para comprobar el estado real antes de proponer o después de integrar un encargo.',
+  background: true,
+  target({ company, project }) { const t = resolveProject(company, project); return { workspace: t.slug, projectId: t.projectId }; },
+  async preview({ company, project, commands }) {
+    const t = resolveProject(company, project);
+    const repo = projectsRepo(t.slug).repository(t.projectId);
+    const cmds = commands?.length ? Array.from(new Set(commands)) : [...CHECKS];
+    const base = { title: `Ejecutar ${cmds.join(', ')} sobre «main» de «${t.projectName}»`, target: { workspace: t.slug, projectId: t.projectId, projectName: t.projectName } };
+    if (!repo) return { ...base, ok: false, details: [], blockers: ['El proyecto no tiene repositorio registrado (Panel → Repositorio).'], excluded: [] };
+    const st = await repoStatus(repo.path); const cwd = repoRoot(repo.path);
+    const blockers: string[] = [];
+    if (!st.isGit) blockers.push('La carpeta registrada no es un repositorio git.');
+    if (!st.mainBranch) blockers.push('El repositorio no tiene rama principal (main).');
+    const { sandboxDeps } = await import('./verification.ts');
+    const sb = await sandboxDeps.detect().catch(() => null);
+    if (!sb || sb.available === 'unavailable') blockers.push(`No hay sandbox disponible (${sb?.detail ?? 'sin respuesta'}): arranca Docker Desktop y pídela de nuevo. Sin sandbox no se ejecuta nada en tu equipo.`);
+    const sha = st.mainBranch ? await git(cwd, ['rev-parse', st.mainBranch]).then(x => x.trim()).catch(() => null) : null;
+    const subject = sha ? await git(cwd, ['log', '-1', '--format=%h %s', sha]).then(x => x.trim()).catch(() => sha.slice(0, 7)) : '—';
+    const details = [`Commit: ${subject} («${st.mainBranch ?? 'main'}»).`, `Se ejecuta, en este orden: ${cmds.join(' → ')}, en un worktree temporal de ese commit dentro del sandbox ${sb?.available ?? ''} (sin red, sin IA).`, 'No cambia nada: ni tu carpeta, ni ramas, ni otros worktrees; el worktree temporal se retira al terminar.', 'Puede tardar varios minutos; el resultado aparece en esta tarjeta.'];
+    return { ...base, ok: !blockers.length, details, blockers, excluded: [], fingerprint: sha };
+  },
+  async execute(p, approved) {
+    const pv = await runChecks.preview(p);
+    if (!pv.ok || !pv.fingerprint) throw err(409, `No se ejecuta: ${pv.blockers.join(' ')}`);
+    // Se ejecuta el commit que mostró la tarjeta autorizada; si main se movió desde entonces, no se ejecuta otro.
+    if (approved?.fingerprint && approved.fingerprint !== pv.fingerprint) throw err(409, 'No se ejecutó: «main» cambió desde que viste la tarjeta. Pídela de nuevo.');
+    const repo = projectsRepo(pv.target.workspace).repository(pv.target.projectId)!;
+    requirePolicy('sandbox_exec', { slug: pv.target.workspace, projectId: pv.target.projectId, authorized: true });
+    const { runOnCommit } = await import('./baseline.ts');
+    const { testDigest } = await import('./testTriage.ts');
+    const { DEPS_MISSING_EXIT } = await import('./sandbox.ts');
+    const cmds = p.commands?.length ? Array.from(new Set(p.commands)) : [...CHECKS];
+    const runs = await runOnCommit(repo.path, pv.fingerprint, cmds, 'checks');
+    const line = (v: VerificationRun) => v.exitCode === 0 ? `${v.command} ✓` : v.exitCode === DEPS_MISSING_EXIT ? `${v.command}: sin dependencias` : v.isolation === 'unavailable' ? `${v.command}: sin sandbox` : v.exitCode === null ? `${v.command}: no terminó` : `${v.command} ✗`;
+    const details: string[] = [];
+    for (const v of runs) {
+      details.push(`${line(v)} · código ${v.exitCode ?? '—'} · ${Math.round(v.durationMs / 1000)} s · ${v.isolation ?? '?'}`);
+      if (v.exitCode === DEPS_MISSING_EXIT) details.push('  Faltan las dependencias Linux de este package-lock en el sandbox: se instalan al autorizar una ejecución (encargo o historia) con «Permitir instalar dependencias». No se instaló nada.');
+      else if (v.exitCode !== 0 && v.command === 'test') for (const t of (v.tests ?? testDigest(v.output)).failing.slice(0, 12)) details.push(`  ✗ «${t.name}»${t.file ? ` (${t.file})` : ''}: ${t.message.replace(/\s+/g, ' ').slice(0, 240)}`);
+      else if (v.exitCode !== 0) details.push(...v.output.trim().split('\n').slice(-6).map(l => `  ${l.slice(0, 240)}`));
+    }
+    const skipped = cmds.filter(c => !runs.some(v => v.command === c));
+    if (skipped.length) details.push(`No se ejecutó: ${skipped.join(', ')} (el anterior lo impidió).`);
+    details.push('Registrado en la auditoría (política sandbox_exec). Worktree temporal retirado.');
+    return { summary: `${runs.map(line).join(' · ')} sobre ${pv.fingerprint.slice(0, 7)} (${runs[0]?.isolation ?? 'sandbox'}).`, details };
+  }
+};
+
+export const CAPABILITIES: Record<string, Capability> = { [publishMain.id]: publishMain, [reconcileProject.id]: reconcileProject, [runChecks.id]: runChecks };

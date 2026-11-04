@@ -1,5 +1,5 @@
 import type { Agent, AgentConfig, AgentCreateInput, Capability, ModelInfo, OrgAgentSnapshot, OrgApplication, OrgChange, OrgChangeKind, OrgEvaluation, OrgProposal, OrgProposalSpec, ProviderId } from '@portal-ia/domain';
-import { CAPABILITIES, ORG_ACTION_LABEL, ORG_TARGET_LABEL, TOOLS, departmentOf, isRetired } from '@portal-ia/domain';
+import { CAPABILITIES, ORG_ACTION_LABEL, ORG_TARGET_LABEL, TOOLS, departmentOf, isRetired, clampEffort } from '@portal-ia/domain';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, workspaceDb } from '../db/workspace.ts';
 import { orgEvaluationsRepo } from '../db/orgEvaluationSchema.ts';
@@ -130,7 +130,7 @@ function createOp(all: Agent[], ev: OrgEvaluation, spec: OrgProposalSpec, depart
   const config: AgentConfig = {
     ...gestor.config, name: spec.name, specialization: spec.specialization || spec.role || spec.name,
     responsibilities: spec.responsibilities?.length ? spec.responsibilities : [spec.specialization || spec.name],
-    provider: gestor.config.provider, model, effort: spec.effort ?? 'medium', tools,
+    provider: gestor.config.provider, model, effort: clampEffort(gestor.config.provider, model, spec.effort ?? 'medium'), tools,
     knowledge: { objectives: true, context: true, history: true, ...(ev.projectId ? { repo: true } : {}) },
     monthlyLimitUsd: 20, perTaskAuthUsd: 2, fallbacks: [], capabilities
   };

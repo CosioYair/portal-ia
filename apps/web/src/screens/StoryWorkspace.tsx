@@ -319,7 +319,7 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
               {ctx.team.map(m => <div key={m.agentId} style={{ display: 'flex', flexDirection: 'column' }}><span className="sm13"><strong>{m.agentName}</strong> · {ROLE[m.role] ?? m.role}{m.override ? ' · añadido por ti' : ''}</span><span className="small muted">{m.reason}{m.model ? ` · ${m.model}` : ''}</span></div>)}
             </div></section>
             {ctx.lessons.length > 0 && <section className="card"><div className="card-h"><div className="h3">Lecciones de esta historia</div><Link className="lnk small" to="/conocimiento#lecciones">ver</Link></div><div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {ctx.lessons.map(l => <div key={l.id} className="sm13"><Chip tone={l.status === 'validated' ? 'ok' : l.status === 'detected' ? 'warn' : ''} xs>{({ detected: 'detectada', proposed: 'propuesta', validated: 'validada', rejected: 'rechazada', obsolete: 'obsoleta' } as Record<string, string>)[l.status] ?? l.status}</Chip> {l.title}</div>)}
+              {ctx.lessons.map(l => <div key={l.id} className="sm13"><Chip tone={l.status === 'validated' ? 'ok' : l.status === 'detected' ? 'warn' : ''} xs>{({ detected: 'detectada', proposed: 'propuesta', validated: 'validada', rejected: 'rechazada', obsolete: 'obsoleta', refuted: 'retirada' } as Record<string, string>)[l.status] ?? l.status}</Chip> {l.title}</div>)}
             </div></section>}
           </aside>
         </div>

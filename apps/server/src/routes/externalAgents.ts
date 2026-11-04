@@ -34,7 +34,7 @@ export async function externalAgentsRoutes(app: FastifyInstance) {
     const b = z.object({
       path: z.string().min(1).max(1024), hash: z.string().length(64), name: z.string().trim().min(2).max(80), role: z.string().trim().min(2).max(80),
       summary: z.string().max(2000).default(''), department: z.string().trim().min(2).max(60),
-      harness: z.enum(['claude-code', 'codex']), model: z.string().trim().min(1).max(120), effort: z.enum(['low', 'medium', 'high']).default('medium'),
+      harness: z.enum(['claude-code', 'codex']), model: z.string().trim().min(1).max(120), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'),
       grants: GRANTS, authorized: z.literal(true)
     }).safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: 'Datos de importación no válidos (nombre, papel, departamento, arnés y tu confirmación).', issues: b.error.issues });

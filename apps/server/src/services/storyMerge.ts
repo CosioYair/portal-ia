@@ -1,4 +1,4 @@
-import { INTERNAL_WORKSPACE, verificationsForApplied, type BranchIntegration, type Process } from '@portal-ia/domain';
+import { INTERNAL_WORKSPACE, mergeAcknowledgementsOf, verificationPassed, verificationsForApplied, type BranchIntegration, type Process } from '@portal-ia/domain';
 import { changed } from './live.ts';
 import { processesRepo, projectsRepo, backlogRepo } from '../db/workspace.ts';
 import { requirePolicy } from './executionPolicy.ts';
@@ -19,7 +19,15 @@ const fail = (statusCode: number, message: string, code?: string, extra: Record<
  * de cualquier espera por el carril): si devuelve un motivo, no se integra (409 'integration_vetoed'). La usa el lote para
  * que un cambio de política, una pausa o una aceptación anulada mientras esperaba el carril nunca acaben en main.
  */
-export type MergeOpts = { into?: string; skipVerification?: boolean; guard?: () => string | null };
+/**
+ * `expectedCommit`: el commit que vio el propietario (si el aplicado cambió, no se integra otro). `acknowledge`: confirma lo
+ * que la línea base dejó pasar (ver mergeAcknowledgements); `requireAck` (integración manual) la exige. Los lotes lo muestran en su revisión y su aceptación
+ * es la confirmación.
+ */
+export type MergeOpts = { into?: string; skipVerification?: boolean; guard?: () => string | null; expectedCommit?: string | null; acknowledge?: { preexisting?: boolean; testUpdates?: boolean }; requireAck?: boolean };
+
+/** Ver mergeAcknowledgementsOf (dominio): lo mismo que muestra la interfaz. */
+export const mergeAcknowledgements = (p: Process) => mergeAcknowledgementsOf(p);
 export async function mergeStory(slug: string, id: string, opts: MergeOpts = {}, log: (o: any, m: string) => void = () => undefined): Promise<Process> {
   // Todo (leer el proceso, comprobar si main avanzó, combinar y registrar) en el carril del repositorio: dos integraciones
   // a la vez (lote y manual, o dos historias) se hacen una detrás de otra y la segunda ve el main que dejó la primera.
@@ -63,11 +71,18 @@ async function mergeStoryLocked(slug: string, id: string, opts: MergeOpts, log: 
   // Evidencia de ESTA versión del código (por el commit verificado; la hora solo en registros antiguos sin commit).
   const fresh = verificationsForApplied(proc.result, 1000);
   const okTypecheck = fresh.some(v => v.command === 'typecheck' && v.exitCode === 0);
-  const failedLast = ['typecheck', 'build', 'test'].map(c => proc.result!.verifications.filter(v => v.command === c).at(-1)).filter(v => v && v.exitCode !== 0);
+  // «test» cuenta como superada también si solo fallan pruebas que ya fallaban sin la historia (triaje frente a la base).
+  const failedLast = ['typecheck', 'build', 'test'].map(c => proc.result!.verifications.filter(v => v.command === c).at(-1)).filter(v => v && !verificationPassed(v));
   // Proyecto interno (el propio Portal): además de typecheck, test y build en sandbox real; en otros proyectos basta typecheck.
   const internal = slug === INTERNAL_WORKSPACE.slug;
-  const okAfter = (cmd: string, sandboxOnly = false) => fresh.some(v => v.command === cmd && v.exitCode === 0 && (!sandboxOnly || v.isolation === 'docker' || v.isolation === 'wsl' || v.isolation === 'linux-ns'));
+  const okAfter = (cmd: string, sandboxOnly = false) => fresh.some(v => v.command === cmd && verificationPassed(v) && (!sandboxOnly || v.isolation === 'docker' || v.isolation === 'wsl' || v.isolation === 'linux-ns'));
   const missing = internal ? [!okTypecheck ? 'typecheck' : '', !okAfter('test', true) ? 'test (sandbox)' : '', !okAfter('build', true) ? 'build (sandbox)' : ''].filter(Boolean) : [!okTypecheck ? 'typecheck' : ''].filter(Boolean);
+  // Se integra lo que el propietario vio: con otro commit aplicado, no.
+  if (opts.expectedCommit && !(proc.result.applied.commit.startsWith(opts.expectedCommit) || opts.expectedCommit.startsWith(proc.result.applied.commit))) throw fail(409, `La versión aplicada cambió (ahora ${proc.result.applied.commit.slice(0, 7)}, viste ${opts.expectedCommit.slice(0, 7)}): revísala de nuevo antes de integrar.`, 'stale_commit');
+  // Lo que la línea base dejó pasar lo confirma el propietario (o la aceptación del lote, que lo muestra en su revisión).
+  const ack = mergeAcknowledgements(proc);
+  const needs = [...(ack.preexisting.length && !opts.acknowledge?.preexisting ? ['preexisting'] : []), ...(ack.testUpdates.length && !opts.acknowledge?.testUpdates ? ['testUpdates'] : [])];
+  if (needs.length && opts.requireAck) throw Object.assign(fail(409, `Confirma antes de integrar: ${[ack.preexisting.length && needs.includes('preexisting') ? `«test» pasa solo frente a la base (estas pruebas ya fallaban en main sin este cambio: ${ack.preexisting.join(', ')})` : '', ack.testUpdates.length && needs.includes('testUpdates') ? `modificó pruebas que ya existían (${ack.testUpdates.join(', ')}) porque comprobaban el comportamiento que cambia` : ''].filter(Boolean).join('; ')}.`, 'ack_required'), { acknowledgements: ack });
   if (!opts.skipVerification || internal) {
     // El proyecto interno (el propio Portal) nunca se integra saltándose la verificación: es un control de seguridad.
     if (failedLast.length) throw fail(409, `La última verificación falló (${failedLast.map(v => v!.command).join(', ')}). Corrige en la rama o rechaza el diff; integrar código roto dejaría el Portal sin compilar.`, 'verification_failed');

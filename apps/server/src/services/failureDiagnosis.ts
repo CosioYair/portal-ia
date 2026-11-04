@@ -23,7 +23,7 @@ const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
  */
 /** load = el ARCHIVO de prueba falla al cargarse (error en su nivel superior) y ninguna de sus pruebas llega a ejecutarse. */
 export type FailingKind = 'assertion' | 'hook' | 'cancelled' | 'timeout' | 'load';
-export interface FailingTest { name: string; message: string; file: string | null; line: number | null; kind?: FailingKind }
+export interface FailingTest { name: string; message: string; file: string | null; line: number | null; kind?: FailingKind; /** Valores de la aserción (TAP de node --test), si los hay. */ expected?: string | null; actual?: string | null }
 
 /**
  * Pruebas que fallan, con el mensaje completo, el archivo y la línea de la aserción (TAP de node --test). Primero las
@@ -40,10 +40,13 @@ export function failingTests(run: Pick<VerificationRun, 'command' | 'output'>, m
     const m = lines[i].match(/^(\s*)not ok \d+ - (.+?)\s*(#.*)?$/); if (!m) continue;
     if (TEST_FILE.test(m[2])) { const load = loadFailure(lines, i, m[2]); if (load) all.push(load); continue; }
     const indent = m[1].length; let message = ''; let file: string | null = null; const frames: { file: string; line: number }[] = [];
-    let failureType: string | null = null; let isSuite = false; const stack: string[] = [];
+    let failureType: string | null = null; let isSuite = false; const stack: string[] = []; const vals: Record<string, string> = {};
     for (let j = i + 1; j < lines.length; j++) {
       const l = lines[j];
       if (/^\s*(not )?ok \d+ /.test(l) && (l.match(/^\s*/)?.[0].length ?? 0) <= indent) break;
+      // expected/actual del bloque YAML (una línea o, si es un bloque, sus primeras líneas): el mismo nombre con OTROS valores no es el mismo fallo.
+      const ev = l.match(/^(\s*)(expected|actual):\s?(.*)$/);
+      if (ev && ev[1].length === indent + 2 && vals[ev[2]] === undefined) { let v = ev[3].trim(); if (!v || /^[|>]-?$/.test(v)) { const more: string[] = []; for (let k = j + 1; k < lines.length && more.length < 6; k++) { if ((lines[k].match(/^\s*/)?.[0].length ?? 0) <= indent + 2 && lines[k].trim()) break; if (lines[k].trim()) more.push(lines[k].trim()); } v = more.join(' '); } vals[ev[2]] = v.slice(0, 300); }
       const ft = l.match(/^\s*failureType: '(\w+)'/); if (ft && !failureType) failureType = ft[1];
       if (/^\s*type: 'suite'/.test(l)) isSuite = true;
       // Pila: marcos del repositorio (no de node:internal) para decir DÓNDE falla, también fuera del archivo de prueba.
@@ -65,7 +68,7 @@ export function failingTests(run: Pick<VerificationRun, 'command' | 'output'>, m
     const frame = frames.find(f => f.file === file) ?? frames[0];
     const name = kind === 'hook' ? `${m[2]} (preparación de la ${isSuite ? 'suite' : 'prueba'}: before/after)` : m[2];
     const where = kind === 'hook' && stack.length ? ` · pila: ${stack.join(' ← ')}` : '';
-    all.push({ name, message: `${message}${where}`.slice(0, 900), file: file ?? frame?.file ?? null, line: frame?.line ?? null, kind });
+    all.push({ name, message: `${message}${where}`.slice(0, 900), file: file ?? frame?.file ?? null, line: frame?.line ?? null, kind, ...(vals.expected !== undefined || vals.actual !== undefined ? { expected: vals.expected ?? null, actual: vals.actual ?? null } : {}) });
   }
   // Primero las causas; las canceladas solo si no hay ninguna causa a la vista (y entonces se dicen canceladas, no fallidas).
   const causes = all.filter(f => f.kind !== 'cancelled');
@@ -218,6 +221,10 @@ export interface DiagnosisInput {
   /** Archivos de la unidad (ya van completos en el encargo). */
   unitFiles: string[];
   index?: RouteDecl[];
+  /** Fallos que la línea base demostró preexistentes: no son de la historia y no se diagnostican. */
+  exclude?: (t: FailingTest) => boolean;
+  /** Pruebas existentes que esta corrección PUEDE actualizar (cambio de comportamiento demostrado por la línea base). */
+  updatable?: string[];
 }
 
 const ENV = /ECONNREFUSED|EAI_AGAIN|ENOTFOUND|ENOSPC|ENOMEM|out of memory|Cannot find package '(?![.\/])|spawn \S+ ENOENT|Faltan las dependencias/i;
@@ -225,11 +232,11 @@ const INTEGRATION = /does not provide an export named|is not a function|is not a
 
 export function diagnoseFailure(input: DiagnosisInput): FailureDiagnosis {
   const { root, run } = input;
-  const failing = failingTests(run);
+  const failing = failingTests(run).filter(t => !input.exclude?.(t));
   const kinds: FailureDiagnosis['kinds'] = [];
   const text = failing.map(f => `${f.name} ${f.message}`).join('\n');
   if (run.exitCode === null || run.exitCode === 86 || run.isolation === 'unavailable' || ENV.test(run.output.slice(-20_000))) kinds.push({ kind: 'environment', why: 'parece un fallo del entorno (red, dependencias, memoria o sandbox), no del código: no cambies el código por esto' });
-  const existing = Array.from(new Set(failing.map(f => f.file).filter((f): f is string => !!f && TEST_FILE.test(f) && !input.storyCreated.includes(f) && !input.planned.includes(f))));
+  const existing = Array.from(new Set(failing.map(f => f.file).filter((f): f is string => !!f && TEST_FILE.test(f) && !input.storyCreated.includes(f) && !input.planned.includes(f) && !(input.updatable ?? []).includes(f))));
   if (existing.length) kinds.push({ kind: 'existing_test', why: `${existing.join(', ')} ya existía y no es un entregable de esta historia: NO la modifiques para que pase (eso debilitaría la verificación); corrige el código que la rompe` });
   const hooks = failing.filter(f => f.kind === 'hook');
   if (hooks.length) kinds.push({ kind: 'test_setup', why: `la PREPARACIÓN de la prueba falla (${hooks.map(h => `«${clip(h.name, 90)}»`).join(', ')}): sus pruebas quedaron canceladas sin ejecutarse, así que no hay aserciones de la implementación que corregir. Corrige la preparación (por ejemplo, usar las funciones reales del Portal para crear datos de prueba en vez de suponer nombres o campos), según la pila del error` });

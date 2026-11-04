@@ -1,10 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import {
-  EXTERNAL_TEXT_LIMIT, EXTERNAL_TOTAL_LIMIT, findSecret, isIdentityPath, isIgnoredExternalDir, normalizeText, parseSkillHeader,
-  type Agent, type ExecutionBackend, type ExternalFileChange, type ExternalGrants, type ExternalLayout, type ExternalProvenance, type IntegrationState
-} from '@portal-ia/domain';
+import { EXTERNAL_TEXT_LIMIT, EXTERNAL_TOTAL_LIMIT, findSecret, isIdentityPath, isIgnoredExternalDir, normalizeText, parseSkillHeader,
+  type Agent, type ExecutionBackend, type ExternalFileChange, type ExternalGrants, type ExternalLayout, type ExternalProvenance, type IntegrationState, type ReasoningEffort, clampEffort } from '@portal-ia/domain';
 import { agentsRepo, workspaceDb } from '../db/workspace.ts';
 import { createAgentFromWizard, localDir } from './agentCreation.ts';
 import { recordAgentEvent } from './agentEvents.ts';
@@ -239,7 +237,7 @@ export function externalPreview(slug: string, dir: string) {
 
 export interface ExternalImportInput {
   path: string; hash: string; name: string; role: string; summary: string; department: string;
-  harness: ExecutionBackend; model: string; effort: 'low' | 'medium' | 'high'; grants: ExternalGrants; authorized: boolean;
+  harness: ExecutionBackend; model: string; effort: ReasoningEffort; grants: ExternalGrants; authorized: boolean;
 }
 
 export async function importExternal(slug: string, i: ExternalImportInput, by = 'owner'): Promise<Agent> {
@@ -253,7 +251,7 @@ export async function importExternal(slug: string, i: ExternalImportInput, by = 
   if (blocking.length) throw err(`No se puede importar: ${blocking.map(p => `${p.path} — ${p.message}`).join(' · ')}`, 400);
   const agent = await createAgentFromWizard(slug, {
     name: i.name, role: i.role, summary: i.summary, responsibilities: [], deliverables: [], department: i.department, scope: 'workspace', projectId: null,
-    harness: i.harness, model: i.model, effort: i.effort, tools: [], knowledge: [], capabilities: [], autonomy: 'ask', instructions: null, authorized: true
+    harness: i.harness, model: i.model, effort: clampEffort(i.harness === 'codex' ? 'openai' : 'anthropic', i.model, i.effort), tools: [], knowledge: [], capabilities: [], autonomy: 'ask', instructions: null, authorized: true
   }, 'import');
   const provenance: ExternalProvenance = { origin: 'external-folder', path: scan.root, importedAt: now(), importedBy: by, originalHash: snapshotHash(scan.files), note: 'Importado como referencia gestionada: la carpeta original es la fuente de verdad.' };
   try { sourcesRepo(slug).insert(agent.id, scan.root, scan.layout, provenance, i.grants, scan.files); }

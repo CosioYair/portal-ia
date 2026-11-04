@@ -74,6 +74,8 @@ export function explainRemoteError(message: string): string {
   if (/stale info|rejected.*lease/i.test(message)) return 'La rama cambió en el remoto justo antes de borrarla (alguien publicó en ella): no se borró. Revisa de nuevo.';
   if (/remote ref does not exist|unable to delete/i.test(message)) return 'La rama ya no existía en el remoto.';
   if (/protected branch|GH006|protected/i.test(message)) return 'El remoto protege esta rama (regla de rama protegida). Quítale la protección en GitHub › Settings › Branches si de verdad quieres borrarla; el Portal no la salta.';
+  // Servidor git propio con `receive.denyDeletes`: el mismo caso (el remoto no deja borrar), con su causa real.
+  if (/deletion prohibited/i.test(message)) return 'El remoto protege esta rama contra el borrado (el servidor rechaza borrar ramas: «deletion prohibited»). Cámbialo en el servidor si de verdad quieres borrarla; el Portal no lo salta.';
   if (/publickey|host key|Permission denied \(/i.test(message)) return 'No se pudo autenticar con el remoto (clave SSH o credencial de este equipo). Revisa la credencial de git; nada se forzó.';
   if (/403|denied|permission|not allowed|write access/i.test(message)) return 'El remoto rechazó el borrado: la credencial de git de este equipo no tiene permiso de escritura en el repositorio (en GitHub, «Contents: Read and write»). Concede ese permiso y reintenta; nada se forzó.';
   if (/could not resolve|unable to access|timed out|tiempo agotado|connection|network|sin respuesta|does not appear to be a git repository|could not read from remote|not found/i.test(message)) return 'No se pudo conectar con el remoto (red, dirección o servicio). No se cambió nada en el remoto; reintenta más tarde.';

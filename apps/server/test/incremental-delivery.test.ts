@@ -30,6 +30,7 @@ const { createStoryProcess, runStory } = await import('../src/services/storyExec
 const { newPipeline } = await import('../src/services/storyPipeline.ts');
 const { kindOf, syntaxProblem, testDiscovered, UNIT_TEXT_BUDGET } = await import('../src/services/storyUnits.ts');
 const { sandboxDeps } = await import('../src/services/verification.ts');
+const { isBaselineWorktree } = await import('../src/services/baseline.ts'); // la línea base (la prueba sin la historia) pasa
 const { depsVolumeName, dockerCliEnv, SANDBOX_IMAGE } = await import('../src/services/sandbox.ts');
 const { lessonsRepo } = await import('../src/services/lessons.ts');
 const { recoverInterruptedProcesses } = await import('../src/services/interruptions.ts');
@@ -817,6 +818,20 @@ test('revisión2 4 · globs recursivos del script de test («**») a cualquier p
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('HU-177 · un script ejecutor («node scripts/run-tests.mjs») no es un patrón: nunca «prueba no ejecutada» sin ejecutarla', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-glob3-'));
+  // El script real del servidor del Portal desde 56421a3: el ejecutor decide los patrones (por defecto test/*.test.ts).
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node scripts/run-tests.mjs' } }));
+  assert.equal(testDiscovered(dir, 'test/lotes-pdf-independientes.test.ts'), null, 'no comprobable estáticamente: lo decide la ejecución real');
+  // Con patrones después del ejecutor, se comprueban esos patrones (y solo esos).
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node scripts/run-tests.mjs test/*.test.ts' } }));
+  assert.equal(testDiscovered(dir, 'test/x.test.ts')?.ok, true); assert.equal(testDiscovered(dir, 'tests/x.test.ts')?.ok, false);
+  // Un archivo de prueba nombrado directamente sigue siendo un patrón.
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node --test test/solo.test.mjs' } }));
+  assert.equal(testDiscovered(dir, 'test/solo.test.mjs')?.ok, true); assert.equal(testDiscovered(dir, 'test/otra.test.mjs')?.ok, false);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('revisión2 6 · una ruta relativa a un workspace (tsc dentro de un paquete) se resuelve al archivo real: la corrección recibe su contenido', async () => {
   sandboxFail = (wt, command) => command === 'typecheck' && /: number = "/.test(fs.readFileSync(path.join(wt, 'pkg/src/contract.mjs'), 'utf8')) ? { exitCode: 2, output: "src/contract.mjs(2,14): error TS2322: Type 'string' is not assignable to type 'number'." } : null;
   try {
@@ -885,7 +900,7 @@ test('HU-159 · al continuar, una corrección planificada con pruebas solo cance
   const rd = (await app.inject({ method: 'GET', url: `${W}/processes/${p.id}/backends` })).json();
   assert.equal(rd.staleCorrections, 1); assert.match(rd.nextOperation, /Repetir «test» sin IA/);
   let tests = 0;
-  sandboxFail = (_wt, command) => command !== 'test' ? null : ++tests === 1 ? { exitCode: 1, output: FULL } : null;
+  sandboxFail = (wt, command) => command !== 'test' || isBaselineWorktree(wt) ? null : ++tests === 1 ? { exitCode: 1, output: FULL } : null;
   try {
     const before = calls().length;
     const res = await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/continue`, payload: { authorized: true } });

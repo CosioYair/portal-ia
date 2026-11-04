@@ -28,7 +28,7 @@ export interface PortableAgentManifest {
   responsibilities: string[];
   deliverables: string[];
   capabilities: string[];
-  harness: { preferred: HarnessId; model: string; effort: 'low' | 'medium' | 'high' };
+  harness: { preferred: HarnessId; model: string; effort: import('./types.ts').ReasoningEffort };
   permissions: { tools: string[]; autonomy: AgentAutonomy };
   createdAt: string;
 }
@@ -253,7 +253,7 @@ export function filesToDefinition(files: PortableFiles): { definition: PortableA
   const pm = (y.permissions && typeof y.permissions === 'object' && !Array.isArray(y.permissions)) ? y.permissions : {};
   const preferred = HARNESSES.includes(str(h.preferred) as HarnessId) ? str(h.preferred) as HarnessId : 'claude-code';
   if (h.preferred && preferred !== h.preferred) problems.push({ path: 'agent.yaml', message: `Arnés desconocido «${str(h.preferred)}»: se usará ${preferred}.`, blocking: false });
-  const effort = ['low', 'medium', 'high'].includes(str(h.effort)) ? str(h.effort) as 'low' | 'medium' | 'high' : 'medium';
+  const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(str(h.effort)) ? str(h.effort) as import('./types.ts').ReasoningEffort : 'medium';
   const manifest: PortableAgentManifest = {
     schema: PORTABLE_AGENT_SCHEMA, id: str(y.id), name, role, department: str(y.department) || null,
     initials: (str(y.initials) || name.split(/\s+/).map(w => w[0] ?? '').join('')).slice(0, 2).toUpperCase(), summary: str(y.summary),

@@ -1,5 +1,5 @@
 import { ownerRoundPossible, prepareOwnerRound } from './storyUnits.ts';
-import { ASSIGNMENT_STATUS_LABEL, DEFAULT_PIPELINE, assignmentReady, verificationsForApplied, type Assignment, type AssignmentOutcome, type AssignmentStatus, type Process } from '@portal-ia/domain';
+import { ASSIGNMENT_STATUS_LABEL, DEFAULT_PIPELINE, assignmentReady, mergeAcknowledgementsOf, verificationPassed, verificationsForApplied, type Assignment, type AssignmentOutcome, type AssignmentStatus, type Process, INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { sameWorkRunning } from './executionLocks.ts';
 import { monotonicNow } from '../clock.ts';
 import { assignmentsRepo } from '../db/assignments.ts';
@@ -135,7 +135,44 @@ export function syncAssignment(slug: string, id: string): Assignment | null {
     if (status === 'ready_for_review') x.outcome = outcomeOf(slug, p);
   });
   if (status === 'ready_for_review' && !updated.knowledgeDocId) recordKnowledge(slug, updated, p);
+  if (updated.conversationId && (status === 'ready_for_review' || status === 'needs_owner' || status === 'failed')) {
+    try { const msg = resultMessage(slug, repo.get(id)!, p); if (msg) resultNotifier?.(updated.conversationId, msg); } catch { /* la conversación ya no existe: el encargo conserva su estado */ }
+  }
   return repo.get(id);
+}
+
+/** Quién publica el resultado en la conversación (lo registra el Asistente al cargar: sin dependencia circular). */
+let resultNotifier: ((conversationId: string, markdown: string) => void) | null = null;
+export function onAssignmentResult(fn: (conversationId: string, markdown: string) => void) { resultNotifier = fn; }
+
+/** Texto que viene del modelo o de un proceso, tal cual dentro del markdown del chat (sin formato que pueda fingir otra cosa). */
+const plainMd = (s: string) => s.replace(/[`*_[\]<>#|~\\]/g, ' ').replace(/\s+/g, ' ').trim();
+/**
+ * Lo que el Asistente comunica cuando un encargo termina, se detiene o falla: SOLO lo que el proceso registró (archivos,
+ * commit, verificación con su línea base, QA, Gauntlet) y el siguiente paso EXACTO con los botones que tiene su tarjeta.
+ * Sin IA: no puede adornar ni inventar un resultado. null = no hay nada que decir (ya integrado, o lo rechazaste tú).
+ */
+export function resultMessage(slug: string, a: Assignment, p: Process): string | null {
+  const r = p.result;
+  if (r?.merged || r?.rejected) return null;
+  const files = (r?.changes ?? []).filter(c => !c.error);
+  const runs = r?.applied ? verificationsForApplied(r) : [];
+  const ev = (['typecheck', 'test', 'build'] as const).map(c => { const v = runs.filter(x => x.command === c).at(-1); return !v ? `${c}: sin ejecutar` : v.exitCode === 0 ? `${c} ✓` : verificationPassed(v) ? `${c} ✓ sin fallos nuevos (${v.triage!.preexisting.length} ya fallaban antes de este cambio)` : v.exitCode === 86 ? `${c}: bloqueado (faltan dependencias)` : v.exitCode === null ? `${c}: no terminó` : `${c} ✗`; }).join(' · ');
+  const head = `**${a.code} · ${plainMd(a.title)}`;
+  const QA: Record<string, string> = { approved: 'aprobada', rejected: 'rechazada', unable_to_verify: 'no pudo verificar', blocked_environment: 'bloqueada por el entorno' };
+  if (a.status === 'ready_for_review') return [
+    `${head}: terminado y verificado, listo para tu revisión.**`,
+    `${files.length} archivo(s) en la rama \`${plainMd(r?.applied?.branch ?? '—')}\` (commit \`${r?.applied?.commit?.slice(0, 7) ?? '—'}\`): ${files.slice(0, 5).map(c => plainMd(c.path)).join(', ')}${files.length > 5 ? ` y ${files.length - 5} más` : ''}.`,
+    `Sandbox: ${ev}. QA: ${QA[r?.review?.verdict ?? ''] ?? '—'}.`,
+    `**Siguiente paso:** en la tarjeta de ${a.code}, revisa el diff y pulsa «Integrar en main»${slug === INTERNAL_WORKSPACE.slug ? '; después, «Reconstruir y reiniciar» en la barra superior para verlo en marcha' : ''}. Nada se ha integrado todavía.`
+  ].join('\n\n');
+  const resumable = !!r?.pipeline && (r.pipeline.state === 'paused' || r.pipeline.state === 'stopped') && (!!r.applied || !!r.manifest);
+  const question = r?.pipeline?.ownerRequest?.question ?? null;
+  const kept = r?.applied ? ` Lo hecho se conserva en su rama (\`${plainMd(r.applied.branch)}\`).` : '';
+  const verif = runs.length ? `\n\nÚltima verificación: ${ev}.` : '';
+  if (a.status === 'failed') return `${head}: falló.** ${plainMd(a.reason ?? '')}${kept}${verif}\n\n**En su tarjeta:** «Autorizar y ejecutar» de nuevo (otra ejecución con lo que necesite) o «cancelar el encargo».`;
+  const next = question ? `el equipo te pregunta: «${plainMd(question)}». Contéstala en su proceso (enlace en la tarjeta) y seguirá sin repetir nada.` : resumable ? '«Continuar» lo retoma donde quedó (puedes añadir llamadas a la suscripción), o «cancelar el encargo».' : '«Autorizar y ejecutar» de nuevo, o «cancelar el encargo».';
+  return `${head}: se detuvo y necesita tu decisión.** ${plainMd(a.reason ?? '')}${kept}${verif}\n\n**En su tarjeta:** ${next}`;
 }
 
 /** Resultado con evidencia: solo lo que el proceso dejó registrado (nunca un éxito sin verificación). */
@@ -145,7 +182,7 @@ function outcomeOf(slug: string, p: Process): AssignmentOutcome {
   return {
     summary: r.implementationSummary ?? null, userFacing: r.userFacing ?? null,
     branch: r.applied?.branch ?? null, commit: r.applied?.commit ?? null, worktree: r.applied?.worktree ?? null,
-    verifications: (['typecheck', 'test', 'build'] as const).map(c => last(c)).filter(Boolean).map(v => ({ command: v!.command, exitCode: v!.exitCode, isolation: v!.isolation ?? null })),
+    verifications: (['typecheck', 'test', 'build'] as const).map(c => last(c)).filter(Boolean).map(v => ({ command: v!.command, exitCode: v!.exitCode, isolation: v!.isolation ?? null, triage: v!.triage ?? null })),
     qa: r.review?.verdict ?? null,
     gauntlet: g ? { mode: g.mode, status: g.status, rounds: g.rounds.length, openFindings: (g.rounds.at(-1)?.findings ?? []).filter(f => f.severity !== 'minor').length } : null,
     agents: Array.from(new Map(p.steps.map(s => [s.agentId, { name: s.agentName, role: s.role ?? 'implementer' }])).values()),
@@ -163,7 +200,7 @@ function recordKnowledge(slug: string, a: Assignment, p: Process) {
     `**Criterios de aceptación:**\n${a.criteria.map(c => `- ${c}`).join('\n')}`,
     `**Resultado técnico** (proceso ${p.id}): ${o.summary ?? 'sin resumen'}`,
     o.userFacing ? `**Para el propietario:** ${o.userFacing}` : '',
-    `**Evidencia:** ${o.verifications.map(v => `${v.command} ${v.exitCode === 0 ? 'en verde' : `con código ${v.exitCode}`} (${v.isolation ?? '?'})`).join(' · ') || 'sin verificaciones registradas'}; QA: ${o.qa ?? '—'}; Gauntlet: ${o.gauntlet ? `${o.gauntlet.mode}, ${o.gauntlet.status}, ${o.gauntlet.rounds} ronda(s), ${o.gauntlet.openFindings} hallazgo(s) mayores abiertos` : 'no aplicado'}.`,
+    `**Evidencia:** ${o.verifications.map(v => `${v.command} ${v.exitCode === 0 ? 'en verde' : verificationPassed(v) ? 'en verde frente a la base (solo fallos preexistentes)' : `con código ${v.exitCode}`} (${v.isolation ?? '?'})`).join(' · ') || 'sin verificaciones registradas'}; QA: ${o.qa ?? '—'}; Gauntlet: ${o.gauntlet ? `${o.gauntlet.mode}, ${o.gauntlet.status}, ${o.gauntlet.rounds} ronda(s), ${o.gauntlet.openFindings} hallazgo(s) mayores abiertos` : 'no aplicado'}.`,
     `**Rama y commit:** ${o.branch ?? '—'} · ${o.commit ?? '—'} (sin integrar en main hasta que lo decidas).`,
     `**Agentes:** ${o.agents.map(x => `${x.name} (${x.role})`).join(', ')}.`,
     `**Uso:** ${o.calls} llamada(s) registradas; ${o.spentUsd.toFixed(2)} USD de API.`,
@@ -233,7 +270,12 @@ export function assignmentView(slug: string, id: string) {
       ownerRound: ownerRoundPossible(p) && !p.result?.pipeline?.ownerRequest,
       // El equipo espera una respuesta tuya: se contesta en su proceso (Continuar sin ella se rechaza).
       question: p.result?.pipeline?.ownerRequest?.question ?? null,
-      pipeline: p.result?.pipeline ? { state: p.result.pipeline.state, phase: p.result.pipeline.phase, reason: p.result.pipeline.reason ?? null, corrections: p.result.pipeline.corrections } : null } : null
+      pipeline: p.result?.pipeline ? { state: p.result.pipeline.state, phase: p.result.pipeline.phase, reason: p.result.pipeline.reason ?? null, corrections: p.result.pipeline.corrections } : null,
+      changes: (p.result?.changes ?? []).filter(c => !c.error).slice(0, 60).map(c => ({ path: c.path, action: c.action, before: c.before, after: c.after })),
+      applied: p.result?.applied ? { branch: p.result.applied.branch, commit: p.result.applied.commit } : null,
+      merged: p.result?.merged ? { commit: p.result.merged.commit, into: p.result.merged.into, mergedAt: p.result.merged.mergedAt } : null,
+      checks: p.result?.applied ? (['typecheck', 'test', 'build'] as const).map(c => verificationsForApplied(p.result!).filter(v => v.command === c).at(-1)).filter(Boolean).map(v => ({ command: v!.command, exitCode: v!.exitCode, isolation: v!.isolation ?? null, passed: verificationPassed(v), preexisting: v!.triage && !v!.triage.unavailable ? v!.triage.preexisting.length : 0 })) : [],
+      qa: p.result?.review?.verdict ?? null, gauntlet: p.result?.gauntlet?.status ?? null, ack: mergeAcknowledgementsOf(p) } : null
   };
 }
 

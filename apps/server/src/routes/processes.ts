@@ -483,14 +483,15 @@ Proceso: ${proc.id}`, { processId: proc.id });
   // ---- Integrar en la rama principal (merge --no-ff · requiere autorización por uso) ----
   app.post('/api/workspaces/:slug/processes/:id/merge', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ authorized: z.literal(true), into: z.string().trim().min(1).max(80).optional(), skipVerification: z.boolean().optional() }).safeParse(req.body);
+    const body = z.object({ authorized: z.literal(true), into: z.string().trim().min(1).max(80).optional(), skipVerification: z.boolean().optional(), expectedCommit: z.string().regex(/^[0-9a-f]{7,40}$/).optional(), acknowledge: z.object({ preexisting: z.boolean().optional(), testUpdates: z.boolean().optional() }).optional() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita.' });
     // Misma integración que el lote pre-autorizado: services/storyMerge.ts (reglas de cierre, candidato y conflictos).
     try {
-      const p = await mergeStory(slug, id, { into: body.data.into, skipVerification: body.data.skipVerification }, (o, m) => app.log.info(o, m));
+      const p = await mergeStory(slug, id, { into: body.data.into, skipVerification: body.data.skipVerification, expectedCommit: body.data.expectedCommit ?? null, acknowledge: body.data.acknowledge, requireAck: true }, (o, m) => app.log.info(o, m));
       return await withGuidance(slug, p);
     } catch (e: any) {
       const p = processesRepo(slug).get(id);
+      if (e.code === 'ack_required') return reply.code(409).send({ error: e.message, code: 'ack_required', acknowledgements: e.acknowledgements });
       if (e.code === 'merge_conflict') return reply.code(409).send({ error: e.message, code: 'merge_conflict', ...(e.integration ? { integration: e.integration } : {}), ...(p ? { process: await withGuidance(slug, p) } : {}) });
       return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError || typeof e.code === 'string' ? e.code : undefined, ...(e.missing ? { missing: e.missing } : {}), ...(e.integration ? { integration: e.integration } : {}) });
     }
@@ -519,7 +520,12 @@ Proceso: ${proc.id}`, { processId: proc.id });
 
   // ---- Verificación local (sandbox_exec · requiere autorización por uso; ejecución local sin sandbox) ----
   // Misma verificación para la ruta (autorización por uso) y para el pipeline autorizado: services/verification.ts.
-  const runVerify = (slug: string, id: string, command: 'install' | 'typecheck' | 'test' | 'build', allowNetwork: boolean): Promise<VerificationRun> => runVerification(slug, id, command, allowNetwork);
+  const runVerify = async (slug: string, id: string, command: 'install' | 'typecheck' | 'test' | 'build', allowNetwork: boolean): Promise<VerificationRun> => {
+    const run = await runVerification(slug, id, command, allowNetwork);
+    // «test» que falla: el mismo triaje frente a la base que en el pipeline (sin IA; nunca lanza).
+    if (command === 'test' && run.exitCode !== 0) { const { triageRun } = await import('../services/baseline.ts'); await triageRun(slug, id, run, { noRerun: true }); }
+    return run;
+  };
   const sendError = (reply: any, e: any) => reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError || typeof e.code === 'string' ? e.code : undefined });
   app.post('/api/workspaces/:slug/processes/:id/verify', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;

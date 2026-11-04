@@ -10,6 +10,10 @@ try { const { runBacklogMaintenance } = await import('./services/backlogMaintena
 try { const { recoverInterruptedProcesses } = await import('./services/interruptions.ts'); const n = recoverInterruptedProcesses((o, m) => app.log.info(o, m)); if (n) app.log.warn({ interrupted: n }, 'procesos interrumpidos por el reinicio: pausados sin reenviar nada'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'recuperación de procesos interrumpidos omitida'); }
 // Revisiones del proyecto que se estaban ejecutando: quedan «a medias» (reanudables) y su tarjeta del Asistente lo dice.
 try { const { recoverInterruptedPlans } = await import('./services/projectMaintenance.ts'); const n = recoverInterruptedPlans(); if (n) app.log.warn({ interrupted: n }, 'revisiones del proyecto interrumpidas por el reinicio: quedan a medias, reanudables'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'recuperación de revisiones interrumpidas omitida'); }
+// Worktrees temporales (línea base, run_checks) que dejó un apagado brusco: son del Portal y se retiran.
+try { const { cleanupBaselineWorktrees } = await import('./services/baseline.ts'); const n = await cleanupBaselineWorktrees(); if (n) app.log.warn({ removed: n }, 'worktrees temporales de una ejecución anterior retirados'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'limpieza de worktrees temporales omitida'); }
+// Operaciones del Asistente que se ejecutaban en segundo plano (p. ej. pruebas en el sandbox): no terminaron; se dice así.
+try { const { recoverInterruptedOperations } = await import('./services/assistant.ts'); const n = recoverInterruptedOperations(); if (n) app.log.warn({ interrupted: n }, 'operaciones del Asistente interrumpidas por el reinicio: quedan como no terminadas'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'recuperación de operaciones del Asistente omitida'); }
 // HU-144: Ctrl+C, SIGTERM y SIGHUP hacen el mismo apagado limpio que «Reiniciar» (puerto libre, sin hijos huérfanos).
 installSignalHandlers(app);
 attachApp(app);

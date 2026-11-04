@@ -60,7 +60,33 @@ export interface ProviderError {
 }
 
 export type Scope = 'workspace' | 'project';
-export type ReasoningEffort = 'low' | 'medium' | 'high';
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export const EFFORT_LEVELS: readonly ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+/**
+ * Niveles de esfuerzo que ADMITE el modelo (según la documentación de Anthropic; nunca se inventa compatibilidad):
+ * Opus 4.7+, Opus 5/5.5, Sonnet 5/5.5, Haiku 5.5 y Fable/Mythos: los cinco (xhigh llegó con Opus 4.7); Opus 4.6 y
+ * Sonnet 4.6: sin xhigh; el resto (y OpenAI): bajo, medio y alto, como hasta ahora.
+ */
+export function effortLevelsFor(provider: string | null | undefined, model: string): ReasoningEffort[] {
+  if (provider && provider !== 'anthropic') return ['low', 'medium', 'high'];
+  const m = model.toLowerCase().replace(/-\d{8}$/, '');
+  if (/fable|mythos/.test(m)) return [...EFFORT_LEVELS];
+  const v = m.match(/(opus|sonnet|haiku)-(\d+)(?:-(\d+))?$/); if (!v) return ['low', 'medium', 'high'];
+  const major = Number(v[2]); const minor = Number(v[3] ?? 0);
+  if (major >= 5) return [...EFFORT_LEVELS];
+  if (major === 4 && v[1] === 'opus' && minor >= 7) return [...EFFORT_LEVELS];
+  if (major === 4 && minor === 6) return ['low', 'medium', 'high', 'max'];
+  return ['low', 'medium', 'high'];
+}
+/** El nivel pedido si el modelo lo admite; si no, el más alto que admite sin pasarse (nunca se inventa un nivel). */
+export function clampEffort(provider: string | null | undefined, model: string, effort: ReasoningEffort | string | null | undefined): ReasoningEffort {
+  const levels = effortLevelsFor(provider, model); const e = (effort ?? 'medium') as ReasoningEffort;
+  if (levels.includes(e)) return e;
+  const order = EFFORT_LEVELS.indexOf(e);
+  return [...levels].reverse().find(l => EFFORT_LEVELS.indexOf(l) <= order) ?? 'medium';
+}
+/** Tokens de razonamiento previstos por esfuerzo en las estimaciones de costo (antes xhigh y max contaban como 0). */
+export const EFFORT_THINKING_TOKENS: Record<ReasoningEffort, number> = { low: 0, medium: 2500, high: 6000, xhigh: 12000, max: 20000 };
 export type ToolRisk = 'local' | 'auth';
 export type AgentStatus = 'inactive' | 'active' | 'paused';
 
@@ -125,6 +151,11 @@ export interface AgentConfig {
   model: string;
   fallbacks: string[];
   effort: ReasoningEffort;
+  /**
+   * El esfuerzo lo eligió el propietario sabiendo que se aplica también a Claude Code (`--effort`). Sin esto (agentes
+   * anteriores), la CLI usa su predeterminado como hasta ahora: el Portal no cambia solo el comportamiento de un agente.
+   */
+  effortApplied?: boolean;
   tools: Record<string, boolean>;
   knowledge: Record<string, boolean>;
   monthlyLimitUsd: number;
@@ -761,6 +792,10 @@ export interface PipelineStatus {
   ineffectiveRounds?: number;
   /** Commits en los que «test» se repitió una vez sin IA porque solo fallaban pruebas ajenas a la historia (posible prueba inestable). */
   flakeRetries?: string[];
+  /** «test» ejecutado sobre la base de la historia (sin IA) para separar fallos preexistentes de los suyos. */
+  baseline?: BaselineRun | null;
+  /** Commits en los que «test» se repitió sin IA porque la evidencia guardada estaba recortada (versión anterior). */
+  evidenceReruns?: string[];
   startedAt: string;
   finishedAt: string | null;
 }
@@ -827,6 +862,8 @@ export interface WorkUnit {
   round?: number;
   /** Archivos que esta unidad dejó aplicados en el worktree (evidencia). */
   applied?: string[];
+  /** Commits que dejó en la rama (las correcciones posteriores reciben su diff y lo que pasó después). */
+  commits?: string[];
   /** Continuaciones por archivo cortado (máximo 2 cada uno). */
   continued?: Record<string, number>;
   /** Veces que el modelo agotó la salida sin escribir texto (todo en razonamiento oculto). */
@@ -836,6 +873,8 @@ export interface WorkUnit {
   disputed?: string | null;
   /** Veces que Claude Code agotó sus turnos en esta unidad: el siguiente intento es acotado; tras dos, no se insiste solo. */
   maxTurns?: number;
+  /** Pruebas existentes que esta corrección PUEDE actualizar: la línea base demostró que pasan en la base y fallan con la historia. */
+  testUpdatable?: string[];
   /** Salidas pagadas del intento en curso (paso + motivo de parada + prefijo de una continuación): al reanudar se releen sin volver a llamar. */
   outputs?: { stepId: string; stopReason: string | null; prefix?: string | null }[];
 }
@@ -877,6 +916,11 @@ export interface StoryManifest {
   reviewedCommit?: string | null;
   /** Cambios que una unidad entregó y no se aplicaron o llegaron con aviso (evidencia para las lecciones). */
   rejected?: { path: string; error: string | null; warning: string | null; unitId: string; at: string }[];
+  /**
+   * Pruebas que YA existían y la historia modificó porque la línea base demostró que comprueban un comportamiento que ella
+   * cambia (pasan en la base, fallan con la historia). Se permite solo así, con el motivo, y QA y el propietario lo ven.
+   */
+  testUpdates?: { path: string; unitId: string; commit: string | null; reason: string; at: string }[];
   createdAt: string;
 }
 /** Estado de una comprobación: superada, fallida, no aplica o no se pudo determinar (nunca cuenta como evidencia). */
@@ -932,7 +976,59 @@ export interface ProcessFailure { kind: 'output_contract' | 'provider' | 'budget
   /** Lo que se pide al propietario para seguir (procesos sin pipeline). */
   request?: OwnerRequest | null }
 export type Isolation = 'docker' | 'wsl' | 'linux-ns' | 'host-min' | 'unavailable';
-export interface VerificationRun { command: string; exitCode: number | null; output: string; startedAt: string; finishedAt: string; durationMs: number; /** Dónde se ejecutó: sandbox real (docker/wsl), verificación mínima en el equipo (solo tsc) o no disponible. */ isolation?: Isolation;  /** Commit del worktree verificado: identifica a qué versión del código corresponde (no la hora). */ commit?: string | null; /** Lo ejecutado en el sandbox cambió el `.git` del worktree (se restauró): incidente de seguridad, no un fallo del código. */ tampered?: boolean; }
+export interface VerificationRun { command: string; exitCode: number | null; output: string; startedAt: string; finishedAt: string; durationMs: number; /** Dónde se ejecutó: sandbox real (docker/wsl), verificación mínima en el equipo (solo tsc) o no disponible. */ isolation?: Isolation;  /** Commit del worktree verificado: identifica a qué versión del código corresponde (no la hora). */ commit?: string | null; /** Lo ejecutado en el sandbox cambió el `.git` del worktree (se restauró): incidente de seguridad, no un fallo del código. */ tampered?: boolean; /** Comparación con la base de la historia (solo «test» que falla): qué fallos ya ocurrían sin ella. */ triage?: BaselineTriage | null; /** Resumen de «test» sobre su salida completa (ver TestDigest). */ tests?: TestDigest | null; }
+
+/** Una prueba que falla, tal como la describe la salida del sandbox (archivo relativo al repositorio). */
+export interface FailingTestRef { file: string | null; name: string; message: string; line?: number | null; expected?: string | null; actual?: string | null }
+/**
+ * Resumen de una ejecución de «test» calculado sobre la salida COMPLETA (antes de recortarla para guardarla): cuántas
+ * pruebas, cuáles fallan (con su error y sus valores) y la huella de las que pasaron. Es lo que usa el triaje frente a
+ * la base: la salida guardada se recorta y podría ocultar un fallo.
+ */
+export interface TestDigest { total: number | null; passed: number | null; failed: number | null; cancelled: number | null; failing: FailingTestRef[]; passedKeys: string[] }
+/**
+ * Triaje de un «test» que falla frente a la BASE de la historia (el commit de main del que partió), ejecutada en el mismo
+ * sandbox y sin IA. `preexisting`: falla igual sin la historia (mismo archivo, prueba y error). `introduced`: pasa en la
+ * base y falla con la historia (la rompió ella). `changed`: ya fallaba en la base pero ahora con OTRO error (cuenta como
+ * de la historia). `accepted`: solo hay preexistentes → no se gasta ninguna corrección (queda señalado en la revisión).
+ */
+export interface BaselineTriage {
+  baseCommit: string;
+  at: string;
+  preexisting: FailingTestRef[];
+  introduced: FailingTestRef[];
+  changed: FailingTestRef[];
+  accepted: boolean;
+  /** Sin línea base fiable (no se pudo ejecutar en la base): se dice por qué y no se clasifica nada. */
+  unavailable?: string | null;
+  /**
+   * Pruebas existentes que la corrección puede actualizar: la base demuestra que PASABAN (resultado «ok» de esa prueba)
+   * y fallan con la historia. Nunca las de seguridad (sesión del propietario, sandbox, puente, capacidades, git).
+   */
+  updatableFiles?: string[];
+}
+/** Ejecución de «test» sobre la base de una historia (se reutiliza para todas las historias con la misma base). */
+export interface BaselineRun { commit: string; at: string; exitCode: number | null; isolation?: Isolation; durationMs: number; failing: FailingTestRef[]; problem?: string | null; total?: number | null; passedKeys?: string[] }
+
+/**
+ * ¿Esta verificación cuenta como superada? En verde, o «test» que solo falla por pruebas que YA fallaban en la base de la
+ * historia con el mismo error (triaje con evidencia; la salida real se conserva y la revisión lo señala).
+ */
+export function verificationPassed(v: Pick<VerificationRun, 'command' | 'exitCode' | 'triage'> | null | undefined): boolean {
+  return !!v && (v.exitCode === 0 || (v.command === 'test' && v.exitCode !== null && v.triage?.accepted === true));
+}
+
+/**
+ * Lo que el propietario debe CONFIRMAR para integrar (lo comprueba el servidor y lo muestra la interfaz): «test» superada
+ * SOLO frente a la base (pruebas que ya fallaban en main, por nombre) y pruebas existentes que la historia modificó
+ * porque comprobaban el comportamiento que cambia. Vacío = nada que confirmar.
+ */
+export function mergeAcknowledgementsOf(p: Pick<Process, 'result'>): { preexisting: string[]; testUpdates: string[] } {
+  const r = p.result; if (!r?.applied) return { preexisting: [], testUpdates: [] };
+  const t = verificationsForApplied(r).filter(v => v.command === 'test').at(-1);
+  const preexisting = t && t.exitCode !== 0 && verificationPassed(t) ? t.triage!.preexisting.map(x => `«${x.name}»${x.file ? ` (${x.file})` : ''}`) : [];
+  return { preexisting, testUpdates: Array.from(new Set((r.manifest?.testUpdates ?? []).map(u => u.path))) };
+}
 /**
  * Verificaciones que corresponden a la versión aplicada ahora. Con el commit registrado (desde v0.16), por identidad
  * del commit: la hora no sirve (el reloj puede retroceder, p. ej. en la VM de Docker, y una verificación válida pasaría
@@ -1435,7 +1531,13 @@ export interface StoryIterationState {
 }
 
 // ---- M4 · Lecciones validadas ----
-export type LessonStatus = 'detected' | 'proposed' | 'validated' | 'rejected' | 'obsolete';
+/** `refuted`: se aplicó en tareas posteriores y el mismo error volvió a ocurrir; deja de inyectarse hasta que la revises. */
+export type LessonStatus = 'detected' | 'proposed' | 'validated' | 'rejected' | 'obsolete' | 'refuted';
+/**
+ * Lo que pasó en una tarea POSTERIOR que llevaba la lección inyectada: `held` = terminó verificada sin que su error
+ * volviera a ocurrir (la lección cambió el comportamiento); `recurred` = el mismo error volvió a ocurrir con ella presente.
+ */
+export interface LessonProof { processId: string; processTitle: string | null; result: 'held' | 'recurred'; detail: string; at: string }
 export interface LessonEvidence { processId: string | null; processTitle: string | null; stepId: string | null; agentId: string | null; agentName: string | null; file: string | null; detail: string; at: string }
 export interface Lesson {
   id: string; projectId: string | null; role: string | null; tags: string[]; status: LessonStatus; version: number; parentId: string | null;
@@ -1448,6 +1550,10 @@ export interface Lesson {
   createdAt: string; updatedAt: string; validatedAt: string | null;
   /** Memoria de un agente concreto (null = lección de la organización, la de siempre). */
   agentId?: string | null;
+  /** Evidencia de tareas posteriores (ver LessonProof). */
+  proof?: LessonProof[];
+  /** Aprendida: la primera tarea posterior que la llevó terminó verificada sin repetir su error. Validada sin esto = pendiente de demostrar. */
+  provenAt?: string | null;
 }
 
 // ---- M5 · Plantillas versionadas ----
