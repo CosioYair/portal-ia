@@ -376,7 +376,8 @@ export function listBatches(slug: string, agentId: string, jobs?: DocumentJob[],
       continue;
     }
     const miss = disk.batches.has(b.id);
-    const items = b.items.filter(i => opts.includeRemoved || !i.removed).map(i => i.jobId && disk.jobs.has(i.jobId) && !i.removed ? { ...i, missingOnDisk: true } : i);
+    // Un documento eliminado sigue en los elementos de SU lote marcado `removed` (cuenta aparte en counts.removed); solo sale de la lista de documentos.
+    const items = b.items.map(i => i.jobId && disk.jobs.has(i.jobId) && !i.removed ? { ...i, missingOnDisk: true } : i);
     out.push({ ...b, items, presence: miss ? 'missing' : 'present', missingOnDisk: miss, removal: null });
   }
   return out;
