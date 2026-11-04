@@ -41,11 +41,18 @@ test('«Pedir» siempre tiene efecto: abre, trae al frente y enfoca, o enfoca la
   const dock = read('components/AssistantDock.tsx');
   assert.match(dock, /useUiEvent\('assistant'/);
   assert.match(dock, /askAction\(\{ onAssistantPage, open \}\)/);
-  assert.match(dock, /querySelector<HTMLTextAreaElement>\('\.assist textarea'\)/);
+  // En /asistente se enfoca la caja de la pantalla completa: el selector debe existir de verdad en Assistant.tsx.
+  assert.match(dock, /querySelector<HTMLTextAreaElement>\('\.assist-page textarea'\)/);
+  assert.ok(!dock.includes("'.assist textarea'"), 'no existe ningún elemento con la clase .assist');
+  const full = read('screens/Assistant.tsx');
+  assert.ok(full.includes('className="page assist-page"'), 'la pantalla completa lleva la clase assist-page');
+  assert.ok(full.includes('<AssistantChat '), 'la caja de mensaje (AssistantChat) está dentro de .assist-page');
   assert.match(dock, /setFront\(true\); setFocusTick\(t => t \+ 1\)/);
   assert.match(dock, /\}, \[open, focusTick\]\);/, 'el foco se repite al pulsar «Pedir» con el panel abierto');
   assert.match(dock, /dock-behind/);
-  assert.match(dock, /closest\('\.agent-panel'\)\) setFront\(false\)/);
+  assert.match(dock, /canYield\(\{ agentModal: !!document\.querySelector\('\.agent-panel-scrim'\) \}\)\) setFront\(false\)/,
+    'por debajo de 1280 px (panel de agente modal) el Asistente no cede bajo su fondo');
+  assert.match(dock, /document\.querySelector\('\.agent-panel-scrim'\)\) setFront\(true\)/, 'si aparece el fondo modal, vuelve al frente');
 });
 
 test('orden de capas: contenido < panel de agente < Asistente < diálogos < búsqueda', () => {
@@ -88,6 +95,12 @@ test('dockLayer: visibilidad, clase de <body> y acción de «Pedir»', async () 
   assert.equal(askAction({ onAssistantPage: false, open: true }), 'front-focus');
 });
 
+test('dockLayer: el Asistente solo cede ante un panel de agente no modal (≥1280 px)', async () => {
+  const { canYield } = await loadLayer();
+  assert.equal(canYield({ agentModal: false }), true);
+  assert.equal(canYield({ agentModal: true }), false);
+});
+
 test('reserva responsive: escritorio y tableta reservan; móvil no reserva padding', () => {
   const sys = read('system.css');
   assert.match(sys, /@media \(min-width: 768px\) \{\s*body\.has-dock \.content \{ padding-right: min\(calc\(min\(540px, 100vw - 32px\) \+ 24px\), 100%\); \}/);
@@ -104,7 +117,9 @@ test('sin cambios: panel ancho, pantalla completa, foco al cerrar, móvil modal 
   assert.ok(dock.includes('title="Abrir en pantalla completa"'));
   assert.ok(dock.includes("navigate('/asistente')"));
   assert.match(dock, /\(opener\.current as HTMLElement \| null\)\?\.focus\?\.\(\)/);
-  assert.match(dock, /aria-modal=\{window\.innerWidth < 768 \|\| undefined\}/);
+  assert.match(dock, /aria-modal=\{mobile \|\| undefined\}/);
+  assert.match(dock, /matchMedia\?\.\('\(max-width: 767px\)'\)/, 'móvil se recalcula al cambiar el tamaño');
+  assert.match(dock, /if \(e\.key !== 'Tab' \|\| !mobile \|\| !panel\.current\) return;/, 'el atrapado de Tab usa el mismo estado');
   assert.match(dock, /setAssistantPending\(n\)/);
   assert.match(dock, /aria-label="Cerrar asistente"/);
   assert.match(dock, /createPortal\(/);

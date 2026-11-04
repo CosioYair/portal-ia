@@ -30,6 +30,15 @@ export function bodyClass(s: { visible: boolean; wide: boolean }): 'has-dock' | 
   return s.wide ? 'has-dock-wide' : 'has-dock';
 }
 
+/**
+ * ¿Puede el Asistente ceder el frente al panel de agente? Solo si este NO es modal (≥1280 px, sin .agent-panel-scrim).
+ * Por debajo de 1280 px el panel de agente es modal: su fondo (59) cubre también «Pedir», así que si el Asistente bajara a 58
+ * no habría forma de recuperarlo. Allí el Asistente se queda delante (65); para usar el panel de agente se cierra (X o Esc).
+ */
+export function canYield(s: { agentModal: boolean }): boolean {
+  return !s.agentModal;
+}
+
 /** «Pedir» nunca se queda sin efecto: enfoca la pantalla completa, abre el panel o lo trae al frente y lo enfoca. */
 export function askAction(s: { onAssistantPage: boolean; open: boolean }): AskAction {
   if (s.onAssistantPage) return 'focus-fullscreen';

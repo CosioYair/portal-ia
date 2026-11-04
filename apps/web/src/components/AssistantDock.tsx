@@ -4,7 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import type { AssistantInfo } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { setAssistantPending, useUiEvent } from '../lib/uiBus.ts';
-import { askAction, bodyClass, dockVisible, isAssistantPath } from '../lib/dockLayer.ts';
+import { askAction, bodyClass, canYield, dockVisible, isAssistantPath } from '../lib/dockLayer.ts';
 import { Icon } from './ui.tsx';
 import { AssistantChat } from './AssistantChat.tsx';
 
@@ -26,10 +26,17 @@ export function AssistantDock() {
   // EN-004: «front» es falso cuando el usuario trabaja en el panel de agente (el Asistente cede y queda detrás);
   // «focusTick» hace que «Pedir» enfoque aunque el panel ya estuviera abierto.
   const [front, setFront] = useState(true); const [focusTick, setFocusTick] = useState(0);
+  // Móvil (<768 px): el panel es aria-modal y atrapa el foco; se recalcula al cambiar el tamaño de la ventana.
+  const [mobile, setMobile] = useState(() => typeof window !== 'undefined' && window.matchMedia?.('(max-width: 767px)').matches === true);
+  useEffect(() => {
+    const mq = window.matchMedia?.('(max-width: 767px)'); if (!mq) return;
+    const on = () => setMobile(mq.matches); on();
+    mq.addEventListener('change', on); return () => mq.removeEventListener('change', on);
+  }, []);
   const visible = dockVisible({ open, onAssistantPage, yielded: !front });
   useUiEvent('assistant', useCallback(() => {
     const action = askAction({ onAssistantPage, open });
-    if (action === 'focus-fullscreen') { document.querySelector<HTMLTextAreaElement>('.assist textarea')?.focus(); return; }
+    if (action === 'focus-fullscreen') { document.querySelector<HTMLTextAreaElement>('.assist-page textarea')?.focus(); return; }
     if (action === 'open') opener.current = document.activeElement;
     setOpen(true); setFront(true); setFocusTick(t => t + 1);
   }, [onAssistantPage, open]));
@@ -52,10 +59,12 @@ export function AssistantDock() {
     if (!open || onAssistantPage) return;
     const onIn = (e: Event) => {
       const t = e.target as Element | null; if (!t || typeof t.closest !== 'function') return;
-      if (t.closest('.agent-panel')) setFront(false); else if (t.closest('.dock')) setFront(true);
+      // Por debajo de 1280 px el panel de agente es modal (con fondo): el Asistente no cede, para no quedar atrapado bajo él.
+      if (t.closest('.agent-panel')) { if (canYield({ agentModal: !!document.querySelector('.agent-panel-scrim') })) setFront(false); }
+      else if (t.closest('.dock')) setFront(true);
     };
     document.addEventListener('pointerdown', onIn, true); document.addEventListener('focusin', onIn, true);
-    const mo = new MutationObserver(() => { if (!document.querySelector('.agent-panel')) setFront(true); });
+    const mo = new MutationObserver(() => { if (!document.querySelector('.agent-panel') || document.querySelector('.agent-panel-scrim')) setFront(true); });
     mo.observe(document.body, { childList: true, attributes: true, attributeFilter: ['class'] });
     return () => { document.removeEventListener('pointerdown', onIn, true); document.removeEventListener('focusin', onIn, true); mo.disconnect(); };
   }, [open, onAssistantPage]);
@@ -67,9 +76,9 @@ export function AssistantDock() {
   if (onAssistantPage) return null; // la pantalla completa ya lo muestra
   // Se monta en <body> (portal) para que position:fixed sea relativo a la ventana y no a un contenedor animado.
   return createPortal(<>
-    {open && <div ref={panel} className={`dock${wide ? ' dock-wide' : ''}${front ? '' : ' dock-behind'}`} role="dialog" aria-label="Asistente de Empresa" aria-modal={window.innerWidth < 768 || undefined} onKeyDown={e => {
+    {open && <div ref={panel} className={`dock${wide ? ' dock-wide' : ''}${front ? '' : ' dock-behind'}`} role="dialog" aria-label="Asistente de Empresa" aria-modal={mobile || undefined} onKeyDown={e => {
       if (e.key === 'Escape') { e.stopPropagation(); close(); return; }
-      if (e.key !== 'Tab' || window.innerWidth >= 768 || !panel.current) return;
+      if (e.key !== 'Tab' || !mobile || !panel.current) return;
       const f = [...panel.current.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled])')].filter(x => x.offsetParent !== null);
       if (!f.length) return; const a = f[0]; const z = f[f.length - 1];
       if (e.shiftKey && document.activeElement === a) { e.preventDefault(); z.focus(); } else if (!e.shiftKey && document.activeElement === z) { e.preventDefault(); a.focus(); }
