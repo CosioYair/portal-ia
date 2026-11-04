@@ -320,7 +320,7 @@ function withRemovals(slug: string, v: DocumentBatch): DocumentBatch {
     dec('total'); dec(COUNT_KEY[i.state]);
     if (i.outcome === 'accepted') dec('accepted');
     if (i.outcome === 'duplicate') dec('duplicates');
-    return { ...i, removed: true, docx: null, docxRel: null };
+    return { ...i, jobId: i.jobId ?? (((db.prepare(`SELECT job_id FROM document_batch_items WHERE batch_id = ? AND idx = ?`).get(v.id, i.idx) as any)?.job_id as string | undefined) ?? null), removed: true, docx: null, docxRel: null };
   });
   c.removed = gone.size;
   return { ...v, counts: c, items };

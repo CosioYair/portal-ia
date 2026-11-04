@@ -419,7 +419,10 @@ export async function startProcessing(slug: string, agentId: string, jobId: stri
 export async function processVersion(slug: string, a: Agent, jobId: string, tc: Toolchain, opts: ProcessOptions): Promise<void> {
   const job = jobsDb(slug).get(jobId);
   const diagnosis = opts.diagnosis === undefined ? (job ? retryDiagnosis(job) : null) : (opts.diagnosis?.trim() || null);
-  if (!job || !diagnosis) return processVersionOnce(slug, a, jobId, tc, opts);
+  // Solo se vuelve a planificar si la comprobación RECHAZÓ el último Word (o si llega un diagnóstico explícito). Un fallo
+  // transitorio del script o de lectura se reintenta con el plan del lote: no gasta otra llamada al modelo.
+  const rejectedByQa = !!job && job.versions.length > 0 && job.versions[job.versions.length - 1].passed === false;
+  if (!job || !diagnosis || (opts.diagnosis === undefined && !rejectedByQa)) return processVersionOnce(slug, a, jobId, tc, opts);
   // En un lote (trae su plan) solo se replanifica si la última versión la rechazó la QA; un fallo de ejecución se reintenta con el plan del lote (sin llamadas).
   const last = job.versions.length ? job.versions[job.versions.length - 1] : null;
   if (opts.plan && !(last && !last.passed)) return processVersionOnce(slug, a, jobId, tc, opts);
