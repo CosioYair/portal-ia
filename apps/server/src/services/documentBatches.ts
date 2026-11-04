@@ -75,10 +75,18 @@ function batchesDb(slug: string) {
 function freeBytes(dir: string): number | null { try { const s = fs.statfsSync(dir); return Number(s.bavail) * Number(s.bsize); } catch { return null; } }
 const mb = (b: number) => `${Math.round(b / 1048576)} MB`;
 
+/**
+ * Carpetas ya asignadas por este proceso. Entre elegir la carpeta y crearla hay esperas (copia del ZIP), así que dos lotes
+ * recibidos a la vez no pueden fiarse solo de que la carpeta exista en disco: así cada uno recibe la suya.
+ */
+const claimedSlugs = new Set<string>();
+const slugKey = (p: string) => process.platform === 'win32' ? p.toLowerCase() : p;
 function freeSlug(root: string, outputs: string, base: string, reserved: string[] = []): string {
   let b = slugify(base).slice(0, 60).replace(/[-.]+$/, '') || 'documento'; if (RESERVED.test(b) || reserved.includes(b)) b = `documento-${b}`;
   let s = b; let k = 2;
-  while (fs.existsSync(path.join(root, ...outputs.split('/'), ...s.split('/')))) s = `${b}-${k++}`;
+  const full = (x: string) => path.join(root, ...outputs.split('/'), ...x.split('/'));
+  while (claimedSlugs.has(slugKey(full(s))) || fs.existsSync(full(s))) s = `${b}-${k++}`;
+  claimedSlugs.add(slugKey(full(s)));
   return s;
 }
 
