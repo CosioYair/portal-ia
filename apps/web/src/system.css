@@ -367,13 +367,13 @@ html { scroll-padding-top: 76px; }
    fórmula, en estrecho y en ancho. La reserva no pasa del ancho de su columna (100 % = área de la rejilla), así que
    en tableta no aparece desplazamiento horizontal. */
 @media (min-width: 768px) {
-  body.has-dock { --dock-reserve: calc(min(540px, 100vw - 32px) + 24px); }
-  body.has-dock-wide { --dock-reserve: calc(min(1100px, 100vw - 32px) + 24px); }
-  body.has-dock .content, body.has-dock-wide .content { padding-right: min(var(--dock-reserve), 100%); }
+  body.has-dock .content { padding-right: min(calc(min(540px, 100vw - 32px) + 24px), 100%); }
+  body.has-dock-wide .content { padding-right: min(calc(min(1100px, 100vw - 32px) + 24px), 100%); }
 }
 /* Panel de agente y Asistente a la vez (≥1280 px): se reserva el mayor de los dos anchos. */
 @media (min-width: 1280px) {
-  body.has-agent-panel.has-dock .content, body.has-agent-panel.has-dock-wide .content { padding-right: max(min(580px, 46vw), min(var(--dock-reserve), 100%)); }
+  body.has-agent-panel.has-dock .content { padding-right: max(min(580px, 46vw), min(calc(min(540px, 100vw - 32px) + 24px), 100%)); }
+  body.has-agent-panel.has-dock-wide .content { padding-right: max(min(580px, 46vw), min(calc(min(1100px, 100vw - 32px) + 24px), 100%)); }
 }
 /* Móvil: el panel ocupa toda la pantalla (aria-modal, con el foco atrapado) y no se reserva espacio. */
 @media (max-width: 767px) {

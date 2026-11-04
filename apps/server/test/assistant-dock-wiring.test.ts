@@ -90,8 +90,9 @@ test('dockLayer: visibilidad, clase de <body> y acción de «Pedir»', async () 
 
 test('reserva responsive: escritorio y tableta reservan; móvil no reserva padding', () => {
   const sys = read('system.css');
-  assert.match(sys, /@media \(min-width: 768px\) \{\s*body\.has-dock \{ --dock-reserve:/);
-  assert.match(sys, /body\.has-dock-wide \{ --dock-reserve: calc\(min\(1100px/);
+  assert.match(sys, /@media \(min-width: 768px\) \{\s*body\.has-dock \.content \{ padding-right: min\(calc\(min\(540px, 100vw - 32px\) \+ 24px\), 100%\); \}/);
+  assert.match(sys, /body\.has-dock-wide \.content \{ padding-right: min\(calc\(min\(1100px, 100vw - 32px\) \+ 24px\), 100%\); \}/);
+  assert.ok(!/var\(--dock-reserve\)/.test(sys), 'sin variables locales: tokens.css no las declara (design-tokens-migration)');
   assert.match(sys, /body\.has-agent-panel\.has-dock \.content/);
   assert.match(sys, /@media \(max-width: 767px\) \{\s*body\.has-dock \.content, body\.has-dock-wide \.content \{ padding-right: 0; \}/);
 });
