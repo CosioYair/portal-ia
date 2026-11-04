@@ -170,8 +170,10 @@ test('(d) dos lotes recibidos a la vez no comparten ni sobrescriben carpetas ni 
   const ids = [...x.items, ...y.items].map((i: any) => i.jobId);
   assert.equal(new Set(ids).size, 4, 'cada lote con sus trabajos');
   assert.ok(fs.existsSync(path.join(root, 'documentos', x.slug, 'origen', 'Simultaneo.zip')) && fs.existsSync(path.join(root, 'documentos', y.slug, 'origen', 'Simultaneo.zip')));
-  await Promise.all([inject('POST', `${A}/batches/${x.id}/start`, { authorized: true }), inject('POST', `${A}/batches/${y.id}/start`, { authorized: true })]);
-  assert.ok(await until(async () => (await batchOf(x.id)).status === 'completed' && (await batchOf(y.id)).status === 'completed'));
+  const [s1, s2] = await Promise.all([inject('POST', `${A}/batches/${x.id}/start`, { authorized: true }), inject('POST', `${A}/batches/${y.id}/start`, { authorized: true })]);
+  assert.equal(s1.status, 200, `arranque del lote 1: ${JSON.stringify(s1.json)}`); assert.equal(s2.status, 200, `arranque del lote 2: ${JSON.stringify(s2.json)}`);
+  const state = async () => JSON.stringify([await batchOf(x.id), await batchOf(y.id)].map((b: any) => ({ status: b?.status, error: b?.error ?? null, counts: b?.counts, items: b?.items?.map((i: any) => `${i.entryName}:${i.state}:${i.reason ?? ''}`) })));
+  assert.ok(await until(async () => (await batchOf(x.id)).status === 'completed' && (await batchOf(y.id)).status === 'completed'), await state());
   const slugs = new Set<string>();
   for (const id of ids) { const j = await jobOf(id); assert.equal(j.versions.length, 1, j.slug); slugs.add(j.slug); }
   assert.equal(slugs.size, 4, 'ninguna carpeta compartida');
