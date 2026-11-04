@@ -254,7 +254,7 @@ export function importPdfFiles(slug: string, agentId: string, files: { file: str
     const r = registerPdf(slug, agentId, s, name, data, batchSlug, 'attachment', by, id);
     {
           // Solo puede repetirse algo de ESTE lote (bySha se limita al lote): queda excluido con su motivo y nunca se encola.
-          if (r.outcome === 'duplicate') db.addItem({ ...base, sha: r.job.inputSha256, outcome: 'rejected', reason: `repetido dentro del ZIP: mismo contenido que «${r.job.inputName}»`, job_id: null, state: 'excluded' });
+          if (r.outcome === 'duplicate') db.addItem({ ...base, sha: r.job.inputSha256, outcome: 'duplicate', reason: `repetido dentro del ZIP: mismo contenido que «${r.job.inputName}»`, job_id: null, state: 'excluded' });
           else db.addItem({ ...base, sha: r.job.inputSha256, outcome: r.outcome, reason: null, job_id: r.job.id, state: 'pending' });
         }
   }
@@ -306,7 +306,7 @@ export function batchView(slug: string, agentId: string, id: string, jobsById?: 
   const counts: DocumentBatchCounts = {
     // total = items.length: cada elemento cuenta en un solo estado; `duplicates` es informativo y no se suma.
       total: items.length,
-      detected: items.length, accepted: items.filter(i => i.outcome === 'accepted').length, duplicates: items.filter(i => i.outcome === 'duplicate' || (i.state === 'excluded' && /^repetido dentro del ZIP/.test(i.reason ?? ''))).length, excluded: c('excluded'),
+      detected: items.length, accepted: items.filter(i => i.outcome === 'accepted').length, duplicates: items.filter(i => i.outcome === 'duplicate').length, excluded: c('excluded'),
     reprocessed: items.filter(i => { if (!i.sha256 || !i.jobId || i.state === 'excluded') return false; const other = jobs.bySha(agentId, i.sha256); return !!other && other.id !== i.jobId && (other.batchId ?? null) !== id; }).length,
     pending: c('pending'), queued: c('queued'), processing: c('processing'), passed: c('passed'), rejectedQa: c('rejected_qa'), failed: c('failed'), cancelled: c('cancelled')
   };
