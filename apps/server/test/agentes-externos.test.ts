@@ -246,8 +246,8 @@ test('entradas: permisos por ruta, PDF y ZIP seguros, sin duplicados, original c
   const z = await up('lote.zip', zip([{ name: 'uno.pdf', data: PDF('U') }, { name: '../dos.pdf', data: PDF('D') }, { name: 'Propuesta.pdf', data: PDF('P') }]));
   // Un ZIP es un lote: cada entrada queda registrada (nueva, ya recibida antes o excluida con su motivo).
   assert.equal(z.status, 201); const items = z.json.batch.items;
-  assert.deepEqual(items.map((i: any) => [i.entryName, i.outcome]), [['uno.pdf', 'accepted'], ['../dos.pdf', 'rejected'], ['Propuesta.pdf', 'duplicate']]);
-  assert.match(items[1].reason, /recorrido/); assert.equal(items[2].jobId, jobId, 'el mismo contenido reutiliza su documento');
+  assert.deepEqual(items.map((i: any) => [i.entryName, i.outcome]), [['uno.pdf', 'accepted'], ['../dos.pdf', 'rejected'], ['Propuesta.pdf', 'accepted']]);
+  assert.match(items[1].reason, /recorrido/); assert.notEqual(items[2].jobId, jobId, 'HU-177: el lote es independiente; el mismo contenido tiene su propio trabajo en el lote');
   assert.ok(z.json.skipped.some((s: string) => s.includes('recorrido')));
   assert.match(fs.readFileSync(path.join(root, 'documentos', 'propuesta-visual', 'HISTORIAL.md'), 'utf8'), /Recibido por Portal IA/);
 });

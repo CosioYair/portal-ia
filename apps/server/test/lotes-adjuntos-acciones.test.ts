@@ -123,9 +123,13 @@ test('lote: un ZIP con 26 PDF (y lo que no es PDF) queda ENTERO registrado; nada
   assert.equal(new Set(igual.map((i: any) => i.jobId)).size, 2);
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'MANIFIESTO.json'), 'utf8')).documentos.length, 30);
   assert.equal((await inject('GET', `${A}/documents`)).json.jobs.filter((j: any) => j.batchId === batchId).length, 27);
-  // El mismo ZIP otra vez: nada se duplica (cada PDF reutiliza su documento).
+  // El mismo ZIP otra vez (HU-177): es OTRO lote, independiente; cada PDF tiene su propio trabajo y el primer lote no cambia.
   const again = await upload(`${A}/documents/upload`, 'Lote de prueba.zip', zip(entries));
-  assert.equal(again.json.batch.counts.duplicates, 27); assert.equal(again.json.batch.counts.accepted, 0);
+  assert.equal(again.json.batch.counts.duplicates, 0); assert.equal(again.json.batch.counts.accepted, 27);
+  assert.notEqual(again.json.batch.slug, b.slug, 'su propia carpeta');
+  const firstJobs = new Set(b.items.map((i: any) => i.jobId).filter(Boolean));
+  assert.ok(again.json.batch.items.every((i: any) => !i.jobId || !firstJobs.has(i.jobId)), 'no reutiliza trabajos de otro lote');
+  assert.equal((await inject('GET', `${A}/documents`)).json.jobs.filter((j: any) => j.batchId === batchId).length, 27, 'el primer lote no cambia');
   // El mismo PDF dos veces DENTRO de un ZIP: un documento, y la copia queda como repetida (no como «nuevo»).
   const twice = (await upload(`${A}/documents/upload`, 'Repetido.zip', zip([{ name: 'uno.pdf', data: PDF('REPETIDO-DENTRO') }, { name: 'copias/uno (copia).pdf', data: PDF('REPETIDO-DENTRO') }]))).json.batch;
   assert.deepEqual(twice.items.map((i: any) => i.outcome), ['accepted', 'duplicate']); assert.equal(twice.items[0].jobId, twice.items[1].jobId);
@@ -427,11 +431,14 @@ test('lote: robustez — la cola no se para si el agente está con un documento 
   const bA = (await upload(`${A}/documents/upload`, 'lote-a.zip', zip([{ name: 'A1.pdf', data: shared }, { name: 'A2.pdf', data: PDF('SOLO-A LENTO') }]))).json.batch;
   await inject('POST', `${A}/batches/${bA.id}/start`, { authorized: true });
   const bB = (await upload(`${A}/documents/upload`, 'lote-b.zip', zip([{ name: 'B1.pdf', data: shared }]))).json.batch;
-  assert.equal(bB.items[0].outcome, 'duplicate');
+  // HU-177: cada lote es independiente; B tiene su propio trabajo para el mismo contenido.
+  assert.equal(bB.items[0].outcome, 'accepted'); assert.notEqual(bB.items[0].jobId, bA.items[0].jobId);
   await inject('POST', `${A}/batches/${bB.id}/start`, { authorized: true });
   assert.ok(await until(async () => (await batchOf(bB.id)).status === 'completed' && (await batchOf(bA.id)).status === 'completed', 60_000));
-  const sharedJob = (await inject('GET', `${A}/documents`)).json.jobs.find((j: any) => j.id === bB.items[0].jobId);
-  assert.equal(sharedJob.versions.length, 1, 'una sola conversión'); assert.equal((await batchOf(bB.id)).counts.passed, 1);
+  const allJobs = (await inject('GET', `${A}/documents`)).json.jobs;
+  const jobB = allJobs.find((j: any) => j.id === bB.items[0].jobId); const jobA = allJobs.find((j: any) => j.id === bA.items[0].jobId);
+  assert.equal(jobB.versions.length, 1, 'B convierte su documento una vez'); assert.equal(jobA.versions.length, 1, 'A no se toca');
+  assert.notEqual(jobB.slug, jobA.slug); assert.equal((await batchOf(bB.id)).counts.passed, 1);
   // 3) Cancelar mientras el agente prepara el plan: el lote queda cancelado (no «terminado» con resumen del agente); doble «Procesar» → 409.
   scenario({ auth: 'subscription', rules: [SUMMARY, { ...PLAN, delayMs: 1500 }] });
   const bC = (await upload(`${A}/documents/upload`, 'cancelar-plan.zip', zip([{ name: 'C1.pdf', data: PDF('PLAN-1') }]))).json.batch;
@@ -467,7 +474,8 @@ test('lote: un fallo de disco al cerrar no tumba el Portal (queda anotado); «en
   assert.notEqual((await inject('POST', `${W}/agents/${other.id}/batches/${b.id}/deliverable`, {})).status, 200);
   // Ruta JSON antigua: un ZIP devuelve sus documentos (y cuáles ya estaban).
   const legacy = await inject('POST', `${A}/documents`, { name: 'antiguo.zip', contentBase64: zip([{ name: 'N1.pdf', data: PDF('LEGADO-NUEVO') }, { name: 'D1.pdf', data: PDF('NOMBRE-RESERVADO') }]).toString('base64') });
-  assert.equal(legacy.status, 201); assert.deepEqual(legacy.json.jobs.map((j: any) => !!j.duplicate), [false, true]);
+  // HU-177: el ZIP es un lote nuevo; un PDF ya visto en otro lote no es duplicado aquí.
+  assert.equal(legacy.status, 201); assert.deepEqual(legacy.json.jobs.map((j: any) => !!j.duplicate), [false, false]);
 });
 
 test('lote (2.ª revisión): mientras se cierra no se pausa ni se reintenta y el agente queda libre; una extracción detenida no deja procesar; cancelar y luego fallar el plan cierra el lote', async () => {
