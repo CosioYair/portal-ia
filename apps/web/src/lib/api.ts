@@ -6,6 +6,7 @@ import type { BatchPolicyChange, BatchPreview, BatchView, GauntletAdvice, Gauntl
 import type { OrgApplication, OrgBriefAttachment, OrgChange, OrgDecision, OrgEvaluation, OrgEvaluationBrief, OrgProposal, OrgProposalSpec } from '@portal-ia/domain';
 import type { ClaudeCodeRun, ClaudeCodeStatusView, ClaudeCodeUsage, ClaudeCodeUsageReport, ClaudeCodeWorkerView, ClaudeCodeWorkspaceView, ExecutionBackend } from '@portal-ia/domain';
 import type { Assignment, AssistantConversation, ConversationArtifact, ConversationDecision, ConversationStage } from '@portal-ia/domain';
+import type { DocumentBatch, DocumentJob, RemovalPreview, RemovalRecord } from '@portal-ia/domain';
 import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
 import { ownerNeeded, ownerToken, setOwnerToken } from './owner.ts';
 
@@ -368,8 +369,21 @@ export const api = {
   retryBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/retry`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   cancelBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/cancel`, { method: 'POST', body: '{}' }),
   postponeBatchItem: (slug: string, id: string, itemId: string, note: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/postpone`, { method: 'POST', body: JSON.stringify({ note }) }),
-  restoreBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/restore`, { method: 'POST', body: '{}' })
+  restoreBatchItem: (slug: string, id: string, itemId: string) => request<BatchView>(`/api/workspaces/${slug}/batches/${id}/items/${itemId}/restore`, { method: 'POST', body: '{}' }),
+  // HU-177 · Eliminación autorizada de lotes y documentos de un agente externo (borrado blando: el histórico y el aprendizaje se conservan).
+  /** Documentos del agente. Con `includeRemoved` también devuelve lo eliminado y el histórico de eliminaciones. Los conteos los calcula el servidor. */
+  agentDocuments: (slug: string, agentId: string, includeRemoved = false) => request<{ jobs: DocumentJob[]; batches: DocumentBatch[]; removals?: RemovalRecord[] }>(`/api/workspaces/${slug}/agents/${encodeURIComponent(agentId)}/documents${includeRemoved ? '?includeRemoved=1' : ''}`),
+  /** Vista previa sin borrar nada: carpeta, archivos, bytes que se liberan, qué se conserva y `token` de lo mostrado. */
+  batchRemovalPreview: (slug: string, agentId: string, batchId: string) => request<RemovalPreview>(`/api/workspaces/${slug}/agents/${encodeURIComponent(agentId)}/batches/${encodeURIComponent(batchId)}/removal-preview`),
+  documentRemovalPreview: (slug: string, agentId: string, jobId: string) => request<RemovalPreview>(`/api/workspaces/${slug}/agents/${encodeURIComponent(agentId)}/documents/${encodeURIComponent(jobId)}/removal-preview`),
+  /** Borra de tu equipo la carpeta del lote (origen y resultados). Se hace por POST para no perder el cuerpo. Responde 409 si se está procesando o si cambió desde la vista previa. */
+  removeDocumentBatch: (slug: string, agentId: string, batchId: string, o: RemovalRequest) => request<RemovalRecord>(`/api/workspaces/${slug}/agents/${encodeURIComponent(agentId)}/batches/${encodeURIComponent(batchId)}/remove`, { method: 'POST', body: JSON.stringify({ authorized: true, reason: o.reason?.trim() || null, previewToken: o.previewToken }) }),
+  /** Borra de tu equipo la carpeta de un documento. Los conteos de su lote se recalculan y los eliminados cuentan aparte. */
+  removeDocument: (slug: string, agentId: string, jobId: string, o: RemovalRequest) => request<RemovalRecord>(`/api/workspaces/${slug}/agents/${encodeURIComponent(agentId)}/documents/${encodeURIComponent(jobId)}/remove`, { method: 'POST', body: JSON.stringify({ authorized: true, reason: o.reason?.trim() || null, previewToken: o.previewToken }) })
 };
+
+/** Eliminación autorizada: `previewToken` es el de la vista previa que viste (si el contenido cambió, el servidor responde 409). */
+export interface RemovalRequest { previewToken: string; reason?: string | null }
 
 /** Alcance que el propietario autoriza para un lote (lo normaliza y acota el servidor). */
 export interface BatchRequest {
