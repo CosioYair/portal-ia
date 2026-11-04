@@ -95,12 +95,14 @@ export function jobsDb(slug: string) {
     /**
      * Trabajo con el mismo contenido (SHA-256). Si se indica un lote, solo busca dentro de ese lote: cada lote es
      * independiente y un PDF que ya llegó en otro lote vuelve a procesarse con su propio trabajo. Si no se indica lote
-     * (PDF suelto), busca en todos los trabajos del agente, como antes.
+     * (PDF suelto), busca en todos los trabajos del agente, como antes, pero con una elección determinista: como cada
+     * lote tiene su propio trabajo, puede haber varias filas con el mismo SHA. Se elige primero el trabajo SUELTO
+     * (batch_id NULL) más antiguo y, solo si no hay ninguno, el trabajo de lote más antiguo (desempate por id).
      */
     bySha(agentId: string, sha: string, batchId?: string | null): DocumentJob | null {
       const r = batchId
-        ? db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ? AND batch_id = ? ORDER BY created_at LIMIT 1`).get(agentId, sha, batchId) as any
-        : db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ?`).get(agentId, sha) as any;
+        ? db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ? AND batch_id = ? ORDER BY created_at, id LIMIT 1`).get(agentId, sha, batchId) as any
+        : db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ? ORDER BY (batch_id IS NOT NULL), created_at, id LIMIT 1`).get(agentId, sha) as any;
       return r ? mapJob(r) : null;
     },
     /**
