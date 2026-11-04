@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { HARNESSES } from '@portal-ia/domain';
+import { HARNESSES, batchCountsAddUp, batchCountsSum, type DocumentBatchCountsLike } from '@portal-ia/domain';
 import { Chip, Icon, Notice, Spinner } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
 import { useApp } from '../lib/store.ts';
@@ -203,11 +203,37 @@ const ACTION_STATUS: Record<AgentAction['status'], { text: string; tone: '' | 'o
 };
 const PROPOSAL_STATE: Record<string, string> = { proposed: 'propuesta: revísala y apruébala en Mejoras', approved: 'aprobada', applied: 'aplicada', rejected: 'rechazada', failed: 'no se pudo aplicar' };
 
+/**
+ * Conteos de un lote para el chat: el denominador es `total` (o `detected` en registros antiguos), igual que en
+ * ExternalAgent; nunca se recalcula con accepted + duplicates. Si no cuadran, se avisa.
+ */
+function batchCountsText(raw: Record<string, any>): { text: string; warning: string | null } {
+  const v = (k: string) => Number(raw?.[k]) || 0;
+  const c: DocumentBatchCountsLike = {
+    total: typeof raw?.total === 'number' ? raw.total : undefined, detected: v('detected'),
+    passed: v('passed'), rejectedQa: v('rejectedQa'), failed: v('failed'), cancelled: v('cancelled'), excluded: v('excluded'),
+    pending: v('pending'), queued: v('queued'), processing: v('processing')
+  };
+  const total = c.total ?? c.detected; const todo = c.pending + c.queued + c.processing;
+  const parts = [
+    c.failed ? `${c.failed} fallaron` : '',
+    c.rejectedQa ? `${c.rejectedQa} no pasaron las comprobaciones` : '',
+    c.cancelled ? `${c.cancelled} cancelados` : '',
+    c.excluded ? `${c.excluded} excluidos` : '',
+    todo ? `${todo} pendientes` : ''
+  ].filter(Boolean);
+  return {
+    text: `Lote: ${c.passed} listos de ${total}${parts.length ? `, ${parts.join(', ')}` : ''}.`,
+    warning: batchCountsAddUp(c) ? null : `Aviso: los conteos no cuadran (suma ${batchCountsSum(c)} de ${total}); revisa el manifiesto, que tiene el motivo de cada documento.`
+  };
+}
+
 /** Una acción que el agente pidió al Portal desde la conversación: qué es, quién la hace, qué cuesta, su estado y adónde ir. */
 function ActionCard({ slug, agentId, a, external, onDone }: { slug: string; agentId: string; a: AgentAction; external: boolean; onDone: () => void }) {
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const box = useRef<HTMLDivElement>(null);
   const st = ACTION_STATUS[a.status]; const r = a.result ?? {};
+  const bc = r.counts ? batchCountsText(r.counts) : null;
   const run = async (fn: () => Promise<unknown>) => { setBusy(true); setError(null); try { await fn(); onDone(); } catch (e: any) { setError(e.message); } finally { setBusy(false); requestAnimationFrame(() => box.current?.focus()); } };
   const lotes = Number(a.payload.lotes) || 1; const pdfs = Number(a.payload.pdfs) || null;
   const what = a.kind === 'procesar_documentos' ? `Convertirá ${pdfs ? `${pdfs} PDF` : 'los PDF adjuntos'} en ${lotes} lote${lotes > 1 ? 's' : ''} (uno por ZIP y otro con los PDF sueltos): el programa del agente se ejecuta en este equipo, de uno en uno, y usa como máximo ${lotes * 2} consulta${lotes * 2 > 1 ? 's' : ''} a tu suscripción (plan y resumen de cada lote).`
@@ -235,7 +261,8 @@ function ActionCard({ slug, agentId, a, external, onDone }: { slug: string; agen
       {r.summary && <span>{r.summary} </span>}
       {r.proposalState && <span className="muted">Propuesta {PROPOSAL_STATE[r.proposalState] ?? r.proposalState}. </span>}
       {r.storyId && <span className="muted">Historia {r.storyId}{r.storyStatus ? ` (${r.storyStatus})` : ''}{r.projectName ? ` en «${r.projectName}»` : ''}. </span>}
-      {r.counts && <span className="muted">Lote: {r.counts.passed} listos de {r.counts.accepted + r.counts.duplicates}{r.counts.failed ? `, ${r.counts.failed} fallaron` : ''}{r.counts.rejectedQa ? `, ${r.counts.rejectedQa} no pasaron las comprobaciones` : ''}. </span>}
+      {bc && <span className="muted">{bc.text} </span>}
+      {bc?.warning && <span role="note" style={{ color: 'var(--color-err-text)' }}>{bc.warning} </span>}
       {r.jobStatus && <span className="muted">Documento: {r.jobStatus}. </span>}
     </div>}
     {a.kind === 'mejorar_agente' && a.status === 'done' && r.proposalId && <span className="small muted">Nada cambia hasta que apruebes la propuesta.</span>}

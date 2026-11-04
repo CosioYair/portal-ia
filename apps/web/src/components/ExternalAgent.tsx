@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { BATCH_ITEM_LABEL, FEEDBACK_LABEL, INTEGRATION_LABEL, type DocumentBatch, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ExecutionBackend, type ExternalGrants, type ImprovementProposal } from '@portal-ia/domain';
+import { BATCH_ITEM_LABEL, FEEDBACK_LABEL, INTEGRATION_LABEL, batchCountsAddUp, type DocumentBatch, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ExecutionBackend, type ExternalGrants, type ImprovementProposal } from '@portal-ia/domain';
 import { Chip, Icon, Notice, Spinner } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
 import { FolderPicker } from './FolderPicker.tsx';
@@ -166,7 +166,7 @@ export function DocumentsTab({ slug, p, onChanged, onTab }: { slug: string; p: P
       const f = ok[k]; setUpload({ name: f.name, progress: 0, n: k + 1, of: ok.length }); setSaid(`Subiendo «${f.name}»${ok.length > 1 ? ` (${k + 1} de ${ok.length})` : ''}.`);
       try {
         const r = await osApi.uploadDocumentFile(slug, p.agent.id, f, fr => setUpload({ name: f.name, progress: fr, n: k + 1, of: ok.length }));
-        if (r.kind === 'zip') { setIntake(r.batch); setOpenBatch(r.batch.id); setSaid(`«${f.name}» recibido: ${r.batch.counts.accepted + r.batch.counts.duplicates} PDF en el lote.`); flash(`ZIP recibido: ${r.batch.counts.accepted + r.batch.counts.duplicates} PDF en el lote`); }
+        if (r.kind === 'zip') { setIntake(r.batch); setOpenBatch(r.batch.id); const n = r.batch.counts.total; setSaid(`«${f.name}» recibido: ${n} archivo(s) en el lote.`); flash(`ZIP recibido: ${n} archivo(s) en el lote`); }
         else { if (r.jobs[0]) setOpen(r.jobs[0].id); setSaid(`«${f.name}» recibido.`); flash(r.jobs.some(j => j.duplicate) ? 'Ese PDF ya estaba recibido: se reutiliza su trabajo (no se duplica).' : 'PDF recibido'); }
       } catch (e: any) { problems.push(`«${f.name}»: ${e.message}`); setSaid(`No se pudo subir «${f.name}».`); }
     }
@@ -216,7 +216,7 @@ export function DocumentsTab({ slug, p, onChanged, onTab }: { slug: string; p: P
 function IntakeSummary({ b, onClose }: { b: DocumentBatch; onClose: () => void }) {
   const c = b.counts; const excluded = b.items.filter(i => i.state === 'excluded'); const dup = b.items.filter(i => i.outcome === 'duplicate');
   return <Notice kind={excluded.length ? 'warn' : 'ok'}>
-    <strong className="wrap-any">«{b.sourceName}»: {c.detected} archivo(s) en el ZIP.</strong> {c.accepted} PDF nuevos{c.duplicates ? `, ${c.duplicates} ya recibidos antes (se reutiliza su trabajo)` : ''}{c.excluded ? `, ${c.excluded} excluidos` : ''}. Nada se ha descartado sin decírtelo; el ZIP original queda guardado en el lote.
+    <strong className="wrap-any">«{b.sourceName}»: {c.detected} archivo(s) en el ZIP.</strong> {c.accepted} PDF para procesar en este lote{c.excluded ? `, ${c.excluded} excluidos (cada uno con su motivo)` : ''}{c.duplicates ? `; de ellos, ${c.duplicates} repetidos dentro del mismo ZIP` : ''}. Nada se ha descartado sin decírtelo; el ZIP original queda guardado en el lote.
     {b.error && <><br />{b.error}</>}
     {(excluded.length > 0 || dup.length > 0) && <details style={{ marginTop: 4 }}><summary style={{ cursor: 'pointer' }}>Ver el detalle</summary>
       <ul className="wrap-any" style={{ margin: '4px 0 0', paddingLeft: 18 }}>
@@ -238,7 +238,7 @@ function BatchCard({ slug, agentId, b, jobsById, queue, open, onToggle, busy, ca
   act: (fn: () => Promise<unknown>, ok: string) => Promise<boolean>; jobCard: (j: DocumentJob) => ReactNode }) {
   const [confirm, setConfirm] = useState<BatchConfirm>(null); const [filter, setFilter] = useState<BatchFilter>('all'); const [doc, setDoc] = useState<string | null>(null);
   const st = BATCH_STATUS[b.status]; const c = b.counts;
-  const total = c.accepted + c.duplicates; const done = c.passed + c.rejectedQa + c.failed + c.cancelled; const todo = c.pending + c.queued + c.processing;
+  const total = c.total; const addsUp = batchCountsAddUp(c); const done = c.passed + c.rejectedQa + c.failed + c.cancelled; const todo = c.pending + c.queued + c.processing;
   const retryable = c.failed + c.cancelled;
   // La confirmación sigue a la vista mientras se prepara (el plan puede tardar un minuto) y se cierra al terminar.
   const a = (action: 'start' | 'pause' | 'resume' | 'retry' | 'cancel', msg: string, body: { includeRejected?: boolean; items?: number[] } = {}) => act(() => osApi.batchAction(slug, agentId, b.id, action, body), msg).finally(() => setConfirm(null));
@@ -251,19 +251,19 @@ function BatchCard({ slug, agentId, b, jobsById, queue, open, onToggle, busy, ca
   const no = <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setConfirm(null)}>No</button>;
   return <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8, minWidth: 0 }}>
     <button type="button" className="lnk" style={{ textAlign: 'left', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }} onClick={onToggle} aria-expanded={open}>
-      {Icon.folder()} <strong className="wrap-any">{b.sourceName}</strong> <Chip xs tone={st.tone}>{st.text}</Chip><span className="small muted">{c.passed} de {total} listos{c.excluded ? ` · ${c.excluded} excluidos` : ''}</span>
+      {Icon.folder()} <strong className="wrap-any">{b.sourceName}</strong> <Chip xs tone={st.tone}>{st.text}</Chip><span className="small muted">{total} en total: {c.passed} listos · {c.rejectedQa} rechazados · {c.failed} fallidos{c.cancelled ? ` · ${c.cancelled} cancelados` : ''} · {c.excluded} excluidos{c.pending + c.queued + c.processing ? ` · ${c.pending + c.queued + c.processing} pendientes` : ''}</span>{!addsUp && <Chip xs tone="warn">Los conteos no cuadran: revisa el manifiesto</Chip>}
     </button>
     <progress className="batch-progress" value={done} max={Math.max(total, 1)} aria-label={`Lote ${b.sourceName}: ${done} de ${total} procesados`} />
     {open && <>
       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }} aria-label="Cifras del lote">
-        <Chip xs>{c.detected} en el ZIP</Chip><Chip xs>{c.accepted} nuevos</Chip>{c.duplicates > 0 && <Chip xs>{c.duplicates} ya recibidos</Chip>}{c.excluded > 0 && <Chip xs>{c.excluded} excluidos</Chip>}
+        <Chip xs>{c.detected} en el ZIP</Chip><Chip xs>{c.accepted} nuevos</Chip>{c.duplicates > 0 && <Chip xs>{c.duplicates} repetidos en el ZIP</Chip>}{c.excluded > 0 && <Chip xs>{c.excluded} excluidos</Chip>}
         {todo > 0 && <Chip xs tone="accent">{todo} por hacer{c.processing ? ` (${c.processing} en curso)` : ''}</Chip>}<Chip xs tone="ok">{c.passed} listos</Chip>
         {c.rejectedQa > 0 && <Chip xs tone="warn">{c.rejectedQa} no pasaron las comprobaciones</Chip>}{c.failed > 0 && <Chip xs tone="err">{c.failed} fallaron</Chip>}{c.cancelled > 0 && <Chip xs>{c.cancelled} cancelados</Chip>}
       </div>
       {b.waiting && <Notice kind="info">{b.waiting}</Notice>}
       {b.error && <Notice kind="warn">{b.error}</Notice>}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }} aria-live="polite">
-        {confirm === 'start' || confirm === 'resume' ? <><span className="small">{todo ? COST(todo) : 'No queda nada por convertir: el lote se cierra (sin consultas a tu suscripción).'}</span>
+        {confirm === 'start' || confirm === 'resume' ? <><span className="small">{todo ? COST(todo) : 'No queda nada por convertir: el lote se cierra (sin consultas a tu suscripción).'}{todo > 0 && (c.reprocessed ?? 0) > 0 ? ` Atención: ${c.reprocessed} PDF ya se procesaron en otro lote y se volverán a convertir (cuentan para el tope diario de conversiones).` : ''}</span>
           {yes(todo ? 'Sí, procesar' : 'Sí, cerrarlo', () => void a(confirm, confirm === 'start' ? 'Lote en marcha: se convierte de uno en uno' : 'Lote reanudado'), busy || !canRun)}{no}</>
           : confirm === 'cancel' ? <><span className="small">No empezará ningún documento más; el que esté en curso termina. Lo ya convertido se conserva y cancelar no consulta a nadie.</span>
             {yes('Sí, cancelar', () => void a('cancel', 'Lote cancelado'), busy)}{no}</>

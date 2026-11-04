@@ -92,7 +92,29 @@ export function jobsDb(slug: string) {
   return {
     list(agentId: string): DocumentJob[] { return (db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? ORDER BY created_at DESC LIMIT 2000`).all(agentId) as any[]).map(mapJob); },
     get(id: string): DocumentJob | null { const r = db.prepare(`SELECT * FROM document_jobs WHERE id = ?`).get(id) as any; return r ? mapJob(r) : null; },
-    bySha(agentId: string, sha: string): DocumentJob | null { const r = db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ?`).get(agentId, sha) as any; return r ? mapJob(r) : null; },
+    /**
+     * Trabajo con el mismo contenido (SHA-256). Si se indica un lote, solo busca dentro de ese lote: cada lote es
+     * independiente y un PDF que ya llegó en otro lote vuelve a procesarse con su propio trabajo. Si no se indica lote
+     * (PDF suelto), busca en todos los trabajos del agente, como antes, pero con una elección determinista: como cada
+     * lote tiene su propio trabajo, puede haber varias filas con el mismo SHA. Se elige primero el trabajo SUELTO
+     * (batch_id NULL) más antiguo y, solo si no hay ninguno, el trabajo de lote más antiguo (desempate por id).
+     */
+    bySha(agentId: string, sha: string, batchId?: string | null): DocumentJob | null {
+      const r = batchId
+        ? db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ? AND batch_id = ? ORDER BY created_at, id LIMIT 1`).get(agentId, sha, batchId) as any
+        : db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ? ORDER BY (batch_id IS NOT NULL), created_at, id LIMIT 1`).get(agentId, sha) as any;
+      return r ? mapJob(r) : null;
+    },
+    /**
+     * Carpeta libre para un trabajo nuevo: devuelve base, base-2, base-3… si ya existe un trabajo del agente con ese slug
+     * o, si se indica `outputsDir`, una carpeta con ese nombre en disco. Así no se sobrescribe nada de lotes anteriores.
+     */
+    uniqueSlug(agentId: string, base: string, outputsDir?: string | null): string {
+      const taken = (s: string) => !!db.prepare(`SELECT 1 AS x FROM document_jobs WHERE agent_id = ? AND slug = ? LIMIT 1`).get(agentId, s) || (!!outputsDir && fs.existsSync(path.join(outputsDir, s)));
+      if (!taken(base)) return base;
+      for (let n = 2; n < 10_000; n++) { const c = `${base}-${n}`; if (!taken(c)) return c; }
+      return `${base}-${crypto.randomUUID().slice(0, 8)}`;
+    },
     insert(j: Omit<DocumentJob, 'versions' | 'error' | 'createdAt' | 'updatedAt'>) { db.prepare(`INSERT INTO document_jobs (id, agent_id, title, slug, status, input_name, input_sha, pages, source, batch_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(j.id, j.agentId, j.title, j.slug, j.status, j.inputName, j.inputSha256, j.pages, j.source, j.batchId ?? null, now(), now()); },
     update(id: string, patch: { status?: string; versions?: DocumentVersion[]; error?: string | null; pages?: number | null }) {
       const cur = this.get(id)!;

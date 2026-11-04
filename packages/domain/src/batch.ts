@@ -585,6 +585,28 @@ export function batchSummary(items: Pick<BatchItem, 'state'>[]): Record<BatchIte
   return out;
 }
 
+// ---------------------------------------------------------------- Conteos de un lote de documentos (ZIP)
+
+/**
+ * Conteos de un lote de documentos. Cada documento del lote cuenta en UN solo estado. `total` es el número de archivos
+ * del lote; sin él (registros antiguos) vale `detected`. `duplicates` es solo informativo y no se suma.
+ */
+export interface DocumentBatchCountsLike {
+  total?: number; detected: number;
+  passed: number; rejectedQa: number; failed: number; cancelled: number; excluded: number;
+  pending: number; queued: number; processing: number;
+}
+
+/** Suma de las partes: listos + rechazados + fallidos + cancelados + excluidos + pendientes (incluye en cola y en proceso). */
+export function batchCountsSum(c: DocumentBatchCountsLike): number {
+  return c.passed + c.rejectedQa + c.failed + c.cancelled + c.excluded + c.pending + c.queued + c.processing;
+}
+
+/** ¿Cuadran los conteos? total = listos + rechazados + fallidos + cancelados + excluidos + pendientes (sin IA ni IO). */
+export function batchCountsAddUp(c: DocumentBatchCountsLike): boolean {
+  return (c.total ?? c.detected) === batchCountsSum(c);
+}
+
 /** Vista del monitor (lo que sirve GET /batches/:id): cada historia con su proceso y los totales del lote. */
 export interface BatchItemView extends BatchItem {
   label: string;

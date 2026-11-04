@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { slugify, type DocumentBatch, type DocumentBatchCounts, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ScriptPlan } from '@portal-ia/domain';
+import { batchCountsAddUp, batchCountsSum, slugify, type DocumentBatch, type DocumentBatchCounts, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ScriptPlan } from '@portal-ia/domain';
 import { agentsRepo } from '../db/workspace.ts';
 import { recordAgentEvent } from './agentEvents.ts';
 import { changed } from './live.ts';
@@ -75,10 +75,18 @@ function batchesDb(slug: string) {
 function freeBytes(dir: string): number | null { try { const s = fs.statfsSync(dir); return Number(s.bavail) * Number(s.bsize); } catch { return null; } }
 const mb = (b: number) => `${Math.round(b / 1048576)} MB`;
 
+/**
+ * Carpetas ya asignadas por este proceso. Entre elegir la carpeta y crearla hay esperas (copia del ZIP), así que dos lotes
+ * recibidos a la vez no pueden fiarse solo de que la carpeta exista en disco: así cada uno recibe la suya.
+ */
+const claimedSlugs = new Set<string>();
+const slugKey = (p: string) => process.platform === 'win32' ? p.toLowerCase() : p;
 function freeSlug(root: string, outputs: string, base: string, reserved: string[] = []): string {
   let b = slugify(base).slice(0, 60).replace(/[-.]+$/, '') || 'documento'; if (RESERVED.test(b) || reserved.includes(b)) b = `documento-${b}`;
   let s = b; let k = 2;
-  while (fs.existsSync(path.join(root, ...outputs.split('/'), ...s.split('/')))) s = `${b}-${k++}`;
+  const full = (x: string) => path.join(root, ...outputs.split('/'), ...x.split('/'));
+  while (claimedSlugs.has(slugKey(full(s))) || fs.existsSync(full(s))) s = `${b}-${k++}`;
+  claimedSlugs.add(slugKey(full(s)));
   return s;
 }
 
@@ -108,9 +116,9 @@ export async function receiveFile(slug: string, agentId: string, file: string, o
 function registerPdf(slug: string, agentId: string, s: ReturnType<typeof sourceOr>, name: string, data: Buffer, parentDir: string | null, source: DocumentJob['source'], by: string, batchId: string | null): { job: DocumentJob & { duplicate?: boolean }; outcome: 'accepted' | 'duplicate' } {
   const jobs = jobsDb(slug);
   const sha = crypto.createHash('sha256').update(data).digest('hex');
-  const dup = jobs.bySha(agentId, sha); if (dup) return { job: { ...dup, duplicate: true }, outcome: 'duplicate' };
+  const dup = jobs.bySha(agentId, sha, batchId); if (dup) return { job: { ...dup, duplicate: true }, outcome: 'duplicate' };
   const zones = [s.layout.outputs!];
-  const docSlug = parentDir ? `${parentDir}/${freeSlug(s.root, `${s.layout.outputs}/${parentDir}`, name.replace(/\.pdf$/i, ''), ['origen', 'entregables'])}` : freeSlug(s.root, s.layout.outputs!, name.replace(/\.pdf$/i, ''));
+  const docSlug = jobs.uniqueSlug(agentId, parentDir ? `${parentDir}/${freeSlug(s.root, `${s.layout.outputs}/${parentDir}`, name.replace(/\.pdf$/i, ''), ['origen', 'entregables'])}` : freeSlug(s.root, s.layout.outputs!, name.replace(/\.pdf$/i, '')), `${s.root}/${s.layout.outputs}`);
   const dir = `${s.layout.outputs}/${docSlug}`;
   safeWrite(s.root, `${dir}/original/${name}`, data, zones, { exclusive: true });
   appendHistory(s.root, dir, zones, `Recibido por Portal IA: «${name}» (${(data.length / 1024).toFixed(0)} KB, sha256 ${sha.slice(0, 12)}…${batchId ? `, del lote ${parentDir}` : ''}).`);
@@ -198,16 +206,19 @@ async function extractEntries(slug: string, agentId: string, id: string, by: str
       // cuenta como aceptado. Si otra entrada ya lo usa, es una copia repetida dentro del ZIP.
       const sameBatch = r.outcome === 'duplicate' && r.job.batchId === id;
       const own = sameBatch && !db.items(id).some(x => x.job_id === r.job.id && x.idx !== it.idx);
-      const reason = r.outcome !== 'duplicate' || own ? null : sameBatch ? `repetido dentro del ZIP: mismo contenido que «${r.job.inputName}»` : `ya recibido antes como «${r.job.inputName}»`;
-      db.settleItem(id, it.idx, { sha: r.job.inputSha256, outcome: own ? 'accepted' : r.outcome, reason, job_id: r.job.id, state: 'pending' });
+      if (r.outcome === 'duplicate' && !own) {
+        // Copia repetida dentro del mismo ZIP: queda EXCLUIDA con su motivo, sin trabajo propio y fuera de la cola (no
+        // hereda el estado del documento original ni cuenta como «listo»).
+        db.settleItem(id, it.idx, { sha: r.job.inputSha256, outcome: 'duplicate', reason: `repetido dentro del ZIP: mismo contenido que «${r.job.inputName}»`, job_id: null, state: 'excluded' });
+      } else db.settleItem(id, it.idx, { sha: r.job.inputSha256, outcome: 'accepted', reason: null, job_id: r.job.id, state: 'pending' });
       if (++done % 10 === 0) changed({ ws: slug, entity: 'agent', id: agentId, kind: 'progress' });
     }
     if (stopped) { db.patch(id, { error: stopped }); return; }
     const v = batchView(slug, agentId, id)!;
-    appendHistory(s.root, `${s.layout.outputs}/${b.slug}`, zones, `Lote recibido: «${b.source_name}» — ${v.counts.detected} archivo(s) detectados: ${v.counts.accepted} PDF nuevos, ${v.counts.duplicates} ya recibidos antes, ${v.counts.excluded} excluidos (con su motivo en el manifiesto).`);
+    appendHistory(s.root, `${s.layout.outputs}/${b.slug}`, zones, `Lote recibido: «${b.source_name}» — total ${v.counts.total} archivo(s): ${v.counts.pending + v.counts.queued + v.counts.processing} PDF por procesar, ${v.counts.passed} listos, ${v.counts.rejectedQa} rechazados, ${v.counts.failed} fallidos, ${v.counts.cancelled} cancelados, ${v.counts.excluded} excluidos${v.counts.duplicates ? ` (${v.counts.duplicates} repetidos dentro del ZIP, excluidos)` : ''}. Cada motivo figura en el manifiesto.`);
     if (b.error && /importación se interrumpió|No se pudieron registrar/.test(b.error)) db.patch(id, { error: null });
     writeManifest(slug, agentId, id);
-    recordAgentEvent(slug, agentId, 'document_job', { batchId: id, action: 'batch_received', name: b.source_name, detected: v.counts.detected, accepted: v.counts.accepted, duplicates: v.counts.duplicates, excluded: v.counts.excluded }, by);
+    recordAgentEvent(slug, agentId, 'document_job', { batchId: id, action: 'batch_received', name: b.source_name, total: v.counts.total, detected: v.counts.detected, accepted: v.counts.accepted, duplicates: v.counts.duplicates, excluded: v.counts.excluded }, by);
   } finally {
     importing.delete(id); waitingNote.delete(id);
     changed({ ws: slug, entity: 'agent', id: agentId });
@@ -241,7 +252,11 @@ export function importPdfFiles(slug: string, agentId: string, files: { file: str
     const data = fs.readFileSync(f.file);
     if (!isPdf(data)) { db.addItem({ ...base, reason: 'no es un PDF válido (falta la cabecera %PDF-)' }); continue; }
     const r = registerPdf(slug, agentId, s, name, data, batchSlug, 'attachment', by, id);
-    db.addItem({ ...base, sha: r.job.inputSha256, outcome: r.outcome, reason: r.outcome === 'duplicate' ? `ya recibido antes como «${r.job.inputName}»` : null, job_id: r.job.id, state: 'pending' });
+    {
+          // Solo puede repetirse algo de ESTE lote (bySha se limita al lote): queda excluido con su motivo y nunca se encola.
+          if (r.outcome === 'duplicate') db.addItem({ ...base, sha: r.job.inputSha256, outcome: 'duplicate', reason: `repetido dentro del ZIP: mismo contenido que «${r.job.inputName}»`, job_id: null, state: 'excluded' });
+          else db.addItem({ ...base, sha: r.job.inputSha256, outcome: r.outcome, reason: null, job_id: r.job.id, state: 'pending' });
+        }
   }
   appendHistory(s.root, `${s.layout.outputs}/${batchSlug}`, zones, `Lote recibido: ${files.length} PDF (${batchName}).`);
   writeManifest(slug, agentId, id);
@@ -289,7 +304,10 @@ export function batchView(slug: string, agentId: string, id: string, jobsById?: 
   });
   const c = (st: DocumentBatchItemState) => items.filter(i => i.state === st).length;
   const counts: DocumentBatchCounts = {
-    detected: items.length, accepted: items.filter(i => i.outcome === 'accepted').length, duplicates: items.filter(i => i.outcome === 'duplicate').length, excluded: c('excluded'),
+    // total = items.length: cada elemento cuenta en un solo estado; `duplicates` es informativo y no se suma.
+      total: items.length,
+      detected: items.length, accepted: items.filter(i => i.outcome === 'accepted').length, duplicates: items.filter(i => i.outcome === 'duplicate').length, excluded: c('excluded'),
+    reprocessed: items.filter(i => { if (!i.sha256 || !i.jobId || i.state === 'excluded') return false; const other = jobs.bySha(agentId, i.sha256); return !!other && other.id !== i.jobId && (other.batchId ?? null) !== id; }).length,
     pending: c('pending'), queued: c('queued'), processing: c('processing'), passed: c('passed'), rejectedQa: c('rejected_qa'), failed: c('failed'), cancelled: c('cancelled')
   };
   return {
@@ -449,7 +467,7 @@ export async function startBatch(slug: string, agentId: string, id: string, opts
       const v = batchView(slug, agentId, id)!; const named = v.items.filter(i => i.jobId);
       waitingNote.set(id, 'Preparando el plan del lote (una consulta a tu suscripción)…'); changed({ ws: slug, entity: 'agent', id: agentId, kind: 'progress' });
       try {
-        plan = await planScript(slug, a, `- Lote «${b.source_name}»: ${named.length} PDF (nombres: ${named.slice(0, 20).map(i => cleanName(i.entryName.split('/').pop() ?? '').slice(0, 80)).join(', ')}${named.length > 20 ? '…' : ''}). El mismo plan se aplicará a cada PDF por separado, cada uno con su comprobación.\n`, null);
+        plan = await planScript(slug, a, `- Lote «${b.source_name}» (carpeta propia «${b.slug}»): ${named.length} PDF (nombres: ${named.slice(0, 20).map(i => cleanName(i.entryName.split('/').pop() ?? '').slice(0, 80)).join(', ')}${named.length > 20 ? '…' : ''}). El mismo plan se aplicará a cada PDF por separado, cada uno con su comprobación.\n`, null);
       } finally { recordModelCall(slug, agentId); }
       batchesDb(slug).patch(id, { plan_json: JSON.stringify(plan), addCalls: 1 });
     }
@@ -577,8 +595,11 @@ async function finishIn(slug: string, agentId: string, id: string, status0: 'com
 
 function portalBatchSummary(v: DocumentBatch): string {
   const c = v.counts;
-  return [`Lote «${v.sourceName}»: ${c.detected} archivo(s) detectados — ${c.passed} listos, ${c.rejectedQa} no pasaron las comprobaciones, ${c.failed} fallaron, ${c.cancelled} cancelados, ${c.excluded} excluidos${c.pending ? `, ${c.pending} sin procesar` : ''}${c.duplicates ? ` (${c.duplicates} ya se habían recibido antes)` : ''}.`,
-    c.failed || c.rejectedQa ? 'Lo que falló puede reintentarse sin repetir lo aprobado.' : '', 'Resumen automático del Portal.'].filter(Boolean).join(' ');
+  return [`Lote «${v.sourceName}»: ${c.total} archivo(s) detectados — ${c.passed} listos, ${c.rejectedQa} no pasaron las comprobaciones, ${c.failed} fallaron, ${c.cancelled} cancelados, ${c.excluded} excluidos${c.pending ? `, ${c.pending} sin procesar` : ''}${c.duplicates ? ` (${c.duplicates} repetidos dentro del ZIP, excluidos)` : ''}.`,
+    c.failed || c.rejectedQa ? 'Lo que falló puede reintentarse sin repetir lo aprobado.' : '',
+    `Total ${c.total} = ${c.passed} listos + ${c.rejectedQa} rechazados + ${c.failed} fallidos + ${c.cancelled} cancelados + ${c.excluded} excluidos + ${c.pending + c.queued + c.processing} pendientes.`,
+    batchCountsAddUp(c) ? '' : `Aviso: los conteos no cuadran (suma ${batchCountsSum(c)} de ${c.total}); revisa el manifiesto, que tiene el motivo de cada documento.`,
+    'Resumen automático del Portal.'].filter(Boolean).join(' ');
 }
 
 /** MANIFIESTO.json del lote: cada entrada del ZIP con su resultado y, si está listo, su Word (asociación determinista). */
