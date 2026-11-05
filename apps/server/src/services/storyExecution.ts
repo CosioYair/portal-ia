@@ -578,9 +578,9 @@ export async function reopenStory(slug: string, processId: string, reason: strin
   let created: Process;
   try {
     backlog.update(item.id, { description: `${item.description ? item.description + '\n' : ''}[${at.slice(0, 10)}] Reabierta por el propietario (estaba ${was}): ${why.slice(0, 300)}` });
-    backlog.setStatus(item.id, 'pending', item.lastProcessId ?? null);
+    setWorkStatus(slug, { id: item.id, source: 'story' }, 'pending', item.lastProcessId ?? null);
     created = createStoryProcess(slug, item.projectId, item.id, { iterationContext: context });
-    backlog.setStatus(item.id, 'pending', created.id);
+    setWorkStatus(slug, { id: item.id, source: 'story' }, 'pending', created.id);
     thread.add({ backlogItemId: item.id, role: 'system', agentId: null, agentName: null, content: `Historia reabierta por el propietario (estaba ${was}). Motivo: ${why}. Iteración ${next} creada (proceso ${created.id}), pendiente de autorización: no consume IA hasta que la autorices.`, processId: created.id, costUsd: 0, tokens: 0, proposals: null });
     db.exec('COMMIT');
   } catch (e) {
