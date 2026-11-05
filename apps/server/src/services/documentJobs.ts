@@ -13,7 +13,7 @@ import { agentsRepo, workspaceDb } from '../db/workspace.ts';
 import { agentBackend, agentCaller } from './claudeCode/backend.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { reconcileWithDisk, removalsById, removedIds } from './documentRemoval.ts';
-import { backupFiles, DEPS_KEY, diffSnapshots, identityZones, markEvaluating, safePath, safeWrite, scanExternal, sha256Text, snapshotHash, sourcesRepo, type SnapshotFiles } from './externalAgents.ts';
+import { backupFiles, DEPS_KEY, diffSnapshots, identityZones, markEvaluating, restoreSourceRevision, safePath, safeWrite, scanExternal, sha256Text, snapshotHash, sourcesRepo, type SnapshotFiles } from './externalAgents.ts';
 import { recordAgentEvent } from './agentEvents.ts';
 import { changed } from './live.ts';
 import { monotonicNow } from '../clock.ts';
@@ -678,6 +678,85 @@ export function versionEvidence(slug: string, agentId: string, jobId: string, n:
 // ---------------------------------------------------------------- Feedback, propuestas y mejoras aprobadas
 
 export function listProposals(slug: string, agentId: string) { const db = proposalsDb(slug); recoverInterrupted(slug, db.list(agentId)); return db.list(agentId); }
+
+/**
+ * HU-178 · Cola en serie por agente (espacio + agente) para la automejora desde el chat: generar, aplicar y deshacer nunca
+ * se cruzan. Así cada mejora parte de la revisión VIGENTE (la que dejó la anterior) y dos mejoras seguidas no dan
+ * stale_proposal. La cola siempre se libera, aunque la tarea falle.
+ */
+const improveQueues = new Map<string, Promise<unknown>>();
+export function serialByAgent<T>(slug: string, agentId: string, fn: () => Promise<T>): Promise<T> {
+  const key = `${slug}:${agentId}`;
+  const prev = improveQueues.get(key) ?? Promise.resolve();
+  const next = prev.catch(() => undefined).then(fn);
+  const tail: Promise<unknown> = next.catch(() => undefined);
+  improveQueues.set(key, tail);
+  void tail.finally(() => { if (improveQueues.get(key) === tail) improveQueues.delete(key); });
+  return next;
+}
+
+export interface ImproveNowResult {
+  proposalId: string; applied: boolean; classification: FeedbackClass; changes: { archivo: string; resumen: string }[];
+  summary: string; reason: string | null; revisionBefore: number | null; revision: number | null; backup: string | null;
+}
+
+/**
+ * HU-178 · Automejora desde el chat: el propietario lo pide y se aplica en el mismo paso, sin «Sí, hazlo» ni Mejoras.
+ * 1) classifyFeedback crea la propuesta sobre la revisión actual: una consulta de la suscripción, dentro del tope del agente.
+ * 2) applyProposal la aplica: copia en configuracion/respaldos, entrada en CAMBIOS.md y nueva revisión adoptada.
+ * El filtro de classifyFeedback descarta todo cambio a permisos, arnés, presupuesto o código del Portal. Si no queda ningún
+ * cambio seguro, no se aplica nada y se dice por qué. applyProposal y su stale_proposal siguen igual para Mejoras.
+ */
+export function improveNow(slug: string, agentId: string, input: { jobId: string | null; text: string }, by = 'chat'): Promise<ImproveNowResult> {
+  return serialByAgent(slug, agentId, async () => {
+    const p = await classifyFeedback(slug, agentId, input, by);
+    const changes = p.changes.map(c => ({ archivo: c.path, resumen: String((c as any).summary ?? (c as any).reason ?? (c as any).description ?? c.kind ?? '').slice(0, 300) }));
+    const base = { proposalId: p.id, classification: p.classification, changes, summary: p.summary, revisionBefore: null, revision: null, backup: null };
+    const applicable = (p.classification === 'reusable' || p.classification === 'needs_validation') && p.changes.length > 0;
+    if (!applicable) {
+      const reason = p.changes.length ? `Clasificada como «${FEEDBACK_LABEL[p.classification] ?? p.classification}»: no cambia su forma de trabajar.` : `No hay cambios seguros que aplicar (${p.reason}). Nunca se tocan permisos, arnés, presupuesto ni código del Portal.`;
+      proposalsDb(slug).transition(p.id, 'proposed', 'rejected', { error: reason.slice(0, 600) });
+      return { ...base, changes: [], applied: false, reason };
+    }
+    const before = sourcesRepo(slug).get(agentId);
+    const revisionBefore = before ? Number(before.revision) : null;
+    await applyProposal(slug, agentId, p.id, { authorized: true, by });
+    const after = proposalsDb(slug).get(p.id);
+    const now1 = sourcesRepo(slug).get(agentId);
+    if (!after || after.state !== 'applied') return { ...base, applied: false, revisionBefore, reason: after?.error ?? 'La mejora no se pudo aplicar.' };
+    return { ...base, applied: true, reason: null, revisionBefore, revision: now1 ? Number(now1.revision) : null, backup: after.backupDir ?? null };
+  });
+}
+
+/**
+ * HU-178 · Deshacer una automejora: vuelve a la revisión anterior a esa mejora con la vuelta atrás que ya existe
+ * (restoreSourceRevision, que conserva CAMBIOS.md y le añade la reversión). Va por la misma cola del agente.
+ */
+export function undoImprovement(slug: string, agentId: string, proposalId: string, revisionBefore: number, by = 'owner', revisionAfter: number | null = null): Promise<void> {
+  return serialByAgent(slug, agentId, async () => {
+    const p = proposalsDb(slug).get(proposalId);
+    if (!p || p.agentId !== agentId) throw err('Mejora no encontrada.', 404);
+    if (p.state !== 'applied') throw err('Esa mejora no está aplicada: no hay nada que deshacer.', 409);
+    // Solo se deshace la ÚLTIMA mejora: si la revisión vigente ya no es la que dejó esta, volver a revisionBefore borraría
+    // en silencio las mejoras posteriores. Se responde 409 sin tocar nada.
+    const later = () => err('Hay mejoras posteriores a esta: deshaz primero la última.', 409, { code: 'later_improvements' });
+    const current = sourcesRepo(slug).get(agentId);
+    if (!current) throw err('Agente externo no encontrado.', 404);
+    if (typeof revisionAfter === 'number') {
+    // Tras deshacer la mejora posterior, la revisión vigente es una «vuelta a» revisionAfter: mismo contenido (CAMBIOS.md
+    // conserva el historial y añade la reversión). Entonces esta mejora ya es la última y se puede deshacer.
+    const last = sourcesRepo(slug).revisions(agentId)[0];
+    const backTo = !!last && last.source === 'restore' && Number(last.n) === Number(current.revision)
+      && new RegExp(`^Vuelta a la revisión ${revisionAfter}(\\D|$)`).test(String(last.note ?? ''));
+    if (Number(current.revision) !== revisionAfter && !backTo) throw later();
+  }
+    else if (proposalsDb(slug).list(agentId).some(o => o.id !== p.id && o.state === 'applied' && !!o.appliedAt && !!p.appliedAt && o.appliedAt > p.appliedAt)) throw later();
+    restoreSourceRevision(slug, agentId, revisionBefore, by);
+    // La propuesta deja de figurar como aplicada (Mejoras y el chat muestran lo mismo).
+    proposalsDb(slug).transition(p.id, 'applied', 'rejected', { error: `Deshecha desde el chat (${by}) el ${now()}: se volvió a la revisión ${revisionBefore}.` });
+    changed({ ws: slug, entity: 'agent', id: agentId, kind: 'progress' });
+  });
+}
 export function pendingProposalCounts(slug: string): [string, number][] {
   return (ensure(slug).prepare(`SELECT agent_id, COUNT(*) AS n FROM improvement_proposals WHERE state = 'proposed' GROUP BY agent_id`).all() as any[]).map(r => [r.agent_id, Number(r.n)]);
 }
@@ -691,7 +770,8 @@ export function recordModelCall(slug: string, agentId: string, what = 'lote') {
 export async function classifyFeedback(slug: string, agentId: string, input: { jobId: string | null; text: string }, by = 'owner'): Promise<ImprovementProposal> {
   const a = agentsRepo(slug).get(agentId); if (!a) throw err('Agente no encontrado', 404);
   if (jobsDb(slug).usageToday(agentId).calls >= MODEL_CALLS_PER_DAY) throw err(`Hoy ya se usaron las ${MODEL_CALLS_PER_DAY} consultas diarias de este agente para documentos y mejoras: inténtalo mañana.`, 429);
-  const s = sourceOr(slug, agentId); const repo = sourcesRepo(slug); const files = repo.files(agentId)!;
+  // HU-178: mejorar la habilidad, las instrucciones o la memoria no necesita «documentos/» (solo la carpeta externa del agente).
+const s = sourcesRepo(slug).get(agentId); if (!s) throw err('Este agente no tiene carpeta externa.', 404); const repo = sourcesRepo(slug); const files = repo.files(agentId)!;
   const job = input.jobId ? jobsDb(slug).get(input.jobId) : null; if (input.jobId && (!job || job.agentId !== agentId)) throw err('Trabajo no encontrado', 404);
   const last = job?.versions[job.versions.length - 1] ?? null;
   const caller = callerFor(slug, a, 'Feedback');

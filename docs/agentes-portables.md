@@ -170,5 +170,45 @@ crea cuando el propietario lo pide (pestaña Archivos → «Crear su carpeta», 
     nuevo) y `POST …/agents/:id/import-zip/:n/undo`.
   - Todo vive en la base de cada espacio: funciona igual en cualquier empresa y no añade nada al núcleo.
 - **Exportar**: copia la revisión adoptada a una carpeta elegida (nunca sobrescribe; fuera de la instalación del Portal) o la
-  descarga como `.agente.json`. Sin credenciales.
+  descarga como **paquete portable (ZIP)** para usarla fuera del Portal (§8). Sin credenciales. El JSON de la carpeta
+  (`GET …/agents/:id/export`) se mantiene solo por compatibilidad.
 - Al eliminar un agente, su carpeta pasa a `agents/_archivadas/` (no la hereda otro agente con el mismo nombre).
+
+## 8. Paquete portable (ZIP) · `portal-ia/agent-bundle@2`
+
+Objetivo: que el agente trabaje fuera del Portal igual que dentro y siga mejorando allí. Panel del agente → **«Descargar
+paquete (ZIP)»** (`GET /api/workspaces/:slug/agents/:id/export.zip`). No llama a la IA y no cuesta nada. Código:
+`packages/domain/src/portable-bundle.ts` (`buildPortableBundle`, `validatePortableBundle`), `zipFile.ts` (`zipBuffers`, ZIP
+en memoria y determinista) y `agentCreation.ts` (`exportBundle`). Prueba: `apps/server/test/agente-portable-paquete.test.ts`.
+
+```
+AGENTS.md             instrucciones; su primera línea remite a AUTOMEJORA.md
+agent.yaml            identidad y autonomía pedida (sin id, sin modelo, sin herramientas concedidas)
+skills/<s>/SKILL.md   habilidades
+memory/MEMORY.md      solo memoria verificada, con procedencia neutra («Aprendido en el Portal»)
+knowledge/<k>.md      referencias (si las hay)
+AUTOMEJORA.md         reglas de automejora (mandan sobre lo demás)
+CAMBIOS.md            historial de cambios (se conserva el que ya tenga la carpeta, si lo hay)
+GUIA.md               pasos breves para Claude Code web, Cowork y ChatGPT
+scripts/anotar-cambio.mjs   añade una entrada a CAMBIOS.md (Node, sin dependencias)
+```
+
+**Qué se excluye y por qué.** No sale nada que sea operativo del Portal o que pueda filtrar datos: ni el id del agente, ni
+UUID de procesos (pasan a «[interno]»), ni rutas locales o de `data/` («[ruta local]»), ni rutas `/api/` o nombres de tablas,
+ni el modelo, ni las herramientas concedidas, ni las lecciones propuestas o retiradas, ni ninguna credencial. Si tras limpiar
+queda algún secreto (`findSecret`), dato interno o ruta fuera de la lista blanca, **no se exporta**: el Portal responde 409
+con la lista de problemas y el panel la muestra. Los archivos de la carpeta portable se pueden volver a importar con
+`filesToDefinition`; los que son propios del paquete solo generan avisos que no bloquean.
+
+**Reglas de automejora (AUTOMEJORA.md).** 1) Aplica lo que el usuario pida en el archivo que corresponda. 2) Aplica lo que
+corrija un reintento, en el archivo que evite repetir el error. 3) Anota cada cambio en CAMBIOS.md con fecha, qué, motivo
+(«Petición del usuario» o «Corrección tras un reintento») y archivo. 4) La memoria nueva se marca «sin verificar». Prohibido:
+ampliar permisos, guardar secretos y marcar memoria como verificada. Formato de cada entrada de CAMBIOS.md, que debe usar
+también «Automejora desde el chat»:
+`## AAAA-MM-DD — Qué cambió` + `- Motivo: …` + `- Archivo: …` (+ `- Detalle: …`). Las entradas nuevas van al final.
+
+**Prueba manual por entorno.** Desde el código no se puede garantizar la efectividad fuera del Portal. Con el mismo ZIP, en
+**Claude Code web**, **Cowork** y **ChatGPT**, siguiendo GUIA.md: (1) comprobar que el agente actúa según AGENTS.md; (2) pedir
+un cambio («a partir de ahora, …») y ver que queda en su archivo y en CAMBIOS.md; (3) rechazar un resultado, corregirlo en un
+reintento y ver que la corrección también queda anotada. En ChatGPT, el agente entrega el archivo y la entrada de CAMBIOS.md
+y el usuario los guarda.

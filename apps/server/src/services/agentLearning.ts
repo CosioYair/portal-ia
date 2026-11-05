@@ -38,6 +38,24 @@ export function proposeFromFeedback(slug: string, agentId: string, input: { proc
   return lessonsRepo(slug).get(l.id)!;
 }
 
+/**
+ * HU-178 · Automejora desde el chat (agente del Portal): pedirlo en el chat es la validación del propietario, y solo
+ * afecta a la Memoria de SU agente. Por eso el aprendizaje entra activo al momento, con su procedencia (texto literal
+ * del propietario, mensaje y fecha). proposeFromFeedback no cambia: la lección se registra y se valida en el mismo paso.
+ */
+export async function applyFromFeedback(slug: string, agentId: string, input: { messageId?: string | null; feedback: string; lesson?: string | null }): Promise<Lesson> {
+  const proposed = proposeFromFeedback(slug, agentId, { messageId: input.messageId ?? null, rating: 'needs_changes', feedback: input.feedback, lesson: input.lesson ?? null });
+  return verifyMemory(slug, agentId, proposed.id);
+}
+
+/** HU-178 · Deshacer un aprendizaje aplicado desde el chat: se retira (queda «obsoleta», con historial). Un segundo deshacer da 409. */
+export async function undoFromFeedback(slug: string, agentId: string, lessonId: string): Promise<Lesson> {
+  const l = lessonsRepo(slug).get(lessonId);
+  if (!l || l.agentId !== agentId) throw Object.assign(new Error('Aprendizaje no encontrado'), { statusCode: 404 });
+  if (l.status !== 'validated') throw Object.assign(new Error('Ese aprendizaje ya no está aplicado: no hay nada que deshacer.'), { statusCode: 409 });
+  return retireMemory(slug, agentId, lessonId);
+}
+
 async function syncIfFolder(slug: string, agentId: string, note: string) {
   const a = agentsRepo(slug).get(agentId);
   if (a && agentFoldersRepo(slug).folderOf(agentId)) { try { await syncAgentFolder(slug, a, note); } catch { /* cambio externo pendiente: la carpeta se pondrá al día al resolverlo */ } }

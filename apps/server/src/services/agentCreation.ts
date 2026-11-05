@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CAPABILITIES, KNOWLEDGE, TOOLS, definitionToFiles, filesToDefinition, slugify, type Agent, type AgentConfig, type Capability, type ExecutionBackend, type PortableFiles, type PortableKnowledge, type PortableSkill, type ProviderId, type ReasoningEffort, clampEffort } from '@portal-ia/domain';
+import { CAPABILITIES, KNOWLEDGE, TOOLS, buildPortableBundle, validatePortableBundle, definitionToFiles, filesToDefinition, slugify, type Agent, type AgentConfig, type Capability, type ExecutionBackend, type PortableFiles, type PortableKnowledge, type PortableSkill, type ProviderId, type ReasoningEffort, clampEffort } from '@portal-ia/domain';
 import { config, REPO_ROOT } from '../config.ts';
 import { agentsRepo, projectsRepo } from '../db/workspace.ts';
 import { departmentsRepo } from './departments.ts';
@@ -11,6 +11,7 @@ import { recordAgentEvent } from './agentEvents.ts';
 import { lessonsRepo } from './lessons.ts';
 import { expandHome, isAllowed } from '../routes/fs.ts';
 import { monotonicNow } from '../clock.ts';
+import { zipBuffers } from './zipFile.ts';
 
 /**
  * Creación de agentes sin código (asistente de la oficina), importación de carpetas portables y exportación.
@@ -158,6 +159,29 @@ export async function exportFiles(slug: string, agentId: string): Promise<{ fold
   const ad = f ? agentFoldersRepo(slug).adopted(agentId) : null;
   const files = ad?.files ?? definitionToFiles(definitionFor(slug, a, adoptedExtras(slug, a)));
   return { folder: f?.folder ?? slugify(`${a.key}-${a.id.slice(0, 8)}`), files };
+}
+
+/**
+ * Paquete portable autosuficiente (portal-ia/agent-bundle@2) en un ZIP en memoria: la carpeta adoptada, limpia de datos
+ * internos, más AUTOMEJORA.md, CAMBIOS.md, GUIA.md y scripts/anotar-cambio.mjs. Si queda algún secreto o dato interno
+ * (id del agente, UUID, rutas locales o de data/, rutas /api/, tablas), se niega con 409 y la lista de problemas.
+ */
+export async function exportBundle(slug: string, agentId: string): Promise<{ fileName: string; zip: Buffer; files: string[] }> {
+  const a = agentsRepo(slug).get(agentId); if (!a) throw Object.assign(new Error('Agente no encontrado'), { statusCode: 404 });
+  const { files } = await exportFiles(slug, agentId);
+  // Si la historia «Automejora desde el chat» deja un CAMBIOS.md en la carpeta, se conserva su historial.
+  const changelog = typeof files['CAMBIOS.md'] === 'string' ? files['CAMBIOS.md'] : null;
+  const bundle = buildPortableBundle(files, { agentName: a.config.name, exportedAt: new Date().toISOString(), changelog });
+  const problems = validatePortableBundle(bundle, { forbidden: [a.id] });
+  if (problems.length) {
+    const list = problems.map(p => (p.path ? `${p.path} — ${p.message}` : p.message));
+    throw Object.assign(new Error(`No se puede exportar el paquete: ${list.slice(0, 5).join(' · ')}${list.length > 5 ? ` (y ${list.length - 5} más)` : ''}`), { statusCode: 409, payload: { problems } });
+  }
+  const names = Object.keys(bundle);
+  const zip = zipBuffers(names.map(name => ({ name, data: Buffer.from(bundle[name]!, 'utf8') })));
+  const fileName = `${slugify(a.config.name).slice(0, 60) || 'agente'}-paquete-portable.zip`;
+  recordAgentEvent(slug, agentId, 'exported', { format: 'zip', files: names.length, bytes: zip.length });
+  return { fileName, zip, files: names };
 }
 
 /** Copia la carpeta del agente a una carpeta elegida por el propietario (nunca sobrescribe). */
