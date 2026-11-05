@@ -122,9 +122,10 @@ test('(a) caso del propietario: el mismo ZIP, ya resuelto con reintentos, se apr
   assert.ok(await until(async () => settled(await batchOf(b1.id))));
   const j1 = await byMarker(await batchOf(b1.id), 'PA-1');
   assert.equal(j1.versions.length, 2); assert.equal(j1.versions[1].passed, true); assert.ok(j1.versions[1].plan.args.includes('corregido'));
-  const prop = (await docs()).proposals.find((p: any) => p.jobId === j1.id && p.state === 'proposed');
-  assert.ok(prop, 'el reintento dejó una propuesta de aprendizaje');
-  const ap = await inject('POST', `${A}/proposals/${prop.id}/apply`, { authorized: true }); assert.equal(ap.status, 200, JSON.stringify(ap.json));
+  // HU-179: con applyImprovements, el reintento verificado se aplica solo (origin='retry'), sin propuesta pendiente.
+  const learned = async () => (await docs()).proposals.find((p: any) => p.jobId === j1.id && p.origin === 'retry' && p.state === 'applied');
+  assert.ok(await until(async () => !!(await learned())), JSON.stringify((await docs()).proposals));
+  assert.ok(!(await docs()).proposals.some((p: any) => p.jobId === j1.id && p.state === 'proposed'), 'el reintento no deja propuestas pendientes');
 
   // Lote 2: mismo ZIP con otro nombre de archivo.
   scenario(RULES); const c0 = convRuns();
