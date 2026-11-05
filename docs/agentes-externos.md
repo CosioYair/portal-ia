@@ -114,12 +114,39 @@ comprueba que la mejora cambió el comportamiento.
 ### Reintento que corrige y aprende
 
 Cuando reintentas un documento rechazado o fallido, el agente recibe el **diagnóstico del intento anterior**: motivo, puertas
-de la QA que fallaron y error. Con ese diagnóstico vuelve a planificar la conversión (una llamada al modelo, dentro del
-tope diario). El diagnóstico también queda como corrección en la nueva versión. Si la nueva versión **pasa** las
-comprobaciones, el Portal crea una **propuesta de aprendizaje** con el error, la causa y la corrección, usando el mismo
-mecanismo de propuestas de la pestaña Mejoras. Queda **pendiente de tu aprobación**: no se aplica sola. Si vuelve a
-fallar, el motivo queda en el documento y no se reintenta en bucle: como máximo hay **un reintento automático por documento
-y petición**. La conversión con IA sigue exigiendo tu autorización, con aviso de costo.
+de la QA que fallaron y error. Con ese diagnóstico vuelve a planificar la conversión con el aviso «REINTENTO: …» y la lista de
+planes ya probados sin éxito. Es una llamada al modelo, dentro del tope diario. El diagnóstico también queda como corrección
+en la nueva versión («Corrección del intento anterior»). Si la nueva versión **pasa** las comprobaciones, el Portal crea una
+**propuesta de aprendizaje** con el error, la causa y la corrección, usando el mismo mecanismo de propuestas de la pestaña
+Mejoras. Queda **pendiente de tu aprobación**: no se aplica sola. La conversión con IA sigue exigiendo tu autorización, con
+aviso de costo.
+
+Reglas (las mismas para un documento suelto y para uno de un lote; código en `processVersion` de `documentJobs.ts`):
+
+- **Una versión por petición como máximo.** Se replanifica una sola vez y, con el plan nuevo, se convierte una sola vez. Si
+  esa versión vuelve a fallar, el motivo queda en el documento y no se reintenta en bucle.
+- **Nunca se repite un plan fallido.** La firma de un plan es su script más sus argumentos. Se reúnen las firmas de todas las
+  versiones con `passed === false`, tanto por fallo de conversión como por rechazo de la QA. El plan común del lote solo se
+  usa en el primer intento de un documento que todavía no tiene versiones fallidas. Si un documento falló con ese plan, el
+  reintento replanifica y la versión nueva lleva un plan distinto del del lote.
+- **Sin llamadas extra con el tope agotado.** El tope diario de consultas se comprueba **antes** de llamar al planificador.
+  Si está agotado, no se llama al planificador ni al convertidor y no se crea ninguna versión.
+- **Intervención con el motivo real.** Si no se puede replanificar o el plan nuevo no sirve, no se crea versión y el
+  documento queda **en intervención**. El motivo dice la causa (constantes `RETRY_REASON` de `packages/domain`):
+  - «No se pudo replanificar: tope diario agotado»;
+  - «No se pudo replanificar: error del planificador: …», cuando la llamada al planificador da un error (esa llamada cuenta
+    en el tope);
+  - «El agente no encontró una corrección distinta», **solo** cuando el plan nuevo sí se obtuvo, pero su firma coincide con
+    la de un plan fallido o con la del lote.
+  Un reintento que sí llega a convertir quita la marca de intervención.
+- **Qué se ve en el lote.** En la vista del lote, cada ítem lleva `needsIntervention` e `interventionReason`. El campo
+  `reason` sigue siendo solo el motivo de exclusión de una entrada del ZIP. La respuesta del reintento del lote añade
+  `retried: [{ idx, jobId, state, needsIntervention, reason }]` por cada documento reintentado.
+- **Los conteos no cambian.** La intervención es una marca sobre el estado (`failed` o `rejected_qa`), no un estado más.
+  El ítem sigue contando donde estaba y se mantiene: total = listos + rechazados + fallidos + excluidos (+ cancelados + por hacer).
+
+Pruebas: `apps/server/test/reintento-aprende.test.ts`, con 7 casos de (a) a (g). Se ejecutan solas con
+`node apps/server/scripts/run-tests.mjs test/reintento-aprende.test.ts`.
 
 ## Eliminar lotes y documentos (liberar espacio)
 

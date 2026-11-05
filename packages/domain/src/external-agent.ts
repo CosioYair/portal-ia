@@ -120,6 +120,8 @@ export interface DocumentVersion {
 export interface DocumentJob {
   id: string; agentId: string; title: string; slug: string; status: DocumentJobStatus; inputName: string; inputSha256: string; pages: number | null;
   source: 'upload' | 'zip' | 'attachment'; versions: DocumentVersion[]; error: string | null; createdAt: string; updatedAt: string; batchId?: string | null;
+  /** Intervención: el reintento no pudo replanificar o no encontró una corrección distinta. No cambia `status` ni los conteos. */
+  needsIntervention?: boolean; interventionReason?: string | null;
   /** Presencia en disco: 'removed' = eliminado desde el Portal (queda como histórico); 'missing' = falta en disco. */
   presence?: DocumentPresence; missingOnDisk?: boolean; removal?: RemovalRecord | null;
 }
@@ -168,6 +170,8 @@ export interface DocumentBatchItem {
   removed?: boolean; missingOnDisk?: boolean;
   /** Word aprobado: `docx` relativo a «documentos/» (manifiesto, entregable); `docxRel` relativo a la carpeta del documento (descarga). */
   docx: string | null; docxRel: string | null; error: string | null;
+  /** Marca sobre el estado (`failed`/`rejected_qa`), no un estado más: el ítem sigue contando donde estaba. */
+  needsIntervention?: boolean; interventionReason?: string | null;
 }
 export interface DocumentBatchCounts {
   /** total = listos + rechazados + fallidos + cancelados + excluidos + pendientes (cada elemento en un solo estado). */
@@ -188,6 +192,20 @@ export interface DocumentBatch {
 export const BATCH_ITEM_LABEL: Record<DocumentBatchItemState, string> = {
   pending: 'Pendiente', queued: 'En cola', processing: 'Convirtiendo…', passed: 'Listo', rejected_qa: 'No pasó las comprobaciones', failed: 'Falló', cancelled: 'Cancelado', excluded: 'Excluido'
 };
+
+/** Motivos de intervención de un reintento (un solo sitio para servicio, pruebas y documentación). */
+export const RETRY_REASON = {
+  cap: 'No se pudo replanificar: tope diario agotado',
+  planner: 'No se pudo replanificar: error del planificador',
+  same: 'El agente no encontró una corrección distinta'
+} as const;
+
+/** Documento reintentado en un lote, tal como lo devuelve el reintento del lote. */
+export interface DocumentBatchRetryItem {
+  idx: number; jobId: string; state: DocumentBatchItemState; needsIntervention?: boolean; reason?: string | null;
+}
+/** Campos que el reintento de un lote añade a su respuesta habitual. */
+export interface DocumentBatchRetryExtras { retried: DocumentBatchRetryItem[] }
 
 export type FeedbackClass = 'document_only' | 'reusable' | 'needs_validation' | 'invalid';
 export const FEEDBACK_LABEL: Record<FeedbackClass, string> = {

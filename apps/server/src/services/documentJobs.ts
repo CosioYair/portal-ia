@@ -5,7 +5,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { execFile } from 'node:child_process';
 import {
-  FEEDBACK_LABEL, isIdentityPath, parseSkillHeader, slugify, validatePlan,
+  FEEDBACK_LABEL, isIdentityPath, parseSkillHeader, RETRY_REASON, slugify, validatePlan,
   type Agent, type DocumentJob, type DocumentVersion, type FeedbackClass, type ImprovementProposal, type ProposalChange, type ScriptPlan
 } from '@portal-ia/domain';
 import { REPO_ROOT } from '../config.ts';
@@ -87,13 +87,13 @@ function ensure(slug: string) {
     const have = (db.prepare(`PRAGMA table_info(${table})`).all() as any[]).map(c => c.name);
     for (const c of wanted) if (!have.includes(c)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${c} TEXT`);
   };
-  addCols('document_jobs', ['removed_at', 'removal_id']);
+  addCols('document_jobs', ['removed_at', 'removal_id', 'intervention']);
   addCols('document_batches', ['removed_at', 'removal_id']);
   addCols('document_batch_items', ['removed_at']);
   return db;
 }
 export const documentsDb = ensure;
-const mapJob = (r: any): DocumentJob => ({ id: r.id, agentId: r.agent_id, title: r.title, slug: r.slug, status: r.status, inputName: r.input_name, inputSha256: r.input_sha, pages: r.pages ?? null, source: r.source, versions: JSON.parse(r.versions_json), error: r.error ?? null, createdAt: r.created_at, updatedAt: r.updated_at, batchId: r.batch_id ?? null });
+const mapJob = (r: any): DocumentJob => ({ id: r.id, agentId: r.agent_id, title: r.title, slug: r.slug, status: r.status, inputName: r.input_name, inputSha256: r.input_sha, pages: r.pages ?? null, source: r.source, versions: JSON.parse(r.versions_json), error: r.error ?? null, createdAt: r.created_at, updatedAt: r.updated_at, batchId: r.batch_id ?? null, needsIntervention: !!r.intervention, interventionReason: r.intervention ?? null });
 const mapProposal = (r: any): ImprovementProposal => ({ id: r.id, agentId: r.agent_id, jobId: r.job_id ?? null, feedback: r.feedback, classification: r.classification, reason: r.reason, summary: r.summary, changes: JSON.parse(r.changes_json), state: r.state, createdAt: r.created_at, decidedAt: r.decided_at ?? null, appliedAt: r.applied_at ?? null, backupDir: r.backup_dir ?? null, error: r.error ?? null, evidence: JSON.parse(r.evidence_json), baseRevision: r.base_revision ?? null });
 
 export function jobsDb(slug: string) {
@@ -128,6 +128,12 @@ export function jobsDb(slug: string) {
     update(id: string, patch: { status?: string; versions?: DocumentVersion[]; error?: string | null; pages?: number | null }) {
       const cur = this.get(id)!;
       db.prepare(`UPDATE document_jobs SET status = ?, versions_json = ?, error = ?, pages = ?, updated_at = ? WHERE id = ?`).run(patch.status ?? cur.status, JSON.stringify(patch.versions ?? cur.versions), patch.error === undefined ? cur.error : patch.error, patch.pages === undefined ? cur.pages : patch.pages, now(), id);
+      changed({ ws: slug, entity: 'agent', id: cur.agentId, kind: 'progress' });
+    },
+    /** Marca (o quita, con null) la intervención de un trabajo. No toca `status`: los conteos del lote no cambian. */
+    setIntervention(id: string, reason: string | null) {
+      const cur = this.get(id); if (!cur) return;
+      db.prepare(`UPDATE document_jobs SET intervention = ?, error = COALESCE(?, error), updated_at = ? WHERE id = ?`).run(reason, reason, now(), id);
       changed({ ws: slug, entity: 'agent', id: cur.agentId, kind: 'progress' });
     },
     /** Versiones de hoy y llamadas al modelo de hoy (versiones sueltas: plan + informe; lotes: plan y resumen del lote; feedback). */
@@ -419,24 +425,47 @@ export async function startProcessing(slug: string, agentId: string, jobId: stri
 export async function processVersion(slug: string, a: Agent, jobId: string, tc: Toolchain, opts: ProcessOptions): Promise<void> {
   const job = jobsDb(slug).get(jobId);
   const diagnosis = opts.diagnosis === undefined ? (job ? retryDiagnosis(job) : null) : (opts.diagnosis?.trim() || null);
-  // Solo se vuelve a planificar si la comprobación RECHAZÓ el último Word (o si llega un diagnóstico explícito). Un fallo
-  // transitorio del script o de lectura se reintenta con el plan del lote: no gasta otra llamada al modelo.
+  // Se vuelve a planificar si la última versión FALLÓ (la conversión no terminó o la QA la rechazó) o si llega un
+  // diagnóstico explícito. Sin versiones fallidas (primer intento o un fallo previo a la conversión) se usa el plan del lote.
   // Una conversión que no terminó (script con error o tiempo agotado) también se guarda con passed=false, pero con
-  // gates.conversion_completada=false: eso NO es un rechazo de la QA y no justifica volver a planificar.
+  // Nunca se ejecuta un plan ya probado sin éxito (ni el del lote): como máximo una versión por petición.
   const lastV = job && job.versions.length > 0 ? job.versions[job.versions.length - 1] : null;
-  const rejectedByQa = !!lastV && lastV.passed === false && lastV.gates?.conversion_completada !== false;
-  if (!job || !diagnosis || (opts.diagnosis === undefined && !rejectedByQa)) return processVersionOnce(slug, a, jobId, tc, opts);
-  // En un lote (trae su plan) solo se replanifica si la última versión la rechazó la QA; un fallo de ejecución se reintenta con el plan del lote (sin llamadas).
-  const last = job.versions.length ? job.versions[job.versions.length - 1] : null;
-  if (opts.plan && !(last && !last.passed && last.gates?.conversion_completada !== false)) return processVersionOnce(slug, a, jobId, tc, opts);
-  const before = job.versions.length;
-  let plan = opts.plan ?? null;
-  if (jobsDb(slug).usageToday(a.id).calls < MODEL_CALLS_PER_DAY) {
-    try {
-      plan = await planScript(slug, a, `PDF «${job.inputName}» (${job.pages ?? '?'} páginas). REINTENTO: el intento anterior no pasó las comprobaciones del Portal.`, `Corrige el fallo del intento anterior (elige script u opciones que lo eviten):\n${diagnosis}`);
-    } catch { /* se mantiene el plan anterior; si vuelve a fallar, el motivo queda en el documento */ }
-    finally { recordModelCall(slug, a.id, 'reintento'); }
+  const lastFailed = !!lastV && lastV.passed === false; // conversión fallida o rechazo de la QA
+  if (!job || !diagnosis || (opts.diagnosis === undefined && !lastFailed)) {
+    if (job) jobsDb(slug).setIntervention(jobId, null);
+    return processVersionOnce(slug, a, jobId, tc, opts);
   }
+  // Reintento con aprendizaje (suelto o de lote): una sola replanificación; si no se puede, intervención con el motivo real.
+  const failedSigs = failedPlanSignatures(job);
+  const lotSig = opts.plan ? planSignature(opts.plan) : null;
+  const before = job.versions.length;
+  let plan: ScriptPlan | null = null;
+  // El tope se comprueba ANTES de llamar al planificador: agotado, no hay ninguna llamada (ni plan ni conversión).
+  let blocked: string | null = jobsDb(slug).usageToday(a.id).calls >= MODEL_CALLS_PER_DAY ? `${RETRY_REASON.cap} (${MODEL_CALLS_PER_DAY} consultas de hoy).` : null;
+  const tried = [...new Set([...job.versions.filter(v => v.passed === false && v.plan?.script).map(v => `${v.plan.script} ${(v.plan.args ?? []).join(' ')}`), ...(opts.plan ? [`${opts.plan.script} ${opts.plan.args.join(' ')}`] : [])])].slice(-6);
+  const intervene = (reason: string) => {
+    jobsDb(slug).setIntervention(jobId, reason);
+    // Sin versión nueva: el documento vuelve al estado de su último intento (no se queda «processing»).
+    jobsDb(slug).update(jobId, { status: lastV?.gates?.conversion_completada === false ? 'failed' : (lastV?.passed === false ? 'rejected' : 'failed'), error: reason.slice(0, 800) });
+    recordAgentEvent(slug, a.id, 'document_job', { jobId, action: 'intervention', reason }, 'portal');
+  };
+  if (!blocked) {
+    try {
+      plan = await planScript(slug, a, `PDF «${job.inputName}» (${job.pages ?? '?'} páginas). REINTENTO: el intento anterior no pasó las comprobaciones del Portal${lastV?.gates?.conversion_completada === false ? ' (la conversión no terminó)' : ''}.${tried.length ? `\nPlanes ya probados sin éxito (NO los repitas):\n${tried.map(t => `- ${t}`).join('\n')}` : ''}`, `Corrige el fallo del intento anterior (elige script u opciones que lo eviten):\n${diagnosis}`);
+    } catch (e: any) {
+        plan = null;
+        blocked = `${RETRY_REASON.planner}: ${String(e?.message ?? e).slice(0, 300)}`;
+      } finally {
+        recordModelCall(slug, a.id, 'reintento'); // la replanificación cuenta en el tope aunque falle
+      }
+  }
+  if (blocked || !plan) { intervene(blocked ?? `${RETRY_REASON.planner}: sin plan.`); return; }
+  const newSig = planSignature(plan);
+  if (failedSigs.has(newSig) || (lotSig !== null && newSig === lotSig)) {
+    intervene(`${RETRY_REASON.same}: el plan propuesto (${plan.script} ${plan.args.join(' ')}) ya se probó sin éxito.`);
+    return;
+  }
+  jobsDb(slug).setIntervention(jobId, null);
   const feedback = [opts.feedback ?? null, `Corrección del intento anterior: ${diagnosis}`].filter(Boolean).join('\n\n').slice(0, 4000);
   await processVersionOnce(slug, a, jobId, tc, { ...opts, plan, feedback });
   const after = jobsDb(slug).get(jobId);
@@ -546,6 +575,15 @@ async function processVersionIn(slug: string, a: Agent, jobId: string, tc: Toolc
   appendHistory(s.root, dir, zones, `v${n}: ${passed ? 'aprobada' : 'rechazada'} por la QA del Portal (${plan.script.split('/').pop()}, revisión ${s.revision} de la habilidad).`);
   recordAgentEvent(slug, a.id, 'document_job', { jobId, action: passed ? 'ready' : 'rejected', version: n, gates }, 'portal');
   markEvaluating(slug, a.id);
+}
+
+/** Firma de un plan (script + argumentos normalizados): dos planes con la misma firma son el mismo intento. */
+export function planSignature(plan: Pick<ScriptPlan, 'script' | 'args'>): string {
+  return JSON.stringify([String(plan.script ?? '').trim(), (plan.args ?? []).map(x => String(x).trim())]);
+}
+/** Firmas de los planes de las versiones fallidas (conversión no terminada o rechazo de la QA). */
+export function failedPlanSignatures(job: Pick<DocumentJob, 'versions'>): Set<string> {
+  return new Set(job.versions.filter(v => v.passed === false && v.plan?.script).map(v => planSignature(v.plan)));
 }
 
 const clipTotal = (t: string, n: number) => t.length > n ? `${t.slice(0, n)}\n…(recortado: el resto no se envía)` : t;

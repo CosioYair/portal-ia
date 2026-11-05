@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { batchCountsAddUp, batchCountsSum, slugify, type DocumentBatch, type DocumentBatchCounts, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ScriptPlan } from '@portal-ia/domain';
+import { batchCountsAddUp, batchCountsSum, slugify, type DocumentBatch, type DocumentBatchCounts, type DocumentBatchItem, type DocumentBatchItemState, type DocumentBatchRetryExtras, type DocumentBatchRetryItem, type DocumentJob, type ScriptPlan } from '@portal-ia/domain';
 import { agentsRepo } from '../db/workspace.ts';
 import { recordAgentEvent } from './agentEvents.ts';
 import { changed } from './live.ts';
@@ -339,7 +339,7 @@ function batchViewRaw(slug: string, agentId: string, id: string, jobsById?: Map<
   const items: DocumentBatchItem[] = db.items(id).map(it => {
     const job = it.job_id ? (jobsById?.get(it.job_id) ?? jobs.get(it.job_id)) : null; const state = deriveState(it, job, !!mine?.has(it.idx));
     const lastOk = job?.versions.filter(v => v.passed).at(-1) ?? null;
-    return { idx: it.idx, entryName: it.entry_name, sha256: it.sha, size: it.size, outcome: it.outcome, reason: it.reason, jobId: it.job_id, state, version: lastOk?.n ?? job?.versions.at(-1)?.n ?? null, docx: lastOk ? `${job!.slug}/${lastOk.docx}` : null, docxRel: lastOk?.docx ?? null, error: state === 'failed' || state === 'rejected_qa' ? (job?.error ?? job?.versions.at(-1)?.report.split('\n')[0] ?? null) : null };
+    return { needsIntervention: !!job?.needsIntervention, interventionReason: job?.interventionReason ?? null, idx: it.idx, entryName: it.entry_name, sha256: it.sha, size: it.size, outcome: it.outcome, reason: it.reason, jobId: it.job_id, state, version: lastOk?.n ?? job?.versions.at(-1)?.n ?? null, docx: lastOk ? `${job!.slug}/${lastOk.docx}` : null, docxRel: lastOk?.docx ?? null, error: state === 'failed' || state === 'rejected_qa' ? (job?.error ?? job?.versions.at(-1)?.report.split('\n')[0] ?? null) : null };
   });
   const c = (st: DocumentBatchItemState) => items.filter(i => i.state === st).length;
   const counts: DocumentBatchCounts = {
@@ -585,13 +585,39 @@ export async function retryBatch(slug: string, agentId: string, id: string, opts
   const b = db.prepare(`SELECT agent_id, removed_at FROM document_batches WHERE id = ?`).get(id) as any;
   if (b && b.agent_id === agentId && b.removed_at) throw err('Este lote se eliminó: queda solo como histórico y no se puede reintentar.', 409, { code: 'already_removed' });
   const gone = new Set((db.prepare(`SELECT idx FROM document_batch_items WHERE batch_id = ? AND removed_at IS NOT NULL`).all(id) as any[]).map(r => Number(r.idx)));
-  if (!gone.size) return retryBatchOnce(slug, agentId, id, opts);
+  if (!gone.size) return withRetryItems(slug, id, await retryBatchOnce(slug, agentId, id, opts), opts.items);
   const eligible = (db.prepare(`SELECT idx, state FROM document_batch_items WHERE batch_id = ? AND removed_at IS NULL`).all(id) as any[])
     .filter(r => r.state === 'failed' || r.state === 'cancelled' || (opts.includeRejected && r.state === 'rejected_qa')).map(r => Number(r.idx));
   const items = (opts.items ?? eligible).filter(i => !gone.has(i));
   if (!items.length) throw err('No queda nada que reintentar en este lote: lo fallido se eliminó.', 409);
-  return retryBatchOnce(slug, agentId, id, { ...opts, items });
+  return withRetryItems(slug, id, await retryBatchOnce(slug, agentId, id, { ...opts, items }), items);
 }
+/**
+ * Documentos reintentados de un lote, con la intervención y su motivo. `needsIntervention` es una marca sobre el estado
+ * (no un estado más): total = listos + rechazados + fallidos + excluidos (+ cancelados + por hacer) sigue cuadrando.
+ */
+export function batchRetryItems(slug: string, batchId: string, only?: number[]): DocumentBatchRetryItem[] {
+  const rows = documentsDb(slug).prepare(`SELECT idx, job_id, state, reason FROM document_batch_items WHERE batch_id = ? AND removed_at IS NULL ORDER BY idx`).all(batchId) as any[];
+  const want = only?.length ? new Set(only.map(Number)) : null;
+  const jobs = jobsDb(slug);
+  const out: DocumentBatchRetryItem[] = [];
+  for (const r of rows) {
+    if (!r.job_id) continue;
+    const idx = Number(r.idx);
+    if (want ? !want.has(idx) : ['passed', 'excluded', 'cancelled'].includes(r.state)) continue;
+    const job = jobs.get(r.job_id);
+    out.push({ idx, jobId: r.job_id, state: r.state as DocumentBatchItemState, needsIntervention: !!job?.needsIntervention, reason: job?.interventionReason ?? r.reason ?? job?.error ?? null });
+  }
+  return out;
+}
+/** Añade `retried` (y `items` si la respuesta no los trae) a la respuesta del reintento, sin quitar nada de lo actual. */
+function withRetryItems<T>(slug: string, batchId: string, res: T, only?: number[]): T & DocumentBatchRetryExtras {
+  const retried = batchRetryItems(slug, batchId, only);
+  const out = { ...(res as unknown as object), retried } as Record<string, unknown>;
+  if (!Array.isArray(out.items)) out.items = retried;
+  return out as unknown as T & DocumentBatchRetryExtras;
+}
+
 async function retryBatchOnce(slug: string, agentId: string, id: string, opts: { authorized: boolean; includeRejected?: boolean; items?: number[]; by?: string }) {
   if (!opts.authorized) throw err('Reintentar ejecuta los programas del agente: confírmalo.', 403);
   const b = batchOr(slug, agentId, id);

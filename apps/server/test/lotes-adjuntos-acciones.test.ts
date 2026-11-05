@@ -181,8 +181,14 @@ test('lote: un plan para todo el lote, cola de UNO a la vez, el corrupto falla y
 });
 
 test('lote: reintentar SOLO lo que falló; lo aprobado no se repite ni se sobrescribe', async () => {
-  scenario({ auth: 'subscription', rules: [SUMMARY, PLAN] });
+  // HU-177: un documento que falló en conversión con el plan del lote se REPLANIFICA con el diagnóstico («REINTENTO: …»);
+  // el plan ya fallido no se repite. La regla REINTENTO va antes que PLAN para que el planificador simulado dé otro plan.
+  const RETRY_PLAN = { match: 'REINTENTO', text: JSON.stringify({ script: 'skills/conv/scripts/conv.py', args: ['{entrada}', '{salida}', '--modo', 'corregido'], reason: 'Corrijo el fallo del intento anterior.' }) };
+  scenario({ auth: 'subscription', rules: [SUMMARY, RETRY_PLAN, PLAN] });
+  const lot = await batchOf(batchId);
+  const inestableId = lot.items.find((i: any) => i.entryName === 'carpeta-b/Igual.pdf').jobId;
   const before = (await inject('GET', `${A}/documents`)).json.jobs.filter((j: any) => j.batchId === batchId);
+  const inestableBefore = before.find((j: any) => j.id === inestableId).versions.length;
   const passedBefore = before.filter((j: any) => j.status === 'ready').map((j: any) => [j.id, j.versions.length]);
   const r = await inject('POST', `${A}/batches/${batchId}/retry`, { authorized: true });
   assert.equal(r.status, 200, JSON.stringify(r.json));
@@ -191,7 +197,13 @@ test('lote: reintentar SOLO lo que falló; lo aprobado no se repite ni se sobres
   assert.equal(b.counts.passed, 26, 'el inestable pasa al reintentar'); assert.equal(b.counts.failed, 1, 'el corrupto sigue fallando, con su motivo');
   const after2 = (await inject('GET', `${A}/documents`)).json.jobs.filter((j: any) => j.batchId === batchId);
   for (const [id, n] of passedBefore) assert.equal(after2.find((j: any) => j.id === id).versions.length, n, 'lo aprobado no se repitió');
-  assert.equal(ccRuns().filter(c => String(c.prompt).includes('Reglas del plan')).length, 0, 'el reintento usa el plan del lote');
+  const planCalls = ccRuns().filter(c => /REINTENTO|Reglas del plan/.test(String(c.prompt)));
+  assert.ok(planCalls.length >= 1, 'tras un fallo de conversión se replanifica');
+  assert.ok(planCalls.every(c => String(c.prompt).includes('REINTENTO')), 'cada llamada es una replanificación con el diagnóstico, no un plan nuevo del lote');
+  const inestable = after2.find((j: any) => j.id === inestableId);
+  assert.equal(inestable.versions.length, inestableBefore + 1, 'una sola versión nueva por petición');
+  assert.ok(inestable.versions.at(-1).plan.args.includes('corregido'), 'la versión nueva usa el plan replanificado');
+  assert.notEqual(JSON.stringify(inestable.versions.at(-1).plan.args), JSON.stringify(lot.plan.args), 'no repite el plan del lote');
   assert.equal((await inject('POST', `${A}/batches/${batchId}/retry`, { authorized: true, items: [0] })).status, 409, 'lo aprobado no se reintenta');
 });
 
