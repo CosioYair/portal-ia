@@ -10,7 +10,7 @@ import { harnessCatalog, harnessOptions, switchHarness } from '../services/harne
 import { detectCodex, getCodexSettings, lastCodexDetection, saveCodexSettings } from '../services/harness/codex.ts';
 import { chatEstimate, chatMessages, chatUsageToday, sendChat } from '../services/agentChat.ts';
 import { adoptExternal, agentFoldersRepo, discardExternal, ensureAgentFolders, folderStatus, restoreRevision, syncAgentFolder, updateExtras } from '../services/agentFolders.ts';
-import { createAgentFromWizard, exportFiles, exportTo, importConfirm, importPreview } from '../services/agentCreation.ts';
+import { createAgentFromWizard, exportBundle, exportFiles, exportTo, importConfirm, importPreview } from '../services/agentCreation.ts';
 import { proposeFromFeedback, retireMemory, verifyMemory } from '../services/agentLearning.ts';
 import { agentEvents, recordAgentEvent } from '../services/agentEvents.ts';
 import { createDelegation, estimateDelegation, MAX_DEPARTMENT_CONSULTS } from '../services/delegation.ts';
@@ -276,9 +276,27 @@ export async function agentsOsRoutes(app: FastifyInstance) {
     if (!b.success) return reply.code(400).send({ error: 'Datos de importación no válidos.', issues: b.error.issues });
     try { const { path: p, hash, ...grant } = b.data; return reply.code(201).send(await importConfirm(slug, p, hash, grant as any)); } catch (e) { return err(reply, e); }
   });
+  // JSON de la carpeta portable (compatibilidad); el paquete para usar fuera del Portal es export.zip.
   app.get('/api/workspaces/:slug/agents/:id/export', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
     try { return await exportFiles(slug, id); } catch (e) { return err(reply, e); }
+  });
+  // Paquete portable autosuficiente (ZIP): sin costo de IA; se niega con 409 y el motivo si encuentra secretos o datos internos.
+  app.get('/api/workspaces/:slug/agents/:id/export.zip', async (req, reply) => {
+    const p = z.object({ slug: z.string().min(1).max(120), id: z.string().min(1).max(120) }).safeParse(req.params);
+    if (!p.success) return reply.code(400).send({ error: 'Parámetros no válidos.' });
+    const { slug, id } = p.data; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
+    try {
+      const { fileName, zip } = await exportBundle(slug, id);
+      const ascii = fileName.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 120) || 'agente-paquete-portable.zip';
+      return reply
+        .header('Content-Type', 'application/zip')
+        .header('Content-Disposition', `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName)}`)
+        .header('Content-Length', String(zip.length))
+        .header('Cache-Control', 'no-store')
+        .header('X-Content-Type-Options', 'nosniff')
+        .send(zip);
+    } catch (e) { return err(reply, e); }
   });
   app.post('/api/workspaces/:slug/agents/:id/export', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;

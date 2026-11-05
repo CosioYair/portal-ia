@@ -13,6 +13,7 @@ export * from './assignment.ts';
 export * from './conversation.ts';
 export * from './portal-capabilities.ts';
 export * from './portable-agent.ts';
+export * from './portable-bundle.ts';
 export * from './harness.ts';
 export * from './agent-catalog.ts';
 export * from './external-agent.ts';

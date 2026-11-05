@@ -265,7 +265,16 @@ function SkillsList({ files }: { files: Record<string, string> }) {
 function ExportBox({ slug, agentId }: { slug: string; agentId: string }) {
   const { flash } = useApp();
   const [path, setPath] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const [picking, setPicking] = useState(false);
-  const download = async () => { try { const r = await osApi.exportFiles(slug, agentId); const blob = new Blob([JSON.stringify({ schema: 'portal-ia/agent-bundle@1', folder: r.folder, files: r.files }, null, 2)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${r.folder}.agente.json`; a.click(); URL.revokeObjectURL(a.href); } catch (e: any) { setError(e.message); } };
+  // Paquete portable (ZIP): sin llamadas a la IA ni costo. Estados explícitos: preparando → listo / error (con los problemas del 409).
+  const [zip, setZip] = useState<{ state: 'idle' | 'preparing' | 'ready' | 'error'; fileName?: string; message?: string; problems?: { path: string; message: string }[] }>({ state: 'idle' });
+  const download = async () => {
+    setZip({ state: 'preparing' });
+    try { const r = await osApi.downloadZip(slug, agentId); setZip({ state: 'ready', fileName: r.fileName }); }
+    catch (e: any) {
+      const problems = Array.isArray(e?.body?.problems) ? (e.body.problems as { path: string; message: string }[]) : [];
+      setZip({ state: 'error', message: problems.length ? 'No se puede exportar el paquete mientras tenga estos problemas:' : (e?.message ?? 'No se pudo descargar el paquete.'), problems });
+    }
+  };
   const toFolder = async () => { setBusy(true); setError(null); try { const r = await osApi.exportTo(slug, agentId, path.trim()); flash(`Exportado a ${r.path}`); setPath(''); } catch (e: any) { setError(e.message); } finally { setBusy(false); } };
   return <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
     <div className="h3">Exportar</div>
@@ -275,9 +284,17 @@ function ExportBox({ slug, agentId }: { slug: string; agentId: string }) {
       <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPicking(true)}>{Icon.folder()} Elegir…</button>
       {picking && <FolderPicker title="Exportar a…" hint="Elige dónde copiar la carpeta del agente (no se sobrescribe nada)." initialPath={path || null} onSelect={x => { setPicking(false); setPath(x); }} onClose={() => setPicking(false)} />}
       <button className="btn btn-secondary btn-sm" disabled={busy || !path.trim()} onClick={() => void toFolder()}>Copiar carpeta</button>
-      <button className="btn btn-ghost btn-sm" onClick={() => void download()}>Descargar (.json)</button>
     </div>
     <span className="small muted">Sin credenciales: la carpeta solo lleva identidad, instrucciones, habilidades, memoria verificada y referencias.</span>
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      <button type="button" className="btn btn-secondary btn-sm" disabled={zip.state === 'preparing'} aria-describedby="zip-help" onClick={() => void download()}>{zip.state === 'preparing' ? 'Preparando el paquete…' : 'Descargar paquete (ZIP)'}</button>
+      {zip.state === 'preparing' && <Spinner />}
+    </div>
+    <span id="zip-help" className="small muted">Para usar el agente fuera del Portal. Incluye sus instrucciones, habilidades, memoria verificada y referencias. También incluye las reglas de automejora (AUTOMEJORA.md), el registro de cambios (CAMBIOS.md), un script para anotar cambios y una guía para Claude Code web, Cowork y ChatGPT. No incluye credenciales ni datos internos del Portal. No usa la IA ni tiene costo.</span>
+    <div aria-live="polite">
+      {zip.state === 'ready' && <Notice kind="ok">Paquete descargado: {zip.fileName}. Para empezar, abre GUIA.md.</Notice>}
+      {zip.state === 'error' && <Notice kind="err">{zip.message}{zip.problems && zip.problems.length > 0 && <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{zip.problems.map((x, i) => <li key={i}>{x.path ? <span className="mono">{x.path}</span> : null}{x.path ? ': ' : ''}{x.message}</li>)}</ul>}</Notice>}
+    </div>
   </section>;
 }
 
