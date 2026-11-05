@@ -1,6 +1,7 @@
 import type { BacklogItem, Process, StoryClosure } from '@portal-ia/domain';
 import { backlogRepo, processesRepo } from '../db/workspace.ts';
-import { InboxError, iterationNumbers } from './inbox.ts';
+import { InboxError } from './inboxError.ts';
+import { iterationNumbers } from './inbox.ts';
 
 /**
  * EN-005 · Guarda «historia cerrada». Un proceso antiguo de una historia no se puede reactivar (continuar, autorizar,
