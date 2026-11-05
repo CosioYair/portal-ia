@@ -215,6 +215,9 @@ export const api = {
   /** Deshace una propuesta aplicada restaurando el estado previo (409 stale_undo si el agente cambió después). */
   undoOrgProposal: (slug: string, id: string, proposalId: string) =>
     request<OrgProposalResult>(`/api/workspaces/${slug}/org-evaluations/${encodeURIComponent(id)}/proposals/${encodeURIComponent(proposalId)}/undo`, { method: 'POST', body: JSON.stringify({ confirm: true }) }),
+  /** Deshace una mejora aplicada a un agente (también las aprendidas de un reintento): restaura su copia previa. */
+  undoAgentProposal: (slug: string, agentId: string, pid: string) =>
+    request<unknown>(`/api/workspaces/${slug}/agents/${encodeURIComponent(agentId)}/proposals/${encodeURIComponent(pid)}/undo`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   // HU-005 · backlog y ejecución de historias
   // Etapas operativas: archivo reversible del trabajo activo (el conocimiento se conserva)
   phase: (slug: string, projectId: string) => request<{ current: PhaseTransition | null; transitions: PhaseTransition[]; defaultName: string }>(`/api/workspaces/${slug}/projects/${projectId}/phase`),

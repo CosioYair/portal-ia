@@ -6,7 +6,7 @@ import { agentsRepo } from '../db/workspace.ts';
 import { adoptSourceChange, externalPreview, importExternal, restoreSourceRevision, sourceStatus, updateGrants } from '../services/externalAgents.ts';
 import os from 'node:os';
 import path from 'node:path';
-import { applyProposal, BATCH_LIMITS, classifyFeedback, detectToolchain, documentJobsRunning, jobFile, jobsDb, listJobs, listProposals, rejectProposal, startProcessing, versionEvidence } from '../services/documentJobs.ts';
+import { applyProposal, BATCH_LIMITS, classifyFeedback, detectToolchain, documentJobsRunning, jobFile, jobsDb, listJobs, listProposals, rejectProposal, serialForAgent, startProcessing, undoProposal, versionEvidence } from '../services/documentJobs.ts';
 import { batchFile, buildDeliverable, cancelBatch, documentQueueStatus, listBatches, pauseBatch, receiveFile, resumeBatch, retryBatch, startBatch } from '../services/documentBatches.ts';
 import { acceptOctetStream, streamToTemp, uploadName } from './uploads.ts';
 import { listRemovals, previewRemoval, removeBatch, removeDocument } from '../services/documentRemoval.ts';
@@ -166,7 +166,13 @@ export async function externalAgentsRoutes(app: FastifyInstance) {
   app.post(`${W}/agents/:id/proposals/:pid/apply`, async (req, reply) => {
     const { slug, id, pid } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
     const b = z.object({ authorized: z.literal(true) }).safeParse(req.body); if (!b.success) return reply.code(400).send({ error: 'Confirma la aprobación de la mejora.' });
-    try { return await applyProposal(slug, id, pid, { authorized: true }); } catch (e) { return err(reply, e); }
+    // Por la cola del agente: no se cruza con aprendizajes automáticos ni con un Deshacer en curso.
+    try { return await serialForAgent(slug, id, () => applyProposal(slug, id, pid, { authorized: true })); } catch (e) { return err(reply, e); }
+  });
+  app.post(`${W}/agents/:id/proposals/:pid/undo`, async (req, reply) => {
+    const { slug, id, pid } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
+    const b = z.object({ authorized: z.literal(true) }).safeParse(req.body); if (!b.success) return reply.code(400).send({ error: 'Confirma que quieres deshacer esta mejora.' });
+    try { return await undoProposal(slug, id, pid); } catch (e) { return err(reply, e); }
   });
   app.post(`${W}/agents/:id/proposals/:pid/reject`, async (req, reply) => {
     const { slug, id, pid } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;

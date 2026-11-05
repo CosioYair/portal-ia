@@ -14,7 +14,9 @@ import { fileURLToPath } from 'node:url';
  *  (d) con el tope diario agotado: ni planificador ni convertidor, ninguna versión y el motivo nombra el tope;
  *  (e) si el planificador falla: ninguna versión ni conversión y el motivo dice «error del planificador» (suelto y lote);
  *  (f) la vista del lote y la respuesta del reintento marcan la intervención con su motivo y los conteos cuadran;
- *  (g) un reintento correcto en lote deja exactamente 2 versiones, la segunda con otro plan, 0 fallidos y una propuesta pendiente.
+ *  (g) un reintento correcto en lote deja exactamente 2 versiones, la segunda con otro plan, 0 fallidos y su aprendizaje
+ *      APLICADO solo (HU-179: autoApplied, origin='retry'), sin ninguna propuesta pendiente.
+ *  (c), (d) y (e) tampoco crean propuestas: si el reintento no pasa, no se aprende nada.
  */
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-reint-'));
 process.env.PORTAL_MOCK_PROVIDER = '1';
@@ -111,6 +113,7 @@ const docs = async () => (await inject('GET', `${A}/documents`)).json;
 const batchOf = async (id: string) => (await docs()).batches.find((b: any) => b.id === id);
 const jobOf = async (id: string) => (await docs()).jobs.find((j: any) => j.id === id);
 const motive = (x: any) => String(x?.interventionReason ?? x?.error ?? '');
+const propsOf = (d: any, jobId: string) => (d.proposals ?? []).filter((p: any) => p.jobId === jobId);
 const addsUp = (c: any) => D.batchCountsAddUp(c) && c.total === c.passed + c.rejectedQa + c.failed + c.excluded + c.cancelled + c.pending + c.queued + c.processing;
 const settled = (b: any) => b && b.status === 'completed' && b.items.every((i: any) => i.state !== 'queued' && i.state !== 'processing');
 
@@ -200,6 +203,7 @@ test('(c) si el plan nuevo coincide con uno fallido: ninguna versión, ninguna c
   assert.equal(j.needsIntervention, true); assert.ok(motive(j).includes(D.RETRY_REASON.same), motive(j));
   const x = await batchOf(b.id); const item = x.items.find((i: any) => i.jobId === it.jobId);
   assert.equal(item.state, 'failed'); assert.equal(item.needsIntervention, true); assert.ok(motive(item).includes(D.RETRY_REASON.same), motive(item));
+  assert.equal(propsOf(await docs(), it.jobId).length, 0, 'un plan repetido no aprende nada');
   sameBatch = b.id; sameJob = it.jobId;
 });
 
@@ -225,6 +229,8 @@ test('(d) tope diario agotado: ni planificador ni convertidor, ninguna versión 
     if (rs.status === 202) { assert.equal(js.needsIntervention, true); assert.ok(motive(js).includes(D.RETRY_REASON.cap), motive(js)); }
     else { assert.equal(rs.status, 429, JSON.stringify(rs.json)); assert.match(String(rs.json?.error), /tope diario|consultas diarias/i); }
     assert.ok(addsUp((await batchOf(b.id)).counts));
+    const d = await docs();
+    assert.equal(propsOf(d, it.jobId).length + propsOf(d, loose.id).length, 0, 'con el tope agotado no se aprende nada');
   } finally { db.prepare(`DELETE FROM document_model_calls WHERE what = 'prueba-tope'`).run(); }
 });
 
@@ -242,6 +248,8 @@ test('(e) si el planificador falla: ninguna versión ni conversión y el motivo 
   for (const j of [jb, js]) { assert.equal(j.needsIntervention, true, JSON.stringify(j)); assert.ok(motive(j).includes(D.RETRY_REASON.planner), motive(j)); }
   const item = (await batchOf(b.id)).items.find((i: any) => i.jobId === it.jobId);
   assert.equal(item.state, 'failed'); assert.equal(item.needsIntervention, true); assert.ok(motive(item).includes(D.RETRY_REASON.planner), motive(item));
+  const d = await docs();
+  assert.equal(propsOf(d, it.jobId).length + propsOf(d, loose.id).length, 0, 'un error del planificador no aprende nada');
   errBatch = b.id; errJob = it.jobId;
 });
 
@@ -268,7 +276,7 @@ test('(f) la vista del lote y la respuesta del reintento marcan la intervención
   assert.ok(addsUp(x.counts), JSON.stringify(x.counts));
 });
 
-test('(g) un reintento correcto en lote: exactamente 2 versiones, la segunda con otro plan, 0 fallidos y una propuesta pendiente', async () => {
+test('(g) un reintento correcto en lote: exactamente 2 versiones, la segunda con otro plan, 0 fallidos y su aprendizaje aplicado solo', async () => {
   const { b, it, job } = await failedBatch('RA lote G.zip', ['RA-G1 FALLA']);
   assert.equal(job.versions.length, 1, 'el fallo de conversión quedó como v1');
   scenario(RULES);
@@ -282,6 +290,8 @@ test('(g) un reintento correcto en lote: exactamente 2 versiones, la segunda con
   const x = await batchOf(b.id);
   assert.equal(x.counts.failed, 0); assert.equal(x.counts.passed, 1); assert.ok(addsUp(x.counts), JSON.stringify(x.counts));
   assert.ok(!x.items.find((i: any) => i.jobId === it.jobId).needsIntervention);
-  const props = (await docs()).proposals.filter((p: any) => p.jobId === it.jobId);
-  assert.equal(props.length, 1, 'una propuesta de aprendizaje'); assert.equal(props[0].state, 'proposed', 'pendiente de aprobación');
+  const props = propsOf(await docs(), it.jobId);
+  assert.equal(props.length, 1, 'un aprendizaje'); assert.equal(props[0].state, 'applied', JSON.stringify(props[0]));
+  assert.equal(props[0].autoApplied, true); assert.equal(props[0].origin, 'retry');
+  assert.equal((await docs()).proposals.filter((p: any) => p.state === 'proposed').length, 0, 'ninguna propuesta pendiente');
 });
