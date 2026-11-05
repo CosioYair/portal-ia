@@ -456,7 +456,6 @@ export async function processVersion(slug: string, a: Agent, jobId: string, tc: 
       } finally {
         recordModelCall(slug, a.id, 'reintento'); // la replanificación cuenta en el tope aunque falle
       }
-    finally { recordModelCall(slug, a.id, 'reintento'); }
   }
   if (blocked || !plan) { intervene(blocked ?? `${RETRY_REASON.planner}: sin plan.`); return; }
   const newSig = planSignature(plan);
