@@ -8,7 +8,7 @@ import { monotonicNow } from '../clock.ts';
  * claude_code_runs): creación, importación, cambio de arnés, de departamento, de carpeta (adoptar, descartar, volver
  * atrás), memoria verificada o retirada. Solo se añade; nunca se edita ni se borra.
  */
-export type AgentEventKind = 'created' | 'imported' | 'exported' | 'harness_changed' | 'department_changed' | 'folder_created' | 'folder_adopted' | 'folder_discarded' | 'folder_restored' | 'identity_updated' | 'memory_proposed' | 'memory_verified' | 'memory_retired' | 'task_created' | 'chat'
+export type AgentEventKind = 'created' | 'imported' | 'imported_zip' | 'imported_zip_undone' | 'exported' | 'harness_changed' | 'department_changed' | 'folder_created' | 'folder_adopted' | 'folder_discarded' | 'folder_restored' | 'identity_updated' | 'memory_proposed' | 'memory_verified' | 'memory_retired' | 'task_created' | 'chat'
   | 'source_imported' | 'source_adopted' | 'source_grants' | 'source_restored' | 'integration_state' | 'document_job' | 'improvement_proposed' | 'improvement_applied' | 'improvement_rejected';
 export interface AgentEvent { id: string; agentId: string; kind: AgentEventKind; detail: Record<string, unknown>; at: string; by: string }
 
