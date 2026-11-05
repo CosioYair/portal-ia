@@ -753,7 +753,8 @@ export function recordModelCall(slug: string, agentId: string, what = 'lote') {
 export async function classifyFeedback(slug: string, agentId: string, input: { jobId: string | null; text: string }, by = 'owner'): Promise<ImprovementProposal> {
   const a = agentsRepo(slug).get(agentId); if (!a) throw err('Agente no encontrado', 404);
   if (jobsDb(slug).usageToday(agentId).calls >= MODEL_CALLS_PER_DAY) throw err(`Hoy ya se usaron las ${MODEL_CALLS_PER_DAY} consultas diarias de este agente para documentos y mejoras: inténtalo mañana.`, 429);
-  const s = sourceOr(slug, agentId); const repo = sourcesRepo(slug); const files = repo.files(agentId)!;
+  // HU-178: mejorar la habilidad, las instrucciones o la memoria no necesita «documentos/» (solo la carpeta externa del agente).
+const s = sourcesRepo(slug).get(agentId); if (!s) throw err('Este agente no tiene carpeta externa.', 404); const repo = sourcesRepo(slug); const files = repo.files(agentId)!;
   const job = input.jobId ? jobsDb(slug).get(input.jobId) : null; if (input.jobId && (!job || job.agentId !== agentId)) throw err('Trabajo no encontrado', 404);
   const last = job?.versions[job.versions.length - 1] ?? null;
   const caller = callerFor(slug, a, 'Feedback');
