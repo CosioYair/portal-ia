@@ -71,11 +71,27 @@ function ProcessViewOf({ processId }: { processId: string }) {
   const [authBusy, setAuthBusy] = useState(false);
   const [authErr, setAuthErr] = useState<string | null>(null);
   useEffect(() => { if (proc && proc.status === 'pending_authorization' && !budget) setBudget(Math.max(0.5, Math.ceil(proc.estimatedUsd * 2 * 2) / 2).toFixed(2)); }, [proc, budget]);
+  // EN-005 · Reabrir una historia cerrada solo con intención explícita: motivo obligatorio + confirmación. Sin IA.
+  const [reopenOpen, setReopenOpen] = useState(false);
+  const [reopenReason, setReopenReason] = useState('');
+  const [reopenOk, setReopenOk] = useState(false);
+  const [reopenBusy, setReopenBusy] = useState(false);
+  const [reopenErr, setReopenErr] = useState<string | null>(null);
+  const reopen = async () => {
+    if (!proc || reopenReason.trim().length < 10 || !reopenOk) return;
+    if (!confirm('¿Reabrir la historia? Se crea una iteración nueva pendiente de tu autorización; no se consume IA hasta que la autorices.')) return;
+    setReopenBusy(true); setReopenErr(null);
+    try { const p = await api.reopenStory(slug, proc.id, reopenReason.trim()); flash('Historia reabierta: revisa y autoriza la nueva iteración'); setReopenOpen(false); navigate(`/procesos/${p.id}`); }
+    catch (e: any) { setReopenErr(e.message); } finally { setReopenBusy(false); }
+  };
   const authorize = async () => { if (!proc) return; setAuthBusy(true); setAuthErr(null); try { const p = await api.authorizeProcess(slug, proc.id, Number(budget), proc.kind === 'story_execution' ? pipeline : undefined); setProc(p); flash(`Autorizado con presupuesto ${fmtUsd(p.budgetUsd)}`); setTimeout(async () => { try { setProc(await api.process(slug, proc.id)); } catch { /* seguirá el sondeo */ } }, 1500); } catch (e: any) { setAuthErr(e.message); } finally { setAuthBusy(false); } };
 
   if (error) return <Shell crumb="Proceso"><main className="page"><Notice kind="err">{error}</Notice></main></Shell>;
   if (!proc) return <Shell crumb="Proceso"><main className="page"><span className="spin" aria-label="Cargando" /></main></Shell>;
   const st = procLabel(proc);
+  // EN-005 · Proceso antiguo de una historia integrada, completada o descartada: sin acciones que lo reactiven.
+  const closure = proc.closure ?? null;
+  const closureWord = closure?.state === 'merged' ? 'integrada' : closure?.state === 'done' ? 'completada' : 'descartada';
   const pct = proc.budgetUsd ? Math.min(100, Math.round((proc.spentUsd / proc.budgetUsd) * 100)) : 0;
   // HU-167: el siguiente paso solo desplaza y enfoca su sección (o navega a la historia). Nunca ejecuta acciones con costo.
   const goNext = (t: NextStepTarget) => {
@@ -108,10 +124,31 @@ function ProcessViewOf({ processId }: { processId: string }) {
         </div>
 
         {proc.archivedAt && <Notice kind="info"><strong>Proceso archivado</strong> con la etapa anterior ({new Date(proc.archivedAt).toLocaleDateString('es-MX')}). Es histórico: se puede consultar, pero no admite acciones. <Link className="lnk" to="/archivo">Archivo histórico</Link>.</Notice>}
+        {closure && <section className="card" id="sec-closure" data-story-closure={closure.state} style={{ borderColor: 'var(--color-flow-waiting)' }}>
+          <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <Notice kind="info"><div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <strong>Esta historia ya está {closureWord}{closure.currentIteration ? ` (iteración ${closure.currentIteration})` : ''}.</strong>
+              <span className="sm13">Este proceso es una iteración antigua: se puede consultar, pero no se puede autorizar, continuar, reintentar, recuperar, aplicar ni verificar.{closure.currentProcessId && closure.currentProcessId !== proc.id && <> <Link className="lnk" to={`/procesos/${closure.currentProcessId}`}>Ir al proceso vigente</Link>.</>}</span>
+            </div></Notice>
+            {!reopenOpen && <button className="btn btn-secondary btn-sm" style={{ alignSelf: 'flex-start' }} onClick={() => { setReopenOpen(true); setReopenErr(null); }}>Reabrir la historia</button>}
+            {reopenOpen && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }} aria-label="Reabrir la historia">
+              <div className="h3">Reabrir la historia</div>
+              <p className="sm13 muted" style={{ margin: 0 }}>Crea una iteración nueva pendiente de tu autorización y deja constancia del motivo. No consume IA: nada se ejecuta hasta que autorices la nueva iteración con un presupuesto.</p>
+              <label className="label" htmlFor="pv-reopen-reason">Motivo (obligatorio, mínimo 10 caracteres)</label>
+              <textarea id="pv-reopen-reason" className="input" rows={3} value={reopenReason} onChange={e => setReopenReason(e.target.value)} placeholder="¿Por qué hay que volver a trabajar en esta historia?" />
+              <label className="ck"><input className="cb" type="checkbox" checked={reopenOk} onChange={e => setReopenOk(e.target.checked)} /><span>Quiero reabrir esta historia {closureWord} de forma explícita.</span></label>
+              {reopenErr && <Notice kind="err">{reopenErr}</Notice>}
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button className="btn btn-primary btn-sm" onClick={reopen} disabled={reopenBusy || !reopenOk || reopenReason.trim().length < 10}>{reopenBusy ? <span className="spin spin-light" /> : Icon.arrow()}Reabrir la historia</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => { setReopenOpen(false); setReopenOk(false); }}>Cancelar</button>
+              </div>
+            </div>}
+          </div>
+        </section>}
         <fieldset disabled={!!proc.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
         {proc.kind === 'story_execution' && proc.guidance?.flow && <div id="sec-flow" tabIndex={-1}><StoryFlowPanel proc={proc} variant="process" onChange={setProc}
           story={proc.backlogItemId ? { id: proc.backlogItemId, storyId: proc.title.split(' · ')[0], title: proc.title.split(' · ').slice(1).join(' · ') || proc.title } : null} /></div>}
-        {proc.guidance && !proc.guidance.flow && proc.status !== 'pending_authorization' && !proc.archivedAt && <div id="sec-recovery" tabIndex={-1}><Notice kind={proc.guidance.tone}><div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
+        {proc.guidance && !proc.guidance.flow && !closure && proc.status !== 'pending_authorization' && !proc.archivedAt && <div id="sec-recovery" tabIndex={-1}><Notice kind={proc.guidance.tone}><div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
           <div><strong>{proc.guidance.phase}.</strong></div>
           {proc.kind === 'story_execution' && !proc.archivedAt && (proc.status === 'failed' || proc.status === 'cancelled' || proc.status === 'budget_exceeded') && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             {!!proc.steps[1]?.outputMd && !proc.result?.applied && <button className="btn btn-primary btn-sm" onClick={recover} disabled={fixBusy !== null}>{fixBusy === 'recover' ? <span className="spin spin-light" /> : Icon.check()}Recuperar el resultado (sin IA)</button>}
@@ -119,7 +156,7 @@ function ProcessViewOf({ processId }: { processId: string }) {
             {fixErr && <span className="sm13" style={{ color: 'var(--color-err-text)' }}>{fixErr}</span>}
           </div>}
         </div></Notice></div>}
-        {proc.status === 'pending_authorization' && !proc.archivedAt && <section className="card" id="sec-authorize" tabIndex={-1} style={{ borderColor: 'var(--color-flow-waiting)', background: 'var(--color-warn-bg-soft)' }}>
+        {proc.status === 'pending_authorization' && !proc.archivedAt && !closure && <section className="card" id="sec-authorize" tabIndex={-1} style={{ borderColor: 'var(--color-flow-waiting)', background: 'var(--color-warn-bg-soft)' }}>
           <div className="card-h"><div><div className="h3">Autorizar este proceso</div><div className="small muted">Consume IA. Nada se ha gastado todavía. Costo estimado ≈ {fmtUsd(proc.estimatedUsd)}.</div></div><Chip tone="warn" xs>requiere tu autorización</Chip></div>
           <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {authErr && <Notice kind="err">{authErr}</Notice>}
@@ -135,7 +172,7 @@ function ProcessViewOf({ processId }: { processId: string }) {
           </div></section>}
         {proc.error && proc.status !== 'failed' && proc.status !== 'budget_exceeded' && <Notice kind="err">{proc.error}</Notice>}
         {proc.status === 'running' && <Disclosure title="Agentes activos durante el proceso"><Notice kind="info">Los agentes implicados están <strong>activos</strong> durante este proceso y volverán a estar inactivos al terminar. {proc.kind === 'story_execution' ? 'Proponen cambios; nada se escribe en el repositorio sin tu aprobación.' : proc.kind === 'delegated_task' ? 'El responsable valida el encargo, consulta a su equipo y entrega el resultado; las propuestas al backlog las aplicas tú.' : 'Solo realizan lectura y análisis; ninguna acción sobre el repositorio.'}</Notice></Disclosure>}
-        {proc.kind === 'story_execution' && proc.result && (proc.status === 'done' || proc.result.changes.length > 0) && <div id="sec-result" tabIndex={-1}><StoryResult proc={proc} onChange={setProc} /></div>}
+        {proc.kind === 'story_execution' && !closure && proc.result && (proc.status === 'done' || proc.result.changes.length > 0) && <div id="sec-result" tabIndex={-1}><StoryResult proc={proc} onChange={setProc} /></div>}
         {proc.kind === 'story_execution' && proc.result?.gauntlet && <GauntletReport state={proc.result.gauntlet} implementer={proc.steps.find(s => s.role === 'implementer')?.agentName ?? null} />}
         {proc.kind === 'delegated_task' && proc.delegation && (proc.delegation.triage || proc.status !== 'running') && <DelegationResultView proc={proc} onChange={setProc} />}
 

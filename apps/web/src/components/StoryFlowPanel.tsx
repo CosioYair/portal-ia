@@ -155,8 +155,12 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
     } finally { setBusy(null); }
   };
 
-  const primary = flow.actions.find(a => a.primary);
-  const secondary = flow.actions.filter(a => !a.primary);
+  // EN-005 · Proceso antiguo de una historia integrada, completada o descartada: ninguna acción que lo reactive
+  // (Continuar, recuperar, reintentar, aceptar plan, aplicar, verificar…). Reabrir es explícito, en la página del proceso.
+  const closed = !!proc.closure;
+  const actions = closed ? [] : flow.actions;
+  const primary = actions.find(a => a.primary);
+  const secondary = actions.filter(a => !a.primary);
   // HU-166 · Siempre hay un botón principal en la cabecera: si el servidor no trae ninguno, solo se navega al proceso (no se ejecuta nada).
   const fallback = variant === 'story' && !primary && !readOnly;
   // Con un formulario abierto (confirmación o autorización), el botón principal es el de ese formulario.
@@ -233,7 +237,8 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       {cc && ccRelevant && <ClaudeCodeCard cc={cc} />}
       {verified && <div className="sf-headline is-ok" role="status" aria-label="Autorización verificada">{Icon.okc()}<span>{verified}</span></div>}
 
-      {!readOnly && (flow.actions.length > 0 || fallback) && <div className="sf-actions" aria-label="Acciones">
+      {closed && <Notice kind="info"><span>Esta historia ya está {proc.closure!.state === 'merged' ? 'integrada' : proc.closure!.state === 'done' ? 'completada' : 'descartada'}{proc.closure!.currentIteration ? ` (iteración ${proc.closure!.currentIteration})` : ''}: este proceso antiguo no admite acciones.{proc.closure!.currentProcessId && proc.closure!.currentProcessId !== proc.id && <> <Link className="lnk" to={`/procesos/${proc.closure!.currentProcessId}`}>Ir al proceso vigente</Link>.</>}</span></Notice>}
+      {!readOnly && (actions.length > 0 || fallback) && <div className="sf-actions" aria-label="Acciones">
         {primary && <button className={`btn ${subForm ? 'btn-secondary' : 'btn-primary'} btn-sm`} onClick={() => void run(primary)} disabled={busy !== null} title={primary.description}>{busy === primary.id ? <span className={subForm ? 'spin' : 'spin spin-light'} /> : Icon.arrow()}{primary.label}</button>}
         {fallback && <Link className="btn btn-primary btn-sm" to={`/procesos/${proc.id}`}>{Icon.arrow()}Ver el proceso y los agentes</Link>}
         {secondary.map(a => <button key={a.id} className="btn btn-secondary btn-sm" onClick={() => void run(a)} disabled={busy !== null} title={a.description}>{busy === a.id ? <span className="spin" /> : null}{a.label}</button>)}
