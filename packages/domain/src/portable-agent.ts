@@ -6,6 +6,7 @@
  *   skills/<s>/SKILL.md   habilidades (frontmatter name/description + cuerpo, como las Agent Skills)
  *   memory/MEMORY.md      SOLO aprendizaje verificado por el propietario, cada entrada con su procedencia
  *   knowledge/<k>.md      referencias aprobadas
+ *   CAMBIOS.md            registro de cambios del agente (lo escribe quien lo edite fuera; opcional)
  *
  * Funciones puras (sin sistema de archivos): las usan el servidor (escribir, leer, importar, detectar cambios) y la web
  * (vista previa). Nunca hay credenciales en una carpeta portable: el contenido que parezca un secreto se rechaza.
@@ -41,6 +42,8 @@ export interface PortableAgentDefinition {
   skills: PortableSkill[];
   memory: MemoryEntry[];
   knowledge: PortableKnowledge[];
+  /** CAMBIOS.md (si existe): se conserva tal cual entre revisiones. */
+  changelog?: string | undefined;
 }
 /** Archivos de la carpeta: ruta relativa con «/» → texto (LF, sin BOM). */
 export type PortableFiles = Record<string, string>;
@@ -48,7 +51,7 @@ export type PortableFiles = Record<string, string>;
 export const PORTABLE_LIMITS = { files: 80, fileBytes: 64 * 1024, totalBytes: 512 * 1024 } as const;
 const SLUG = '[a-z0-9][a-z0-9-]{0,63}';
 const ALLOWED = [
-  /^agent\.yaml$/, /^AGENTS\.md$/, new RegExp(`^skills/${SLUG}/SKILL\\.md$`), /^memory\/MEMORY\.md$/, new RegExp(`^knowledge/${SLUG}\\.md$`)
+  /^agent\.yaml$/, /^AGENTS\.md$/, new RegExp(`^skills/${SLUG}/SKILL\\.md$`), /^memory\/MEMORY\.md$/, new RegExp(`^knowledge/${SLUG}\\.md$`), /^CAMBIOS\.md$/
 ];
 /** ¿Es una ruta permitida dentro de una carpeta portable? (lista blanca: nada de rutas absolutas, «..», ni otros tipos). */
 export function allowedPortablePath(rel: string): boolean { return ALLOWED.some(r => r.test(rel)); }
@@ -220,6 +223,7 @@ export function definitionToFiles(d: PortableAgentDefinition): PortableFiles {
   };
   for (const s of d.skills) files[`skills/${s.slug}/SKILL.md`] = skillToMarkdown(s);
   for (const k of d.knowledge) files[`knowledge/${k.slug}.md`] = normalizeText(`# ${k.title}\n\n${k.body.trim()}`);
+  if (d.changelog !== undefined && d.changelog.trim()) files['CAMBIOS.md'] = normalizeText(d.changelog);
   return files;
 }
 
@@ -272,7 +276,8 @@ export function filesToDefinition(files: PortableFiles): { definition: PortableA
   skills.sort((a, b) => a.slug.localeCompare(b.slug)); knowledge.sort((a, b) => a.slug.localeCompare(b.slug));
   const instructions = files['AGENTS.md'] !== undefined ? normalizeText(files['AGENTS.md']).trim() : '';
   const memory = files['memory/MEMORY.md'] !== undefined ? parseMemory(files['memory/MEMORY.md']) : [];
-  return { definition: { manifest, instructions, skills, memory, knowledge }, problems };
+  const changelog = files['CAMBIOS.md'] !== undefined ? normalizeText(files['CAMBIOS.md']).trim() : undefined;
+  return { definition: { manifest, instructions, skills, memory, knowledge, changelog }, problems };
 }
 
 /** Diferencias legibles entre dos versiones de la carpeta (por archivo; líneas añadidas/quitadas acotadas). */
@@ -286,4 +291,60 @@ export function diffFiles(before: PortableFiles, after: PortableFiles): { path: 
     out.push({ path: p, change: a === undefined ? 'added' : b === undefined ? 'removed' : 'modified', added: lb.filter(l => !sa.has(l) && l.trim()).slice(0, 60), removed: la.filter(l => !sb.has(l) && l.trim()).slice(0, 60) });
   }
   return out;
+}
+
+// ---------------------------------------------------------------- Fusión a tres bandas (importar lo cambiado fuera)
+
+export interface PortableMergeConflict { path: string; base: string | null; ours: string | null; theirs: string | null }
+export interface PortableMergeResult { merged: PortableFiles; adopted: string[]; conflicts: PortableMergeConflict[] }
+const sameText = (a: string | undefined, b: string | undefined) => a === undefined || b === undefined ? a === b : normalizeText(a) === normalizeText(b);
+
+/**
+ * Fusión por archivo: `base` es la revisión exportada, `ours` la adoptada en el Portal y `theirs` lo que llega de fuera.
+ * - Fuera no cambió (theirs = base): se queda lo del Portal.
+ * - El Portal no cambió (ours = base): se toma lo de fuera (se anota en `adopted`).
+ * - Ambos iguales: sin cambio.
+ * - Ambos cambiaron distinto: conflicto; en `merged` se queda lo del Portal hasta que el propietario elija.
+ * Un archivo ausente cuenta como versión (borrar es un cambio).
+ */
+export function mergePortableFiles(base: PortableFiles, ours: PortableFiles, theirs: PortableFiles): PortableMergeResult {
+  const merged: PortableFiles = {}; const adopted: string[] = []; const conflicts: PortableMergeConflict[] = [];
+  const has = (o: PortableFiles, p: string) => Object.prototype.hasOwnProperty.call(o, p);
+  const paths = Array.from(new Set([...Object.keys(base), ...Object.keys(ours), ...Object.keys(theirs)])).sort();
+  for (const p of paths) {
+    const b = has(base, p) ? base[p] : undefined; const o = has(ours, p) ? ours[p] : undefined; const t = has(theirs, p) ? theirs[p] : undefined;
+    let out: string | undefined;
+    if (sameText(o, t)) out = o;
+    else if (sameText(t, b)) out = o;
+    else if (sameText(o, b)) { out = t; adopted.push(p); }
+    else { out = o; conflicts.push({ path: p, base: b ?? null, ours: o ?? null, theirs: t ?? null }); }
+    if (out !== undefined) merged[p] = normalizeText(out);
+  }
+  return { merged, adopted, conflicts };
+}
+
+/** Aplica la versión que eligió el propietario en cada conflicto ('portal' | 'zip'); devuelve los que siguen sin elegir. */
+export function applyMergeResolutions(result: PortableMergeResult, resolutions: Record<string, 'portal' | 'zip'>): { files: PortableFiles; unresolved: string[] } {
+  const files: PortableFiles = { ...result.merged }; const unresolved: string[] = [];
+  for (const c of result.conflicts) {
+    const r = Object.prototype.hasOwnProperty.call(resolutions, c.path) ? resolutions[c.path] : undefined;
+    if (r === 'zip') { if (c.theirs === null) delete files[c.path]; else files[c.path] = normalizeText(c.theirs); }
+    else if (r !== 'portal') unresolved.push(c.path);
+  }
+  return { files, unresolved };
+}
+
+const TOP_DIRS = new Set(['skills', 'knowledge', 'memory']);
+/**
+ * Quita la carpeta raíz común de las entradas de un ZIP («mi-agente/agent.yaml» → «agent.yaml»). Convierte «\» en «/».
+ * Solo la quita si TODAS las entradas cuelgan de la misma carpeta y esta no es una carpeta propia del contrato
+ * (skills/, knowledge/, memory/), ni «.», «..» ni una unidad («C:»). Devuelve las rutas en el mismo orden.
+ */
+export function stripZipRoot(paths: string[]): { root: string | null; paths: string[] } {
+  const norm = paths.map(p => p.replace(/\\/g, '/'));
+  const firsts = new Set<string>(); let nested = norm.length > 0;
+  for (const p of norm) { const i = p.indexOf('/'); if (i <= 0) { nested = false; break; } firsts.add(p.slice(0, i)); }
+  const root = nested && firsts.size === 1 ? Array.from(firsts)[0]! : null;
+  if (!root || TOP_DIRS.has(root) || root === '.' || root === '..' || root.includes(':')) return { root: null, paths: norm };
+  return { root, paths: norm.map(p => p.slice(root.length + 1)) };
 }

@@ -114,7 +114,7 @@ export const hasOwnInstructions = (text: string) => !!text.trim() && !text.inclu
 /** El arnés de la carpeta: el backend concedido en la base (la API cuenta como «api»). */
 const harnessOf = (a: Agent): HarnessId => (a.config.backend ?? 'api') as HarnessId;
 
-export interface AgentExtras { instructions: string; skills: PortableSkill[]; memory: MemoryEntry[]; knowledge: PortableKnowledge[]; deliverables: string[]; autonomy: 'ask' | 'within_scope' }
+export interface AgentExtras { instructions: string; skills: PortableSkill[]; memory: MemoryEntry[]; knowledge: PortableKnowledge[]; deliverables: string[]; autonomy: 'ask' | 'within_scope'; changelog?: string | undefined }
 const EMPTY_EXTRAS = (a: Agent): AgentExtras => ({ instructions: defaultInstructions(a.config.name, a.config.specialization), skills: [], memory: [], knowledge: [], deliverables: [], autonomy: 'ask' });
 
 /** Definición portable a partir de la fila (lo concedido) y de lo propio de la carpeta (instrucciones, habilidades…). */
@@ -128,7 +128,7 @@ export function definitionFor(slug: string, a: Agent, extras: AgentExtras): Port
       permissions: { tools: Object.keys(a.config.tools).filter(k => a.config.tools[k]).sort(), autonomy: extras.autonomy },
       createdAt: a.createdAt
     },
-    instructions: extras.instructions, skills: extras.skills, memory: memoryOf(slug, a.id), knowledge: extras.knowledge
+    instructions: extras.instructions, skills: extras.skills, memory: memoryOf(slug, a.id), knowledge: extras.knowledge, changelog: extras.changelog
   };
 }
 
@@ -143,7 +143,7 @@ export function memoryOf(slug: string, agentId: string): MemoryEntry[] {
 export function extrasFromFiles(files: PortableFiles): AgentExtras | null {
   const { definition } = filesToDefinition(files); if (!definition) return null;
   // La memoria NO se toma del archivo: MEMORY.md es una proyección de las entradas verificadas (lessons con agent_id).
-  return { instructions: definition.instructions, skills: definition.skills, memory: [], knowledge: definition.knowledge, deliverables: definition.manifest.deliverables, autonomy: definition.manifest.permissions.autonomy };
+  return { instructions: definition.instructions, skills: definition.skills, memory: [], knowledge: definition.knowledge, deliverables: definition.manifest.deliverables, autonomy: definition.manifest.permissions.autonomy, changelog: definition.changelog };
 }
 
 // ---------------------------------------------------------------- Repositorio de carpetas y revisiones
@@ -340,7 +340,7 @@ export function folderStatus(slug: string, a: Agent) {
 }
 
 /** Partes de un cambio externo que NO se adoptan (son concesiones del propietario): arnés y permisos. */
-function notAdoptedChanges(before: PortableFiles, after: PortableFiles): string[] {
+export function notAdoptedChanges(before: PortableFiles, after: PortableFiles): string[] {
   const a = filesToDefinition(before).definition?.manifest; const b = filesToDefinition(after).definition?.manifest;
   if (!a || !b) return [];
   const out: string[] = [];
@@ -358,7 +358,7 @@ function notAdoptedChanges(before: PortableFiles, after: PortableFiles): string[
  * Adopta el cambio externo: la nueva revisión es lo que hay en disco, salvo arnés, permisos e id, que se reponen desde la
  * base (y se reescriben en la carpeta). Nombre, papel, resumen, responsabilidades y departamento pasan a la fila.
  */
-type RowPatch = { name: string; role: string; summary: string; responsibilities: string[]; initials: string; department: string | null; capabilities: string[] };
+export type RowPatch = { name: string; role: string; summary: string; responsibilities: string[]; initials: string; department: string | null; capabilities: string[] };
 /** Aplica a la fila lo que se adopta y, si lo que sigue falla, la deja exactamente como estaba. */
 function withRowRollback<T>(slug: string, agentId: string, onRow: (p: RowPatch) => void, patch: RowPatch, rest: () => T): T {
   const agents = agentsRepo(slug); const before = agents.get(agentId)!;
@@ -385,7 +385,7 @@ export async function adoptExternal(slug: string, agentId: string, expectHash: s
     const d = parsed.definition; const current = adoptedExtras(slug, a);
     return withRowRollback(slug, agentId, onRow, rowPatchOf(d), () => {
       const fresh = agentsRepo(slug).get(agentId)!;
-      const files = definitionToFiles(definitionFor(slug, fresh, { instructions: d.instructions, skills: d.skills, memory: [], knowledge: d.knowledge, deliverables: d.manifest.deliverables, autonomy: current.autonomy }));
+      const files = definitionToFiles(definitionFor(slug, fresh, { instructions: d.instructions, skills: d.skills, memory: [], knowledge: d.knowledge, deliverables: d.manifest.deliverables, autonomy: current.autonomy, changelog: d.changelog }));
       // El cambio externo sigue en disco: se escribe la revisión adoptada encima (la huella del disco ya se comprobó).
       const n = repo.begin(agentId, files, 'external', 'Cambio hecho fuera del Portal, revisado y adoptado por el propietario', 'owner');
       try { writeFiles(folderPath(slug, f.folder), files); } catch (e) { repo.abandon(agentId, n); throw e; }
@@ -417,8 +417,43 @@ export async function restoreRevision(slug: string, agentId: string, n: number, 
     const a = agentsRepo(slug).get(agentId)!; const current = adoptedExtras(slug, a);
     return withRowRollback(slug, agentId, onRow, rowPatchOf(d), () => {
       const fresh = agentsRepo(slug).get(agentId)!;
-      const out = definitionToFiles(definitionFor(slug, fresh, { instructions: d.instructions, skills: d.skills, memory: [], knowledge: d.knowledge, deliverables: d.manifest.deliverables, autonomy: current.autonomy }));
+      const out = definitionToFiles(definitionFor(slug, fresh, { instructions: d.instructions, skills: d.skills, memory: [], knowledge: d.knowledge, deliverables: d.manifest.deliverables, autonomy: current.autonomy, changelog: d.changelog }));
       return writeRevisionUnlocked(slug, agentId, out, 'restore', `Vuelta a la revisión ${n}`, 'owner');
+    });
+  });
+}
+
+/**
+ * Escribe como revisión «import» unos archivos que llegan de fuera ya fusionados (p. ej. desde un ZIP). Bajo el cerrojo:
+ * - 409 si la revisión adoptada ya no es `expectAdoptedN` (el agente cambió en el Portal desde la vista previa);
+ * - 409 si la carpeta tiene un cambio externo sin revisar (nunca se pisa);
+ * - 400 si hay secretos o problemas que bloquean, o si el id no es el de este agente.
+ * Arnés, permisos, autonomía, capacidades, id y memoria se reponen desde la base (MEMORY.md es la proyección de las
+ * lessons: quien importe crea antes las entradas nuevas). La identidad pasa a la fila; si algo falla, la fila se repone.
+ * Si el resultado es idéntico a lo adoptado, no se crea revisión (`created: false`).
+ */
+export async function writeImportedRevision(slug: string, agentId: string, files: PortableFiles, expectAdoptedN: number | null, onRow: (patch: RowPatch) => void, note = 'Importado desde ZIP (adoptado automáticamente)', by = 'owner'): Promise<{ revision: AgentRevision; previousN: number | null; created: boolean }> {
+  for (const [p, c] of Object.entries(files)) { const s = findSecret(c); if (s) throw Object.assign(new Error(`${p} contiene lo que parece una ${s}: las credenciales nunca van en la carpeta de un agente.`), { statusCode: 400 }); }
+  return withLock(`${slug}:${agentId}`, () => {
+    const a = agentsRepo(slug).get(agentId); if (!a) throw Object.assign(new Error('Agente no encontrado'), { statusCode: 404 });
+    resolveWriting(slug, agentId);
+    const repo = agentFoldersRepo(slug); const f = repo.folderOf(agentId);
+    if (!f) throw Object.assign(new Error('El agente aún no tiene carpeta.'), { statusCode: 409 });
+    const adopted = repo.adopted(agentId); const previousN = adopted?.n ?? null;
+    if (previousN !== expectAdoptedN) throw Object.assign(new Error('El agente cambió en el Portal desde la vista previa: vuelve a revisar la importación.'), { statusCode: 409, stale: true });
+    const disk = diskFiles(slug, f.folder);
+    if (adopted && disk && hashFiles(disk.files) !== adopted.hash) throw Object.assign(new Error('La carpeta del agente tiene cambios hechos fuera del Portal sin revisar: adóptalos o descártalos antes de importar.'), { statusCode: 409, external: true });
+    const parsed = filesToDefinition(files);
+    const blocking = parsed.problems.filter(p => p.blocking);
+    if (!parsed.definition || blocking.length) throw Object.assign(new Error(`No se puede importar: ${blocking.map(p => `${p.path} — ${p.message}`).join(' · ') || 'carpeta no válida'}`), { statusCode: 400 });
+    const d = parsed.definition;
+    if (d.manifest.id && d.manifest.id !== agentId) throw Object.assign(new Error('El agente del ZIP no es este agente (su id es otro).'), { statusCode: 400 });
+    const current = adoptedExtras(slug, a);
+    return withRowRollback(slug, agentId, onRow, rowPatchOf(d), () => {
+      const fresh = agentsRepo(slug).get(agentId)!;
+      const out = definitionToFiles(definitionFor(slug, fresh, { instructions: d.instructions, skills: d.skills, memory: [], knowledge: d.knowledge, deliverables: d.manifest.deliverables, autonomy: current.autonomy, changelog: d.changelog }));
+      const revision = writeRevisionUnlocked(slug, agentId, out, 'import', note, by);
+      return { revision, previousN, created: revision.n !== previousN };
     });
   });
 }
