@@ -173,6 +173,39 @@ test('(e) nunca cambia permisos, arnés, presupuesto ni código del Portal: no s
   assert.equal(skill(), skill0); assert.equal(revision(), rev0, 'sin revisión nueva');
 });
 
+test('(e2) cambio mixto: se aplica solo lo seguro; los archivos protegidos de la carpeta quedan intactos y lo descartado consta', async () => {
+  // Archivos protegidos DENTRO de la carpeta del agente (permisos y presupuesto): no son identidad, nunca se modifican.
+  w('configuracion/permisos.json', '{"applyImprovements":true,"runScripts":true,"writeDocuments":true}\n');
+  w('configuracion/presupuesto.json', '{"consultasPorDia":80}\n');
+  const PERM = path.join(root, 'configuracion', 'permisos.json'); const BUDG = path.join(root, 'configuracion', 'presupuesto.json');
+  const permBefore = fs.readFileSync(PERM); const budgBefore = fs.readFileSync(BUDG);
+  const cfgBefore = JSON.stringify(agentsRepo(S).get(agentId)!.config);
+  const grantsBefore = JSON.stringify((sourcesRepo(S).get(agentId) as any)?.grants ?? null);
+  const rev0 = revision();
+  scenario({ auth: 'subscription', rules: [classifier('Mixto', [
+    { path: 'skills/conv/SKILL.md', kind: 'append', content: '- MIXTO-SEGURO: revisa las tablas.', summary: 'Revisar tablas' },
+    { path: 'configuracion/permisos.json', kind: 'replace', content: '{"applyImprovements":true,"runScripts":true,"writeDocuments":true,"todo":true}', summary: 'más permisos' },
+    { path: 'configuracion/presupuesto.json', kind: 'replace', content: '{"consultasPorDia":9999}', summary: 'más presupuesto' }
+  ]), { match: 'cambio mixto', text: accion({ tipo: 'mejorar_agente', descripcion: 'Revisar tablas y, de paso, más permisos y presupuesto.' }) }] });
+  const a = await chatAction(A, 'Haz este cambio mixto: revisa las tablas y súbete permisos y presupuesto.');
+  assert.equal(a.status, 'done', a.error); assert.equal(a.result.applied, true, JSON.stringify(a.result));
+  assert.ok(skill().includes('MIXTO-SEGURO'), 'lo seguro se aplica');
+  assert.equal(revision(), rev0 + 1, 'una revisión nueva, solo por lo seguro');
+  assert.ok(fs.readFileSync(PERM).equals(permBefore), 'permisos.json byte a byte igual');
+  assert.ok(fs.readFileSync(BUDG).equals(budgBefore), 'presupuesto.json byte a byte igual');
+  const archivos = (a.result.changes as any[]).map(c => String(c.archivo));
+  assert.ok(archivos.includes('skills/conv/SKILL.md'), JSON.stringify(archivos));
+  assert.ok(archivos.every(x => !x.startsWith('configuracion/')), `result.changes no incluye lo protegido: ${JSON.stringify(archivos)}`);
+  assert.equal(JSON.stringify(agentsRepo(S).get(agentId)!.config), cfgBefore, 'arnés, modelo y presupuesto intactos');
+  assert.equal(JSON.stringify((sourcesRepo(S).get(agentId) as any)?.grants ?? null), grantsBefore, 'permisos del Portal intactos');
+  const prop = (await inject('GET', `${A}/documents`)).json.proposals.find((p: any) => p.id === a.result.proposalId);
+  assert.ok(prop, 'la propuesta aplicada consta');
+  assert.match(String(prop.reason), /descart/i, 'se informa de lo descartado');
+  assert.match(String(prop.reason), /configuracion\/permisos\.json/);
+  assert.match(String(prop.reason), /configuracion\/presupuesto\.json/);
+  assert.equal(classifierCalls(), 1, 'una sola consulta');
+});
+
 test('(f) con el tope diario del agente agotado, la mejora falla sin consultar ni aplicar', async () => {
   const db = workspaceDb(S); const at = new Date().toISOString();
   const ins = db.prepare(`INSERT INTO document_model_calls (agent_id, at, what) VALUES (?, ?, 'prueba-tope')`);
