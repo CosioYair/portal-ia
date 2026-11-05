@@ -6,7 +6,8 @@ import { practicesFor } from './agentTemplates.ts';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
-import { decisionsFromProcess } from './inbox.ts';
+import { decisionsFromProcess, iterationNumbers } from './inbox.ts';
+import { isNewerThan, latestMerged } from './storyClosure.ts';
 import { activeAgents } from './activeAgents.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
@@ -517,7 +518,7 @@ export async function recoverStory(slug: string, processId: string): Promise<Pro
 }
 
 /** Volver a ejecutar la historia de un proceso terminado (nuevo proceso pendiente de autorización). */
-export function retryStory(slug: string, processId: string, opts: StoryOptions = {}): Process {
+export function retryStory(slug: string, processId: string, opts: StoryOptions & { reopen?: boolean } = {}): Process {
   const proc = processesRepo(slug).get(processId);
   if (!proc || proc.kind !== 'story_execution' || !proc.backlogItemId) throw Object.assign(new Error('Proceso de historia no encontrado'), { statusCode: 404 });
   if (proc.status === 'running' || proc.status === 'pending_authorization') throw Object.assign(new Error('El proceso sigue activo.'), { statusCode: 409 });
@@ -525,10 +526,72 @@ export function retryStory(slug: string, processId: string, opts: StoryOptions =
   if (!item) throw Object.assign(new Error('La historia ya no existe en el backlog.'), { statusCode: 404 });
   if (item.status === 'done' || item.status === 'discarded') throw Object.assign(new Error(`La historia está ${item.status === 'done' ? 'completada' : 'descartada'}; reábrela desde el backlog si quieres repetirla.`), { statusCode: 409 });
   if (item.status === 'in_progress') throw Object.assign(new Error('La historia ya está en ejecución.'), { statusCode: 409 });
+  // EN-005 · Si la historia ya está integrada en main, no se repite desde este proceso ni desde uno anterior sin reabrirla.
+  // Una iteración creada después de la integración (porque se reabrió) sí se puede reintentar.
+  if (!opts.reopen) {
+    const all = processesRepo(slug).listByBacklogItem(item.id).filter(p => p.kind === 'story_execution');
+    const merged = latestMerged(all);
+    if (merged && !isNewerThan(proc, merged)) {
+      const n = iterationNumbers(all).get(merged.id);
+      throw Object.assign(new Error(`Esta historia ya está integrada en main (iteración ${n ?? '?'}, proceso ${merged.id}). Para volver a ejecutarla usa «Reabrir la historia» (pide confirmación y motivo).`), { statusCode: 409, code: 'story_closed' });
+    }
+  }
   // El Coordinador ya concluyó que esta historia (con este texto) no cambia código: repetirla igual pagaría la misma respuesta.
   const nc = proc.result?.planNoCode;
   if (nc && nc.basis && nc.basis === storyBasis(item, proc.result?.iterationContext ?? null)) throw Object.assign(new Error('La historia no ha cambiado y el Coordinador ya concluyó que no cambia ningún archivo: volver a ejecutarla daría lo mismo. Conviértela en un encargo de análisis, reformúlala (nueva iteración) o ciérrala.'), { statusCode: 409, code: 'plan_no_code_unchanged' });
   return createStoryProcess(slug, proc.projectId, item.id, opts);
+}
+
+/**
+ * EN-005 · Reapertura explícita de una historia integrada, completada o descartada, sin IA. Crea una iteración nueva
+ * pendiente de autorización (createStoryProcess marca como superadas las anteriores) y deja la historia en «pending»,
+ * nunca en «in_progress». El motivo queda en la descripción, en el hilo de la historia y en el historial de ejecución.
+ */
+export async function reopenStory(slug: string, processId: string, reason: string): Promise<Process> {
+  const procs = processesRepo(slug); const backlog = backlogRepo(slug);
+  const proc = procs.get(processId);
+  if (!proc || proc.kind !== 'story_execution' || !proc.backlogItemId) throw Object.assign(new Error('Proceso de historia no encontrado'), { statusCode: 404 });
+  const why = (reason ?? '').trim();
+  if (why.length < 10) throw Object.assign(new Error('Indica el motivo de la reapertura (al menos 10 caracteres).'), { statusCode: 400 });
+  const item = backlog.get(proc.backlogItemId);
+  if (!item) throw Object.assign(new Error('La historia ya no existe en el backlog.'), { statusCode: 404 });
+  const all = procs.listByBacklogItem(item.id).filter(p => p.kind === 'story_execution');
+  const merged = latestMerged(all);
+  const integrated = !!merged && !all.some(p => isNewerThan(p, merged));
+  const closed = item.status === 'done' || item.status === 'discarded';
+  if (!integrated && !closed) throw Object.assign(new Error('La historia no está integrada ni cerrada: no hace falta reabrirla. Usa «Reintentar» o «Nueva iteración».'), { statusCode: 409, code: 'story_open' });
+  if (all.some(p => !p.supersededBy && !p.archivedAt && (p.status === 'running' || p.status === 'pending_authorization'))) throw Object.assign(new Error('Ya hay una iteración de esta historia en ejecución o pendiente de autorización.'), { statusCode: 409, code: 'iteration_in_progress' });
+  const iters = iterationNumbers(all);
+  const next = all.length + 1;
+  const was = item.status === 'done' ? 'completada' : item.status === 'discarded' ? 'descartada' : 'integrada en main';
+  const at = new Date().toISOString();
+  const context = [
+    `Iteración ${next} de la historia, reabierta de forma explícita por el propietario (estaba ${was}).`,
+    `Motivo de la reapertura: ${why}`,
+    merged?.result?.merged ? `La iteración ${iters.get(merged.id) ?? '?'} YA está integrada en ${merged.result.merged.into} (commit ${merged.result.merged.commit}): esta iteración parte de ese código y lo corrige o completa.` : '',
+    `Criterio de aceptación vigente: ${item.criterion || '(no definido)'}`
+  ].filter(Boolean).join('\n\n');
+  const { threadRepo } = await import('./storyThread.ts');
+  const thread = threadRepo(slug);
+  const db = workspaceDb(slug);
+  db.exec('BEGIN');
+  let created: Process;
+  try {
+    backlog.update(item.id, { description: `${item.description ? item.description + '\n' : ''}[${at.slice(0, 10)}] Reabierta por el propietario (estaba ${was}): ${why.slice(0, 300)}` });
+    backlog.setStatus(item.id, 'pending', item.lastProcessId ?? null);
+    created = createStoryProcess(slug, item.projectId, item.id, { iterationContext: context });
+    backlog.setStatus(item.id, 'pending', created.id);
+    thread.add({ backlogItemId: item.id, role: 'system', agentId: null, agentName: null, content: `Historia reabierta por el propietario (estaba ${was}). Motivo: ${why}. Iteración ${next} creada (proceso ${created.id}), pendiente de autorización: no consume IA hasta que la autorices.`, processId: created.id, costUsd: 0, tokens: 0, proposals: null });
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* la transacción ya no estaba abierta */ }
+    throw e;
+  }
+  const agentId = created.steps[0]?.agentId;
+  if (agentId) {
+    try { procs.logExecution({ projectId: item.projectId, agentId, kind: 'story:reopen', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: at }); } catch { /* el registro no debe deshacer la reapertura */ }
+  }
+  return procs.get(created.id) ?? created;
 }
 
 /** Estimación de generar la lista de prueba manual (1 llamada corta del Especialista QA o, en su defecto, del Coordinador). */
