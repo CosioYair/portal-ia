@@ -56,6 +56,22 @@ export interface ImportPreview { path: string; hash: string; files: string[]; ig
   agent: { name: string; role: string; summary: string; department: string | null; responsibilities: string[]; deliverables: string[]; capabilities: string[] } | null;
   requests: { harness: string; model: string; tools: string[]; autonomy: string } | null; instructions: string; skills: { slug: string; name: string; description: string; body: string }[]; memory: { title: string; text: string }[]; references: { slug: string; title: string; body: string }[]; note: string }
 
+/** Importación desde ZIP (apps/server/src/services/agentZipImport.ts). */
+export interface ZipImportConflict { path: string; base: string | null; ours: string | null; theirs: string | null }
+export interface ZipImportPreview {
+  token: string; hash: string; name: string; ok: boolean; mode: 'nuevo' | 'existente'; agentId: string | null; files: string[]; problems: { path: string; message: string; blocking: boolean }[];
+  agent: ImportPreview['agent']; requests: ImportPreview['requests']; instructions: string; skills: ImportPreview['skills']; memory: ImportPreview['memory']; references: ImportPreview['references'];
+  /** Revisión adoptada al hacer la vista previa y revisión de partida (exportada) de la fusión. */
+  adoptedN: number | null; base: { n: number | null; how: 'marcador' | 'parecido' | 'sin-base' } | null;
+  adopted: string[]; conflicts: ZipImportConflict[]; newMemory: { title: string; text: string }[]; notAdopted: string[]; upToDate: boolean; note: string;
+}
+export type ZipImportGrant = Omit<WizardInput, 'name' | 'role' | 'summary' | 'responsibilities' | 'deliverables' | 'instructions' | 'skills' | 'references' | 'capabilities'> & { capabilities?: Capability[] | null };
+export interface ZipImportResult {
+  mode: 'nuevo' | 'existente'; agent: Agent; revision: Revision | null;
+  /** Para Deshacer: revisión a la que se vuelve, revisión importada y memoria que se retiraría. */
+  undo: { n: number; importN: number; lessonIds: string[] } | null; adopted: string[]; notAdopted: string[]; upToDate: boolean;
+}
+
 const J = (body: unknown) => JSON.stringify(body);
 /** Problema que impide exportar el paquete (409 de export.zip). */
 export interface BundleProblem { path: string; message: string }
@@ -144,6 +160,12 @@ export const osApi = {
   createAgent: (slug: string, input: WizardInput) => request<Agent>(`${W(slug)}/agents/wizard`, { method: 'POST', body: J(input) }),
   importPreview: (slug: string, path: string) => request<ImportPreview>(`${W(slug)}/agents/import/preview`, { method: 'POST', body: J({ path }) }),
   importAgent: (slug: string, body: Omit<WizardInput, 'name' | 'role' | 'summary' | 'responsibilities' | 'deliverables' | 'instructions' | 'skills' | 'references' | 'capabilities'> & { path: string; hash: string }) => request<Agent>(`${W(slug)}/agents/import`, { method: 'POST', body: J(body) }),
+  /** Sube el ZIP en flujo y devuelve la vista previa (modo, adoptados, conflictos). Sin costo. */
+  zipImportPreview: (slug: string, file: File, onProgress?: (fraction: number) => void, signal?: AbortSignal) =>
+    streamUpload<ZipImportPreview>(`${W(slug)}/agents/import-zip/preview?name=${encodeURIComponent(file.name)}`, file, onProgress, signal),
+  zipImportConfirm: (slug: string, body: { token: string; hash: string; resolutions?: Record<string, 'portal' | 'zip'>; grant?: ZipImportGrant }) =>
+    request<ZipImportResult>(`${W(slug)}/agents/import-zip/confirm`, { method: 'POST', body: J({ ...body, resolutions: body.resolutions ?? {} }) }),
+  zipImportUndo: (slug: string, id: string, importN: number) => request<{ revision: Revision; retired: number }>(`${W(slug)}/agents/${id}/import-zip/${importN}/undo`, { method: 'POST', body: J({}) }),
   exportFiles: (slug: string, id: string) => request<{ folder: string; files: PortableFiles }>(`${W(slug)}/agents/${id}/export`),
   /** URL del paquete portable (ZIP) del agente. */
   exportZipUrl: (slug: string, id: string) => `${W(slug)}/agents/${encodeURIComponent(id)}/export.zip`,

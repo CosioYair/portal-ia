@@ -472,15 +472,35 @@ function UndoProposalControl({ slug, agentId, proposal, onDone }: { slug: string
 
 // ---------------------------------------------------------------- Origen: procedencia, integración, cambios, permisos
 
+/** Programas que se ejecutarían en este equipo: si cambian fuera, su adopción no es automática (pide revisión). */
+const PROGRAM_RE = /\.(py|sh|bash|zsh|js|mjs|cjs|ts|rb|pl|ps1|bat|cmd|exe)$/i;
+/**
+ * HU-183: lo que cambió fuera del Portal se adopta solo (versión nueva, con Deshacer). Devuelve por qué NO puede
+ * adoptarse solo (el «conflicto» que el propietario debe decidir) o null si puede adoptarse automáticamente.
+ */
+const manualReason = (s: SourceStatus): string | null =>
+  s.readError ? 'no se puede leer su carpeta'
+    : !s.diskHash ? 'no se pudo calcular la huella de su carpeta'
+    : s.problems.some(x => x.blocking) ? 'hay problemas que lo impiden (abajo)'
+    : s.diff.some(d => PROGRAM_RE.test(d.path)) ? 'cambiaron programas que se ejecutan en este equipo y eso pide tu revisión'
+    : null;
+
 export function OriginTab({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: () => void }) {
   const { flash } = useApp();
   const [s, setS] = useState<SourceStatus | null>(null); const [error, setError] = useState<string | null>(null); const [busy, setBusy] = useState(false);
   const [grants, setGrants] = useState<ExternalGrants | null>(null); const [confirmRestore, setConfirmRestore] = useState<number | null>(null); const [confirmAdopt, setConfirmAdopt] = useState(false);
+  const [autoUndo, setAutoUndo] = useState<{ from: number; files: string[] } | null>(null); const autoTried = useRef<string | null>(null);
   const dirty = useRef(false);
   const load = useCallback(() => osApi.source(slug, p.agent.id).then(x => { setS(x); if (!dirty.current) setGrants(x.grants); }).catch(e => setError(e.message)), [slug, p.agent.id]);
   useEffect(() => { void load(); }, [load]);
   useLive(c => c.ws === slug && c.entity === 'agent' && c.id === p.agent.id && c.kind !== 'progress', () => void load(), { minMs: 1500 });
   const act = async (fn: () => Promise<unknown>, ok: string) => { setBusy(true); setError(null); try { await fn(); flash(ok); dirty.current = false; await load(); onChanged(); } catch (e: any) { setError(e.message); } finally { setBusy(false); } };
+  // Adopción automática de lo que cambió fuera (una sola vez por huella; si falla, queda la revisión manual con el error).
+  useEffect(() => {
+    if (!s || busy || s.changes.length === 0 || manualReason(s) !== null || autoTried.current === s.diskHash) return;
+    autoTried.current = s.diskHash; const from = s.revision; const files = s.diff.map(d => d.path); const hash = s.diskHash!;
+    void act(async () => { await osApi.adoptSource(slug, p.agent.id, hash); setAutoUndo({ from, files }); }, 'Lo que cambió fuera se adoptó automáticamente (versión nueva, puedes deshacerlo)');
+  }, [s, busy]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!s || !grants) return error ? <Notice kind="err">{error}</Notice> : <Spinner />;
   const changed = JSON.stringify(grants) !== JSON.stringify(s.grants);
   const restoreBlock = s.changes.length > 0 ? 'Primero revisa los cambios hechos fuera del Portal.' : !s.grants.applyImprovements ? 'Necesita el permiso de aplicar mejoras.' : null;
@@ -491,11 +511,15 @@ export function OriginTab({ slug, p, onChanged }: { slug: string; p: Panel; onCh
       <p className="small muted">{s.state === 'integrated' ? 'El Portal ya aplicó a sus archivos una mejora que aprobaste, comprobada, con copia previa y registro.' : s.state === 'evaluating' ? 'Ya trabajó con el Portal. Pasará a «Integrado» cuando apruebes una mejora y se aplique a su habilidad o instrucciones.' : 'Integrado como referencia: aún no ha trabajado con el Portal.'}</p>
       <div className="small"><strong>De dónde viene</strong> (no cambia): <code className="mono">{s.provenance.path}</code>, integrado el {new Date(s.provenance.importedAt).toLocaleString('es-MX')} por {s.provenance.importedBy === 'owner' ? 'ti' : s.provenance.importedBy}.</div>
       <div className="small">Su carpeta (la original): <code className="mono">{s.root}</code> · versión revisada <strong>{s.revision}</strong></div>
+      <div className="small muted">Lo que cambia en su carpeta original fuera del Portal se adopta solo como versión nueva, que puedes deshacer. Solo te lo pedimos si cambian programas que se ejecutan en este equipo o hay un problema. La importación desde ZIP es para los agentes con carpeta del Portal (Ajustes › Archivos): este agente vive en su carpeta original y un ZIP no la reemplaza.</div>
     </section>
+    {autoUndo && s.revision !== autoUndo.from && s.changes.length === 0 && <Notice kind="ok">Se adoptó automáticamente lo que cambió fuera del Portal ({autoUndo.files.join(', ')}) como versión {s.revision}.{' '}
+      {restoreBlock ? <span className="small">Para deshacerlo: {restoreBlock}</span>
+        : <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => { const from = autoUndo.from; void act(async () => { await osApi.restoreSource(slug, p.agent.id, from); setAutoUndo(null); }, `Deshecho: vuelta a la versión ${from} (con copia previa)`); }}>Deshacer (volver a la versión {autoUndo.from})</button>}</Notice>}
     {s.readError && <Notice kind="err">No se puede leer su carpeta: {s.readError}</Notice>}
-    {s.changes.length > 0 && <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8, borderColor: 'var(--color-warn-border)' }}>
+    {s.changes.length > 0 && (manualReason(s) !== null || (autoTried.current === s.diskHash && !busy)) && <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8, borderColor: 'var(--color-warn-border)' }}>
       <div className="h3">Cambios hechos fuera del Portal</div>
-      <p className="small">El agente sigue usando la versión que revisaste; los programas cambiados no se ejecutan hasta que adoptes los cambios. Revísalos:</p>
+      <p className="small">Estos cambios no se adoptan solos: {manualReason(s) ?? 'no se pudieron adoptar automáticamente (mira el error de arriba)'}. El agente sigue usando la versión que revisaste; los programas cambiados no se ejecutan hasta que adoptes los cambios. Revísalos:</p>
       {s.diff.map(d => <details key={d.path} className="card" style={{ padding: 8 }} open={s.diff.length <= 3}><summary className="small" style={{ cursor: 'pointer' }}><code>{d.path}</code> · {d.before === null ? 'nuevo' : d.after === null ? 'eliminado' : 'modificado'}{d.path.endsWith('.py') ? ' · programa: se ejecutará en este equipo' : ''}</summary><LineDiff before={d.before} after={d.after} /></details>)}
       {s.problems.map((x, i) => <Notice key={i} kind={x.blocking ? 'err' : 'warn'}>{x.path}: {x.message}</Notice>)}
       {confirmAdopt ? <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}><span className="small">El agente usará estos cambios desde ahora{s.diff.some(d => d.path.endsWith('.py')) ? ', incluidos los programas modificados' : ''}.</span>

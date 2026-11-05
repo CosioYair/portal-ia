@@ -6,7 +6,8 @@
 
 Código: `packages/domain/src/portable-agent.ts` (contrato puro), `apps/server/src/services/agentFolders.ts` (carpetas y
 revisiones), `agentIdentity.ts` (lo que llega al prompt), `agentLearning.ts` (memoria), `agentCreation.ts` (crear, importar,
-exportar). Pruebas: `apps/server/test/sistema-operativo-agentes.test.ts`.
+exportar), `agentZipImport.ts` (importar desde ZIP con fusión a tres bandas). Pruebas:
+`apps/server/test/sistema-operativo-agentes.test.ts`, `apps/server/test/agente-zip-import.test.ts`.
 
 ## 1. La carpeta
 
@@ -82,6 +83,11 @@ Si el disco no coincide con la revisión adoptada, el agente aparece «Te necesi
 - Mientras no se resuelva, el Portal no escribe encima (409).
 - Una carpeta borrada fuera del Portal se restaura desde la revisión adoptada.
 
+Si el agente se editó fuera y vuelve como **ZIP** (§7), no hace falta revisar a mano. Lo que solo cambió fuera se adopta
+**automáticamente** como revisión nueva de origen `import`, con la nota «Importado desde ZIP (adoptado automáticamente)»,
+y se ofrece **Deshacer**. Deshacer crea una revisión `restore` igual a la anterior y retira la memoria creada por esa
+importación. Los prompts vuelven a usar lo de antes. Si después hubo otra revisión, ya no se puede deshacer (409).
+
 ## 4. Memoria verificada
 
 Una sola fuente: las lecciones del Portal (`lessons`) con `agent_id`. Flujo: opinión del propietario sobre un entregable o
@@ -89,6 +95,20 @@ una respuesta → **propuesta** ligada a esa tarea o mensaje → el propietario 
 prompts de ese agente y en `memory/MEMORY.md` con su procedencia → se puede retirar. Nada generado por un modelo se verifica
 solo, y editar `MEMORY.md` a mano no crea memoria verificada. Las lecciones de un agente no aparecen en las listas ni en las
 inyecciones de la organización (todas las existentes tienen `agent_id` NULL).
+Excepción acotada: al importar el ZIP de un agente **que ya existe**, las entradas nuevas de su `MEMORY.md` (las que no
+estaban al exportar ni existen ya) pasan a ser lecciones verificadas de ese agente. Llevan la evidencia del ZIP y la
+etiqueta `zip`, y Deshacer las retira. Para un agente nuevo, la memoria importada sigue llegando como propuesta.
+Decisión del propietario (HU-183): la confirmó en el criterio de aceptación («si ya existe, lo que cambió fuera —memoria,
+habilidades, CAMBIOS.md— se incorpora automáticamente como revisión nueva con Deshacer») y en el detalle de la historia
+(«se adoptan automáticamente salvo conflicto»). La razón es que la memoria de ese agente ya es del propietario: la exportó
+él y la trae de vuelta él. Límites de la excepción:
+- solo vale para un agente de este mismo espacio (un marcador de otro espacio lo trata como nuevo);
+- entran como mucho 50 entradas;
+- nunca entra una que ya estaba al exportar o que ya existe;
+- lo que entró se ve en la vista previa antes de confirmar y queda en `imported_zip` con sus `lessonIds`;
+- Deshacer o un fallo al escribir la revisión las retiran.
+Si el propietario cambia de criterio, basta con usar `'proposed'` en `applyZipImport` (`setLessons`) y ajustar
+`agente-zip-import.test.ts`.
 
 ## 5. Lo que llega al prompt
 
@@ -114,6 +134,41 @@ crea cuando el propietario lo pide (pestaña Archivos → «Crear su carpeta», 
   (instrucciones, habilidades y referencias completas). El propietario concede arnés, permisos, papeles en el equipo
   (capacidades; por defecto ninguno) y departamento: nada pedido viene concedido. El agente recibe un **id nuevo**; la memoria
   importada llega como **propuesta**.
+- **Importar desde ZIP** (asistente → «¿Ya tienes el ZIP de un agente?»). Sirve para un agente nuevo o para uno que ya existe.
+  Sin costo de IA. El ZIP se valida **entero antes de escribir nada** y se rechaza completo (400) si:
+  - alguna entrada tiene problemas: `../`, ruta absoluta, enlace o cifrado;
+  - alguna ruta está fuera de la lista blanca (fuera de la carpeta del agente);
+  - hay duplicados, aunque solo cambien mayúsculas y minúsculas;
+  - hay texto que no es UTF-8, se superan los límites o algo parece un secreto.
+
+  Se aceptan una carpeta raíz común y separadores `\`. El único archivo extra admitido es el marcador `portal-export.json`:
+  `{ workspace, agentId, n, hash, exportedAt }`.
+  - **Nuevo**: el id de `agent.yaml` no existe en este espacio, o el marcador es de otro espacio, porque nunca se adopta un
+    agente ajeno. Se sigue el mismo flujo que con la carpeta: vista previa, el propietario concede arnés, permisos y
+    departamento, el agente recibe un id nuevo y la memoria llega como propuesta.
+  - **Existente**: se fusiona a tres bandas, archivo por archivo, con `mergePortableFiles`:
+    - el punto de partida es la revisión exportada;
+    - lo del Portal es la revisión adoptada;
+    - lo de fuera es el ZIP.
+
+    La revisión de partida es la del marcador, si su huella coincide. Si no la hay, se usa la revisión con más archivos
+    idénticos al ZIP. Si ninguna se parece, todo archivo que difiera de lo adoptado es conflicto. Las reglas son:
+    - si fuera no cambió, se queda lo del Portal;
+    - si el Portal no cambió, se toma lo de fuera;
+    - si cambiaron los dos, hay **conflicto**: de ese archivo no se aplica nada hasta que el propietario elija «la del
+      Portal» o «la del ZIP» (409 con la lista);
+    - los archivos sin conflicto se fusionan.
+
+    Borrar un archivo cuenta como cambio.
+  - **Nunca se adoptan desde el ZIP**: arnés, modelo, esfuerzo, herramientas, autonomía, capacidades ni id. Se reponen desde
+    el Portal y la vista previa explica qué no se adoptó y que se cambia en Configuración.
+  - Se escribe bajo el cerrojo del agente (`writeImportedRevision`). Responde 409 si la revisión adoptada cambió desde la
+    vista previa o si hay un cambio externo en disco sin revisar. Si la huella del ZIP cambió entre la vista previa y la
+    confirmación, también responde 409. Todo queda registrado como `imported_zip` / `imported_zip_undone`.
+  - Rutas: `POST /api/workspaces/:slug/agents/import-zip/preview` (subida `application/octet-stream`; devuelve un token
+    que caduca a los 30 min), `POST …/agents/import-zip/confirm` (`token`, `hash`, `resolutions`, `grant` solo para uno
+    nuevo) y `POST …/agents/:id/import-zip/:n/undo`.
+  - Todo vive en la base de cada espacio: funciona igual en cualquier empresa y no añade nada al núcleo.
 - **Exportar**: copia la revisión adoptada a una carpeta elegida (nunca sobrescribe; fuera de la instalación del Portal) o la
   descarga como **paquete portable (ZIP)** para usarla fuera del Portal (§8). Sin credenciales. El JSON de la carpeta
   (`GET …/agents/:id/export`) se mantiene solo por compatibilidad.

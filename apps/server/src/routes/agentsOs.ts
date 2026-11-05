@@ -11,6 +11,8 @@ import { detectCodex, getCodexSettings, lastCodexDetection, saveCodexSettings } 
 import { chatEstimate, chatMessages, chatUsageToday, sendChat } from '../services/agentChat.ts';
 import { adoptExternal, agentFoldersRepo, discardExternal, ensureAgentFolders, folderStatus, restoreRevision, syncAgentFolder, updateExtras } from '../services/agentFolders.ts';
 import { createAgentFromWizard, exportBundle, exportFiles, exportTo, importConfirm, importPreview } from '../services/agentCreation.ts';
+import { applyZipImport, previewZipImport, undoZipImport, ZIP_UPLOAD_MAX } from '../services/agentZipImport.ts';
+import { acceptOctetStream, streamToTemp, uploadName } from './uploads.ts';
 import { proposeFromFeedback, retireMemory, verifyMemory } from '../services/agentLearning.ts';
 import { agentEvents, recordAgentEvent } from '../services/agentEvents.ts';
 import { createDelegation, estimateDelegation, MAX_DEPARTMENT_CONSULTS } from '../services/delegation.ts';
@@ -51,7 +53,12 @@ const WIZARD = z.object({
   authorized: z.boolean()
 });
 
+/** Lo que concede el propietario a un agente importado nuevo: nunca sale de la carpeta ni del ZIP. */
+const GRANT = z.object({ department: z.string().trim().min(2).max(60), scope: z.enum(['workspace', 'project']), projectId: z.string().nullable(), harness: HARNESS, model: z.string().trim().min(1).max(120), provider: z.enum(['anthropic', 'openai']).nullable().optional(), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'), tools: z.array(z.string().max(40)).max(12).default([]), knowledge: z.array(z.string().max(40)).max(8).default([]), capabilities: z.array(CAP).max(6).nullable().optional(), autonomy: z.enum(['ask', 'within_scope']).default('ask'), authorized: z.boolean() });
+
 export async function agentsOsRoutes(app: FastifyInstance) {
+  // Subida del ZIP en flujo: el parser se registra una sola vez por contexto.
+  if (!app.hasContentTypeParser('application/octet-stream')) acceptOctetStream(app);
   const guard = (slug: string, reply: FastifyReply) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
   const agentOr404 = (slug: string, id: string, reply: FastifyReply): Agent | null => { const a = agentsRepo(slug).get(id); if (!a) { reply.code(404).send({ error: 'Agente no encontrado' }); return null; } return a; };
 
@@ -275,6 +282,26 @@ export async function agentsOsRoutes(app: FastifyInstance) {
     const b = z.object({ path: z.string().min(1).max(1024), hash: z.string().length(64), department: z.string().trim().min(2).max(60), scope: z.enum(['workspace', 'project']), projectId: z.string().nullable(), harness: HARNESS, model: z.string().trim().min(1).max(120), provider: z.enum(['anthropic', 'openai']).nullable().optional(), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'), tools: z.array(z.string().max(40)).max(12).default([]), knowledge: z.array(z.string().max(40)).max(8).default([]), capabilities: z.array(CAP).max(6).nullable().optional(), autonomy: z.enum(['ask', 'within_scope']).default('ask'), authorized: z.boolean() }).safeParse(req.body);
     if (!b.success) return reply.code(400).send({ error: 'Datos de importación no válidos.', issues: b.error.issues });
     try { const { path: p, hash, ...grant } = b.data; return reply.code(201).send(await importConfirm(slug, p, hash, grant as any)); } catch (e) { return err(reply, e); }
+  });
+  // ---------- Importar desde ZIP (sin costo): vista previa, confirmación (adopción o agente nuevo) y Deshacer
+  app.route({
+    method: ['POST', 'PUT'], url: '/api/workspaces/:slug/agents/import-zip/preview',
+    handler: async (req, reply) => {
+      const { slug } = req.params as any; if (!guard(slug, reply)) return;
+      let up: Awaited<ReturnType<typeof streamToTemp>> | null = null;
+      try { up = await streamToTemp(req, ZIP_UPLOAD_MAX); return previewZipImport(slug, up.file, uploadName(req)); } catch (e) { return err(reply, e); } finally { up?.cleanup(); }
+    }
+  });
+  app.post('/api/workspaces/:slug/agents/import-zip/confirm', async (req, reply) => {
+    const { slug } = req.params as any; if (!guard(slug, reply)) return;
+    const b = z.object({ token: z.string().min(8).max(80), hash: z.string().length(64), resolutions: z.record(z.string().max(200), z.enum(['portal', 'zip'])).default({}), grant: GRANT.optional() }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'Datos de importación no válidos.', issues: b.error.issues });
+    try { return reply.code(201).send(await applyZipImport(slug, { token: b.data.token, hash: b.data.hash, resolutions: b.data.resolutions, grant: b.data.grant as any }, agentId => onRow(slug, agentId))); } catch (e) { return err(reply, e); }
+  });
+  app.post('/api/workspaces/:slug/agents/:id/import-zip/:n/undo', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
+    const p = z.object({ n: z.coerce.number().int().min(1) }).safeParse(req.params); if (!p.success) return reply.code(400).send({ error: 'Indica la revisión importada.' });
+    try { return await undoZipImport(slug, id, p.data.n, onRow(slug, id)); } catch (e) { return err(reply, e); }
   });
   // JSON de la carpeta portable (compatibilidad); el paquete para usar fuera del Portal es export.zip.
   app.get('/api/workspaces/:slug/agents/:id/export', async (req, reply) => {

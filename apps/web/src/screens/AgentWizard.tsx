@@ -4,6 +4,7 @@ import type { Capability, ExecutionBackend, PortableSkill, ProviderId } from '@p
 import { AGENT_ARCHETYPES, CAPABILITIES, DEPARTMENT_PRESETS, GENERAL_ARCHETYPE, HARNESSES, KNOWLEDGE, TOOLS, suggestArchetypes, type AgentArchetype } from '@portal-ia/domain';
 import { FolderPicker } from '../components/FolderPicker.tsx';
 import { ExternalImportBox } from '../components/ExternalAgent.tsx';
+import { AgentZipImport } from '../components/AgentZipImport.tsx';
 import { DraftNote } from '../components/ui.tsx';
 const HARNESS_NAME: Record<string, string> = Object.fromEntries(HARNESSES.map(h => [h.id, h.name]));
 import { Shell } from '../components/Shell.tsx';
@@ -47,7 +48,7 @@ export function AgentWizard() {
   const [advanced, setAdvanced] = useState(false); const [auth, setAuth] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<{ id: string; name: string; firstTask: string } | null>(null);
   // «Nuevo agente ▾» de la Oficina puede abrir directamente la importación (?importar=portable|externo).
-  const [importing, setImporting] = useState<false | 'portable' | 'external'>(() => params.get('importar') === 'portable' ? 'portable' : params.get('importar') === 'externo' ? 'external' : false);
+  const [importing, setImporting] = useState<false | 'portable' | 'external' | 'zip'>(() => params.get('importar') === 'portable' ? 'portable' : params.get('importar') === 'externo' ? 'external' : params.get('importar') === 'zip' ? 'zip' : false);
   const [showDevTools, setShowDevTools] = useState(false);
   useEffect(() => { osApi.harnesses().then(r => setHarnesses(r.harnesses)).catch(e => setError(e.message)); osApi.departments(ws.slug).then(l => setDepartments(l.map(x => x.name))).catch(() => undefined); }, [ws.slug]);
   const suggestions = useMemo(() => suggestArchetypes(d.need), [d.need]);
@@ -92,9 +93,11 @@ export function AgentWizard() {
             </button>)}</div>
           </>}
           <button type="button" className="lnk small" style={{ alignSelf: 'flex-start' }} onClick={() => setImporting('portable')}>¿Tienes la carpeta portable de un agente (agent.yaml)? Impórtala</button>
+          <button type="button" className="lnk small" style={{ alignSelf: 'flex-start' }} onClick={() => setImporting('zip')}>¿Ya tienes el ZIP de un agente (nuevo o que ya está aquí)? Importar desde ZIP</button>
           <button type="button" className="lnk small" style={{ alignSelf: 'flex-start' }} onClick={() => setImporting('external')}>¿Es un agente que ya trabaja en su propia carpeta (AGENTS.md, CLAUDE.md, skills…)? Intégralo sin copiarlo</button>
         </section>}
         {step === 0 && importing === 'external' && <ExternalImportBox slug={ws.slug} harnesses={harnesses} departments={departments} onCancel={() => setImporting(false)} onDone={id => navigate(`/oficina/agente/${id}/origen`)} />}
+        {step === 0 && importing === 'zip' && <AgentZipImport slug={ws.slug} projectId={project?.id ?? null} harnesses={harnesses} departments={departments} onCancel={() => setImporting(false)} onDone={id => navigate(`/oficina/agente/${id}/archivos`)} />}
         {step === 0 && importing === 'portable' && <ImportBox slug={ws.slug} projectId={project?.id ?? null} harnesses={harnesses} departments={departments} onCancel={() => setImporting(false)} onDone={id => navigate(`/oficina/agente/${id}/archivos`)} />}
 
         {step === 1 && <section className="card" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
