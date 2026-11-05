@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
  *  (e) una carpeta fuera de la raíz del agente (ruta transversal) se rechaza y no se toca;
  *  (f) lo borrado a mano aparece como «falta en disco» y se puede quitar de la lista;
  *  (g) volver a subir un PDF eliminado crea un documento nuevo;
- *  (h) el reintento de un rechazado recibe el motivo anterior y, si pasa, deja una propuesta de aprendizaje pendiente.
+ *  (h) el reintento de un rechazado recibe el motivo anterior y, si pasa, su aprendizaje se aplica solo (HU-179, con Deshacer).
  */
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-elim-'));
 process.env.PORTAL_MOCK_PROVIDER = '1';
@@ -221,7 +221,7 @@ test('(g) volver a subir un PDF eliminado crea un documento nuevo', async () => 
   assert.equal(z.items[0].outcome, 'accepted'); assert.notEqual(z.items[0].jobId, removedJobId);
 });
 
-test('(h) el reintento de un rechazado recibe el motivo anterior y una corrección exitosa deja una propuesta pendiente', async () => {
+test('(h) el reintento de un rechazado recibe el motivo anterior y una corrección exitosa se aprende sola', async () => {
   scenario(RULES);
   const b = await runBatch((await newBatch('Rechazo.zip', ['ELIM-H1 RECHAZO'])).id);
   assert.equal(b.items[0].state, 'rejected_qa', JSON.stringify(b.items[0])); assert.equal(b.counts.rejectedQa, 1);
@@ -236,7 +236,12 @@ test('(h) el reintento de un rechazado recibe el motivo anterior y una correcci�
   assert.equal(j.versions[0].passed, false); assert.equal(j.versions[1].passed, true);
   assert.ok(j.versions[1].plan.args.includes('corregido'), 'el agente replanificó con el diagnóstico');
   assert.match(String(j.versions[1].feedback ?? ''), /Corrección del intento anterior/, 'recibió el motivo del fallo anterior');
-  const props = (await docs()).proposals.filter((p: any) => p.jobId === jobId && String(p.feedback).startsWith('Reintento corregido'));
-  assert.equal(props.length, 1, 'una propuesta de aprendizaje');
-  assert.equal(props[0].state, 'proposed', 'pendiente de tu aprobación: no se aplica sola');
+  const learned = async () => (await docs()).proposals.filter((p: any) => p.jobId === jobId && String(p.feedback).startsWith('Reintento corregido'));
+  assert.ok(await until(async () => (await learned()).some((p: any) => p.state === 'applied')), JSON.stringify(await learned()));
+  const props = await learned();
+  assert.equal(props.length, 1, 'un solo aprendizaje del reintento');
+  assert.equal(props[0].state, 'applied', 'HU-179: un reintento verificado se aprende solo, sin propuesta pendiente');
+  assert.equal(props[0].autoApplied, true, 'aplicado por el Portal sin aprobación manual');
+  assert.equal(props[0].origin, 'retry', 'origen: aprendido de un reintento');
+  assert.ok(!props.some((p: any) => p.state === 'proposed'), 'ninguna propuesta queda pendiente');
 });
