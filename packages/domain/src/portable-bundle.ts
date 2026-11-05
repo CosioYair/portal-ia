@@ -1,4 +1,5 @@
 import { PORTABLE_AGENT_SCHEMA, PORTABLE_LIMITS, allowedPortablePath, findSecret, memoryToMarkdown, normalizeText, parseMemory, parseYaml, toYaml, type PortableFiles } from './portable-agent.ts';
+import { EXTERNAL_TEXT_LIMIT, EXTERNAL_TOTAL_LIMIT, isIdentityPath, parseSkillHeader } from './external-agent.ts';
 
 /**
  * Paquete portable de un agente (`portal-ia/agent-bundle@2`, docs/agentes-portables.md): la carpeta `portal-ia/agent@1`
@@ -13,11 +14,28 @@ import { PORTABLE_AGENT_SCHEMA, PORTABLE_LIMITS, allowedPortablePath, findSecret
 export const PORTABLE_BUNDLE_SCHEMA = 'portal-ia/agent-bundle@2';
 export interface BundleProblem { path: string; message: string }
 export interface BundleOptions { agentName: string; exportedAt: string; changelog?: string | null }
+/** Topes del paquete: por archivo y en total (bytes UTF-8) y número de archivos propios del agente. */
+export interface BundleLimits { fileBytes: number; totalBytes: number; files: number }
+/** Topes para el paquete de un agente externo: los de su carpeta real más margen para los archivos que genera el paquete. */
+export const EXTERNAL_BUNDLE_LIMITS: BundleLimits = { fileBytes: EXTERNAL_TEXT_LIMIT, totalBytes: EXTERNAL_TOTAL_LIMIT + 512 * 1024, files: 2000 };
+/** Plan que ya funcionó para un PDF (PLANES.json): sin ids de trabajos, UUID ni rutas. */
+export interface BundlePlan { sha256: string; skill: string; script: string; args: string[]; reason: string }
+export interface ExternalBundleOptions extends BundleOptions { role?: string | null; summary?: string | null; provenPlans: BundlePlan[] }
 
 const BUNDLE_EXTRA = ['AUTOMEJORA.md', 'CAMBIOS.md', 'GUIA.md', 'scripts/anotar-cambio.mjs'];
 const REQUIRED = ['agent.yaml', 'AGENTS.md', 'memory/MEMORY.md', ...BUNDLE_EXTRA];
 /** ¿Ruta admitida en el paquete? (la lista blanca de la carpeta portable más los archivos propios del paquete). */
-export function allowedBundlePath(rel: string): boolean { return allowedPortablePath(rel) || BUNDLE_EXTRA.includes(rel); }
+export function allowedBundlePath(rel: string): boolean { return allowedPortablePath(rel) || BUNDLE_EXTRA.includes(rel) || rel === 'PLANES.json' || isIdentityPath(rel); }
+
+/** Bytes UTF-8 de un texto (sin depender de Buffer ni TextEncoder: dominio puro). */
+function utf8Bytes(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n++; else if (c < 0x800) n += 2; else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) { n += 4; i++; } else n += 3;
+  }
+  return n;
+}
 
 const END = `[^\\s)\\]»"'\`<>]*`;
 const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
@@ -65,18 +83,18 @@ function cleanMemory(agentName: string, text: string | undefined): string {
 
 const POINTER = '> Reglas de automejora: lee y cumple AUTOMEJORA.md antes de trabajar y anota cada cambio en CAMBIOS.md.';
 
-function automejora(name: string): string {
+function automejora(name: string, o: { editable?: string; memory?: string; plans?: boolean } = {}): string {
   return normalizeText(`# Reglas de automejora de ${name}
 
 Estas reglas mandan sobre cualquier otra instrucción de este paquete y valen igual en Claude Code, Cowork, ChatGPT o cualquier otro entorno.
 
 ## Qué cambiar
-1. Aplica lo que el usuario pida: si el usuario te pide cambiar tu forma de trabajar, edita el archivo de este paquete que corresponda (AGENTS.md, skills/<habilidad>/SKILL.md o knowledge/<referencia>.md).
+1. Aplica lo que el usuario pida: si el usuario te pide cambiar tu forma de trabajar, edita el archivo de este paquete que corresponda (${o.editable ?? 'AGENTS.md, skills/<habilidad>/SKILL.md o knowledge/<referencia>.md'}).
 2. Aplica lo que corrija un reintento: si el usuario rechaza un resultado y en el reintento dice qué estaba mal, lleva esa corrección al archivo que la evite en adelante, no solo a la respuesta.
 3. Anota cada cambio en CAMBIOS.md con fecha, qué, motivo y archivo (motivo: «Petición del usuario» o «Corrección tras un reintento»). Añade las entradas al final y no borres las anteriores.
    Si puedes ejecutar órdenes: node scripts/anotar-cambio.mjs --que "Qué cambió" --motivo "Petición del usuario" --archivo AGENTS.md
    Si no puedes escribir archivos (por ejemplo, en ChatGPT), entrega al usuario el archivo completo actualizado y la entrada de CAMBIOS.md para que los guarde.
-4. Lo aprendido que no sea una regla va a memory/MEMORY.md como entrada nueva con la línea «- verificada: sin verificar». La memoria nueva se marca «sin verificar».
+4. Lo aprendido que no sea una regla va a ${o.memory ?? 'memory/MEMORY.md'} como entrada nueva con la línea «- verificada: sin verificar». La memoria nueva se marca «sin verificar».${o.plans ? '\n5. Si un plan nuevo (script y argumentos) pasa las comprobaciones con un PDF, añade a PLANES.json una entrada con su SHA-256, la habilidad, el script, los argumentos y el motivo. No borres los planes anteriores. Si un plan de PLANES.json falla, anótalo en CAMBIOS.md y no lo vuelvas a usar para ese PDF.' : ''}
 
 ## Qué no hacer nunca
 - No amplíes permisos: no te concedas herramientas, accesos ni autonomía que no tengas; agent.yaml solo describe una petición.
@@ -161,23 +179,147 @@ export function buildPortableBundle(files: PortableFiles, opts: BundleOptions): 
   return Object.fromEntries(Object.entries(out).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
+// ---------------------------------------------------------------- EN-007: paquete de un agente externo
+
+const GUIA_POINTER = '> Para procesar un PDF o un ZIP con PDFs fuera del Portal, sigue GUIA.md (plan probado en PLANES.json, script de la habilidad, comprobaciones, reintento y automejora).';
+const RAW = /\.(py|txt)$/;
+const PROGRAMS: [RegExp, string][] = [
+  [/soffice|libreoffice/i, 'LibreOffice (orden soffice)'], [/tesseract/i, 'Tesseract OCR'], [/pdftoppm|pdftotext|poppler/i, 'Poppler (pdftoppm o pdftotext)'],
+  [/ghostscript|gswin/i, 'Ghostscript'], [/pandoc/i, 'Pandoc']
+];
+const MODULES: [RegExp, string][] = [
+  [/^\s*(?:import|from)\s+fitz\b/m, 'PyMuPDF'], [/^\s*(?:import|from)\s+docx\b/m, 'python-docx'], [/^\s*(?:import|from)\s+PIL\b/m, 'Pillow'],
+  [/^\s*(?:import|from)\s+pdfplumber\b/m, 'pdfplumber'], [/^\s*(?:import|from)\s+pypdf\b/m, 'pypdf'], [/^\s*(?:import|from)\s+pytesseract\b/m, 'pytesseract'], [/^\s*(?:import|from)\s+lxml\b/m, 'lxml']
+];
+
+/** GUIA.md del paquete externo. Solo cita rutas que existen en `files` (más los archivos que genera el propio paquete). */
+function guiaExterna(name: string, files: PortableFiles, planCount: number): string {
+  const keys = Object.keys(files).sort();
+  const slugs = [...new Set(keys.map(p => /^skills\/([^/]+)\/SKILL\.md$/.exec(p)?.[1]).filter((s): s is string => !!s))].sort();
+  const skills = slugs.map(s => {
+    const h = parseSkillHeader(files[`skills/${s}/SKILL.md`] ?? '');
+    return {
+      slug: s, name: scrub(h.name ?? s), description: scrub(h.description ?? ''),
+      scripts: keys.filter(p => p.startsWith(`skills/${s}/scripts/`) && p.endsWith('.py')),
+      reqs: keys.filter(p => p.startsWith(`skills/${s}/scripts/`) && /requirements[^/]*\.txt$/i.test(p))
+    };
+  });
+  const mem = keys.filter(p => /^memoria\//i.test(p));
+  const ctx = keys.filter(p => /^contexto\//i.test(p));
+  const py = keys.filter(p => p.endsWith('.py')).map(p => files[p]).join('\n');
+  const programs = PROGRAMS.filter(([re]) => re.test(py)).map(([, n]) => n);
+  const modules = MODULES.filter(([re]) => re.test(py)).map(([, n]) => n);
+  const reqs = skills.flatMap(s => s.reqs);
+  const example = skills.flatMap(s => s.scripts)[0] ?? null;
+  const memRef = mem.length ? mem.map(p => `\`${p}\``).join(', ') : '`memory/MEMORY.md`';
+  const skillList = skills.length
+    ? skills.map(s => `- \`skills/${s.slug}/SKILL.md\`: ${s.name}${s.description ? `. ${s.description}` : ''}${s.scripts.length ? `\n  Scripts: ${s.scripts.map(p => `\`${p}\``).join(', ')}` : ''}${s.reqs.length ? `\n  Paquetes declarados: ${s.reqs.map(p => `\`${p}\``).join(', ')}` : ''}`).join('\n')
+    : '- Este agente no tiene habilidades con scripts. Sigue `AGENTS.md`: los pasos de conversión de abajo solo sirven si le añades una habilidad con scripts.';
+  return normalizeText(`# Guía: usar a ${name} fuera de Portal IA
+
+Paquete ${PORTABLE_BUNDLE_SCHEMA}. Contiene \`AGENTS.md\` (instrucciones), \`agent.yaml\` (identidad), ${ctx.length ? `${ctx.map(p => `\`${p}\``).join(', ')} (contexto), ` : ''}la memoria (${memRef}, con lo aprendido desde el chat y en reintentos verificados), las habilidades con sus scripts, \`PLANES.json\` (planes que ya funcionaron), \`AUTOMEJORA.md\` (reglas de automejora), \`CAMBIOS.md\` (historial) y \`scripts/anotar-cambio.mjs\` (anota un cambio; solo necesita Node).
+
+No incluye dependencias instaladas, programas externos, documentos convertidos ni la bandeja de entrada.
+
+## Habilidades y scripts
+${skillList}
+
+## Procesar un PDF
+1. Calcula su SHA-256. En Linux: \`sha256sum documento.pdf\`. En macOS: \`shasum -a 256 documento.pdf\`. En Windows: \`Get-FileHash documento.pdf -Algorithm SHA256\`.
+2. Busca ese valor, en minúsculas, en el campo «sha256» de \`PLANES.json\` (${planCount} plan(es) probados). Si coincide, usa su «script» y sus «args». Sustituye {entrada} por el PDF, {salida} por el Word que vas a crear, {informe} por un archivo .json nuevo y {trabajo} por una carpeta temporal vacía.
+3. Si no coincide, elige el script y las opciones según el SKILL.md de la habilidad. Los dos primeros argumentos son siempre el PDF de entrada y el Word de salida.
+4. Ejecuta el script desde la carpeta del paquete${example ? `, por ejemplo: \`python ${example} documento.pdf documento.docx\`` : ''} (en Windows, \`py -3\` en lugar de \`python\`).
+5. Aplica las comprobaciones que describe el SKILL.md de la habilidad y, además, estas: el Word se abre; el texto es editable (no hay páginas convertidas en imagen); tiene las mismas páginas; no falta ni se duplica contenido; las tablas son tablas. El Portal usaba su propia herramienta de comprobación, que no se incluye: hazlas tú y di cuáles no pudiste comprobar.
+6. Si falla alguna comprobación o el script termina con error, reintenta con otro plan (otro script u otras opciones del SKILL.md). No repitas un plan que ya falló con ese PDF. Tras tres intentos sin éxito, informa de que el documento necesita intervención y explica el motivo.
+7. Anota lo aprendido según \`AUTOMEJORA.md\`: si un plan nuevo pasó, añádelo a \`PLANES.json\`; el aprendizaje va a ${memRef} como «sin verificar» y el cambio a \`CAMBIOS.md\` (si puedes ejecutar órdenes: \`node scripts/anotar-cambio.mjs --que "..." --motivo "Corrección tras un reintento" --archivo PLANES.json\`).
+
+## Procesar un ZIP con PDFs
+1. Descomprímelo en una carpeta nueva y vacía: \`unzip lote.zip -d lote\` o, en Windows, \`Expand-Archive lote.zip -DestinationPath lote\`.
+2. Antes de convertir, revisa la lista: excluye (y anota como excluido, con el motivo) lo que no sea .pdf; no extraigas entradas con «..» ni rutas absolutas. Si el ZIP supera los topes del Portal (500 PDF, 100 MB por PDF o 4 GB descomprimido), recházalo entero y pide dividirlo; nunca lo cortes en silencio.
+3. Procesa cada PDF con los pasos de «Procesar un PDF», cada uno con su propio SHA-256.
+4. Entrega un resumen por documento (aprobado, aprobado tras reintento o necesita intervención, con el motivo) y otro del lote. No des por convertido un documento que no pasó las comprobaciones.
+
+## Requisitos de la plataforma
+- Python 3 para ejecutar los scripts (compruébalo con \`python --version\`).
+- Paquetes de Python: ${reqs.length ? reqs.map(p => `\`pip install -r ${p}\``).join(' · ') : 'los scripts no declaran un requirements.txt'}${modules.length ? `. Según sus imports, usan (orientativo): ${modules.join(', ')}` : ''}.
+- Programas externos: ${programs.length ? `${programs.join(', ')} (aparecen en el texto de los scripts). Instálalos tú; sin ellos, los scripts que los usan fallarán` : 'no se detectó ninguno en los scripts'}.
+- Node solo para \`scripts/anotar-cambio.mjs\` (opcional).
+
+## Dónde no se pueden ejecutar scripts
+En ChatGPT sin intérprete de código, o en cualquier entorno sin Python, el agente no puede convertir el documento. Debe decirlo con claridad, explicar los pasos de esta guía para que los ejecutes en tu equipo y no prometer ni simular un resultado. Con intérprete pero sin los programas externos, avisa de qué scripts no podrán funcionar antes de intentarlo.
+
+## Fallos conocidos y cómo se resolvieron
+Las entradas de ${memRef} que vienen de reintentos verificados describen el síntoma, la causa y el plan que lo resolvió. Léelas antes de reintentar y no repitas un plan que la memoria marca como fallido.
+
+## Claude Code web y Cowork
+Descomprime el paquete en un repositorio o en una carpeta de trabajo y empieza con: «Lee AGENTS.md, AUTOMEJORA.md y GUIA.md y síguelos». Revisa los cambios en los archivos y en \`CAMBIOS.md\`.
+
+## ChatGPT
+Pega \`AGENTS.md\` y \`AUTOMEJORA.md\` en sus instrucciones y adjunta el resto de archivos. ChatGPT no escribe en tus archivos: te dará el archivo actualizado y la entrada de \`CAMBIOS.md\` para que los guardes tú.
+`);
+}
+
+/**
+ * Paquete de un agente EXTERNO a partir de su revisión adoptada (lo que admite isIdentityPath). Los scripts (*.py, *.txt)
+ * se copian TAL CUAL, sin normalizar ni limpiar; si contienen un secreto, una ruta local o un dato interno, validatePortableBundle
+ * lo detecta y la exportación se niega (409). Genera agent.yaml y memory/MEMORY.md mínimos para que el ZIP se pueda reimportar
+ * (HU-183), PLANES.json, AUTOMEJORA.md, CAMBIOS.md, GUIA.md y scripts/anotar-cambio.mjs. Determinista para las mismas entradas.
+ */
+export function buildExternalBundle(snapshot: PortableFiles, opts: ExternalBundleOptions): PortableFiles {
+  const name = scrub(opts.agentName.trim()) || 'Agente';
+  const date = opts.exportedAt.slice(0, 10);
+  const out: PortableFiles = {};
+  for (const [p, c] of Object.entries(snapshot)) {
+    if (!isIdentityPath(p) || p === 'AGENTS.md') continue;
+    out[p] = RAW.test(p) ? c : normalizeText(scrub(c));
+  }
+  const agents = normalizeText(scrub(snapshot['AGENTS.md'] ?? `# ${name}`));
+  out['AGENTS.md'] = agents.startsWith(POINTER) ? agents : normalizeText(`${POINTER}\n${GUIA_POINTER}\n\n${agents}`);
+  const manifest: Record<string, string> = { name, role: scrub(opts.role?.trim() || name) };
+  if (opts.summary?.trim()) manifest.summary = scrub(opts.summary.trim());
+  out['agent.yaml'] = cleanManifest(toYaml(manifest));
+  const mem = Object.keys(out).filter(p => /^memoria\//i.test(p)).sort();
+  out['memory/MEMORY.md'] = memoryToMarkdown(name, mem.length ? [{
+    id: 'm1', title: 'Dónde está la memoria', text: `La memoria completa del agente (también lo aprendido desde el chat y en reintentos verificados) está en: ${mem.join(', ')}.`,
+    verifiedAt: date, verifiedBy: 'el propietario', source: 'Aprendido en el Portal'
+  }] : []);
+  const scripts = new Set(Object.keys(out).filter(p => /^skills\/[^/]+\/scripts\/[^/]+\.py$/.test(p)));
+  const seen = new Set<string>();
+  const plans = opts.provenPlans
+    .filter(x => scripts.has(x.script) && !seen.has(x.sha256.toLowerCase()) && !!seen.add(x.sha256.toLowerCase()))
+    .map(x => ({ sha256: x.sha256.toLowerCase(), skill: x.skill, script: x.script, args: [...x.args], reason: x.reason }))
+    .sort((a, b) => (a.sha256 < b.sha256 ? -1 : a.sha256 > b.sha256 ? 1 : 0));
+  out['PLANES.json'] = `${JSON.stringify({
+    schemaVersion: 1,
+    nota: 'El SHA-256 identifica el PDF. Un plan que ya funcionó no garantiza el mismo resultado: aplica siempre las comprobaciones de GUIA.md.',
+    marcadores: { '{entrada}': 'PDF de entrada', '{salida}': 'Word de salida', '{informe}': 'informe .json (opcional)', '{trabajo}': 'carpeta temporal vacía' },
+    planes: plans
+  }, null, 2)}\n`;
+  out['AUTOMEJORA.md'] = automejora(name, { editable: 'AGENTS.md, contexto/, memoria/ o la carpeta de su habilidad en skills/', memory: mem[0] ?? 'memory/MEMORY.md', plans: true });
+  out['CAMBIOS.md'] = cambios(name, date, opts.changelog);
+  out['GUIA.md'] = guiaExterna(name, out, plans.length);
+  out['scripts/anotar-cambio.mjs'] = SCRIPT;
+  return Object.fromEntries(Object.entries(out).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+}
+
 /** Problemas que impiden exportar el paquete (lista vacía = se puede exportar). `forbidden`: textos que no deben aparecer (p. ej. el id del agente). */
-export function validatePortableBundle(files: PortableFiles, opts: { forbidden?: string[] } = {}): BundleProblem[] {
+export function validatePortableBundle(files: PortableFiles, opts: { forbidden?: string[]; limits?: BundleLimits } = {}): BundleProblem[] {
+  const lim = opts.limits ?? PORTABLE_LIMITS;
   const out: BundleProblem[] = [];
   for (const r of REQUIRED) if (files[r] === undefined) out.push({ path: r, message: 'Falta en el paquete.' });
   const forbidden = (opts.forbidden ?? []).filter(f => f && f.length >= 4).map(f => f.toLowerCase());
   let total = 0;
   for (const [p, c] of Object.entries(files)) {
-    total += c.length;
+    const size = utf8Bytes(c); total += size;
     if (!allowedBundlePath(p)) { out.push({ path: p, message: 'Ruta no permitida en el paquete.' }); continue; }
-    if (c.length > PORTABLE_LIMITS.fileBytes) out.push({ path: p, message: `Archivo demasiado grande (máx. ${PORTABLE_LIMITS.fileBytes / 1024} KB).` });
+    if (size > lim.fileBytes) out.push({ path: p, message: `Archivo demasiado grande (${Math.ceil(size / 1024)} KB; máx. ${lim.fileBytes / 1024} KB).` });
     const secret = findSecret(c); if (secret) out.push({ path: p, message: `Contiene lo que parece una ${secret}: las credenciales nunca salen del Portal.` });
     if (new RegExp(UUID).test(c)) out.push({ path: p, message: 'Contiene un identificador interno (UUID).' });
     if (LOCAL.some(l => new RegExp(l).test(c))) out.push({ path: p, message: 'Contiene una ruta local o de datos del Portal.' });
     if (new RegExp(API).test(c) || new RegExp(TABLES).test(c)) out.push({ path: p, message: 'Contiene rutas o tablas internas del Portal.' });
     const low = c.toLowerCase(); if (forbidden.some(f => low.includes(f))) out.push({ path: p, message: 'Contiene un dato interno del agente (su id en el Portal).' });
   }
-  if (Object.keys(files).length > PORTABLE_LIMITS.files + BUNDLE_EXTRA.length) out.push({ path: '', message: 'Demasiados archivos en el paquete.' });
-  if (total > PORTABLE_LIMITS.totalBytes) out.push({ path: '', message: `El paquete es demasiado grande (máx. ${PORTABLE_LIMITS.totalBytes / 1024} KB).` });
+  if (Object.keys(files).length > lim.files + BUNDLE_EXTRA.length + 1) out.push({ path: '', message: `Demasiados archivos en el paquete (máx. ${lim.files + BUNDLE_EXTRA.length + 1}).` });
+  if (total > lim.totalBytes) out.push({ path: '', message: `El paquete es demasiado grande (${Math.ceil(total / 1024)} KB; máx. ${lim.totalBytes / 1024} KB).` });
   return out;
 }

@@ -613,6 +613,42 @@ export function planSignature(plan: Pick<ScriptPlan, 'script' | 'args'>): string
   return JSON.stringify([String(plan.script ?? '').trim(), (plan.args ?? []).map(x => String(x).trim())]);
 }
 /** Firmas de los planes de las versiones fallidas (conversión no terminada o rechazo de la QA). */
+/** EN-007 · Plan exportable (PLANES.json): solo SHA-256 del PDF, habilidad, script, argumentos (marcadores) y motivo. */
+export interface ExportedPlan { sha256: string; skill: string; script: string; args: string[]; reason: string }
+const INTERNAL_TEXT = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\b[a-z]:[\\/]|(?:^|[\s("'])\/(?:home|users|tmp|var|private|mnt|root)\/|(?<![\w-])data\/|\/api\/|\.sqlite\b|workspace\.db|\\\\[\w.-]+\\/i;
+
+/**
+ * EN-007 · Planes que ya funcionaron, para el paquete portable de un agente externo. Misma regla que provenPlanBySha (HU-180):
+ * versiones aprobadas por la QA del Portal (passed=true) de trabajos no eliminados, cuyo script sigue en la revisión
+ * adoptada (`files`) con la MISMA huella y cuyo plan es válido con los scripts actuales. Por SHA-256 se queda la más
+ * reciente. Sin ids de trabajos ni de lotes, títulos, nombres de archivo ni rutas; un motivo con datos internos se sustituye
+ * por uno neutro. No llama al modelo.
+ */
+export function provenPlansForExport(slug: string, agentId: string, files: SnapshotFiles): ExportedPlan[] {
+  const db = ensure(slug);
+  const scripts = Object.keys(files).filter(p => /^skills\/[^/]+\/scripts\/[^/]+\.py$/.test(p));
+  const rows = db.prepare(`SELECT input_sha, versions_json FROM document_jobs WHERE agent_id = ? AND removed_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 5000`).all(agentId) as any[];
+  const best = new Map<string, { at: string; plan: ExportedPlan }>();
+  for (const r of rows) {
+    const sha = String(r.input_sha ?? '').toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(sha)) continue;
+    let versions: DocumentVersion[] = [];
+    try { versions = JSON.parse(r.versions_json); } catch { continue; }
+    for (const v of versions.slice().reverse()) {
+      if (v.passed !== true || !v.plan?.script || files[v.plan.script] === undefined) continue;
+      if (!v.scriptHash || v.scriptHash !== sha256Text(files[v.plan.script]!)) continue; // script cambiado: el plan no se exporta
+      const ok = validatePlan(v.plan, scripts);
+      if (!ok.ok) continue;
+      const prev = best.get(sha);
+      if (prev && prev.at >= String(v.createdAt ?? '')) break;
+      const reason = ok.plan.reason.replace(/\s+/g, ' ').trim().slice(0, 300);
+      best.set(sha, { at: String(v.createdAt ?? ''), plan: { sha256: sha, skill: ok.plan.script.split('/')[1] ?? '', script: ok.plan.script, args: [...ok.plan.args], reason: reason && !INTERNAL_TEXT.test(reason) ? reason : 'Plan aprobado por las comprobaciones del Portal.' } });
+      break;
+    }
+  }
+  return [...best.values()].map(x => x.plan).sort((a, b) => (a.sha256 < b.sha256 ? -1 : a.sha256 > b.sha256 ? 1 : 0));
+}
+
 export function failedPlanSignatures(job: Pick<DocumentJob, 'versions'>): Set<string> {
   return new Set(job.versions.filter(v => v.passed === false && v.plan?.script).map(v => planSignature(v.plan)));
 }

@@ -176,10 +176,17 @@ crea cuando el propietario lo pide (pestaña Archivos → «Crear su carpeta», 
 
 ## 8. Paquete portable (ZIP) · `portal-ia/agent-bundle@2`
 
-Objetivo: que el agente trabaje fuera del Portal igual que dentro y siga mejorando allí. Panel del agente → **«Descargar
-paquete (ZIP)»** (`GET /api/workspaces/:slug/agents/:id/export.zip`). No llama a la IA y no cuesta nada. Código:
-`packages/domain/src/portable-bundle.ts` (`buildPortableBundle`, `validatePortableBundle`), `zipFile.ts` (`zipBuffers`, ZIP
-en memoria y determinista) y `agentCreation.ts` (`exportBundle`). Prueba: `apps/server/test/agente-portable-paquete.test.ts`.
+Objetivo: que el agente trabaje fuera del Portal igual que dentro y siga mejorando allí. **«Descargar paquete (ZIP)»** está en
+Ajustes › **Archivos** de un agente interno y en Ajustes › **Origen** de un agente externo. Es el mismo botón
+(`BundleDownloadButton`) y la misma ruta: `GET /api/workspaces/:slug/agents/:id/export.zip`. No llama a la IA y no cuesta
+nada. Código:
+- `packages/domain/src/portable-bundle.ts`: `buildPortableBundle`, `buildExternalBundle`, `validatePortableBundle` y
+  `EXTERNAL_BUNDLE_LIMITS`;
+- `zipFile.ts`: `zipBuffers`, ZIP en memoria y determinista;
+- `agentCreation.ts`: `exportFiles` y `exportBundle`;
+- `documentJobs.ts`: `provenPlansForExport`.
+
+Pruebas: `apps/server/test/agente-portable-paquete.test.ts` y `apps/server/test/agente-portable-externo.test.ts`.
 
 ```
 AGENTS.md             instrucciones; su primera línea remite a AUTOMEJORA.md
@@ -199,6 +206,68 @@ ni el modelo, ni las herramientas concedidas, ni las lecciones propuestas o reti
 queda algún secreto (`findSecret`), dato interno o ruta fuera de la lista blanca, **no se exporta**: el Portal responde 409
 con la lista de problemas y el panel la muestra. Los archivos de la carpeta portable se pueden volver a importar con
 `filesToDefinition`; los que son propios del paquete solo generan avisos que no bloquean.
+
+**Agente interno: todo lo que llega a sus prompts.** El paquete lleva las instrucciones, las habilidades, la memoria
+verificada y las referencias. Si hay lecciones validadas de su papel, añade también `knowledge/lecciones-del-papel.md`.
+Esas lecciones salen de la misma consulta que las inyecta en los prompts (`lessonsFor`). Si no hay ninguna, el archivo no se
+crea. Su texto pasa por la misma limpieza que el resto de `knowledge/`.
+
+**Agente externo (EN-007).** `exportFiles` parte de su **revisión adoptada**, no de `definitionFor`: solo lo que admite
+`isIdentityPath`. `buildExternalBundle` arma el paquete:
+
+```
+AGENTS.md                      sus instrucciones, sin reescribir (arriba: remite a AUTOMEJORA.md y GUIA.md)
+contexto/*.md · memoria/*.md   contexto y TODA su memoria: también lo aprendido desde el chat (HU-178) y en reintentos verificados (HU-179)
+skills/<s>/SKILL.md            habilidades
+skills/<s>/scripts/*.py|*.txt  scripts y requirements, copiados byte a byte
+PLANES.json                    planes que ya funcionaron, por SHA-256 del PDF
+agent.yaml · memory/MEMORY.md  mínimos, para que el ZIP se pueda reimportar (HU-183); MEMORY.md remite a memoria/
+AUTOMEJORA.md · CAMBIOS.md · GUIA.md · scripts/anotar-cambio.mjs
+```
+
+No salen las dependencias instaladas (`.dependencias`, venv), los binarios, `bandeja-de-entrada/`, `documentos/` ni los
+documentos convertidos.
+
+- **PLANES.json** (`schemaVersion: 1`). Cada plan lleva `{ sha256, skill, script, args, reason }`, ordenado por `sha256`.
+  Solo entran los planes que pasaron la QA del Portal (`passed=true`) y cuyo script sigue en el paquete con la misma huella.
+  Si hay varios para el mismo PDF, queda el más reciente. Los argumentos usan los marcadores `{entrada}`, `{salida}`,
+  `{informe}` y `{trabajo}`. No lleva ids de trabajos ni de lotes, UUID, rutas ni títulos. Incluye una nota: un plan que ya
+  funcionó **no garantiza** el mismo resultado.
+- **GUIA.md** explica paso a paso cómo procesar sin el Portal un PDF y un ZIP con PDFs:
+  1. descomprimir el ZIP (solo `.pdf`, sin rutas `..`);
+  2. calcular el SHA-256 (`sha256sum` o `Get-FileHash`);
+  3. si el hash está en PLANES.json, usar ese script con esos argumentos;
+  4. si no está, elegir el script según `skills/<s>/SKILL.md`;
+  5. ejecutar `python skills/<s>/scripts/<x>.py`;
+  6. aplicar las comprobaciones de la habilidad;
+  7. si fallan, reintentar con otro plan;
+  8. anotar lo aprendido en `memoria/` y en `CAMBIOS.md` según AUTOMEJORA.md.
+
+  También indica qué necesita la plataforma: Python 3, los paquetes de `requirements*.txt` y los programas externos que
+  aparecen en los scripts (p. ej. LibreOffice). Y qué hacer donde no se pueden ejecutar scripts, como ChatGPT sin intérprete:
+  explicar los pasos sin prometer ni simular resultados. Solo cita rutas que existan en el ZIP, y la prueba lo comprueba.
+- **Topes.** Para un externo, `EXTERNAL_BUNDLE_LIMITS`:
+  - por archivo, `EXTERNAL_TEXT_LIMIT`;
+  - en total, `EXTERNAL_TOTAL_LIMIT` más 512 KB para los archivos que genera el paquete;
+  - como mucho 2000 archivos.
+
+  Para un interno siguen valiendo los de `PORTABLE_LIMITS`.
+- **Los scripts nunca se limpian.** Los `.py` y `.txt` no pasan por `scrub` ni se normalizan, porque cambiarlos los
+  rompería. Los `.md` sí se limpian como en un interno.
+
+**Sin paquetes parciales.** `validatePortableBundle` revisa todos los archivos del paquete. Si alguno contiene un secreto,
+una ruta local, un UUID, el id del agente o una ruta o tabla interna, o si supera los topes, la exportación se niega
+**entera**. La respuesta es un 409 con `payload.problems` (archivo y motivo de cada problema), y el panel muestra esa lista.
+Nunca se quita un archivo en silencio. La solución es corregir el archivo en la carpeta del agente, adoptarlo y volver a
+exportar.
+
+**Reimportar.** El ZIP de un externo sigue entrando por el flujo de HU-183. Los archivos propios del paquete no bloquean la
+importación. Al exportar o importar nunca salen ni cambian el id, el modelo, el arnés, los permisos concedidos ni los
+secretos. Los scripts modificados fuera del Portal no se adoptan automáticamente.
+
+**Frontera.** Exportar es una función replicable: funciona igual en cualquier empresa y con cualquier agente.
+`AUTOMEJORA.md` es el aprendizaje **local** del agente fuera del Portal (su memoria y `CAMBIOS.md`). No es la automejora del
+Portal, que sigue siendo exclusiva del sistema principal.
 
 **Reglas de automejora (AUTOMEJORA.md).** 1) Aplica lo que el usuario pida en el archivo que corresponda. 2) Aplica lo que
 corrija un reintento, en el archivo que evite repetir el error. 3) Anota cada cambio en CAMBIOS.md con fecha, qué, motivo

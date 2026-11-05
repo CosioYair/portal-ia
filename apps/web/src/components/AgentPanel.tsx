@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import type { ExecutionBackend, Lesson, PortableSkill, ProviderId } from '@portal-ia/domain';
@@ -269,10 +269,13 @@ function SkillsList({ files }: { files: Record<string, string> }) {
   const skills = skillsOf(files);
   return skills.length ? <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>{skills.map(s => <li key={s.slug}><strong>{s.name}</strong>{s.description ? ` — ${s.description}` : ''}</li>)}</ul> : <p className="small muted">Sin habilidades todavía.</p>;
 }
-function ExportBox({ slug, agentId }: { slug: string; agentId: string }) {
-  const { flash } = useApp();
-  const [path, setPath] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const [picking, setPicking] = useState(false);
-  // Paquete portable (ZIP): sin llamadas a la IA ni costo. Estados explícitos: preparando → listo / error (con los problemas del 409).
+/**
+ * «Descargar paquete (ZIP)»: el mismo botón en Ajustes › Archivos (agentes internos) y en Ajustes › Origen (externos).
+ * No llama a la IA ni tiene costo. Estados explícitos: preparando → listo / error. Si el servidor responde 409, muestra
+ * cada archivo con su motivo: nunca se entrega un paquete incompleto.
+ */
+export function BundleDownloadButton({ slug, agentId, external = false }: { slug: string; agentId: string; external?: boolean }) {
+  const helpId = useId();
   const [zip, setZip] = useState<{ state: 'idle' | 'preparing' | 'ready' | 'error'; fileName?: string; message?: string; problems?: { path: string; message: string }[] }>({ state: 'idle' });
   const download = async () => {
     setZip({ state: 'preparing' });
@@ -282,6 +285,23 @@ function ExportBox({ slug, agentId }: { slug: string; agentId: string }) {
       setZip({ state: 'error', message: problems.length ? 'No se puede exportar el paquete mientras tenga estos problemas:' : (e?.message ?? 'No se pudo descargar el paquete.'), problems });
     }
   };
+  return <>
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+      <button type="button" className="btn btn-secondary btn-sm" disabled={zip.state === 'preparing'} aria-describedby={helpId} onClick={() => void download()}>{zip.state === 'preparing' ? 'Preparando el paquete…' : 'Descargar paquete (ZIP)'}</button>
+      {zip.state === 'preparing' && <Spinner />}
+    </div>
+    <span id={helpId} className="small muted">{external
+      ? <>Para usar el agente fuera del Portal con todo lo que usa hoy: sus instrucciones, contexto, habilidades con sus scripts (sin modificar), toda su memoria y los planes que ya funcionaron (PLANES.json). También incluye las reglas de automejora (AUTOMEJORA.md), el registro de cambios (CAMBIOS.md) y una guía (GUIA.md) para procesar un PDF o un ZIP con PDFs sin el Portal. No incluye documentos, la bandeja de entrada, dependencias instaladas, credenciales ni datos internos del Portal. No usa la IA ni tiene costo.</>
+      : <>Para usar el agente fuera del Portal. Incluye sus instrucciones, habilidades, memoria verificada y referencias, y las lecciones validadas de su papel si las hay. También incluye las reglas de automejora (AUTOMEJORA.md), el registro de cambios (CAMBIOS.md), un script para anotar cambios y una guía para Claude Code web, Cowork y ChatGPT. No incluye credenciales ni datos internos del Portal. No usa la IA ni tiene costo.</>}</span>
+    <div aria-live="polite">
+      {zip.state === 'ready' && <Notice kind="ok">Paquete descargado: {zip.fileName}. Para empezar, abre GUIA.md.</Notice>}
+      {zip.state === 'error' && <Notice kind="err">{zip.message}{zip.problems && zip.problems.length > 0 && <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{zip.problems.map((x, i) => <li key={i}>{x.path ? <span className="mono">{x.path}</span> : null}{x.path ? ': ' : ''}{x.message}</li>)}</ul>}</Notice>}
+    </div>
+  </>;
+}
+function ExportBox({ slug, agentId }: { slug: string; agentId: string }) {
+  const { flash } = useApp();
+  const [path, setPath] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const [picking, setPicking] = useState(false);
   const toFolder = async () => { setBusy(true); setError(null); try { const r = await osApi.exportTo(slug, agentId, path.trim()); flash(`Exportado a ${r.path}`); setPath(''); } catch (e: any) { setError(e.message); } finally { setBusy(false); } };
   return <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
     <div className="h3">Exportar</div>
@@ -293,15 +313,7 @@ function ExportBox({ slug, agentId }: { slug: string; agentId: string }) {
       <button className="btn btn-secondary btn-sm" disabled={busy || !path.trim()} onClick={() => void toFolder()}>Copiar carpeta</button>
     </div>
     <span className="small muted">Sin credenciales: la carpeta solo lleva identidad, instrucciones, habilidades, memoria verificada y referencias.</span>
-    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-      <button type="button" className="btn btn-secondary btn-sm" disabled={zip.state === 'preparing'} aria-describedby="zip-help" onClick={() => void download()}>{zip.state === 'preparing' ? 'Preparando el paquete…' : 'Descargar paquete (ZIP)'}</button>
-      {zip.state === 'preparing' && <Spinner />}
-    </div>
-    <span id="zip-help" className="small muted">Para usar el agente fuera del Portal. Incluye sus instrucciones, habilidades, memoria verificada y referencias. También incluye las reglas de automejora (AUTOMEJORA.md), el registro de cambios (CAMBIOS.md), un script para anotar cambios y una guía para Claude Code web, Cowork y ChatGPT. No incluye credenciales ni datos internos del Portal. No usa la IA ni tiene costo.</span>
-    <div aria-live="polite">
-      {zip.state === 'ready' && <Notice kind="ok">Paquete descargado: {zip.fileName}. Para empezar, abre GUIA.md.</Notice>}
-      {zip.state === 'error' && <Notice kind="err">{zip.message}{zip.problems && zip.problems.length > 0 && <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{zip.problems.map((x, i) => <li key={i}>{x.path ? <span className="mono">{x.path}</span> : null}{x.path ? ': ' : ''}{x.message}</li>)}</ul>}</Notice>}
-    </div>
+    <BundleDownloadButton slug={slug} agentId={agentId} />
   </section>;
 }
 

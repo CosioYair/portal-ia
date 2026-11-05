@@ -8,6 +8,7 @@ import { useLive } from '../lib/live.ts';
 import { osApi, type AgentPanel as Panel, type DocumentQueue, type ExternalPreview, type SourceStatus } from '../lib/osApi.ts';
 import { fmtBytes } from './AgentChat.tsx';
 import { api, ApiError } from '../lib/api.ts';
+import { BundleDownloadButton } from './AgentPanel.tsx';
 
 // ---------------------------------------------------------------- Eliminación autorizada (HU-177)
 
@@ -506,6 +507,11 @@ export function OriginTab({ slug, p, onChanged }: { slug: string; p: Panel; onCh
   const restoreBlock = s.changes.length > 0 ? 'Primero revisa los cambios hechos fuera del Portal.' : !s.grants.applyImprovements ? 'Necesita el permiso de aplicar mejoras.' : null;
   return <>
     {error && <Notice kind="err">{error}</Notice>}
+    <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }} aria-labelledby="origin-bundle-h">
+      <div className="h3" id="origin-bundle-h">Exportar</div>
+      {s.changes.length > 0 && <span className="small muted">El paquete sale de la versión adoptada ({s.revision}). Lo que cambió fuera y aún no se adopta no entra.</span>}
+      <BundleDownloadButton slug={slug} agentId={p.agent.id} external />
+    </section>
     <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}><div className="h3">Integración</div><Chip xs tone={s.state === 'integrated' ? 'ok' : s.state === 'evaluating' ? 'accent' : 'warn'}>{INTEGRATION_LABEL[s.state]}</Chip></div>
       <p className="small muted">{s.state === 'integrated' ? 'El Portal ya aplicó a sus archivos una mejora que aprobaste, comprobada, con copia previa y registro.' : s.state === 'evaluating' ? 'Ya trabajó con el Portal. Pasará a «Integrado» cuando apruebes una mejora y se aplique a su habilidad o instrucciones.' : 'Integrado como referencia: aún no ha trabajado con el Portal.'}</p>

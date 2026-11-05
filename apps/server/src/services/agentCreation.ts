@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CAPABILITIES, KNOWLEDGE, TOOLS, buildPortableBundle, validatePortableBundle, definitionToFiles, filesToDefinition, slugify, type Agent, type AgentConfig, type Capability, type ExecutionBackend, type PortableFiles, type PortableKnowledge, type PortableSkill, type ProviderId, type ReasoningEffort, clampEffort } from '@portal-ia/domain';
+import { CAPABILITIES, EXTERNAL_BUNDLE_LIMITS, KNOWLEDGE, TOOLS, buildExternalBundle, buildPortableBundle, isIdentityPath, validatePortableBundle, definitionToFiles, filesToDefinition, slugify, type Agent, type AgentConfig, type Capability, type ExecutionBackend, type PortableFiles, type PortableKnowledge, type PortableSkill, type ProviderId, type ReasoningEffort, type TeamRole, clampEffort } from '@portal-ia/domain';
 import { config, REPO_ROOT } from '../config.ts';
 import { agentsRepo, projectsRepo } from '../db/workspace.ts';
 import { departmentsRepo } from './departments.ts';
@@ -8,7 +8,7 @@ import { agentFoldersRepo, definitionFor, defaultInstructions, hashFiles, readFo
 import { harnessAvailability, harnessModels } from './harness/index.ts';
 import { inheritLatestTemplate } from './agentTemplates.ts';
 import { recordAgentEvent } from './agentEvents.ts';
-import { lessonsRepo } from './lessons.ts';
+import { lessonsFor, lessonsRepo } from './lessons.ts';
 import { expandHome, isAllowed } from '../routes/fs.ts';
 import { monotonicNow } from '../clock.ts';
 import { zipBuffers } from './zipFile.ts';
@@ -152,13 +152,47 @@ export async function importFromFiles(slug: string, files: PortableFiles, origin
   return agent;
 }
 
+/** Papel de equipo del agente para las lecciones (el mismo filtro de rol que usa la inyección en los prompts). */
+function teamRoleOf(a: Agent): TeamRole | null {
+  const t = `${a.key} ${a.template?.role ?? ''}`.toLowerCase();
+  if (/coordinador|planific|planner/.test(t)) return 'planner' as TeamRole;
+  if (/\bqa\b|revis|calidad|reviewer/.test(t)) return 'reviewer' as TeamRole;
+  if (/desarroll|implement|ingenier|developer/.test(t)) return 'implementer' as TeamRole;
+  if (/consult|especialista|curador|diseñ/.test(t)) return 'consultant' as TeamRole;
+  return null;
+}
+
+/**
+ * EN-007 · Lecciones validadas de su papel (lessonsFor: la misma consulta que las inyecta en los prompts). Si no hay
+ * ninguna, no se crea el archivo. El paquete limpia las rutas y los UUID de knowledge/ con el mismo scrub que el resto.
+ */
+function roleLessons(slug: string, a: Agent): string | null {
+  try {
+    const ls = lessonsFor(slug, { projectId: a.projectId ?? null, role: teamRoleOf(a), tags: [] }).filter(l => (l.lessonText ?? '').trim());
+    if (!ls.length) return null;
+    return `# Lecciones del papel\n\nLecciones validadas por el propietario que el Portal inyecta en los prompts de este papel. Son obligatorias.\n\n${ls.map((l, i) => `${i + 1}. ${l.lessonText!.trim().replace(/\s+/g, ' ')}`).join('\n')}\n`;
+  } catch { return null; }
+}
+
 /** Archivos de la revisión adoptada (o la que se generaría) para descargar como paquete. */
-export async function exportFiles(slug: string, agentId: string): Promise<{ folder: string; files: PortableFiles }> {
+export async function exportFiles(slug: string, agentId: string): Promise<{ folder: string; files: PortableFiles; kind: 'internal' | 'external' }> {
   const a = agentsRepo(slug).get(agentId); if (!a) throw Object.assign(new Error('Agente no encontrado'), { statusCode: 404 });
+  // EN-007 · Agente externo: su revisión adoptada (lo que admite isIdentityPath), no definitionFor. Import diferido:
+  // externalAgents.ts importa este módulo.
+  const ext = await import('./externalAgents.ts');
+  const src = ext.externalSource(slug, agentId);
+  if (src) {
+    const snap = ext.sourcesRepo(slug).files(agentId) ?? {};
+    const files: PortableFiles = {};
+    for (const p of Object.keys(snap).sort()) if (isIdentityPath(p)) files[p] = snap[p]!;
+    return { folder: slugify(path.basename(src.root)).slice(0, 60) || slugify(a.config.name).slice(0, 60) || 'agente', files, kind: 'external' };
+  }
   const f = agentFoldersRepo(slug).folderOf(agentId);
   const ad = f ? agentFoldersRepo(slug).adopted(agentId) : null;
-  const files = ad?.files ?? definitionToFiles(definitionFor(slug, a, adoptedExtras(slug, a)));
-  return { folder: f?.folder ?? slugify(`${a.key}-${a.id.slice(0, 8)}`), files };
+  const base = ad?.files ?? definitionToFiles(definitionFor(slug, a, adoptedExtras(slug, a)));
+  const lessons = roleLessons(slug, a);
+  const files: PortableFiles = lessons ? { ...base, 'knowledge/lecciones-del-papel.md': lessons } : base;
+  return { folder: f?.folder ?? slugify(`${a.key}-${a.id.slice(0, 8)}`), files, kind: 'internal' };
 }
 
 /**
@@ -168,11 +202,18 @@ export async function exportFiles(slug: string, agentId: string): Promise<{ fold
  */
 export async function exportBundle(slug: string, agentId: string): Promise<{ fileName: string; zip: Buffer; files: string[] }> {
   const a = agentsRepo(slug).get(agentId); if (!a) throw Object.assign(new Error('Agente no encontrado'), { statusCode: 404 });
-  const { files } = await exportFiles(slug, agentId);
+  const { files, kind } = await exportFiles(slug, agentId);
   // Si la historia «Automejora desde el chat» deja un CAMBIOS.md en la carpeta, se conserva su historial.
   const changelog = typeof files['CAMBIOS.md'] === 'string' ? files['CAMBIOS.md'] : null;
-  const bundle = buildPortableBundle(files, { agentName: a.config.name, exportedAt: new Date().toISOString(), changelog });
-  const problems = validatePortableBundle(bundle, { forbidden: [a.id] });
+  const exportedAt = new Date().toISOString();
+  let bundle: PortableFiles;
+  if (kind === 'external') {
+    // EN-007 · Revisión adoptada con los scripts sin tocar, más los planes que ya funcionaron por SHA-256 del PDF.
+    const { provenPlansForExport } = await import('./documentJobs.ts');
+    bundle = buildExternalBundle(files, { agentName: a.config.name, role: a.template?.role ?? null, summary: a.config.specialization ?? null, exportedAt, changelog, provenPlans: provenPlansForExport(slug, agentId, files) });
+  } else bundle = buildPortableBundle(files, { agentName: a.config.name, exportedAt, changelog });
+  // Nunca se entrega un ZIP parcial: cualquier problema (secreto, ruta local, dato interno o tamaño) niega TODO con 409.
+  const problems = validatePortableBundle(bundle, { forbidden: [a.id], limits: kind === 'external' ? EXTERNAL_BUNDLE_LIMITS : undefined });
   if (problems.length) {
     const list = problems.map(p => (p.path ? `${p.path} — ${p.message}` : p.message));
     throw Object.assign(new Error(`No se puede exportar el paquete: ${list.slice(0, 5).join(' · ')}${list.length > 5 ? ` (y ${list.length - 5} más)` : ''}`), { statusCode: 409, payload: { problems } });
