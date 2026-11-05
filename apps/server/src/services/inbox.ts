@@ -5,11 +5,10 @@ import { backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { ensureOpsParsed } from './delegation.ts';
 import { config } from '../config.ts';
 import { processVersion } from './revision.ts';
+import { InboxError } from './inboxError.ts';
 
-/** Error con código HTTP para que la ruta lo traduzca tal cual. */
-export class InboxError extends Error {
-  constructor(public status: number, message: string) { super(message); }
-}
+/** Error con código HTTP para que la ruta lo traduzca tal cual (definido en inboxError.ts; misma clase). */
+export { InboxError };
 
 const money = (n: number) => `${n.toFixed(2).replace('.', ',')} USD`;
 

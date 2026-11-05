@@ -349,6 +349,25 @@ export interface Process {
   superseded?: { byProcessId: string; byIteration: number | null; at: string | null } | null;
   /** Descripción de «qué pasa y qué hacer» calculada por el servidor al servir el proceso (no se persiste). */
   guidance?: ProcessGuidance;
+  /**
+   * EN-005 · La historia de este proceso ya está integrada por otra iteración, completada o descartada, y este proceso
+   * no es el vigente. La calcula el servidor al servir el proceso y no se guarda. Si está presente, la interfaz no ofrece
+   * ninguna acción que reactive el proceso: solo enlaza con el vigente y ofrece «Reabrir la historia».
+   */
+  closure?: StoryClosure | null;
+}
+
+/**
+ * EN-005 · Cierre de la historia visto desde uno de sus procesos antiguos. `iteration` es la iteración que cerró la
+ * historia (la integrada, o la vigente si se completó o descartó sin integrar). `currentProcessId` y `currentIteration`
+ * apuntan al proceso vigente, que tras una reapertura puede ser una iteración posterior.
+ */
+export interface StoryClosure {
+  state: 'merged' | 'done' | 'discarded';
+  currentProcessId: string | null;
+  iteration: number | null;
+  currentIteration?: number | null;
+  message: string;
 }
 
 /** Orientación calculada por el servidor (services/guidance.ts): en qué fase está el proceso y cuál es el siguiente paso del propietario. */
