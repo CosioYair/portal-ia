@@ -98,6 +98,17 @@ inyecciones de la organización (todas las existentes tienen `agent_id` NULL).
 Excepción acotada: al importar el ZIP de un agente **que ya existe**, las entradas nuevas de su `MEMORY.md` (las que no
 estaban al exportar ni existen ya) pasan a ser lecciones verificadas de ese agente. Llevan la evidencia del ZIP y la
 etiqueta `zip`, y Deshacer las retira. Para un agente nuevo, la memoria importada sigue llegando como propuesta.
+Decisión del propietario (HU-183): la confirmó en el criterio de aceptación («si ya existe, lo que cambió fuera —memoria,
+habilidades, CAMBIOS.md— se incorpora automáticamente como revisión nueva con Deshacer») y en el detalle de la historia
+(«se adoptan automáticamente salvo conflicto»). La razón es que la memoria de ese agente ya es del propietario: la exportó
+él y la trae de vuelta él. Límites de la excepción:
+- solo vale para un agente de este mismo espacio (un marcador de otro espacio lo trata como nuevo);
+- entran como mucho 50 entradas;
+- nunca entra una que ya estaba al exportar o que ya existe;
+- lo que entró se ve en la vista previa antes de confirmar y queda en `imported_zip` con sus `lessonIds`;
+- Deshacer o un fallo al escribir la revisión las retiran.
+Si el propietario cambia de criterio, basta con usar `'proposed'` en `applyZipImport` (`setLessons`) y ajustar
+`agente-zip-import.test.ts`.
 
 ## 5. Lo que llega al prompt
 
