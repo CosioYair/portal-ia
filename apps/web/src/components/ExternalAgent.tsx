@@ -524,7 +524,7 @@ export function ImprovementsTab({ slug, p, onChanged, onTab }: { slug: string; p
     {list.length === 0 && <p className="small muted">Sin propuestas todavía. Puedes dar feedback sobre cualquier documento en «Documentos».</p>}
     {list.map(x => <section key={x.id} className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><Chip xs tone={x.classification === 'reusable' ? 'accent' : x.classification === 'invalid' ? 'err' : ''}>{FEEDBACK_LABEL[x.classification]}</Chip>
-        <Chip xs tone={x.state === 'applied' ? 'ok' : x.state === 'failed' ? 'err' : x.state === 'proposed' ? 'warn' : ''}>{({ proposed: 'Pendiente de tu aprobación', approved: 'Aplicándose…', applied: 'Aplicada', rejected: x.changes.length ? 'Rechazada' : 'Sin cambios que aplicar', failed: 'Falló (todo volvió a como estaba)' } as const)[x.state]}</Chip>
+        <Chip xs tone={x.state === 'applied' ? 'ok' : x.state === 'failed' ? 'err' : x.state === 'proposed' ? 'warn' : ''}>{({ proposed: 'Pendiente de tu aprobación', approved: 'Aplicándose…', applied: 'Aplicada', rejected: x.changes.length ? 'Rechazada' : 'Sin cambios que aplicar', failed: 'Falló (todo volvió a como estaba)', undone: 'Deshecha' } as const)[x.state]}</Chip>
         <span className="small muted">{new Date(x.createdAt).toLocaleString('es-MX')}</span></div>
       <div className="small"><strong>Tu feedback:</strong> {x.feedback}</div>
       <div className="small"><strong>{x.summary}</strong> — {x.reason}</div>
