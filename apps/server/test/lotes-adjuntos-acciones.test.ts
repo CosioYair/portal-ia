@@ -329,24 +329,26 @@ test('chat → mejorar el Portal: historia en el backlog del proyecto del Portal
   assert.equal((await inject('GET', `${A}/chat`)).json.messages.at(-1).actions[0].result.storyStatus, it.status);
 });
 
-test('chat → mejorar el agente: propuesta en Mejoras (externo) con aprobación; un agente del Portal propone aprendizaje', async () => {
+test('chat → mejorar el agente: se aplica al momento (externo, sin «Sí, hazlo» ni Mejoras); un agente del Portal aprende directamente', async () => {
   scenario({ auth: 'subscription', rules: [
     // Primero la regla del clasificador: su prompt también contiene las palabras del propietario.
     { match: '# Feedback del propietario', text: JSON.stringify({ classification: 'reusable', reason: 'r', summary: 'Aviso de escaneados', changes: [{ path: 'skills/conv/SKILL.md', kind: 'append', content: '- Avisa de PDF escaneados.', summary: 's' }] }) },
     { match: 'mejora tu forma', text: accion({ tipo: 'mejorar_agente', descripcion: 'Documentar en la habilidad el aviso de PDF escaneados.' }) }] });
   const m = await reply('Por favor mejora tu forma de avisar de los PDF escaneados.');
-  const a0 = m.actions[0]; assert.equal(a0.kind, 'mejorar_agente'); assert.equal(a0.status, 'proposed', 'preparar la propuesta gasta una consulta: se confirma antes');
-  assert.equal(ccRuns().filter(c => String(c.prompt).includes('# Feedback del propietario')).length, 0);
-  const c = await inject('POST', `${A}/actions/${a0.id}/confirm`, { authorized: true }); assert.equal(c.status, 200, JSON.stringify(c.json));
-  const a = (await inject('GET', `${A}/chat`)).json.messages.at(-1).actions[0]; assert.equal(a.status, 'done', a.error); assert.equal(a.result.proposalState, 'proposed');
+  const a0 = m.actions[0]; assert.equal(a0.kind, 'mejorar_agente'); assert.equal(a0.needsConfirmation, false, 'HU-178: la automejora no pide «Sí, hazlo»');
+  assert.ok(await until(async () => ((await inject('GET', `${A}/chat`)).json.messages.at(-1).actions ?? []).some((x: any) => x.id === a0.id && (x.status === 'done' || x.status === 'failed'))), 'la mejora termina sola');
+  assert.equal(ccRuns().filter(c => String(c.prompt).includes('# Feedback del propietario')).length, 1, 'cada mejora usa exactamente una consulta');
+  assert.notEqual((await inject('POST', `${A}/actions/${a0.id}/confirm`, { authorized: true })).status, 200, 'no queda nada pendiente de confirmar');
+  const a = (await inject('GET', `${A}/chat`)).json.messages.at(-1).actions[0]; assert.equal(a.status, 'done', a.error); assert.equal(a.result.applied, true, JSON.stringify(a.result));
+  assert.ok(Array.isArray(a.result.changes) && a.result.changes.length >= 1 && a.result.changes[0].archivo, 'el chat recibe qué cambió');
   const prop = (await inject('GET', `${A}/documents`)).json.proposals.find((x: any) => x.id === a.result.proposalId);
   assert.match(prop.feedback, /^Por favor mejora tu forma de avisar de los PDF escaneados\./, 'el feedback son las palabras del propietario');
   assert.match(prop.feedback, /Interpretación del agente «Conversor» \(no son palabras del propietario\)/);
   assert.equal(a.link, `/oficina/agente/${agentId}/mejoras`);
-  assert.ok(!fs.readFileSync(path.join(root, 'skills/conv/SKILL.md'), 'utf8').includes('escaneados'), 'nada se aplica sin aprobar');
-  const ap = await inject('POST', `${A}/proposals/${a.result.proposalId}/apply`, { authorized: true }); assert.equal(ap.status, 200, JSON.stringify(ap.json));
+  assert.ok(fs.readFileSync(path.join(root, 'skills/conv/SKILL.md'), 'utf8').includes('escaneados'), 'se aplica al momento, sin aprobar en Mejoras');
+  assert.equal(prop.state, 'applied', 'la propuesta queda aplicada, no pendiente');
   const after1 = (await inject('GET', `${A}/chat`)).json.messages.at(-1).actions[0];
-  assert.equal(after1.result.proposalState, 'applied', 'la conversación ve el resultado');
+  assert.equal(after1.result.applied, true, 'la conversación ve el resultado'); assert.ok(after1.result.undo, 'con algo que deshacer');
   // Agente del Portal (sin carpeta externa): la mejora es aprendizaje propuesto (Memoria), no una propuesta de archivos.
   const coord = agentsRepo(S).list().find(x => x.key === 'ws-gestor' || x.key === 'pj-coordinador')!;
   agentsRepo(S).updateConfig(coord.id, { ...coord.config, backend: 'claude-code', provider: 'anthropic' } as any);
@@ -356,6 +358,9 @@ test('chat → mejorar el agente: propuesta en Mejoras (externo) con aprobación
   await until(async () => ((await inject('GET', `${W}/agents/${coord.id}/chat`)).json.messages.at(-1).actions ?? []).some((x: any) => x.status === 'done'));
   const ca = (await inject('GET', `${W}/agents/${coord.id}/chat`)).json.messages.at(-1).actions[0];
   assert.equal(ca.kind, 'mejorar_agente'); assert.ok(ca.result.lessonId); assert.match(ca.link, /\/memoria$/);
+  assert.equal(ca.needsConfirmation, false); assert.equal(ca.result.applied, true);
+  const { lessonsRepo } = await import('../src/services/lessons.ts');
+  assert.equal(lessonsRepo(S).get(ca.result.lessonId)?.status, 'validated', 'aplicado en su Memoria, no «por verificar»');
 });
 
 test('chat → procesar adjuntos y corregir un documento: SOLO tras confirmar; lo inválido se rechaza', async () => {
@@ -378,11 +383,17 @@ test('chat → procesar adjuntos y corregir un documento: SOLO tras confirmar; l
 });
 
 test('chat: el propietario reasigna una mejora (del agente ↔ del Portal); bloques repetidos o tipos raros no hacen nada; una acción cortada por un reinicio no queda «en curso»', async () => {
-  scenario({ auth: 'subscription', rules: [{ match: 'arregla la subida', text: accion({ tipo: 'mejorar_agente', descripcion: 'La subida de archivos grandes se corta a la mitad. Hay que revisarla.' }) }] });
+  scenario({ auth: 'subscription', rules: [
+    { match: '# Feedback del propietario', text: JSON.stringify({ classification: 'reusable', reason: 'r', summary: 'Aviso de subidas cortadas', changes: [{ path: 'skills/conv/SKILL.md', kind: 'append', content: '- Avisa si la subida se corta.', summary: 's' }] }) },
+    { match: 'arregla la subida', text: accion({ tipo: 'mejorar_agente', descripcion: 'La subida de archivos grandes se corta a la mitad. Hay que revisarla.' }) }
+  ] });
   const a0 = (await reply('Por favor arregla la subida de archivos grandes.')).actions[0];
-  assert.equal(a0.kind, 'mejorar_agente'); assert.equal(a0.status, 'proposed');
+  assert.equal(a0.kind, 'mejorar_agente');
+  assert.ok(await until(async () => ((await inject('GET', `${A}/chat`)).json.messages.at(-1).actions ?? []).some((x: any) => x.id === a0.id && x.status === 'done' && x.result?.applied)), 'la mejora del agente se aplica al momento');
+  assert.ok(fs.readFileSync(path.join(root, 'skills/conv/SKILL.md'), 'utf8').includes('se corta'));
   const rr = await inject('POST', `${A}/actions/${a0.id}/reroute`, {}); assert.equal(rr.status, 200, JSON.stringify(rr.json));
   assert.equal(rr.json.kind, 'mejorar_portal'); assert.equal(rr.json.payload.titulo, 'La subida de archivos grandes se corta a la mitad.'); assert.equal(rr.json.needsConfirmation, true);
+  assert.ok(!fs.readFileSync(path.join(root, 'skills/conv/SKILL.md'), 'utf8').includes('se corta'), 'reasignar deshace la mejora ya aplicada');
   const c = await inject('POST', `${A}/actions/${a0.id}/confirm`, { authorized: true }); assert.equal(c.json.status, 'done', c.json.error); assert.ok(c.json.result.backlogItemId);
   assert.equal((await inject('POST', `${A}/actions/${a0.id}/reroute`, {})).status, 409, 'solo mientras espera');
   scenario({ auth: 'subscription', rules: [{ match: 'dos cosas', text: `${accion({ tipo: 'mejorar_portal', titulo: 'Uno uno uno', descripcion: 'Primera cosa a revisar.' })}\n\n${accion({ tipo: 'mejorar_portal', titulo: 'Dos dos dos', descripcion: 'Segunda cosa a revisar.' })}` }] });
