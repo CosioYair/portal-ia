@@ -245,7 +245,13 @@ function ActionCard({ slug, agentId, a, external, onDone }: { slug: string; agen
     setUndoState('undoing'); setError(null); setUndoSaid('Deshaciendo el cambio…');
     try { await osApi.undoAction(slug, agentId, a.id); setUndoState('idle'); setUndoSaid('Cambio deshecho.'); onDone(); }
     catch (e: any) {
-      if (e?.status === 409) { setUndoState('idle'); setUndoSaid('Esta mejora ya estaba deshecha.'); onDone(); return; }
+      if (e?.status === 409) {
+        // 409 puede ser «ya deshecha» o que no se puede deshacer (p. ej. no consta la revisión anterior): se dice lo que responde el servidor.
+        const code = e?.body?.code ?? e?.code;
+        if (code === 'already_undone') { setUndoState('idle'); setUndoSaid('Esta mejora ya estaba deshecha.'); onDone(); return; }
+        const msg = e?.message || 'No se puede deshacer esta mejora.';
+        setUndoState('idle'); setError(`No se pudo deshacer: ${msg}`); setUndoSaid(`No se pudo deshacer: ${msg}`); onDone(); return;
+      }
       setUndoState('error'); setError(`No se pudo deshacer: ${e.message}`); setUndoSaid('No se pudo deshacer el cambio.');
     } finally { requestAnimationFrame(() => box.current?.focus()); }
   };
@@ -262,7 +268,9 @@ function ActionCard({ slug, agentId, a, external, onDone }: { slug: string; agen
     {a.kind === 'procesar_documentos' && !!a.payload.nombres?.length && <div className="small">Adjuntos: {a.payload.nombres.map((n: string) => `«${n}»`).join(', ')}</div>}
     {a.kind === 'corregir_documento' && a.payload.correccion && <div className="small">{a.payload.documento && <>Documento «{a.payload.documento}». </>}<strong>Corrección:</strong> {a.payload.correccion}</div>}
     {error && <Notice kind="err">{error}</Notice>}
-    {a.error && <Notice kind="err">{a.error}</Notice>}
+    {a.error && (a.kind === 'mejorar_agente' && a.status === 'failed' && r.capReached
+      ? <Notice kind="err">No se aplicó nada: tope diario agotado. {a.error}</Notice>
+      : <Notice kind="err">{a.error}</Notice>)}
     {a.status === 'proposed' && a.kind === 'mejorar_agente' && !a.needsConfirmation && <span className="small muted" role="note">Aplicando el cambio… {what}</span>}
     {a.status === 'proposed' && (a.kind !== 'mejorar_agente' || a.needsConfirmation) && <>
       <span className="small muted" role="note">{what}</span>
@@ -286,6 +294,7 @@ function ActionCard({ slug, agentId, a, external, onDone }: { slug: string; agen
       {changes.length > 0 && <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
         {changes.map((c, i) => <li key={`${c.archivo}-${i}`} style={undone ? { textDecoration: 'line-through' } : undefined}><code>{c.archivo}</code>{c.resumen ? `: ${c.resumen}` : ''}</li>)}
       </ul>}
+      {external && <div className="muted">Usó 1 consulta de tu suscripción.</div>}
       {undone
         ? <span className="muted">Se deshizo: volvió a como estaba antes. El historial (CAMBIOS.md o Memoria) conserva el cambio y la vuelta atrás.</span>
         : <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>

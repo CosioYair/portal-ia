@@ -233,7 +233,9 @@ async function runAction(slug: string, a: Agent, id: string, ownerMessageId: str
     } else throw err('Tipo de acción desconocido.', 400);
   } catch (e: any) {
     // Si ya se recibieron documentos (lotes creados) quedan en Documentos: se dice y se enlaza aunque no hayan empezado.
-    patch(slug, id, { status: 'failed', error: String(e?.message ?? e).slice(0, 800), ...(batches.length ? { result: { batchId: batches[0], batches, summary: `${batches.length} lote(s) recibido(s) en Documentos, sin empezar.` }, link: `/oficina/agente/${a.id}/documentos` } : {}) });
+    // HU-178: un tope diario agotado (429) se marca para que el chat lo diga con claridad (no se aplicó nada).
+    const capReached = e?.statusCode === 429;
+    patch(slug, id, { status: 'failed', error: String(e?.message ?? e).slice(0, 800), ...(batches.length ? { result: { batchId: batches[0], batches, summary: `${batches.length} lote(s) recibido(s) en Documentos, sin empezar.` }, link: `/oficina/agente/${a.id}/documentos` } : capReached ? { result: { capReached: true } } : {}) });
   } finally { running.delete(id); }
 }
 
@@ -271,12 +273,12 @@ export async function rerouteAction(slug: string, agentId: string, id: string): 
 export async function undoAction(slug: string, agentId: string, id: string): Promise<AgentAction> {
   const act = getAction(slug, agentId, id); if (!act) throw err('Acción no encontrada', 404);
   if (act.kind !== 'mejorar_agente' || act.status !== 'done' || !act.result?.applied || !act.result?.undo) throw err('Esta acción no se puede deshacer.', 400);
-  if (act.result.undone || undoing.has(id)) throw err('Esta mejora ya se deshizo.', 409);
+  if (act.result.undone || undoing.has(id)) throw Object.assign(err('Esta mejora ya se deshizo.', 409), { code: 'already_undone' });
   undoing.add(id);
   try {
     const u = act.result.undo as { type: 'proposal' | 'lesson'; id: string; revision?: number; revisionAfter?: number | null };
     if (u.type === 'proposal') {
-      if (typeof u.revision !== 'number') throw err('No consta la revisión anterior a esta mejora: no se puede deshacer desde el chat.', 409);
+      if (typeof u.revision !== 'number') throw Object.assign(err('No consta la revisión anterior a esta mejora: no se puede deshacer desde el chat.', 409), { code: 'missing_revision' });
       await undoImprovement(slug, agentId, u.id, u.revision, 'owner', typeof u.revisionAfter === 'number' ? u.revisionAfter : null);
     } else await undoFromFeedback(slug, agentId, u.id);
     patch(slug, id, { result: { ...act.result, undone: true, undoneAt: now(), summary: `Deshecho: ${String(act.result.summary ?? '')}`.slice(0, 1000) } });
