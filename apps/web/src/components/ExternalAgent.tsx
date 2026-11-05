@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { BATCH_ITEM_LABEL, FEEDBACK_LABEL, INTEGRATION_LABEL, PRESENCE_LABEL, batchCountsAddUp, type RemovalPreview, type RemovalRecord, type DocumentBatch, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ExecutionBackend, type ExternalGrants, type ImprovementProposal } from '@portal-ia/domain';
+import { BATCH_ITEM_LABEL, FEEDBACK_LABEL, INTEGRATION_LABEL, PRESENCE_LABEL, PROPOSAL_ORIGIN_LABEL, batchCountsAddUp, type RemovalPreview, type RemovalRecord, type DocumentBatch, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ExecutionBackend, type ExternalGrants, type ImprovementProposal } from '@portal-ia/domain';
 import { Chip, Icon, Notice, Spinner } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
 import { FolderPicker } from './FolderPicker.tsx';
@@ -446,6 +446,30 @@ function VersionView({ slug, agentId, jobId, v }: { slug: string; agentId: strin
   </div>;
 }
 
+/**
+ * Botón «Deshacer» de una mejora ya aplicada (incluidas las aprendidas solas de un reintento). Pide confirmación,
+ * restaura la copia previa de su carpeta y la marca como deshecha. No consulta a ningún modelo (sin costo).
+ */
+function UndoProposalControl({ slug, agentId, proposal, onDone }: { slug: string; agentId: string; proposal: ImprovementProposal; onDone: () => void }) {
+  const { flash } = useApp();
+  const [ask, setAsk] = useState(false); const [working, setWorking] = useState(false); const [error, setError] = useState<string | null>(null);
+  if (proposal.state !== 'applied' || proposal.origin === 'undo') return null;
+  const run = async () => {
+    setWorking(true); setError(null);
+    try { await api.undoAgentProposal(slug, agentId, proposal.id); setAsk(false); flash('Mejora deshecha: su carpeta volvió a la copia previa'); onDone(); }
+    catch (e: any) { setError(e.message); } finally { setWorking(false); }
+  };
+  return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    {error && <Notice kind="err">{error}</Notice>}
+    {ask ? <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }} role="group" aria-label="Confirmar deshacer la mejora">
+      <span className="small">Se restaurará la copia previa de sus archivos (queda registrado en su historial). No consulta a tu suscripción.</span>
+      <button type="button" className="btn btn-primary btn-sm" disabled={working} onClick={() => void run()}>{working ? 'Deshaciendo…' : 'Sí, deshacer'}</button>
+      <button type="button" className="btn btn-ghost btn-sm" disabled={working} onClick={() => setAsk(false)}>No</button>
+    </div>
+      : <button type="button" className="btn btn-ghost btn-sm" style={{ alignSelf: 'flex-start' }} disabled={working} onClick={() => setAsk(true)}>Deshacer</button>}
+  </div>;
+}
+
 // ---------------------------------------------------------------- Origen: procedencia, integración, cambios, permisos
 
 export function OriginTab({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: () => void }) {
@@ -525,7 +549,10 @@ export function ImprovementsTab({ slug, p, onChanged, onTab }: { slug: string; p
     {list.map(x => <section key={x.id} className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><Chip xs tone={x.classification === 'reusable' ? 'accent' : x.classification === 'invalid' ? 'err' : ''}>{FEEDBACK_LABEL[x.classification]}</Chip>
         <Chip xs tone={x.state === 'applied' ? 'ok' : x.state === 'failed' ? 'err' : x.state === 'proposed' ? 'warn' : ''}>{({ proposed: 'Pendiente de tu aprobación', approved: 'Aplicándose…', applied: 'Aplicada', rejected: x.changes.length ? 'Rechazada' : 'Sin cambios que aplicar', failed: 'Falló (todo volvió a como estaba)', undone: 'Deshecha' } as const)[x.state]}</Chip>
-        <span className="small muted">{new Date(x.createdAt).toLocaleString('es-MX')}</span></div>
+        <span className="small muted">{new Date(x.createdAt).toLocaleString('es-MX')}</span>
+        {x.autoApplied && x.origin && <Chip xs tone="accent">{PROPOSAL_ORIGIN_LABEL[x.origin]}</Chip>}
+        {x.origin === 'undo' && <Chip xs>{PROPOSAL_ORIGIN_LABEL.undo}</Chip>}</div>
+      <UndoProposalControl slug={slug} agentId={p.agent.id} proposal={x} onDone={onChanged} />
       <div className="small"><strong>Tu feedback:</strong> {x.feedback}</div>
       <div className="small"><strong>{x.summary}</strong> — {x.reason}</div>
       {x.classification === 'document_only' && <span className="small muted">Vale solo para ese documento: aplícalo con «Nueva versión con esta corrección» en <button type="button" className="lnk" onClick={() => onTab('documentos')}>Documentos</button>. No cambia su habilidad.</span>}
