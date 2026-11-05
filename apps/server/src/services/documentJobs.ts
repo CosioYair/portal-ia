@@ -115,6 +115,21 @@ export function jobsDb(slug: string) {
       return r ? mapJob(r) : null;
     },
     /**
+     * HU-180 · Plan que ya funcionó para ESTE mismo documento (mismo agente y SHA-256) en otro trabajo (p. ej. de un lote
+     * anterior). Recorre los trabajos no eliminados con ese SHA, excepto `excludeJobId`, del más reciente al más antiguo,
+     * y devuelve la última versión aprobada por la QA que cumpla `accept` (p. ej. misma huella del script). Sin SQL nuevo:
+     * se lee de versions_json. No llama al modelo.
+     */
+    provenPlanBySha(agentId: string, sha: string, excludeJobId: string, accept: (v: DocumentVersion) => boolean = () => true): { plan: ScriptPlan; jobId: string; jobTitle: string; version: number; scriptHash: string | null; skillRevision: string | null; batchId: string | null } | null {
+      const rows = db.prepare(`SELECT * FROM document_jobs WHERE agent_id = ? AND input_sha = ? AND id <> ? AND removed_at IS NULL ORDER BY created_at DESC, id DESC LIMIT 200`).all(agentId, sha, excludeJobId) as any[];
+      for (const r of rows) {
+        const j = mapJob(r);
+        const ok = j.versions.slice().reverse().find(v => v.passed === true && !!v.plan?.script && accept(v));
+        if (ok) return { plan: ok.plan, jobId: j.id, jobTitle: j.title, version: ok.n, scriptHash: (ok as any).scriptHash ?? null, skillRevision: (ok as any).skillRevision ?? null, batchId: j.batchId ?? null };
+      }
+      return null;
+    },
+    /**
      * Carpeta libre para un trabajo nuevo: devuelve base, base-2, base-3… si ya existe un trabajo del agente con ese slug
      * o, si se indica `outputsDir`, una carpeta con ese nombre en disco. Así no se sobrescribe nada de lotes anteriores.
      */
@@ -507,7 +522,20 @@ async function processVersionIn(slug: string, a: Agent, jobId: string, tc: Toolc
   // 2. Plan del agente (Claude Code): qué script de su habilidad y con qué argumentos. Un lote trae su plan (una llamada).
   const scripts = s.layout.skills.flatMap(k => k.scripts);
   let plan: ScriptPlan;
-  if (opts.plan) { const v = validatePlan(opts.plan, scripts); if (!v.ok) throw err(`El plan del lote ya no es válido: ${v.error}`, 409); plan = v.plan; }
+  // HU-180 · Primer intento con lo aprendido: si este trabajo aún no tiene versiones ni corrección del propietario, se usa
+  // el plan que ya pasó la QA para este MISMO documento (SHA-256) en otro trabajo, solo si el script sigue existiendo con
+  // la misma huella y el plan es válido con los scripts actuales. Si no, se sigue con el plan del lote (o se planifica).
+  let proven: ReturnType<ReturnType<typeof jobsDb>['provenPlanBySha']> = null;
+  if (!job.versions.length && !opts.feedback) {
+    try {
+      const found = jobs.provenPlanBySha(a.id, job.inputSha256, job.id, v => files[v.plan.script] !== undefined && (!v.scriptHash || v.scriptHash === sha256Text(files[v.plan.script] ?? '')));
+      if (found) { const v = validatePlan(found.plan, scripts); if (v.ok) proven = { ...found, plan: v.plan }; }
+    } catch { proven = null; /* sin plan probado: se sigue con el plan normal */ }
+  }
+  const provenNote = proven ? `Primer intento con el plan que ya funcionó para este documento (SHA-256 ${job.inputSha256.slice(0, 12)}…, trabajo ${proven.jobId} v${proven.version}${proven.skillRevision && proven.skillRevision !== String(s.revision) ? `; plan de la revisión ${proven.skillRevision}, habilidad ahora en ${s.revision}` : ''}).` : '';
+  const planCalls = proven || opts.plan ? 0 : 1;
+  if (proven) { plan = proven.plan; appendHistory(s.root, dir, zones, `v${n}: ${provenNote}`); }
+  else if (opts.plan) { const v = validatePlan(opts.plan, scripts); if (!v.ok) throw err(`El plan del lote ya no es válido: ${v.error}`, 409); plan = v.plan; }
   else {
     const prev = job.versions.map(v => `- v${v.n}: ${v.passed ? 'aprobada por la QA' : 'RECHAZADA por la QA'} · script ${v.plan.script} ${v.plan.args.join(' ')} · puertas fallidas: ${Object.entries(v.gates).filter(([, ok]) => !ok).map(([g]) => g).join(', ') || 'ninguna'}${v.feedback ? ` · corrección del propietario: «${v.feedback.slice(0, 300)}»` : ''}`).join('\n');
     plan = await planScript(slug, a, `- Archivo: ${job.inputName} · páginas: ${pdf.pages} · páginas con texto extraíble: ${pdf.text_pages}\n${prev ? `- Versiones anteriores:\n${prev}\n` : ''}`, opts.feedback ?? null);
@@ -526,11 +554,11 @@ async function processVersionIn(slug: string, a: Agent, jobId: string, tc: Toolc
   if (!runEnv.PYTHONPATH) delete runEnv.PYTHONPATH;
   const sub: Record<string, string> = { '{entrada}': input, '{salida}': output, '{informe}': reportPath, '{trabajo}': path.join(work, 'ajuste') }; // ruta corta temporal (ver processVersion)
   requirePolicy('agent_script', { slug, agentId: a.id, authorized: true });
-  recordAgentEvent(slug, a.id, 'document_job', { jobId, action: 'run', version: n, script: plan.script, args: plan.args, scriptSha256: sha256Text(onDisk), skillRevision: s.revision }, 'portal');
+  recordAgentEvent(slug, a.id, 'document_job', { jobId, action: 'run', version: n, script: plan.script, args: plan.args, scriptSha256: sha256Text(onDisk), skillRevision: s.revision, ...(proven ? { provenFrom: { jobId: proven.jobId, version: proven.version, sha256: job.inputSha256, batchId: proven.batchId } } : {}) }, 'portal');
   const conv = await run(tc.python!, [...pyRunFlags(work), scriptAbs, ...plan.args.map(x => sub[x] ?? x)], { cwd: work, timeoutMs: RUN_TIMEOUT_MS, env: runEnv });
   const tail = (t: string) => t.slice(-1500);
   if (conv.code !== 0 || !fs.existsSync(output)) {
-    const version: DocumentVersion = { n, docx: '', qaDir: '', passed: false, gates: { conversion_completada: false }, metrics: { exit_code: conv.code ?? -1 }, plan, scriptHash: sha256Text(onDisk), skillRevision: String(s.revision), report: `La conversión falló${conv.timedOut ? ' (tiempo agotado)' : ''}: ${tail(conv.stderr || conv.stdout)}`, reportBy: 'Portal', feedback: opts.feedback ?? null, createdAt: now(), durationMs: Date.now() - t0, calls: opts.plan ? 0 : 1, batchId: opts.batchId ?? null };
+    const version: DocumentVersion = { n, docx: '', qaDir: '', passed: false, gates: { conversion_completada: false }, metrics: { exit_code: conv.code ?? -1 }, plan, scriptHash: sha256Text(onDisk), skillRevision: String(s.revision), report: `La conversión falló${conv.timedOut ? ' (tiempo agotado)' : ''}: ${tail(conv.stderr || conv.stdout)}`, reportBy: 'Portal', feedback: opts.feedback ?? null, createdAt: now(), durationMs: Date.now() - t0, calls: planCalls, batchId: opts.batchId ?? null };
     jobs.update(jobId, { status: 'failed', versions: [...job.versions, version], error: version.report.slice(0, 600) });
     appendHistory(s.root, dir, zones, `v${n}: la conversión falló (${plan.script}).`);
     return;
@@ -569,8 +597,8 @@ async function processVersionIn(slug: string, a: Agent, jobId: string, tc: Toolc
     reportBy = 'Portal';
     report = `${passed ? 'La QA del Portal aprobó esta versión.' : `La QA del Portal RECHAZÓ esta versión (puertas fallidas: ${Object.entries(gates).filter(([, ok]) => !ok).map(([g]) => g).join(', ')}).`} Métricas: ${JSON.stringify(metrics)}. (Informe automático: el arnés del agente falló al redactarlo — ${String(e?.message ?? e).slice(0, 200)}.)`;
   }
-  const version: DocumentVersion = { n, docx: `versiones/v${n}.docx`, qaDir: q ? `revisiones/v${n}/qa` : '', passed, gates, metrics, plan, scriptHash: sha256Text(onDisk), skillRevision: String(s.revision), report, reportBy, feedback: opts.feedback ?? null, createdAt: now(), durationMs: Date.now() - t0, calls: (opts.plan ? 0 : 1) + (opts.reportMode === 'portal' ? 0 : 1), batchId: opts.batchId ?? null };
-  safeWrite(s.root, `${dir}/revisiones/v${n}/INFORME.md`, `# Versión ${n} — ${passed ? 'aprobada por la QA del Portal' : 'RECHAZADA por la QA del Portal'}\n\n${report}\n\n## Plan\n\`${plan.script} ${plan.args.join(' ')}\`\n\n${plan.reason}\n\n## Puertas\n${Object.entries(gates).map(([g, ok]) => `- ${ok ? '✔' : '✘'} ${g}`).join('\n')}\n`, zones);
+  const version: DocumentVersion = { n, docx: `versiones/v${n}.docx`, qaDir: q ? `revisiones/v${n}/qa` : '', passed, gates, metrics, plan, scriptHash: sha256Text(onDisk), skillRevision: String(s.revision), report: provenNote ? `${provenNote}\n\n${report}` : report, reportBy, feedback: opts.feedback ?? null, createdAt: now(), durationMs: Date.now() - t0, calls: planCalls + (opts.reportMode === 'portal' ? 0 : 1), batchId: opts.batchId ?? null };
+  safeWrite(s.root, `${dir}/revisiones/v${n}/INFORME.md`, `# Versión ${n} — ${passed ? 'aprobada por la QA del Portal' : 'RECHAZADA por la QA del Portal'}\n\n${version.report}\n\n## Plan\n\`${plan.script} ${plan.args.join(' ')}\`\n\n${plan.reason}\n\n## Puertas\n${Object.entries(gates).map(([g, ok]) => `- ${ok ? '✔' : '✘'} ${g}`).join('\n')}\n`, zones);
   jobs.update(jobId, { status: passed ? 'ready' : 'rejected', versions: [...job.versions, version], error: null });
   appendHistory(s.root, dir, zones, `v${n}: ${passed ? 'aprobada' : 'rechazada'} por la QA del Portal (${plan.script.split('/').pop()}, revisión ${s.revision} de la habilidad).`);
   recordAgentEvent(slug, a.id, 'document_job', { jobId, action: passed ? 'ready' : 'rejected', version: n, gates }, 'portal');
@@ -609,8 +637,13 @@ export async function planScript(slug: string, a: Agent, docInfo: string, feedba
   const caller = callerFor(slug, a, 'Plan de conversión');
   requirePolicy('ai_call', { slug, agentId: a.id, authorized: true, route: 'claude-code' });
   const ctx = skillContext(files, s.layout.skills);
+  // HU-180 · Memoria aplicada del agente (la que deja una propuesta aprobada en memoria/APRENDIZAJES.md o la memoria de su
+  // carpeta): el plan del lote la ve, igual que la identidad del agente (extracto final acotado, ~1 800 caracteres).
+  const memPath = s.layout.memory && files[s.layout.memory] !== undefined ? s.layout.memory : (Object.keys(files).find(p => p.toLowerCase() === 'memoria/aprendizajes.md') ?? null);
+  const memText = memPath ? (files[memPath] ?? '').trim() : '';
+  const memBlock = memText && !ctx.context.includes(memText.slice(-200)) ? `# Memoria aplicada del agente (${memPath}, final; aplícala)\n${memText.slice(-1800)}\n\n` : '';
   const scripts = s.layout.skills.flatMap(k => k.scripts);
-  const planPrompt = `${clipTotal(ctx.skills, 30_000)}\n\n${ctx.context ? `# Contexto\n${clipTotal(ctx.context, 12_000)}\n\n` : ''}# Scripts disponibles (SOLO estos)\n${ctx.scripts || '(ninguno)'}\n\n# Documento\n${docInfo}${feedback ? `\n# Corrección del propietario para ESTA versión\n${feedback.slice(0, 2000)}\n` : ''}\n# Reglas del plan\n- Empieza SIEMPRE por {entrada} {salida} (PDF original y DOCX nuevo). {informe} (JSON de informe del script, si lo admite) y {trabajo} (carpeta de trabajo temporal) solo como valor de una opción. Cada marcador una vez.\n- Argumentos: solo marcadores, opciones --nombre y valores simples (números o palabras). Ninguna ruta. Programas y perfiles (p. ej. LibreOffice) los fija el Portal.\n- Sigue el procedimiento de tu habilidad para producir el entregable COMPLETO (todas las páginas), salvo que el propietario pida un piloto.\n- La QA la hace el Portal después: no planifiques scripts de QA.\nResponde SOLO con JSON: {"script": "<ruta exacta de la lista>", "args": ["..."], "reason": "<por qué, en una frase>"}`;
+  const planPrompt = `${clipTotal(ctx.skills, 30_000)}\n\n${ctx.context ? `# Contexto\n${clipTotal(ctx.context, 12_000)}\n\n` : ''}${memBlock}# Scripts disponibles (SOLO estos)\n${ctx.scripts || '(ninguno)'}\n\n# Documento\n${docInfo}${feedback ? `\n# Corrección del propietario para ESTA versión\n${feedback.slice(0, 2000)}\n` : ''}\n# Reglas del plan\n- Empieza SIEMPRE por {entrada} {salida} (PDF original y DOCX nuevo). {informe} (JSON de informe del script, si lo admite) y {trabajo} (carpeta de trabajo temporal) solo como valor de una opción. Cada marcador una vez.\n- Argumentos: solo marcadores, opciones --nombre y valores simples (números o palabras). Ninguna ruta. Programas y perfiles (p. ej. LibreOffice) los fija el Portal.\n- Sigue el procedimiento de tu habilidad para producir el entregable COMPLETO (todas las páginas), salvo que el propietario pida un piloto.\n- La QA la hace el Portal después: no planifiques scripts de QA.\nResponde SOLO con JSON: {"script": "<ruta exacta de la lista>", "args": ["..."], "reason": "<por qué, en una frase>"}`;
   let planError: string | null = null;
   try {
     const r = await caller.complete({ model: a.config.model, system: `Eres «${a.config.name}». Planificas UNA ejecución de los scripts de tu habilidad para convertir PDF. No ejecutas nada: el Portal valida y ejecuta tu plan. Respondes solo con JSON.`, user: planPrompt, maxTokens: 1500, effort: a.config.effort, supportsEffort: false });
