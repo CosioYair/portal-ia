@@ -6,7 +6,7 @@ import { Markdown } from './Markdown.tsx';
 import { useApp } from '../lib/store.ts';
 import { useLive } from '../lib/live.ts';
 import { fmtUsd } from '../lib/labels.ts';
-import { osApi, type AgentAction, type AgentMessage, type AgentPanel as Panel, type AttachmentKind, type ChatAttachment } from '../lib/osApi.ts';
+import { osApi, type AgentAction, type AgentMessage, type AgentPanel as Panel, type AttachmentKind, type ChatAttachment, type ImprovementChange } from '../lib/osApi.ts';
 
 /**
  * Chat con cualquier agente: mensajes, adjuntos (capturas, PDF, ZIP, texto) y acciones que propone el agente.
@@ -231,16 +231,30 @@ function batchCountsText(raw: Record<string, any>): { text: string; warning: str
 /** Una acción que el agente pidió al Portal desde la conversación: qué es, quién la hace, qué cuesta, su estado y adónde ir. */
 function ActionCard({ slug, agentId, a, external, onDone }: { slug: string; agentId: string; a: AgentAction; external: boolean; onDone: () => void }) {
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
+  const [undoState, setUndoState] = useState<'idle' | 'undoing' | 'error'>('idle'); const [undoSaid, setUndoSaid] = useState('');
   const box = useRef<HTMLDivElement>(null);
-  const st = ACTION_STATUS[a.status]; const r = a.result ?? {};
+  const r = a.result ?? {};
+  // Mejora del agente aplicada al momento desde el chat: sin confirmación, con lista de cambios y Deshacer.
+  const improved = a.kind === 'mejorar_agente' && a.status === 'done' && !!r.applied;
+  const undone = improved && !!r.undone;
+  const changes: ImprovementChange[] = Array.isArray(r.changes) ? r.changes.filter((c: any) => c && typeof c.archivo === 'string') : [];
+  const st = improved ? (undone ? { text: 'Deshecho', tone: '' as const } : { text: 'Aplicado', tone: 'ok' as const }) : ACTION_STATUS[a.status];
   const bc = r.counts ? batchCountsText(r.counts) : null;
   const run = async (fn: () => Promise<unknown>) => { setBusy(true); setError(null); try { await fn(); onDone(); } catch (e: any) { setError(e.message); } finally { setBusy(false); requestAnimationFrame(() => box.current?.focus()); } };
+  const undo = async () => {
+    setUndoState('undoing'); setError(null); setUndoSaid('Deshaciendo el cambio…');
+    try { await osApi.undoAction(slug, agentId, a.id); setUndoState('idle'); setUndoSaid('Cambio deshecho.'); onDone(); }
+    catch (e: any) {
+      if (e?.status === 409) { setUndoState('idle'); setUndoSaid('Esta mejora ya estaba deshecha.'); onDone(); return; }
+      setUndoState('error'); setError(`No se pudo deshacer: ${e.message}`); setUndoSaid('No se pudo deshacer el cambio.');
+    } finally { requestAnimationFrame(() => box.current?.focus()); }
+  };
   const lotes = Number(a.payload.lotes) || 1; const pdfs = Number(a.payload.pdfs) || null;
   const what = a.kind === 'procesar_documentos' ? `Convertirá ${pdfs ? `${pdfs} PDF` : 'los PDF adjuntos'} en ${lotes} lote${lotes > 1 ? 's' : ''} (uno por ZIP y otro con los PDF sueltos): el programa del agente se ejecuta en este equipo, de uno en uno, y usa como máximo ${lotes * 2} consulta${lotes * 2 > 1 ? 's' : ''} a tu suscripción (plan y resumen de cada lote).`
     : a.kind === 'corregir_documento' ? 'Creará una nueva versión del documento con esta corrección (2 consultas a tu suscripción y el programa del agente en este equipo). Las versiones anteriores no se tocan.'
-    : a.kind === 'mejorar_agente' ? (external ? 'Preparará una propuesta de cambio de su habilidad o sus instrucciones con tus palabras (una consulta a tu suscripción). Nada cambia hasta que la apruebes en Mejoras.' : 'Propondrá un aprendizaje que verificas en Memoria (sin consultas).')
+    : a.kind === 'mejorar_agente' ? (external ? 'Aplica al momento el cambio en sus instrucciones, habilidades, scripts o memoria con tus palabras (una consulta a tu suscripción). Guarda copia y lo anota en CAMBIOS.md; puedes deshacerlo. Nunca toca permisos, arnés, presupuesto ni el código del Portal.' : 'Aplica al momento el aprendizaje en su Memoria (sin consultas); puedes deshacerlo.')
     : 'Creará una historia en el backlog del Portal con tus palabras y la evidencia; la investiga y la hace el equipo de desarrollo del Portal con su propio proceso y tu aprobación. Este agente no toca el código del Portal.';
-  const linkText = a.kind === 'mejorar_portal' ? 'Ver en el backlog' : a.kind === 'mejorar_agente' ? (a.link?.endsWith('/memoria') ? 'Ver en Memoria' : 'Revisar en Mejoras') : 'Ver en Documentos';
+  const linkText = a.kind === 'mejorar_portal' ? 'Ver en el backlog' : a.kind === 'mejorar_agente' ? (a.link?.endsWith('/memoria') ? 'Ver en Memoria' : 'Ver en Mejoras') : 'Ver en Documentos';
   return <div ref={box} tabIndex={-1} className="card action-card" role="group" aria-label={ACTION_TITLE[a.kind]}>
     <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}><strong className="small">{ACTION_TITLE[a.kind]}</strong><Chip xs tone={st.tone}>{st.text}</Chip>
       {a.kind === 'mejorar_portal' && <Chip xs>la hace el equipo de desarrollo del Portal, no este agente</Chip>}{a.payload.reasignada && <Chip xs>reasignada por ti</Chip>}</div>
@@ -249,7 +263,8 @@ function ActionCard({ slug, agentId, a, external, onDone }: { slug: string; agen
     {a.kind === 'corregir_documento' && a.payload.correccion && <div className="small">{a.payload.documento && <>Documento «{a.payload.documento}». </>}<strong>Corrección:</strong> {a.payload.correccion}</div>}
     {error && <Notice kind="err">{error}</Notice>}
     {a.error && <Notice kind="err">{a.error}</Notice>}
-    {a.status === 'proposed' && <>
+    {a.status === 'proposed' && a.kind === 'mejorar_agente' && !a.needsConfirmation && <span className="small muted" role="note">Aplicando el cambio… {what}</span>}
+    {a.status === 'proposed' && (a.kind !== 'mejorar_agente' || a.needsConfirmation) && <>
       <span className="small muted" role="note">{what}</span>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void run(() => osApi.confirmAction(slug, agentId, a.id))}>{busy ? 'Un momento…' : 'Sí, hazlo'}</button>
@@ -265,7 +280,20 @@ function ActionCard({ slug, agentId, a, external, onDone }: { slug: string; agen
       {bc?.warning && <span role="note" style={{ color: 'var(--color-err-text)' }}>{bc.warning} </span>}
       {r.jobStatus && <span className="muted">Documento: {r.jobStatus}. </span>}
     </div>}
-    {a.kind === 'mejorar_agente' && a.status === 'done' && r.proposalId && <span className="small muted">Nada cambia hasta que apruebes la propuesta.</span>}
+    <div className="sr" role="status" aria-live="polite">{undoSaid}</div>
+    {improved && <div className="small" role="group" aria-label={undone ? 'Cambios deshechos' : 'Cambios aplicados'}>
+      <strong>{undone ? 'Cambios deshechos' : 'Cambios aplicados'}</strong>
+      {changes.length > 0 && <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
+        {changes.map((c, i) => <li key={`${c.archivo}-${i}`} style={undone ? { textDecoration: 'line-through' } : undefined}><code>{c.archivo}</code>{c.resumen ? `: ${c.resumen}` : ''}</li>)}
+      </ul>}
+      {undone
+        ? <span className="muted">Se deshizo: volvió a como estaba antes. El historial (CAMBIOS.md o Memoria) conserva el cambio y la vuelta atrás.</span>
+        : <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button type="button" className="btn btn-secondary btn-sm" disabled={undoState === 'undoing' || busy} aria-busy={undoState === 'undoing'} onClick={() => void undo()}>{undoState === 'undoing' ? 'Deshaciendo…' : undoState === 'error' ? 'Reintentar deshacer' : 'Deshacer'}</button>
+          <button type="button" className="btn btn-ghost btn-sm" disabled={undoState === 'undoing' || busy} onClick={() => void run(() => osApi.rerouteAction(slug, agentId, a.id))}>Es del Portal, no del agente</button>
+          <span className="muted">Deshacer no tiene coste{external ? ' y restaura la copia guardada' : ''}.</span>
+        </div>}
+    </div>}
     {a.link && (a.status === 'done' || a.status === 'failed') && <Link className="small" to={a.link}>{linkText} →</Link>}
   </div>;
 }
