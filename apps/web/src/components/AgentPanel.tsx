@@ -11,6 +11,7 @@ import { TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
 import { HARNESSES } from '@portal-ia/domain';
 import { FolderPicker } from './FolderPicker.tsx';
 import { DocumentsTab, ImprovementsTab, OriginTab } from './ExternalAgent.tsx';
+import { AgentZipImport } from './AgentZipImport.tsx';
 import { ChatTab, FeedbackForm } from './AgentChat.tsx';
 import { INTEGRATION_LABEL } from '@portal-ia/domain';
 import { osApi, type AgentPanel as Panel, type Department, type FolderStatus, type HarnessOptions, type OfficeAgent, type WorkItem } from '../lib/osApi.ts';
@@ -193,7 +194,7 @@ function FilesTab({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: (
   const [st, setSt] = useState<FolderStatus | null>(null); const [file, setFile] = useState<string | null>(null);
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const [edit, setEdit] = useState<string | null>(null); const [skill, setSkill] = useState<PortableSkill | null>(null);
-  const [confirmDiscard, setConfirmDiscard] = useState(false); const [confirmRestore, setConfirmRestore] = useState<number | null>(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false); const [confirmRestore, setConfirmRestore] = useState<number | null>(null); const [zip, setZip] = useState(false);
   const load = useCallback(() => osApi.folder(slug, p.agent.id).then(setSt).catch(e => setError(e.message)), [slug, p.agent.id]);
   useEffect(() => { void load(); }, [load, p.folder.adopted?.n]);
   const act = async (fn: () => Promise<unknown>, ok: string) => { setBusy(true); setError(null); try { await fn(); flash(ok); await load(); onChanged(); } catch (e: any) { setError(e.message); } finally { setBusy(false); } };
@@ -250,6 +251,12 @@ function FilesTab({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: (
         {r.state === 'adopted' && <Chip xs tone="ok">actual</Chip>}
       </div>)}
     </section>
+    {zip ? <AgentZipImport slug={slug} projectId={null} harnesses={null} departments={[]} agentId={p.agent.id} onCancel={() => setZip(false)} onDone={() => { setZip(false); void load(); onChanged(); }} />
+      : <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div className="h3">Importar desde ZIP</div>
+        <span className="small muted">Trae lo que este agente aprendió fuera (instrucciones, habilidades, memoria, referencias y CAMBIOS.md): se adopta solo como revisión nueva, que puedes deshacer, y solo te preguntamos si un archivo cambió también aquí desde la exportación. Arnés, permisos e id no cambian. No tiene costo.</span>
+        <button type="button" className="btn btn-secondary btn-sm" style={{ alignSelf: 'flex-start' }} disabled={busy || !!st.external} title={st.external ? 'Primero adopta o descarta los cambios hechos en su carpeta' : undefined} onClick={() => setZip(true)}>Importar desde ZIP…</button>
+      </section>}
     <ExportBox slug={slug} agentId={p.agent.id} />
   </>;
 }
