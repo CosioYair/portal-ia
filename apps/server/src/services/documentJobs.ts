@@ -732,12 +732,22 @@ export function improveNow(slug: string, agentId: string, input: { jobId: string
  * HU-178 · Deshacer una automejora: vuelve a la revisión anterior a esa mejora con la vuelta atrás que ya existe
  * (restoreSourceRevision, que conserva CAMBIOS.md y le añade la reversión). Va por la misma cola del agente.
  */
-export function undoImprovement(slug: string, agentId: string, proposalId: string, revisionBefore: number, by = 'owner'): Promise<void> {
+export function undoImprovement(slug: string, agentId: string, proposalId: string, revisionBefore: number, by = 'owner', revisionAfter: number | null = null): Promise<void> {
   return serialByAgent(slug, agentId, async () => {
     const p = proposalsDb(slug).get(proposalId);
     if (!p || p.agentId !== agentId) throw err('Mejora no encontrada.', 404);
     if (p.state !== 'applied') throw err('Esa mejora no está aplicada: no hay nada que deshacer.', 409);
+    // Solo se deshace la ÚLTIMA mejora: si la revisión vigente ya no es la que dejó esta, volver a revisionBefore borraría
+    // en silencio las mejoras posteriores. Se responde 409 sin tocar nada.
+    const later = () => err('Hay mejoras posteriores a esta: deshaz primero la última.', 409, { code: 'later_improvements' });
+    const current = sourcesRepo(slug).get(agentId);
+    if (!current) throw err('Agente externo no encontrado.', 404);
+    if (typeof revisionAfter === 'number') { if (Number(current.revision) !== revisionAfter) throw later(); }
+    else if (proposalsDb(slug).list(agentId).some(o => o.id !== p.id && o.state === 'applied' && !!o.appliedAt && !!p.appliedAt && o.appliedAt > p.appliedAt)) throw later();
     restoreSourceRevision(slug, agentId, revisionBefore, by);
+    // La propuesta deja de figurar como aplicada (Mejoras y el chat muestran lo mismo).
+    proposalsDb(slug).transition(p.id, 'applied', 'rejected', { error: `Deshecha desde el chat (${by}) el ${now()}: se volvió a la revisión ${revisionBefore}.` });
+    changed({ ws: slug, entity: 'agent', id: agentId, kind: 'progress' });
   });
 }
 export function pendingProposalCounts(slug: string): [string, number][] {

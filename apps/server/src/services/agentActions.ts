@@ -206,7 +206,7 @@ async function runAction(slug: string, a: Agent, id: string, ownerMessageId: str
     if (act.kind === 'mejorar_agente') {
       if (externalSource(slug, a.id)) {
         const r = await improveNow(slug, a.id, { jobId: act.payload.trabajo ?? null, text: `${asOwner}\n\n${agentView}${proof}` }, 'chat');
-        patch(slug, id, { status: 'done', result: { applied: r.applied, proposalId: r.proposalId, classification: r.classification, changes: r.changes, summary: r.applied ? `Aplicado: ${r.summary}` : `No se aplicó nada: ${r.reason ?? r.summary}`, reason: r.reason, revision: r.revision, backup: r.backup, ...(r.applied && r.revisionBefore !== null ? { undo: { type: 'proposal', id: r.proposalId, revision: r.revisionBefore } } : {}) }, link: `/oficina/agente/${a.id}/mejoras` });
+        patch(slug, id, { status: 'done', result: { applied: r.applied, proposalId: r.proposalId, classification: r.classification, changes: r.changes, summary: r.applied ? `Aplicado: ${r.summary}` : `No se aplicó nada: ${r.reason ?? r.summary}`, reason: r.reason, revision: r.revision, backup: r.backup, ...(r.applied && r.revisionBefore !== null ? { undo: { type: 'proposal', id: r.proposalId, revision: r.revisionBefore, revisionAfter: r.revision } } : {}) }, link: `/oficina/agente/${a.id}/mejoras` });
       } else {
         const l = await applyFromFeedback(slug, a.id, { messageId: ownerMessageId, feedback: asOwner, lesson: act.payload.descripcion });
         patch(slug, id, { status: 'done', result: { applied: true, lessonId: l.id, changes: [{ archivo: 'Memoria', resumen: String(l.lessonText ?? l.title ?? '').slice(0, 300) }], summary: 'Aprendizaje aplicado en su Memoria.', undo: { type: 'lesson', id: l.id } }, link: `/oficina/agente/${a.id}/memoria` });
@@ -274,10 +274,10 @@ export async function undoAction(slug: string, agentId: string, id: string): Pro
   if (act.result.undone || undoing.has(id)) throw err('Esta mejora ya se deshizo.', 409);
   undoing.add(id);
   try {
-    const u = act.result.undo as { type: 'proposal' | 'lesson'; id: string; revision?: number };
+    const u = act.result.undo as { type: 'proposal' | 'lesson'; id: string; revision?: number; revisionAfter?: number | null };
     if (u.type === 'proposal') {
       if (typeof u.revision !== 'number') throw err('No consta la revisión anterior a esta mejora: no se puede deshacer desde el chat.', 409);
-      await undoImprovement(slug, agentId, u.id, u.revision, 'owner');
+      await undoImprovement(slug, agentId, u.id, u.revision, 'owner', typeof u.revisionAfter === 'number' ? u.revisionAfter : null);
     } else await undoFromFeedback(slug, agentId, u.id);
     patch(slug, id, { result: { ...act.result, undone: true, undoneAt: now(), summary: `Deshecho: ${String(act.result.summary ?? '')}`.slice(0, 1000) } });
     recordAgentEvent(slug, agentId, 'chat', { action: 'deshacer', actionId: id, undo: u }, 'owner');
