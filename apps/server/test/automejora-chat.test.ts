@@ -69,7 +69,8 @@ const A = `${W}/agents/${agentId}`;
 const SKILL = path.join(root, 'skills', 'conv', 'SKILL.md');
 const skill = () => fs.readFileSync(SKILL, 'utf8');
 const filesUnder = (dir: string): string[] => { const out: string[] = []; if (!fs.existsSync(dir)) return out; const walk = (d: string, r: string) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const rel = r ? `${r}/${e.name}` : e.name; if (e.isDirectory()) walk(path.join(d, e.name), rel); else out.push(rel); } }; walk(dir, ''); return out.sort(); };
-const cambios = () => { const f = filesUnder(root).find(p => p.split('/').at(-1) === 'CAMBIOS.md'); return f ? fs.readFileSync(path.join(root, ...f.split('/')), 'utf8') : ''; };
+// El historial vivo, no las copias que Deshacer guarda en configuracion/respaldos (esas también se llaman CAMBIOS.md).
+const cambios = () => { const f = filesUnder(root).find(p => p.split('/').at(-1) === 'CAMBIOS.md' && !p.startsWith('configuracion/')); return f ? fs.readFileSync(path.join(root, ...f.split('/')), 'utf8') : ''; };
 const revision = () => Number((sourcesRepo(S).get(agentId) as any)?.revision);
 
 /** Envía un mensaje al chat y espera a que la acción del agente termine (sin pulsar nada). */
