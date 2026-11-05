@@ -90,11 +90,13 @@ function ensure(slug: string) {
   addCols('document_jobs', ['removed_at', 'removal_id', 'intervention']);
   addCols('document_batches', ['removed_at', 'removal_id']);
   addCols('document_batch_items', ['removed_at']);
+  // HU-179 (aditivo): origen, aplicación automática por reintento verificado y Deshacer.
+  addCols('improvement_proposals', ['origin', 'auto_applied', 'undone_at']);
   return db;
 }
 export const documentsDb = ensure;
 const mapJob = (r: any): DocumentJob => ({ id: r.id, agentId: r.agent_id, title: r.title, slug: r.slug, status: r.status, inputName: r.input_name, inputSha256: r.input_sha, pages: r.pages ?? null, source: r.source, versions: JSON.parse(r.versions_json), error: r.error ?? null, createdAt: r.created_at, updatedAt: r.updated_at, batchId: r.batch_id ?? null, needsIntervention: !!r.intervention, interventionReason: r.intervention ?? null });
-const mapProposal = (r: any): ImprovementProposal => ({ id: r.id, agentId: r.agent_id, jobId: r.job_id ?? null, feedback: r.feedback, classification: r.classification, reason: r.reason, summary: r.summary, changes: JSON.parse(r.changes_json), state: r.state, createdAt: r.created_at, decidedAt: r.decided_at ?? null, appliedAt: r.applied_at ?? null, backupDir: r.backup_dir ?? null, error: r.error ?? null, evidence: JSON.parse(r.evidence_json), baseRevision: r.base_revision ?? null });
+const mapProposal = (r: any): ImprovementProposal => ({ id: r.id, agentId: r.agent_id, jobId: r.job_id ?? null, feedback: r.feedback, classification: r.classification, reason: r.reason, summary: r.summary, changes: JSON.parse(r.changes_json), state: r.state, createdAt: r.created_at, decidedAt: r.decided_at ?? null, appliedAt: r.applied_at ?? null, backupDir: r.backup_dir ?? null, error: r.error ?? null, evidence: JSON.parse(r.evidence_json), baseRevision: r.base_revision ?? null, origin: r.origin ?? 'feedback', autoApplied: r.auto_applied === '1', undoneAt: r.undone_at ?? null });
 
 export function jobsDb(slug: string) {
   const db = ensure(slug);
@@ -143,7 +145,7 @@ export function jobsDb(slug: string) {
       for (const r of db.prepare(`SELECT versions_json FROM document_jobs WHERE agent_id = ?`).all(agentId) as any[]) for (const v of JSON.parse(r.versions_json) as DocumentVersion[]) if (v.createdAt >= iso) { versions++; calls += v.calls ?? 2; }
       // Llamadas de los lotes (plan y resumen), cada una con su hora: un lote antiguo tocado hoy no vuelve a contar.
       calls += Number((db.prepare(`SELECT COUNT(*) AS c FROM document_model_calls WHERE agent_id = ? AND at >= ?`).get(agentId, iso) as any).c);
-      calls += Number((db.prepare(`SELECT COUNT(*) AS c FROM improvement_proposals WHERE agent_id = ? AND created_at >= ?`).get(agentId, iso) as any).c);
+      calls += Number((db.prepare(`SELECT COUNT(*) AS c FROM improvement_proposals WHERE agent_id = ? AND created_at >= ? AND COALESCE(origin, 'feedback') <> 'undo'`).get(agentId, iso) as any).c);
       return { versions, calls };
     }
   };
@@ -471,7 +473,7 @@ export async function processVersion(slug: string, a: Agent, jobId: string, tc: 
   const after = jobsDb(slug).get(jobId);
   const v = after?.versions[after.versions.length - 1];
   if (!after || after.versions.length <= before || !v?.passed) return;
-  try { proposeRetryLearning(slug, a, after, v, diagnosis); } catch { /* la versión ya está guardada; la propuesta es opcional */ }
+  try { await learnFromRetry(slug, a, after, v, diagnosis); } catch { /* la versión ya está guardada; el aprendizaje es opcional y nunca bloquea el reintento */ }
 }
 async function processVersionOnce(slug: string, a: Agent, jobId: string, tc: Toolchain, opts: ProcessOptions): Promise<void> {
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'pia-'));
@@ -584,6 +586,106 @@ export function planSignature(plan: Pick<ScriptPlan, 'script' | 'args'>): string
 /** Firmas de los planes de las versiones fallidas (conversión no terminada o rechazo de la QA). */
 export function failedPlanSignatures(job: Pick<DocumentJob, 'versions'>): Set<string> {
   return new Set(job.versions.filter(v => v.passed === false && v.plan?.script).map(v => planSignature(v.plan)));
+}
+
+// ---------------------------------------------------------------- HU-179: aprendizaje automático por reintento verificado
+
+/**
+ * Cola en serie por agente: todo lo que escribe en su identidad desde aquí (aprendizajes de reintentos, Deshacer y
+ * aplicaciones desde la ruta) pasa por promesas encadenadas, así varios aprendizajes del mismo lote se aplican en orden
+ * y cada uno lee la revisión vigente justo antes de aplicar: nunca chocan por versión (sin 409 stale_proposal).
+ */
+const agentQueues = new Map<string, Promise<unknown>>();
+export function serialForAgent<T>(slug: string, agentId: string, fn: () => Promise<T> | T): Promise<T> {
+  const key = `${slug}\u0000${agentId}`;
+  const prev = agentQueues.get(key) ?? Promise.resolve();
+  const next = prev.catch(() => undefined).then(fn);
+  const tail = next.catch(() => undefined);
+  agentQueues.set(key, tail);
+  void tail.then(() => { if (agentQueues.get(key) === tail) agentQueues.delete(key); });
+  return next;
+}
+
+/**
+ * Aprende de un reintento SOLO si la versión nueva pasó la QA del Portal (`v.passed === true`, doc_qa) y había un
+ * diagnóstico del fallo anterior. Que el script termine sin error no basta. Guarda qué falló y qué plan lo resolvió
+ * (origin='retry') y lo aplica por la cola con la revisión base leída al aplicar, sin dejarlo en 'proposed'.
+ * Sin el permiso applyImprovements queda como propuesta pendiente, como hasta ahora. Si aplicar falla: 'failed'
+ * con el motivo, sin bloquear el reintento. Si el reintento no pasó, no se crea nada.
+ */
+async function learnFromRetry(slug: string, a: Agent, job: DocumentJob, v: DocumentVersion | null | undefined, diagnosis: string | null): Promise<ImprovementProposal | null> {
+  if (!v || v.passed !== true || !diagnosis?.trim()) return null;
+  const p = proposeRetryLearning(slug, a, job, v, diagnosis);
+  if (!p) return null;
+  const db = ensure(slug); const props = proposalsDb(slug);
+  db.prepare(`UPDATE improvement_proposals SET origin = 'retry' WHERE id = ?`).run(p.id);
+  const s0 = sourcesRepo(slug).get(a.id);
+  if (!s0?.grants.applyImprovements) return props.get(p.id);
+  db.prepare(`UPDATE improvement_proposals SET auto_applied = '1' WHERE id = ?`).run(p.id);
+  const fail = (msg: string) => { db.prepare(`UPDATE improvement_proposals SET state = 'failed', decided_at = COALESCE(decided_at, ?), error = ? WHERE id = ? AND state IN ('proposed', 'approved')`).run(now(), msg.slice(0, 600), p.id); };
+  return serialForAgent(slug, a.id, async () => {
+    const repo = sourcesRepo(slug); const s = repo.get(a.id);
+    if (!s) { fail('El agente ya no tiene su carpeta adoptada.'); return props.get(p.id); }
+    // Si el script cambió desde la versión que pasó, el aprendizaje describiría una habilidad que ya no existe.
+    const files = repo.files(a.id) ?? {};
+    if (v.plan?.script && v.scriptHash && sha256Text(files[v.plan.script] ?? '') !== v.scriptHash) { fail(`El script ${v.plan.script} cambió desde la versión que pasó la QA: no se aprende.`); return props.get(p.id); }
+    // La revisión base se lee al aplicar, no al proponer (los cambios de aprendizaje solo añaden notas).
+    db.prepare(`UPDATE improvement_proposals SET base_revision = ? WHERE id = ? AND state = 'proposed'`).run(s.revision, p.id);
+    try { await applyProposal(slug, a.id, p.id, { authorized: true, by: 'retry-auto' }); }
+    catch (e: any) { fail(`No se pudo aplicar el aprendizaje: ${String(e?.message ?? e)}`); }
+    changed({ ws: slug, entity: 'agent', id: a.id, kind: 'progress' });
+    return props.get(p.id);
+  });
+}
+
+/**
+ * Deshace una mejora aplicada sin tocar las demás: construye los cambios inversos sobre el contenido vigente
+ * (quita el bloque añadido, o restaura `previous` si fue un reemplazo) y los aplica por el mismo camino de
+ * applyProposal (copia de seguridad, revisión nueva, CAMBIOS.md y registro). Luego marca la original como 'undone'.
+ */
+export async function undoProposal(slug: string, agentId: string, id: string, by = 'owner'): Promise<ImprovementProposal> {
+  return serialForAgent(slug, agentId, async () => {
+    const props = proposalsDb(slug); const p = props.get(id);
+    if (!p || p.agentId !== agentId) throw err('Propuesta no encontrada', 404);
+    if (p.state === 'undone') throw err('Esta mejora ya se deshizo.', 409, { code: 'already_undone' });
+    if (p.state !== 'applied') throw err('Solo se puede deshacer una mejora aplicada.', 409, { code: 'not_applied' });
+    const repo = sourcesRepo(slug); const s = repo.get(agentId);
+    if (!s) throw err('El agente no tiene una carpeta adoptada.', 404);
+    if (!s.grants.applyImprovements) throw err('Deshacer escribe en sus instrucciones y habilidades: concede antes «aplicar mejoras aprobadas».', 403);
+    const files = repo.files(agentId) ?? {};
+    const work: Record<string, string> = {};
+    for (const c of p.changes) {
+      const cur = work[c.path] ?? files[c.path];
+      if (c.kind === 'append' && c.content?.trim()) {
+        if (cur == null) throw err(`No se encuentra ${c.path} para deshacer el cambio.`, 409, { code: 'undo_conflict' });
+        const block = c.content.trim(); const at = cur.lastIndexOf(block);
+        if (at < 0) throw err(`El texto añadido en ${c.path} ya no está tal cual: no se puede deshacer automáticamente.`, 409, { code: 'undo_conflict' });
+        let start = at; while (start > 0 && /\s/.test(cur[start - 1])) start--;
+        const next = cur.slice(0, start) + cur.slice(at + block.length);
+        work[c.path] = next.endsWith('\n') ? next : `${next}\n`;
+      } else if (c.kind === 'replace' && c.previous != null) {
+        work[c.path] = c.previous;
+      } else throw err(`El cambio en ${c.path} (${c.kind}) no se puede deshacer automáticamente.`, 409, { code: 'undo_unsupported' });
+    }
+    const inverse: ProposalChange[] = Object.entries(work).map(([pth, content]) => ({ path: pth, kind: 'replace', content, summary: `Deshacer: ${p.summary}`.slice(0, 300), previous: files[pth] ?? null }));
+    const inv: ImprovementProposal = {
+      id: crypto.randomUUID(), agentId, jobId: p.jobId, feedback: `Deshacer la mejora ${p.id}`, classification: 'reusable', reason: `Deshacer pedido por ${by}.`,
+      summary: `Deshacer: ${p.summary}`.slice(0, 300), changes: inverse, state: 'proposed', createdAt: now(), decidedAt: null, appliedAt: null,
+      backupDir: null, error: null, evidence: p.evidence, baseRevision: s.revision
+    };
+    props.insert(inv);
+    const db = ensure(slug);
+    db.prepare(`UPDATE improvement_proposals SET origin = 'undo', auto_applied = '1' WHERE id = ?`).run(inv.id);
+    try { await applyProposal(slug, agentId, inv.id, { authorized: true, by }); }
+    catch (e: any) {
+      db.prepare(`UPDATE improvement_proposals SET state = 'failed', error = ? WHERE id = ? AND state IN ('proposed', 'approved')`).run(String(e?.message ?? e).slice(0, 600), inv.id);
+      throw e;
+    }
+    db.prepare(`UPDATE improvement_proposals SET state = 'undone', undone_at = ? WHERE id = ? AND state = 'applied'`).run(now(), id);
+    recordAgentEvent(slug, agentId, 'document_job', { action: 'undo_improvement', proposalId: id, inverseId: inv.id, origin: p.origin ?? 'feedback' }, by);
+    changed({ ws: slug, entity: 'agent', id: agentId, kind: 'progress' });
+    return props.get(id)!;
+  });
 }
 
 const clipTotal = (t: string, n: number) => t.length > n ? `${t.slice(0, n)}\n…(recortado: el resto no se envía)` : t;

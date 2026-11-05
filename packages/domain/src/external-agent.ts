@@ -212,11 +212,21 @@ export const FEEDBACK_LABEL: Record<FeedbackClass, string> = {
   document_only: 'Solo este documento', reusable: 'Reutilizable (cambia la habilidad)', needs_validation: 'Necesita validación', invalid: 'No aplicable'
 };
 export interface ProposalChange { path: string; kind: 'replace' | 'append' | 'install'; content?: string; kit?: string; summary: string; previous?: string | null }
-export type ProposalState = 'proposed' | 'approved' | 'applied' | 'rejected' | 'failed';
+/** 'undone': mejora aplicada que se deshizo después (sus archivos se restauraron con una revisión nueva). */
+export type ProposalState = 'proposed' | 'approved' | 'applied' | 'rejected' | 'failed' | 'undone';
+/** Origen de una propuesta: feedback del propietario, aprendizaje de un reintento verificado o la inversa de un Deshacer. */
+export type ProposalOrigin = 'feedback' | 'retry' | 'undo';
+export const PROPOSAL_ORIGIN_LABEL: Record<ProposalOrigin, string> = { feedback: 'Feedback del propietario', retry: 'Aprendido de un reintento', undo: 'Deshacer' };
 export interface ImprovementProposal {
   id: string; agentId: string; jobId: string | null; feedback: string; classification: FeedbackClass; reason: string; summary: string;
   changes: ProposalChange[]; state: ProposalState; createdAt: string; decidedAt: string | null; appliedAt: string | null;
   backupDir: string | null; error: string | null; evidence: { jobId: string | null; version: number | null; gates: Record<string, boolean> | null };
   /** Revisión adoptada sobre la que se propuso: si cambió, la propuesta está obsoleta y no se aplica. */
   baseRevision?: number | null;
+  /** De dónde viene ('feedback' por defecto). */
+  origin?: ProposalOrigin;
+  /** true si el Portal la aplicó solo (reintento verificado), sin pasar por la aprobación del propietario. */
+  autoApplied?: boolean;
+  /** Cuándo se deshizo (estado 'undone'). */
+  undoneAt?: string | null;
 }
