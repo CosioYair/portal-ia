@@ -62,6 +62,8 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const [msg, setMsg] = useState<string | null>(null);
   const [answer, setAnswer] = useState('');
   const [cancelling, setCancelling] = useState(false);
+  // EN-008 · Feedback de un encargo (sin historia): nota editable → petición de cambios del encargo.
+  const [asgFeedback, setAsgFeedback] = useState<{ note: string; discard: boolean; needDiscard: string | null } | null>(null);
   // Claude Code: estado real (configuración guardada, CLI, ejecutor, alcance, siguiente operación) y la última comprobación tras autorizar.
   const [cc, setCc] = useState<ProcessBackends | null>(null);
   const [verified, setVerified] = useState<string | null>(null);
@@ -72,11 +74,39 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   useEffect(() => { setVerified(null); }, [proc.id]);
   const [, tick] = useState(0);
   useEffect(() => { if (proc.status !== 'running') return; const t = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(t); }, [proc.status]);
-  useEffect(() => { setConfirming(null); setComposer(null); setErr(null); setMsg(null); setOkAuth(false); setAnswer(''); }, [proc.id, flow?.current, flow?.issue?.kind]);
+  useEffect(() => { setConfirming(null); setComposer(null); setAsgFeedback(null); setErr(null); setMsg(null); setOkAuth(false); setAnswer(''); }, [proc.id, flow?.current, flow?.issue?.kind]);
   const ackNow = mergeAcknowledgementsOf(proc);
   useEffect(() => { if (proc.status !== 'running') setCancelling(false); }, [proc.status]);
   if (!flow) return null;
   const itemId = proc.backlogItemId ?? story?.id ?? null;
+  const assignmentId = proc.assignmentId ?? null;
+  const merged = !!proc.result?.merged;
+  const NEEDS_STORY = 'Esta acción necesita una historia y este proceso es de un encargo (EN-n): usa su tarjeta o «Enviar feedback al equipo».';
+  /** Guarda común: una acción que necesita historia nunca ignora el clic; lo dice. */
+  const needsStory = () => { setErr(NEEDS_STORY); };
+  const openAssignmentFeedback = () => {
+    const iss = flow.issue;
+    const lines = iss ? [iss.title, ...iss.details.map(d => `- ${d.text}`)] : ['Feedback de la prueba de aceptación:'];
+    setComposer(null); setConfirming(null);
+    setAsgFeedback({ note: lines.join('\n'), discard: false, needDiscard: null });
+  };
+  const sendAssignmentFeedback = async () => {
+    if (!assignmentId || !asgFeedback) return;
+    const note = asgFeedback.note.trim();
+    if (note.length < 3) { setErr('Escribe al menos 3 caracteres con lo que debe cambiar el equipo.'); return; }
+    setBusy('assignment_feedback'); setErr(null); setMsg(null);
+    try {
+      await api.requestAssignmentChanges(slug, assignmentId, note, asgFeedback.discard);
+      setAsgFeedback(null);
+      setMsg(`Petición de cambios creada: la nueva ejecución del encargo queda pendiente de tu autorización en su tarjeta, sin gasto hasta entonces.${merged ? ' Parte de main y no se ha descartado nada.' : ''}`);
+      flash('Feedback enviado al equipo');
+      await reload();
+    } catch (e: any) {
+      const code = e instanceof ApiError ? e.body?.code : undefined;
+      if (code === 'discard_confirmation_required') setAsgFeedback(f => f && { ...f, needDiscard: e.message });
+      else setErr(explainError(e));
+    } finally { setBusy(null); }
+  };
   const issue = flow.issue;
   const cur = flow.stages.find(s => s.key === flow.current)!;
   const curIdx = flow.stages.findIndex(s => s.key === flow.current);
@@ -94,7 +124,8 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
     if (a.id === 'rebuild') { window.scrollTo({ top: 0, behavior: 'smooth' }); setMsg('Usa «Reconstruir y reiniciar» en la barra amarilla de arriba: construye la versión nueva aparte y reinicia el Portal; si el build falla, la versión anterior sigue en marcha.'); return; }
     if (a.id === 'sandbox_help') { setShowAll(true); setMsg('Guía completa: docs/sandbox.md en la carpeta del Portal. Cuando Docker Desktop diga «Engine running», pulsa «Comprobar el sandbox de nuevo».'); return; }
     if (a.id === 'authorize') { if (variant === 'story' && onAuthorize) onAuthorize(); else if (variant === 'story' && onOpenIterations) onOpenIterations(); else go('sec-authorize'); return; }
-    if (a.id === 'ask_team') { if (!itemId) return; if (onAsk) onAsk(askText); else navigate(`/historias/${itemId}#chat`, { state: { ask: askText } }); return; }
+    if (a.id === 'ask_team') { if (!itemId) { needsStory(); return; } if (onAsk) onAsk(askText); else navigate(`/historias/${itemId}#chat`, { state: { ask: askText } }); return; }
+    if ((a.id === 'request_fix' || a.id === 'new_iteration') && !itemId) { if (assignmentId) openAssignmentFeedback(); else needsStory(); return; }
     if ((a.id === 'request_fix' || a.id === 'new_iteration') && itemId) { setBusy(a.id); try { setComposer(await api.story(slug, itemId)); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } return; }
     // El resto se ejecuta aquí: las que exigen autorización/red piden confirmación explícita antes
     if (a.requires.some(r => r === 'authorization' || r === 'network') && confirming?.id !== a.id) { setConfirming(a); setOkAuth(false); setAnswer(''); setAddBudget((a.suggestedBudgetUsd ?? 0.5).toFixed(2)); setAllowInstall(!!a.pipeline?.allowInstall); return; }
@@ -111,10 +142,10 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       else if (a.id === 'merge') { try { const ack = mergeAcknowledgementsOf(proc); const p = await api.mergeProcess(slug, proc.id, false, { expectedCommit: proc.result?.applied?.commit ?? null, acknowledge: { preexisting: ack.preexisting.length > 0, testUpdates: ack.testUpdates.length > 0 } }); onChange(p); flash(`Integrada en ${p.result?.merged?.into}`); } catch (e: any) { if (e instanceof ApiError && e.body?.process) onChange(e.body.process); else throw e; } }
       else if (a.id === 'runtime_check') { const p = await api.runtimeCheck(slug, proc.id); onChange(p); }
       else if (a.id === 'refresh_sandbox') { const s = await api.systemSandbox(true); await reload(); flash(s.available === 'unavailable' ? 'Sigue sin sandbox: arranca Docker Desktop' : `Sandbox disponible: ${s.available}`, s.available === 'unavailable' ? 'err' : 'ok'); }
-      else if (a.id === 'tasks_from_issue' && itemId) { const t = await api.storyTasksFromIssue(slug, itemId); setMsg(t.length ? `${t.length} tarea(s) creadas a partir del problema.` : 'Ya existían tareas para estos hallazgos; no se duplican.'); }
+      else if (a.id === 'tasks_from_issue') { if (!itemId) { needsStory(); return; } const t = await api.storyTasksFromIssue(slug, itemId); setMsg(t.length ? `${t.length} tarea(s) creadas a partir del problema.` : 'Ya existían tareas para estos hallazgos; no se duplican.'); }
       else if (a.id === 'reject') { const reason = prompt('¿Por qué rechazas esta iteración? (la historia vuelve a pendiente)', issue?.title ?? 'replanteada'); if (reason === null) return; onChange(await api.rejectProcess(slug, proc.id, reason.trim() || undefined)); }
-      else if (a.id === 'close' && itemId) { await api.markStoryDone(slug, itemId); flash('Historia completada'); await reload(); }
-      else if (a.id === 'close_resolved' && itemId) { const reason = prompt('Cerrar como resuelta: indica brevemente por qué (queda registrado).', 'Lo pedido ya funciona en el Portal'); if (reason === null) return; await api.markStoryDone(slug, itemId, { force: true, reason: reason.trim() || 'resuelta fuera del flujo' }); await reload(); }
+      else if (a.id === 'close') { if (!itemId) { needsStory(); return; } await api.markStoryDone(slug, itemId); flash('Historia completada'); await reload(); }
+      else if (a.id === 'close_resolved') { if (!itemId) { needsStory(); return; } const reason = prompt('Cerrar como resuelta: indica brevemente por qué (queda registrado).', 'Lo pedido ya funciona en el Portal'); if (reason === null) return; await api.markStoryDone(slug, itemId, { force: true, reason: reason.trim() || 'resuelta fuera del flujo' }); await reload(); }
       else if (a.id === 'accept_plan') { onChange(await api.acceptPlan(slug, proc.id, Math.max(0, Number(addBudget) || 0))); flash('Se implementa el plan aceptado; lo pendiente queda documentado'); }
       else if (a.id === 'convert_to_analysis') { const p = await api.convertToAnalysis(slug, proc.id); flash('Encargo de análisis preparado: revísalo y autorízalo'); navigate(`/procesos/${p.id}`); }
       else if (a.id === 'retry_process') { const p = await api.retryProcess(slug, proc.id); flash('Proceso nuevo creado: elige el presupuesto y autorízalo'); navigate(`/procesos/${p.id}`); }
@@ -267,6 +298,22 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         <div className="sf-actions"><button className="btn btn-primary btn-sm" disabled={!okAuth || busy !== null || (needsAnswer && answer.trim().length < (confirming.id === 'register_external' ? 3 : 2))} onClick={() => void run(confirming)}>{busy === confirming.id ? <span className="spin spin-light" /> : Icon.check()}{confirming.id === 'register_external' ? 'Registrar y verificar (sin IA)' : confirming.id === 'integration_prepare' ? 'Preparar y verificar (sin IA)' : confirming.id === 'claude_code_fix' ? 'Autorizar y comprobar' : needsAnswer ? 'Enviar respuesta y continuar' : 'Confirmar y ejecutar'}</button><button className="btn btn-ghost btn-sm" onClick={() => setConfirming(null)} disabled={busy !== null}>Cancelar</button></div>
       </div>}
 
+      {asgFeedback && assignmentId && <div className="sf-confirm" aria-label="Feedback del encargo">
+        <strong>Enviar feedback al equipo (nueva iteración del encargo)</strong>
+        <p className="small">Crea la petición de cambios del encargo con esta nota. La nueva ejecución queda pendiente de tu autorización en la tarjeta del encargo: no se gasta nada hasta entonces.</p>
+        {merged && <p className="small muted">Ya está integrado en main: la nueva ejecución parte de main y no se descarta nada.</p>}
+        <label className="small" style={{ display: 'block' }}>Pasos con falla y tus comentarios (puedes editarlo)
+          <textarea rows={6} style={{ width: '100%' }} value={asgFeedback.note} onChange={e => { const v = e.target.value; setAsgFeedback(f => f && { ...f, note: v }); }} />
+        </label>
+        {asgFeedback.needDiscard && <div className="small">
+          <p>{asgFeedback.needDiscard}</p>
+          <label><input type="checkbox" checked={asgFeedback.discard} onChange={e => { const v = e.target.checked; setAsgFeedback(f => f && { ...f, discard: v }); }} /> Descartar la versión aplicada sin integrar</label>
+        </div>}
+        <div>
+          <button type="button" className="btn btn-primary btn-sm" disabled={busy === 'assignment_feedback' || asgFeedback.note.trim().length < 3 || (!!asgFeedback.needDiscard && !asgFeedback.discard)} onClick={() => void sendAssignmentFeedback()}>{busy === 'assignment_feedback' ? 'Enviando…' : 'Confirmar y enviar'}</button>{' '}
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy === 'assignment_feedback'} onClick={() => setAsgFeedback(null)}>Cancelar</button>
+        </div>
+      </div>}
       {composer && itemId && <div className="sf-confirm" aria-label="Iteración correctiva">
         <strong className="sm13">{issue ? 'Pedir al equipo que lo corrija' : 'Nueva iteración'}</strong>
         <span className="small">{issue ? 'El equipo recibirá automáticamente el problema (comando, errores, archivos, evidencia), los intentos anteriores, las tareas abiertas y el criterio vigente.' : 'El equipo recibirá el contexto acumulado de la historia.'}</span>
