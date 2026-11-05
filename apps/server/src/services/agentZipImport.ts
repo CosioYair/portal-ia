@@ -121,13 +121,15 @@ function baseFor(slug: string, agentId: string, theirs: PortableFiles, marker: Z
     const f = repo.revisionFiles(agentId, marker.n);
     if (f && (!marker.hash || hashFiles(f) === marker.hash)) return { n: marker.n, files: f, how: 'marcador' };
   }
-  // Sin marcador fiable: la revisión con más archivos idénticos al ZIP (la más reciente si empatan).
+  // Sin marcador fiable: la revisión con más archivos idénticos al ZIP. Si empatan gana la MÁS ANTIGUA (las revisiones
+  // llegan de la más reciente a la más antigua): una base más antigua solo puede convertir adopciones en conflictos, nunca
+  // al revés, así que un cambio hecho en el Portal tras exportar no se pisa en silencio con lo de fuera.
   let best: { n: number; files: PortableFiles; score: number } | null = null;
   for (const r of repo.revisions(agentId).slice(0, 200)) {
     if (r.state === 'writing' || r.state === 'abandoned') continue;
     const f = repo.revisionFiles(agentId, r.n); if (!f) continue;
     let score = 0; for (const p of Object.keys(theirs)) if (f[p] !== undefined && normalizeText(f[p]!) === normalizeText(theirs[p]!)) score++;
-    if (!best || score > best.score) best = { n: r.n, files: f, score };
+    if (!best || score >= best.score) best = { n: r.n, files: f, score };
   }
   return best && best.score > 0 ? { n: best.n, files: best.files, how: 'parecido' } : { n: null, files: {}, how: 'sin-base' };
 }

@@ -142,6 +142,52 @@ test('conflicto resuelto con la versión del ZIP', async () => {
   assert.ok(r.adopted.includes('AGENTS.md')); assert.match(agentFoldersRepo(S).adopted(agentId)!.files['AGENTS.md']!, /OTRA-ZIP/);
 });
 
+test('sin marcador (base «parecido»): lo cambiado en el Portal y fuera sale como conflicto, nunca se pisa en silencio', async () => {
+  const { files } = await exportFiles(S, agentId);
+  await updateExtras(S, agentId, { instructions: 'VERSION-PORTAL-SM: editado en el Portal tras exportar.' }, 'portal', 'Cambio en el Portal');
+  const theirs = mutate(files, d => {
+    d.instructions = 'VERSION-ZIP-SM: editado fuera.';
+    d.skills = d.skills.map((s: any) => s.slug === 'resumir' ? { ...s, body: 'HABILIDAD-FUERA: resume en cinco puntos.' } : s);
+  });
+  const pv = previewZipImport(S, zipFile(entriesOf(theirs)), 'sin-marcador.zip');
+  assert.equal(pv.mode, 'existente'); assert.equal(pv.base?.how, 'parecido');
+  assert.deepEqual(pv.conflicts.map(c => c.path), ['AGENTS.md'], 'la base adivinada no puede ser la revisión editada en el Portal');
+  assert.ok(pv.adopted.includes('skills/resumir/SKILL.md'), `la habilidad de fuera se adopta: ${pv.adopted.join(', ')}`);
+  const n0 = agentFoldersRepo(S).adopted(agentId)!.n;
+  await assert.rejects(applyZipImport(S, { token: pv.token, hash: pv.hash, resolutions: {} }, noRow), status(409));
+  assert.equal(agentFoldersRepo(S).adopted(agentId)!.n, n0, 'nada aplicado sin elegir');
+  assert.match(agentFoldersRepo(S).adopted(agentId)!.files['AGENTS.md']!, /VERSION-PORTAL-SM/);
+  await applyZipImport(S, { token: pv.token, hash: pv.hash, resolutions: { 'AGENTS.md': 'portal' } }, noRow);
+  const ad = agentFoldersRepo(S).adopted(agentId)!;
+  assert.match(ad.files['AGENTS.md']!, /VERSION-PORTAL-SM/, 'se conserva lo del Portal');
+  assert.ok(!ad.files['AGENTS.md']!.includes('VERSION-ZIP-SM'));
+  assert.match(ad.files['skills/resumir/SKILL.md'] ?? '', /HABILIDAD-FUERA/);
+});
+
+test('sin marcador ni base reconocible («sin-base»): todo lo que difiere sale como conflicto', async () => {
+  const { files } = await exportFiles(S, agentId);
+  const changedFiles = mutate(files, d => {
+    d.manifest.summary = 'RESUMEN-SB: nada en común con el Portal.'; d.instructions = 'INSTR-SB: nada en común.';
+    d.skills = d.skills.map((s: any) => ({ ...s, body: 'SKILL-SB: otra cosa distinta.' }));
+  });
+  const theirs = Object.fromEntries(Object.entries(changedFiles).filter(([p]) => p === 'agent.yaml' || p === 'AGENTS.md' || p.startsWith('skills/')));
+  const pv = previewZipImport(S, zipFile(entriesOf(theirs)), 'sin-base.zip');
+  assert.equal(pv.mode, 'existente'); assert.equal(pv.base?.how, 'sin-base');
+  assert.deepEqual(pv.conflicts.map(c => c.path).sort(), Object.keys(theirs).sort());
+  assert.deepEqual(pv.adopted, [], 'sin base no se adopta nada solo');
+  const n0 = agentFoldersRepo(S).adopted(agentId)!.n; const c0 = revCount(agentId);
+  await assert.rejects(applyZipImport(S, { token: pv.token, hash: pv.hash, resolutions: {} }, noRow), status(409));
+  assert.equal(agentFoldersRepo(S).adopted(agentId)!.n, n0); assert.equal(revCount(agentId), c0);
+});
+
+test('rutas con «\\» se aceptan normalizadas; un duplicado real se rechaza', async () => {
+  const { files } = await exportFiles(S, agentId);
+  const pv = previewZipImport(S, zipFile([...entriesOf(files, 'raiz\\'), { ...markerFor(agentId), name: 'raiz\\portal-export.json' }]), 'windows.zip');
+  assert.equal(pv.mode, 'existente'); assert.ok(pv.files.includes('AGENTS.md')); assert.ok(pv.files.includes('agent.yaml'));
+  assert.equal(pv.upToDate, true);
+  assert.throws(() => previewZipImport(S, zipFile([...entriesOf(files, 'raiz/'), { name: 'raiz\\AGENTS.md', data: 'duplicado' }]), 'dup.zip'), status(400, /AGENTS\.md: está repetido/));
+});
+
 test('rechazo completo: secretos, recorridos, rutas absolutas, enlaces y archivos fuera de la lista blanca (sin revisión)', async () => {
   const { files } = await exportFiles(S, agentId); const c0 = revCount(agentId); const n0 = agentFoldersRepo(S).adopted(agentId)!.n;
   const fake = ['sk', 'ant', 'api03'].join('-') + '-' + 'Q'.repeat(30);
@@ -153,7 +199,8 @@ test('rechazo completo: secretos, recorridos, rutas absolutas, enlaces y archivo
     [{ name: '/etc/AGENTS.md', data: 'x' }, /etc/],
     [{ name: 'scripts/run.sh', data: 'echo x' }, /fuera de la carpeta del agente/],
     [{ name: 'knowledge/enlace.md', data: '/etc/passwd', ext: (0o120777 << 16) >>> 0 }, /enlace/],
-    [{ name: 'agents.md', data: 'duplicado' }, /repetido|fuera de la carpeta/]
+    [{ name: 'AGENTS.md', data: 'duplicado' }, /AGENTS\.md: está repetido/],
+    [{ name: 'agents.md', data: 'duplicado' }, /agents\.md: está repetido/]
   ];
   for (const [entry, re] of bad) assert.throws(() => previewZipImport(S, zipFile([...entriesOf(files), entry]), 'malo.zip'), status(400, re), entry.name);
   assert.equal(revCount(agentId), c0); assert.equal(agentFoldersRepo(S).adopted(agentId)!.n, n0);
