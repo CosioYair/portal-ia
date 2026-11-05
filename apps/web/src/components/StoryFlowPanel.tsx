@@ -238,7 +238,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       {verified && <div className="sf-headline is-ok" role="status" aria-label="Autorización verificada">{Icon.okc()}<span>{verified}</span></div>}
 
       {closed && <Notice kind="info"><span>Esta historia ya está {proc.closure!.state === 'merged' ? 'integrada' : proc.closure!.state === 'done' ? 'completada' : 'descartada'}{proc.closure!.currentIteration ? ` (iteración ${proc.closure!.currentIteration})` : ''}: este proceso antiguo no admite acciones.{proc.closure!.currentProcessId && proc.closure!.currentProcessId !== proc.id && <> <Link className="lnk" to={`/procesos/${proc.closure!.currentProcessId}`}>Ir al proceso vigente</Link>.</>}</span></Notice>}
-      {!readOnly && (actions.length > 0 || fallback) && <div className="sf-actions" aria-label="Acciones">
+      {!readOnly && (!closed || fallback) && (flow.actions.length > 0 || fallback) && <div className="sf-actions" aria-label="Acciones">
         {primary && <button className={`btn ${subForm ? 'btn-secondary' : 'btn-primary'} btn-sm`} onClick={() => void run(primary)} disabled={busy !== null} title={primary.description}>{busy === primary.id ? <span className={subForm ? 'spin' : 'spin spin-light'} /> : Icon.arrow()}{primary.label}</button>}
         {fallback && <Link className="btn btn-primary btn-sm" to={`/procesos/${proc.id}`}>{Icon.arrow()}Ver el proceso y los agentes</Link>}
         {secondary.map(a => <button key={a.id} className="btn btn-secondary btn-sm" onClick={() => void run(a)} disabled={busy !== null} title={a.description}>{busy === a.id ? <span className="spin" /> : null}{a.label}</button>)}
