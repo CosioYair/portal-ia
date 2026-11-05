@@ -11,7 +11,8 @@ Código: `packages/domain/src/external-agent.ts`, `apps/server/src/services/exte
 `apps/server/src/services/documentRemoval.ts` (eliminación y conciliación con el disco),
 `apps/web/src/components/ExternalAgent.tsx`, herramientas en `apps/server/tools/`. Pruebas:
 `apps/server/test/agentes-externos.test.ts`, `apps/server/test/lotes-independientes.test.ts`,
-`apps/server/test/documentos-eliminacion.test.ts`.
+`apps/server/test/documentos-eliminacion.test.ts`, `apps/server/test/reintento-aprende.test.ts`,
+`apps/server/test/reintento-autoaprende.test.ts`.
 
 ## Contrato y compatibilidad con estructuras existentes
 
@@ -116,10 +117,39 @@ comprueba que la mejora cambió el comportamiento.
 Cuando reintentas un documento rechazado o fallido, el agente recibe el **diagnóstico del intento anterior**: motivo, puertas
 de la QA que fallaron y error. Con ese diagnóstico vuelve a planificar la conversión con el aviso «REINTENTO: …» y la lista de
 planes ya probados sin éxito. Es una llamada al modelo, dentro del tope diario. El diagnóstico también queda como corrección
-en la nueva versión («Corrección del intento anterior»). Si la nueva versión **pasa** las comprobaciones, el Portal crea una
-**propuesta de aprendizaje** con el error, la causa y la corrección, usando el mismo mecanismo de propuestas de la pestaña
-Mejoras. Queda **pendiente de tu aprobación**: no se aplica sola. La conversión con IA sigue exigiendo tu autorización, con
-aviso de costo.
+en la nueva versión («Corrección del intento anterior»). La conversión con IA sigue exigiendo tu autorización, con aviso de
+costo.
+
+#### Lo que corrige un reintento verificado queda aprendido solo
+
+- **Cuándo se aprende.** Solo si hubo un diagnóstico de fallo del intento anterior y la versión nueva tiene
+  `passed === true`, es decir, si pasó la **QA del Portal** (`doc_qa`). Que el script termine sin error no basta. Código:
+  `learnFromRetry` en `documentJobs.ts`.
+- **Qué se aprende.** Qué falló (un resumen del diagnóstico: motivo, puertas y error) y qué plan lo resolvió (script,
+  argumentos y motivo). Se añade a la memoria o a la habilidad del agente como una lección. No se escribe código.
+- **Cómo se aplica.** Queda registrado como propuesta con `origin: 'retry'` y `autoApplied: true` y se aplica **en ese
+  momento**, sin pasar por el estado `proposed`. Usa el mismo camino que una mejora aprobada (`applyProposal`, con actor
+  `retry-auto`): copia previa en `configuracion/respaldos/`, entrada en `CAMBIOS.md`, validación, revisión adoptada nueva y
+  evento. La revisión base se lee justo antes de aplicar, no al crear el aprendizaje.
+- **Cola por agente.** Todas las escrituras en la identidad de un agente pasan en serie por una cola propia
+  (`serialForAgent`): aprendizajes automáticos, mejoras aprobadas desde la pestaña Mejoras y Deshacer. Si un lote corrige
+  varios documentos en el mismo reintento, los aprendizajes se aplican uno tras otro, con revisiones consecutivas y sin
+  ningún 409 `stale_proposal`.
+- **Sin el permiso «aplicar mejoras»** (`applyImprovements`), nada cambia respecto a antes: el aprendizaje queda como
+  **propuesta pendiente** de tu aprobación.
+- **Si aplicar falla**, el aprendizaje queda en `failed` con su error, los archivos vuelven a como estaban y el reintento
+  no se bloquea: su versión ya está guardada.
+- **Cuándo no se aprende nada.** Si el reintento no pasa (falla la conversión o la QA), repite un plan fallido, se agota el
+  tope diario o falla el planificador, no cambian los archivos del agente ni su revisión y no se crea ninguna propuesta.
+
+#### Deshacer un aprendizaje
+
+En la pestaña Mejoras, cada aprendizaje aplicado («Aprendido de un reintento») tiene **Deshacer**, que pide tu confirmación
+(`POST …/proposals/:pid/undo` con `{ authorized: true }`). Deshacer también escribe en los archivos del agente, así que exige
+el mismo permiso (403 sin él) y pasa por la misma cola. Restaura los archivos desde su copia de seguridad, sube la revisión
+y anota la vuelta atrás en el historial y en `CAMBIOS.md`. Queda un registro inverso con `origin: 'undo'` y el aprendizaje
+pasa a `undone` (`undoneAt`). Deshacer uno no toca los demás aprendizajes. En esta historia no hay «Rehacer»: para volver a
+aprenderlo, basta otro reintento verificado.
 
 Reglas (las mismas para un documento suelto y para uno de un lote; código en `processVersion` de `documentJobs.ts`):
 
@@ -145,8 +175,16 @@ Reglas (las mismas para un documento suelto y para uno de un lote; código en `p
 - **Los conteos no cambian.** La intervención es una marca sobre el estado (`failed` o `rejected_qa`), no un estado más.
   El ítem sigue contando donde estaba y se mantiene: total = listos + rechazados + fallidos + excluidos (+ cancelados + por hacer).
 
-Pruebas: `apps/server/test/reintento-aprende.test.ts`, con 7 casos de (a) a (g). Se ejecutan solas con
-`node apps/server/scripts/run-tests.mjs test/reintento-aprende.test.ts`.
+Pruebas: `apps/server/test/reintento-aprende.test.ts`, con 7 casos de (a) a (g); en (g) el aprendizaje queda aplicado y
+ninguna propuesta en `proposed`. `apps/server/test/reintento-autoaprende.test.ts` cubre:
+- un reintento suelto que se aplica solo;
+- un reintento que no pasa y no cambia nada;
+- un lote de 3 documentos con 3 aplicaciones en orden;
+- Deshacer;
+- el caso sin permiso, que queda pendiente.
+
+Ambas usan el proveedor simulado y el Claude falso (0 USD) y se ejecutan solas con
+`node apps/server/scripts/run-tests.mjs test/reintento-aprende.test.ts` (o `test/reintento-autoaprende.test.ts`).
 
 ## Eliminar lotes y documentos (liberar espacio)
 
@@ -222,7 +260,7 @@ borrado a mano («Falta en disco», se puede quitar de la lista).
 `POST …/source/adopt` · `PUT …/source/grants` · `POST …/source/restore` · `GET|POST …/agents/:id/documents` ·
 `PUT …/documents/upload?name=` · `POST …/batches/:batchId/start|pause|resume|retry|cancel|deliverable` ·
 `POST …/documents/:jobId/process` · `GET …/documents/:jobId/file?path=` · `GET …/documents/:jobId/versions/:n/evidence` ·
-`POST …/agents/:id/feedback` · `POST …/proposals/:pid/apply|reject` ·
+`POST …/agents/:id/feedback` · `POST …/proposals/:pid/apply|reject|undo` ·
 `GET …/documents?includeRemoved=1` · `GET …/batches/:batchId/removal-preview` · `GET …/documents/:jobId/removal-preview` ·
 `DELETE …/batches/:batchId` y `DELETE …/documents/:jobId` (equivalentes: `POST …/batches/:batchId/remove`,
 `POST …/documents/:jobId/remove`), con cuerpo `{ authorized: true, reason?, previewToken? }`.
