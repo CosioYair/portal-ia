@@ -94,12 +94,7 @@ export function readZipEntry(file: string, e: ZipEntry): Buffer {
  * peligrosas) y ruta del archivo en disco. Escritura exclusiva: nunca reemplaza un ZIP existente.
  */
 export async function writeZip(outFile: string, files: { name: string; file: string }[]): Promise<{ bytes: number; entries: number }> {
-  const seen = new Set<string>();
-  for (const f of files) {
-    if (!f.name || f.name.startsWith('/') || f.name.split('/').includes('..') || /^[a-z]:/i.test(f.name)) throw err(`Nombre no permitido en el ZIP: ${f.name}`);
-    if (seen.has(f.name.toLowerCase())) throw err(`Nombre repetido en el ZIP: ${f.name}`);
-    seen.add(f.name.toLowerCase());
-  }
+  checkZipNames(files.map(f => f.name));
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
   const fd = fs.openSync(outFile, 'wx'); const central: Buffer[] = []; let off = 0;
   const dos = (d: Date) => ({ time: (d.getHours() << 11) | (d.getMinutes() << 5) | Math.floor(d.getSeconds() / 2), date: ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate() });
@@ -123,6 +118,44 @@ export async function writeZip(outFile: string, files: { name: string; file: str
     return { bytes: off + cd.length + 22, entries: files.length };
   } catch (e) { try { fs.closeSync(fd); } catch { /* ya cerrado */ } try { fs.rmSync(outFile, { force: true }); } catch { /* sin archivo */ } throw e; }
   finally { try { fs.closeSync(fd); } catch { /* ya cerrado */ } }
+}
+
+/** Nombres dentro del ZIP: únicos (sin distinguir mayúsculas) y sin rutas peligrosas. Común a writeZip y zipBuffers. */
+function checkZipNames(names: string[]): void {
+  const seen = new Set<string>();
+  for (const n of names) {
+    if (!n || n.startsWith('/') || n.split('/').includes('..') || /^[a-z]:/i.test(n)) throw err(`Nombre no permitido en el ZIP: ${n}`);
+    if (seen.has(n.toLowerCase())) throw err(`Nombre repetido en el ZIP: ${n}`);
+    seen.add(n.toLowerCase());
+  }
+}
+
+/** Fecha fija (1980-01-01 00:00, el mínimo DOS): el mismo contenido da siempre el mismo ZIP. */
+const FIXED_DOS = { time: 0, date: (0 << 9) | (1 << 5) | 1 };
+
+/**
+ * ZIP en memoria (sin tocar disco) con el mismo formato que writeZip: deflate, nombres UTF-8 (flag 0x800), CRC32 y
+ * directorio central. Determinista: fecha fija y el orden de `entries`. Para paquetes pequeños (p. ej. agentes portables).
+ */
+export function zipBuffers(entries: { name: string; data: Buffer }[]): Buffer {
+  checkZipNames(entries.map(e => e.name));
+  if (entries.length >= 0xffff) throw err('Demasiados archivos para un ZIP sin ZIP64.');
+  const parts: Buffer[] = []; const central: Buffer[] = []; let off = 0; const t = FIXED_DOS;
+  for (const e of entries) {
+    const data = e.data; const comp = zlib.deflateRawSync(data); const crc = zlib.crc32(data);
+    if (data.length >= 0xffffffff || comp.length >= 0xffffffff || off >= 0xffffffff) throw err('El ZIP superaría 4 GB.');
+    const name = Buffer.from(e.name, 'utf8');
+    const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x800, 6); lh.writeUInt16LE(8, 8); lh.writeUInt16LE(t.time, 10); lh.writeUInt16LE(t.date, 12);
+    lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(comp.length, 18); lh.writeUInt32LE(data.length, 22); lh.writeUInt16LE(name.length, 26);
+    parts.push(lh, name, comp);
+    const ch = Buffer.alloc(46); ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x800, 8); ch.writeUInt16LE(8, 10); ch.writeUInt16LE(t.time, 12); ch.writeUInt16LE(t.date, 14);
+    ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(data.length, 24); ch.writeUInt16LE(name.length, 28); ch.writeUInt32LE(off, 42);
+    central.push(Buffer.concat([ch, name]));
+    off += 30 + name.length + comp.length;
+  }
+  const cd = Buffer.concat(central);
+  const end = Buffer.alloc(22); end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(off, 16);
+  return Buffer.concat([...parts, cd, end]);
 }
 
 /** SHA-256 de un archivo leído en flujo, sin bloquear el servidor (un ZIP de 1 GB tarda unos segundos). */

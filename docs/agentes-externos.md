@@ -12,7 +12,7 @@ Código: `packages/domain/src/external-agent.ts`, `apps/server/src/services/exte
 `apps/web/src/components/ExternalAgent.tsx`, herramientas en `apps/server/tools/`. Pruebas:
 `apps/server/test/agentes-externos.test.ts`, `apps/server/test/lotes-independientes.test.ts`,
 `apps/server/test/documentos-eliminacion.test.ts`, `apps/server/test/reintento-aprende.test.ts`,
-`apps/server/test/reintento-autoaprende.test.ts`.
+`apps/server/test/reintento-autoaprende.test.ts`, `apps/server/test/primer-intento-aprendido.test.ts`.
 
 ## Contrato y compatibilidad con estructuras existentes
 
@@ -193,6 +193,41 @@ ninguna propuesta en `proposed`. `apps/server/test/reintento-autoaprende.test.ts
 
 Ambas usan el proveedor simulado y el Claude falso (0 USD) y se ejecutan solas con
 `node apps/server/scripts/run-tests.mjs test/reintento-aprende.test.ts` (o `test/reintento-autoaprende.test.ts`).
+
+### Primer intento con lo aprendido
+
+Si vuelves a enviar un ZIP o un PDF que ya se resolvió, aunque fuera con reintentos, el primer intento del documento nuevo
+usa **el plan que ya funcionó para ese mismo documento**. Así se convierte a la primera, sin repetir el fallo ni el reintento.
+Código: `jobsDb.provenPlanBySha` y `processVersion` de `documentJobs.ts`.
+
+- **Cuándo.** Solo en el primer intento de un trabajo, es decir, cuando todavía no tiene versiones ni corrección. Un reintento
+  sigue las reglas de la sección anterior.
+- **Cómo se identifica el documento.** Por el **SHA-256 del PDF**, no por su nombre ni por el del ZIP. Se buscan los trabajos
+  del mismo agente con ese SHA-256 en cualquier lote anterior o como documento suelto. Se excluyen el trabajo actual y los
+  eliminados, y se revisan del más reciente al más antiguo. Se toma el plan de la última versión que **pasó la QA**
+  (`passed = true`).
+- **Cuándo es válido.** El plan se reutiliza solo si el script sigue existiendo en la instantánea adoptada, si su huella
+  coincide con la de la versión que funcionó (`scriptHash`) y si `validatePlan` lo acepta con los scripts actuales. Si una
+  de estas condiciones falla, se usa **el plan del lote** como siempre, sin error ni intervención. Un plan probado que ya no
+  es válido no se ejecuta nunca.
+- **Costo.** Reutilizar el plan **no hace ninguna llamada al modelo**: el documento no se replanifica. La conversión y la QA
+  son las de siempre y siguen exigiendo tu autorización del lote.
+- **Dónde queda anotado.** La primera línea del informe de la v1 y su línea en `HISTORIAL.md` dicen «Primer intento con el
+  plan que ya funcionó para este documento (SHA-256 …, trabajo X vN)». Si la habilidad cambió de revisión desde entonces,
+  también lo indican. El evento `run` del agente incluye `provenFrom` con `{ jobId, version, sha256, batchId }`. No hay
+  pantallas nuevas: lo ves en el informe de la versión y en el historial del agente.
+- **Memoria y plan probado son cosas distintas.** El aprendizaje que deja un reintento correcto entra en la memoria del
+  agente en ese momento si tiene el permiso «aplicar mejoras»; sin ese permiso, solo cuando **tú apruebas** la propuesta. A
+  partir de ahí, el plan común de cada lote nuevo se pide con esa memoria aplicada en el prompt: la memoria enseña **la regla
+  general** para documentos parecidos. El plan probado, en cambio, resuelve **ese mismo documento** (mismo SHA-256) aunque el
+  aprendizaje no se haya aplicado o se haya deshecho, porque no depende de la memoria.
+- **Conteos.** Cada documento sigue siendo un trabajo nuevo con una sola versión (v1). No cuenta como reintento, y los
+  conteos del lote se mantienen igual: total = listos + rechazados + fallidos + excluidos (+ cancelados + por hacer).
+
+Pruebas: `apps/server/test/primer-intento-aprendido.test.ts`. El caso (a) reproduce el caso del propietario: el mismo ZIP en
+un segundo lote se aprueba entero a la primera, con 1 versión por trabajo, 0 llamadas «REINTENTO» y 1 conversión por
+documento. El caso (b) comprueba que, con un plan probado que ya no es válido, se usa el plan del lote. Se ejecutan con
+`node apps/server/scripts/run-tests.mjs test/primer-intento-aprendido.test.ts`.
 
 ## Eliminar lotes y documentos (liberar espacio)
 

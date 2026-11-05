@@ -55,6 +55,34 @@ export interface ImportPreview { path: string; hash: string; files: string[]; ig
   requests: { harness: string; model: string; tools: string[]; autonomy: string } | null; instructions: string; skills: { slug: string; name: string; description: string; body: string }[]; memory: { title: string; text: string }[]; references: { slug: string; title: string; body: string }[]; note: string }
 
 const J = (body: unknown) => JSON.stringify(body);
+/** Problema que impide exportar el paquete (409 de export.zip). */
+export interface BundleProblem { path: string; message: string }
+/**
+ * Descarga un archivo binario (GET) como blob y lo guarda con el nombre que da el servidor. Si falla, lanza un ApiError
+ * con el motivo del servidor; en un 409 de export.zip, `body.problems` trae la lista de lo que impide exportar.
+ */
+async function downloadBlob(url: string, fallbackName: string): Promise<{ fileName: string; bytes: number }> {
+  let res: Response;
+  try { res = await fetch(url, { headers: { ...ownerHeaders() } }); }
+  catch { throw new ApiError(0, 'No se pudo conectar con el Portal para descargar el paquete.'); }
+  if (!res.ok) {
+    let body: any = null; try { body = await res.json(); } catch { /* sin JSON */ }
+    const problems: BundleProblem[] = Array.isArray(body?.problems) ? body.problems : [];
+    const reason = problems.length ? problems.map(p => (p.path ? `${p.path}: ${p.message}` : p.message)).join(' · ') : null;
+    throw new ApiError(res.status, body?.error ?? reason ?? `No se pudo descargar el paquete (error ${res.status}).`, body);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get('Content-Disposition') ?? '';
+  const star = /filename\*=UTF-8''([^;]+)/i.exec(cd); const plain = /filename="([^"]+)"/i.exec(cd);
+  let fileName = fallbackName;
+  try { fileName = star ? decodeURIComponent(star[1]!) : plain ? plain[1]! : fallbackName; } catch { fileName = plain ? plain[1]! : fallbackName; }
+  const href = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a'); a.href = href; a.download = fileName; a.rel = 'noopener';
+    document.body.appendChild(a); a.click(); a.remove();
+  } finally { setTimeout(() => URL.revokeObjectURL(href), 1000); }
+  return { fileName, bytes: blob.size };
+}
 /** PUT del archivo tal cual (application/octet-stream) con progreso: el servidor lo escribe en disco por partes. */
 function streamUpload<T>(url: string, file: File, onProgress?: (fraction: number) => void, signal?: AbortSignal): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -113,6 +141,10 @@ export const osApi = {
   importPreview: (slug: string, path: string) => request<ImportPreview>(`${W(slug)}/agents/import/preview`, { method: 'POST', body: J({ path }) }),
   importAgent: (slug: string, body: Omit<WizardInput, 'name' | 'role' | 'summary' | 'responsibilities' | 'deliverables' | 'instructions' | 'skills' | 'references' | 'capabilities'> & { path: string; hash: string }) => request<Agent>(`${W(slug)}/agents/import`, { method: 'POST', body: J(body) }),
   exportFiles: (slug: string, id: string) => request<{ folder: string; files: PortableFiles }>(`${W(slug)}/agents/${id}/export`),
+  /** URL del paquete portable (ZIP) del agente. */
+  exportZipUrl: (slug: string, id: string) => `${W(slug)}/agents/${encodeURIComponent(id)}/export.zip`,
+  /** Descarga el paquete portable (ZIP). Sin costo de IA. Lanza ApiError con el motivo (y `body.problems` en un 409). */
+  downloadZip: (slug: string, id: string) => downloadBlob(`${W(slug)}/agents/${encodeURIComponent(id)}/export.zip`, 'agente-paquete-portable.zip'),
   exportTo: (slug: string, id: string, path: string) => request<{ path: string }>(`${W(slug)}/agents/${id}/export`, { method: 'POST', body: J({ path }) }),
   // Agentes externos (referencia gestionada) y su banco de documentos — apps/server/src/routes/externalAgents.ts
   externalPreview: (slug: string, path: string) => request<ExternalPreview>(`${W(slug)}/agents/external/preview`, { method: 'POST', body: J({ path }) }),
