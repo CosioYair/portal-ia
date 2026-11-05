@@ -145,7 +145,8 @@ export function jobsDb(slug: string) {
       for (const r of db.prepare(`SELECT versions_json FROM document_jobs WHERE agent_id = ?`).all(agentId) as any[]) for (const v of JSON.parse(r.versions_json) as DocumentVersion[]) if (v.createdAt >= iso) { versions++; calls += v.calls ?? 2; }
       // Llamadas de los lotes (plan y resumen), cada una con su hora: un lote antiguo tocado hoy no vuelve a contar.
       calls += Number((db.prepare(`SELECT COUNT(*) AS c FROM document_model_calls WHERE agent_id = ? AND at >= ?`).get(agentId, iso) as any).c);
-      calls += Number((db.prepare(`SELECT COUNT(*) AS c FROM improvement_proposals WHERE agent_id = ? AND created_at >= ? AND COALESCE(origin, 'feedback') <> 'undo'`).get(agentId, iso) as any).c);
+      // Deshacer y aprendizajes automáticos por reintento no consultan al modelo: no cuentan contra el tope diario.
+      calls += Number((db.prepare(`SELECT COUNT(*) AS c FROM improvement_proposals WHERE agent_id = ? AND created_at >= ? AND COALESCE(origin, 'feedback') NOT IN ('undo', 'retry')`).get(agentId, iso) as any).c);
       return { versions, calls };
     }
   };
@@ -631,7 +632,12 @@ async function learnFromRetry(slug: string, a: Agent, job: DocumentJob, v: Docum
     if (v.plan?.script && v.scriptHash && sha256Text(files[v.plan.script] ?? '') !== v.scriptHash) { fail(`El script ${v.plan.script} cambió desde la versión que pasó la QA: no se aprende.`); return props.get(p.id); }
     // La revisión base se lee al aplicar, no al proponer (los cambios de aprendizaje solo añaden notas).
     db.prepare(`UPDATE improvement_proposals SET base_revision = ? WHERE id = ? AND state = 'proposed'`).run(s.revision, p.id);
-    try { await applyProposal(slug, a.id, p.id, { authorized: true, by: 'retry-auto' }); }
+    try {
+      await applyProposal(slug, a.id, p.id, { authorized: true, by: 'retry-auto' });
+      // Se aplicó sin aprobación porque pasó la QA del Portal: ya no «necesita validación».
+      db.prepare(`UPDATE improvement_proposals SET classification = 'reusable', reason = ? WHERE id = ? AND state = 'applied'`)
+        .run('Aprendido automáticamente: la corrección pasó las comprobaciones del Portal. Puedes deshacerlo.', p.id);
+    }
     catch (e: any) { fail(`No se pudo aplicar el aprendizaje: ${String(e?.message ?? e)}`); }
     changed({ ws: slug, entity: 'agent', id: a.id, kind: 'progress' });
     return props.get(p.id);
