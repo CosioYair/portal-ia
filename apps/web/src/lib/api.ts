@@ -273,6 +273,11 @@ export const api = {
   acceptPlan: (slug: string, processId: string, addBudgetUsd = 0) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/accept-plan`, { method: 'POST', body: JSON.stringify({ authorized: true, addBudgetUsd }) }),
   convertToAnalysis: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/convert-to-analysis`, { method: 'POST', body: JSON.stringify({}) }),
   retryProcess: (slug: string, processId: string, skipQa = false) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/retry`, { method: 'POST', body: JSON.stringify({ skipQa }) }),
+  /**
+   * EN-005 · «Reabrir la historia» desde un proceso de una historia integrada, completada o descartada. Lleva siempre
+   * confirmación explícita y motivo. Crea una iteración nueva pendiente de autorización (sin consumir IA) y devuelve ese proceso.
+   */
+  reopenStory: (slug: string, processId: string, reason: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/reopen-story`, { method: 'POST', body: JSON.stringify({ confirm: true, reason }) }),
   /** `expectedCommit`: el commit que viste; `acknowledge`: confirmas lo que la línea base dejó pasar (ver mergeAcknowledgementsOf). */
   mergeProcess: (slug: string, processId: string, skipVerification = false, opts: { expectedCommit?: string | null; acknowledge?: { preexisting?: boolean; testUpdates?: boolean } } = {}) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/merge`, { method: 'POST', body: JSON.stringify({ authorized: true, skipVerification, ...(opts.expectedCommit ? { expectedCommit: opts.expectedCommit } : {}), ...(opts.acknowledge ? { acknowledge: opts.acknowledge } : {}) }) }),
   publishProcess: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/publish`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),

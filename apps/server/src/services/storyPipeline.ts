@@ -29,6 +29,17 @@ import { lastDetection } from './claudeCode/detect.ts';
 import { getClaudeCodeSettings } from './claudeCode/settings.ts';
 import { monotonicNow } from '../clock.ts';
 import { setWorkStatus, workItemOf, type WorkItem } from './workItems.ts';
+import { assertStoryOpen, storyClosureFor } from './storyClosure.ts';
+
+/**
+ * EN-005 · Defensa en profundidad: ¿este proceso es antiguo y su historia ya está integrada, completada o descartada?
+ * En ese caso el pipeline no cambia el estado de la historia (ni a in_progress ni a review/pending), aunque lo reanude
+ * una vía interna o un lote.
+ */
+const storyClosed = (slug: string, processId: string): boolean => {
+  const p = processesRepo(slug).get(processId);
+  return !!p && !!storyClosureFor(slug, p);
+};
 
 /**
  * Pipeline autónomo autorizado de una historia (sin supervisión del propietario entre pasos rutinarios).
@@ -1069,11 +1080,14 @@ export function storyRunContext(slug: string, processId: string, log: (o: any, m
 }
 
 export async function resumeStory(slug: string, processId: string, log: (o: any, m: string) => void, isCancelled: () => boolean) {
+  // EN-005: un proceso antiguo de una historia cerrada no se reanuda (409 sin efectos), venga de una ruta, de un lote o de dentro.
+  { const p0 = processesRepo(slug).get(processId); if (p0) assertStoryOpen(slug, p0); }
   const procs = processesRepo(slug); const agents = agentsRepo(slug); const backlog = backlogRepo(slug);
   const { ctx, involved, repoPath } = storyRunContext(slug, processId, log, isCancelled);
   const item = ctx.item; const repo = { path: repoPath };
   involved.forEach(id => agents.setStatus(id, 'active'));
-  setWorkStatus(slug, item, 'in_progress', processId);
+  if (storyClosed(slug, processId)) log({ processId }, 'historia cerrada o integrada por otra iteración: no se devuelve a in_progress');
+  else setWorkStatus(slug, item, 'in_progress', processId);
   let status: Process['status'] = 'done'; let error: string | null = null;
   try {
     updatePipeline(slug, processId, { state: 'running', reason: null, pauseKind: null, finishedAt: null }, { kind: 'info', message: 'El propietario autorizó continuar. El equipo retoma donde lo dejó.' });
@@ -1106,7 +1120,7 @@ export async function resumeStory(slug: string, processId: string, log: (o: any,
   } finally {
     involved.forEach(id => agents.setStatus(id, 'inactive'));
     const fin = procs.get(processId)!.result!;
-    setWorkStatus(slug, item, fin.applied || fin.changes.some(c => !c.error) ? 'review' : 'pending', processId);
+    if (!storyClosed(slug, processId)) setWorkStatus(slug, item, fin.applied || fin.changes.some(c => !c.error) ? 'review' : 'pending', processId);
     procs.finish(processId, status, error);
     log({ processId, state: fin.pipeline?.state, spent: procs.get(processId)?.spentUsd.toFixed(4) }, 'pipeline de la historia detenido');
     // Detección determinista (sin IA) también al reanudar: bloqueos, negativas, plazos, verificaciones fallidas.

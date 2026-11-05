@@ -9,7 +9,8 @@ import { agentsRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/wo
 import { cancelProcess, clearCancel, createAssessment, estimateAssessment, isCancelled, runAssessment } from '../services/assessment.ts';
 import { isActiveJob, trackJob } from '../services/activeJobs.ts';
 import { abortProcessCalls } from '../services/providerCalls.ts';
-import { createStoryProcess, estimateManualTest, estimateStory, generateManualTest, recoverStory, retryStory, runStory, stepByRole } from '../services/storyExecution.ts';
+import { createStoryProcess, estimateManualTest, estimateStory, generateManualTest, recoverStory, reopenStory, retryStory, runStory, stepByRole } from '../services/storyExecution.ts';
+import { assertStoryOpen, StoryClosedError, storyClosureFor } from '../services/storyClosure.ts';
 import { applyBacklogOps, createDelegation, ensureOpsParsed, estimateDelegation, runDelegation } from '../services/delegation.ts';
 import { describeProcess } from '../services/guidance.ts';
 import { flowOptions, slimResult } from '../services/processView.ts';
@@ -46,6 +47,8 @@ const OPERATION: Record<string, string> = { authorize: 'autorizar', continue: 'c
 /** Operaciones que ponen a trabajar a la IA o al sandbox: no empiezan mientras el Portal se reconstruye para reiniciarse. */
 const STARTS_WORK = /^(authorize|continue|accept-plan|integration\/prepare|integration\/resolve|external-correction|manual-test\/generate|verify|verify\/install-and-retry|recover|runtime-check)$/;
 const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish|continue|accept-plan)$/;
+/** EN-005 · Rutas que reactivarían un proceso antiguo de una historia integrada, completada o descartada: 409 sin efectos. */
+const CLOSURE_GUARDED = /\/processes\/:id\/(authorize|continue|accept-plan|recover|retry|apply|verify|verify\/install-and-retry)$/;
 
 /**
  * Procesos autorizados (HU-004). Un proceso nace 'pending_authorization' con una estimación; solo empieza a consumir
@@ -67,7 +70,7 @@ export async function processRoutes(app: FastifyInstance) {
     }
     const item = q.kind === 'story_execution' && q.backlogItemId ? backlogRepo(slug).get(q.backlogItemId) : undefined;
     const fo = await flowOptions(slug, q, item);
-    return { ...q, version: processVersion(q), guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, ...fo, backends: q.kind === 'story_execution' ? teamReadiness(slug, q.id) : null }) };
+    return { ...q, version: processVersion(q), closure: storyClosureFor(slug, q), guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, ...fo, backends: q.kind === 'story_execution' ? teamReadiness(slug, q.id) : null }) };
   };
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
 
@@ -84,6 +87,25 @@ export async function processRoutes(app: FastifyInstance) {
     try { assertNotSuperseded(slug, proc); }
     catch (e: any) {
       if (e instanceof InboxError) { reply.code(e.status).send({ error: e.message, code: 'superseded' }); return reply; }
+      throw e;
+    }
+  });
+
+  // EN-005: un proceso antiguo de una historia ya integrada (otra iteración tiene result.merged), completada o descartada
+  // no se continúa, autoriza, recupera, reintenta, aplica ni verifica. 409 con la iteración vigente, ANTES del arriendo y
+  // de cualquier cambio de estado: no cambia ni el proceso ni la historia. Para volver a trabajar en ella: reopen-story.
+  app.addHook('preHandler', async (req, reply) => {
+    if (req.method !== 'POST') return;
+    const url: string = (req as any).routeOptions?.url ?? (req as any).routerPath ?? '';
+    if (!CLOSURE_GUARDED.test(url)) return;
+    const { slug, id } = (req.params ?? {}) as { slug?: string; id?: string };
+    if (!slug || !id || !workspacesRepo.get(slug)) return;
+    const proc = processesRepo(slug).get(id);
+    if (!proc) return;
+    try { assertStoryOpen(slug, proc); }
+    catch (e: any) {
+      if (e instanceof StoryClosedError) { reply.code(e.status).send({ error: e.message, code: 'story_closed', closure: e.closure }); return reply; }
+      if (e instanceof InboxError) { reply.code(e.status).send({ error: e.message, code: 'story_closed' }); return reply; }
       throw e;
     }
   });
@@ -516,6 +538,21 @@ Proceso: ${proc.id}`, { processId: proc.id });
       app.log.info({ processId: id, remote: p.remote, branches }, 'ramas publicadas');
       return procs.get(id);
     } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+
+  // EN-005 · «Reabrir la historia»: la única forma de volver a trabajar en una historia integrada, completada o
+  // descartada. Exige confirmación explícita y motivo. Crea una iteración nueva pendiente de autorización, deja el
+  // motivo registrado, no consume IA y no pone la historia en in_progress.
+  app.post('/api/workspaces/:slug/processes/:id/reopen-story', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ confirm: z.literal(true), reason: z.string().trim().min(10).max(500) }).safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Reabrir la historia exige tu confirmación explícita y un motivo (al menos 10 caracteres).', code: 'reason_required' });
+    if (!processesRepo(slug).get(id)) return reply.code(404).send({ error: 'Proceso no encontrado' });
+    try {
+      const created = await reopenStory(slug, id, body.data.reason);
+      app.log.info({ processId: id, newProcessId: created.id }, 'historia reabierta de forma explícita');
+      return await withGuidance(slug, processesRepo(slug).get(created.id) ?? created);
+    } catch (e: any) { return reply.code(e.statusCode ?? e.status ?? 500).send({ error: e.message, code: e.code }); }
   });
 
   // ---- Verificación local (sandbox_exec · requiere autorización por uso; ejecución local sin sandbox) ----
