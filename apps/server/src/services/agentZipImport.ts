@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CAPABILITIES, PORTABLE_LIMITS, allowedPortablePath, applyMergeResolutions, definitionToFiles, filesToDefinition, findSecret, mergePortableFiles, normalizeText, stripZipRoot } from '@portal-ia/domain';
+import { CAPABILITIES, PORTABLE_LIMITS, allowedBundlePath, allowedPortablePath, applyMergeResolutions, definitionToFiles, filesToDefinition, findSecret, mergePortableFiles, normalizeText, stripZipRoot } from '@portal-ia/domain';
 import type { Agent, PortableFiles, PortableMergeConflict, PortableMergeResult } from '@portal-ia/domain';
 import { listZip, readZipEntry } from './zipFile.ts';
 import { agentsRepo } from '../db/workspace.ts';
@@ -58,6 +58,9 @@ export function readAgentZip(file: string): { files: PortableFiles; marker: ZipM
     if (seen.has(key)) { problems.push(`${rel}: está repetido en el ZIP`); return; }
     seen.add(key);
     const isMarker = rel === ZIP_EXPORT_MARKER;
+    // EN-007 · Archivos propios del paquete portable (GUIA.md, AUTOMEJORA.md, PLANES.json, contexto/, memoria/, scripts de
+    // habilidades de un externo…): no forman parte de la carpeta portal-ia/agent@1 y se ignoran al importar, sin bloquear.
+    if (!isMarker && !allowedPortablePath(rel) && allowedBundlePath(rel)) return;
     if (!isMarker && !allowedPortablePath(rel)) { problems.push(`${rel}: fuera de la carpeta del agente (no está entre los archivos permitidos)`); return; }
     total += e.usize;
     if (total > PORTABLE_LIMITS.totalBytes) { tooBig = true; problems.push(`El contenido supera ${PORTABLE_LIMITS.totalBytes / 1024} KB`); return; }

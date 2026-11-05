@@ -37,6 +37,7 @@ const { listZip, readZipEntry } = await import('../src/services/zipFile.ts');
 const { getClaudeCodeSettings, saveClaudeCodeSettings } = await import('../src/services/claudeCode/settings.ts');
 const { resetDetectionCache, verifiedDetection } = await import('../src/services/claudeCode/detect.ts');
 const { provenPlansForExport } = await import('../src/services/documentJobs.ts');
+const { sha256Text } = await import('../src/services/externalAgents.ts');
 const { applyZipImport, previewZipImport } = await import('../src/services/agentZipImport.ts');
 const { buildApp } = await import('./fixtures/owner-app.ts');
 
@@ -92,7 +93,8 @@ let ext: Record<string, string> = {}; let extBytes: Record<string, Buffer> = {};
 test('registrar un trabajo de documento aprobado con su SHA-256', async () => {
   await app.inject({ method: 'GET', url: `${W}/agents/${extId}/documents` }); // crea las tablas de documentos
   provenPlansForExport(S, extId, {});
-  const hash = crypto.createHash('sha256').update(SCRIPT.toString('utf8'), 'utf8').digest('hex');
+  // La misma huella que guarda el Portal al ejecutar el script (sha256Text del contenido adoptado).
+  const hash = sha256Text(SCRIPT.toString('utf8'));
   const at = new Date().toISOString();
   const version = { n: 1, docx: 'versiones/v1.docx', qaDir: '', passed: true, gates: { conversion_completada: true }, metrics: {}, plan: { script: 'skills/pdf/scripts/convertir.py', args: ARGS, reason: 'Tablas complejas: modo fiel.' }, scriptHash: hash, skillRevision: '1', report: `Listo en C:\\Users\\yair\\x.docx (${JOB_ID})`, reportBy: 'portal', at };
   workspaceDb(S).prepare(`INSERT INTO document_jobs (id, agent_id, title, slug, status, input_name, input_sha, pages, source, versions_json, error, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`)
