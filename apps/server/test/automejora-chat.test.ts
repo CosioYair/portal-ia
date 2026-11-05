@@ -157,6 +157,19 @@ test('(b2) Deshacer con mejoras posteriores: 409 later_improvements sin cambios;
   const still = (await inject('GET', `${A}/chat`)).json.messages.flatMap((m: any) => m.actions ?? []).find((x: any) => x.id === m1.id);
   assert.notEqual(still.result.undone, true, 'la primera sigue aplicada');
 
+  // Reasignar al Portal la primera con una posterior aplicada: 409, sigue 'done' y aplicada, sin pasar a mejorar_portal.
+  const actionsOf = () => workspaceDb(S).prepare(`SELECT id, kind, status FROM agent_actions WHERE agent_id = ?`).all(agentId) as any[];
+  const portalBefore = actionsOf().filter(x => x.kind === 'mejorar_portal').length;
+  const pendingBefore = actionsOf().filter(x => x.status === 'proposed').length;
+  const rr = await inject('POST', `${A}/actions/${m1.id}/reroute`, {});
+  assert.equal(rr.status, 409, JSON.stringify(rr.json)); assert.equal(rr.json.code, 'later_improvements', JSON.stringify(rr.json));
+  const afterRr = (await inject('GET', `${A}/chat`)).json.messages.flatMap((m: any) => m.actions ?? []).find((x: any) => x.id === m1.id);
+  assert.equal(afterRr.kind, 'mejorar_agente', 'no pasa a mejorar_portal'); assert.equal(afterRr.status, 'done');
+  assert.equal(afterRr.result.applied, true); assert.notEqual(afterRr.result.undone, true);
+  assert.equal(actionsOf().filter(x => x.kind === 'mejorar_portal').length, portalBefore, 'ninguna historia del Portal en camino');
+  assert.equal(actionsOf().filter(x => x.status === 'proposed').length, pendingBefore, 'nada nuevo pendiente');
+  assert.equal(skill(), both, 'la habilidad no cambia'); assert.equal(revision(), rev0 + 2, 'la revisión no cambia');
+
   // En orden inverso: primero la última, después la primera.
   const u2 = await inject('POST', `${A}/actions/${m2.id}/undo`, {});
   assert.equal(u2.status, 200, JSON.stringify(u2.json));

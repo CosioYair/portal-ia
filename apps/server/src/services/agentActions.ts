@@ -247,8 +247,12 @@ export async function rerouteAction(slug: string, agentId: string, id: string): 
   // HU-178: una mejora del agente ya aplicada primero se deshace y después pasa al Portal (otra vez pendiente de confirmar).
   const first = getAction(slug, agentId, id); if (!first) throw err('Acción no encontrada', 404);
   if (first.kind === 'mejorar_agente' && first.status === 'done') {
+    // Si el deshacer falla (p. ej. 409 later_improvements), la excepción sale aquí: la acción sigue 'done' y aplicada.
     if (first.result?.applied && !first.result?.undone) await undoAction(slug, agentId, id);
-    ensure(slug).prepare(`UPDATE agent_actions SET status = 'proposed', result_json = NULL, error = NULL, link = NULL, updated_at = ? WHERE id = ?`).run(now(), id);
+    const cur = getAction(slug, agentId, id);
+    if (!cur || cur.status !== 'done' || (cur.result?.applied && !cur.result?.undone)) throw err('La mejora no se pudo deshacer: no se reasigna.', 409);
+    const upd = ensure(slug).prepare(`UPDATE agent_actions SET status = 'proposed', result_json = NULL, error = NULL, link = NULL, updated_at = ? WHERE id = ? AND status = 'done'`).run(now(), id) as { changes?: number | bigint };
+    if (!Number(upd.changes ?? 0)) throw err('La acción cambió mientras se reasignaba.', 409);
   }
   const act = getAction(slug, agentId, id); if (!act) throw err('Acción no encontrada', 404);
   if (act.status !== 'proposed') throw err('La acción ya no está pendiente.', 409);
