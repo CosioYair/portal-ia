@@ -4,11 +4,11 @@ import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
 import { agentsRepo } from '../db/workspace.ts';
 import { ATTACHMENT_LIMITS, attachmentPath, deleteAttachment, listAttachments, saveAttachment } from '../services/agentAttachments.ts';
-import { confirmAction, dismissAction, rerouteAction } from '../services/agentActions.ts';
+import { confirmAction, dismissAction, rerouteAction, undoAction } from '../services/agentActions.ts';
 import { acceptOctetStream, streamToTemp, uploadName } from './uploads.ts';
 
 /**
- * Adjuntos de las conversaciones con cualquier agente y acciones que nacen del chat (confirmar / descartar).
+ * Adjuntos de las conversaciones con cualquier agente y acciones que nacen del chat (confirmar / descartar / deshacer una mejora ya aplicada).
  * Control de acceso: cada adjunto y cada acción pertenecen a UN agente de UNA empresa (su base y su carpeta de datos).
  */
 const err = (reply: FastifyReply, e: any) => reply.code(e.statusCode ?? 500).send({ error: e.message, ...(e.code ? { code: e.code } : {}) });
@@ -58,7 +58,14 @@ export async function agentFilesRoutes(app: FastifyInstance) {
   // El propietario corrige a quién le toca una mejora (del agente ↔ del Portal) antes de confirmarla.
   app.post(`${W}/actions/:actionId/reroute`, async (req, reply) => {
     const { slug, id, actionId } = req.params as any; if (!ok(slug, id, reply)) return;
-    try { return rerouteAction(slug, id, actionId); } catch (e) { return err(reply, e); }
+    try { return await rerouteAction(slug, id, actionId); } catch (e) { return err(reply, e); }
+  });
+  // Deshace una mejora del agente aplicada desde el chat (sin coste). Un segundo deshacer responde 409.
+  const UndoParams = z.object({ slug: z.string().min(1), id: z.string().min(1), actionId: z.string().min(1).max(200) });
+  app.post(`${W}/actions/:actionId/undo`, async (req, reply) => {
+    const p = UndoParams.safeParse(req.params); if (!p.success) return reply.code(400).send({ error: 'Parámetros no válidos.' });
+    const { slug, id, actionId } = p.data; if (!ok(slug, id, reply)) return;
+    try { return await undoAction(slug, id, actionId); } catch (e) { return err(reply, e); }
   });
   app.post(`${W}/actions/:actionId/dismiss`, async (req, reply) => {
     const { slug, id, actionId } = req.params as any; if (!ok(slug, id, reply)) return;

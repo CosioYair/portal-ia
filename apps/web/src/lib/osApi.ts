@@ -31,6 +31,8 @@ export interface ChatAttachment { id: string; agentId: string; projectId: string
 export type AgentActionKind = 'mejorar_agente' | 'mejorar_portal' | 'procesar_documentos' | 'corregir_documento';
 export interface AgentAction { id: string; agentId: string; messageId: string; kind: AgentActionKind; payload: Record<string, any>; status: 'proposed' | 'running' | 'done' | 'failed' | 'dismissed';
   result: Record<string, any> | null; error: string | null; link: string | null; createdAt: string; updatedAt: string; needsConfirmation: boolean }
+/** Un cambio que aplicó una mejora del agente desde el chat (result.changes de mejorar_agente). */
+export interface ImprovementChange { archivo: string; resumen: string }
 export interface DocumentQueue { queued: number; active: number; maxActive: number; minFreeMb: number; freeMb: number }
 export interface BatchLimits { maxUploadBytes: number; maxEntries: number; maxDocs: number; maxPdfBytes: number; maxTotal: number; maxRatio: number }
 export type ReceiveResult = { kind: 'pdf'; jobs: (DocumentJob & { duplicate?: boolean })[] } | { kind: 'zip'; batch: DocumentBatch };
@@ -126,6 +128,8 @@ export const osApi = {
   confirmAction: (slug: string, id: string, actionId: string) => request<AgentAction>(`${W(slug)}/agents/${id}/actions/${actionId}/confirm`, { method: 'POST', body: J({ authorized: true }) }),
   rerouteAction: (slug: string, id: string, actionId: string) => request<AgentAction>(`${W(slug)}/agents/${id}/actions/${actionId}/reroute`, { method: 'POST', body: J({}) }),
   dismissAction: (slug: string, id: string, actionId: string) => request<AgentAction>(`${W(slug)}/agents/${id}/actions/${actionId}/dismiss`, { method: 'POST', body: J({}) }),
+  /** Deshace una mejora aplicada desde el chat (sin coste). Si ya se deshizo, el servidor responde 409. */
+  undoAction: (slug: string, id: string, actionId: string) => request<AgentAction>(`${W(slug)}/agents/${id}/actions/${encodeURIComponent(actionId)}/undo`, { method: 'POST', body: J({}) }),
   task: (slug: string, id: string, body: { request: string; projectId: string | null; budgetUsd?: number; maxSubscriptionCalls?: number; preview?: boolean }) => request<Process & { estimate?: any }>(`${W(slug)}/agents/${id}/tasks`, { method: 'POST', body: J({ ...body, authorized: true }) }),
   folder: (slug: string, id: string) => request<FolderStatus>(`${W(slug)}/agents/${id}/folder`),
   createFolder: (slug: string, id: string) => request<FolderStatus>(`${W(slug)}/agents/${id}/folder`, { method: 'POST', body: J({}) }),
