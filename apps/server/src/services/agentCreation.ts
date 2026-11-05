@@ -28,6 +28,8 @@ export interface WizardInput {
   tools: string[]; knowledge: string[]; capabilities: Capability[]; autonomy: 'ask' | 'within_scope';
   instructions?: string | null; skills?: PortableSkill[]; references?: PortableKnowledge[];
   initials?: string | null; authorized: boolean;
+  /** CAMBIOS.md de una carpeta o ZIP importado (se conserva tal cual). */
+  changelog?: string | null;
 }
 
 const initialsOf = (name: string) => name.split(/\s+/).filter(w => w.length > 2 && !/^(de|del|la|el|los|las|y|en|para)$/i.test(w)).map(w => w[0]!.toUpperCase()).slice(0, 2).join('') || name.slice(0, 2).toUpperCase();
@@ -47,7 +49,7 @@ function validate(slug: string, i: WizardInput): { provider: ProviderId } {
   return { provider };
 }
 
-export async function createAgentFromWizard(slug: string, i: WizardInput, source: 'created' | 'import' = 'created'): Promise<Agent> {
+export async function createAgentFromWizard(slug: string, i: WizardInput, source: 'created' | 'import' = 'created', importNote = 'Importado desde una carpeta (revisado por el propietario)'): Promise<Agent> {
   const { provider } = validate(slug, i);
   const agents = agentsRepo(slug); const deps = departmentsRepo(slug);
   const dep = deps.materialize({ name: i.department.trim() || 'Dirección', purpose: i.departmentPurpose ?? undefined });
@@ -70,9 +72,10 @@ export async function createAgentFromWizard(slug: string, i: WizardInput, source
   const extras: AgentExtras = {
     instructions: i.instructions?.trim() ? i.instructions.trim() : defaultInstructions(cfg.name, cfg.specialization),
     skills: (i.skills ?? []).map(s => ({ ...s, slug: slugify(s.slug || s.name).slice(0, 60) })), memory: [], knowledge: (i.references ?? []).map(k => ({ ...k, slug: slugify(k.slug || k.title).slice(0, 60) })),
-    deliverables: i.deliverables.map(d => d.trim()).filter(Boolean).slice(0, 20), autonomy: i.autonomy
+    deliverables: i.deliverables.map(d => d.trim()).filter(Boolean).slice(0, 20), autonomy: i.autonomy,
+    changelog: i.changelog?.trim() ? i.changelog : undefined
   };
-  await writeRevision(slug, agent.id, definitionToFiles(definitionFor(slug, agent, extras)), source === 'import' ? 'import' : 'created', source === 'import' ? 'Importado desde una carpeta (revisado por el propietario)' : 'Creado con el asistente de la oficina');
+  await writeRevision(slug, agent.id, definitionToFiles(definitionFor(slug, agent, extras)), source === 'import' ? 'import' : 'created', source === 'import' ? importNote : 'Creado con el asistente de la oficina');
   recordAgentEvent(slug, agent.id, source === 'import' ? 'imported' : 'created', { harness: i.harness, model: i.model, department: dep.name, tools: i.tools, autonomy: i.autonomy, scope: i.scope });
   return agentsRepo(slug).get(agent.id)!;
 }
@@ -117,22 +120,33 @@ export function importPreview(slug: string, dir: string) {
   };
 }
 
-export async function importConfirm(slug: string, dir: string, expectHash: string, grant: Omit<WizardInput, 'name' | 'role' | 'summary' | 'responsibilities' | 'deliverables' | 'instructions' | 'skills' | 'references' | 'capabilities'> & { capabilities?: Capability[] | null }): Promise<Agent> {
+/** Lo que concede el propietario al importar un agente nuevo (arnés, permisos, departamento…): nunca sale de la carpeta. */
+export type ImportGrant = Omit<WizardInput, 'name' | 'role' | 'summary' | 'responsibilities' | 'deliverables' | 'instructions' | 'skills' | 'references' | 'capabilities' | 'changelog'> & { capabilities?: Capability[] | null };
+
+export async function importConfirm(slug: string, dir: string, expectHash: string, grant: ImportGrant): Promise<Agent> {
   const abs = localDir(dir);
   const { files } = readFolder(abs);
   if (hashFiles(files) !== expectHash) throw Object.assign(new Error('La carpeta cambió desde la vista previa: vuelve a revisarla.'), { statusCode: 409 });
+  return importFromFiles(slug, files, abs, grant);
+}
+
+/**
+ * Crea un agente NUEVO a partir de archivos portables ya leídos (de una carpeta o de un ZIP). `origin` describe de dónde
+ * vienen (se guarda en la evidencia de la memoria propuesta). El id de la carpeta se ignora: el agente recibe uno nuevo.
+ */
+export async function importFromFiles(slug: string, files: PortableFiles, origin: string, grant: ImportGrant, note = 'Importado desde una carpeta (revisado por el propietario)'): Promise<Agent> {
   const parsed = filesToDefinition(files);
   if (!parsed.definition || parsed.problems.some(p => p.blocking)) throw Object.assign(new Error(`No se puede importar: ${parsed.problems.filter(p => p.blocking).map(p => `${p.path} — ${p.message}`).join(' · ')}`), { statusCode: 400 });
   const d = parsed.definition;
   const agent = await createAgentFromWizard(slug, {
     ...grant, name: d.manifest.name, role: d.manifest.role, summary: d.manifest.summary, responsibilities: d.manifest.responsibilities, deliverables: d.manifest.deliverables,
     capabilities: grant.capabilities ?? [],
-    instructions: d.instructions, skills: d.skills, references: d.knowledge, initials: d.manifest.initials
-  }, 'import');
+    instructions: d.instructions, skills: d.skills, references: d.knowledge, initials: d.manifest.initials, changelog: d.changelog ?? null
+  }, 'import', note);
   // La memoria de la carpeta llega como PROPUESTA (el propietario la verifica o la descarta).
   const lessons = lessonsRepo(slug); const ts = monotonicNow();
   for (const m of d.memory.slice(0, 50)) {
-    const l = lessons.insert({ projectId: null, role: null, tags: ['importada'], status: 'proposed', version: 1, parentId: null, title: m.title.slice(0, 120) || 'Aprendizaje importado', detector: 'import', evidence: { processId: null, processTitle: null, stepId: null, agentId: agent.id, agentName: agent.config.name, file: null, detail: `Importado de ${abs} (${m.source || 'sin origen'}) el ${ts.slice(0, 10)}; sin verificar.`, at: ts }, rootCause: null, correctiveAction: null, lessonText: m.text, source: 'import', promotedTo: null, dedupeKey: null, agentId: agent.id });
+    const l = lessons.insert({ projectId: null, role: null, tags: ['importada'], status: 'proposed', version: 1, parentId: null, title: m.title.slice(0, 120) || 'Aprendizaje importado', detector: 'import', evidence: { processId: null, processTitle: null, stepId: null, agentId: agent.id, agentName: agent.config.name, file: null, detail: `Importado de ${origin} (${m.source || 'sin origen'}) el ${ts.slice(0, 10)}; sin verificar.`, at: ts }, rootCause: null, correctiveAction: null, lessonText: m.text, source: 'import', promotedTo: null, dedupeKey: null, agentId: agent.id });
     void l;
   }
   return agent;

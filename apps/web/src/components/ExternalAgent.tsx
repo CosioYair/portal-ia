@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { BATCH_ITEM_LABEL, FEEDBACK_LABEL, INTEGRATION_LABEL, PRESENCE_LABEL, batchCountsAddUp, type RemovalPreview, type RemovalRecord, type DocumentBatch, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ExecutionBackend, type ExternalGrants, type ImprovementProposal } from '@portal-ia/domain';
+import { BATCH_ITEM_LABEL, FEEDBACK_LABEL, INTEGRATION_LABEL, PRESENCE_LABEL, PROPOSAL_ORIGIN_LABEL, batchCountsAddUp, type RemovalPreview, type RemovalRecord, type DocumentBatch, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ExecutionBackend, type ExternalGrants, type ImprovementProposal } from '@portal-ia/domain';
 import { Chip, Icon, Notice, Spinner } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
 import { FolderPicker } from './FolderPicker.tsx';
@@ -446,17 +446,61 @@ function VersionView({ slug, agentId, jobId, v }: { slug: string; agentId: strin
   </div>;
 }
 
+/**
+ * Botón «Deshacer» de una mejora ya aplicada (incluidas las aprendidas solas de un reintento). Pide confirmación,
+ * retira solo el bloque que añadió esa mejora (409 undo_conflict si ya no está tal cual) y la marca como deshecha. No consulta a ningún modelo (sin costo).
+ */
+function UndoProposalControl({ slug, agentId, proposal, onDone }: { slug: string; agentId: string; proposal: ImprovementProposal; onDone: () => void }) {
+  const { flash } = useApp();
+  const [ask, setAsk] = useState(false); const [working, setWorking] = useState(false); const [error, setError] = useState<string | null>(null);
+  if (proposal.state !== 'applied' || proposal.origin === 'undo') return null;
+  const run = async () => {
+    setWorking(true); setError(null);
+    try { await api.undoAgentProposal(slug, agentId, proposal.id); setAsk(false); flash('Mejora deshecha: se retiró el bloque que había añadido'); onDone(); }
+    catch (e: any) { setError(e.message); } finally { setWorking(false); }
+  };
+  return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    {error && <Notice kind="err">{error}</Notice>}
+    {ask ? <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }} role="group" aria-label="Confirmar deshacer la mejora">
+      <span className="small">Se restaurará la copia previa de sus archivos (queda registrado en su historial). No consulta a tu suscripción.</span>
+      <button type="button" className="btn btn-primary btn-sm" disabled={working} onClick={() => void run()}>{working ? 'Deshaciendo…' : 'Sí, deshacer'}</button>
+      <button type="button" className="btn btn-ghost btn-sm" disabled={working} onClick={() => setAsk(false)}>No</button>
+    </div>
+      : <button type="button" className="btn btn-ghost btn-sm" style={{ alignSelf: 'flex-start' }} disabled={working} onClick={() => setAsk(true)}>Deshacer</button>}
+  </div>;
+}
+
 // ---------------------------------------------------------------- Origen: procedencia, integración, cambios, permisos
+
+/** Programas que se ejecutarían en este equipo: si cambian fuera, su adopción no es automática (pide revisión). */
+const PROGRAM_RE = /\.(py|sh|bash|zsh|js|mjs|cjs|ts|rb|pl|ps1|bat|cmd|exe)$/i;
+/**
+ * HU-183: lo que cambió fuera del Portal se adopta solo (versión nueva, con Deshacer). Devuelve por qué NO puede
+ * adoptarse solo (el «conflicto» que el propietario debe decidir) o null si puede adoptarse automáticamente.
+ */
+const manualReason = (s: SourceStatus): string | null =>
+  s.readError ? 'no se puede leer su carpeta'
+    : !s.diskHash ? 'no se pudo calcular la huella de su carpeta'
+    : s.problems.some(x => x.blocking) ? 'hay problemas que lo impiden (abajo)'
+    : s.diff.some(d => PROGRAM_RE.test(d.path)) ? 'cambiaron programas que se ejecutan en este equipo y eso pide tu revisión'
+    : null;
 
 export function OriginTab({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: () => void }) {
   const { flash } = useApp();
   const [s, setS] = useState<SourceStatus | null>(null); const [error, setError] = useState<string | null>(null); const [busy, setBusy] = useState(false);
   const [grants, setGrants] = useState<ExternalGrants | null>(null); const [confirmRestore, setConfirmRestore] = useState<number | null>(null); const [confirmAdopt, setConfirmAdopt] = useState(false);
+  const [autoUndo, setAutoUndo] = useState<{ from: number; files: string[] } | null>(null); const autoTried = useRef<string | null>(null);
   const dirty = useRef(false);
   const load = useCallback(() => osApi.source(slug, p.agent.id).then(x => { setS(x); if (!dirty.current) setGrants(x.grants); }).catch(e => setError(e.message)), [slug, p.agent.id]);
   useEffect(() => { void load(); }, [load]);
   useLive(c => c.ws === slug && c.entity === 'agent' && c.id === p.agent.id && c.kind !== 'progress', () => void load(), { minMs: 1500 });
   const act = async (fn: () => Promise<unknown>, ok: string) => { setBusy(true); setError(null); try { await fn(); flash(ok); dirty.current = false; await load(); onChanged(); } catch (e: any) { setError(e.message); } finally { setBusy(false); } };
+  // Adopción automática de lo que cambió fuera (una sola vez por huella; si falla, queda la revisión manual con el error).
+  useEffect(() => {
+    if (!s || busy || s.changes.length === 0 || manualReason(s) !== null || autoTried.current === s.diskHash) return;
+    autoTried.current = s.diskHash; const from = s.revision; const files = s.diff.map(d => d.path); const hash = s.diskHash!;
+    void act(async () => { await osApi.adoptSource(slug, p.agent.id, hash); setAutoUndo({ from, files }); }, 'Lo que cambió fuera se adoptó automáticamente (versión nueva, puedes deshacerlo)');
+  }, [s, busy]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!s || !grants) return error ? <Notice kind="err">{error}</Notice> : <Spinner />;
   const changed = JSON.stringify(grants) !== JSON.stringify(s.grants);
   const restoreBlock = s.changes.length > 0 ? 'Primero revisa los cambios hechos fuera del Portal.' : !s.grants.applyImprovements ? 'Necesita el permiso de aplicar mejoras.' : null;
@@ -467,11 +511,15 @@ export function OriginTab({ slug, p, onChanged }: { slug: string; p: Panel; onCh
       <p className="small muted">{s.state === 'integrated' ? 'El Portal ya aplicó a sus archivos una mejora que aprobaste, comprobada, con copia previa y registro.' : s.state === 'evaluating' ? 'Ya trabajó con el Portal. Pasará a «Integrado» cuando apruebes una mejora y se aplique a su habilidad o instrucciones.' : 'Integrado como referencia: aún no ha trabajado con el Portal.'}</p>
       <div className="small"><strong>De dónde viene</strong> (no cambia): <code className="mono">{s.provenance.path}</code>, integrado el {new Date(s.provenance.importedAt).toLocaleString('es-MX')} por {s.provenance.importedBy === 'owner' ? 'ti' : s.provenance.importedBy}.</div>
       <div className="small">Su carpeta (la original): <code className="mono">{s.root}</code> · versión revisada <strong>{s.revision}</strong></div>
+      <div className="small muted">Lo que cambia en su carpeta original fuera del Portal se adopta solo como versión nueva, que puedes deshacer. Solo te lo pedimos si cambian programas que se ejecutan en este equipo o hay un problema. La importación desde ZIP es para los agentes con carpeta del Portal (Ajustes › Archivos): este agente vive en su carpeta original y un ZIP no la reemplaza.</div>
     </section>
+    {autoUndo && s.revision !== autoUndo.from && s.changes.length === 0 && <Notice kind="ok">Se adoptó automáticamente lo que cambió fuera del Portal ({autoUndo.files.join(', ')}) como versión {s.revision}.{' '}
+      {restoreBlock ? <span className="small">Para deshacerlo: {restoreBlock}</span>
+        : <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => { const from = autoUndo.from; void act(async () => { await osApi.restoreSource(slug, p.agent.id, from); setAutoUndo(null); }, `Deshecho: vuelta a la versión ${from} (con copia previa)`); }}>Deshacer (volver a la versión {autoUndo.from})</button>}</Notice>}
     {s.readError && <Notice kind="err">No se puede leer su carpeta: {s.readError}</Notice>}
-    {s.changes.length > 0 && <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8, borderColor: 'var(--color-warn-border)' }}>
+    {s.changes.length > 0 && (manualReason(s) !== null || (autoTried.current === s.diskHash && !busy)) && <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8, borderColor: 'var(--color-warn-border)' }}>
       <div className="h3">Cambios hechos fuera del Portal</div>
-      <p className="small">El agente sigue usando la versión que revisaste; los programas cambiados no se ejecutan hasta que adoptes los cambios. Revísalos:</p>
+      <p className="small">Estos cambios no se adoptan solos: {manualReason(s) ?? 'no se pudieron adoptar automáticamente (mira el error de arriba)'}. El agente sigue usando la versión que revisaste; los programas cambiados no se ejecutan hasta que adoptes los cambios. Revísalos:</p>
       {s.diff.map(d => <details key={d.path} className="card" style={{ padding: 8 }} open={s.diff.length <= 3}><summary className="small" style={{ cursor: 'pointer' }}><code>{d.path}</code> · {d.before === null ? 'nuevo' : d.after === null ? 'eliminado' : 'modificado'}{d.path.endsWith('.py') ? ' · programa: se ejecutará en este equipo' : ''}</summary><LineDiff before={d.before} after={d.after} /></details>)}
       {s.problems.map((x, i) => <Notice key={i} kind={x.blocking ? 'err' : 'warn'}>{x.path}: {x.message}</Notice>)}
       {confirmAdopt ? <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}><span className="small">El agente usará estos cambios desde ahora{s.diff.some(d => d.path.endsWith('.py')) ? ', incluidos los programas modificados' : ''}.</span>
@@ -524,8 +572,11 @@ export function ImprovementsTab({ slug, p, onChanged, onTab }: { slug: string; p
     {list.length === 0 && <p className="small muted">Sin propuestas todavía. Puedes dar feedback sobre cualquier documento en «Documentos».</p>}
     {list.map(x => <section key={x.id} className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><Chip xs tone={x.classification === 'reusable' ? 'accent' : x.classification === 'invalid' ? 'err' : ''}>{FEEDBACK_LABEL[x.classification]}</Chip>
-        <Chip xs tone={x.state === 'applied' ? 'ok' : x.state === 'failed' ? 'err' : x.state === 'proposed' ? 'warn' : ''}>{({ proposed: 'Pendiente de tu aprobación', approved: 'Aplicándose…', applied: 'Aplicada', rejected: x.changes.length ? 'Rechazada' : 'Sin cambios que aplicar', failed: 'Falló (todo volvió a como estaba)' } as const)[x.state]}</Chip>
-        <span className="small muted">{new Date(x.createdAt).toLocaleString('es-MX')}</span></div>
+        <Chip xs tone={x.state === 'applied' ? 'ok' : x.state === 'failed' ? 'err' : x.state === 'proposed' ? 'warn' : ''}>{({ proposed: 'Pendiente de tu aprobación', approved: 'Aplicándose…', applied: 'Aplicada', rejected: x.changes.length ? 'Rechazada' : 'Sin cambios que aplicar', failed: 'Falló (todo volvió a como estaba)', undone: 'Deshecha' } as const)[x.state]}</Chip>
+        <span className="small muted">{new Date(x.createdAt).toLocaleString('es-MX')}</span>
+        {x.autoApplied && x.origin && <Chip xs tone="accent">{PROPOSAL_ORIGIN_LABEL[x.origin]}</Chip>}
+        {x.origin === 'undo' && <Chip xs>{PROPOSAL_ORIGIN_LABEL.undo}</Chip>}</div>
+      <UndoProposalControl slug={slug} agentId={p.agent.id} proposal={x} onDone={onChanged} />
       <div className="small"><strong>Tu feedback:</strong> {x.feedback}</div>
       <div className="small"><strong>{x.summary}</strong> — {x.reason}</div>
       {x.classification === 'document_only' && <span className="small muted">Vale solo para ese documento: aplícalo con «Nueva versión con esta corrección» en <button type="button" className="lnk" onClick={() => onTab('documentos')}>Documentos</button>. No cambia su habilidad.</span>}

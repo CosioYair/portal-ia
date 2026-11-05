@@ -345,6 +345,9 @@ test('la mejora cambia la siguiente ejecución; una corrección solo del documen
   let job = (await inject('GET', `${W}/agents/${agentId}/documents`)).json.jobs.find((j: any) => j.id === jobId);
   assert.equal(job.status, 'ready', JSON.stringify(job.versions.at(-1))); const v2 = job.versions[1];
   assert.equal(v2.plan.script, 'skills/convertir-pdf-word/scripts/convertir_editable.py'); assert.equal(v2.passed, true); assert.equal(v2.skillRevision, '3');
+  // HU-179: v1 fue rechazada y v2 (reintento con diagnóstico) pasó → lo aprendido se aplica solo, con una revisión nueva.
+  const revAfterRetry = (await inject('GET', `${W}/agents/${agentId}/source`)).json.revision;
+  assert.equal(revAfterRetry, 4, 'el reintento verificado aprende solo (nueva revisión, sin propuesta pendiente)');
   assert.equal(fs.readFileSync(path.join(root, 'documentos/propuesta-visual/versiones/v1.docx'), 'utf8'), 'PK-docx-RASTER', 'v1 no se sobrescribe');
   // Corrección solo de este documento.
   scenario({ auth: 'subscription', rules: [{ match: '# Feedback del propietario', text: JSON.stringify({ classification: 'document_only', reason: 'Solo afecta a este documento.', summary: 'Reducir un poco la escala.', changes: [] }) },
@@ -356,7 +359,7 @@ test('la mejora cambia la siguiente ejecución; una corrección solo del documen
   job = (await inject('GET', `${W}/agents/${agentId}/documents`)).json.jobs.find((j: any) => j.id === jobId);
   assert.equal(job.versions.length, 3); assert.deepEqual(job.versions[2].plan.args, ['{entrada}', '{salida}', '--escala', '0.96']);
   assert.equal(fs.readFileSync(path.join(root, 'documentos/propuesta-visual/versiones/v3.docx'), 'utf8'), 'PK-docx-EDITABLE-escala-0.96');
-  assert.equal((await inject('GET', `${W}/agents/${agentId}/source`)).json.revision, 3, 'la corrección del documento no cambia la habilidad');
+  assert.equal((await inject('GET', `${W}/agents/${agentId}/source`)).json.revision, revAfterRetry, 'la corrección del documento no cambia la habilidad');
 });
 
 test('fallos: script cambiado fuera, arnés caído, PDF escaneado sin OCR, reinicio a mitad, escritura por un enlace', async () => {
@@ -399,7 +402,7 @@ test('restaurar una revisión anterior: con copia previa, nueva revisión y la c
   assert.ok(!fs.existsSync(path.join(root, 'skills/convertir-pdf-word/scripts/convertir_editable.py')));
   assert.equal(fs.readFileSync(path.join(root, ...r.json.backup.split('/'), 'skills/convertir-pdf-word/SKILL.md'), 'utf8'), before['skills/convertir-pdf-word/SKILL.md']);
   const src = (await inject('GET', `${W}/agents/${agentId}/source`)).json;
-  assert.equal(src.revision, 4); assert.equal(src.changes.length, 0); assert.equal(src.state, 'integrated', 'la procedencia y el historial se conservan');
+  assert.equal(src.revision, 5, 'restaurar crea una revisión nueva tras la 4 aprendida del reintento'); assert.equal(src.changes.length, 0); assert.equal(src.state, 'integrated', 'la procedencia y el historial se conservan');
   assert.ok(fs.existsSync(path.join(root, 'documentos/propuesta-visual/versiones/v2.docx')), 'restaurar no toca los entregables');
 });
 
