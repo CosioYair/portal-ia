@@ -144,11 +144,19 @@ costo.
 
 #### Deshacer un aprendizaje
 
-En la pestaña Mejoras, cada aprendizaje aplicado («Aprendido de un reintento») tiene **Deshacer**, que pide tu confirmación
-(`POST …/proposals/:pid/undo` con `{ authorized: true }`). Deshacer también escribe en los archivos del agente, así que exige
-el mismo permiso (403 sin él) y pasa por la misma cola. Restaura los archivos desde su copia de seguridad, sube la revisión
-y anota la vuelta atrás en el historial y en `CAMBIOS.md`. Queda un registro inverso con `origin: 'undo'` y el aprendizaje
-pasa a `undone` (`undoneAt`). Deshacer uno no toca los demás aprendizajes. En esta historia no hay «Rehacer»: para volver a
+En la pestaña Mejoras, cada mejora aplicada, incluidas las que vienen de un reintento («Aprendido de un reintento»), tiene
+el botón **Deshacer** (`UndoProposalControl` en `ExternalAgent.tsx`). Antes de actuar pide tu confirmación («Sí, deshacer»)
+y después llama a `POST …/proposals/:pid/undo` con `{ authorized: true }`. No consulta a ningún modelo, así que no tiene
+costo. Deshacer también escribe en los archivos del agente, así que exige el mismo permiso (403 sin él) y pasa por la misma
+cola.
+
+Deshacer **no** restaura la copia de seguridad entera: quita **solo el bloque que añadió ese aprendizaje**. Para cada archivo
+que cambió, busca la última aparición de ese texto tal cual (`undoProposal` en `documentJobs.ts`) y la retira; el resto del
+archivo queda igual. Así no se pierde lo que se aplicó después, sea otro aprendizaje, una mejora aprobada o un cambio
+adoptado. Si el archivo ya no existe o el bloque ya no está tal cual (alguien lo editó), responde **409 `undo_conflict`** y
+no cambia nada; ese caso hay que resolverlo a mano. Si sale bien, sube la revisión y anota la vuelta atrás en el historial y
+en `CAMBIOS.md`. Queda un registro inverso con `origin: 'undo'` y el aprendizaje pasa a `undone` (`undoneAt`), con la
+etiqueta «Deshecha». Deshacer uno no toca los demás aprendizajes. En esta historia no hay «Rehacer»: para volver a
 aprenderlo, basta otro reintento verificado.
 
 Reglas (las mismas para un documento suelto y para uno de un lote; código en `processVersion` de `documentJobs.ts`):

@@ -448,7 +448,7 @@ function VersionView({ slug, agentId, jobId, v }: { slug: string; agentId: strin
 
 /**
  * Botón «Deshacer» de una mejora ya aplicada (incluidas las aprendidas solas de un reintento). Pide confirmación,
- * restaura la copia previa de su carpeta y la marca como deshecha. No consulta a ningún modelo (sin costo).
+ * retira solo el bloque que añadió esa mejora (409 undo_conflict si ya no está tal cual) y la marca como deshecha. No consulta a ningún modelo (sin costo).
  */
 function UndoProposalControl({ slug, agentId, proposal, onDone }: { slug: string; agentId: string; proposal: ImprovementProposal; onDone: () => void }) {
   const { flash } = useApp();
@@ -456,7 +456,7 @@ function UndoProposalControl({ slug, agentId, proposal, onDone }: { slug: string
   if (proposal.state !== 'applied' || proposal.origin === 'undo') return null;
   const run = async () => {
     setWorking(true); setError(null);
-    try { await api.undoAgentProposal(slug, agentId, proposal.id); setAsk(false); flash('Mejora deshecha: su carpeta volvió a la copia previa'); onDone(); }
+    try { await api.undoAgentProposal(slug, agentId, proposal.id); setAsk(false); flash('Mejora deshecha: se retiró el bloque que había añadido'); onDone(); }
     catch (e: any) { setError(e.message); } finally { setWorking(false); }
   };
   return <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
