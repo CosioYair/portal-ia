@@ -742,7 +742,14 @@ export function undoImprovement(slug: string, agentId: string, proposalId: strin
     const later = () => err('Hay mejoras posteriores a esta: deshaz primero la última.', 409, { code: 'later_improvements' });
     const current = sourcesRepo(slug).get(agentId);
     if (!current) throw err('Agente externo no encontrado.', 404);
-    if (typeof revisionAfter === 'number') { if (Number(current.revision) !== revisionAfter) throw later(); }
+    if (typeof revisionAfter === 'number') {
+    // Tras deshacer la mejora posterior, la revisión vigente es una «vuelta a» revisionAfter: mismo contenido (CAMBIOS.md
+    // conserva el historial y añade la reversión). Entonces esta mejora ya es la última y se puede deshacer.
+    const last = sourcesRepo(slug).revisions(agentId)[0];
+    const backTo = !!last && last.source === 'restore' && Number(last.n) === Number(current.revision)
+      && new RegExp(`^Vuelta a la revisión ${revisionAfter}(\\D|$)`).test(String(last.note ?? ''));
+    if (Number(current.revision) !== revisionAfter && !backTo) throw later();
+  }
     else if (proposalsDb(slug).list(agentId).some(o => o.id !== p.id && o.state === 'applied' && !!o.appliedAt && !!p.appliedAt && o.appliedAt > p.appliedAt)) throw later();
     restoreSourceRevision(slug, agentId, revisionBefore, by);
     // La propuesta deja de figurar como aplicada (Mejoras y el chat muestran lo mismo).

@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
  *  (a) agente externo: la mejora se aplica al momento, sin «Sí, hazlo» ni Mejoras, con copia en respaldos y CAMBIOS.md;
  *  (c) Deshacer restaura la copia, CAMBIOS.md conserva el historial y un segundo Deshacer da 409;
  *  (b) dos mejoras seguidas el mismo día (por el chat y en paralelo) se aplican las dos, sin stale_proposal, revisión +2;
+ *  (b2) deshacer la primera de dos mejoras seguidas da 409 (later_improvements) sin tocar nada; en orden inverso, las dos se deshacen;
  *  (d) agente del Portal: el aprendizaje queda activo en su Memoria y se puede deshacer;
  *  (e) una petición sobre permisos, arnés, presupuesto o código del Portal no aplica nada y lo protegido queda intacto;
  *  (f) cada mejora usa exactamente una consulta y, con el tope del agente agotado, falla sin consultar ni aplicar.
@@ -135,6 +136,34 @@ test('(b) dos mejoras seguidas el mismo día (por el chat y en paralelo) se apli
   assert.equal(revision(), rev1 + 2, 'las dos aplicadas, sin versión obsoleta');
   assert.ok(skill().includes('PAR-A') && skill().includes('PAR-B'));
   assert.equal(classifierCalls(), 2, 'una consulta por mejora');
+});
+
+test('(b2) Deshacer con mejoras posteriores: 409 later_improvements sin cambios; en orden inverso se deshacen las dos', async () => {
+  const skill0 = skill(); const rev0 = revision();
+  scenario({ auth: 'subscription', rules: [classifier('Orden uno', [{ path: 'skills/conv/SKILL.md', kind: 'append', content: '- ORDEN-UNO.', summary: 'Orden uno' }]), { match: 'mejora ORDEN-UNO', text: accion({ tipo: 'mejorar_agente', descripcion: 'Mejora ORDEN-UNO.' }) }] });
+  const m1 = await chatAction(A, 'Aplica la mejora ORDEN-UNO a tu forma de trabajar, por favor.');
+  assert.equal(m1.status, 'done', m1.error); assert.equal(m1.result.applied, true, JSON.stringify(m1.result));
+  scenario({ auth: 'subscription', rules: [classifier('Orden dos', [{ path: 'skills/conv/SKILL.md', kind: 'append', content: '- ORDEN-DOS.', summary: 'Orden dos' }]), { match: 'mejora ORDEN-DOS', text: accion({ tipo: 'mejorar_agente', descripcion: 'Mejora ORDEN-DOS.' }) }] });
+  const m2 = await chatAction(A, 'Aplica ahora la mejora ORDEN-DOS, por favor.');
+  assert.equal(m2.status, 'done', m2.error); assert.equal(m2.result.applied, true, JSON.stringify(m2.result));
+  assert.equal(revision(), rev0 + 2);
+  const both = skill(); assert.ok(both.includes('ORDEN-UNO') && both.includes('ORDEN-DOS'));
+
+  // Deshacer la primera con una posterior aplicada: 409 later_improvements y nada cambia.
+  const u1 = await inject('POST', `${A}/actions/${m1.id}/undo`, {});
+  assert.equal(u1.status, 409, JSON.stringify(u1.json)); assert.equal(u1.json.code, 'later_improvements', JSON.stringify(u1.json));
+  assert.equal(skill(), both, 'la habilidad conserva las dos mejoras'); assert.ok(skill().includes('ORDEN-UNO') && skill().includes('ORDEN-DOS'));
+  assert.equal(revision(), rev0 + 2, 'la revisión no cambia');
+  const still = (await inject('GET', `${A}/chat`)).json.messages.flatMap((m: any) => m.actions ?? []).find((x: any) => x.id === m1.id);
+  assert.notEqual(still.result.undone, true, 'la primera sigue aplicada');
+
+  // En orden inverso: primero la última, después la primera.
+  const u2 = await inject('POST', `${A}/actions/${m2.id}/undo`, {});
+  assert.equal(u2.status, 200, JSON.stringify(u2.json));
+  assert.ok(skill().includes('ORDEN-UNO') && !skill().includes('ORDEN-DOS'), 'solo se retira la segunda');
+  const u1b = await inject('POST', `${A}/actions/${m1.id}/undo`, {});
+  assert.equal(u1b.status, 200, JSON.stringify(u1b.json)); assert.equal(u1b.json.result.undone, true);
+  assert.equal(skill(), skill0, 'la habilidad queda como antes de la primera mejora');
 });
 
 test('(d) agente del Portal: el aprendizaje queda aplicado en su Memoria (no «por verificar») y se puede deshacer', async () => {
