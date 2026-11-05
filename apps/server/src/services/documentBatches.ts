@@ -339,7 +339,7 @@ function batchViewRaw(slug: string, agentId: string, id: string, jobsById?: Map<
   const items: DocumentBatchItem[] = db.items(id).map(it => {
     const job = it.job_id ? (jobsById?.get(it.job_id) ?? jobs.get(it.job_id)) : null; const state = deriveState(it, job, !!mine?.has(it.idx));
     const lastOk = job?.versions.filter(v => v.passed).at(-1) ?? null;
-    return { idx: it.idx, entryName: it.entry_name, sha256: it.sha, size: it.size, outcome: it.outcome, reason: it.reason, jobId: it.job_id, state, version: lastOk?.n ?? job?.versions.at(-1)?.n ?? null, docx: lastOk ? `${job!.slug}/${lastOk.docx}` : null, docxRel: lastOk?.docx ?? null, error: state === 'failed' || state === 'rejected_qa' ? (job?.error ?? job?.versions.at(-1)?.report.split('\n')[0] ?? null) : null };
+    return { needsIntervention: !!job?.needsIntervention, interventionReason: job?.interventionReason ?? null, idx: it.idx, entryName: it.entry_name, sha256: it.sha, size: it.size, outcome: it.outcome, reason: it.reason, jobId: it.job_id, state, version: lastOk?.n ?? job?.versions.at(-1)?.n ?? null, docx: lastOk ? `${job!.slug}/${lastOk.docx}` : null, docxRel: lastOk?.docx ?? null, error: state === 'failed' || state === 'rejected_qa' ? (job?.error ?? job?.versions.at(-1)?.report.split('\n')[0] ?? null) : null };
   });
   const c = (st: DocumentBatchItemState) => items.filter(i => i.state === st).length;
   const counts: DocumentBatchCounts = {

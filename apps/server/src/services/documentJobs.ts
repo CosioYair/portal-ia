@@ -445,6 +445,8 @@ export async function processVersion(slug: string, a: Agent, jobId: string, tc: 
   const tried = [...new Set([...job.versions.filter(v => v.passed === false && v.plan?.script).map(v => `${v.plan.script} ${(v.plan.args ?? []).join(' ')}`), ...(opts.plan ? [`${opts.plan.script} ${opts.plan.args.join(' ')}`] : [])])].slice(-6);
   const intervene = (reason: string) => {
     jobsDb(slug).setIntervention(jobId, reason);
+    // Sin versión nueva: el documento vuelve al estado de su último intento (no se queda «processing»).
+    jobsDb(slug).update(jobId, { status: lastV?.gates?.conversion_completada === false ? 'failed' : (lastV?.passed === false ? 'rejected' : 'failed'), error: reason.slice(0, 800) });
     recordAgentEvent(slug, a.id, 'document_job', { jobId, action: 'intervention', reason }, 'portal');
   };
   if (!blocked) {
