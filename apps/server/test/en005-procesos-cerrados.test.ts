@@ -169,7 +169,6 @@ test('Reabrir la historia: exige confirmación y motivo; crea una iteración pen
   // El proceso antiguo sigue bloqueado y ahora apunta a la iteración nueva; la nueva queda libre.
   const g = await app.inject({ method: 'GET', url: `/api/workspaces/${slug}/processes/${old.id}` });
   assert.equal(g.json().closure?.currentProcessId, created.id);
-  const c = await app.continueBlocked?.(); void c;
   const again = await app.inject({ method: 'POST', url: `/api/workspaces/${slug}/processes/${old.id}/continue`, payload: {} });
   assert.equal(again.statusCode, 409);
   assert.notEqual(backlogRepo(slug).get(item.id)!.status, 'in_progress');
