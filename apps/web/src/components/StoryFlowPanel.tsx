@@ -126,7 +126,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
     if (a.id === 'authorize') { if (variant === 'story' && onAuthorize) onAuthorize(); else if (variant === 'story' && onOpenIterations) onOpenIterations(); else go('sec-authorize'); return; }
     if (a.id === 'ask_team') { if (!itemId) { needsStory(); return; } if (onAsk) onAsk(askText); else navigate(`/historias/${itemId}#chat`, { state: { ask: askText } }); return; }
     if ((a.id === 'request_fix' || a.id === 'new_iteration') && !itemId) { if (assignmentId) openAssignmentFeedback(); else needsStory(); return; }
-    if ((a.id === 'request_fix' || a.id === 'new_iteration') && itemId) { setBusy(a.id); try { setComposer(await api.story(slug, itemId)); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } return; }
+    if (a.id === 'request_fix' || a.id === 'new_iteration') { if (!itemId) { needsStory(); return; } setBusy(a.id); try { setComposer(await api.story(slug, itemId)); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } return; }
     // El resto se ejecuta aquí: las que exigen autorización/red piden confirmación explícita antes
     if (a.requires.some(r => r === 'authorization' || r === 'network') && confirming?.id !== a.id) { setConfirming(a); setOkAuth(false); setAnswer(''); setAddBudget((a.suggestedBudgetUsd ?? 0.5).toFixed(2)); setAllowInstall(!!a.pipeline?.allowInstall); return; }
     setBusy(a.id);
