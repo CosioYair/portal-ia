@@ -212,5 +212,7 @@ test('reimportar el ZIP exportado (HU-183) funciona y no expone id, modelo, perm
   const parsed = D.filesToDefinition(ext);
   assert.deepEqual(parsed.problems.filter(p => p.blocking), []);
   assert.equal(parsed.definition?.manifest.name, 'PDF Word Fiel');
-  assert.equal((parsed.definition?.manifest as any)?.id ?? null, null, 'el ZIP no lleva id');
+  // filesToDefinition devuelve id '' (str(y.id)) cuando agent.yaml no trae id: vacío = el ZIP no lleva id.
+  assert.equal(parsed.definition?.manifest.id ?? '', '', 'el ZIP no lleva id');
+  assert.ok(!/^\s*id\s*:/m.test(ext['agent.yaml']!), 'agent.yaml sin línea id');
 });
