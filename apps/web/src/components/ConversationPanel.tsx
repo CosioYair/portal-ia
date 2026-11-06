@@ -222,8 +222,17 @@ export function AcceptAssignmentAction({ slug, a, label = 'Aceptar', primary = t
   const [motivo, setMotivo] = useState('');
   const done = async () => { flash(doneMsg ?? `${a.code} aceptado`); setBlocked(null); setMotivo(''); await onAccepted(); };
   const failed = (e: any) => { if (e?.status === 409) setBlocked({ msg: e.message, code: e?.body?.code ?? null }); else setErr(e?.message ?? String(e)); };
-  const tryAccept = async () => { setBusy(true); setErr(null); try { await api.acceptAssignment(slug, a.id, null); await done(); } catch (e: any) { failed(e); } finally { setBusy(false); } };
-  const acceptWithReason = async () => { setBusy(true); setErr(null); try { await api.acceptAssignment(slug, a.id, null, motivo.trim()); await done(); } catch (e: any) { failed(e); } finally { setBusy(false); } };
+  /** EN-012 · Si hay una nota de cambios sin ejecutar, avisa de que se descartará y solo reenvía con discardNote si lo confirmas. */
+  const withNoteConfirm = async (send: (discardNote: boolean) => Promise<unknown>): Promise<boolean> => {
+    try { await send(false); return true; }
+    catch (e: any) {
+      if (e?.body?.code !== 'note_discard_confirmation_required') throw e;
+      if (!confirm(`${e.message}\n\n¿Aceptar el encargo y descartar esa nota?`)) { setErr('No se aceptó: la nota de cambios se conserva y la iteración sigue esperando tu autorización.'); return false; }
+      await send(true); return true;
+    }
+  };
+  const tryAccept = async () => { setBusy(true); setErr(null); try { if (await withNoteConfirm(d => api.acceptAssignment(slug, a.id, null, null, d))) await done(); } catch (e: any) { failed(e); } finally { setBusy(false); } };
+  const acceptWithReason = async () => { setBusy(true); setErr(null); try { if (await withNoteConfirm(d => api.acceptAssignment(slug, a.id, null, motivo.trim(), d))) await done(); } catch (e: any) { failed(e); } finally { setBusy(false); } };
   const reasonable = !!blocked && !ACCEPT_NO_REASON.includes(blocked.code ?? '');
   return <>
     <button type="button" className={`btn ${primary ? 'btn-primary' : 'btn-secondary'} btn-sm`} disabled={busy} onClick={() => void tryAccept()}>{busy && !blocked ? <span className="spin spin-light" /> : null}{label}</button>
@@ -274,7 +283,7 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged, review 
   return <div className="card" style={{ borderColor: authorizable ? 'var(--color-flow-waiting)' : undefined }} data-testid={`assignment-${a.code}`}>
     <div className="card-h" style={{ alignItems: 'flex-start', gap: 8 }}>
       <div><div className="h3" style={{ fontSize: 14 }}><span className="mono">{a.code}</span> {a.title}</div><div className="small muted">Encargo de desarrollo, sin historia{a.size ? ` · tamaño ${a.size}` : ''}</div></div>
-      <Chip xs tone={a.status === 'ready_for_review' ? 'accent' : a.status === 'accepted' ? 'ok' : a.status === 'failed' || a.status === 'cancelled' ? 'err' : authorizable ? 'warn' : ''}>{a.statusLabel}</Chip>
+      <Chip xs tone={a.pending?.ownerPending && a.pending.kind !== 'awaiting_review' ? 'warn' : a.status === 'ready_for_review' ? 'accent' : a.status === 'accepted' ? 'ok' : a.status === 'failed' || a.status === 'cancelled' ? 'err' : authorizable ? 'warn' : ''}>{a.pending?.label ?? a.statusLabel}</Chip>
     </div>
     <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       {err && <Notice kind="err">{err}</Notice>}
@@ -332,6 +341,13 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged, review 
         {a.process?.merged ? <div className="small muted">Ya está integrado: pedir cambios prepara otra ejecución sobre main con tu nota (no se descarta nada).</div> : a.process?.ownerRound ? <div className="small muted">Los cambios se aplican sobre su rama (no se descarta lo hecho) con la misma autorización.</div> : <label className="ck small"><input className="cb" type="checkbox" checked={discard} onChange={e => setDiscard(e.target.checked)} /><span>Para pedir cambios, descarto esta versión (su worktree y su rama sin integrar).</span></label>}
         <div className="small muted">Aceptar exige lo mismo que cerrar una historia (aplicado, verificado, probado); integrar en main sigue siendo una decisión aparte. Pedir cambios descarta esta versión (su rama sin integrar) y prepara otra ejecución desde main con tu nota, que autorizas aparte.</div>
       </div>}
+      {/* EN-012 · Cambios pedidos: la nueva iteración espera tu autorización (con la nota como contexto). */}
+      {a.pending?.kind === 'awaiting_iteration_authorization' && <Notice kind="warn"><div data-testid={`assignment-next-iteration-${a.code}`}>
+        <strong>{a.pending.label}</strong>. Tu nota se pasará al equipo como contexto: «{(a.nextIteration?.note ?? a.iterationNote ?? '').slice(0, 300)}».
+        {a.nextIteration ? <> Estimación sin IA ≈ {fmtUsd(a.nextIteration.estimatedUsd)} · {a.nextIteration.steps} paso(s).</> : null}
+        {' '}Autorízala con «Autorizar» en esta tarjeta{a.pending.where ? ` (${a.pending.where})` : ''}. No se ejecuta ni gasta nada hasta entonces.
+      </div></Notice>}
+      {a.pending?.kind === 'merged_awaiting_acceptance' && a.pending.where && <div className="small" data-testid={`assignment-pending-merged-${a.code}`}><strong>{a.pending.label}</strong> · acéptalo {a.pending.where}.</div>}
       {/* EN-009 · ya integrado en main pero con cambios pedidos, pendiente de ti o fallido: se puede cerrar aceptándolo con tu motivo. */}
       {a.process && a.process.merged && ['changes_requested', 'needs_owner', 'failed'].includes(a.status) && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} data-testid={`assignment-accept-merged-${a.code}`}>
         <div className="small">Ya está integrado en <span className="mono">{a.process.merged.into}</span> (commit <span className="mono">{a.process.merged.commit.slice(0, 7)}</span>). Si no necesitas otra iteración, ciérralo con «Aceptar el encargo»: te pedirá tu motivo y quedará registrado{a.iterationNote ? <>; la nota pendiente («{a.iterationNote.slice(0, 160)}») quedará descartada</> : null}.</div>
