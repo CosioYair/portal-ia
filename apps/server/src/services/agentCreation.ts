@@ -175,7 +175,7 @@ function roleLessons(slug: string, a: Agent): string | null {
 }
 
 /** Archivos de la revisión adoptada (o la que se generaría) para descargar como paquete. */
-export async function exportFiles(slug: string, agentId: string): Promise<{ folder: string; files: PortableFiles; kind: 'internal' | 'external' }> {
+export async function exportFiles(slug: string, agentId: string): Promise<{ folder: string; files: PortableFiles; kind: 'internal' | 'external'; sourceRoot?: string }> {
   const a = agentsRepo(slug).get(agentId); if (!a) throw Object.assign(new Error('Agente no encontrado'), { statusCode: 404 });
   // EN-007 · Agente externo: su revisión adoptada (lo que admite isIdentityPath), no definitionFor. Import diferido:
   // externalAgents.ts importa este módulo.
@@ -185,7 +185,7 @@ export async function exportFiles(slug: string, agentId: string): Promise<{ fold
     const snap = ext.sourcesRepo(slug).files(agentId) ?? {};
     const files: PortableFiles = {};
     for (const p of Object.keys(snap).sort()) if (isIdentityPath(p)) files[p] = snap[p]!;
-    return { folder: slugify(path.basename(src.root)).slice(0, 60) || slugify(a.config.name).slice(0, 60) || 'agente', files, kind: 'external' };
+    return { folder: slugify(path.basename(src.root)).slice(0, 60) || slugify(a.config.name).slice(0, 60) || 'agente', files, kind: 'external', sourceRoot: src.root };
   }
   const f = agentFoldersRepo(slug).folderOf(agentId);
   const ad = f ? agentFoldersRepo(slug).adopted(agentId) : null;
@@ -202,7 +202,7 @@ export async function exportFiles(slug: string, agentId: string): Promise<{ fold
  */
 export async function exportBundle(slug: string, agentId: string): Promise<{ fileName: string; zip: Buffer; files: string[] }> {
   const a = agentsRepo(slug).get(agentId); if (!a) throw Object.assign(new Error('Agente no encontrado'), { statusCode: 404 });
-  const { files, kind } = await exportFiles(slug, agentId);
+  const { files, kind, sourceRoot } = await exportFiles(slug, agentId);
   // Si la historia «Automejora desde el chat» deja un CAMBIOS.md en la carpeta, se conserva su historial.
   const changelog = typeof files['CAMBIOS.md'] === 'string' ? files['CAMBIOS.md'] : null;
   const exportedAt = new Date().toISOString();
@@ -213,10 +213,15 @@ export async function exportBundle(slug: string, agentId: string): Promise<{ fil
     bundle = buildExternalBundle(files, { agentName: a.config.name, role: a.template?.role ?? null, summary: a.config.specialization ?? null, exportedAt, changelog, provenPlans: provenPlansForExport(slug, agentId, files) });
   } else bundle = buildPortableBundle(files, { agentName: a.config.name, exportedAt, changelog });
   // Nunca se entrega un ZIP parcial: cualquier problema (secreto, ruta local, dato interno o tamaño) niega TODO con 409.
-  const problems = validatePortableBundle(bundle, { forbidden: [a.id], limits: kind === 'external' ? EXTERNAL_BUNDLE_LIMITS : undefined });
+  // EN-010 · En los externos, su carpeta original y la de datos del Portal son rutas privadas: nunca salen en el paquete.
+  const privatePaths = kind === 'external'
+    ? [...(sourceRoot ? [{ path: sourceRoot, kind: 'source' as const }] : []), ...(config.dataDir ? [{ path: config.dataDir, kind: 'portal-data' as const }] : [])]
+    : undefined;
+  const problems = validatePortableBundle(bundle, { forbidden: [a.id], limits: kind === 'external' ? EXTERNAL_BUNDLE_LIMITS : undefined, privatePaths });
   if (problems.length) {
-    const list = problems.map(p => (p.path ? `${p.path} — ${p.message}` : p.message));
-    throw Object.assign(new Error(`No se puede exportar el paquete: ${list.slice(0, 5).join(' · ')}${list.length > 5 ? ` (y ${list.length - 5} más)` : ''}`), { statusCode: 409, payload: { problems } });
+    const list = problems.map(p => (p.path ? `${p.path}${p.line ? `:${p.line}` : ''} — ${p.message}` : p.message));
+    const hint = problems.find(p => p.hint)?.hint;
+    throw Object.assign(new Error(`No se puede exportar el paquete: ${list.slice(0, 5).join(' · ')}${list.length > 5 ? ` (y ${list.length - 5} más)` : ''}${hint ? `. ${hint}` : ''}`), { statusCode: 409, payload: { problems } });
   }
   const names = Object.keys(bundle);
   const zip = zipBuffers(names.map(name => ({ name, data: Buffer.from(bundle[name]!, 'utf8') })));
