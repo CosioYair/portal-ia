@@ -1,4 +1,5 @@
 import type { PortableSkill } from './portable-agent.ts';
+import type { AgentContextScope } from './types.ts';
 
 /**
  * Habilidades base de los agentes internos (EN-011). Funciones puras, sin IO.
@@ -30,6 +31,8 @@ interface BaseSkillSpec {
   where: ToolWhere[];
   portal: string[];
   terminal: string[];
+  /** EN-014 · Versión genérica de «Fuera con terminal y Docker» para el ámbito General sin Proyecto (sin órdenes propias del Portal). */
+  terminalGeneral?: string[];
   web: string[];
 }
 
@@ -62,6 +65,7 @@ const CATALOG: BaseSkillSpec[] = [
     where: ['sandbox', 'authorized'],
     portal: ['La verificación la ejecuta el pipeline autorizado del Portal en el sandbox (Docker o WSL2): tú no lanzas órdenes por tu cuenta.', 'Usa la evidencia que te devuelve el Portal (salida y código de salida). Si el sandbox no está disponible, dilo y no des el cambio por verificado.'],
     terminal: ['Con Docker, construye la imagen una vez: `docker build -t portal-ia-sandbox:1 -f docker/sandbox.Dockerfile docker`.', 'Ejecuta las comprobaciones dentro del contenedor, sin red y montando solo la copia de trabajo, nunca directamente en el equipo.', 'Sin Docker ni WSL2, avisa de que no hay aislamiento y no ejecutes código del repositorio.'],
+    terminalGeneral: ['Si el entorno tiene Docker, ejecuta las comprobaciones dentro de un contenedor sin red, montando solo la copia de trabajo; usa el Dockerfile o la configuración de contenedores del propio proyecto si la tiene.', 'Sin Docker ni otro aislamiento, avisa de que no hay aislamiento y no ejecutes código del repositorio sin que el propietario lo autorice.'],
     web: ['Sin terminal no hay sandbox: no puedes verificar nada por tu cuenta.', ...WEB_COMMON]
   },
   {
@@ -70,6 +74,7 @@ const CATALOG: BaseSkillSpec[] = [
     where: ['sandbox', 'authorized'],
     portal: ['Las pruebas se ejecutan por el pipeline autorizado del Portal, dentro del sandbox: `npm run typecheck`, `npm test` y `npm run build`.', 'Informa del resultado con la evidencia que te entregue el Portal. Si una prueba falla, cita el fallo; no la des por superada.'],
     terminal: ['Dentro del sandbox o del contenedor: `npm run typecheck`, `npm test` y `npm run build`.', 'Copia en tu respuesta las líneas relevantes de la salida y el código de salida.'],
+    terminalGeneral: ['Detecta las órdenes del proyecto donde trabajes: los scripts de package.json, los objetivos del Makefile, pyproject.toml o lo que indique su README.', 'Ejecuta las de tipos, pruebas y compilación (dentro de un contenedor si hay Docker) y copia en tu respuesta las líneas relevantes de la salida y el código de salida.'],
     web: ['Sin terminal no puedes ejecutar pruebas: indica qué órdenes debe ejecutar el propietario y qué esperas ver.', ...WEB_COMMON]
   },
   {
@@ -78,6 +83,7 @@ const CATALOG: BaseSkillSpec[] = [
     where: ['sandbox', 'authorized'],
     portal: ['Solo se instala con una autorización aparte del propietario, con el cambio de package.json a la vista; el Portal lo hace en el sandbox.', 'No añadas dependencias nuevas sin justificar la necesidad.'],
     terminal: ['Dentro del contenedor: `npm ci --ignore-scripts --no-audit --no-fund`.', 'No instales nada en el equipo del propietario fuera del sandbox.'],
+    terminalGeneral: ['Usa el gestor de dependencias del proyecto según sus archivos (package.json, requirements.txt, Cargo.toml…), dentro de un contenedor si hay Docker y sin ejecutar scripts de instalación que no hayas revisado.', 'No instales nada en el equipo del propietario fuera del aislamiento.'],
     web: ['Sin terminal no puedes instalar nada: propón el cambio de package.json y la orden para que la ejecute el propietario.', ...WEB_COMMON]
   },
   {
@@ -103,7 +109,28 @@ const BY_SLUG = new Map(CATALOG.map(s => [s.slug, s]));
 const bullets = (xs: string[]) => xs.map(x => `- ${x}`).join('\n');
 const whereText = (w: ToolWhere[]) => w.map(x => TOOL_WHERE_LABEL[x]).join(' · ');
 
-function skillBody(s: BaseSkillSpec): string {
+/**
+ * EN-014 · Cómo se escribe «Fuera con terminal y Docker» según el ámbito (sin IA):
+ * - 'concrete': las órdenes concretas del proyecto (sin ámbito, con solo Empresa o con Proyecto sin General). Es el texto de siempre.
+ * - 'concrete+general': las órdenes concretas y una nota para trabajar fuera de este proyecto (Proyecto + General).
+ * - 'general': texto genérico, sin docker/sandbox.Dockerfile ni la imagen del Portal (General sin Proyecto).
+ * Ninguna variante concede permisos.
+ */
+export type TerminalContext = 'concrete' | 'concrete+general' | 'general';
+export function terminalContextFor(scope: AgentContextScope | null | undefined): TerminalContext {
+  if (!scope) return 'concrete';
+  if (scope.project) return scope.general ? 'concrete+general' : 'concrete';
+  return scope.general ? 'general' : 'concrete';
+}
+const GENERAL_NOTE = 'En cualquier entorno: detecta las órdenes del proyecto donde trabajes (por ejemplo, los scripts de package.json o los objetivos del Makefile) y usa Docker si existe; si el entorno no lo permite, dilo y no simules resultados.';
+const OUTSIDE_NOTE = 'Fuera de este proyecto: detecta las órdenes del proyecto donde trabajes (por ejemplo, package.json o Makefile) y usa Docker si existe.';
+function terminalLines(s: BaseSkillSpec, ctx: TerminalContext): string[] {
+  if (ctx === 'general') return [...(s.terminalGeneral ?? s.terminal), GENERAL_NOTE];
+  if (ctx === 'concrete+general') return [...s.terminal, OUTSIDE_NOTE];
+  return s.terminal;
+}
+
+function skillBody(s: BaseSkillSpec, ctx: TerminalContext = 'concrete'): string {
   return `# ${s.label}
 
 ${s.description}
@@ -116,7 +143,7 @@ Dónde funciona: ${whereText(s.where)}.
 ${bullets(s.portal)}
 
 ## Fuera con terminal y Docker
-${bullets(s.terminal)}
+${bullets(terminalLines(s, ctx))}
 
 ## Sin terminal (web)
 ${bullets(s.web)}
@@ -124,14 +151,15 @@ ${bullets(s.web)}
 }
 
 /** Habilidades base de las herramientas concedidas (sin duplicados, ordenadas por slug: hash estable). Las herramientas desconocidas no aportan nada. */
-export function baseSkillsFor(tools: readonly string[] | null | undefined): PortableSkill[] {
+export function baseSkillsFor(tools: readonly string[] | null | undefined, scope?: AgentContextScope | null): PortableSkill[] {
+  const ctx = terminalContextFor(scope);
   const seen = new Set<string>();
   const out: PortableSkill[] = [];
   for (const t of tools ?? []) {
     const s = BY_TOOL.get(t);
     if (!s || seen.has(s.slug)) continue;
     seen.add(s.slug);
-    out.push({ slug: s.slug, name: s.label, description: s.description, body: skillBody(s) });
+    out.push({ slug: s.slug, name: s.label, description: s.description, body: skillBody(s, ctx) });
   }
   return out.sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
 }
@@ -163,7 +191,17 @@ export function toolCapabilities(tools: readonly string[] | null | undefined): T
 }
 
 /** Sección «Entorno» de GUIA.md: cómo trabajar dentro del Portal, fuera con terminal y Docker, y en la web sin terminal. */
-export function environmentGuide(): string {
+const ENV_CONCRETE = 'Construye la imagen del sandbox una vez (`docker build -t portal-ia-sandbox:1 -f docker/sandbox.Dockerfile docker`) y ejecuta dentro del contenedor, sin red: `npm run typecheck`, `npm test` y `npm run build`. Sin Docker ni WSL2 no hay aislamiento: no ejecutes código del repositorio en tu equipo.';
+const ENV_GENERAL = 'Detecta las órdenes del proyecto donde trabajes (los scripts de package.json, los objetivos del Makefile, pyproject.toml o su README) y ejecuta las de tipos, pruebas y compilación. Si el entorno tiene Docker, hazlo dentro de un contenedor sin red montando solo la copia de trabajo; sin Docker ni otro aislamiento, avisa y no ejecutes código del repositorio en tu equipo sin autorización.';
+const ENV_OUTSIDE = 'Fuera de este proyecto, detecta las órdenes del proyecto donde trabajes (por ejemplo, package.json o Makefile) y usa Docker si existe.';
+function envTerminal(ctx: TerminalContext): string {
+  if (ctx === 'general') return ENV_GENERAL;
+  if (ctx === 'concrete+general') return `${ENV_CONCRETE} ${ENV_OUTSIDE}`;
+  return ENV_CONCRETE;
+}
+
+export function environmentGuide(scope?: AgentContextScope | null): string {
+  const ctx = terminalContextFor(scope);
   return `## Entorno
 Las habilidades \`skills/portal-*\` describen cómo trabajar según el entorno. No conceden permisos: describen lo que el agente tenía concedido en el Portal.
 
@@ -171,7 +209,7 @@ Las habilidades \`skills/portal-*\` describen cómo trabajar según el entorno. 
 Las verificaciones (typecheck, pruebas y compilación) solo se ejecutan por el pipeline autorizado, en el sandbox Docker o WSL2. El agente no ejecuta órdenes por su cuenta y usa la evidencia que le entrega el Portal.
 
 ### Fuera con terminal y Docker
-Construye la imagen del sandbox una vez (\`docker build -t portal-ia-sandbox:1 -f docker/sandbox.Dockerfile docker\`) y ejecuta dentro del contenedor, sin red: \`npm run typecheck\`, \`npm test\` y \`npm run build\`. Sin Docker ni WSL2 no hay aislamiento: no ejecutes código del repositorio en tu equipo.
+${envTerminal(ctx)}
 
 ### Sin terminal (web)
 En Claude Code web sin terminal, en ChatGPT o en cualquier entorno sin órdenes, el agente debe decir claramente que no puede ejecutar nada, no debe simular resultados y debe pedirte la evidencia (salida copiada o archivos) para trabajar con ella.

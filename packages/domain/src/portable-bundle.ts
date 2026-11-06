@@ -1,6 +1,8 @@
 import { PORTABLE_AGENT_SCHEMA, PORTABLE_LIMITS, allowedPortablePath, findSecret, memoryToMarkdown, normalizeText, parseMemory, parseYaml, toYaml, type PortableFiles } from './portable-agent.ts';
 import { EXTERNAL_TEXT_LIMIT, EXTERNAL_TOTAL_LIMIT, isIdentityPath, parseSkillHeader } from './external-agent.ts';
 import { environmentGuide } from './agent-skills.ts';
+import { contextScopeFromPortable, contextScopeToPortable, type PortableContextScope } from './portable-agent.ts';
+import { CONTEXT_SCOPE_VALUES, contextScopeLabel, contextScopeOptions, describeContextScope, isGeneralOnly, type AgentContextScope } from './types.ts';
 
 /**
  * Paquete portable de un agente (`portal-ia/agent-bundle@2`, docs/agentes-portables.md): la carpeta `portal-ia/agent@1`
@@ -23,7 +25,12 @@ export type PrivatePath = string | { path: string; kind: 'source' | 'portal-data
 /** Clase de una ruta encontrada: 'system' (genérica del sistema), 'profile' (perfil del usuario), 'source' (carpeta original), 'portal-data' (datos del Portal), 'other' (otra unidad, UNC u otra ruta absoluta). */
 export type LocalPathKind = 'system' | 'profile' | 'source' | 'portal-data' | 'other';
 export interface LocalPathHit { line: number; snippet: string; kind: LocalPathKind; match: string }
-export interface BundleOptions { agentName: string; exportedAt: string; changelog?: string | null }
+/**
+ * EN-014 · `contextScope`: ámbito del agente. Si falta, se usa el `context_scope` de agent.yaml, y sin ninguno de los dos el
+ * paquete queda como antes. `companyName` y `projectName` solo salen si su opción está marcada; con solo General se
+ * sustituyen en los archivos del agente.
+ */
+export interface BundleOptions { agentName: string; exportedAt: string; changelog?: string | null; contextScope?: AgentContextScope | null; companyName?: string | null; projectName?: string | null }
 /** Topes del paquete: por archivo y en total (bytes UTF-8) y número de archivos propios del agente. */
 export interface BundleLimits { fileBytes: number; totalBytes: number; files: number }
 /** Topes para el paquete de un agente externo: los de su carpeta real más margen para los archivos que genera el paquete. */
@@ -136,10 +143,16 @@ function scrubDeep(v: YVal): YVal {
 const asMap = (v: YVal | undefined): YMap => v && typeof v === 'object' && !Array.isArray(v) ? v : {};
 
 /** agent.yaml sin id, sin harness.model y sin permissions.tools (son del Portal); conserva la identidad y la autonomía pedida. */
-function cleanManifest(yaml: string): string {
+function cleanManifest(yaml: string, cs?: PortableContextScope): string {
   const y = parseYaml(yaml); const h = asMap(y.harness); const pm = asMap(y.permissions);
   const out: YMap = { schema: PORTABLE_AGENT_SCHEMA };
   for (const k of ['name', 'role', 'department', 'initials', 'summary', 'responsibilities', 'deliverables', 'capabilities']) if (y[k] !== undefined) out[k] = scrubDeep(y[k] as YVal);
+  // EN-014 · Ámbito: lista blanca explícita. Los nombres solo van si su opción está marcada (nunca con solo General).
+  if (cs && cs.options.length) {
+    out.context_scope = CONTEXT_SCOPE_VALUES.filter(o => cs.options.includes(o));
+    if (cs.options.includes('project') && cs.projectName?.trim()) out.project_name = scrub(cs.projectName.trim());
+    if (cs.options.includes('company') && cs.companyName?.trim()) out.company_name = scrub(cs.companyName.trim());
+  }
   const harness: YMap = {};
   if (h.preferred !== undefined) harness.preferred = scrubDeep(h.preferred as YVal);
   if (h.effort !== undefined) harness.effort = scrubDeep(h.effort as YVal);
@@ -224,7 +237,58 @@ Historial de los cambios que el agente hace en sí mismo (reglas en AUTOMEJORA.m
   return normalizeText(`${head.replace(/\s+$/, '')}\n\n## ${date} — ${CHANGELOG_EXPORT_HEADING}\n- Motivo: exportación (punto de partida)\n- Archivo: todos\n`);
 }
 
-function guia(name: string): string {
+// ---------------------------------------------------------------- EN-014: ámbito del paquete
+
+interface BundleScope { scope: AgentContextScope; portable: PortableContextScope; company: string | null; project: string | null }
+
+/** `context_scope` de un agent.yaml (tolerante: si falta o no es válido, no hay ámbito y el paquete queda como antes). */
+function yamlScope(yaml: string | undefined): PortableContextScope | undefined {
+  if (yaml === undefined) return undefined;
+  let y: YMap;
+  try { y = parseYaml(yaml); } catch { return undefined; }
+  const raw = y.context_scope;
+  if (!Array.isArray(raw)) return undefined;
+  const set = new Set(raw.filter((x): x is string => typeof x === 'string').map(x => x.trim()));
+  const options = CONTEXT_SCOPE_VALUES.filter(o => set.has(o));
+  if (!options.length) return undefined;
+  const s = (v: YVal | undefined) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  return { options, projectName: set.has('project') ? s(y.project_name) : null, companyName: set.has('company') ? s(y.company_name) : null };
+}
+
+/** Ámbito efectivo del paquete: el de las opciones o, si falta, el de agent.yaml. Con solo General, sin nombres. */
+function bundleScope(opts: BundleOptions, yaml: string | undefined): BundleScope | null {
+  const fromOpts = opts.contextScope && contextScopeOptions(opts.contextScope).length ? contextScopeToPortable(opts.contextScope, opts.companyName) : undefined;
+  const portable = fromOpts ?? yamlScope(yaml);
+  if (!portable) return null;
+  const scope = fromOpts && opts.contextScope ? opts.contextScope : contextScopeFromPortable(portable).scope;
+  if (isGeneralOnly(scope)) return { scope, portable: { options: portable.options, projectName: null, companyName: null }, company: null, project: null };
+  return { scope, portable, company: portable.companyName, project: portable.projectName };
+}
+
+const escRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/** Con solo General, sustituye el nombre de la empresa y del proyecto en los textos del agente (no en los archivos que genera el paquete). */
+function redactNames(b: BundleScope | null, opts: BundleOptions): (s: string) => string {
+  if (!b || !isGeneralOnly(b.scope)) return s => s;
+  const pairs: [string, string][] = [];
+  for (const [n, r] of [[opts.projectName, 'el proyecto'], [opts.contextScope?.project?.name, 'el proyecto'], [opts.companyName, 'la empresa']] as [string | null | undefined, string][]) {
+    const t = (n ?? '').trim();
+    if (t.length >= 3 && !pairs.some(([x]) => x.toLowerCase() === t.toLowerCase())) pairs.push([t, r]);
+  }
+  if (!pairs.length) return s => s;
+  pairs.sort((a, b2) => b2[0].length - a[0].length);
+  return s => pairs.reduce((t, [n, r]) => t.replace(new RegExp(escRe(n), 'gi'), r), s);
+}
+
+/** Sección «## Ámbito» de GUIA.md: qué declara agent.yaml y qué cambia cada opción (describeContextScope, el mismo texto que la interfaz). */
+function ambitoSection(b: BundleScope): string {
+  const lines = describeContextScope(b.scope, { company: b.company, project: b.project });
+  return `## Ámbito
+Declarado en agent.yaml (context_scope): ${contextScopeLabel(b.scope)}. El ámbito decide el contexto de las instrucciones y de las habilidades base; no concede ni quita herramientas ni permisos.
+${lines.map(l => `- ${l}`).join('\n')}
+`;
+}
+
+function guia(name: string, b: BundleScope | null = null, red: (s: string) => string = s => s): string {
   return normalizeText(`# Guía rápida: usar a ${name} fuera de Portal IA
 
 Paquete ${PORTABLE_BUNDLE_SCHEMA}. Contiene: AGENTS.md (instrucciones), agent.yaml (identidad), skills/ (habilidades), memory/MEMORY.md (memoria verificada), knowledge/ (referencias, si las hay), AUTOMEJORA.md (reglas de automejora), CAMBIOS.md (historial) y scripts/anotar-cambio.mjs (anota un cambio; solo necesita Node).
@@ -246,7 +310,7 @@ Paquete ${PORTABLE_BUNDLE_SCHEMA}. Contiene: AGENTS.md (instrucciones), agent.ya
 ## Comprobación
 Pide un cambio («a partir de ahora, …») y comprueba que queda en su archivo y en CAMBIOS.md. Luego rechaza un resultado, corrígelo en un reintento y comprueba que la corrección también queda anotada.
 
-${environmentGuide()}`);
+${b ? `${red(ambitoSection(b))}\n` : ''}${environmentGuide(b?.scope ?? null)}`);
 }
 
 const SCRIPT = String.raw`#!/usr/bin/env node
@@ -280,14 +344,16 @@ export function buildPortableBundle(files: PortableFiles, opts: BundleOptions): 
   const name = scrub(opts.agentName.trim()) || 'Agente';
   const date = opts.exportedAt.slice(0, 10);
   const out: PortableFiles = {};
-  out['agent.yaml'] = files['agent.yaml'] !== undefined ? cleanManifest(files['agent.yaml']) : cleanManifest(toYaml({ name, role: name }));
-  const agents = scrub(normalizeText(files['AGENTS.md'] ?? `# ${name}`));
+  const b = bundleScope(opts, files['agent.yaml']);
+  const red = redactNames(b, opts);
+  out['agent.yaml'] = red(files['agent.yaml'] !== undefined ? cleanManifest(files['agent.yaml'], b?.portable) : cleanManifest(toYaml({ name, role: name }), b?.portable));
+  const agents = red(scrub(normalizeText(files['AGENTS.md'] ?? `# ${name}`)));
   out['AGENTS.md'] = normalizeText(agents.startsWith(POINTER) ? agents : `${POINTER}\n\n${agents}`);
-  out['memory/MEMORY.md'] = cleanMemory(name, files['memory/MEMORY.md']);
-  for (const [p, c] of Object.entries(files)) if (allowedPortablePath(p) && (p.startsWith('skills/') || p.startsWith('knowledge/'))) out[p] = normalizeText(scrub(c));
+  out['memory/MEMORY.md'] = normalizeText(red(cleanMemory(name, files['memory/MEMORY.md'])));
+  for (const [p, c] of Object.entries(files)) if (allowedPortablePath(p) && (p.startsWith('skills/') || p.startsWith('knowledge/'))) out[p] = normalizeText(red(scrub(c)));
   out['AUTOMEJORA.md'] = automejora(name);
   out['CAMBIOS.md'] = cambios(name, date, opts.changelog);
-  out['GUIA.md'] = guia(name);
+  out['GUIA.md'] = guia(name, b, red);
   out['scripts/anotar-cambio.mjs'] = SCRIPT;
   return Object.fromEntries(Object.entries(out).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
@@ -395,15 +461,17 @@ export function buildExternalBundle(snapshot: PortableFiles, opts: ExternalBundl
   const name = scrub(opts.agentName.trim()) || 'Agente';
   const date = opts.exportedAt.slice(0, 10);
   const out: PortableFiles = {};
+  const b = bundleScope(opts, snapshot['agent.yaml']);
+  const red = redactNames(b, opts);
   for (const [p, c] of Object.entries(snapshot)) {
     if (!isIdentityPath(p) || p === 'AGENTS.md') continue;
-    out[p] = RAW.test(p) ? c : normalizeText(scrub(c));
+    out[p] = RAW.test(p) ? c : normalizeText(red(scrub(c)));
   }
-  const agents = normalizeText(scrub(snapshot['AGENTS.md'] ?? `# ${name}`));
+  const agents = normalizeText(red(scrub(snapshot['AGENTS.md'] ?? `# ${name}`)));
   out['AGENTS.md'] = agents.startsWith(POINTER) ? agents : normalizeText(`${POINTER}\n${GUIA_POINTER}\n\n${agents}`);
   const manifest: Record<string, string> = { name, role: scrub(opts.role?.trim() || name) };
   if (opts.summary?.trim()) manifest.summary = scrub(opts.summary.trim());
-  out['agent.yaml'] = cleanManifest(toYaml(manifest));
+  out['agent.yaml'] = red(cleanManifest(toYaml(manifest), b?.portable));
   const mem = Object.keys(out).filter(p => /^memoria\//i.test(p)).sort();
   out['memory/MEMORY.md'] = memoryToMarkdown(name, mem.length ? [{
     id: 'm1', title: 'Dónde está la memoria', text: `La memoria completa del agente (también lo aprendido desde el chat y en reintentos verificados) está en: ${mem.join(', ')}.`,
@@ -423,7 +491,7 @@ export function buildExternalBundle(snapshot: PortableFiles, opts: ExternalBundl
   }, null, 2)}\n`;
   out['AUTOMEJORA.md'] = automejora(name, { editable: 'AGENTS.md, contexto/, memoria/ o la carpeta de su habilidad en skills/', memory: mem[0] ?? 'memory/MEMORY.md', plans: true });
   out['CAMBIOS.md'] = cambios(name, date, opts.changelog);
-  out['GUIA.md'] = guiaExterna(name, out, plans.length);
+  out['GUIA.md'] = b ? normalizeText(`${guiaExterna(name, out, plans.length)}\n${red(ambitoSection(b))}`) : guiaExterna(name, out, plans.length);
   out['scripts/anotar-cambio.mjs'] = SCRIPT;
   return Object.fromEntries(Object.entries(out).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
