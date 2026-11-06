@@ -1,4 +1,4 @@
-import type { Agent, Capability, DocumentBatch, DocumentJob, ExecutionBackend, ExternalFileChange, ExternalGrants, ExternalLayout, ExternalProvenance, HarnessCapability, HarnessDescriptor, ImprovementProposal, IntegrationState, Lesson, Process, PortableFiles, PortableKnowledge, PortableSkill, ProviderId } from '@portal-ia/domain';
+import type { Agent, AgentContextScope, Capability, DocumentBatch, DocumentJob, ExecutionBackend, ExternalFileChange, ExternalGrants, ExternalLayout, ExternalProvenance, HarnessCapability, HarnessDescriptor, ImprovementProposal, IntegrationState, Lesson, Process, PortableFiles, PortableKnowledge, PortableSkill, ProviderId } from '@portal-ia/domain';
 import { ApiError, apiRequest as request } from './api.ts';
 import { noteOwnerResponse, ownerHeaders } from './owner.ts';
 
@@ -11,6 +11,8 @@ export interface OfficeAgent {
   integration: IntegrationState | null;
   /** HU-181 · Historial de automejoras (solo en el panel de un agente externo: panel.office.improvementHistory). */
   improvementHistory?: ImprovementHistoryItem[];
+  /** EN-014 · Ámbito real del agente (Proyecto/Empresa/General). No es `scope`, que indica dónde trabaja. null = sin ámbito. */
+  contextScope?: AgentContextScope | null;
 }
 /** HU-181 · Una automejora aplicada, deshecha o archivada (apps/server/src/services/documentJobs.ts). */
 export interface ImprovementHistoryItem {
