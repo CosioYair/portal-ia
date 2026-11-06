@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { CAPABILITIES, EXTERNAL_BUNDLE_LIMITS, KNOWLEDGE, TOOLS, buildExternalBundle, buildPortableBundle, isIdentityPath, validatePortableBundle, definitionToFiles, filesToDefinition, slugify, type Agent, type AgentConfig, type Capability, type ExecutionBackend, type PortableFiles, type PortableKnowledge, type PortableSkill, type ProviderId, type ReasoningEffort, type TeamRole, clampEffort } from '@portal-ia/domain';
+import { CAPABILITIES, DEFAULT_CONTEXT_SCOPE, contextScopeFromPortable, contextScopeOptions, normalizeContextScope, type AgentContextScope, EXTERNAL_BUNDLE_LIMITS, KNOWLEDGE, TOOLS, buildExternalBundle, buildPortableBundle, isIdentityPath, validatePortableBundle, definitionToFiles, filesToDefinition, slugify, type Agent, type AgentConfig, type Capability, type ExecutionBackend, type PortableFiles, type PortableKnowledge, type PortableSkill, type ProviderId, type ReasoningEffort, type TeamRole, clampEffort } from '@portal-ia/domain';
 import { config, REPO_ROOT } from '../config.ts';
 import { agentsRepo, projectsRepo } from '../db/workspace.ts';
 import { departmentsRepo } from './departments.ts';
-import { agentFoldersRepo, definitionFor, agentDefaultInstructions, hashFiles, readFolder, registerAgentFolder, writeRevision, adoptedExtras, type AgentExtras } from './agentFolders.ts';
+import { agentFoldersRepo, definitionFor, agentDefaultInstructions, hashFiles, readFolder, registerAgentFolder, writeRevision, adoptedExtras, companyNameOf, contextScopeOf, GENERAL_ONLY_SCOPE, type AgentExtras } from './agentFolders.ts';
 import { harnessAvailability, harnessModels } from './harness/index.ts';
 import { inheritLatestTemplate } from './agentTemplates.ts';
 import { recordAgentEvent } from './agentEvents.ts';
@@ -30,6 +30,22 @@ export interface WizardInput {
   initials?: string | null; authorized: boolean;
   /** CAMBIOS.md de una carpeta o ZIP importado (se conserva tal cual). */
   changelog?: string | null;
+  /** EN-014 · Ámbito (Proyecto/Empresa/General, combinables). Sin valor: DEFAULT_CONTEXT_SCOPE (Empresa + General). */
+  contextScope?: { project?: { id: string; name?: string } | null; company: boolean; general: boolean } | AgentContextScope | null;
+}
+
+/** EN-014 · Valida el ámbito pedido (al menos una opción; el proyecto debe existir en este espacio). */
+function resolveContextScope(slug: string, raw: WizardInput['contextScope']): AgentContextScope {
+  if (!raw) return DEFAULT_CONTEXT_SCOPE;
+  let project: { id: string; name: string } | null = null;
+  if (raw.project?.id) {
+    const p = projectsRepo(slug).get(raw.project.id);
+    if (!p) throw Object.assign(new Error('El proyecto del ámbito no existe en este Portal: elige otro o quita «Proyecto».'), { statusCode: 400 });
+    project = { id: p.id, name: (p as { name?: string }).name ?? raw.project.name ?? '' };
+  }
+  const scope = normalizeContextScope({ project, company: raw.company === true, general: raw.general === true }, project);
+  if (!scope || !contextScopeOptions(scope).length) throw Object.assign(new Error('Elige al menos un ámbito: Proyecto, Empresa o General.'), { statusCode: 400 });
+  return scope;
 }
 
 const initialsOf = (name: string) => name.split(/\s+/).filter(w => w.length > 2 && !/^(de|del|la|el|los|las|y|en|para)$/i.test(w)).map(w => w[0]!.toUpperCase()).slice(0, 2).join('') || name.slice(0, 2).toUpperCase();
@@ -51,6 +67,7 @@ function validate(slug: string, i: WizardInput): { provider: ProviderId } {
 
 export async function createAgentFromWizard(slug: string, i: WizardInput, source: 'created' | 'import' = 'created', importNote = 'Importado desde una carpeta (revisado por el propietario)'): Promise<Agent> {
   const { provider } = validate(slug, i);
+  const contextScope = resolveContextScope(slug, i.contextScope);
   const agents = agentsRepo(slug); const deps = departmentsRepo(slug);
   const dep = deps.materialize({ name: i.department.trim() || 'Dirección', purpose: i.departmentPurpose ?? undefined });
   const coord = deps.coordinatorOf(dep.slug);
@@ -66,7 +83,9 @@ export async function createAgentFromWizard(slug: string, i: WizardInput, source
     key, scope: i.scope, projectId: i.scope === 'project' ? i.projectId : null, config: cfg,
     template: { initials: (i.initials || initialsOf(i.name)).slice(0, 2).toUpperCase(), role: i.role.trim(), reportsTo: coord && (coord.scope === 'workspace' || coord.projectId === (i.scope === 'project' ? i.projectId : null)) ? coord.key : 'owner', supervises: [], collaborates: [], evaluation: i.deliverables.slice(0, 5), tier: 'mid', department: dep.name } as Agent['template']
   });
-  const agent = inheritLatestTemplate(slug, created);
+  // EN-014 · El ámbito se guarda ANTES de generar la carpeta: AGENTS.md por defecto, habilidades base y agent.yaml lo usan.
+  const inherited = inheritLatestTemplate(slug, created);
+  const agent = agentsRepo(slug).setContextScope(inherited.id, contextScope);
   // Carpeta portable: identidad + lo propio (instrucciones, habilidades, referencias, entregables, autonomía).
   registerAgentFolder(slug, agent);
   // EN-013 · Sin instrucciones propias, el AGENTS.md por defecto se genera sin IA a partir de los datos reales del agente
@@ -142,8 +161,14 @@ export async function importFromFiles(slug: string, files: PortableFiles, origin
   const parsed = filesToDefinition(files);
   if (!parsed.definition || parsed.problems.some(p => p.blocking)) throw Object.assign(new Error(`No se puede importar: ${parsed.problems.filter(p => p.blocking).map(p => `${p.path} — ${p.message}`).join(' · ')}`), { statusCode: 400 });
   const d = parsed.definition;
+  // EN-014 · El ámbito declarado en agent.yaml se respeta; un ZIP o una carpeta antiguos sin él dejan al agente nuevo como General.
+  let importedScope: AgentContextScope = GENERAL_ONLY_SCOPE;
+  if (d.manifest.contextScope) {
+    const s = contextScopeFromPortable(d.manifest.contextScope).scope;
+    importedScope = contextScopeOptions(s).length ? s : GENERAL_ONLY_SCOPE;
+  }
   const agent = await createAgentFromWizard(slug, {
-    ...grant, name: d.manifest.name, role: d.manifest.role, summary: d.manifest.summary, responsibilities: d.manifest.responsibilities, deliverables: d.manifest.deliverables,
+    ...grant, contextScope: importedScope, name: d.manifest.name, role: d.manifest.role, summary: d.manifest.summary, responsibilities: d.manifest.responsibilities, deliverables: d.manifest.deliverables,
     capabilities: grant.capabilities ?? [],
     instructions: d.instructions, skills: d.skills, references: d.knowledge, initials: d.manifest.initials, changelog: d.changelog ?? null
   }, 'import', note);
@@ -210,12 +235,16 @@ export async function exportBundle(slug: string, agentId: string): Promise<{ fil
   // Si la historia «Automejora desde el chat» deja un CAMBIOS.md en la carpeta, se conserva su historial.
   const changelog = typeof files['CAMBIOS.md'] === 'string' ? files['CAMBIOS.md'] : null;
   const exportedAt = new Date().toISOString();
+  // EN-014 · Ámbito y nombres reales; con solo General el paquete no lleva el nombre de la empresa ni del proyecto.
+  const contextScope = contextScopeOf(slug, a);
+  const companyName = contextScope?.company ? companyNameOf(slug) : null;
+  const projectName = contextScope?.project?.name ?? null;
   let bundle: PortableFiles;
   if (kind === 'external') {
     // EN-007 · Revisión adoptada con los scripts sin tocar, más los planes que ya funcionaron por SHA-256 del PDF.
     const { provenPlansForExport } = await import('./documentJobs.ts');
-    bundle = buildExternalBundle(files, { agentName: a.config.name, role: a.template?.role ?? null, summary: a.config.specialization ?? null, exportedAt, changelog, provenPlans: provenPlansForExport(slug, agentId, files) });
-  } else bundle = buildPortableBundle(files, { agentName: a.config.name, exportedAt, changelog });
+    bundle = buildExternalBundle(files, { agentName: a.config.name, role: a.template?.role ?? null, summary: a.config.specialization ?? null, exportedAt, changelog, provenPlans: provenPlansForExport(slug, agentId, files), contextScope, companyName, projectName });
+  } else bundle = buildPortableBundle(files, { agentName: a.config.name, exportedAt, changelog, contextScope, companyName, projectName });
   // Nunca se entrega un ZIP parcial: cualquier problema (secreto, ruta local, dato interno o tamaño) niega TODO con 409.
   // EN-010 · En los externos, su carpeta original y la de datos del Portal son rutas privadas: nunca salen en el paquete.
   const privatePaths = kind === 'external'
