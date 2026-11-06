@@ -75,6 +75,8 @@ export interface ZipImportPreview {
   /** Revisión adoptada al hacer la vista previa y revisión de partida (exportada) de la fusión. */
   adoptedN: number | null; base: { n: number | null; how: 'marcador' | 'parecido' | 'sin-base' } | null;
   adopted: string[]; conflicts: ZipImportConflict[]; newMemory: { title: string; text: string }[]; notAdopted: string[]; upToDate: boolean; note: string;
+  /** EN-014 · Ámbito que declara el ZIP (o que hereda si no lo declara) y aviso si su proyecto no existe aquí (no bloquea). */
+  contextScope?: ImportScopeView;
 }
 export type ZipImportGrant = Omit<WizardInput, 'name' | 'role' | 'summary' | 'responsibilities' | 'deliverables' | 'instructions' | 'skills' | 'references' | 'capabilities'> & { capabilities?: Capability[] | null };
 export interface ZipImportResult {
