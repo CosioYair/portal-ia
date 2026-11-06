@@ -834,15 +834,6 @@ async function learnFromRetry(slug: string, a: Agent, job: DocumentJob, v: Docum
  * applyProposal (copia de seguridad, revisión nueva, CAMBIOS.md y registro). Luego marca la original como 'undone'.
  */
 export async function undoProposal(slug: string, agentId: string, id: string, by = 'owner'): Promise<ImprovementProposal> {
-  // HU-181 · Solo se deshace la ÚLTIMA automejora aplicada: con otra aplicada después, 409 later_improvements sin tocar nada.
-  {
-    const all = proposalsDb(slug).list(agentId);
-    const target = all.find(o => o.id === id);
-    if (target && target.state === 'applied' && target.appliedAt
-      && all.some(o => o.id !== id && o.state === 'applied' && !!o.appliedAt && o.appliedAt > target.appliedAt!)) {
-      throw err('Hay mejoras posteriores a esta: deshaz primero la última.', 409, { code: 'later_improvements' });
-    }
-  }
   return serialForAgent(slug, agentId, async () => {
     const props = proposalsDb(slug); const p = props.get(id);
     if (!p || p.agentId !== agentId) throw err('Propuesta no encontrada', 404);
@@ -851,6 +842,16 @@ export async function undoProposal(slug: string, agentId: string, id: string, by
     const repo = sourcesRepo(slug); const s = repo.get(agentId);
     if (!s) throw err('El agente no tiene una carpeta adoptada.', 404);
     if (!s.grants.applyImprovements) throw err('Deshacer escribe en sus instrucciones y habilidades: concede antes «aplicar mejoras aprobadas».', 403);
+    // HU-181 · Solo se deshace la ÚLTIMA automejora aplicada (las inversas de Deshacer, origin='undo', no cuentan):
+    // con otra aplicada después, 409 later_improvements sin tocar nada. Tras el permiso: sin él, 403.
+    {
+      const t = ensure(slug).prepare(`SELECT state, applied_at FROM improvement_proposals WHERE id = ? AND agent_id = ?`).get(id, agentId) as any;
+      if (t && t.state === 'applied' && t.applied_at) {
+        const later = ensure(slug).prepare(`SELECT COUNT(*) AS n FROM improvement_proposals WHERE agent_id = ? AND id <> ? AND state = 'applied'
+          AND COALESCE(origin, 'feedback') <> 'undo' AND applied_at IS NOT NULL AND applied_at > ?`).get(agentId, id, t.applied_at) as any;
+        if (Number(later?.n ?? 0) > 0) throw err('Hay mejoras posteriores a esta: deshaz primero la última.', 409, { code: 'later_improvements' });
+      }
+    }
     const files = repo.files(agentId) ?? {};
     const work: Record<string, string> = {};
     for (const c of p.changes) {
