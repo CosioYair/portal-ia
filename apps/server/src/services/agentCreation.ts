@@ -4,7 +4,7 @@ import { CAPABILITIES, EXTERNAL_BUNDLE_LIMITS, KNOWLEDGE, TOOLS, buildExternalBu
 import { config, REPO_ROOT } from '../config.ts';
 import { agentsRepo, projectsRepo } from '../db/workspace.ts';
 import { departmentsRepo } from './departments.ts';
-import { agentFoldersRepo, definitionFor, defaultInstructions, hashFiles, readFolder, registerAgentFolder, writeRevision, adoptedExtras, type AgentExtras } from './agentFolders.ts';
+import { agentFoldersRepo, definitionFor, agentDefaultInstructions, hashFiles, readFolder, registerAgentFolder, writeRevision, adoptedExtras, type AgentExtras } from './agentFolders.ts';
 import { harnessAvailability, harnessModels } from './harness/index.ts';
 import { inheritLatestTemplate } from './agentTemplates.ts';
 import { recordAgentEvent } from './agentEvents.ts';
@@ -69,8 +69,12 @@ export async function createAgentFromWizard(slug: string, i: WizardInput, source
   const agent = inheritLatestTemplate(slug, created);
   // Carpeta portable: identidad + lo propio (instrucciones, habilidades, referencias, entregables, autonomía).
   registerAgentFolder(slug, agent);
+  // EN-013 · Sin instrucciones propias, el AGENTS.md por defecto se genera sin IA a partir de los datos reales del agente
+  // ya creado (papel, especialización, responsabilidades, a quién reporta y habilidades según las herramientas concedidas).
+  // Un AGENTS.md importado con la marca de por defecto también se regenera en definitionFor con los datos de ESTE agente.
+  // Uno sin la marca (propio) se conserva tal cual. Las instrucciones nunca conceden permisos: estos salen solo de la fila.
   const extras: AgentExtras = {
-    instructions: i.instructions?.trim() ? i.instructions.trim() : defaultInstructions(cfg.name, cfg.specialization),
+    instructions: i.instructions?.trim() ? i.instructions.trim() : agentDefaultInstructions(slug, agent),
     skills: (i.skills ?? []).map(s => ({ ...s, slug: slugify(s.slug || s.name).slice(0, 60) })), memory: [], knowledge: (i.references ?? []).map(k => ({ ...k, slug: slugify(k.slug || k.title).slice(0, 60) })),
     deliverables: i.deliverables.map(d => d.trim()).filter(Boolean).slice(0, 20), autonomy: i.autonomy,
     changelog: i.changelog?.trim() ? i.changelog : undefined
