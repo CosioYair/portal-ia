@@ -76,7 +76,11 @@ test('panel del agente: cada pestaña antigua pertenece a un grupo (los enlaces 
   const panel = read('components/AgentPanel.tsx');
   const tabs = (name: string) => panel.slice(panel.indexOf(`const ${name} = [`), panel.indexOf('] as const;', panel.indexOf(`const ${name} = [`)));
   const ids = new Set([...(tabs('BASE_TABS') + tabs('EXTERNAL_TABS')).matchAll(/\['([a-z]+)', '[^']+'\]/g)].map(m => m[1]));
-  assert.ok(ids.size >= 9, 'no se encontraron las pestañas');
+  // HU-181: Mejoras se retira; …/mejoras es un alias de Memoria. Quedan 8: chat, solicitudes, trabajo, archivos,
+  // memoria, configuracion, documentos y origen.
+  assert.ok(ids.size >= 8, 'no se encontraron las pestañas');
+  assert.ok(!ids.has('mejoras'), 'Mejoras ya no es una pestaña');
+  assert.match(panel, /tab === 'mejoras'/);
   const groupOf = panel.match(/const GROUP_OF: Record<Tab, Group> = \{([^}]*)\}/);
   assert.ok(groupOf, 'falta GROUP_OF');
   for (const id of ids) assert.match(groupOf[1], new RegExp(`\\b${id}: '`), `la pestaña «${id}» no tiene grupo`);
