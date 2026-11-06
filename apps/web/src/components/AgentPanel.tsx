@@ -193,6 +193,23 @@ function WorkTab({ slug, p, projects, onChanged }: { slug: string; p: Panel; pro
 
 // ---------------------------------------------------------------- Archivos
 
+/** EN-013 · Marca de las instrucciones por defecto (la misma que DEFAULT_INSTRUCTIONS_MARK en el servidor). */
+const DEFAULT_INSTRUCTIONS_RE = /portal-ia: instrucciones por defecto/;
+
+/**
+ * EN-013 · Contenido de AGENTS.md en solo lectura, sin la línea de la marca. Si son las instrucciones por defecto, se dice
+ * que las genera el Portal y que se actualizan solas. No llama a la IA ni tiene costo.
+ */
+function InstructionsView({ text }: { text: string }) {
+  const isDefault = DEFAULT_INSTRUCTIONS_RE.test(text);
+  const shown = text.split(/\r?\n/).filter(l => !DEFAULT_INSTRUCTIONS_RE.test(l)).join('\n').trim();
+  if (!shown) return <span className="small muted">Aún no tiene instrucciones en su carpeta.</span>;
+  return <>
+    {isDefault && <Notice kind="info">Generadas por el Portal a partir del papel, las responsabilidades y los permisos del agente. Se actualizan solas hasta que las edites.</Notice>}
+    <pre className="file-view" aria-label="Contenido de AGENTS.md" tabIndex={0} style={{ maxHeight: 320, overflow: 'auto', whiteSpace: 'pre-wrap', margin: 0 }}>{shown}</pre>
+  </>;
+}
+
 function FilesTab(props: { slug: string; p: Panel; onChanged: () => void }) {
   return <><CapabilitiesBlock slug={props.slug} agentId={props.p.agent.id} /><FilesTabBody {...props} /></>;
 }
@@ -263,7 +280,7 @@ function FilesTabBody({ slug, p, onChanged }: { slug: string; p: Panel; onChange
     </section>
     <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div className="h3">Instrucciones (AGENTS.md)</div>
-      {edit === null ? <><p className="small muted">Lo que este agente debe tener siempre presente, con cualquier arnés.</p><button className="btn btn-secondary btn-sm" style={{ alignSelf: 'flex-start' }} disabled={!!st.external} onClick={() => setEdit(/portal-ia: instrucciones por defecto/.test(instr) ? '' : instr)}>Editar instrucciones</button></>
+      {edit === null ? <><p className="small muted">Lo que este agente debe tener siempre presente, con cualquier arnés.</p><InstructionsView text={instr} /><button className="btn btn-secondary btn-sm" style={{ alignSelf: 'flex-start' }} disabled={!!st.external} onClick={() => setEdit(/portal-ia: instrucciones por defecto/.test(instr) ? '' : instr)}>Editar instrucciones</button></>
         : <><textarea className="input" rows={8} value={edit} onChange={e => setEdit(e.target.value)} aria-label="Instrucciones del agente" />
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}><button className="btn btn-ghost btn-sm" onClick={() => setEdit(null)}>Cancelar</button><button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void act(() => osApi.identity(slug, p.agent.id, { instructions: edit, expectN: st.adopted?.n ?? null }), 'Instrucciones guardadas (nueva revisión)').then(() => setEdit(null))}>Guardar</button></div></>}
     </section>
