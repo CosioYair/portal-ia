@@ -22,7 +22,7 @@ const D = await import('@portal-ia/domain');
 const { encryptSecret } = await import('../src/security/crypto.ts');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
-const { agentsRepo } = await import('../src/db/workspace.ts');
+const { agentsRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
 const { lessonsRepo } = await import('../src/services/lessons.ts');
 const F = await import('../src/services/agentFolders.ts');
 const { exportBundle, exportFiles } = await import('../src/services/agentCreation.ts');
@@ -66,9 +66,9 @@ const setTools = async (id: string, tools: Record<string, boolean>) => {
   return F.syncAgentFolder(S, agentsRepo(S).get(id)!);
 };
 const skillOf = (id: string, slug: string) => F.agentFoldersRepo(S).adopted(id)!.files[`skills/${slug}/SKILL.md`];
-const lesson = (status: string, title: string, text: string, agentId: string | null, evAgent: string | null) => lessonsRepo(S).insert({
+const lesson = (status: string, title: string, text: string, agentId: string | null, evAgent: string | null, processId: string | null = null) => lessonsRepo(S).insert({
   projectId: null, role: null, tags: ['prueba'], status, version: 1, parentId: null, title, detector: 'import',
-  evidence: { processId: null, processTitle: null, stepId: null, agentId: evAgent, agentName: null, file: null, detail: 'prueba', at: new Date().toISOString() },
+  evidence: { processId, processTitle: null, stepId: null, agentId: evAgent, agentName: null, file: null, detail: 'prueba', at: new Date().toISOString() },
   rootCause: null, correctiveAction: null, lessonText: text, source: 'import', promotedTo: null, dedupeKey: null, agentId
 } as any)!;
 
@@ -154,6 +154,31 @@ test('Memoria: verificado, pendiente y relacionado; leer no cambia estado, agent
   const after = lessonsRepo(S).get(rel.id)!;
   assert.equal(after.status, 'detected'); assert.equal(after.agentId ?? null, null); assert.ok(inProject(), 'sigue en las listas del proyecto');
   assert.ok(!F.memoryOf(S, id).some(m => m.title === 'Relacionada EN011' || m.title === 'Pendiente EN011'));
+});
+
+test('Memoria: lecciones de procesos en los que participó (paso ejecutado) con link «paso»; las de procesos ajenos no aparecen', () => {
+  const project = projectsRepo(S).create({ slug: 'en011-paso', name: 'EN011 paso', description: '' });
+  const otro = 'otro-agente-en011';
+  const mine = processesRepo(S).create({ projectId: project.id, kind: 'story_execution', title: 'Encargo con la ingeniera', estimatedUsd: 0, steps: [
+    { agentId: otro, agentName: 'Coordinador', title: 'Plan', model: 'm' },
+    { agentId: id, agentName: 'Ingeniera EN011', title: 'Implementación', model: 'm' }
+  ] });
+  const foreign = processesRepo(S).create({ projectId: project.id, kind: 'story_execution', title: 'Encargo ajeno', estimatedUsd: 0, steps: [
+    { agentId: otro, agentName: 'Coordinador', title: 'Plan', model: 'm' }
+  ] });
+  const viaStep = lesson('detected', 'Por paso EN011', 'Lección de una historia en la que ejecutó un paso.', null, otro, mine.id);
+  const notMine = lesson('detected', 'Ajena EN011', 'Lección de un proceso en el que no participó.', null, otro, foreign.id);
+  const l = F.agentLearning(S, id);
+  const r = l.related.find(m => m.id === viaStep.id);
+  assert.ok(r, `falta la lección por paso: ${JSON.stringify(l.related.map(x => x.title))}`);
+  assert.equal(r!.link, 'paso'); assert.equal(r!.status, 'detected'); assert.equal(r!.processId, mine.id);
+  assert.ok(!l.related.some(m => m.id === notMine.id), 'un proceso en el que no participó no aparece');
+  assert.ok(!l.pending.some(m => m.id === viaStep.id || m.id === notMine.id));
+  for (const x of [viaStep, notMine]) {
+    const now = lessonsRepo(S).get(x.id)!;
+    assert.equal(now.status, 'detected'); assert.equal(now.agentId ?? null, null);
+    assert.ok(lessonsRepo(S).list(null, null).some(y => y.id === x.id), 'sigue en las listas del proyecto');
+  }
 });
 
 let bundle: Record<string, string> = {};
