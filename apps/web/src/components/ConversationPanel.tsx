@@ -231,7 +231,7 @@ export function AcceptAssignmentAction({ slug, a, label = 'Aceptar', primary = t
       await send(true); return true;
     }
   };
-  const tryAccept = async () => { setBusy(true); setErr(null); try { if (await withNoteConfirm(d => api.acceptAssignment(slug, a.id, null, null, d))) await done(); } catch (e: any) { failed(e); } finally { setBusy(false); } };
+  const tryAccept = async () => { setBusy(true); setErr(null); try { if (await withNoteConfirm(d => d ? api.acceptAssignment(slug, a.id, null, null, true) : api.acceptAssignment(slug, a.id, null))) await done(); } catch (e: any) { failed(e); } finally { setBusy(false); } };
   const acceptWithReason = async () => { setBusy(true); setErr(null); try { if (await withNoteConfirm(d => api.acceptAssignment(slug, a.id, null, motivo.trim(), d))) await done(); } catch (e: any) { failed(e); } finally { setBusy(false); } };
   const reasonable = !!blocked && !ACCEPT_NO_REASON.includes(blocked.code ?? '');
   return <>
