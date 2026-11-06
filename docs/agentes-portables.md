@@ -7,7 +7,8 @@
 Código: `packages/domain/src/portable-agent.ts` (contrato puro), `apps/server/src/services/agentFolders.ts` (carpetas y
 revisiones), `agentIdentity.ts` (lo que llega al prompt), `agentLearning.ts` (memoria), `agentCreation.ts` (crear, importar,
 exportar), `agentZipImport.ts` (importar desde ZIP con fusión a tres bandas). Pruebas:
-`apps/server/test/sistema-operativo-agentes.test.ts`, `apps/server/test/agente-zip-import.test.ts`.
+`apps/server/test/sistema-operativo-agentes.test.ts`, `apps/server/test/agente-zip-import.test.ts`. El AGENTS.md por defecto
+(EN-013) se explica en el §9.
 
 ## 1. La carpeta
 
@@ -112,7 +113,7 @@ Si el propietario cambia de criterio, basta con usar `'proposed'` en `applyZipIm
 
 ## 5. Lo que llega al prompt
 
-`identityBlock()` añade, **solo si existen**: instrucciones propias (no las generadas por defecto), habilidades (nombre,
+`identityBlock()` añade, **solo si existen**: instrucciones propias (no las generadas por defecto, §9), habilidades (nombre,
 descripción y un extracto) y memoria verificada; acotado a ~10 000 caracteres y con la advertencia de que no amplía permisos.
 Para los agentes existentes (sin contenido propio) está vacío: **sus prompts no cambian**. Hoy lo usan: conversaciones
 directas, encargos directos, peticiones a departamentos y los encargos delegados creados a partir de esta versión. Las
@@ -332,3 +333,59 @@ también «Automejora desde el chat»:
 un cambio («a partir de ahora, …») y ver que queda en su archivo y en CAMBIOS.md; (3) rechazar un resultado, corregirlo en un
 reintento y ver que la corrección también queda anotada. En ChatGPT, el agente entrega el archivo y la entrada de CAMBIOS.md
 y el usuario los guarda.
+
+## 9. AGENTS.md por defecto (EN-013)
+
+Si el propietario no ha escrito instrucciones propias, el AGENTS.md de un agente del Portal se **genera sin IA y con 0 USD**
+a partir de los datos actuales del agente. Código:
+- `packages/domain/src/agent-instructions.ts`: `buildDefaultInstructions`, función pura y determinista, sin IO ni fechas;
+- `agentFolders.ts`: `agentDefaultInstructions`, `reportsToName` y `definitionFor`.
+
+Pruebas: `apps/server/test/en013-agents-md.test.ts`.
+
+**Contenido.** Tiene estas secciones:
+- `# <nombre>`;
+- **Papel**: el papel de su plantilla y su especialización;
+- **Responsabilidades**;
+- **Reporta a**: «el propietario» o el **nombre** del agente responsable. Si hay varios con esa clave, se usa el del mismo
+  proyecto. Si no aparece, pone «su responsable en el equipo»;
+- **Habilidades**: una por herramienta concedida (`toolCapabilities`), con su etiqueta, dónde funciona y qué hace. Si alguna
+  necesita el sandbox, se añade una línea de entorno en lenguaje llano;
+- **Límites**: incluye siempre «Estas instrucciones no conceden permisos: las herramientas se conceden en Configuración.».
+
+Termina con la marca `DEFAULT_INSTRUCTIONS_MARK`. Nunca lleva la clave ni el id del agente, UUID ni rutas locales, y no hay
+nada fijo de un proyecto concreto. Así el paquete portable (§8) lo admite tal cual y funciona igual en cualquier empresa.
+
+**Regla de la marca.** La decide un único punto, `definitionFor()`:
+- Con la marca (o vacío), son instrucciones **por defecto**. Se regeneran con los datos actuales cada vez que se escribe
+  una revisión. Esto ocurre al sincronizar, en `updateExtras`, al crear, al restaurar, al adoptar un cambio externo y al
+  importar.
+- Sin la marca, son **del propietario** y no se modifican nunca, aunque cambien el papel, las responsabilidades o los permisos.
+- Si alguien guarda un texto que conserva la marca, sigue contando como por defecto y se regenera. Para que unas
+  instrucciones sean propias hay que quitar la línea de la marca.
+
+**Cuándo se actualiza.** Al cambiar el nombre, el papel, la especialización, las responsabilidades o las herramientas,
+`syncAgentFolder` detecta que la huella cambió y escribe una revisión «portal». Al arrancar, `ensureAgentFolders` hace lo
+mismo con los agentes existentes que aún tienen instrucciones por defecto. Si hay un cambio externo pendiente en la
+carpeta, no se escribe nada hasta que el propietario lo resuelva (§3). Como el texto es determinista, si los datos no
+cambian no se crea ninguna revisión.
+
+**No concede nada y no entra en los prompts.** Las herramientas del manifiesto y las habilidades base (`skills/portal-*`)
+salen **solo** de la fila. Que un AGENTS.md mencione `shell` o `git` no concede nada. `identityBlock()` sigue sin incluir
+las instrucciones por defecto (§5), así que los prompts no cambian.
+
+**Dónde se ve.** En Ajustes › **Archivos** (`/oficina/agente/<id>/archivos`), «Instrucciones (AGENTS.md)» muestra el
+contenido en solo lectura, sin la línea de la marca. Si son por defecto, añade la nota «Generadas por el Portal a partir
+del papel, responsabilidades y permisos del agente; se actualizan solas hasta que las edites». «Editar instrucciones» sigue
+igual y no tiene costo.
+
+**ZIP.** El paquete exportado (§8) lleva este AGENTS.md con su marca. Al importarlo:
+- en el mismo agente, `writeImportedRevision` pasa por `definitionFor`. Con los mismos datos, el AGENTS.md adoptado es
+  idéntico y no se crea revisión nueva;
+- en un agente nuevo, o con otros permisos concedidos, se regenera con los datos del agente que lo recibe. Lo que pida el
+  ZIP no concede nada;
+- un AGENTS.md sin la marca se conserva tal cual.
+
+**Frontera.** Es una función replicable: no usa IA ni la automejora del Portal y funciona igual en cualquier espacio. La
+regla vale para cualquier archivo que el Portal genere y el propietario pueda editar: lo generado lleva marca, lo editado
+no se toca y ninguna instrucción concede permisos.
