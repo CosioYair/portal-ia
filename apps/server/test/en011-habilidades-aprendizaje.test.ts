@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 
 /**
  * EN-011 · Habilidades y aprendizaje visibles y portables de los agentes internos. Sin modelos ni costo (proveedor
@@ -41,7 +42,6 @@ let seq = 0;
 
 /** ZIP «almacenado» mínimo a partir de archivos de texto. */
 function zip(files: Record<string, string>): string {
-  const zlib = require('node:zlib') as typeof import('node:zlib');
   const locals: Buffer[] = []; const centrals: Buffer[] = []; let off = 0; const entries = Object.entries(files);
   for (const [n, d] of entries) {
     const data = Buffer.from(d, 'utf8'); const name = Buffer.from(n, 'utf8'); const crc = zlib.crc32(data);

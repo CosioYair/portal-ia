@@ -239,7 +239,9 @@ export function previewZipImport(slug: string, uploaded: string, name: string) {
     return { ...common, mode: 'nuevo' as const, agentId: null, adoptedN: null, base: null, adopted: [] as string[], conflicts: [] as PortableMergeConflict[], newMemory: [] as { title: string; text: string }[], notAdopted: [] as string[], upToDate: false, note: NOTE_NEW, learned };
   }
   const plan = planMerge(slug, existing, files, marker);
-  const adopted = [...plan.result.adopted];
+  // MEMORY.md no se fusiona como texto (es la proyección de las lecciones); si el ZIP trae memoria nueva, se adopta como
+  // lecciones pendientes de tu verificación y así se muestra en la vista previa.
+  const adopted = [...plan.result.adopted, ...(plan.newMemory.length && !plan.result.adopted.includes(MEM) ? [MEM] : [])];
   return {
     ...common, mode: 'existente' as const, agentId: existing.id, adoptedN: plan.adoptedN, base: plan.base, adopted, conflicts: plan.result.conflicts,
     newMemory: plan.newMemory.map(m => ({ title: m.title, text: m.text })), notAdopted: plan.notAdopted,
