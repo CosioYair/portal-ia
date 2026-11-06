@@ -440,7 +440,7 @@ export async function migrateAgentContextScopes(slug: string, companyName?: stri
   for (const row of changedRows) {
     try {
       const fresh = agentsRepo(slug).get(row.id) ?? row;
-      await syncAgentFolder(slug, fresh, contextScopeMigrationNote(company));
+      await syncAgentFolder(slug, fresh, contextScopeMigrationNote(company)); const migNote = contextScopeMigrationNote(company); const hasMigNote = Number((workspaceDb(slug).prepare(`SELECT COUNT(*) AS n FROM agent_revisions WHERE agent_id = ? AND note LIKE 'Ámbito inicial%'`).get(row.id) as any)?.n ?? 0) > 0; const adoptedNow = agentFoldersRepo(slug).adopted(row.id); if (!hasMigNote && adoptedNow) await writeRevision(slug, row.id, { ...adoptedNow.files }, 'portal', migNote, 'portal');
       migrated.push(row.id);
     } catch (e) { failed.push({ agentId: row.id, error: (e as Error).message }); }
   }
