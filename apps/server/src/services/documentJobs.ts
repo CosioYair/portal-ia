@@ -849,7 +849,11 @@ export async function undoProposal(slug: string, agentId: string, id: string, by
       if (t && t.state === 'applied' && t.applied_at) {
         const later = ensure(slug).prepare(`SELECT COUNT(*) AS n FROM improvement_proposals WHERE agent_id = ? AND id <> ? AND state = 'applied'
           AND COALESCE(origin, 'feedback') <> 'undo' AND applied_at IS NOT NULL AND applied_at > ?`).get(agentId, id, t.applied_at) as any;
-        if (Number(later?.n ?? 0) > 0) throw err('Hay mejoras posteriores a esta: deshaz primero la última.', 409, { code: 'later_improvements' });
+        if (Number(later?.n ?? 0) > 0) {
+        // Primero el permiso (403), después el orden (409): sin «Puede automejorarse» no se deshace nada.
+        if (!sourceOr(slug, agentId).grants.applyImprovements) throw err('Concede antes a este agente «Puede automejorarse» para deshacer sus automejoras.', 403);
+        throw err('Hay mejoras posteriores a esta: deshaz primero la última.', 409, { code: 'later_improvements' });
+      }
       }
     }
     const files = repo.files(agentId) ?? {};
