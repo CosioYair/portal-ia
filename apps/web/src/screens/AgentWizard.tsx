@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import type { Capability, ExecutionBackend, PortableSkill, ProviderId } from '@portal-ia/domain';
-import { AGENT_ARCHETYPES, CAPABILITIES, DEPARTMENT_PRESETS, GENERAL_ARCHETYPE, HARNESSES, KNOWLEDGE, TOOLS, suggestArchetypes, type AgentArchetype } from '@portal-ia/domain';
+import type { AgentContextScope, Capability, ContextScopeOption, ExecutionBackend, PortableSkill, ProviderId } from '@portal-ia/domain';
+import { AGENT_ARCHETYPES, CAPABILITIES, CONTEXT_SCOPE_OPTIONS, DEFAULT_CONTEXT_SCOPE, DEPARTMENT_PRESETS, GENERAL_ARCHETYPE, HARNESSES, KNOWLEDGE, TOOLS, contextScopeLabel, suggestArchetypes, type AgentArchetype } from '@portal-ia/domain';
 import { FolderPicker } from '../components/FolderPicker.tsx';
 import { ExternalImportBox } from '../components/ExternalAgent.tsx';
 import { AgentZipImport } from '../components/AgentZipImport.tsx';
@@ -29,7 +29,46 @@ interface Draft {
   harness: ExecutionBackend | null; model: string; provider: ProviderId | null; effort: 'low' | 'medium' | 'high'; tools: string[]; autonomy: 'ask' | 'within_scope'; capabilities: Capability[];
   instructions: string;
   departmentLocked?: boolean;
+  /** EN-014 · Ámbito (contexto de sus instrucciones, habilidades y paquete). Los borradores antiguos no lo traen. */
+  contextScope?: AgentContextScope;
 }
+
+/** EN-014 · Un ámbito vacío no vale: al menos una opción. */
+export const scopeIsEmpty = (s: AgentContextScope) => !s.project && !s.company && !s.general;
+
+/**
+ * EN-014 · Casillas de «Ámbito» (compartidas por Nuevo agente y Configuración del agente): Proyecto (con selector), Empresa y
+ * General, combinables, con una línea por opción. Cambiarlo no concede ni quita herramientas ni permisos y no gasta nada.
+ */
+export function ContextScopeFields({ value, onChange, projects, companyName, idPrefix = 'scope' }: { value: AgentContextScope; onChange: (v: AgentContextScope) => void; projects: { id: string; name: string }[]; companyName?: string | null; idPrefix?: string }) {
+  const opt = (id: ContextScopeOption) => CONTEXT_SCOPE_OPTIONS.find(o => o.id === id);
+  const missing = value.project && !projects.some(p => p.id === value.project!.id) ? value.project : null;
+  const choices = missing ? [...projects, missing] : projects;
+  return <fieldset style={{ border: 0, padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 6 }}><legend className="label">Ámbito</legend>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <label className="ck small"><input className="cb" type="checkbox" checked={!!value.project} disabled={!choices.length} onChange={e => onChange({ ...value, project: e.target.checked ? (choices[0] ?? null) : null })} /> {opt('project')?.label ?? 'Proyecto'}</label>
+      <select className="input" style={{ maxWidth: 320 }} aria-label="Proyecto del ámbito" id={`${idPrefix}-project`} disabled={!value.project} value={value.project?.id ?? ''} onChange={e => { const p = choices.find(x => x.id === e.target.value); if (p) onChange({ ...value, project: { id: p.id, name: p.name } }); }}>
+        {!value.project && <option value="">— marca Proyecto para elegirlo —</option>}
+        {choices.map(p => <option key={p.id} value={p.id}>{p.name}{missing && p.id === missing.id ? ' (ya no existe en este Portal)' : ''}</option>)}
+      </select>
+      {!choices.length && <span className="small muted">No hay proyectos disponibles: abre un proyecto para poder elegirlo.</span>}
+      <span className="small muted">{opt('project')?.text}</span>
+    </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <label className="ck small"><input className="cb" type="checkbox" checked={value.company} onChange={e => onChange({ ...value, company: e.target.checked })} /> {opt('company')?.label ?? 'Empresa'}{companyName ? ` (${companyName})` : ''}</label>
+      <span className="small muted">{opt('company')?.text}</span>
+    </div>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      <label className="ck small"><input className="cb" type="checkbox" checked={value.general} onChange={e => onChange({ ...value, general: e.target.checked })} /> {opt('general')?.label ?? 'General'}</label>
+      <span className="small muted">{opt('general')?.text}</span>
+    </div>
+    {scopeIsEmpty(value) && <span className="small" role="alert" style={{ color: 'var(--color-err-text)' }}>Elige al menos una opción.</span>}
+    <span className="small muted">Cambiarlo no concede ni quita herramientas ni permisos y no gasta nada.</span>
+  </fieldset>;
+}
+
+/** Ámbito que devuelve la vista previa de importación (el servidor lo añade a la respuesta). */
+type ScopePreview = { declared: boolean; label: string; lines: string[]; projectMissing: boolean; warning: string | null };
 const EMPTY: Draft = { need: '', archetype: null, name: '', role: '', summary: '', department: 'Dirección', responsibilities: [], deliverables: [], skills: [], knowledge: ['context'], scope: 'project', harness: null, model: '', provider: null, effort: 'medium', tools: ['knowledge_write'], autonomy: 'ask', capabilities: ['consultar'], instructions: '' };
 const STEPS = ['¿Qué necesitas?', 'Identidad', 'Cómo trabaja', 'Revisión', 'Primera tarea'];
 const RISKY = new Set(TOOLS.filter(t => t.risk === 'auth').map(t => t.id));
@@ -42,6 +81,8 @@ export function AgentWizard() {
   const navigate = useNavigate(); const [params] = useSearchParams();
   const draft = useDraft<Draft>(draftKey('oficina.nuevo-agente', ws.slug), { ...EMPTY, department: params.get('departamento') ?? EMPTY.department });
   const d = draft.value; const set = (patch: Partial<Draft>) => draft.set(v => ({ ...v, ...patch }));
+  const scope: AgentContextScope = d.contextScope ?? DEFAULT_CONTEXT_SCOPE;
+  const companyName = (ws as { name?: string }).name ?? null;
   const [step, setStep] = useState(0);
   const [harnesses, setHarnesses] = useState<Awaited<ReturnType<typeof osApi.harnesses>>['harnesses'] | null>(null);
   const [departments, setDepartments] = useState<string[]>([]);
@@ -64,12 +105,14 @@ export function AgentWizard() {
   const harness = harnesses?.find(h => h.id === d.harness) ?? null;
   const modelGroups = harness?.models ?? [];
   const pickHarness = (id: ExecutionBackend) => { const h = harnesses?.find(x => x.id === id); const g = h?.models[0]; set({ harness: id, provider: g?.provider ?? null, model: g?.models.find(m => /sonnet|default/i.test(m.id))?.id ?? g?.models[0]?.id ?? '' }); };
-  const valid = [d.need.trim().length >= 3 || !!d.archetype, d.name.trim().length >= 2 && d.role.trim().length >= 2 && d.department.trim().length >= 2, !!d.harness && !!d.model && !!harness?.availability.available, auth];
+  const valid = [d.need.trim().length >= 3 || !!d.archetype, d.name.trim().length >= 2 && d.role.trim().length >= 2 && d.department.trim().length >= 2 && !scopeIsEmpty(scope), !!d.harness && !!d.model && !!harness?.availability.available, auth];
   const create = async () => {
     setBusy(true); setError(null);
     try {
-      const a = await osApi.createAgent(ws.slug, { name: d.name, role: d.role, summary: d.summary, responsibilities: d.responsibilities.filter(Boolean), deliverables: d.deliverables.filter(Boolean), department: d.department, scope: d.scope === 'project' && project ? 'project' : 'workspace', projectId: d.scope === 'project' && project ? project.id : null,
-        harness: d.harness!, model: d.model, provider: d.provider, effort: d.effort, tools: d.tools, knowledge: d.knowledge, capabilities: d.capabilities, autonomy: d.autonomy, instructions: d.instructions || null, skills: d.skills, authorized: true });
+      const body = { name: d.name, role: d.role, summary: d.summary, responsibilities: d.responsibilities.filter(Boolean), deliverables: d.deliverables.filter(Boolean), department: d.department, scope: d.scope === 'project' && project ? 'project' : 'workspace', projectId: d.scope === 'project' && project ? project.id : null,
+        harness: d.harness!, model: d.model, provider: d.provider, effort: d.effort, tools: d.tools, knowledge: d.knowledge, capabilities: d.capabilities, autonomy: d.autonomy, instructions: d.instructions || null, skills: d.skills, authorized: true,
+        contextScope: { project: scope.project ? { id: scope.project.id, name: scope.project.name } : null, company: scope.company, general: scope.general } };
+      const a = await osApi.createAgent(ws.slug, body as unknown as Parameters<typeof osApi.createAgent>[1]);
       draft.clear(); setCreated({ id: a.id, name: a.config.name, firstTask: archetype?.firstTask ?? GENERAL_ARCHETYPE.firstTask }); setStep(4); flash(`«${a.config.name}» ya está en la oficina`);
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
   };
@@ -123,6 +166,7 @@ export function AgentWizard() {
             <label className="ck small"><input type="radio" name="scope" checked={d.scope === 'project' && !!project} disabled={!project} onChange={() => set({ scope: 'project' })} /> En el proyecto «{project?.name ?? '—'}»</label>
             <label className="ck small"><input type="radio" name="scope" checked={d.scope === 'workspace' || !project} onChange={() => set({ scope: 'workspace' })} /> En toda la empresa</label>
           </fieldset>
+          <ContextScopeFields value={scope} onChange={contextScope => set({ contextScope })} projects={project ? [{ id: project.id, name: project.name }] : []} companyName={companyName} idPrefix="w-scope" />
         </section>}
 
         {step === 2 && <section className="card" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -161,7 +205,7 @@ export function AgentWizard() {
             <div><strong>Accede a</strong><ul>{d.knowledge.map(k => <li key={k}>{KNOWLEDGE_LABELS[k] ?? k}</li>)}<li>{d.scope === 'project' && project ? `El proyecto «${project.name}»` : 'La empresa (sin proyectos concretos)'}</li></ul></div>
             <div><strong>Necesita tu aprobación para</strong><ul>{d.tools.filter(t => RISKY.has(t)).map(t => <li key={t}>{TOOL_LABELS[t]?.name ?? t}</li>)}<li>Cada encargo (lo autorizas al crearlo)</li>{harness?.billing === 'api' && <li>Cada mensaje (es facturable)</li>}</ul></div>
           </div>
-          <div className="small">Trabaja con <strong>{harness?.name}</strong> ({harness?.billing === 'subscription' ? 'tu suscripción, sin pago por uso' : harness?.billing === 'api' ? 'se paga por uso' : 'no verificable'}) · departamento <strong>{d.department}</strong></div>
+          <div className="small">Trabaja con <strong>{harness?.name}</strong> ({harness?.billing === 'subscription' ? 'tu suscripción, sin pago por uso' : harness?.billing === 'api' ? 'se paga por uso' : 'no verificable'}) · departamento <strong>{d.department}</strong> · ámbito <strong>{contextScopeLabel(scope)}</strong></div>
           <div className="small muted">Se guardará su carpeta portable (agent.yaml, AGENTS.md, habilidades y memoria) y un registro de la creación. Crear no llama a ningún modelo.</div>
           <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /> Autorizo crear a {d.name} con {harness?.name} y estos permisos.</label>
         </section>}
@@ -212,6 +256,11 @@ function ImportBox({ slug, projectId, harnesses, departments, onCancel, onDone }
     {pv && <>
       {pv.problems.map((p, i) => <Notice key={i} kind={p.blocking ? 'err' : 'warn'}>{p.path}: {p.message}</Notice>)}
       {pv.agent && <div className="small"><strong>{pv.agent.name}</strong> · {pv.agent.role} — {pv.agent.summary}</div>}
+      {(() => { const sp: ScopePreview | undefined = pv?.contextScope; if (!sp) return null; return <div className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <div><strong>Ámbito:</strong> {sp.label}{sp.declared ? '' : ' (no lo declara el paquete)'}</div>
+        {sp.lines.length > 0 && <ul style={{ margin: 0, paddingLeft: 18 }}>{sp.lines.map((l, i) => <li key={i} className="muted">{l}</li>)}</ul>}
+        {sp.warning && <Notice kind={sp.projectMissing ? 'warn' : 'info'}>{sp.warning}</Notice>}
+      </div>; })()}
       <div className="small">Archivos: {pv.files.join(', ')}{pv.ignored.length ? ` · ignorados: ${pv.ignored.join(', ')}` : ''}</div>
       {pv.requests && <Notice kind="info">La carpeta pide: trabajar con {HARNESS_NAME[pv.requests.harness] ?? pv.requests.harness}; permisos: {pv.requests.tools.map(t => TOOL_LABELS[t]?.name ?? t).join(', ') || 'ninguno'}; {pv.requests.autonomy === 'within_scope' ? 'trabajar sin preguntar dentro de lo autorizado' : 'preguntar antes de cada trabajo'}. {pv.note}</Notice>}
       <details className="card" style={{ padding: 10 }}><summary className="small" style={{ cursor: 'pointer' }}><strong>Lo que llegaría a sus instrucciones</strong> (léelo antes de importar)</summary>

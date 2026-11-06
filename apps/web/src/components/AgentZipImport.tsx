@@ -1,8 +1,8 @@
 import { useRef, useState } from 'react';
-import { TOOLS, diffFiles, type ExecutionBackend } from '@portal-ia/domain';
+import { TOOLS, contextScopeLabel, diffFiles, type AgentContextScope, type ExecutionBackend } from '@portal-ia/domain';
 import { Icon, Notice, Spinner } from './ui.tsx';
 import { TOOL_LABELS } from '../lib/labels.ts';
-import { osApi, type ZipImportConflict, type ZipImportPreview, type ZipImportResult } from '../lib/osApi.ts';
+import { osApi, type ImportScopeView, type ZipImportConflict, type ZipImportPreview, type ZipImportResult } from '../lib/osApi.ts';
 import type { ImportLearned } from '../lib/api.ts';
 
 /** EN-011 · `learned` lo añade el servidor a la vista previa y al resultado; si falta (servidor antiguo) no se muestra. */
@@ -21,6 +21,7 @@ type State =
   | { kind: 'new'; pv: ZipImportPreview }
   | { kind: 'applying'; pv: ZipImportPreview }
   | { kind: 'conflict'; pv: ZipImportPreview; conflicts: ZipImportConflict[] }
+  | { kind: 'scope'; pv: ZipImportPreview; current: AgentContextScope | null }
   | { kind: 'adopted'; pv: ZipImportPreview; result: ZipImportResult }
   | { kind: 'uptodate'; pv: ZipImportPreview }
   | { kind: 'undone'; agentId: string; revision: number; retired: number }
@@ -28,6 +29,8 @@ type State =
 
 const NOT_ADOPTED_NOTE = 'Arnés, modelo, esfuerzo, herramientas, autonomía, capacidades e id nunca se adoptan desde el ZIP: son concesiones tuyas en el Portal y se conservan.';
 const problemsOf = (e: any): string[] => (Array.isArray(e?.body?.problems) ? e.body.problems : []).map((p: any) => typeof p === 'string' ? p : `${p.path}: ${p.message}`);
+/** EN-014 · Mismo ámbito (proyecto por id, Empresa y General). */
+const sameScope = (a: AgentContextScope, b: AgentContextScope) => a.company === b.company && a.general === b.general && (a.project?.id ?? null) === (b.project?.id ?? null);
 
 export function AgentZipImport({ slug, projectId, harnesses, departments, agentId, onCancel, onDone }: { slug: string; projectId: string | null; harnesses: Harnesses; departments: string[]; agentId?: string | null; onCancel: () => void; onDone: (id: string) => void }) {
   const [st, setSt] = useState<State>({ kind: 'idle' });
@@ -35,6 +38,8 @@ export function AgentZipImport({ slug, projectId, harnesses, departments, agentI
   const [harness, setHarness] = useState<ExecutionBackend | null>(null); const [dep, setDep] = useState(''); const [tools, setTools] = useState<string[]>([]); const [auth, setAuth] = useState(false);
   const [undoing, setUndoing] = useState(false);
   const abort = useRef<AbortController | null>(null);
+  /** EN-014 · Ámbito que tenía el agente existente antes de importar (null si no se pudo leer o es nuevo). */
+  const prevScope = useRef<AgentContextScope | null>(null);
   const fail = (e: any) => setSt({ kind: 'error', message: e?.message ?? String(e), problems: problemsOf(e) });
 
   const confirm = async (pv: ZipImportPreview, resolutions: Record<string, 'portal' | 'zip'> = {}, grantNew = false) => {
@@ -61,8 +66,16 @@ export function AgentZipImport({ slug, projectId, harnesses, departments, agentI
       if (agentId && pv.agentId !== agentId) { setSt({ kind: 'error', message: 'Este ZIP es de otro agente (su id no coincide).', problems: [] }); return; }
       if (pv.mode === 'nuevo') { setDep(pv.agent?.department ?? departments[0] ?? 'Dirección'); setTools([]); setHarness(null); setAuth(false); setSt({ kind: 'new', pv }); return; }
       if (pv.upToDate) { setSt({ kind: 'uptodate', pv }); return; }
+      // EN-014 · Ámbito actual del agente (lectura sin costo) para mostrar el cambio y no adoptarlo sin que el propietario lo vea.
+      prevScope.current = null;
+      if (pv.agentId) {
+        try { const panel = await osApi.panel(slug, pv.agentId); prevScope.current = (panel.agent as { contextScope?: AgentContextScope | null }).contextScope ?? null; }
+        catch { prevScope.current = null; }
+      }
       if (pv.conflicts.length) { setChoice({}); setSt({ kind: 'conflict', pv, conflicts: pv.conflicts }); return; }
-      await confirm(pv); // solo cambió lo de fuera: se adopta sin intervención (con Deshacer)
+      const sp = pv.contextScope;
+      if (sp?.declared && (!prevScope.current || !sameScope(prevScope.current, sp.contextScope))) { setSt({ kind: 'scope', pv, current: prevScope.current }); return; }
+      await confirm(pv); // solo cambió lo de fuera y el ámbito no cambia: se adopta sin intervención (con Deshacer)
     } catch (e: any) { if (e?.body?.code === 'aborted') setSt({ kind: 'idle' }); else fail(e); }
   };
 
@@ -93,6 +106,7 @@ export function AgentZipImport({ slug, projectId, harnesses, departments, agentI
     {st.kind === 'adopted' && <>
       <Notice kind="ok">Se adoptó automáticamente lo que cambió fuera como revisión {st.result.revision?.n} (origen «import»), visible en su historial.
         {st.result.adopted.length > 0 && <> Archivos: {st.result.adopted.join(', ')}.</>}</Notice>
+      <ScopeView sp={st.pv.contextScope} isNew={false} current={prevScope.current} />
       <LearnedSummary learned={learnedOf(st.result) ?? learnedOf(st.pv)} />
       <NotAdopted list={st.result.notAdopted} />
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -110,14 +124,25 @@ export function AgentZipImport({ slug, projectId, harnesses, departments, agentI
       <Notice kind="warn">{st.conflicts.length === 1 ? 'Un archivo cambió' : `${st.conflicts.length} archivos cambiaron`} también en el Portal desde la exportación. No se aplica nada de ellos hasta que elijas qué versión quedarte.
         {st.pv.adopted.length > 0 && <> Lo demás se fusiona sin conflicto: {st.pv.adopted.join(', ')}.</>}</Notice>
       {st.conflicts.map(c => <ConflictRow key={c.path} c={c} value={choice[c.path]} onChange={v => setChoice(x => ({ ...x, [c.path]: v }))} />)}
+      <ScopeView sp={st.pv.contextScope} isNew={false} current={prevScope.current} />
       <LearnedSummary learned={learnedOf(st.pv)} />
       <NotAdopted list={st.pv.notAdopted} />
       <button className="btn btn-primary" style={{ alignSelf: 'flex-start' }} disabled={st.conflicts.some(c => !choice[c.path])} onClick={() => void confirm(st.pv, choice)}>Aplicar lo elegido</button>
     </>}
 
+    {st.kind === 'scope' && <>
+      <Notice kind="warn">Este ZIP cambia el ámbito de «{st.pv.agent?.name ?? st.pv.name}»{st.current ? <> de «{contextScopeLabel(st.current)}»</> : null} a «{st.pv.contextScope?.label ?? ''}». No se aplica nada hasta que lo confirmes.
+        {st.pv.adopted.length > 0 && <> Archivos que se adoptarán: {st.pv.adopted.join(', ')}.</>}</Notice>
+      <ScopeView sp={st.pv.contextScope} isNew={false} current={st.current} />
+      <LearnedSummary learned={learnedOf(st.pv)} />
+      <NotAdopted list={st.pv.notAdopted} />
+      <button className="btn btn-primary" style={{ alignSelf: 'flex-start' }} onClick={() => void confirm(st.pv)}>Aplicar la importación con este ámbito</button>
+    </>}
+
     {st.kind === 'new' && <>
       {st.pv.agent && <div className="small"><strong>{st.pv.agent.name}</strong> · {st.pv.agent.role} — {st.pv.agent.summary}</div>}
       <div className="small">Archivos: {st.pv.files.join(', ')}</div>
+      <ScopeView sp={st.pv.contextScope} isNew current={null} />
       <LearnedSummary learned={learnedOf(st.pv)} />
       {st.pv.problems.filter(p => !p.blocking).map((p, i) => <Notice key={i} kind="warn">{p.path}: {p.message}</Notice>)}
       <Notice kind="info">Es un agente nuevo en este espacio: recibirá un id nuevo. {st.pv.memory.length > 0 ? `Trae ${st.pv.memory.length} aprendizaje(s), que llegarán como propuestas para que los verifiques. ` : ''}{NOT_ADOPTED_NOTE}</Notice>
@@ -146,6 +171,20 @@ function LearnedSummary({ learned }: { learned: ImportLearned | null }) {
     {learned.changelogSince.length > 0 && <div className="small"><strong>CAMBIOS.md desde la exportación</strong>{learned.changelogMark ? <span className="muted"> ({learned.changelogMark})</span> : null}<ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{learned.changelogSince.map((c, i) => <li key={i}><strong>{c.heading}</strong>{c.text ? ` — ${c.text}` : ''}</li>)}</ul></div>}
     {learned.warnings.map((w, i) => <Notice key={i} kind="warn">{w}</Notice>)}
     <span className="small muted">Las habilidades no conceden permisos: las herramientas se conceden en Configuración.</span>
+  </div>;
+}
+
+/** EN-014 · Ámbito del ZIP: etiqueta, qué cambia cada opción, aviso de proyecto inexistente (sin bloquear) y qué pasa si no lo declara. */
+function ScopeView({ sp, isNew, current }: { sp: ImportScopeView | undefined; isNew: boolean; current: AgentContextScope | null }) {
+  if (!sp) return null;
+  const currentLabel = current ? contextScopeLabel(current) : null;
+  return <div className="card" style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }} aria-label="Ámbito">
+    <div className="h3">Ámbito: {sp.label}</div>
+    {!isNew && currentLabel && currentLabel !== sp.label && <div className="small">Ámbito actual del agente: «{currentLabel}» → pasará a «{sp.label}».</div>}
+    {sp.lines.length > 0 && <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{sp.lines.map((l, i) => <li key={i}>{l}</li>)}</ul>}
+    {!sp.declared && <span className="small muted">Sin ámbito en el ZIP: {isNew ? 'queda General.' : 'conserva el del agente.'}</span>}
+    {sp.warning && <Notice kind="warn">{sp.warning}</Notice>}
+    <span className="small muted">El ámbito no concede ni quita herramientas ni permisos y no tiene costo.</span>
   </div>;
 }
 

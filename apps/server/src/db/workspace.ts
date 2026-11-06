@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { config } from '../config.ts';
-import { defaultCapabilitiesFor } from '@portal-ia/domain';
+import { defaultCapabilitiesFor, DEFAULT_CONTEXT_SCOPE } from '@portal-ia/domain';
+import type { AgentContextScope } from '@portal-ia/domain';
 import type { ClaudeCodeRun, ClaudeCodeRunStatus, ClaudeCodeUsage, DelegationResult, Agent, AgentConfig, AgentStatus, AgentTemplate, BacklogItem, BacklogStatus, ContextItem, ExecutionResult, KnowledgeDoc, Objective, Process, ProcessStatus, ProcessStep, Project, Repository, Scope, StepStatus, UsageToday } from '@portal-ia/domain';
 import { monotonicNow } from '../clock.ts';
 import { changed } from '../services/live.ts';
@@ -151,6 +152,8 @@ export function workspaceDb(slug: string): DatabaseSync {
   // M5: versión de plantilla aplicada a cada agente.
   const acols = (db.prepare(`PRAGMA table_info(agents)`).all() as any[]).map(c => c.name);
   if (!acols.includes('template_version')) db.exec(`ALTER TABLE agents ADD COLUMN template_version TEXT`);
+  // EN-014 · Ámbito del agente (Proyecto, Empresa, General). Columna aditiva: NULL = sin ámbito (el texto de siempre). No es Template.scope.
+  if (!acols.includes('context_scope_json')) db.exec(`ALTER TABLE agents ADD COLUMN context_scope_json TEXT`);
   // Migración: conocimiento con nombre de autor y proceso de origen.
   const kcols = (db.prepare(`PRAGMA table_info(knowledge)`).all() as any[]).map(c => c.name);
   if (!kcols.includes('author_agent_name')) db.exec(`ALTER TABLE knowledge ADD COLUMN author_agent_name TEXT`);
@@ -244,6 +247,24 @@ export function projectsRepo(slug: string) {
   };
 }
 
+/** EN-014 · Lee context_scope_json. Un valor ilegible o vacío (ninguna opción) cuenta como sin ámbito: nunca impide cargar el agente. */
+function parseContextScope(raw: unknown): AgentContextScope | null {
+  if (typeof raw !== 'string' || !raw) return null;
+  try {
+    const v = JSON.parse(raw) as any;
+    if (!v || typeof v !== 'object') return null;
+    const project = v.project && typeof v.project === 'object' && typeof v.project.name === 'string' ? { id: String(v.project.id ?? ''), name: v.project.name as string } : null;
+    const out: AgentContextScope = { project, company: v.company === true, general: v.general === true };
+    return out.project || out.company || out.general ? out : null;
+  } catch { return null; }
+}
+const scopeJson = (s: AgentContextScope) => JSON.stringify({ project: s.project ? { id: s.project.id, name: s.project.name } : null, company: !!s.company, general: !!s.general });
+
+/** EN-014 · Nota de la revisión «portal» que deja la migración inicial del ámbito. */
+export function contextScopeMigrationNote(companyName: string): string {
+  return `Ámbito inicial: Empresa (${companyName}) + General (EN-014); no cambia arnés, permisos, memoria ni carpeta`;
+}
+
 export function agentsRepo(slug: string) {
   const db = workspaceDb(slug);
   const map = (r: any): Agent => {
@@ -253,7 +274,8 @@ export function agentsRepo(slug: string) {
     return {
       id: r.id, key: r.key, workspaceSlug: slug, projectId: r.project_id, templateId: r.template_id, scope: r.scope as Scope, status: r.status,
       config, configEdited: !!r.config_edited, template: JSON.parse(r.template_json), createdAt: r.created_at, updatedAt: r.updated_at,
-      templateVersion: r.template_version ?? null
+      templateVersion: r.template_version ?? null,
+      contextScope: parseContextScope(r.context_scope_json)
     };
   };
   return {
@@ -294,7 +316,35 @@ export function agentsRepo(slug: string) {
       changed({ ws: slug, entity: 'agent', id });
     },
     delete(id: string) { db.prepare(`DELETE FROM agents WHERE id = ?`).run(id); changed({ ws: slug, entity: 'agent', id }); },
-    keyExists(key: string): boolean { return !!db.prepare(`SELECT 1 FROM agents WHERE key = ?`).get(key); }
+    keyExists(key: string): boolean { return !!db.prepare(`SELECT 1 FROM agents WHERE key = ?`).get(key); },
+    /** EN-014 · Guarda el ámbito. No toca config_json, permisos, arnés ni plantilla. Un ámbito vacío se rechaza (400). */
+    setContextScope(id: string, scope: AgentContextScope): Agent {
+      if (!scope || (!scope.project && !scope.company && !scope.general)) throw Object.assign(new Error('Elige al menos una opción de ámbito: Proyecto, Empresa o General.'), { statusCode: 400 });
+      db.prepare(`UPDATE agents SET context_scope_json = ?, updated_at = ? WHERE id = ?`).run(scopeJson(scope), now(), id);
+      changed({ ws: slug, entity: 'agent', id });
+      return this.get(id)!;
+    },
+    /** EN-014 · Agentes que aún no tienen ámbito (los anteriores a EN-014). */
+    withoutContextScope(): Agent[] { return (db.prepare(`SELECT * FROM agents WHERE context_scope_json IS NULL ORDER BY created_at, id`).all() as any[]).map(map); },
+    /**
+     * EN-014 · Migración idempotente: da el ámbito por defecto (Empresa + General) SOLO a los agentes sin ámbito y devuelve
+     * los que cambió (la segunda pasada devuelve []). Solo escribe context_scope_json: no toca arnés, permisos, memoria,
+     * clave ni updated_at. Quien la llama crea la revisión «portal» de cada agente devuelto (syncAgentFolder).
+     */
+    migrateContextScope(scope: AgentContextScope = DEFAULT_CONTEXT_SCOPE): Agent[] {
+      const ids = (db.prepare(`SELECT id FROM agents WHERE context_scope_json IS NULL ORDER BY created_at, id`).all() as any[]).map(r => r.id as string);
+      if (!ids.length) return [];
+      const upd = db.prepare(`UPDATE agents SET context_scope_json = ? WHERE id = ? AND context_scope_json IS NULL`);
+      const json = scopeJson(scope);
+      const done: string[] = [];
+      db.exec('BEGIN');
+      try {
+        for (const id of ids) if (Number(upd.run(json, id).changes) > 0) done.push(id);
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      for (const id of done) changed({ ws: slug, entity: 'agent', id });
+      return done.map(id => this.get(id)!).filter(Boolean);
+    }
   };
 }
 

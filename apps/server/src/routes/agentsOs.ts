@@ -9,7 +9,7 @@ import { departmentsRepo } from '../services/departments.ts';
 import { harnessCatalog, harnessOptions, switchHarness } from '../services/harness/index.ts';
 import { detectCodex, getCodexSettings, lastCodexDetection, saveCodexSettings } from '../services/harness/codex.ts';
 import { chatEstimate, chatMessages, chatUsageToday, sendChat } from '../services/agentChat.ts';
-import { adoptExternal, agentCapabilities, agentFoldersRepo, agentLearning, discardExternal, ensureAgentFolders, folderStatus, restoreRevision, syncAgentFolder, updateExtras } from '../services/agentFolders.ts';
+import { adoptExternal, agentCapabilities, agentFoldersRepo, agentLearning, discardExternal, ensureAgentFolders, folderStatus, restoreRevision, setAgentContextScope, syncAgentFolder, updateExtras } from '../services/agentFolders.ts';
 import { detectSandbox } from '../services/sandbox.ts';
 import { createAgentFromWizard, exportBundle, exportFiles, exportTo, importConfirm, importPreview } from '../services/agentCreation.ts';
 import { applyZipImport, previewZipImport, undoZipImport, ZIP_UPLOAD_MAX } from '../services/agentZipImport.ts';
@@ -42,6 +42,11 @@ const SKILL = z.object({ slug: z.string().max(64).default(''), name: z.string().
 const REF = z.object({ slug: z.string().max(64).default(''), title: z.string().trim().min(2).max(120), body: z.string().max(20_000).default('') });
 const HARNESS = z.enum(['api', 'claude-code', 'claude-code-terminal', 'codex']);
 const CAP = z.enum(CAPABILITIES.map(c => c.id) as [string, ...string[]]);
+/** EN-014 · Ámbito elegido en «Nuevo agente». Si está vacío, el servicio responde 400 («Elige al menos un ámbito»). */
+const CONTEXT_SCOPE_BODY = z.object({
+  project: z.object({ id: z.string().min(1).max(120), name: z.string().max(200).optional() }).nullable().default(null),
+  company: z.boolean().default(false), general: z.boolean().default(false)
+});
 const WIZARD = z.object({
   name: z.string().trim().min(2).max(80), role: z.string().trim().min(2).max(80), summary: z.string().trim().max(2000).default(''),
   responsibilities: z.array(z.string().trim().min(1).max(300)).max(30).default([]), deliverables: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
@@ -51,6 +56,7 @@ const WIZARD = z.object({
   tools: z.array(z.string().max(40)).max(12).default([]), knowledge: z.array(z.string().max(40)).max(8).default([]), capabilities: z.array(CAP).max(6).default([]),
   autonomy: z.enum(['ask', 'within_scope']).default('ask'), instructions: z.string().max(20_000).nullable().optional(),
   skills: z.array(SKILL).max(20).default([]), references: z.array(REF).max(20).default([]), initials: z.string().max(2).nullable().optional(),
+  contextScope: CONTEXT_SCOPE_BODY.optional(),
   authorized: z.boolean()
 });
 
@@ -101,6 +107,21 @@ export async function agentsOsRoutes(app: FastifyInstance) {
       deps.assign(id, d.slug); recordAgentEvent(slug, id, 'department_changed', { to: d.name });
       if (agentFoldersRepo(slug).folderOf(id)) await syncAgentFolder(slug, agentsRepo(slug).get(id)!).catch(() => null);
       return agentsRepo(slug).get(id);
+    } catch (e) { return err(reply, e); }
+  });
+  // EN-014 · Ámbito (Proyecto/Empresa/General, combinables). Sin IA ni costo; no cambia herramientas, permisos ni arnés.
+  app.put('/api/workspaces/:slug/agents/:id/context-scope', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
+    const b = z.object({
+      project: z.object({ id: z.string().min(1).max(120), name: z.string().max(200).optional() }).nullable().default(null),
+      company: z.boolean().default(false), general: z.boolean().default(false)
+    }).refine(s => !!s.project || s.company || s.general, { message: 'Elige al menos una opción de ámbito.' }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'Ámbito no válido: elige al menos una opción (Proyecto, Empresa o General).', issues: b.error.issues });
+    if (b.data.project && !projectsRepo(slug).get(b.data.project.id)) return reply.code(400).send({ error: 'El proyecto elegido no existe en esta empresa.' });
+    try {
+      const updated = await setAgentContextScope(slug, id, { project: b.data.project ? { id: b.data.project.id, name: b.data.project.name ?? '' } : null, company: b.data.company, general: b.data.general } as any);
+      recordAgentEvent(slug, id, 'context_scope_changed', { project: b.data.project?.id ?? null, company: b.data.company, general: b.data.general });
+      return updated;
     } catch (e) { return err(reply, e); }
   });
   // Petición a un departamento: la recibe su coordinador, consulta a los miembros confirmados y entrega UN resultado.
@@ -209,7 +230,7 @@ export async function agentsOsRoutes(app: FastifyInstance) {
   app.post('/api/workspaces/:slug/agent-folders', async (req, reply) => {
     const { slug } = req.params as any; if (!guard(slug, reply)) return;
     const b = z.object({ authorized: z.literal(true) }).safeParse(req.body); if (!b.success) return reply.code(400).send({ error: 'Confirma que quieres crear las carpetas.' });
-    return ensureAgentFolders(slug);
+    return ensureAgentFolders(slug, { companyName: workspacesRepo.get(slug)?.name ?? null });
   });
   const onRow = (slug: string, id: string) => (p: { name: string; role: string; summary: string; responsibilities: string[]; initials: string; department: string | null }) => {
     const agents = agentsRepo(slug); const cur = agents.get(id)!;

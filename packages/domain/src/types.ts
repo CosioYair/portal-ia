@@ -180,8 +180,94 @@ export interface Agent {
   updatedAt: string;
   /** Datos inmutables heredados de la plantilla, para la UI. */
   template: Pick<AgentTemplate, 'initials' | 'role' | 'reportsTo' | 'supervises' | 'collaborates' | 'evaluation' | 'tier'>;
+  /**
+   * EN-014 · Ámbito del agente (Proyecto, Empresa, General; combinables). Decide, sin IA, el contexto de su AGENTS.md por
+   * defecto, de sus habilidades base y de su paquete exportado. No concede ni quita herramientas ni permisos y no es
+   * `scope` (workspace/project), que sigue indicando dónde trabaja en el Portal. Sin valor = agente anterior a EN-014.
+   */
+  contextScope?: AgentContextScope | null;
   /** Versión de plantilla aplicada (M5), p. ej. «pj-dev@2»; null = versión original (@1). */
   templateVersion?: string | null;
+}
+
+// ---- EN-014 · Ámbito de los agentes ----
+export type ContextScopeOption = 'project' | 'company' | 'general';
+/** Orden canónico de las opciones (al escribir agent.yaml y al describirlas). */
+export const CONTEXT_SCOPE_VALUES: readonly ContextScopeOption[] = ['project', 'company', 'general'];
+/**
+ * Ámbito combinable del agente. `project`: el proyecto concreto en el que se especializa (o null). El `id` puede venir
+ * vacío si se importó de un ZIP cuyo proyecto no existe en este Portal; en ese caso solo se conserva el nombre.
+ */
+export interface AgentContextScope { project: { id: string; name: string } | null; company: boolean; general: boolean }
+/** Valor por defecto (agentes nuevos y migración de los actuales): Empresa + General. */
+export const DEFAULT_CONTEXT_SCOPE: AgentContextScope = { project: null, company: true, general: true };
+
+/** Nombre y explicación de cada opción: una línea que dice qué cambia. La usan la interfaz y GUIA.md. */
+export const CONTEXT_SCOPE_OPTIONS: { id: ContextScopeOption; label: string; text: string }[] = [
+  { id: 'project', label: 'Proyecto', text: 'Sus instrucciones nombran el proyecto y sus objetivos, y sus habilidades usan las órdenes concretas de ese proyecto.' },
+  { id: 'company', label: 'Empresa', text: 'Sus instrucciones nombran la empresa y sus reglas: la autoridad es el propietario y nada con costo se hace sin su autorización.' },
+  { id: 'general', label: 'General', text: 'Sirve en cualquier entorno: se adapta a lo que permita donde trabaje y detecta allí las órdenes del proyecto. Si es la única opción, el paquete exportado no lleva el nombre de la empresa ni el del proyecto.' }
+];
+
+const projectRef = (v: unknown): { id: string; name: string } | null => {
+  if (typeof v === 'string') return v.trim() ? { id: v.trim(), name: '' } : null;
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const o = v as Record<string, unknown>;
+  const id = typeof o.id === 'string' ? o.id.trim() : ''; const name = typeof o.name === 'string' ? o.name.replace(/\s+/g, ' ').trim() : '';
+  return id || name ? { id, name } : null;
+};
+
+/**
+ * Normaliza un ámbito que llega de la base de datos (texto JSON), de una petición o de un agent.yaml ya leído. Admite
+ * dos formas: el objeto `{ project, company, general }` o una lista de opciones (`['company', 'general']`). En la lista,
+ * el proyecto se indica en `project`. Devuelve null si no es válido: sin ninguna opción marcada (un ámbito vacío no
+ * vale), con un valor desconocido o con Proyecto marcado y sin proyecto.
+ */
+export function normalizeContextScope(raw: unknown, project?: { id: string; name: string } | null): AgentContextScope | null {
+  let v: unknown = raw;
+  if (typeof v === 'string') { try { v = JSON.parse(v); } catch { return null; } }
+  if (v === null || v === undefined || typeof v !== 'object') return null;
+  let out: AgentContextScope;
+  if (Array.isArray(v)) {
+    if (v.some(x => typeof x !== 'string' || !(CONTEXT_SCOPE_VALUES as readonly string[]).includes(x))) return null;
+    const set = new Set(v as string[]);
+    const p = set.has('project') ? projectRef(project ?? null) : null;
+    if (set.has('project') && !p) return null;
+    out = { project: p, company: set.has('company'), general: set.has('general') };
+  } else {
+    const o = v as Record<string, unknown>;
+    const p = o.project === null || o.project === undefined || o.project === false ? null : projectRef(o.project);
+    if (o.project && !p) return null;
+    out = { project: p, company: o.company === true, general: o.general === true };
+  }
+  return out.project || out.company || out.general ? out : null;
+}
+
+/** Opciones marcadas, en orden canónico. */
+export function contextScopeOptions(scope: AgentContextScope | null | undefined): ContextScopeOption[] {
+  if (!scope) return [];
+  return CONTEXT_SCOPE_VALUES.filter(o => o === 'project' ? !!scope.project : o === 'company' ? scope.company : scope.general);
+}
+/** Solo General (sin Proyecto ni Empresa): el contexto y el paquete no llevan nombres de empresa ni de proyecto. */
+export function isGeneralOnly(scope: AgentContextScope | null | undefined): boolean {
+  return !!scope && scope.general && !scope.company && !scope.project;
+}
+/** Etiqueta corta, p. ej. «Empresa + General». */
+export function contextScopeLabel(scope: AgentContextScope | null | undefined): string {
+  const opts = contextScopeOptions(scope);
+  return opts.length ? opts.map(o => CONTEXT_SCOPE_OPTIONS.find(x => x.id === o)!.label).join(' + ') : 'Sin ámbito';
+}
+/**
+ * Una línea por opción marcada, con lo que cambia («Empresa: …»). Con `names` se muestran también el nombre de la
+ * empresa o del proyecto; con solo General no se nombra ninguno aunque lleguen.
+ */
+export function describeContextScope(scope: AgentContextScope | null | undefined, names?: { company?: string | null; project?: string | null }): string[] {
+  const general = isGeneralOnly(scope);
+  return contextScopeOptions(scope).map(o => {
+    const def = CONTEXT_SCOPE_OPTIONS.find(x => x.id === o)!;
+    const nm = general ? '' : o === 'company' ? (names?.company ?? '').trim() : o === 'project' ? ((names?.project ?? '') || scope?.project?.name || '').trim() : '';
+    return `${def.label}${nm ? ` (${nm})` : ''}: ${def.text}`;
+  });
 }
 
 export interface Workspace {

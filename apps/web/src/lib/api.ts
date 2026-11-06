@@ -180,6 +180,8 @@ export const api = {
   claudeCodeWorkspace: (slug: string) => request<ClaudeCodeWorkspaceView>(`/api/workspaces/${slug}/claude-code`),
   claudeCodeProjects: (slug: string, projectIds: string[]) => request<{ projects: string[] }>(`/api/workspaces/${slug}/claude-code/projects`, { method: 'PUT', body: JSON.stringify({ authorized: true, projectIds }) }),
   setAgentBackend: (slug: string, id: string, backend: ExecutionBackend) => request<Agent>(`/api/workspaces/${slug}/agents/${id}/backend`, { method: 'PUT', body: JSON.stringify({ backend, authorized: true }) }),
+  // EN-014 · Ámbito del agente: sin costo; no cambia herramientas ni permisos.
+  setAgentContextScope: (slug: string, id: string, scope: import('@portal-ia/domain').AgentContextScope) => request<Agent>(`/api/workspaces/${slug}/agents/${id}/context-scope`, { method: 'PUT', body: JSON.stringify({ project: scope.project ? { id: scope.project.id, name: scope.project.name } : null, company: !!scope.company, general: !!scope.general }) }),
   createClaudeCodeWorker: (slug: string, name: string, agentIds: string[]) => request<{ worker: ClaudeCodeWorkerView; token: string; setup: { cwd: string; command: string; args: string[] } }>(`/api/workspaces/${slug}/claude-code/workers`, { method: 'POST', body: JSON.stringify({ authorized: true, name, agentIds }) }),
   revokeClaudeCodeWorker: (slug: string, id: string) => request<ClaudeCodeWorkerView>(`/api/workspaces/${slug}/claude-code/workers/${id}`, { method: 'DELETE' }),
   agent: (slug: string, id: string) => request<Agent>(`/api/workspaces/${slug}/agents/${id}`),

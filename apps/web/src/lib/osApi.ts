@@ -61,7 +61,9 @@ export interface WizardInput {
   scope: 'workspace' | 'project'; projectId: string | null; harness: ExecutionBackend; model: string; provider?: ProviderId | null; effort: 'low' | 'medium' | 'high';
   tools: string[]; knowledge: string[]; capabilities: Capability[]; autonomy: 'ask' | 'within_scope'; instructions?: string | null; skills?: PortableSkill[]; references?: PortableKnowledge[]; authorized: boolean;
 }
-export interface ImportPreview { path: string; hash: string; files: string[]; ignored: string[]; problems: { path: string; message: string; blocking: boolean }[]; ok: boolean;
+/** EN-014 · Ámbito que declara (o hereda) lo que se importa, tal como lo devuelve el servidor (importScopePreview). */
+export interface ImportScopeView { declared: boolean; contextScope: import('@portal-ia/domain').AgentContextScope; label: string; lines: string[]; projectMissing: boolean; warning: string | null }
+export interface ImportPreview { path: string; hash: string; files: string[]; ignored: string[]; problems: { path: string; message: string; blocking: boolean }[]; ok: boolean; contextScope?: ImportScopeView;
   agent: { name: string; role: string; summary: string; department: string | null; responsibilities: string[]; deliverables: string[]; capabilities: string[] } | null;
   requests: { harness: string; model: string; tools: string[]; autonomy: string } | null; instructions: string; skills: { slug: string; name: string; description: string; body: string }[]; memory: { title: string; text: string }[]; references: { slug: string; title: string; body: string }[]; note: string }
 
@@ -73,6 +75,8 @@ export interface ZipImportPreview {
   /** Revisión adoptada al hacer la vista previa y revisión de partida (exportada) de la fusión. */
   adoptedN: number | null; base: { n: number | null; how: 'marcador' | 'parecido' | 'sin-base' } | null;
   adopted: string[]; conflicts: ZipImportConflict[]; newMemory: { title: string; text: string }[]; notAdopted: string[]; upToDate: boolean; note: string;
+  /** EN-014 · Ámbito que declara el ZIP (o que hereda si no lo declara) y aviso si su proyecto no existe aquí (no bloquea). */
+  contextScope?: ImportScopeView;
 }
 export type ZipImportGrant = Omit<WizardInput, 'name' | 'role' | 'summary' | 'responsibilities' | 'deliverables' | 'instructions' | 'skills' | 'references' | 'capabilities'> & { capabilities?: Capability[] | null };
 export interface ZipImportResult {
