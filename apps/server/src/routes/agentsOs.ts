@@ -224,7 +224,7 @@ export async function agentsOsRoutes(app: FastifyInstance) {
   app.post('/api/workspaces/:slug/agent-folders', async (req, reply) => {
     const { slug } = req.params as any; if (!guard(slug, reply)) return;
     const b = z.object({ authorized: z.literal(true) }).safeParse(req.body); if (!b.success) return reply.code(400).send({ error: 'Confirma que quieres crear las carpetas.' });
-    return ensureAgentFolders(slug);
+    return ensureAgentFolders(slug, { companyName: workspacesRepo.get(slug)?.name ?? null });
   });
   const onRow = (slug: string, id: string) => (p: { name: string; role: string; summary: string; responsibilities: string[]; initials: string; department: string | null }) => {
     const agents = agentsRepo(slug); const cur = agents.get(id)!;
