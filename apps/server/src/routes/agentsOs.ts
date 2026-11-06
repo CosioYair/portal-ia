@@ -9,7 +9,8 @@ import { departmentsRepo } from '../services/departments.ts';
 import { harnessCatalog, harnessOptions, switchHarness } from '../services/harness/index.ts';
 import { detectCodex, getCodexSettings, lastCodexDetection, saveCodexSettings } from '../services/harness/codex.ts';
 import { chatEstimate, chatMessages, chatUsageToday, sendChat } from '../services/agentChat.ts';
-import { adoptExternal, agentFoldersRepo, discardExternal, ensureAgentFolders, folderStatus, restoreRevision, syncAgentFolder, updateExtras } from '../services/agentFolders.ts';
+import { adoptExternal, agentCapabilities, agentFoldersRepo, agentLearning, discardExternal, ensureAgentFolders, folderStatus, restoreRevision, syncAgentFolder, updateExtras } from '../services/agentFolders.ts';
+import { detectSandbox } from '../services/sandbox.ts';
 import { createAgentFromWizard, exportBundle, exportFiles, exportTo, importConfirm, importPreview } from '../services/agentCreation.ts';
 import { applyZipImport, previewZipImport, undoZipImport, ZIP_UPLOAD_MAX } from '../services/agentZipImport.ts';
 import { acceptOctetStream, streamToTemp, uploadName } from './uploads.ts';
@@ -264,6 +265,21 @@ export async function agentsOsRoutes(app: FastifyInstance) {
   app.post('/api/workspaces/:slug/agents/:id/memory/:lessonId/retire', async (req, reply) => {
     const { slug, id, lessonId } = req.params as any; if (!guard(slug, reply)) return;
     try { return await retireMemory(slug, id, lessonId); } catch (e) { return err(reply, e); }
+  });
+
+  // ---------- Qué sabe hacer y qué aprendió (EN-011): solo lectura, sin costo y sin ejecutar nada
+  const AGENT_PARAMS = z.object({ slug: z.string().min(1).max(120), id: z.string().min(1).max(120) });
+  app.get('/api/workspaces/:slug/agents/:id/capabilities', async (req, reply) => {
+    const p = AGENT_PARAMS.safeParse(req.params); if (!p.success) return reply.code(400).send({ error: 'Parámetros no válidos.' });
+    const { slug, id } = p.data; if (!guard(slug, reply)) return; const a = agentOr404(slug, id, reply); if (!a) return;
+    // Estado del sandbox en caché (detectSandbox sin forzar): solo se consulta, no se ejecuta ninguna verificación.
+    const sandbox = await detectSandbox().catch(() => null);
+    try { return agentCapabilities(slug, a, sandbox); } catch (e) { return err(reply, e); }
+  });
+  app.get('/api/workspaces/:slug/agents/:id/learning', async (req, reply) => {
+    const p = AGENT_PARAMS.safeParse(req.params); if (!p.success) return reply.code(400).send({ error: 'Parámetros no válidos.' });
+    const { slug, id } = p.data; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
+    try { return agentLearning(slug, id); } catch (e) { return err(reply, e); }
   });
 
   // ---------- Crear, importar, exportar
