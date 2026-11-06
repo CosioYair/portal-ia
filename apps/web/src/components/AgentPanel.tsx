@@ -7,6 +7,7 @@ import { AgentFigure, STATE_TEXT } from './AgentFigure.tsx';
 import { Markdown } from './Markdown.tsx';
 import { useApp } from '../lib/store.ts';
 import { useLive } from '../lib/live.ts';
+import { api, type AgentCapabilitiesView, type AgentLearningEntry, type AgentLearningView } from '../lib/api.ts';
 import { TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
 import { HARNESSES } from '@portal-ia/domain';
 import { FolderPicker } from './FolderPicker.tsx';
@@ -192,7 +193,38 @@ function WorkTab({ slug, p, projects, onChanged }: { slug: string; p: Panel; pro
 
 // ---------------------------------------------------------------- Archivos
 
-function FilesTab({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: () => void }) {
+function FilesTab(props: { slug: string; p: Panel; onChanged: () => void }) {
+  return <><CapabilitiesBlock slug={props.slug} agentId={props.p.agent.id} /><FilesTabBody {...props} /></>;
+}
+
+/** EN-011 · «Qué sabe hacer»: herramientas concedidas, dónde funcionan y si el sandbox está disponible ahora. */
+function CapabilitiesBlock({ slug, agentId }: { slug: string; agentId: string }) {
+  const [st, setSt] = useState<{ kind: 'loading' } | { kind: 'error'; message: string } | { kind: 'ok'; v: AgentCapabilitiesView }>({ kind: 'loading' });
+  useEffect(() => {
+    let alive = true; setSt({ kind: 'loading' });
+    api.agentCapabilities(slug, agentId).then(v => { if (alive) setSt({ kind: 'ok', v }); }).catch(e => { if (alive) setSt({ kind: 'error', message: e?.message ?? String(e) }); });
+    return () => { alive = false; };
+  }, [slug, agentId]);
+  return <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }} aria-labelledby="caps-h">
+    <div className="h3" id="caps-h">Qué sabe hacer</div>
+    {st.kind === 'loading' && <div className="small" style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Spinner /> Cargando sus habilidades…</div>}
+    {st.kind === 'error' && <Notice kind="err">No se pudo cargar lo que sabe hacer: {st.message}</Notice>}
+    {st.kind === 'ok' && <>
+      {st.v.tools.length === 0
+        ? <p className="small muted">No tiene herramientas concedidas: solo conversa y propone. Puedes concederlas en Configuración.</p>
+        : <ul className="cap-list">{st.v.tools.map(t => <li key={t.tool}>{Icon.stateDone()} <span><strong>{t.label}</strong>{t.description ? ` — ${t.description}` : ''}<br /><span className="muted">Dónde funciona: {t.whereText}{t.skill ? <> · habilidad <span className="mono">skills/{t.skill}</span></> : null}</span></span></li>)}</ul>}
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+        {!st.v.sandbox || !st.v.sandbox.checked
+          ? <Chip xs>Sandbox: no comprobado</Chip>
+          : <Chip xs tone={st.v.sandbox.available ? 'ok' : 'soon'}>{st.v.sandbox.available ? `Sandbox disponible ahora${st.v.sandbox.kind && SANDBOX_KIND_LABEL[st.v.sandbox.kind] ? ` (${SANDBOX_KIND_LABEL[st.v.sandbox.kind]})` : ''}` : 'Sandbox no disponible ahora'}</Chip>}
+        {st.v.sandbox?.detail && <span className="small muted">{st.v.sandbox.detail}</span>}
+      </div>
+      <div className="small muted">Las habilidades no conceden permisos: se cambian en Configuración. Editar un SKILL.md no concede nada. Las pruebas y el sandbox solo se ejecutan por el pipeline autorizado; sin terminal (web) el agente lo dice y no simula resultados.</div>
+    </>}
+  </section>;
+}
+
+function FilesTabBody({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: () => void }) {
   const { flash } = useApp();
   const [st, setSt] = useState<FolderStatus | null>(null); const [file, setFile] = useState<string | null>(null);
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
@@ -377,7 +409,39 @@ function ImprovementHistory({ slug, p, onChanged, focus }: { slug: string; p: Pa
   </section>;
 }
 
-function MemoryTab({ slug, p, onChanged, focusHistory = false }: { slug: string; p: Panel; onChanged: () => void; focusHistory?: boolean }) {
+function MemoryTab(props: { slug: string; p: Panel; onChanged: () => void; focusHistory?: boolean }) {
+  return <><LearningBlock slug={props.slug} agentId={props.p.agent.id} /><MemoryTabBody {...props} /></>;
+}
+
+/** EN-011 · Aprendizaje verificado, pendiente y de procesos en los que participó (solo lectura: nada cambia de estado). */
+function LearningBlock({ slug, agentId }: { slug: string; agentId: string }) {
+  const [st, setSt] = useState<{ kind: 'loading' } | { kind: 'error'; message: string } | { kind: 'ok'; v: AgentLearningView }>({ kind: 'loading' });
+  useEffect(() => {
+    let alive = true; setSt({ kind: 'loading' });
+    api.agentLearning(slug, agentId).then(v => { if (alive) setSt({ kind: 'ok', v }); }).catch(e => { if (alive) setSt({ kind: 'error', message: e?.message ?? String(e) }); });
+    return () => { alive = false; };
+  }, [slug, agentId]);
+  const entries = (list: AgentLearningEntry[], empty: string) => list.length === 0
+    ? <span className="small muted">{empty}</span>
+    : <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>{list.map(l => <li key={l.id}><strong>{l.title}</strong> — {l.text}{l.processTitle ? <span className="muted"> · de «{l.processTitle}»{l.link === 'paso' ? ' (participó en un paso)' : l.link === 'evidencia' ? ' (según la evidencia)' : ''}</span> : null}</li>)}</ul>;
+  return <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }} aria-labelledby="learn-h">
+    <div className="h3" id="learn-h">Lo que aprendió</div>
+    {st.kind === 'loading' && <div className="small" style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Spinner /> Cargando su aprendizaje…</div>}
+    {st.kind === 'error' && <Notice kind="err">No se pudo cargar su aprendizaje: {st.message}</Notice>}
+    {st.kind === 'ok' && <>
+      <div className="small"><strong>Verificado</strong> ({st.v.verified.length})</div>
+      {st.v.verified.length === 0 ? <span className="small muted">Aún no tiene aprendizaje verificado.</span>
+        : <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>{st.v.verified.map((m, i) => <li key={i}><strong>{m.title}</strong> — {m.text}</li>)}</ul>}
+      <div className="small"><strong>Pendiente de tu verificación</strong> ({st.v.pending.length})</div>
+      {entries(st.v.pending, 'Nada pendiente de verificar.')}
+      <div className="small"><strong>De historias o encargos en los que participó</strong> ({st.v.related.length})</div>
+      {entries(st.v.related, 'No hay lecciones detectadas de procesos en los que participó.')}
+      <div className="small muted">{st.v.note}</div>
+    </>}
+  </section>;
+}
+
+function MemoryTabBody({ slug, p, onChanged, focusHistory = false }: { slug: string; p: Panel; onChanged: () => void; focusHistory?: boolean }) {
   const { flash } = useApp();
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const [edits, setEdits] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState(false);
@@ -480,6 +544,8 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
   </>;
 }
 const LEVEL: Record<string, string> = { yes: 'sí', partial: 'parcial', no: 'no' };
+/** EN-011 · Tipo de sandbox en lenguaje claro; solo se muestra si está disponible (otros valores, como 'none', no se enseñan). */
+const SANDBOX_KIND_LABEL: Record<string, string> = { docker: 'Docker', wsl: 'WSL2', 'linux-ns': 'espacios de nombres de Linux' };
 /** Problema de la exportación (409): EN-010 añade la línea, el fragmento, el motivo y la sugerencia de pedirlo en el chat. */
 type ExportProblem = { path: string; message: string; line?: number; snippet?: string; reason?: string; hint?: string };
 const HARNESS_NAME: Record<string, string> = Object.fromEntries(HARNESSES.map(h => [h.id, h.name]));

@@ -104,7 +104,9 @@ test('existente con cambios solo fuera: se adopta solo como revisión «import»
   assert.equal(ad.n, r.revision!.n); assert.match(ad.files['AGENTS.md']!, /APRENDIDO-FUERA/); assert.match(ad.files['CAMBIOS.md'] ?? '', /tabla resumen/);
   assert.deepEqual(def.manifest.harness, beforeDef.manifest.harness, 'el arnés no se adopta');
   assert.deepEqual(def.manifest.permissions, beforeDef.manifest.permissions, 'los permisos no se adoptan');
-  assert.ok(lessonsRepo(S).listForAgent(agentId, 'validated').some(l => /tabla resumen/.test(l.lessonText ?? '')));
+  // EN-011: la memoria importada llega como lección DETECTADA del agente (pendiente de tu verificación), nunca validada sola.
+  assert.ok(lessonsRepo(S).listForAgent(agentId).some(l => l.status === 'detected' && /tabla resumen/.test(l.lessonText ?? '')));
+  assert.ok(!lessonsRepo(S).listForAgent(agentId, 'validated').some(l => /tabla resumen/.test(l.lessonText ?? '')), 'no entra validada');
   assert.match(identityBlock(S, agentsRepo(S).get(agentId)!, null), /APRENDIDO-FUERA/, 'los prompts usan lo adoptado');
   assert.ok(agentFoldersRepo(S).revisions(agentId).some(x => x.n === r.revision!.n && x.source === 'import'), 'visible en el historial');
   // Deshacer.

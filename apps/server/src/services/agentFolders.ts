@@ -1,10 +1,11 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { PORTABLE_AGENT_SCHEMA, PORTABLE_LIMITS, allowedPortablePath, definitionToFiles, diffFiles, filesToDefinition, findSecret, normalizeText, slugify } from '@portal-ia/domain';
-import type { Agent, HarnessId, MemoryEntry, PortableAgentDefinition, PortableFiles, PortableKnowledge, PortableSkill } from '@portal-ia/domain';
+import { PORTABLE_AGENT_SCHEMA, PORTABLE_LIMITS, allowedPortablePath, baseSkillsFor, definitionToFiles, diffFiles, filesToDefinition, findSecret, isBaseSkill, normalizeText, slugify, toolCapabilities } from '@portal-ia/domain';
+import type { Agent, HarnessId, Lesson, MemoryEntry, PortableAgentDefinition, PortableFiles, PortableKnowledge, PortableSkill, ToolCapability } from '@portal-ia/domain';
 import { config } from '../config.ts';
-import { agentsRepo, workspaceDb, workspaceDbPath } from '../db/workspace.ts';
+import { agentsRepo, processesRepo, workspaceDb, workspaceDbPath } from '../db/workspace.ts';
+import type { SandboxStatus } from './sandbox.ts';
 import { changed } from './live.ts';
 import { monotonicNow } from '../clock.ts';
 import { departmentsRepo } from './departments.ts';
@@ -117,18 +118,26 @@ const harnessOf = (a: Agent): HarnessId => (a.config.backend ?? 'api') as Harnes
 export interface AgentExtras { instructions: string; skills: PortableSkill[]; memory: MemoryEntry[]; knowledge: PortableKnowledge[]; deliverables: string[]; autonomy: 'ask' | 'within_scope'; changelog?: string | undefined }
 const EMPTY_EXTRAS = (a: Agent): AgentExtras => ({ instructions: defaultInstructions(a.config.name, a.config.specialization), skills: [], memory: [], knowledge: [], deliverables: [], autonomy: 'ask' });
 
-/** Definición portable a partir de la fila (lo concedido) y de lo propio de la carpeta (instrucciones, habilidades…). */
+/** Herramientas concedidas en Configuración (la base es la fuente de verdad), ordenadas. */
+export const grantedTools = (a: Agent): string[] => Object.keys(a.config.tools).filter(k => a.config.tools[k]).sort();
+
+/**
+ * Definición portable a partir de la fila (lo concedido) y de lo propio de la carpeta (instrucciones, habilidades…).
+ * EN-011: las habilidades base (`skills/portal-*`) salen SOLO de las herramientas concedidas; las de la carpeta con ese
+ * prefijo se descartan. Quitar una herramienta retira su habilidad y editar un SKILL.md base no concede nada.
+ */
 export function definitionFor(slug: string, a: Agent, extras: AgentExtras): PortableAgentDefinition {
   const dep = departmentsRepo(slug).departmentOf(a);
+  const tools = grantedTools(a);
   return {
     manifest: {
       schema: PORTABLE_AGENT_SCHEMA, id: a.id, name: a.config.name, role: a.template.role, department: dep?.slug ?? null, initials: a.template.initials,
       summary: a.config.specialization, responsibilities: a.config.responsibilities, deliverables: extras.deliverables, capabilities: a.config.capabilities ?? [],
       harness: { preferred: harnessOf(a), model: a.config.model, effort: a.config.effort },
-      permissions: { tools: Object.keys(a.config.tools).filter(k => a.config.tools[k]).sort(), autonomy: extras.autonomy },
+      permissions: { tools, autonomy: extras.autonomy },
       createdAt: a.createdAt
     },
-    instructions: extras.instructions, skills: extras.skills, memory: memoryOf(slug, a.id), knowledge: extras.knowledge, changelog: extras.changelog
+    instructions: extras.instructions, skills: [...baseSkillsFor(tools), ...extras.skills.filter(s => !isBaseSkill(s.slug))], memory: memoryOf(slug, a.id), knowledge: extras.knowledge, changelog: extras.changelog
   };
 }
 
@@ -143,7 +152,8 @@ export function memoryOf(slug: string, agentId: string): MemoryEntry[] {
 export function extrasFromFiles(files: PortableFiles): AgentExtras | null {
   const { definition } = filesToDefinition(files); if (!definition) return null;
   // La memoria NO se toma del archivo: MEMORY.md es una proyección de las entradas verificadas (lessons con agent_id).
-  return { instructions: definition.instructions, skills: definition.skills, memory: [], knowledge: definition.knowledge, deliverables: definition.manifest.deliverables, autonomy: definition.manifest.permissions.autonomy, changelog: definition.changelog };
+  // Las habilidades base tampoco: se generan desde las herramientas concedidas (nunca se adoptan desde archivos).
+  return { instructions: definition.instructions, skills: definition.skills.filter(s => !isBaseSkill(s.slug)), memory: [], knowledge: definition.knowledge, deliverables: definition.manifest.deliverables, autonomy: definition.manifest.permissions.autonomy, changelog: definition.changelog };
 }
 
 // ---------------------------------------------------------------- Repositorio de carpetas y revisiones
@@ -312,7 +322,7 @@ export async function syncAgentFolder(slug: string, a: Agent, note = 'Sincroniza
 export async function ensureAgentFolders(slug: string): Promise<{ created: number; failed: { agentId: string; error: string }[] }> {
   let created = 0; const failed: { agentId: string; error: string }[] = [];
   for (const a of agentsRepo(slug).list()) {
-    try { if ((await syncAgentFolder(slug, a)).created) created++; } catch (e) { failed.push({ agentId: a.id, error: (e as Error).message }); }
+    try { if ((await syncAgentFolder(slug, a, 'Habilidades base según herramientas concedidas')).created) created++; } catch (e) { failed.push({ agentId: a.id, error: (e as Error).message }); }
   }
   return { created, failed };
 }
@@ -351,6 +361,10 @@ export function notAdoptedChanges(before: PortableFiles, after: PortableFiles): 
   if (a.permissions.tools.join(',') !== b.permissions.tools.join(',')) out.push(`Herramientas (${b.permissions.tools.join(', ') || 'ninguna'}): se conceden en Configuración, nunca desde la carpeta.`);
   if (a.id !== b.id) out.push('El identificador (id) no se puede cambiar.');
   if (normalizeText(before['memory/MEMORY.md'] ?? '') !== normalizeText(after['memory/MEMORY.md'] ?? '')) out.push('Memoria: MEMORY.md refleja el aprendizaje que verificaste en el Portal; las ediciones del archivo no se adoptan (añade o retira aprendizaje desde la pestaña Memoria).');
+  const baseRe = /^skills\/portal-[^/]+\//;
+  const basePaths = [...new Set([...Object.keys(before), ...Object.keys(after)])].filter(p => baseRe.test(p)).sort();
+  const touched = basePaths.filter(p => (before[p] === undefined) !== (after[p] === undefined) || normalizeText(before[p] ?? '') !== normalizeText(after[p] ?? ''));
+  if (touched.length) out.push(`Habilidades base (${[...new Set(touched.map(p => p.split('/')[1]))].join(', ')}): las habilidades base salen de las herramientas concedidas en Configuración; editarlas no concede nada y no se adoptan.`);
   return out;
 }
 
@@ -477,6 +491,69 @@ export function archiveAgentFolder(slug: string, agentId: string): string | null
   const dest = path.join(agentsRoot(slug), '_archivadas', `${f.folder}-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.renameSync(from, dest);
   return dest;
+}
+
+// ---------------------------------------------------------------- EN-011 · Qué sabe hacer y qué aprendió (solo lectura)
+
+const SANDBOX_OK = new Set(['docker', 'wsl', 'linux-ns']);
+
+export interface AgentCapabilities {
+  tools: (ToolCapability & { inFolder: boolean })[];
+  sandbox: { checked: boolean; available: boolean; kind: string | null; detail: string; checkedAt: string | null };
+  needsSandbox: boolean;
+  note: string;
+}
+
+/**
+ * Herramientas concedidas en lenguaje claro, dónde funcionan y si su habilidad base está en la revisión adoptada, más el
+ * estado del sandbox que le pasa quien llama (`detectSandbox`, en caché). No ejecuta nada ni escribe nada.
+ */
+export function agentCapabilities(slug: string, a: Agent, sandbox: SandboxStatus | null): AgentCapabilities {
+  const caps = toolCapabilities(grantedTools(a));
+  const adopted = agentFoldersRepo(slug).adopted(a.id);
+  const inFolder = new Set(Object.keys(adopted?.files ?? {}).map(p => /^skills\/([^/]+)\/SKILL\.md$/.exec(p)?.[1]).filter((s): s is string => !!s));
+  return {
+    tools: caps.map(t => ({ ...t, inFolder: !!t.skill && inFolder.has(t.skill) })),
+    sandbox: sandbox
+      ? { checked: true, available: SANDBOX_OK.has(sandbox.available), kind: sandbox.available, detail: sandbox.detail, checkedAt: sandbox.checkedAt }
+      : { checked: false, available: false, kind: null, detail: 'No se pudo comprobar el sandbox ahora.', checkedAt: null },
+    needsSandbox: caps.some(t => t.where.includes('sandbox')),
+    note: 'Las habilidades no conceden permisos: las herramientas se cambian en Configuración.'
+  };
+}
+
+export interface LearningEntry { id: string; title: string; text: string; detail: string; status: string; detector: string; at: string; processId: string | null; processTitle: string | null; link: 'evidencia' | 'paso' | null }
+const PENDING_STATUS = new Set(['detected', 'proposed']);
+const MAX_RELATED = 50;
+
+/**
+ * Aprendizaje del agente. `verified` = memoria verificada (memoryOf); `pending` = sus lecciones con agent_id aún sin
+ * verificar; `related` = lecciones del proyecto (agent_id NULL) detectadas o propuestas cuyo vínculo con el agente es
+ * exacto: la evidencia lo nombra ('evidencia') o el agente ejecutó un paso de ese proceso ('paso'). Solo lectura: nada
+ * cambia de estado ni de agent_id, así que siguen en las listas del proyecto y esperan tu verificación.
+ */
+export function agentLearning(slug: string, agentId: string): { verified: MemoryEntry[]; pending: LearningEntry[]; related: LearningEntry[]; note: string } {
+  const repo = lessonsRepo(slug);
+  const entry = (l: Lesson, link: LearningEntry['link']): LearningEntry => ({
+    id: l.id, title: l.title, text: l.lessonText ?? '', detail: l.evidence.detail ?? '', status: l.status, detector: l.detector, at: l.createdAt,
+    processId: l.evidence.processId ?? null, processTitle: l.evidence.processTitle ?? null, link
+  });
+  const pending = repo.listForAgent(agentId).filter(l => PENDING_STATUS.has(l.status)).map(l => entry(l, null));
+  const procs = processesRepo(slug); const took = new Map<string, boolean>();
+  const tookPart = (pid: string): boolean => {
+    let v = took.get(pid);
+    if (v === undefined) { try { v = !!procs.get(pid)?.steps.some(s => s.agentId === agentId); } catch { v = false; } took.set(pid, v); }
+    return v;
+  };
+  const related: LearningEntry[] = [];
+  for (const l of repo.list(null, null)) {
+    if (!PENDING_STATUS.has(l.status)) continue;
+    const link: LearningEntry['link'] = l.evidence.agentId === agentId ? 'evidencia' : (l.evidence.processId && tookPart(l.evidence.processId) ? 'paso' : null);
+    if (!link) continue;
+    related.push(entry(l, link));
+    if (related.length >= MAX_RELATED) break;
+  }
+  return { verified: memoryOf(slug, agentId), pending, related, note: 'Lo pendiente y lo relacionado sigue esperando tu verificación: nada se inyecta en los prompts hasta que lo verificas.' };
 }
 
 /** Registra la carpeta de un agente nuevo (sin escribir nada todavía): la primera revisión la escribe quien lo crea. */

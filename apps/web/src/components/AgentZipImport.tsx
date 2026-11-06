@@ -3,6 +3,10 @@ import { TOOLS, diffFiles, type ExecutionBackend } from '@portal-ia/domain';
 import { Icon, Notice, Spinner } from './ui.tsx';
 import { TOOL_LABELS } from '../lib/labels.ts';
 import { osApi, type ZipImportConflict, type ZipImportPreview, type ZipImportResult } from '../lib/osApi.ts';
+import type { ImportLearned } from '../lib/api.ts';
+
+/** EN-011 · `learned` lo añade el servidor a la vista previa y al resultado; si falta (servidor antiguo) no se muestra. */
+const learnedOf = (x: unknown): ImportLearned | null => { const l = (x as { learned?: ImportLearned } | null)?.learned; return l && typeof l === 'object' ? l : null; };
 
 /**
  * Importar un agente desde un ZIP (sin costo de IA: nada llama a un modelo).
@@ -89,6 +93,7 @@ export function AgentZipImport({ slug, projectId, harnesses, departments, agentI
     {st.kind === 'adopted' && <>
       <Notice kind="ok">Se adoptó automáticamente lo que cambió fuera como revisión {st.result.revision?.n} (origen «import»), visible en su historial.
         {st.result.adopted.length > 0 && <> Archivos: {st.result.adopted.join(', ')}.</>}</Notice>
+      <LearnedSummary learned={learnedOf(st.result) ?? learnedOf(st.pv)} />
       <NotAdopted list={st.result.notAdopted} />
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         {st.result.undo && <button className="btn btn-secondary" disabled={undoing} onClick={() => void undo(st.result)}>{undoing ? 'Deshaciendo…' : `Deshacer (volver a la revisión ${st.result.undo.n})`}</button>}
@@ -105,6 +110,7 @@ export function AgentZipImport({ slug, projectId, harnesses, departments, agentI
       <Notice kind="warn">{st.conflicts.length === 1 ? 'Un archivo cambió' : `${st.conflicts.length} archivos cambiaron`} también en el Portal desde la exportación. No se aplica nada de ellos hasta que elijas qué versión quedarte.
         {st.pv.adopted.length > 0 && <> Lo demás se fusiona sin conflicto: {st.pv.adopted.join(', ')}.</>}</Notice>
       {st.conflicts.map(c => <ConflictRow key={c.path} c={c} value={choice[c.path]} onChange={v => setChoice(x => ({ ...x, [c.path]: v }))} />)}
+      <LearnedSummary learned={learnedOf(st.pv)} />
       <NotAdopted list={st.pv.notAdopted} />
       <button className="btn btn-primary" style={{ alignSelf: 'flex-start' }} disabled={st.conflicts.some(c => !choice[c.path])} onClick={() => void confirm(st.pv, choice)}>Aplicar lo elegido</button>
     </>}
@@ -112,6 +118,7 @@ export function AgentZipImport({ slug, projectId, harnesses, departments, agentI
     {st.kind === 'new' && <>
       {st.pv.agent && <div className="small"><strong>{st.pv.agent.name}</strong> · {st.pv.agent.role} — {st.pv.agent.summary}</div>}
       <div className="small">Archivos: {st.pv.files.join(', ')}</div>
+      <LearnedSummary learned={learnedOf(st.pv)} />
       {st.pv.problems.filter(p => !p.blocking).map((p, i) => <Notice key={i} kind="warn">{p.path}: {p.message}</Notice>)}
       <Notice kind="info">Es un agente nuevo en este espacio: recibirá un id nuevo. {st.pv.memory.length > 0 ? `Trae ${st.pv.memory.length} aprendizaje(s), que llegarán como propuestas para que los verifiques. ` : ''}{NOT_ADOPTED_NOTE}</Notice>
       <div className="harness-cards">{(harnesses ?? []).filter(x => x.id !== 'claude-code-terminal').map(x => <button key={x.id} type="button" className="harness-card" aria-pressed={harness === x.id} disabled={!x.availability.available} onClick={() => setHarness(x.id)}><strong>{x.name}</strong><span className="small">{x.availability.available ? 'Disponible' : x.availability.reason}</span></button>)}</div>
@@ -123,6 +130,23 @@ export function AgentZipImport({ slug, projectId, harnesses, departments, agentI
 
     <button className="btn btn-ghost" style={{ alignSelf: 'flex-start' }} disabled={st.kind === 'applying'} onClick={() => { abort.current?.abort(); onCancel(); }}>Volver</button>
   </section>;
+}
+
+/** «Qué trae y qué aprendió»: habilidades nuevas o cambiadas, memoria nueva (llega pendiente) y CAMBIOS.md desde la exportación. */
+function LearnedSummary({ learned }: { learned: ImportLearned | null }) {
+  if (!learned) return null;
+  const empty = !learned.skillsNew.length && !learned.skillsChanged.length && !learned.memoryNew.length && !learned.changelogSince.length;
+  const skill = (s: ImportLearned['skillsNew'][number]) => <li key={s.slug}><strong>{s.name}</strong>{s.description ? ` — ${s.description}` : ''}{s.base ? <span className="muted"> (habilidad base: solo informativa, sale de las herramientas concedidas)</span> : null}{s.note ? <span className="muted"> · {s.note}</span> : null}</li>;
+  return <div className="card" style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 6 }} aria-label="Qué trae y qué aprendió">
+    <div className="h3">Qué trae y qué aprendió</div>
+    {empty && <span className="small muted">No trae habilidades nuevas ni cambiadas, memoria nueva ni entradas de CAMBIOS.md desde la exportación.</span>}
+    {learned.skillsNew.length > 0 && <div className="small"><strong>Habilidades nuevas</strong><ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{learned.skillsNew.map(skill)}</ul></div>}
+    {learned.skillsChanged.length > 0 && <div className="small"><strong>Habilidades cambiadas</strong><ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{learned.skillsChanged.map(skill)}</ul></div>}
+    {learned.memoryNew.length > 0 && <div className="small"><strong>Memoria nueva</strong> (llega pendiente de tu verificación; no se usa hasta que la verifiques)<ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{learned.memoryNew.map((m, i) => <li key={i}><strong>{m.title}</strong> — {m.text}</li>)}</ul></div>}
+    {learned.changelogSince.length > 0 && <div className="small"><strong>CAMBIOS.md desde la exportación</strong>{learned.changelogMark ? <span className="muted"> ({learned.changelogMark})</span> : null}<ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{learned.changelogSince.map((c, i) => <li key={i}><strong>{c.heading}</strong>{c.text ? ` — ${c.text}` : ''}</li>)}</ul></div>}
+    {learned.warnings.map((w, i) => <Notice key={i} kind="warn">{w}</Notice>)}
+    <span className="small muted">Las habilidades no conceden permisos: las herramientas se conceden en Configuración.</span>
+  </div>;
 }
 
 function NotAdopted({ list }: { list: string[] }) {
