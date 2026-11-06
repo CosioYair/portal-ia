@@ -126,10 +126,10 @@ export type { OrgApplication, OrgBriefAttachment, OrgChange, OrgEvaluationBrief,
 export interface OrgProposalResult { evaluation: OrgEvaluation; proposal: OrgProposalView }
 
 /** EN-011 · «Qué sabe hacer»: herramientas concedidas en lenguaje claro y estado del sandbox (no ejecuta nada). */
-export interface AgentCapabilityTool { tool: string; label: string; where: string | string[]; skill: string | null; description?: string }
+export interface AgentCapabilityTool { tool: string; label: string; where: ('portal' | 'authorized' | 'sandbox')[]; whereText: string; skill: string | null; description: string; inFolder: boolean }
 export interface AgentCapabilitiesView {
   tools: AgentCapabilityTool[];
-  sandbox: { available: boolean; kind: string | null; detail: string | null; checkedAt?: string | null } | null;
+  sandbox: { checked: boolean; available: boolean; kind: string | null; detail: string | null; checkedAt?: string | null } | null;
   note?: string;
 }
 /** EN-011 · Entrada de aprendizaje pendiente o relacionada (sigue esperando la verificación del propietario). */

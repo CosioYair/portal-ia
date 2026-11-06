@@ -212,11 +212,11 @@ function CapabilitiesBlock({ slug, agentId }: { slug: string; agentId: string })
     {st.kind === 'ok' && <>
       {st.v.tools.length === 0
         ? <p className="small muted">No tiene herramientas concedidas: solo conversa y propone. Puedes concederlas en Configuración.</p>
-        : <ul className="cap-list">{st.v.tools.map(t => <li key={t.tool}>{Icon.stateDone()} <span><strong>{t.label}</strong>{t.description ? ` — ${t.description}` : ''}<br /><span className="muted">Dónde funciona: {Array.isArray(t.where) ? t.where.join(' · ') : t.where}{t.skill ? <> · habilidad <span className="mono">skills/{t.skill}</span></> : null}</span></span></li>)}</ul>}
+        : <ul className="cap-list">{st.v.tools.map(t => <li key={t.tool}>{Icon.stateDone()} <span><strong>{t.label}</strong>{t.description ? ` — ${t.description}` : ''}<br /><span className="muted">Dónde funciona: {t.whereText}{t.skill ? <> · habilidad <span className="mono">skills/{t.skill}</span></> : null}</span></span></li>)}</ul>}
       <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-        {st.v.sandbox === null
-          ? <Chip xs>Sandbox: estado desconocido</Chip>
-          : <Chip xs tone={st.v.sandbox.available ? 'ok' : 'soon'}>{st.v.sandbox.available ? `Sandbox disponible ahora${st.v.sandbox.kind ? ` (${st.v.sandbox.kind})` : ''}` : 'Sandbox no disponible ahora'}</Chip>}
+        {!st.v.sandbox || !st.v.sandbox.checked
+          ? <Chip xs>Sandbox: no comprobado</Chip>
+          : <Chip xs tone={st.v.sandbox.available ? 'ok' : 'soon'}>{st.v.sandbox.available ? `Sandbox disponible ahora${st.v.sandbox.kind && SANDBOX_KIND_LABEL[st.v.sandbox.kind] ? ` (${SANDBOX_KIND_LABEL[st.v.sandbox.kind]})` : ''}` : 'Sandbox no disponible ahora'}</Chip>}
         {st.v.sandbox?.detail && <span className="small muted">{st.v.sandbox.detail}</span>}
       </div>
       <div className="small muted">Las habilidades no conceden permisos: se cambian en Configuración. Editar un SKILL.md no concede nada. Las pruebas y el sandbox solo se ejecutan por el pipeline autorizado; sin terminal (web) el agente lo dice y no simula resultados.</div>
@@ -544,6 +544,8 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
   </>;
 }
 const LEVEL: Record<string, string> = { yes: 'sí', partial: 'parcial', no: 'no' };
+/** EN-011 · Tipo de sandbox en lenguaje claro; solo se muestra si está disponible (otros valores, como 'none', no se enseñan). */
+const SANDBOX_KIND_LABEL: Record<string, string> = { docker: 'Docker', wsl: 'WSL2', 'linux-ns': 'espacios de nombres de Linux' };
 /** Problema de la exportación (409): EN-010 añade la línea, el fragmento, el motivo y la sugerencia de pedirlo en el chat. */
 type ExportProblem = { path: string; message: string; line?: number; snippet?: string; reason?: string; hint?: string };
 const HARNESS_NAME: Record<string, string> = Object.fromEntries(HARNESSES.map(h => [h.id, h.name]));
