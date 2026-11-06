@@ -40,6 +40,7 @@ import { monotonicNow } from '../clock.ts';
 import { authorizeProcess } from '../services/processAuthorization.ts';
 import { workItemOf } from '../services/workItems.ts';
 import { closingBlocker } from '../services/closing.ts';
+import { markPublishedIncluded } from '../services/publishedSync.ts';
 
 /** Rutas con efecto (IA o git) que nunca deben actuar sobre una iteración superada de su historia (HU-161). */
 /** Nombre de cada operación con arriendo, para explicar un choque («HU-175 tiene otra operación en curso (integrar en main)»). */
@@ -536,6 +537,11 @@ Proceso: ${proc.id}`, { processId: proc.id });
       procs.setResult(id, { ...proc.result, published: { ...p, pushedAt: new Date().toISOString() } });
       procs.logExecution({ projectId: proc.projectId, agentId: proc.steps[0]?.agentId ?? '', kind: 'repo_push', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() });
       app.log.info({ processId: id, remote: p.remote, branches }, 'ramas publicadas');
+      // EN-009 · Publicar main hasta este commit incluye otros procesos ya integrados: quedan también publicados (sin red).
+      if (proc.result.merged) {
+        try { const others = await markPublishedIncluded(slug, proc.projectId, { remote: p.remote, url: p.url }); if (others.length) app.log.info({ processId: id, marked: others }, 'procesos incluidos en main marcados como publicados'); }
+        catch (e: any) { app.log.warn({ processId: id, err: e?.message }, 'no se pudieron marcar los procesos incluidos como publicados'); }
+      }
       return procs.get(id);
     } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });

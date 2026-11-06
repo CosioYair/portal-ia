@@ -5,6 +5,7 @@ import { requirePolicy, type PolicyOp } from './executionPolicy.ts';
 import { repoStatus } from './repoStatus.ts';
 import { git, pushBranches, repoRoot } from './repoWrite.ts';
 import { createPlan, pendingPlans, rejectPlan, setPlanSource } from './projectMaintenance.ts';
+import { markPublishedIncluded } from './publishedSync.ts';
 import type { MaintenanceItem, MaintenancePlan, VerificationRun } from '@portal-ia/domain';
 
 /**
@@ -73,13 +74,18 @@ function resolveProject(company: string, project: string): { slug: string; proje
  * del Panel): `git push -u <remoto> <main>`, nunca forzado y nunca otra rama. Queda en la auditoría (política git_push).
  */
 /** Publica main; con `commit`, exactamente ese commit (el que se autorizó), aunque main haya avanzado después. */
-export async function publishProjectMain(slug: string, projectId: string, commit: string | null = null): Promise<{ remote: string; url: string | null; branches: string[] }> {
+export async function publishProjectMain(slug: string, projectId: string, commit: string | null = null): Promise<{ remote: string; url: string | null; branches: string[]; markedPublished: number }> {
   const repo = projectsRepo(slug).repository(projectId);
   if (!repo) throw err(409, 'El proyecto no tiene repositorio registrado.');
   const st = await repoStatus(repo.path);
   if (!st.mainBranch) throw err(409, 'El repositorio no tiene rama principal (main). Créala primero.');
   requirePolicy('git_push', { slug, projectId, authorized: true });
-  return pushBranches(repo.path, [st.mainBranch], commit ? { [st.mainBranch]: commit } : {});
+  const res = await pushBranches(repo.path, [st.mainBranch], commit ? { [st.mainBranch]: commit } : {});
+  // EN-009 · Los procesos integrados que esta publicación incluye quedan publicados (su «Publicar» sale de Decisiones).
+  // Sin red (solo la referencia local que actualizó el push); si falla, la publicación sigue siendo válida.
+  let markedPublished = 0;
+  try { markedPublished = (await markPublishedIncluded(slug, projectId, { remote: res.remote, url: res.url })).length; } catch { /* la publicación ya se hizo */ }
+  return { ...res, markedPublished };
 }
 
 const publishMain: Capability<{ company: string; project: string }> = {
@@ -127,7 +133,7 @@ const publishMain: Capability<{ company: string; project: string }> = {
     const remoteHead = await git(repoRoot(repo.path), ['rev-parse', '--short', `${res.remote}/${after.mainBranch}`]).then(s => s.trim()).catch(() => null);
     return {
       summary: `«${res.branches.join(', ')}» publicada en ${res.remote}${res.url ? ` (${res.url})` : ''}.`,
-      details: [`${res.remote}/${after.mainBranch} ahora en ${remoteHead ?? '?'} (main local en ${after.headCommit ?? '?'}).`, `Commits pendientes tras publicar: ${after.aheadOfRemote ?? '?'}.`, 'Registrado en la auditoría (política git_push).']
+      details: [`${res.remote}/${after.mainBranch} ahora en ${remoteHead ?? '?'} (main local en ${after.headCommit ?? '?'}).`, `Commits pendientes tras publicar: ${after.aheadOfRemote ?? '?'}.`, `${res.markedPublished} proceso(s) marcados como publicados (ya no piden «Publicar» en Decisiones).`, 'Registrado en la auditoría (política git_push).']
     };
   }
 };

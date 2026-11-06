@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import type { ManualTestFeedbackEntry, Process } from '@portal-ia/domain';
 import { manualTestStepKey } from '@portal-ia/domain';
-import { api } from '../lib/api.ts';
+import { api, type AssignmentView } from '../lib/api.ts';
+import { AcceptAssignmentAction } from './ConversationPanel.tsx';
 import { getManualTestFeedback, saveManualTestStepFeedback } from '../lib/manualTestFeedback.ts';
 import { ManualTestStepList } from './ManualTestStepList.tsx';
 import { FeedbackToTeam } from './FeedbackToTeam.tsx';
@@ -29,6 +30,15 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
   const [genAuth, setGenAuth] = useState(false);
   const [manualText, setManualText] = useState('');
   const [writing, setWriting] = useState(false);
+  // EN-009 · proceso de un encargo: se cierra aceptando el encargo (no hay historia que completar).
+  const [asg, setAsg] = useState<AssignmentView | null>(null);
+  const [asgErr, setAsgErr] = useState<string | null>(null);
+  const loadAsg = async () => {
+    if (!proc.assignmentId) { setAsg(null); return; }
+    try { setAsg(await api.assignment(slug, proc.assignmentId)); setAsgErr(null); } catch (e: any) { setAsgErr(e?.message ?? 'No se pudo cargar el encargo.'); }
+  };
+  useEffect(() => { void loadAsg(); // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slug, proc.assignmentId, proc.status, r.merged?.commit]);
   useEffect(() => { if (!r.manualTest && proc.status === 'done') api.manualTestEstimate(slug, proc.id).then(setGenEst).catch(() => setGenEst(null)); }, [r.manualTest, proc.id, proc.status, slug]);
   const generate = async () => { setBusy(true); setErr(null); try { const p = await api.manualTestGenerate(slug, proc.id); onChange(p); flash('Lista de prueba generada'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); setGenAuth(false); } };
   const saveSteps = async () => { const steps = manualText.split(/\r?\n/).map(l => l.replace(/^\s*\d+[.)]\s*/, '').trim()).filter(l => l.length > 3); if (!steps.length) return; setBusy(true); setErr(null); try { const p = await api.manualTestSteps(slug, proc.id, steps); onChange(p); setWriting(false); setManualText(''); flash('Pasos de prueba guardados'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
@@ -72,7 +82,7 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
   const close = async () => { setBusy(true); setErr(null); try { await onClose(); flash('Historia completada'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
 
   return <section className="card" style={{ borderColor: 'var(--color-accent-border)' }}>
-    <div className="card-h"><div><div className="h3">Resumen de la historia</div><div className="small muted">Qué cambia para ti, cómo comprobarlo y la prueba de aceptación.</div></div>{proc.guidance && !proc.guidance.flow && <Chip tone={proc.guidance.tone === 'err' ? 'err' : proc.guidance.tone === 'ok' ? 'ok' : proc.guidance.tone === 'warn' ? 'warn' : ''} xs>{proc.guidance.phase}</Chip>}</div>
+    <div className="card-h"><div><div className="h3">Resumen de la historia</div><div className="small muted">Qué cambia para ti, cómo comprobarlo y la prueba de aceptación.</div></div>{proc.guidance && !proc.guidance.flow && !proc.assignmentId && <Chip tone={proc.guidance.tone === 'err' ? 'err' : proc.guidance.tone === 'ok' ? 'ok' : proc.guidance.tone === 'warn' ? 'warn' : ''} xs>{proc.guidance.phase}</Chip>}</div>
     <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
       {rejected && <Notice kind="warn">Este diff fue rechazado ({r.rejected!.reason}); la historia volvió a pendiente.</Notice>}
       <div>
@@ -119,8 +129,16 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
 
       {err && <Notice kind="err">{err}</Notice>}
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        {proc.assignmentId ? <>
+          {asg?.status === 'accepted' ? <Notice kind="ok">Encargo <span className="mono">{asg.code}</span> aceptado.</Notice>
+            : asg && (asg.status === 'ready_for_review' || (!!r.merged && ['changes_requested', 'needs_owner', 'failed'].includes(asg.status)))
+              ? <AcceptAssignmentAction slug={slug} a={asg} label="Aceptar el encargo" doneMsg="Encargo aceptado" onAccepted={async () => { await loadAsg(); await refresh(); }} />
+              : asg ? <span className="small muted">Encargo <span className="mono">{asg.code}</span>: {asg.statusLabel}. «Aceptar el encargo» aparece cuando está listo para revisar o ya integrado en main.</span>
+                : asgErr ? <Notice kind="err">{asgErr}</Notice> : <span className="small muted">Cargando el encargo…</span>}
+        </> : <>
         {canClose && <button className="btn btn-primary" onClick={close} disabled={busy || !proc.backlogItemId}>{busy ? <span className="spin spin-light" /> : Icon.check()}Marcar historia como completada</button>}
         {!canClose && !storyClosed && !legacy && proc.backlogItemId && <button className="lnk small" onClick={closeResolved} disabled={busy} title="Si la historia ya está resuelta por otro camino, ciérrala indicando el motivo (queda registrado)">Cerrar como resuelta fuera del flujo</button>}
+        </>}
       </div>
     </div>
   </section>;

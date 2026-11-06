@@ -207,6 +207,38 @@ export function ConversationPanel({ detail, compact, onChanged }: { detail: Conv
   </details>;
 }
 
+/** 409 que no se resuelven con un motivo del propietario (hay que esperar o cambiar el estado). */
+const ACCEPT_NO_REASON = ['active_process', 'invalid_state', 'not_found', 'stale_view'];
+
+/**
+ * EN-009 · Aceptar un encargo. Primero se intenta sin motivo. Si la regla de cierre (closingBlocker) o el estado lo
+ * bloquean (409), se muestra el motivo exacto y puedes aceptarlo con TU motivo, que queda en sus eventos. Con una
+ * ejecución en marcha no se ofrece el motivo: hay que esperar a que termine o cancelarla. Nada se integra ni se publica.
+ */
+export function AcceptAssignmentAction({ slug, a, label = 'Aceptar', primary = true, doneMsg, onAccepted }: { slug: string; a: { id: string; code: string }; label?: string; primary?: boolean; doneMsg?: string; onAccepted: () => void | Promise<void> }) {
+  const { flash } = useApp();
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState<string | null>(null);
+  const [blocked, setBlocked] = useState<{ msg: string; code: string | null } | null>(null);
+  const [motivo, setMotivo] = useState('');
+  const done = async () => { flash(doneMsg ?? `${a.code} aceptado`); setBlocked(null); setMotivo(''); await onAccepted(); };
+  const failed = (e: any) => { if (e?.status === 409) setBlocked({ msg: e.message, code: e?.body?.code ?? null }); else setErr(e?.message ?? String(e)); };
+  const tryAccept = async () => { setBusy(true); setErr(null); try { await api.acceptAssignment(slug, a.id, null); await done(); } catch (e: any) { failed(e); } finally { setBusy(false); } };
+  const acceptWithReason = async () => { setBusy(true); setErr(null); try { await api.acceptAssignment(slug, a.id, null, motivo.trim()); await done(); } catch (e: any) { failed(e); } finally { setBusy(false); } };
+  const reasonable = !!blocked && !ACCEPT_NO_REASON.includes(blocked.code ?? '');
+  return <>
+    <button type="button" className={`btn ${primary ? 'btn-primary' : 'btn-secondary'} btn-sm`} disabled={busy} onClick={() => void tryAccept()}>{busy && !blocked ? <span className="spin spin-light" /> : null}{label}</button>
+    {err && <div style={{ width: '100%' }}><Notice kind="err">{err}</Notice></div>}
+    {blocked && <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 6 }} data-testid={`accept-blocked-${a.code}`}>
+      <Notice kind="warn">{blocked.msg}</Notice>
+      {reasonable ? <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <label className="sr" htmlFor={`ar-${a.id}`}>Tu motivo</label>
+        <input id={`ar-${a.id}`} className="input" style={{ flex: 1, minWidth: 200, height: 30 }} value={motivo} onChange={e => setMotivo(e.target.value)} placeholder="Tu motivo para aceptarlo así (queda registrado en el encargo)" />
+        <button type="button" className="btn btn-primary btn-sm" disabled={busy || motivo.trim().length < 3} onClick={() => void acceptWithReason()}>{busy ? <span className="spin spin-light" /> : null}Aceptar con tu motivo</button>
+      </div> : <div className="small muted">{blocked.code === 'active_process' ? 'Tiene una ejecución en marcha: espera a que termine o cancélala antes de aceptarlo.' : 'Esto no se resuelve con un motivo: actualiza la página para ver el estado real del encargo.'}</div>}
+    </div>}
+  </>;
+}
+
 /** Encargo de desarrollo (sin historia): borrador → autorizar (presupuesto, tope de suscripción) → progreso → revisar. */
 /** `review`: la revisión e integración (archivos, verificación, «Integrar en main») se muestran en UN sitio: la tarjeta del chat. */
 export function AssignmentCard({ slug, assignmentId, initial, onChanged, review = true }: { slug: string; assignmentId: string; initial?: AssignmentView | null; onChanged?: () => void; review?: boolean }) {
@@ -291,7 +323,7 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged, review 
       </div>}
       {a.status === 'ready_for_review' && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button type="button" className={`btn ${a.process?.merged ? 'btn-primary' : 'btn-secondary'} btn-sm`} disabled={busy} onClick={() => void act(() => api.acceptAssignment(slug, a.id, null), `${a.code} aceptado`)}>Aceptar</button>
+          <AcceptAssignmentAction slug={slug} a={a} primary={!!a.process?.merged} onAccepted={async () => { await load(); onChanged?.(); }} />
           <label className="sr" htmlFor={`en-${a.id}`}>Qué cambiar</label>
           <input id={`en-${a.id}`} className="input" style={{ flex: 1, minWidth: 180, height: 30 }} value={note} onChange={e => setNote(e.target.value)} placeholder="Qué cambiar (para pedir cambios)" />
           {/* Con entrega incremental, los cambios van sobre su rama y se aplican YA con la misma autorización (un clic). */}
@@ -300,6 +332,14 @@ export function AssignmentCard({ slug, assignmentId, initial, onChanged, review 
         {a.process?.merged ? <div className="small muted">Ya está integrado: pedir cambios prepara otra ejecución sobre main con tu nota (no se descarta nada).</div> : a.process?.ownerRound ? <div className="small muted">Los cambios se aplican sobre su rama (no se descarta lo hecho) con la misma autorización.</div> : <label className="ck small"><input className="cb" type="checkbox" checked={discard} onChange={e => setDiscard(e.target.checked)} /><span>Para pedir cambios, descarto esta versión (su worktree y su rama sin integrar).</span></label>}
         <div className="small muted">Aceptar exige lo mismo que cerrar una historia (aplicado, verificado, probado); integrar en main sigue siendo una decisión aparte. Pedir cambios descarta esta versión (su rama sin integrar) y prepara otra ejecución desde main con tu nota, que autorizas aparte.</div>
       </div>}
+      {/* EN-009 · ya integrado en main pero con cambios pedidos, pendiente de ti o fallido: se puede cerrar aceptándolo con tu motivo. */}
+      {a.process && a.process.merged && ['changes_requested', 'needs_owner', 'failed'].includes(a.status) && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} data-testid={`assignment-accept-merged-${a.code}`}>
+        <div className="small">Ya está integrado en <span className="mono">{a.process.merged.into}</span> (commit <span className="mono">{a.process.merged.commit.slice(0, 7)}</span>). Si no necesitas otra iteración, ciérralo con «Aceptar el encargo»: te pedirá tu motivo y quedará registrado{a.iterationNote ? <>; la nota pendiente («{a.iterationNote.slice(0, 160)}») quedará descartada</> : null}.</div>
+        {a.process.status === 'running' || a.process.status === 'pending_authorization'
+          ? <Notice kind="info">Tiene una ejecución en marcha o pendiente de autorizar: espera a que termine o cancélala antes de aceptarlo.</Notice>
+          : <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}><AcceptAssignmentAction slug={slug} a={a} label="Aceptar el encargo" onAccepted={async () => { await load(); onChanged?.(); }} /></div>}
+      </div>}
+      {a.status === 'accepted' && (() => { const ev = [...a.events].reverse().find(e => e.kind === 'accepted'); return ev ? <div className="small muted">Aceptado el {new Date(ev.at).toLocaleString()}{a.reason ? ` · ${a.reason}` : ''}</div> : null; })()}
       {['draft', 'changes_requested', 'needs_owner', 'failed', 'ready_for_review'].includes(a.status) && <div><button type="button" className="lnk small" disabled={busy} onClick={() => void act(() => api.cancelAssignment(slug, a.id), `${a.code} cancelado`)}>cancelar el encargo</button></div>}
     </div>
   </div>;
