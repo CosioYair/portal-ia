@@ -1,5 +1,5 @@
 import { ownerRoundPossible, prepareOwnerRound } from './storyUnits.ts';
-import { ASSIGNMENT_STATUS_LABEL, DEFAULT_PIPELINE, assignmentReady, mergeAcknowledgementsOf, verificationPassed, verificationsForApplied, type Assignment, type AssignmentOutcome, type AssignmentStatus, type Process, INTERNAL_WORKSPACE } from '@portal-ia/domain';
+import { ASSIGNMENT_STATUS_LABEL, DEFAULT_PIPELINE, assignmentPendingState, assignmentReady, mergeAcknowledgementsOf, verificationPassed, verificationsForApplied, type Assignment, type AssignmentOutcome, type AssignmentStatus, type Process, INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { sameWorkRunning } from './executionLocks.ts';
 import { monotonicNow } from '../clock.ts';
 import { assignmentsRepo } from '../db/assignments.ts';
@@ -215,7 +215,7 @@ function recordKnowledge(slug: string, a: Assignment, p: Process) {
  * principal, activo y verificado en ejecución si es el propio Portal, prueba manual hecha). No integra ni publica.
  */
 /** Aceptar (listo para revisar). Si le falta un paso de la regla de cierre, solo con el motivo del propietario (queda en la nota). */
-export async function acceptAssignment(slug: string, id: string, note: string | null, opts: { ownerReason?: string | null } = {}): Promise<Assignment> {
+export async function acceptAssignment(slug: string, id: string, note: string | null, opts: { ownerReason?: string | null; discardNote?: boolean } = {}): Promise<Assignment> {
   const a = syncAssignment(slug, id); if (!a) throw fail(404, 'Encargo no encontrado.', 'not_found');
   const ownerReason = (opts.ownerReason ?? '').trim().slice(0, 1000);
   const cur = a.processId ? processesRepo(slug).get(a.processId) : undefined;
@@ -229,6 +229,8 @@ export async function acceptAssignment(slug: string, id: string, note: string | 
     const active = ids.map(pid => processesRepo(slug).get(pid)).find(p => p && (p.status === 'running' || p.status === 'pending_authorization'));
     if (active) throw fail(409, 'El encargo tiene una ejecución en marcha o pendiente de autorizar: espera a que termine o cancélala antes de aceptarlo.', 'active_process');
     if (ownerReason.length < 3) throw fail(409, `El encargo está ${ASSIGNMENT_STATUS_LABEL[a.status]}, pero su proceso ya está integrado en ${cur!.result!.merged!.into}. Para aceptarlo así, indica tu motivo (al menos 3 caracteres).`, 'owner_reason_required');
+    // EN-012: la nota de cambios sin ejecutar no se descarta en silencio; hace falta tu confirmación explícita.
+    if (a.iterationNote && !opts.discardNote) throw fail(409, `Hay una nota de cambios sin ejecutar: «${a.iterationNote.slice(0, 300)}». Si aceptas el encargo, esa nota se descartará y no se ejecutará ninguna iteración. Confírmalo explícitamente.`, 'note_discard_confirmation_required');
     closingMerged = true;
   }
   const blocker = await closingBlocker(slug, cur, 'encargo');
@@ -267,7 +269,23 @@ export async function requestAssignmentChanges(slug: string, id: string, note: s
     if (!opts.discardApplied) throw fail(409, `La versión entregada está aplicada en ${applied.result!.applied!.branch} sin integrar. Pedir cambios la descarta (worktree y rama): confírmalo explícitamente.`, 'discard_confirmation_required');
     discarded = await discardAppliedVersion(slug, a, applied, 'descartada al pedir cambios: la siguiente ejecución parte de main con la nota del propietario');
   }
-  return assignmentsRepo(slug).update(id, x => { x.status = 'changes_requested'; x.iterationNote = note.trim().slice(0, 2000); x.events.push({ at: monotonicNow(), kind: 'changes', processId: p?.id, message: `Cambios pedidos: ${note.slice(0, 300)}.${discarded}` }); });
+  const merged = !applied && !!p?.result?.merged;
+  const updated = assignmentsRepo(slug).update(id, x => {
+    x.status = 'changes_requested'; x.iterationNote = note.trim().slice(0, 2000);
+    x.events.push({ at: monotonicNow(), kind: 'changes', processId: p?.id, message: merged
+      ? `Cambios pedidos: ${note.slice(0, 300)}. Ya integrado en ${p!.result!.merged!.into}: nueva iteración esperando autorización (no se ejecuta ni gasta nada hasta que la autorices).`
+      : `Cambios pedidos: ${note.slice(0, 300)}.${discarded}` });
+  });
+  // EN-012: encargo integrado → la conversación lo sabe (mensaje fijo, sin IA) con la nota y el siguiente paso.
+  if (merged && updated.conversationId) {
+    const where = p ? `en la tarjeta de ${updated.code} o en /procesos/${p.id}` : `en la tarjeta de ${updated.code}`;
+    const msg = [
+      `**${updated.code} · ${plainMd(updated.title)}: cambios pedidos.** Nota: «${plainMd(updated.iterationNote ?? '')}».`,
+      `**Siguiente paso:** nueva iteración preparada como borrador; no se ejecuta ni gasta nada hasta que la autorices ${where} (pulsa «Autorizar iteración»). La nota irá como contexto de la iteración.`
+    ].join('\n\n');
+    try { resultNotifier?.(updated.conversationId, msg); } catch { /* la conversación ya no existe: el encargo conserva su estado */ }
+  }
+  return updated;
 }
 
 /** Cancelar el encargo (no borra nada: el proceso y su worktree se conservan para consulta). */
@@ -284,8 +302,19 @@ export function cancelAssignment(slug: string, id: string, reason: string | null
 export function assignmentView(slug: string, id: string) {
   const a = syncAssignment(slug, id); if (!a) throw fail(404, 'Encargo no encontrado.', 'not_found');
   const p = a.processId ? processesRepo(slug).get(a.processId) : undefined;
+  const activeProcess = !!p && (p.status === 'running' || p.status === 'pending_authorization');
+  // EN-012: la misma regla del «pendiente» para el Asistente, Decisiones y la tarjeta.
+  const pending = assignmentPendingState(a, { merged: p?.result?.merged ? { into: p.result.merged.into } : null, activeProcess, processId: p?.id ?? null });
+  // Iteración siguiente lista para autorizar (sin IA, sin crear proceso): nota, estimación y lo que se autorizaría.
+  let nextIteration: { note: string; estimatedUsd: number; suggestedBudgetUsd: number; steps: number; merged: boolean } | null = null;
+  if (a.status === 'changes_requested' && a.iterationNote && !activeProcess) {
+    try {
+      const est = estimateWork(slug, a.projectId, assignmentAsItem(a));
+      nextIteration = { note: a.iterationNote, estimatedUsd: est.estimatedUsd, suggestedBudgetUsd: est.suggestedBudgetUsd, steps: est.steps.length, merged: !!p?.result?.merged };
+    } catch { nextIteration = { note: a.iterationNote, estimatedUsd: 0, suggestedBudgetUsd: 0, steps: 0, merged: !!p?.result?.merged }; }
+  }
   return {
-    ...a, statusLabel: ASSIGNMENT_STATUS_LABEL[a.status],
+    ...a, statusLabel: ASSIGNMENT_STATUS_LABEL[a.status], pending, nextIteration,
     process: p ? { id: p.id, status: p.status, spentUsd: p.spentUsd, budgetUsd: p.budgetUsd, estimatedUsd: p.estimatedUsd, steps: p.steps.length,
       // En pausa con trabajo conservado: «Continuar» la retoma donde quedó (autorizar de nuevo la descartaría).
       resumable: p.status === 'done' && !!p.result?.pipeline && (p.result.pipeline.state === 'paused' || p.result.pipeline.state === 'stopped') && !p.result.merged && !p.result.rejected && (!!p.result.applied || !!p.result.manifest),

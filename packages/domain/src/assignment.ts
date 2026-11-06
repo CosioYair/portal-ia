@@ -81,6 +81,37 @@ export const ASSIGNMENT_STATUS_LABEL: Record<AssignmentStatus, string> = {
 /** Estados que ya no avanzan sin el propietario. */
 export const ASSIGNMENT_OPEN: AssignmentStatus[] = ['draft', 'pending_authorization', 'running', 'needs_owner', 'ready_for_review', 'changes_requested'];
 
+export type AssignmentPendingKind = 'awaiting_iteration_authorization' | 'merged_awaiting_acceptance' | 'awaiting_review' | 'other';
+
+export interface AssignmentPendingState {
+  kind: AssignmentPendingKind;
+  /** Texto único que muestran el Asistente, Decisiones y la tarjeta. */
+  label: string;
+  /** Dónde actuar (tarjeta del encargo o /procesos/<id>); null si no hay nada que hacer ahí. */
+  where: string | null;
+  /** true = espera una decisión del propietario. */
+  ownerPending: boolean;
+}
+
+export const ASSIGNMENT_MERGED_PENDING_LABEL = (into: string) => `Integrado en ${into} · falta aceptarlo`;
+export const ASSIGNMENT_ITERATION_PENDING_LABEL = 'Nueva iteración esperando tu autorización';
+
+/**
+ * EN-012: regla ÚNICA y pura (sin IO) del «pendiente» de un encargo. «Integrado» significa lo mismo que al aceptar
+ * (EN-009): el proceso vigente tiene `result.merged`. No cambia el estado guardado: solo cómo se presenta.
+ */
+export function assignmentPendingState(
+  a: Pick<Assignment, 'status' | 'iterationNote' | 'code'>,
+  ctx: { merged: { into: string } | null; activeProcess?: boolean; processId?: string | null }
+): AssignmentPendingState {
+  const where = ctx.processId ? `en la tarjeta de ${a.code} o en /procesos/${ctx.processId}` : `en la tarjeta de ${a.code}`;
+  if (ctx.activeProcess) return { kind: 'other', label: ASSIGNMENT_STATUS_LABEL[a.status], where: null, ownerPending: a.status === 'pending_authorization' };
+  if (a.status === 'changes_requested' && a.iterationNote) return { kind: 'awaiting_iteration_authorization', label: ASSIGNMENT_ITERATION_PENDING_LABEL, where, ownerPending: true };
+  if (ctx.merged && ['ready_for_review', 'changes_requested', 'needs_owner', 'failed'].includes(a.status)) return { kind: 'merged_awaiting_acceptance', label: ASSIGNMENT_MERGED_PENDING_LABEL(ctx.merged.into), where, ownerPending: true };
+  if (a.status === 'ready_for_review') return { kind: 'awaiting_review', label: ASSIGNMENT_STATUS_LABEL.ready_for_review, where, ownerPending: true };
+  return { kind: 'other', label: ASSIGNMENT_STATUS_LABEL[a.status], where: null, ownerPending: ['pending_authorization', 'needs_owner', 'failed'].includes(a.status) };
+}
+
 /** Criterios mínimos para preparar la ejecución: objetivo y al menos un criterio comprobable. */
 export function assignmentReady(a: Pick<Assignment, 'objective' | 'criteria'>): string | null {
   if (a.objective.trim().length < 10) return 'Falta el objetivo del encargo.';
