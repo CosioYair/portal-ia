@@ -102,19 +102,27 @@ test('(a) feedback a un encargo integrado: nueva iteración visible, sin proceso
   assert.match(msgs[0].markdown, /Autorizar iteración/);
   assert.ok(assignmentsRepo(S).get(a.id)!.events.some(e => e.kind === 'changes' && /nueva iteración esperando autorización/.test(e.message)));
 
-  // Decisiones: el encargo aparece como pendiente del propietario, con la nota y el enlace a su proceso.
-  const item = assignmentPendingItems(S).find(i => i.assignmentId === a.id);
+  // Decisiones (/autorizaciones): por su ruta real, el encargo aparece como pendiente del propietario, con la nota y el enlace.
+  const dr = await inject('GET', `${W}/inbox/assignments`);
+  assert.equal(dr.statusCode, 200, dr.body);
+  const item = (dr.json() as any[]).find(i => i.assignmentId === a.id);
   assert.ok(item, 'Decisiones lo muestra');
-  assert.equal(item!.kind, 'awaiting_iteration_authorization'); assert.equal(item!.label, v.pending.label);
-  assert.equal(item!.note, note); assert.match(item!.link, new RegExp(`/procesos/${p.id}$`));
+  assert.equal(item.kind, 'awaiting_iteration_authorization'); assert.equal(item.label, v.pending.label);
+  assert.equal(item.note, note); assert.match(item.link, new RegExp(`/procesos/${p.id}$`));
+  assert.equal(calls(), calls0, 'Decisiones sin IA');
 
-  // (b) Al preparar la iteración (lo que hace authorizeAssignment antes de autorizar) el proceso recibe la nota.
-  const prep = prepareAssignment(S, a.id);
-  try {
-    assert.equal(prep.process.status, 'pending_authorization', 'sigue sin ejecutarse');
-    assert.match(JSON.stringify(processesRepo(S).get(prep.process.id)), /El botón de enviar no muestra confirmación/, 'la nota va en iterationContext');
-    assert.equal(spent(a.id), usd0);
-  } finally { cancelAssignment(S, a.id); }
+  // (b) «Autorizar iteración» = POST /authorize (authorizeAssignment): el proceso que crea recibe la nota en iterationContext.
+  // Con 0 USD y el equipo por la API, authorizeProcess lo rechaza (budget_required) DESPUÉS de crear el proceso y ANTES de
+  // autorizarlo: el motor no se ejecuta, no se gasta nada y el proceso creado queda cancelado con la nota.
+  const before = new Set(procsOf(a.id).map(x => x.id));
+  const ar = await inject('POST', `${W}/assignments/${a.id}/authorize`, { authorized: true, budgetUsd: 0, gauntlet: { mode: 'off' } });
+  assert.equal(ar.statusCode, 400, ar.body); assert.equal(ar.json().code, 'budget_required');
+  const created = procsOf(a.id).filter(x => !before.has(x.id));
+  assert.equal(created.length, 1, 'authorizeAssignment creó el proceso de la iteración');
+  assert.match(JSON.stringify(processesRepo(S).get(created[0].id)), /El botón de enviar no muestra confirmación/, 'la nota va en iterationContext');
+  assert.equal(processesRepo(S).get(created[0].id)!.status, 'cancelled', 'no quedó nada pendiente ni en marcha');
+  assert.ok(!procsOf(a.id).some(x => x.status === 'running'));
+  assert.equal(spent(a.id), usd0, '0 USD'); assert.equal(calls(), calls0, 'sin llamadas a la IA');
 });
 
 test('(c) aceptar un encargo integrado con nota sin ejecutar exige confirmar el descarte', async () => {
@@ -131,7 +139,7 @@ test('(c) aceptar un encargo integrado con nota sin ejecutar exige confirmar el 
   assert.ok(r2.json().events.some((e: any) => /Nota pendiente descartada al aceptar: Cambiar el color del aviso/.test(e.message)));
 });
 
-test('(d) listo para revisar e integrado: la misma etiqueta en el Asistente, en Decisiones y en la tarjeta', () => {
+test('(d) listo para revisar e integrado: la misma etiqueta en el Asistente, en Decisiones y en la tarjeta', async () => {
   const { a, p } = mkAssignment('integrado sin aceptar', true);
   assert.equal(a.status, 'ready_for_review', 'el estado guardado no cambia');
   const label = ASSIGNMENT_MERGED_PENDING_LABEL('main');
@@ -141,8 +149,12 @@ test('(d) listo para revisar e integrado: la misma etiqueta en el Asistente, en 
   assert.match(pure.where ?? '', new RegExp(`tarjeta de ${a.code}.*/procesos/${p.id}`));
   const view = assignmentView(S, a.id);
   assert.equal(view.pending.label, label, 'tarjeta');
-  const item = assignmentPendingItems(S).find(i => i.assignmentId === a.id);
-  assert.equal(item?.label, label, 'Decisiones'); assert.equal(item?.kind, 'merged_awaiting_acceptance');
+  const dr = await inject('GET', `${W}/inbox/assignments`);
+  assert.equal(dr.statusCode, 200, dr.body);
+  const item = (dr.json() as any[]).find(i => i.assignmentId === a.id);
+  assert.equal(item?.label, label, 'Decisiones (ruta real)'); assert.equal(item?.kind, 'merged_awaiting_acceptance');
+  assert.match(item?.link ?? '', new RegExp(`/procesos/${p.id}$`));
+  assert.equal(assignmentPendingItems(S).find(i => i.assignmentId === a.id)?.label, label, 'la ruta y el servicio coinciden');
   // Asistente: la acción del encargo en el chat se presenta con la misma regla (estado calculado al leer).
   assistantRepo.add({ role: 'assistant', content: 'Encargo propuesto', actions: [{ type: 'propose_assignment', status: 'pending', label: a.title, assignmentId: a.id, workspaceSlug: S, projectId: project.id }], attachments: [], tokensIn: 0, tokensOut: 0, costUsd: 0, model: null } as any, null as any);
   const act = assistantRepo.listLive(200).flatMap(m => m.actions).find(x => x.assignmentId === a.id);
@@ -178,8 +190,13 @@ test('(f) cableado de la web: iteración visible, pendiente único y confirmaci�
   const flow = fs.readFileSync(path.join(web, 'components', 'StoryFlowPanel.tsx'), 'utf8');
   const panel = fs.readFileSync(path.join(web, 'components', 'ConversationPanel.tsx'), 'utf8');
   const api = fs.readFileSync(path.join(web, 'lib', 'api.ts'), 'utf8');
+  const inboxScreen = fs.readFileSync(path.join(web, 'screens', 'InboxScreen.tsx'), 'utf8');
   assert.match(flow, /api\.requestAssignmentChanges\(/);
   assert.match(flow, /nextIteration/); assert.match(flow, /Autorizar iteración/);
+  assert.match(flow, /api\.authorizeAssignment\(/, '«Autorizar iteración» usa la autorización del encargo');
+  // Decisiones (/autorizaciones): la pantalla carga los encargos pendientes de su ruta y pinta la etiqueta única.
+  assert.match(api, /\/inbox\/assignments/);
+  assert.match(inboxScreen, /api\.inboxAssignments\(/); assert.match(inboxScreen, /it\.label/);
   assert.match(panel, /a\.pending\.label/); assert.match(panel, /nextIteration/);
   assert.match(panel, /discardNote/);
   assert.match(api, /discardNote/); assert.match(api, /pending: AssignmentPendingState/); assert.match(api, /nextIteration: AssignmentNextIteration \| null/);
