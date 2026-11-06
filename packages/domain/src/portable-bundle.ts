@@ -12,7 +12,16 @@ import { EXTERNAL_TEXT_LIMIT, EXTERNAL_TOTAL_LIMIT, isIdentityPath, parseSkillHe
  * locales ni de data/, ni rutas /api/ ni nombres de tablas. Sin secretos (findSecret).
  */
 export const PORTABLE_BUNDLE_SCHEMA = 'portal-ia/agent-bundle@2';
-export interface BundleProblem { path: string; message: string }
+/**
+ * Problema que impide exportar. `line` (1-based), `snippet` (fragmento detectado, ≤ 80 caracteres, sin secretos) y `reason`
+ * (el motivo sin el prefijo «Línea N») acompañan a las rutas locales; `hint` sugiere pedir el cambio al agente en su chat.
+ */
+export interface BundleProblem { path: string; message: string; line?: number; snippet?: string; reason?: string; hint?: string }
+/** Ruta privada que no puede salir en el paquete: la carpeta original del agente ('source') o la de datos del Portal ('portal-data'). Un texto suelto cuenta como 'source'. */
+export type PrivatePath = string | { path: string; kind: 'source' | 'portal-data' };
+/** Clase de una ruta encontrada: 'system' (genérica del sistema), 'profile' (perfil del usuario), 'source' (carpeta original), 'portal-data' (datos del Portal), 'other' (otra unidad, UNC u otra ruta absoluta). */
+export type LocalPathKind = 'system' | 'profile' | 'source' | 'portal-data' | 'other';
+export interface LocalPathHit { line: number; snippet: string; kind: LocalPathKind; match: string }
 export interface BundleOptions { agentName: string; exportedAt: string; changelog?: string | null }
 /** Topes del paquete: por archivo y en total (bytes UTF-8) y número de archivos propios del agente. */
 export interface BundleLimits { fileBytes: number; totalBytes: number; files: number }
@@ -39,14 +48,80 @@ function utf8Bytes(s: string): number {
 
 const END = `[^\\s)\\]»"'\`<>]*`;
 const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
-const LOCAL = [`\\b[A-Za-z]:[\\\\/]${END}`, `\\\\\\\\[\\w.-]+\\\\${END}`, `(?<![\\w.])/(?:home|Users|tmp|var|private|mnt|root)/${END}`, `(?<![\\w-])data/${END}`];
+/** Unidad de Windows (X:\ o X:/, también con «\\» escapado); admite «Program Files» y «Program Files (x86)» con su espacio. */
+const DRIVE = String.raw`(?<!\w)[A-Za-z]:[\\/]+(?:Program Files(?: \(x86\))?)?` + END;
+/** Ruta de red \\servidor\recurso (servidor de 2+ caracteres: «\\n\\n» de un script no lo es). */
+const UNC = String.raw`\\\\[\w.-]{2,}\\[\w$.-]+` + END;
+const POSIX_PRIVATE = String.raw`(?<![\w.])/(?:home|Users|tmp|var|private|mnt|root)/` + END;
+const POSIX_SYSTEM = String.raw`(?<![\w.])/(?:usr|bin|opt|etc|Library/Fonts|System/Library)(?![\w.-])` + END;
+/** «data/» solo cuando apunta a la carpeta de datos del Portal (no cualquier «data/» del código). */
+const PORTAL_DATA = String.raw`(?<![\w-])data[\\/]+(?:workspaces|evidence|platform\.sqlite|master\.key)(?![\w-])` + END;
+const DETECT: [string, string][] = [[DRIVE, 'gi'], [UNC, 'g'], [POSIX_PRIVATE, 'g'], [POSIX_SYSTEM, 'g'], [PORTAL_DATA, 'g']];
+const SCRUB: [string, string][] = [[DRIVE, 'gi'], [UNC, 'g'], [POSIX_PRIVATE, 'g'], [PORTAL_DATA, 'g']];
 const API = `(?<![\\w.])/api/(?:workspaces|agents|processes|companies|projects|platform)\\b${END}`;
 const TABLES = '\\b(?:agent_revisions|agent_folders|agent_events|workspace\\.db)\\b|\\.sqlite\\b';
+
+const SYSTEM_RE = [/^[a-z]:\/(?:windows|program files(?: \(x86\))?)(?:\/|$)/, /^\/(?:usr|bin|opt|etc)(?:\/|$)/, /^\/library\/fonts(?:\/|$)/, /^\/system\/library(?:\/|$)/];
+const PROFILE_RE = [/^[a-z]:\/users\/[^/]+/, /^\/(?:home|users)\/[^/]+/];
+const PORTAL_DATA_RE = /(?:^|\/)data\/(?:workspaces|evidence|platform\.sqlite|master\.key)(?:\/|$)/;
+const normPath = (s: string) => s.replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
+interface PrivNorm { raw: string; norm: string; base: string; kind: 'source' | 'portal-data' }
+function privateList(list: PrivatePath[] = []): PrivNorm[] {
+  return list.map(x => (typeof x === 'string' ? { path: x, kind: 'source' as const } : x)).filter(x => typeof x.path === 'string' && x.path.trim())
+    .map(x => { const raw = x.path.trim(); const norm = normPath(raw); const base = norm.split('/').pop() ?? ''; return { raw, norm, base: base.length >= 6 ? base : '', kind: x.kind }; })
+    .filter(x => x.norm.length >= 4);
+}
+function classify(m: string, privs: PrivNorm[]): LocalPathKind {
+  const n = normPath(m);
+  for (const pv of privs) if (n === pv.norm || n.startsWith(`${pv.norm}/`)) return pv.kind;
+  if (PORTAL_DATA_RE.test(n)) return 'portal-data';
+  if (PROFILE_RE.some(r => r.test(n))) return 'profile';
+  if (SYSTEM_RE.some(r => r.test(n))) return 'system';
+  for (const pv of privs) if (pv.base && (n.includes(`/${pv.base}/`) || n.endsWith(`/${pv.base}`))) return pv.kind;
+  return 'other';
+}
+function snippetOf(m: string): string {
+  const s = m.length > 80 ? `${m.slice(0, 79)}…` : m;
+  return findSecret(s) ? '[oculto]' : s;
+}
+
+/**
+ * Rutas de un texto, línea a línea (\r?\n), con su clase. `privatePaths`: carpeta original del agente y carpeta de datos del
+ * Portal (se comparan sin distinguir mayúsculas ni separadores). Función pura: no lee el disco.
+ */
+export function findLocalPaths(text: string, opts: { privatePaths?: PrivatePath[] } = {}): LocalPathHit[] {
+  const privs = privateList(opts.privatePaths);
+  const out: LocalPathHit[] = [];
+  text.split(/\r?\n/).forEach((ln, i) => {
+    const taken: [number, number][] = [];
+    const found: { at: number; m: string }[] = [];
+    for (const [src, fl] of DETECT) {
+      const re = new RegExp(src, fl);
+      for (let m = re.exec(ln); m; m = re.exec(ln)) {
+        if (!m[0]) { re.lastIndex++; continue; }
+        const a = m.index; const b = a + m[0].length;
+        if (taken.some(([x, y]) => a < y && b > x)) continue;
+        taken.push([a, b]); found.push({ at: a, m: m[0] });
+      }
+    }
+    if (privs.length) {
+      const low = normPath(ln);
+      for (const pv of privs) if (low.includes(pv.norm) && !found.some(f => classify(f.m, privs) === pv.kind)) found.push({ at: Number.MAX_SAFE_INTEGER, m: pv.raw });
+    }
+    found.sort((x, y) => x.at - y.at);
+    for (const f of found) {
+      const match = f.m.replace(/[.,;:]+$/, '');
+      if (!match) continue;
+      out.push({ line: i + 1, match, snippet: snippetOf(match), kind: classify(match, privs) });
+    }
+  });
+  return out;
+}
 
 /** Quita datos internos de un texto: rutas locales → «[ruta local]», UUID y tablas → «[interno]», rutas /api/ → «[ruta interna]». */
 function scrub(s: string): string {
   let t = s;
-  for (const l of LOCAL) t = t.replace(new RegExp(l, 'g'), '[ruta local]');
+  for (const [src, fl] of SCRUB) t = t.replace(new RegExp(src, fl), '[ruta local]');
   return t.replace(new RegExp(UUID, 'g'), '[interno]').replace(new RegExp(API, 'g'), '[ruta interna]').replace(new RegExp(TABLES, 'g'), '[interno]');
 }
 type YMap = ReturnType<typeof parseYaml>;
@@ -192,6 +267,14 @@ const MODULES: [RegExp, string][] = [
   [/^\s*(?:import|from)\s+pdfplumber\b/m, 'pdfplumber'], [/^\s*(?:import|from)\s+pypdf\b/m, 'pypdf'], [/^\s*(?:import|from)\s+pytesseract\b/m, 'pytesseract'], [/^\s*(?:import|from)\s+lxml\b/m, 'lxml']
 ];
 
+/** Rutas genéricas del sistema que citan los .py (únicas, ordenadas, como mucho 20), separadas en Windows y Linux/macOS. */
+function systemPathsOf(files: PortableFiles): { win: string[]; unix: string[] } {
+  const set = new Set<string>();
+  for (const p of Object.keys(files).filter(k => k.endsWith('.py')).sort()) for (const h of findLocalPaths(files[p] ?? '')) if (h.kind === 'system') set.add(h.match.replace(/\\+/g, '\\'));
+  const all = [...set].sort().slice(0, 20);
+  return { win: all.filter(x => /^[A-Za-z]:/.test(x)), unix: all.filter(x => !/^[A-Za-z]:/.test(x)) };
+}
+
 /** GUIA.md del paquete externo. Solo cita rutas que existen en `files` (más los archivos que genera el propio paquete). */
 function guiaExterna(name: string, files: PortableFiles, planCount: number): string {
   const keys = Object.keys(files).sort();
@@ -209,6 +292,11 @@ function guiaExterna(name: string, files: PortableFiles, planCount: number): str
   const py = keys.filter(p => p.endsWith('.py')).map(p => files[p]).join('\n');
   const programs = PROGRAMS.filter(([re]) => re.test(py)).map(([, n]) => n);
   const modules = MODULES.filter(([re]) => re.test(py)).map(([, n]) => n);
+  const sys = systemPathsOf(files);
+  const fmtPaths = (xs: string[]) => xs.map(x => `\`${x}\``).join(', ');
+  const sysReq = sys.win.length || sys.unix.length
+    ? `- Rutas del sistema que citan los scripts (comprueba que existen en tu equipo; ajústalas si tu instalación está en otra carpeta):${sys.win.length ? `\n  - Windows: ${fmtPaths(sys.win)}` : ''}${sys.unix.length ? `\n  - Linux y macOS: ${fmtPaths(sys.unix)}` : ''}\n`
+    : '';
   const reqs = skills.flatMap(s => s.reqs);
   const example = skills.flatMap(s => s.scripts)[0] ?? null;
   const memRef = mem.length ? mem.map(p => `\`${p}\``).join(', ') : '`memory/MEMORY.md`';
@@ -243,7 +331,7 @@ ${skillList}
 - Python 3 para ejecutar los scripts (compruébalo con \`python --version\`).
 - Paquetes de Python: ${reqs.length ? reqs.map(p => `\`pip install -r ${p}\``).join(' · ') : 'los scripts no declaran un requirements.txt'}${modules.length ? `. Según sus imports, usan (orientativo): ${modules.join(', ')}` : ''}.
 - Programas externos: ${programs.length ? `${programs.join(', ')} (aparecen en el texto de los scripts). Instálalos tú; sin ellos, los scripts que los usan fallarán` : 'no se detectó ninguno en los scripts'}.
-- Node solo para \`scripts/anotar-cambio.mjs\` (opcional).
+${sysReq}- Node solo para \`scripts/anotar-cambio.mjs\` (opcional).
 
 ## Dónde no se pueden ejecutar scripts
 En ChatGPT sin intérprete de código, o en cualquier entorno sin Python, el agente no puede convertir el documento. Debe decirlo con claridad, explicar los pasos de esta guía para que los ejecutes en tu equipo y no prometer ni simular un resultado. Con intérprete pero sin los programas externos, avisa de qué scripts no podrán funcionar antes de intentarlo.
@@ -303,7 +391,24 @@ export function buildExternalBundle(snapshot: PortableFiles, opts: ExternalBundl
 }
 
 /** Problemas que impiden exportar el paquete (lista vacía = se puede exportar). `forbidden`: textos que no deben aparecer (p. ej. el id del agente). */
-export function validatePortableBundle(files: PortableFiles, opts: { forbidden?: string[]; limits?: BundleLimits } = {}): BundleProblem[] {
+const KIND_LABEL: Record<LocalPathKind, string> = {
+  profile: 'tu perfil de usuario', source: 'la carpeta original del agente', 'portal-data': 'los datos del Portal',
+  other: 'otra unidad, red o carpeta del equipo', system: 'ruta del sistema fuera de un script'
+};
+const GENERATED = new Set([...BUNDLE_EXTRA, 'PLANES.json', 'agent.yaml', 'memory/MEMORY.md']);
+function localProblem(p: string, h: LocalPathHit): BundleProblem {
+  const raw = RAW.test(p);
+  const reason = `contiene una ruta local (${KIND_LABEL[h.kind]}). ${raw ? 'Cámbiala por una ruta relativa o por un argumento del script.' : 'Quítala o cámbiala por una ruta relativa.'}`;
+  const pr: BundleProblem = { path: p, line: h.line, snippet: h.snippet, reason, message: `Línea ${h.line}: «${h.snippet}» — ${reason}` };
+  if (/\.(py|txt|md)$/.test(p) && !GENERATED.has(p)) pr.hint = `Puedes pedirle al agente en su chat que cambie la línea ${h.line} de ${p} (automejora con copia y Deshacer).`;
+  return pr;
+}
+function lineOf(c: string, src: string): number {
+  const m = new RegExp(src).exec(c);
+  return m ? c.slice(0, m.index).split('\n').length : 0;
+}
+
+export function validatePortableBundle(files: PortableFiles, opts: { forbidden?: string[]; limits?: BundleLimits; privatePaths?: PrivatePath[] } = {}): BundleProblem[] {
   const lim = opts.limits ?? PORTABLE_LIMITS;
   const out: BundleProblem[] = [];
   for (const r of REQUIRED) if (files[r] === undefined) out.push({ path: r, message: 'Falta en el paquete.' });
@@ -314,9 +419,20 @@ export function validatePortableBundle(files: PortableFiles, opts: { forbidden?:
     if (!allowedBundlePath(p)) { out.push({ path: p, message: 'Ruta no permitida en el paquete.' }); continue; }
     if (size > lim.fileBytes) out.push({ path: p, message: `Archivo demasiado grande (${Math.ceil(size / 1024)} KB; máx. ${lim.fileBytes / 1024} KB).` });
     const secret = findSecret(c); if (secret) out.push({ path: p, message: `Contiene lo que parece una ${secret}: las credenciales nunca salen del Portal.` });
-    if (new RegExp(UUID).test(c)) out.push({ path: p, message: 'Contiene un identificador interno (UUID).' });
-    if (LOCAL.some(l => new RegExp(l).test(c))) out.push({ path: p, message: 'Contiene una ruta local o de datos del Portal.' });
-    if (new RegExp(API).test(c) || new RegExp(TABLES).test(c)) out.push({ path: p, message: 'Contiene rutas o tablas internas del Portal.' });
+    const uuidLine = lineOf(c, UUID); if (uuidLine) out.push({ path: p, line: uuidLine, message: 'Contiene un identificador interno (UUID).' });
+    // Rutas: las genéricas del sistema solo se admiten en los scripts copiados tal cual (.py/.txt) y en GUIA.md; en el resto,
+    // las de unidad de Windows siguen bloqueando como antes. Un problema por línea (máx. 5 por archivo y un resumen).
+    const allowSystem = RAW.test(p) || p === 'GUIA.md';
+    const byLine = new Map<number, LocalPathHit>();
+    for (const h of findLocalPaths(c, { privatePaths: opts.privatePaths })) {
+      const blocks = h.kind !== 'system' || (!allowSystem && /^[A-Za-z]:/.test(h.match));
+      if (blocks && !byLine.has(h.line)) byLine.set(h.line, h);
+    }
+    const hits = [...byLine.values()];
+    for (const h of hits.slice(0, 5)) out.push(localProblem(p, h));
+    if (hits.length > 5) out.push({ path: p, message: `Y ${hits.length - 5} línea(s) más con rutas locales o de datos del Portal en este archivo.` });
+    const apiLines = [lineOf(c, API), lineOf(c, TABLES)].filter(n => n > 0);
+    if (apiLines.length) out.push({ path: p, line: Math.min(...apiLines), message: 'Contiene rutas o tablas internas del Portal.' });
     const low = c.toLowerCase(); if (forbidden.some(f => low.includes(f))) out.push({ path: p, message: 'Contiene un dato interno del agente (su id en el Portal).' });
   }
   if (Object.keys(files).length > lim.files + BUNDLE_EXTRA.length + 1) out.push({ path: '', message: `Demasiados archivos en el paquete (máx. ${lim.files + BUNDLE_EXTRA.length + 1}).` });

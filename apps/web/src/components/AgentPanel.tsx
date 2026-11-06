@@ -277,14 +277,14 @@ function SkillsList({ files }: { files: Record<string, string> }) {
  * No llama a la IA ni tiene costo. Estados explícitos: preparando → listo / error. Si el servidor responde 409, muestra
  * cada archivo con su motivo: nunca se entrega un paquete incompleto.
  */
-export function BundleDownloadButton({ slug, agentId, external = false }: { slug: string; agentId: string; external?: boolean }) {
+export function BundleDownloadButton({ slug, agentId, external = false, onChat }: { slug: string; agentId: string; external?: boolean; onChat?: () => void }) {
   const helpId = useId();
-  const [zip, setZip] = useState<{ state: 'idle' | 'preparing' | 'ready' | 'error'; fileName?: string; message?: string; problems?: { path: string; message: string }[] }>({ state: 'idle' });
+  const [zip, setZip] = useState<{ state: 'idle' | 'preparing' | 'ready' | 'error'; fileName?: string; message?: string; problems?: ExportProblem[] }>({ state: 'idle' });
   const download = async () => {
     setZip({ state: 'preparing' });
     try { const r = await osApi.downloadZip(slug, agentId); setZip({ state: 'ready', fileName: r.fileName }); }
     catch (e: any) {
-      const problems = Array.isArray(e?.body?.problems) ? (e.body.problems as { path: string; message: string }[]) : [];
+      const problems = Array.isArray(e?.body?.problems) ? (e.body.problems as ExportProblem[]) : [];
       setZip({ state: 'error', message: problems.length ? 'No se puede exportar el paquete mientras tenga estos problemas:' : (e?.message ?? 'No se pudo descargar el paquete.'), problems });
     }
   };
@@ -298,7 +298,12 @@ export function BundleDownloadButton({ slug, agentId, external = false }: { slug
       : <>Para usar el agente fuera del Portal. Incluye sus instrucciones, habilidades, memoria verificada y referencias, y las lecciones validadas de su papel si las hay. También incluye las reglas de automejora (AUTOMEJORA.md), el registro de cambios (CAMBIOS.md), un script para anotar cambios y una guía para Claude Code web, Cowork y ChatGPT. No incluye credenciales ni datos internos del Portal. No usa la IA ni tiene costo.</>}</span>
     <div aria-live="polite">
       {zip.state === 'ready' && <Notice kind="ok">Paquete descargado: {zip.fileName}. Para empezar, abre GUIA.md.</Notice>}
-      {zip.state === 'error' && <Notice kind="err">{zip.message}{zip.problems && zip.problems.length > 0 && <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{zip.problems.map((x, i) => <li key={i}>{x.path ? <span className="mono">{x.path}</span> : null}{x.path ? ': ' : ''}{x.message}</li>)}</ul>}</Notice>}
+      {zip.state === 'error' && <Notice kind="err">{zip.message}{zip.problems && zip.problems.length > 0 && <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{zip.problems.map((x, i) => <li key={i}>{x.path ? <span className="mono">{x.path}{x.line ? `:${x.line}` : ''}</span> : null}{x.path ? ': ' : ''}{x.snippet ? <><code>{x.snippet}</code> — {x.reason ?? x.message}</> : x.message}</li>)}</ul>}
+            {zip.problems && zip.problems.some(x => x.hint) && <div className="small" style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <span>Qué cambiar: {zip.problems.filter(x => x.hint && x.line).map(x => `${x.path}:${x.line}`).join(', ')}. Usa una ruta relativa o un argumento del script.</span>
+              <span>Puedes pedírselo al agente en la pestaña Chat, por ejemplo: «Cambia {zip.problems.filter(x => x.hint && x.line).length > 1 ? 'esas líneas' : `la línea ${zip.problems.find(x => x.hint && x.line)?.line ?? ''} de ${zip.problems.find(x => x.hint && x.line)?.path ?? 'ese archivo'}`} para que no use una ruta de mi equipo». La automejora guarda una copia y la puedes deshacer.</span>
+              {onChat && <button type="button" className="btn btn-secondary btn-sm" style={{ alignSelf: 'flex-start' }} onClick={onChat}>Pedírselo en el chat</button>}
+            </div>}</Notice>}
     </div>
   </>;
 }
@@ -475,6 +480,8 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
   </>;
 }
 const LEVEL: Record<string, string> = { yes: 'sí', partial: 'parcial', no: 'no' };
+/** Problema de la exportación (409): EN-010 añade la línea, el fragmento, el motivo y la sugerencia de pedirlo en el chat. */
+type ExportProblem = { path: string; message: string; line?: number; snippet?: string; reason?: string; hint?: string };
 const HARNESS_NAME: Record<string, string> = Object.fromEntries(HARNESSES.map(h => [h.id, h.name]));
 const EVENT_TEXT: Record<string, string> = { created: 'Creado', imported: 'Importado', exported: 'Exportado', harness_changed: 'Arnés cambiado', department_changed: 'Cambio de departamento', folder_created: 'Carpeta creada', folder_adopted: 'Cambios externos adoptados', folder_discarded: 'Cambios externos descartados', folder_restored: 'Vuelta a una revisión anterior', identity_updated: 'Identidad editada', memory_proposed: 'Aprendizaje propuesto', memory_verified: 'Aprendizaje verificado', memory_retired: 'Aprendizaje retirado', task_created: 'Encargo creado', chat: 'Conversación',
   source_imported: 'Integrado desde su carpeta', source_adopted: 'Cambios externos adoptados', source_grants: 'Permisos cambiados', source_restored: 'Vuelta a una versión anterior', integration_state: 'Estado de integración', document_job: 'Documento', improvement_proposed: 'Automejora propuesta', improvement_applied: 'Automejora aplicada', improvement_rejected: 'Automejora archivada', improvement_undone: 'Automejora deshecha' };
