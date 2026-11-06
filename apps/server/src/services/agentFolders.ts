@@ -432,6 +432,27 @@ export async function syncAgentFolder(slug: string, a: Agent, note = 'Sincroniza
  * por agente (syncAgentFolder solo la crea si cambian los archivos). La segunda pasada no cambia nada. No toca el arnés,
  * los permisos, la memoria ni el nombre de la carpeta.
  */
+/**
+ * EN-014 · Guarda el ámbito elegido por el propietario en Ajustes. Sin IA y sin costo: no toca herramientas, permisos,
+ * arnés ni memoria. Exige al menos una opción y un proyecto existente (se guarda con su nombre real). Si el agente tiene
+ * carpeta, la sincroniza con una revisión «portal» que lo explica.
+ */
+export async function setAgentContextScope(slug: string, agentId: string, scope: AgentContextScope): Promise<Agent> {
+  const agents = agentsRepo(slug);
+  if (!agents.get(agentId)) throw Object.assign(new Error('Agente no encontrado'), { statusCode: 404 });
+  let project: AgentContextScope['project'] = null;
+  if (scope.project) {
+    const p = projectsRepo(slug).get(scope.project.id);
+    if (!p) throw Object.assign(new Error('El proyecto elegido no existe en esta empresa.'), { statusCode: 400 });
+    project = { ...scope.project, id: p.id, name: p.name };
+  }
+  const next: AgentContextScope = { ...scope, project, company: !!scope.company, general: !!scope.general };
+  if (!contextScopeOptions(next).length) throw Object.assign(new Error('Elige al menos una opción de ámbito (Proyecto, Empresa o General).'), { statusCode: 400 });
+  const updated = agents.setContextScope(agentId, next);
+  if (agentFoldersRepo(slug).folderOf(agentId)) await syncAgentFolder(slug, updated, `Ámbito cambiado a ${contextScopeLabel(next)} por el propietario (sin cambios en herramientas ni permisos)`).catch(() => null);
+  return agents.get(agentId) ?? updated;
+}
+
 export async function migrateAgentContextScopes(slug: string, companyName?: string | null): Promise<{ migrated: string[]; failed: { agentId: string; error: string }[] }> {
   const company = (companyName ?? '').trim() || companyNameOf(slug) || 'la empresa';
   const migrated: string[] = []; const failed: { agentId: string; error: string }[] = [];

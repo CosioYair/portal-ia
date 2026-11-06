@@ -93,10 +93,8 @@ export function AgentDetail() {
   const companyName = (ws as { name?: string }).name ?? null;
   const saveScope = async () => {
     if (!scopePick || scopeIsEmpty(scopePick)) return;
-    const scopeApi = api as unknown as { setAgentContextScope?: (slug: string, id: string, scope: AgentContextScope) => Promise<unknown> };
-    if (!scopeApi.setAgentContextScope) { flash('Esta versión del Portal todavía no puede guardar el ámbito.', 'err'); return; }
     setScopeBusy(true);
-    try { await scopeApi.setAgentContextScope(ws.slug, agent.id, scopePick); await load(); setScopePick(null); flash(`Ámbito de ${agent.config.name}: ${contextScopeLabel(scopePick)}. Sus herramientas y permisos no cambian.`); }
+    try { await api.setAgentContextScope(ws.slug, agent.id, scopePick); await load(); setScopePick(null); flash(`Ámbito de ${agent.config.name}: ${contextScopeLabel(scopePick)}. Sus herramientas y permisos no cambian.`); }
     catch (e: any) { flash(e.message, 'err'); } finally { setScopeBusy(false); }
   };
   const changeProvider = (pid: ProviderId) => {

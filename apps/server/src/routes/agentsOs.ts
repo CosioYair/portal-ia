@@ -9,7 +9,7 @@ import { departmentsRepo } from '../services/departments.ts';
 import { harnessCatalog, harnessOptions, switchHarness } from '../services/harness/index.ts';
 import { detectCodex, getCodexSettings, lastCodexDetection, saveCodexSettings } from '../services/harness/codex.ts';
 import { chatEstimate, chatMessages, chatUsageToday, sendChat } from '../services/agentChat.ts';
-import { adoptExternal, agentCapabilities, agentFoldersRepo, agentLearning, discardExternal, ensureAgentFolders, folderStatus, restoreRevision, syncAgentFolder, updateExtras } from '../services/agentFolders.ts';
+import { adoptExternal, agentCapabilities, agentFoldersRepo, agentLearning, discardExternal, ensureAgentFolders, folderStatus, restoreRevision, setAgentContextScope, syncAgentFolder, updateExtras } from '../services/agentFolders.ts';
 import { detectSandbox } from '../services/sandbox.ts';
 import { createAgentFromWizard, exportBundle, exportFiles, exportTo, importConfirm, importPreview } from '../services/agentCreation.ts';
 import { applyZipImport, previewZipImport, undoZipImport, ZIP_UPLOAD_MAX } from '../services/agentZipImport.ts';
@@ -101,6 +101,21 @@ export async function agentsOsRoutes(app: FastifyInstance) {
       deps.assign(id, d.slug); recordAgentEvent(slug, id, 'department_changed', { to: d.name });
       if (agentFoldersRepo(slug).folderOf(id)) await syncAgentFolder(slug, agentsRepo(slug).get(id)!).catch(() => null);
       return agentsRepo(slug).get(id);
+    } catch (e) { return err(reply, e); }
+  });
+  // EN-014 · Ámbito (Proyecto/Empresa/General, combinables). Sin IA ni costo; no cambia herramientas, permisos ni arnés.
+  app.put('/api/workspaces/:slug/agents/:id/context-scope', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
+    const b = z.object({
+      project: z.object({ id: z.string().min(1).max(120), name: z.string().max(200).optional() }).nullable().default(null),
+      company: z.boolean().default(false), general: z.boolean().default(false)
+    }).refine(s => !!s.project || s.company || s.general, { message: 'Elige al menos una opción de ámbito.' }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'Ámbito no válido: elige al menos una opción (Proyecto, Empresa o General).', issues: b.error.issues });
+    if (b.data.project && !projectsRepo(slug).get(b.data.project.id)) return reply.code(400).send({ error: 'El proyecto elegido no existe en esta empresa.' });
+    try {
+      const updated = await setAgentContextScope(slug, id, { project: b.data.project ? { id: b.data.project.id, name: b.data.project.name ?? '' } : null, company: b.data.company, general: b.data.general } as any);
+      recordAgentEvent(slug, id, 'context_scope_changed', { project: b.data.project?.id ?? null, company: b.data.company, general: b.data.general });
+      return updated;
     } catch (e) { return err(reply, e); }
   });
   // Petición a un departamento: la recibe su coordinador, consulta a los miembros confirmados y entrega UN resultado.
