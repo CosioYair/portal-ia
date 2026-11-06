@@ -306,7 +306,8 @@ test('feedback reutilizable → propuesta (lo inseguro se descarta); aplicar exi
   assert.deepEqual(r.json.changes.map((c: any) => c.path), ['skills/convertir-pdf-word/SKILL.md', 'skills/convertir-pdf-word/scripts/convertir_editable.py', 'contexto/contrato-de-calidad.md', 'memoria/MEMORIA.md']);
   assert.match(r.json.reason, /descartó/);
   const office = (await inject('GET', `${W}/office`)).json.agents.find((a: any) => a.id === agentId);
-  assert.ok(office.attention.some((x: any) => x.kind === 'improvement'));
+  // HU-181: las automejoras ya no generan avisos (ni en Decisiones ni en «Te necesitan»).
+  assert.ok(!office.attention.some((x: any) => x.kind === 'improvement'), 'HU-181: sin aviso de automejora');
   const before = snapshotOfDisk();
   assert.equal((await inject('POST', `${W}/agents/${agentId}/proposals/${proposalId}/apply`, {})).status, 400, 'sin aprobación explícita');
   assert.equal((await inject('POST', `${W}/agents/${agentId}/proposals/${proposalId}/apply`, { authorized: true })).status, 403, 'sin permiso de mejoras');
