@@ -8,7 +8,7 @@ import { departmentsRepo, departmentLabelOf } from './departments.ts';
 import { agentFoldersRepo, diskHash, folderPath } from './agentFolders.ts';
 import { ensureLessonsTable, lessonsRepo } from './lessons.ts';
 import { chatInFlight } from './agentChat.ts';
-import { documentJobsRunning, pendingProposalCounts } from './documentJobs.ts';
+import { documentJobsRunning, improvementHistory, pendingProposalCounts, settleLegacyProposals, type ImprovementHistoryItem } from './documentJobs.ts';
 import { pendingActionCounts } from './agentActions.ts';
 import { pendingExternalChanges, sourcesRepo } from './externalAgents.ts';
 import fs from 'node:fs';
@@ -33,6 +33,26 @@ export interface OfficeAgent {
   hasFolder: boolean; custom: boolean;
   /** Agente externo (referencia gestionada): su estado de integración; null si no lo es. */
   integration: IntegrationState | null;
+  /** HU-181 · Historial de automejoras (solo en el panel de un agente externo). */
+  improvementHistory?: ImprovementHistoryItem[];
+}
+
+/**
+ * HU-181 · Resuelve en segundo plano las propuestas pendientes de un agente externo (aplicar o archivar con motivo).
+ * Una sola ejecución a la vez por agente; settleLegacyProposals avisa en tiempo real si cambió algo.
+ */
+const settling = new Set<string>();
+function settleInBackground(slug: string, agentId: string) {
+  const key = `${slug}\u0000${agentId}`;
+  if (settling.has(key)) return;
+  settling.add(key);
+  void settleLegacyProposals(slug, agentId).catch(() => undefined).finally(() => { settling.delete(key); });
+}
+
+/** HU-181 · Historial de automejoras tras resolver las pendientes (espera a que terminen). Nunca lanza. */
+export async function externalImprovementHistory(slug: string, agentId: string): Promise<ImprovementHistoryItem[]> {
+  try { await settleLegacyProposals(slug, agentId); } catch { /* el historial se muestra igual */ }
+  try { return improvementHistory(slug, agentId); } catch { return []; }
 }
 
 /** Quién «lleva» un proceso: el responsable del encargo o, en una historia, quien implementa (o el primer paso). */
@@ -75,7 +95,10 @@ export function officeView(slug: string, decisions: PendingDecision[], opts: { p
   };
   let integration = new Map<string, IntegrationState>();
   try { const sr = sourcesRepo(slug); integration = new Map(sr.list().map(id => [id, sr.get(id)?.state ?? 'pending'] as const)); } catch { /* sin agentes externos */ }
-  try { for (const [id, n] of pendingProposalCounts(slug)) add(id, { kind: 'improvement', label: `${n} mejora(s) propuesta(s) esperan tu aprobación` }); } catch { /* sin propuestas */ }
+  // HU-181: sin aviso 'improvement'. En el panel de un agente externo, sus pendientes se resuelven solas (aplicar o archivar).
+  if (opts.onlyAgentId && integration.has(opts.onlyAgentId)) {
+    try { if (pendingProposalCounts(slug).some(([id]) => id === opts.onlyAgentId)) settleInBackground(slug, opts.onlyAgentId); } catch { /* sin propuestas */ }
+  }
   try { for (const [id, n] of pendingActionCounts(slug)) add(id, { kind: 'action', label: `${n} acción(es) del chat esperan tu «Sí, hazlo»` }); } catch { /* sin acciones */ }
   for (const id of integration.keys()) { const n = pendingExternalChanges(slug, id); if (n) add(id, { kind: 'source', label: `${n} archivo(s) de su carpeta cambiaron fuera del Portal: revísalos en «Origen»` }); }
   const out: OfficeAgent[] = agents.map(a => {
@@ -89,7 +112,10 @@ export function officeView(slug: string, decisions: PendingDecision[], opts: { p
     const issue = retired ? null : issueOf(a);
     const state: OfficeState = retired ? 'retired' : working.has(a.id) ? 'working' : att.length ? 'attention' : queued.has(a.id) ? 'queued' : issue ? 'unavailable' : 'idle';
     const harness = agentBackend(a); const dep = deps.departmentOf(a);
+    let history: ImprovementHistoryItem[] | undefined;
+    if (opts.onlyAgentId && integration.has(a.id)) { try { history = improvementHistory(slug, a.id); } catch { history = []; } }
     return {
+      ...(history ? { improvementHistory: history } : {}),
       id: a.id, key: a.key, name: a.config.name, role: a.template.role, initials: a.template.initials, scope: a.scope, projectId: a.projectId,
       department: departmentLabelOf(a), departmentSlug: dep?.slug ?? '', harness, harnessLabel: backendLabel(harness, harness === 'codex' ? (codexBilling as any) : harness === 'api' ? null : ccBilling, a.config.provider), model: a.config.model,
       state, activity: working.get(a.id) ?? queued.get(a.id) ?? null, attention: att, harnessIssue: issue, hasFolder: !!f, custom: a.templateId === 'tpl.custom@1', integration: integration.get(a.id) ?? null
