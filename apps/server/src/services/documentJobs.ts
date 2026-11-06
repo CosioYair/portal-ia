@@ -834,6 +834,15 @@ async function learnFromRetry(slug: string, a: Agent, job: DocumentJob, v: Docum
  * applyProposal (copia de seguridad, revisión nueva, CAMBIOS.md y registro). Luego marca la original como 'undone'.
  */
 export async function undoProposal(slug: string, agentId: string, id: string, by = 'owner'): Promise<ImprovementProposal> {
+  // HU-181 · Solo se deshace la ÚLTIMA automejora aplicada: con otra aplicada después, 409 later_improvements sin tocar nada.
+  {
+    const all = proposalsDb(slug).list(agentId);
+    const target = all.find(o => o.id === id);
+    if (target && target.state === 'applied' && target.appliedAt
+      && all.some(o => o.id !== id && o.state === 'applied' && !!o.appliedAt && o.appliedAt > target.appliedAt!)) {
+      throw err('Hay mejoras posteriores a esta: deshaz primero la última.', 409, { code: 'later_improvements' });
+    }
+  }
   return serialForAgent(slug, agentId, async () => {
     const props = proposalsDb(slug); const p = props.get(id);
     if (!p || p.agentId !== agentId) throw err('Propuesta no encontrada', 404);
