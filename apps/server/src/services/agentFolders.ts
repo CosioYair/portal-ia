@@ -1,10 +1,10 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { PORTABLE_AGENT_SCHEMA, PORTABLE_LIMITS, allowedPortablePath, baseSkillsFor, buildDefaultInstructions, definitionToFiles, diffFiles, filesToDefinition, findSecret, isBaseSkill, normalizeText, slugify, toolCapabilities } from '@portal-ia/domain';
-import type { Agent, HarnessId, Lesson, MemoryEntry, PortableAgentDefinition, PortableFiles, PortableKnowledge, PortableSkill, ToolCapability } from '@portal-ia/domain';
+import { PORTABLE_AGENT_SCHEMA, PORTABLE_LIMITS, allowedPortablePath, baseSkillsFor, buildDefaultInstructions, contextScopeFromPortable, contextScopeLabel, contextScopeOptions, contextScopeToPortable, definitionToFiles, describeContextScope, diffFiles, filesToDefinition, findSecret, isBaseSkill, normalizeText, slugify, toolCapabilities } from '@portal-ia/domain';
+import type { Agent, AgentContextScope, HarnessId, Lesson, MemoryEntry, PortableAgentDefinition, PortableFiles, PortableKnowledge, PortableSkill, ToolCapability } from '@portal-ia/domain';
 import { config } from '../config.ts';
-import { agentsRepo, processesRepo, workspaceDb, workspaceDbPath } from '../db/workspace.ts';
+import { agentsRepo, contextScopeMigrationNote, processesRepo, projectsRepo, workspaceDb, workspaceDbPath } from '../db/workspace.ts';
 import type { SandboxStatus } from './sandbox.ts';
 import { changed } from './live.ts';
 import { monotonicNow } from '../clock.ts';
@@ -128,10 +128,90 @@ export function reportsToName(slug: string, a: Agent): string {
 
 /** AGENTS.md por defecto con los datos actuales del agente (sin IA ni IO salvo leer la fila; no se inyecta en los prompts). */
 export function agentDefaultInstructions(slug: string, a: Agent): string {
+  // EN-014: sin ámbito, el texto es exactamente el de antes (la huella no cambia y no aparecen revisiones de más).
+  const scope = contextScopeOf(slug, a);
   return buildDefaultInstructions({
     name: a.config.name, role: a.template.role, specialization: a.config.specialization, responsibilities: a.config.responsibilities ?? [],
-    reportsTo: reportsToName(slug, a), tools: grantedTools(a), mark: DEFAULT_INSTRUCTIONS_MARK
+    reportsTo: reportsToName(slug, a), tools: grantedTools(a), mark: DEFAULT_INSTRUCTIONS_MARK,
+    ...(scope ? {
+      contextScope: scope, companyName: scope.company ? companyNameOf(slug) : null,
+      projectName: scope.project?.name ?? null, projectGoals: scope.project ? projectGoalsOf(slug, scope.project.id) : []
+    } : {})
   });
+}
+
+// ---------------------------------------------------------------- EN-014 · Ámbito del agente (contexto, no permisos)
+
+/** Quién da el nombre legible de la empresa de un espacio (lo registra el arranque); sin él se escribe «la empresa». */
+let companyNameResolver: ((slug: string) => string | null | undefined) | null = null;
+export function setCompanyNameResolver(fn: ((slug: string) => string | null | undefined) | null) { companyNameResolver = fn; }
+export function companyNameOf(slug: string): string | null {
+  try { const n = companyNameResolver?.(slug); return n && n.trim() ? n.trim() : null; } catch { return null; }
+}
+
+type ProjectRef = { id: string; name: string };
+/** Proyectos del espacio (id y nombre). Si no se pueden leer, lista vacía: el ámbito nunca impide cargar un agente. */
+export function projectsOf(slug: string): ProjectRef[] {
+  try {
+    const repo = projectsRepo(slug) as unknown as { list?: () => { id: string; name: string }[] };
+    return typeof repo.list === 'function' ? repo.list().map(p => ({ id: p.id, name: p.name })) : [];
+  } catch { return []; }
+}
+function projectGoalsOf(slug: string, projectId: string): string[] {
+  try {
+    const repo = projectsRepo(slug) as unknown as { objectives?: (id: string) => { text?: unknown }[] };
+    return typeof repo.objectives === 'function' ? repo.objectives(projectId).map(o => (typeof o.text === 'string' ? o.text : '')).filter(Boolean) : [];
+  } catch { return []; }
+}
+
+/** Ámbito vigente del agente con el nombre actual de su proyecto (si se renombró). Si el proyecto ya no existe, se conserva el nombre guardado. */
+export function contextScopeOf(slug: string, a: Agent): AgentContextScope | null {
+  const s = a.contextScope ?? null;
+  if (!s || !contextScopeOptions(s).length) return null;
+  if (!s.project) return s;
+  const cur = projectsOf(slug).find(p => p.id === s.project!.id);
+  return cur && cur.name !== s.project.name ? { ...s, project: { id: cur.id, name: cur.name } } : s;
+}
+
+/** Ámbito para un ZIP o carpeta que no lo declara: el del agente existente o, si es nuevo, solo General. */
+export const GENERAL_ONLY_SCOPE: AgentContextScope = { project: null, company: false, general: true };
+
+export interface ImportScopePreview { declared: boolean; contextScope: AgentContextScope; label: string; lines: string[]; projectMissing: boolean; warning: string | null }
+
+/**
+ * Vista previa del ámbito de unos archivos importados (sin IA ni escritura). Si es Proyecto de un proyecto que no existe
+ * en este Portal, avisa sin bloquear. Si no lo declaran, se informa qué ámbito quedará.
+ */
+export function importScopePreview(slug: string, files: PortableFiles, existing?: Agent | null): ImportScopePreview {
+  const def = filesToDefinition(files).definition;
+  const portable = def?.manifest.contextScope;
+  const company = companyNameOf(slug);
+  if (portable && portable.options.length) {
+    const { scope, projectMissing } = contextScopeFromPortable(portable, projectsOf(slug));
+    return {
+      declared: true, contextScope: scope, label: contextScopeLabel(scope), lines: describeContextScope(scope, { company, project: scope.project?.name ?? portable.projectName ?? null }),
+      projectMissing,
+      warning: projectMissing ? `El agente está especializado en el proyecto «${portable.projectName ?? 'sin nombre'}», que no existe en este Portal. Puedes importarlo igual; elige su proyecto después en Configuración.` : null
+    };
+  }
+  const kept = existing ? contextScopeOf(slug, existing) : null;
+  const scope = kept ?? GENERAL_ONLY_SCOPE;
+  return {
+    declared: false, contextScope: scope, label: contextScopeLabel(scope), lines: describeContextScope(scope, { company, project: scope.project?.name ?? null }), projectMissing: false,
+    warning: kept ? 'El paquete no declara ámbito: el agente conserva el que ya tiene.' : 'El paquete no declara ámbito: el agente quedará como General.'
+  };
+}
+
+/**
+ * Aplica a la fila el ámbito de unos archivos importados. Si lo declaran, ese; si no, el agente existente conserva el suyo y
+ * uno nuevo queda General. Solo escribe el ámbito: no toca herramientas, permisos, arnés ni memoria.
+ */
+export function applyImportedContextScope(slug: string, agentId: string, files: PortableFiles, isNew: boolean): AgentContextScope | null {
+  const agents = agentsRepo(slug); const a = agents.get(agentId); if (!a) return null;
+  const pv = importScopePreview(slug, files, isNew ? null : a);
+  if (!pv.declared && !isNew) return a.contextScope ?? null;
+  agents.setContextScope(agentId, pv.contextScope);
+  return pv.contextScope;
 }
 
 /** El arnés de la carpeta: el backend concedido en la base (la API cuenta como «api»). */
@@ -153,15 +233,20 @@ export function definitionFor(slug: string, a: Agent, extras: AgentExtras): Port
   const tools = grantedTools(a);
   // EN-013: unas instrucciones por defecto (con la marca, o vacías) se regeneran con los datos actuales; las propias no se tocan.
   const instructions = hasOwnInstructions(extras.instructions) ? extras.instructions : agentDefaultInstructions(slug, a);
+  // EN-014: el ámbito va en agent.yaml (context_scope) y decide el contexto de las habilidades base; no concede nada.
+  // Los nombres de empresa y proyecto solo se escriben si su opción está marcada.
+  const scope = contextScopeOf(slug, a);
+  const portableScope = scope ? contextScopeToPortable(scope, scope.company ? companyNameOf(slug) : null) : undefined;
   return {
     manifest: {
       schema: PORTABLE_AGENT_SCHEMA, id: a.id, name: a.config.name, role: a.template.role, department: dep?.slug ?? null, initials: a.template.initials,
       summary: a.config.specialization, responsibilities: a.config.responsibilities, deliverables: extras.deliverables, capabilities: a.config.capabilities ?? [],
       harness: { preferred: harnessOf(a), model: a.config.model, effort: a.config.effort },
       permissions: { tools, autonomy: extras.autonomy },
-      createdAt: a.createdAt
+      createdAt: a.createdAt,
+      ...(portableScope ? { contextScope: portableScope } : {})
     },
-    instructions, skills: [...baseSkillsFor(tools), ...extras.skills.filter(s => !isBaseSkill(s.slug))], memory: memoryOf(slug, a.id), knowledge: extras.knowledge, changelog: extras.changelog
+    instructions, skills: [...baseSkillsFor(tools, scope), ...extras.skills.filter(s => !isBaseSkill(s.slug))], memory: memoryOf(slug, a.id), knowledge: extras.knowledge, changelog: extras.changelog
   };
 }
 
@@ -342,9 +427,31 @@ export async function syncAgentFolder(slug: string, a: Agent, note = 'Sincroniza
   return { created, revision: await writeRevision(slug, a.id, files, 'portal', note, 'portal'), pendingExternal: false };
 }
 
+/**
+ * EN-014 · Migración idempotente del ámbito: los agentes sin ámbito quedan Empresa + General, con una revisión «portal»
+ * por agente (syncAgentFolder solo la crea si cambian los archivos). La segunda pasada no cambia nada. No toca el arnés,
+ * los permisos, la memoria ni el nombre de la carpeta.
+ */
+export async function migrateAgentContextScopes(slug: string, companyName?: string | null): Promise<{ migrated: string[]; failed: { agentId: string; error: string }[] }> {
+  const company = (companyName ?? '').trim() || companyNameOf(slug) || 'la empresa';
+  const migrated: string[] = []; const failed: { agentId: string; error: string }[] = [];
+  let changedRows: Agent[] = [];
+  try { changedRows = agentsRepo(slug).migrateContextScope(); } catch (e) { return { migrated, failed: [{ agentId: '*', error: (e as Error).message }] }; }
+  for (const row of changedRows) {
+    try {
+      const fresh = agentsRepo(slug).get(row.id) ?? row;
+      await syncAgentFolder(slug, fresh, contextScopeMigrationNote(company));
+      migrated.push(row.id);
+    } catch (e) { failed.push({ agentId: row.id, error: (e as Error).message }); }
+  }
+  return { migrated, failed };
+}
+
 /** Migración al arrancar: todos los agentes del espacio con su carpeta. Idempotente; un error en uno no para los demás. */
-export async function ensureAgentFolders(slug: string): Promise<{ created: number; failed: { agentId: string; error: string }[] }> {
+export async function ensureAgentFolders(slug: string, opts: { companyName?: string | null } = {}): Promise<{ created: number; failed: { agentId: string; error: string }[] }> {
   let created = 0; const failed: { agentId: string; error: string }[] = [];
+  // EN-014: primero el ámbito, para que cada agente reciba una sola revisión «portal» con su nota clara.
+  failed.push(...(await migrateAgentContextScopes(slug, opts.companyName)).failed);
   for (const a of agentsRepo(slug).list()) {
     try { if ((await syncAgentFolder(slug, a, 'Habilidades base según herramientas concedidas')).created) created++; } catch (e) { failed.push({ agentId: a.id, error: (e as Error).message }); }
   }
@@ -488,10 +595,18 @@ export async function writeImportedRevision(slug: string, agentId: string, files
     if (d.manifest.id && d.manifest.id !== agentId) throw Object.assign(new Error('El agente del ZIP no es este agente (su id es otro).'), { statusCode: 400 });
     const current = adoptedExtras(slug, a);
     return withRowRollback(slug, agentId, onRow, rowPatchOf(d), () => {
-      const fresh = agentsRepo(slug).get(agentId)!;
-      const out = definitionToFiles(definitionFor(slug, fresh, { instructions: d.instructions, skills: d.skills, memory: [], knowledge: d.knowledge, deliverables: d.manifest.deliverables, autonomy: current.autonomy, changelog: d.changelog }));
-      const revision = writeRevisionUnlocked(slug, agentId, out, 'import', note, by);
-      return { revision, previousN, created: revision.n !== previousN };
+      // EN-014: si el ZIP declara ámbito se adopta; un ZIP antiguo sin ámbito conserva el del agente.
+      const prevScope = a.contextScope ?? null;
+      applyImportedContextScope(slug, agentId, files, false);
+      try {
+        const fresh = agentsRepo(slug).get(agentId)!;
+        const out = definitionToFiles(definitionFor(slug, fresh, { instructions: d.instructions, skills: d.skills, memory: [], knowledge: d.knowledge, deliverables: d.manifest.deliverables, autonomy: current.autonomy, changelog: d.changelog }));
+        const revision = writeRevisionUnlocked(slug, agentId, out, 'import', note, by);
+        return { revision, previousN, created: revision.n !== previousN };
+      } catch (e) {
+        if (prevScope) { try { agentsRepo(slug).setContextScope(agentId, prevScope); } catch { /* se informa el error original */ } }
+        throw e;
+      }
     });
   });
 }
@@ -584,4 +699,36 @@ export function agentLearning(slug: string, agentId: string): { verified: Memory
 export function registerAgentFolder(slug: string, a: Agent): string {
   const repo = agentFoldersRepo(slug); const f = repo.folderOf(a.id); if (f) return f.folder;
   const folder = freeFolderName(slug, a); repo.register(a.id, folder); return folder;
+}
+
+/**
+ * EN-014 · Valida un ámbito pedido por la interfaz: al menos una opción. Con Proyecto, el proyecto tiene que existir en este
+ * Portal, salvo que sea el que el agente ya tiene (se conserva aunque se haya borrado).
+ */
+export function validateContextScope(slug: string, raw: { project?: { id: string } | null; company?: boolean; general?: boolean }, current?: AgentContextScope | null): AgentContextScope {
+  let project: ProjectRef | null = null;
+  if (raw.project?.id) {
+    const found = projectsOf(slug).find(p => p.id === raw.project!.id);
+    if (found) project = found;
+    else if (current?.project?.id === raw.project.id) project = current.project;
+    else throw Object.assign(new Error('El proyecto elegido no existe en este Portal.'), { statusCode: 400 });
+  }
+  const scope: AgentContextScope = { project, company: raw.company === true, general: raw.general === true };
+  if (!contextScopeOptions(scope).length) throw Object.assign(new Error('Elige al menos una opción de ámbito (Proyecto, Empresa o General).'), { statusCode: 400 });
+  return scope;
+}
+
+/**
+ * EN-014 · Cambia el ámbito de un agente: guarda la fila y regenera la carpeta (AGENTS.md por defecto, habilidades base y
+ * agent.yaml), con una revisión «portal». Sin IA y sin costo; no cambia herramientas, permisos, arnés ni memoria. Si la
+ * carpeta tiene cambios externos sin revisar, el ámbito se guarda y la carpeta se actualiza cuando se resuelvan.
+ */
+export async function updateContextScope(slug: string, agentId: string, raw: { project?: { id: string } | null; company?: boolean; general?: boolean }): Promise<{ agent: Agent; revision: AgentRevision | null; pendingExternal: boolean }> {
+  const agents = agentsRepo(slug); const a = agents.get(agentId);
+  if (!a) throw Object.assign(new Error('Agente no encontrado'), { statusCode: 404 });
+  const scope = validateContextScope(slug, raw, a.contextScope ?? null);
+  const agent = agents.setContextScope(agentId, scope);
+  const r = await syncAgentFolder(slug, agent, `Ámbito: ${contextScopeLabel(scope)} (no cambia herramientas, permisos, arnés ni memoria)`);
+  changed({ ws: slug, entity: 'agent', id: agentId });
+  return { agent, revision: r.revision, pendingExternal: r.pendingExternal };
 }

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import type { Agent, AgentConfig, ClaudeCodeStatusView, ExecutionBackend, ProviderId } from '@portal-ia/domain';
-import { backendLabel, CAPABILITIES, KNOWLEDGE, TOOLS, EFFORT_LEVELS, effortLevelsFor, clampEffort } from '@portal-ia/domain';
+import type { Agent, AgentConfig, AgentContextScope, ClaudeCodeStatusView, ExecutionBackend, ProviderId } from '@portal-ia/domain';
+import { backendLabel, CAPABILITIES, KNOWLEDGE, TOOLS, EFFORT_LEVELS, effortLevelsFor, clampEffort, contextScopeLabel } from '@portal-ia/domain';
+import { ContextScopeFields, scopeIsEmpty } from './AgentWizard.tsx';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS, KNOWLEDGE_LABELS, TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
@@ -33,6 +34,10 @@ export function AgentDetail() {
   const [tplTo, setTplTo] = useState<string>('');
   const [tplBusy, setTplBusy] = useState(false);
   const loadTpl = (to?: string) => { if (agentId) api.agentTemplate(ws.slug, agentId, to).then(setTpl).catch(() => setTpl(null)); };
+  // EN-014 · Ámbito: se guarda aparte de la configuración (no toca herramientas, permisos ni costo).
+  const [scopePick, setScopePick] = useState<AgentContextScope | null>(null);
+  const [scopeBusy, setScopeBusy] = useState(false);
+  useEffect(() => { setScopePick(null); }, [agentId]);
   useEffect(() => { setTplTo(''); loadTpl(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, ws.slug]);
   const changeVersion = async (v: string) => { if (!agentId) return; setTplBusy(true); try { await api.setAgentTemplateVersion(ws.slug, agentId, v); flash(`Agente ahora sigue ${v}`); setTplTo(''); loadTpl(); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setTplBusy(false); } };
@@ -80,6 +85,19 @@ export function AgentDetail() {
     if (backendPick !== 'api' && !confirm(`¿Autorizas que «${agent.config.name}» ejecute sus pasos con ${backendPick === 'claude-code' ? 'Claude Code gestionado por el Portal' : 'tu consola de Claude Code'} (tu suscripción de Claude)?`)) return;
     try { await api.setAgentBackend(ws.slug, agent.id, backendPick); await load(); setBackendPick(null); flash(`Backend de ${agent.config.name}: ${backendLabel(backendPick, cc?.detection?.billing, agent.config.provider)}`); }
     catch (e: any) { flash(e.message, 'err'); }
+  };
+  const currentScope: AgentContextScope | null = agent.contextScope ?? null;
+  const scopeValue: AgentContextScope = scopePick ?? currentScope ?? { project: null, company: false, general: false };
+  const scopeDirty = !!scopePick && JSON.stringify(scopePick) !== JSON.stringify(currentScope);
+  const scopeProjects = status.project ? [{ id: status.project.id, name: status.project.name }] : [];
+  const companyName = (ws as { name?: string }).name ?? null;
+  const saveScope = async () => {
+    if (!scopePick || scopeIsEmpty(scopePick)) return;
+    const scopeApi = api as unknown as { setAgentContextScope?: (slug: string, id: string, scope: AgentContextScope) => Promise<unknown> };
+    if (!scopeApi.setAgentContextScope) { flash('Esta versión del Portal todavía no puede guardar el ámbito.', 'err'); return; }
+    setScopeBusy(true);
+    try { await scopeApi.setAgentContextScope(ws.slug, agent.id, scopePick); await load(); setScopePick(null); flash(`Ámbito de ${agent.config.name}: ${contextScopeLabel(scopePick)}. Sus herramientas y permisos no cambian.`); }
+    catch (e: any) { flash(e.message, 'err'); } finally { setScopeBusy(false); }
   };
   const changeProvider = (pid: ProviderId) => {
     const p = providers.find(x => x.id === pid); if (!p) return;
@@ -253,6 +271,16 @@ export function AgentDetail() {
                   <label htmlFor={`tool-${t.id}`} style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2, cursor: 'pointer', minWidth: 0 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{TOOL_LABELS[t.id].name}</span><span className="small muted">{TOOL_LABELS[t.id].desc}</span></label>
                   <Chip tone={t.risk === 'auth' ? 'warn' : ''} xs>{t.risk === 'auth' ? 'requiere autorización' : 'local'}</Chip></div>)}
                 <div style={{ marginTop: 14 }}><Notice kind="warn">Las herramientas marcadas con <strong>«requiere autorización»</strong> nunca se ejecutan de forma autónoma: cada uso se detiene hasta que lo apruebes, aunque el agente esté activo. Habilitarlas aquí solo las añade a su configuración.</Notice></div>
+              </div></section>
+
+            <section className="card" style={{ gridColumn: '1 / -1' }}><div className="card-h"><div><div className="h3">Ámbito</div><div className="small muted">Decide, sin IA, el contexto de sus instrucciones por defecto, sus habilidades base y su paquete exportado. No limita dónde trabaja en el Portal.</div></div><span className="small muted">{currentScope ? contextScopeLabel(currentScope) : 'sin definir'}</span></div>
+              <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <ContextScopeFields value={scopeValue} onChange={setScopePick} projects={scopeProjects} companyName={companyName} idPrefix="cfg-scope" />
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <button className="btn btn-primary btn-sm" disabled={!scopeDirty || scopeBusy || scopeIsEmpty(scopeValue)} onClick={() => void saveScope()}>{scopeBusy ? <span className="spin spin-light" /> : null}Guardar ámbito</button>
+                  {scopeDirty && <button className="btn btn-ghost btn-sm" disabled={scopeBusy} onClick={() => setScopePick(null)}>Descartar</button>}
+                  {scopeDirty && scopeIsEmpty(scopeValue) && <span className="small muted">Elige al menos una opción para guardar.</span>}
+                </div>
               </div></section>
 
             <section className="card"><div className="card-h"><div className="h3">Acceso a conocimiento</div><span className="small muted">{knowOn} de {KNOWLEDGE.length}</span></div>
