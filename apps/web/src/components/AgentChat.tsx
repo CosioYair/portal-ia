@@ -201,7 +201,7 @@ const ACTION_TITLE: Record<AgentAction['kind'], string> = {
 const ACTION_STATUS: Record<AgentAction['status'], { text: string; tone: '' | 'ok' | 'warn' | 'err' | 'accent' }> = {
   proposed: { text: 'Espera tu confirmación', tone: 'warn' }, running: { text: 'En curso…', tone: 'accent' }, done: { text: 'Hecho', tone: 'ok' }, failed: { text: 'Falló', tone: 'err' }, dismissed: { text: 'Descartada', tone: '' }
 };
-const PROPOSAL_STATE: Record<string, string> = { proposed: 'propuesta: revísala y apruébala en Mejoras', approved: 'aprobada', applied: 'aplicada', rejected: 'rechazada', failed: 'no se pudo aplicar' };
+const PROPOSAL_STATE: Record<string, string> = { proposed: 'pendiente: se aplicará o archivará automáticamente', approved: 'aprobada', applied: 'aplicada', rejected: 'archivada', failed: 'no se pudo aplicar' };
 
 /**
  * Conteos de un lote para el chat: el denominador es `total` (o `detected` en registros antiguos), igual que en
@@ -260,7 +260,7 @@ function ActionCard({ slug, agentId, a, external, onDone }: { slug: string; agen
     : a.kind === 'corregir_documento' ? 'Creará una nueva versión del documento con esta corrección (2 consultas a tu suscripción y el programa del agente en este equipo). Las versiones anteriores no se tocan.'
     : a.kind === 'mejorar_agente' ? (external ? 'Aplica al momento el cambio en sus instrucciones, habilidades, scripts o memoria con tus palabras (una consulta a tu suscripción). Guarda copia y lo anota en CAMBIOS.md; puedes deshacerlo. Nunca toca permisos, arnés, presupuesto ni el código del Portal.' : 'Aplica al momento el aprendizaje en su Memoria (sin consultas); puedes deshacerlo.')
     : 'Creará una historia en el backlog del Portal con tus palabras y la evidencia; la investiga y la hace el equipo de desarrollo del Portal con su propio proceso y tu aprobación. Este agente no toca el código del Portal.';
-  const linkText = a.kind === 'mejorar_portal' ? 'Ver en el backlog' : a.kind === 'mejorar_agente' ? (a.link?.endsWith('/memoria') ? 'Ver en Memoria' : 'Ver en Mejoras') : 'Ver en Documentos';
+  const linkText = a.kind === 'mejorar_portal' ? 'Ver en el backlog' : a.kind === 'mejorar_agente' ? 'Ver en Memoria' : 'Ver en Documentos';
   return <div ref={box} tabIndex={-1} className="card action-card" role="group" aria-label={ACTION_TITLE[a.kind]}>
     <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}><strong className="small">{ACTION_TITLE[a.kind]}</strong><Chip xs tone={st.tone}>{st.text}</Chip>
       {a.kind === 'mejorar_portal' && <Chip xs>la hace el equipo de desarrollo del Portal, no este agente</Chip>}{a.payload.reasignada && <Chip xs>reasignada por ti</Chip>}</div>

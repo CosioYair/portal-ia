@@ -91,13 +91,13 @@ function RemovedHistory({ slug, agentId }: { slug: string; agentId: string }) {
 }
 
 /**
- * Agentes externos (referencia gestionada): importar sin copiar, banco de documentos, origen e integración, mejoras.
+ * Agentes externos (referencia gestionada): importar sin copiar, banco de documentos, origen e integración, automejoras (historial en Memoria).
  * La carpeta original es la fuente de verdad; todo lo que cambia sus archivos, ejecuta algo o gasta pide confirmación.
  */
 const GRANTS_TEXT: Record<keyof ExternalGrants, { label: string; hint: string }> = {
   writeDocuments: { label: 'Guardar documentos en su carpeta', hint: 'Solo en «documentos/» y «bandeja-de-entrada/». Nunca reemplaza una versión anterior.' },
   runScripts: { label: 'Ejecutar los programas de sus habilidades en este equipo', hint: 'Solo los que ya revisaste (si cambian fuera del Portal, se bloquean hasta que los revises), sin acceso a otros programas y con tiempo límite. Ojo: no corren aislados del resto del equipo; usan tus permisos de usuario.' },
-  applyImprovements: { label: 'Aplicar a sus instrucciones y habilidades las mejoras que apruebes', hint: 'Solo cuando apruebas una propuesta concreta: antes guarda una copia en «configuracion/respaldos/», anota el cambio en CAMBIOS.md y siempre se puede volver atrás.' }
+  applyImprovements: { label: 'Puede automejorarse (instrucciones y habilidades)', hint: 'Cambia sus propias instrucciones y habilidades a partir de tu feedback o de un reintento. Antes guarda un respaldo en «configuracion/respaldos/» y anota el cambio en CAMBIOS.md. Cada cambio aparece en Memoria («Historial de automejoras») y se puede deshacer.' }
 };
 const NO_GRANTS: ExternalGrants = { writeDocuments: false, runScripts: false, applyImprovements: false };
 
@@ -214,7 +214,7 @@ const METRIC_TEXT: Record<string, (v: unknown) => string> = {
   imagenes_de_pagina_completa: v => `Imágenes de página completa: ${v}`, tablas: v => `Tablas: ${v}`, diferencia_visual_media: v => `Diferencia visual media: ${pct(v)}`, exit_code: v => `Código de salida del programa: ${v}`, qa_error: v => `Error de la comprobación: ${v}`
 };
 
-export function DocumentsTab({ slug, p, onChanged, onTab }: { slug: string; p: Panel; onChanged: () => void; onTab: (t: 'origen' | 'mejoras') => void }) {
+export function DocumentsTab({ slug, p, onChanged, onTab }: { slug: string; p: Panel; onChanged: () => void; onTab: (t: 'origen' | 'memoria') => void }) {
   const { flash } = useApp();
   const [data, setData] = useState<Awaited<ReturnType<typeof osApi.documents>> | null>(null); const [src, setSrc] = useState<SourceStatus | null>(null);
   const [error, setError] = useState<string | null>(null); const [busy, setBusy] = useState(false); const [open, setOpen] = useState<string | null>(null);
@@ -263,7 +263,7 @@ export function DocumentsTab({ slug, p, onChanged, onTab }: { slug: string; p: P
   const L = data.limits; const loose = data.jobs.filter(j => !j.batchId); const jobsById = new Map(data.jobs.map(j => [j.id, j]));
   const jobCard = (j: DocumentJob) => <JobCard key={j.id} slug={slug} agentId={p.agent.id} job={j} open={open === j.id} onToggle={() => setOpen(open === j.id ? null : j.id)} busy={busy || running} canRun={canRun}
     onProcess={fb => act(() => osApi.processDocument(slug, p.agent.id, j.id, fb), fb ? 'Generando una nueva versión con tu corrección' : 'Procesando: el agente decide, el Portal ejecuta y comprueba')}
-    onFeedback={text => act(() => osApi.sendFeedback(slug, p.agent.id, j.id, text), 'Feedback clasificado: revísalo en «Mejoras»').then(ok => { if (ok) onTab('mejoras'); return ok; })} />;
+    onFeedback={text => act(() => osApi.sendFeedback(slug, p.agent.id, j.id, text), 'Feedback clasificado: si cambia su forma de trabajar, la automejora queda en Memoria').then(ok => { if (ok) onTab('memoria'); return ok; })} />;
   const dropOk = !!src.grants.writeDocuments;
   return <>
     {error && <Notice kind="err">{error}</Notice>}
@@ -504,7 +504,7 @@ export function OriginTab({ slug, p, onChanged }: { slug: string; p: Panel; onCh
   }, [s, busy]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!s || !grants) return error ? <Notice kind="err">{error}</Notice> : <Spinner />;
   const changed = JSON.stringify(grants) !== JSON.stringify(s.grants);
-  const restoreBlock = s.changes.length > 0 ? 'Primero revisa los cambios hechos fuera del Portal.' : !s.grants.applyImprovements ? 'Necesita el permiso de aplicar mejoras.' : null;
+  const restoreBlock = s.changes.length > 0 ? 'Primero revisa los cambios hechos fuera del Portal.' : !s.grants.applyImprovements ? 'Necesita el permiso de automejora.' : null;
   return <>
     {error && <Notice kind="err">{error}</Notice>}
     <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }} aria-labelledby="origin-bundle-h">
@@ -559,9 +559,12 @@ export function OriginTab({ slug, p, onChanged }: { slug: string; p: Panel; onCh
   </>;
 }
 
-// ---------------------------------------------------------------- Mejoras: propuestas del agente a partir de tu feedback
+// ---------------------------------------------------------------- HU-181: lista heredada de propuestas (sin uso)
+// La pestaña Mejoras se retiró: ninguna pantalla monta esta lista. Las automejoras se ven y se deshacen en Memoria
+// («Historial de automejoras»). Las propuestas pendientes las resuelve el servidor (se aplican o se archivan con motivo).
 
-export function ImprovementsTab({ slug, p, onChanged, onTab }: { slug: string; p: Panel; onChanged: () => void; onTab: (t: 'origen' | 'documentos') => void }) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function LegacyProposalList({ slug, p, onChanged, onTab }: { slug: string; p: Panel; onChanged: () => void; onTab: (t: 'origen' | 'documentos') => void }) {
   const { flash } = useApp();
   const [list, setList] = useState<ImprovementProposal[] | null>(null); const [src, setSrc] = useState<SourceStatus | null>(null);
   const [error, setError] = useState<string | null>(null); const [busy, setBusy] = useState(false); const [confirm, setConfirm] = useState<{ id: string; what: 'apply' | 'reject' } | null>(null);
@@ -570,7 +573,7 @@ export function ImprovementsTab({ slug, p, onChanged, onTab }: { slug: string; p
   useLive(c => c.ws === slug && c.entity === 'agent' && c.id === p.agent.id && c.kind !== 'progress', () => void load(), { minMs: 1500 });
   const act = async (fn: () => Promise<unknown>, ok: string) => { setBusy(true); setError(null); try { await fn(); flash(ok); await load(); onChanged(); } catch (e: any) { setError(e.message); } finally { setBusy(false); } };
   if (!list || !src) return error ? <Notice kind="err">{error}</Notice> : <Spinner />;
-  const blocked = !src.grants.applyImprovements ? 'Falta el permiso de aplicar mejoras (en Origen).' : src.changes.length > 0 ? 'Su carpeta tiene cambios hechos fuera del Portal: revísalos primero en Origen.' : null;
+  const blocked = !src.grants.applyImprovements ? 'Necesita el permiso de automejora (en Origen).' : src.changes.length > 0 ? 'Su carpeta tiene cambios hechos fuera del Portal: revísalos primero en Origen.' : null;
   return <>
     {error && <Notice kind="err">{error}</Notice>}
     <p className="small muted">Aquí llega tu feedback ya clasificado. Si debe cambiar su forma de trabajar, el agente propone cambios concretos a su habilidad, instrucciones o memoria; nada se aplica sin tu aprobación. Al aplicarse, el Portal guarda una copia de lo que había, anota el cambio en CAMBIOS.md y siempre se puede volver atrás (Origen → Versiones).</p>

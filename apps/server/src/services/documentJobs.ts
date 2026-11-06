@@ -13,7 +13,7 @@ import { agentsRepo, workspaceDb } from '../db/workspace.ts';
 import { agentBackend, agentCaller } from './claudeCode/backend.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { reconcileWithDisk, removalsById, removedIds } from './documentRemoval.ts';
-import { backupFiles, DEPS_KEY, diffSnapshots, identityZones, markEvaluating, restoreSourceRevision, safePath, safeWrite, scanExternal, sha256Text, snapshotHash, sourcesRepo, type SnapshotFiles } from './externalAgents.ts';
+import { backupFiles, DEPS_KEY, diffSnapshots, identityZones, markEvaluating, pendingExternalChanges, restoreSourceRevision, safePath, safeWrite, scanExternal, sha256Text, snapshotHash, sourcesRepo, type SnapshotFiles } from './externalAgents.ts';
 import { recordAgentEvent } from './agentEvents.ts';
 import { changed } from './live.ts';
 import { monotonicNow } from '../clock.ts';
@@ -671,6 +671,126 @@ export function serialForAgent<T>(slug: string, agentId: string, fn: () => Promi
   return next;
 }
 
+// ---------------------------------------------------------------- HU-181: historial de automejoras (sin pestaña Mejoras)
+
+/** Origen visible de una automejora: lo que viene de un reintento verificado es «reintento»; todo lo demás, «chat». */
+export type ImprovementOriginLabel = 'chat' | 'reintento';
+export function originLabel(origin: string | null | undefined): ImprovementOriginLabel {
+  return origin === 'retry' ? 'reintento' : 'chat';
+}
+
+/** Prefijo del motivo con el que se archivan las propuestas pendientes al retirar la pestaña Mejoras. */
+export const LEGACY_ARCHIVE_PREFIX = 'archivada al retirar Mejoras';
+
+export interface ImprovementHistoryItem {
+  id: string;
+  /** Cuándo se aplicó (o se archivó). */
+  at: string;
+  origin: ImprovementOriginLabel;
+  files: string[];
+  summary: string;
+  /** Revisión adoptada sobre la que se propuso, si consta. */
+  revisionBefore: number | null;
+  /** El registro no guarda la revisión resultante: null. */
+  revisionAfter: number | null;
+  status: 'applied' | 'undone' | 'archived';
+  /** Motivo visible (solo en las archivadas). */
+  reason: string | null;
+  autoApplied: boolean;
+  undone: boolean;
+  /** Solo la última aplicada se puede deshacer (coherente con el 409 later_improvements). */
+  canUndo: boolean;
+}
+
+/**
+ * Historial de automejoras de un agente, de la más reciente a la más antigua: las aplicadas, las deshechas y las
+ * pendientes antiguas archivadas al retirar Mejoras (con su motivo). Las inversas que crea Deshacer (origin='undo')
+ * no aparecen como cambios propios: la original se muestra como deshecha. Sin IA y sin escrituras.
+ */
+export function improvementHistory(slug: string, agentId: string): ImprovementHistoryItem[] {
+  const db = ensure(slug);
+  const rows = db.prepare(`SELECT * FROM improvement_proposals WHERE agent_id = ? AND COALESCE(origin, 'feedback') <> 'undo'
+    AND (state IN ('applied', 'undone') OR (state = 'rejected' AND error LIKE ?))
+    ORDER BY COALESCE(applied_at, decided_at, created_at) DESC, id DESC LIMIT 200`).all(agentId, `${LEGACY_ARCHIVE_PREFIX}%`) as any[];
+  let undoableTaken = false;
+  const out: ImprovementHistoryItem[] = [];
+  for (const r of rows) {
+    const p = mapProposal(r);
+    const state = String(p.state);
+    const status: ImprovementHistoryItem['status'] = state === 'applied' ? 'applied' : state === 'undone' ? 'undone' : 'archived';
+    const canUndo = status === 'applied' && !undoableTaken;
+    if (status === 'applied') undoableTaken = true;
+    const files = [...new Set((p.changes ?? []).map((c: ProposalChange) => String(c.path)))];
+    const item: ImprovementHistoryItem = {
+      id: p.id,
+      at: String(p.appliedAt ?? p.decidedAt ?? p.createdAt),
+      origin: originLabel(p.origin),
+      files,
+      summary: String(p.summary ?? ''),
+      revisionBefore: typeof p.baseRevision === 'number' ? p.baseRevision : null,
+      revisionAfter: null,
+      status,
+      reason: status === 'archived' ? (p.error ?? null) : null,
+      autoApplied: !!p.autoApplied,
+      undone: status === 'undone',
+      canUndo
+    };
+    out.push(item);
+  }
+  return out;
+}
+
+export interface SettleResult { applied: string[]; archived: { id: string; reason: string }[] }
+
+/**
+ * Resuelve las propuestas que quedaron pendientes ('proposed') al retirar la pestaña Mejoras, sin IA. Cada una se aplica
+ * por el camino normal (applyProposal: respaldo, CAMBIOS.md, revisión nueva y registro) si el agente puede
+ * automejorarse (permiso applyImprovements) y su carpeta no tiene cambios externos sin revisar. Si no, se archiva
+ * ('rejected') con un motivo legible. Va en la cola en serie del agente y es idempotente: una segunda llamada no
+ * encuentra pendientes y no cambia nada. Nunca lanza.
+ */
+export function settleLegacyProposals(slug: string, agentId: string): Promise<SettleResult> {
+  return serialForAgent(slug, agentId, async (): Promise<SettleResult> => {
+    const result: SettleResult = { applied: [], archived: [] };
+    let pending: ImprovementProposal[] = [];
+    try {
+      const db = ensure(slug);
+      pending = (db.prepare(`SELECT * FROM improvement_proposals WHERE agent_id = ? AND state = 'proposed' ORDER BY created_at, id`).all(agentId) as any[]).map(mapProposal);
+    } catch { return result; }
+    const archive = (id: string, why: string) => {
+      const reason = `${LEGACY_ARCHIVE_PREFIX}: ${why}`.slice(0, 600);
+      try {
+        const r = ensure(slug).prepare(`UPDATE improvement_proposals SET state = 'rejected', decided_at = COALESCE(decided_at, ?), error = ? WHERE id = ? AND state IN ('proposed', 'approved', 'failed')`).run(now(), reason, id);
+        if (Number(r.changes) === 1) result.archived.push({ id, reason });
+      } catch { /* se intentará en la próxima carga */ }
+    };
+    for (const p of pending) {
+      let why: string | null = null;
+      try {
+        const s = sourcesRepo(slug).get(agentId);
+        if (!s) why = 'el agente ya no tiene su carpeta adoptada';
+        else if (!s.grants.applyImprovements) why = 'sin permiso de automejora';
+        else if (pendingExternalChanges(slug, agentId) > 0) why = 'cambios externos sin revisar';
+        else if (!p.changes?.length) why = 'ya no aplica (sin cambios que aplicar)';
+      } catch (e: any) { why = `no se pudo comprobar el agente (${String(e?.message ?? e).slice(0, 200)})`; }
+      if (!why) {
+        try {
+          await applyProposal(slug, agentId, p.id, { authorized: true, by: 'portal' });
+          result.applied.push(p.id);
+          continue;
+        } catch (e: any) {
+          why = e?.code === 'stale_proposal' ? 'ya no aplica (stale)' : `no se pudo aplicar (${String(e?.message ?? e).slice(0, 300)})`;
+        }
+      }
+      archive(p.id, why);
+    }
+    if (result.applied.length || result.archived.length) {
+      try { changed({ ws: slug, entity: 'agent', id: agentId, kind: 'progress' }); } catch { /* aviso opcional */ }
+    }
+    return result;
+  });
+}
+
 /**
  * Aprende de un reintento SOLO si la versión nueva pasó la QA del Portal (`v.passed === true`, doc_qa) y había un
  * diagnóstico del fallo anterior. Que el script termine sin error no basta. Guarda qué falló y qué plan lo resolvió
@@ -722,6 +842,20 @@ export async function undoProposal(slug: string, agentId: string, id: string, by
     const repo = sourcesRepo(slug); const s = repo.get(agentId);
     if (!s) throw err('El agente no tiene una carpeta adoptada.', 404);
     if (!s.grants.applyImprovements) throw err('Deshacer escribe en sus instrucciones y habilidades: concede antes «aplicar mejoras aprobadas».', 403);
+    // HU-181 · Solo se deshace la ÚLTIMA automejora aplicada (las inversas de Deshacer, origin='undo', no cuentan):
+    // con otra aplicada después, 409 later_improvements sin tocar nada. Tras el permiso: sin él, 403.
+    {
+      const t = ensure(slug).prepare(`SELECT state, applied_at FROM improvement_proposals WHERE id = ? AND agent_id = ?`).get(id, agentId) as any;
+      if (t && t.state === 'applied' && t.applied_at) {
+        const later = ensure(slug).prepare(`SELECT COUNT(*) AS n FROM improvement_proposals WHERE agent_id = ? AND id <> ? AND state = 'applied'
+          AND COALESCE(origin, 'feedback') <> 'undo' AND applied_at IS NOT NULL AND applied_at > ?`).get(agentId, id, t.applied_at) as any;
+        if (Number(later?.n ?? 0) > 0) {
+        // Primero el permiso (403), después el orden (409): sin «Puede automejorarse» no se deshace nada.
+        if (!sourceOr(slug, agentId).grants.applyImprovements) throw err('Concede antes a este agente «Puede automejorarse» para deshacer sus automejoras.', 403);
+        throw err('Hay mejoras posteriores a esta: deshaz primero la última.', 409, { code: 'later_improvements' });
+      }
+      }
+    }
     const files = repo.files(agentId) ?? {};
     const work: Record<string, string> = {};
     for (const c of p.changes) {

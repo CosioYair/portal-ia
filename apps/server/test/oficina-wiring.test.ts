@@ -41,7 +41,9 @@ test('panel del agente: seis pestañas con rol de pestaña, flechas del teclado 
   // En pantallas anchas va al lado: el contenido se aparta y nada enfocable queda debajo del panel.
   assert.match(panel, /document\.body\.classList\.add\('has-agent-panel'\)/); assert.match(read('system.css'), /body\.has-agent-panel \.content \{ padding-right:/);
   // Portal IA 2.0: cinco grupos; cada nombre antiguo de pestaña sigue valiendo en la ruta (abre su grupo).
-  assert.match(panel, /const GROUP_OF: Record<Tab, Group> = \{ chat: 'chat', trabajo: 'trabajo', documentos: 'trabajo', solicitudes: 'revisar', mejoras: 'revisar', memoria: 'memoria', configuracion: 'ajustes', archivos: 'ajustes', origen: 'ajustes' \};/);
+  // HU-181: Mejoras se retira del panel; …/mejoras es un alias que abre Memoria (no tiene grupo propio).
+  assert.match(panel, /const GROUP_OF: Record<Tab, Group> = \{ chat: 'chat', trabajo: 'trabajo', documentos: 'trabajo', solicitudes: 'revisar', memoria: 'memoria', configuracion: 'ajustes', archivos: 'ajustes', origen: 'ajustes' \};/);
+  assert.match(panel, /tab === 'mejoras' \? 'memoria'/);
   // Modal por debajo de 1280 px: foco atrapado (también Mayús+Tab desde el propio panel); Esc de otros diálogos no lo cierra.
   assert.match(panel, /if \(!modal \|\| e\.key !== 'Tab' \|\| !ref\.current\) return;/);
   assert.match(panel, /document\.activeElement === a \|\| document\.activeElement === ref\.current/);

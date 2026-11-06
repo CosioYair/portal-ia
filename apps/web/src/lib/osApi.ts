@@ -9,6 +9,15 @@ export interface OfficeAgent {
   department: string; departmentSlug: string; harness: ExecutionBackend; harnessLabel: string; model: string;
   state: OfficeState; activity: string | null; attention: { kind: string; label: string; processId?: string | null }[]; harnessIssue: string | null; hasFolder: boolean; custom: boolean;
   integration: IntegrationState | null;
+  /** HU-181 · Historial de automejoras (solo en el panel de un agente externo: panel.office.improvementHistory). */
+  improvementHistory?: ImprovementHistoryItem[];
+}
+/** HU-181 · Una automejora aplicada, deshecha o archivada (apps/server/src/services/documentJobs.ts). */
+export interface ImprovementHistoryItem {
+  id: string; at: string; origin: 'chat' | 'reintento'; files: string[]; summary: string;
+  revisionBefore: number | null; revisionAfter: number | null;
+  status: 'applied' | 'undone' | 'archived'; reason: string | null; autoApplied: boolean;
+  undone: boolean; canUndo: boolean;
 }
 export interface Department { id: string; slug: string; name: string; purpose: string; hue: number; coordinatorAgentId: string | null; createdAt: string; archivedAt: string | null; implicit?: boolean; members: string[] }
 export interface OfficeView { agents: OfficeAgent[]; departments: Department[]; counts: { agents: number; working: number; attention: number; decisions: number }; projects: { id: string; name: string }[] }
@@ -193,7 +202,9 @@ export const osApi = {
   evidence: (slug: string, id: string, jobId: string, n: number) => request<{ images: string[] }>(`${W(slug)}/agents/${id}/documents/${jobId}/versions/${n}/evidence`),
   sendFeedback: (slug: string, id: string, jobId: string | null, text: string) => request<ImprovementProposal>(`${W(slug)}/agents/${id}/feedback`, { method: 'POST', body: J({ jobId, text }) }),
   applyProposal: (slug: string, id: string, pid: string) => request<{ revision: number; backup: string; files: ExternalFileChange[] }>(`${W(slug)}/agents/${id}/proposals/${pid}/apply`, { method: 'POST', body: J({ authorized: true }) }),
-  rejectProposal: (slug: string, id: string, pid: string) => request<ImprovementProposal>(`${W(slug)}/agents/${id}/proposals/${pid}/reject`, { method: 'POST', body: J({}) })
+  rejectProposal: (slug: string, id: string, pid: string) => request<ImprovementProposal>(`${W(slug)}/agents/${id}/proposals/${pid}/reject`, { method: 'POST', body: J({}) }),
+  /** HU-181 · Deshacer una automejora (solo la última; si hay posteriores, 409 later_improvements). */
+  undoImprovement: (slug: string, id: string, pid: string) => request<ImprovementProposal>(`${W(slug)}/agents/${id}/proposals/${pid}/undo`, { method: 'POST', body: J({ authorized: true }) })
 };
 
 export interface ExternalPreview {

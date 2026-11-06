@@ -75,6 +75,9 @@ export function officeHome(): string {
 }
 export function rememberOfficeView(view: string) { try { localStorage.setItem(OFFICE_KEY, JSON.stringify(view)); } catch { /* sin almacenamiento */ } }
 
-/** Pestaña del panel del agente donde se resuelve cada tipo de petición (las de procesos, en Solicitudes o Decisiones). */
-export const TAB_FOR_KIND: Record<string, string> = { memory: 'memoria', improvement: 'mejoras', source: 'origen', folder: 'archivos', action: 'chat' };
+/**
+ * Pestaña del panel del agente donde se resuelve cada tipo de petición (las de procesos, en Solicitudes o Decisiones).
+ * HU-181: Mejoras se retira; las automejoras (y cualquier aviso o enlace antiguo 'improvement') se ven en Memoria.
+ */
+export const TAB_FOR_KIND: Record<string, string> = { memory: 'memoria', improvement: 'memoria', source: 'origen', folder: 'archivos', action: 'chat' };
 export const tabFor = (item: { kind: string; processId?: string | null }) => (item.processId ? 'solicitudes' : TAB_FOR_KIND[item.kind] ?? 'solicitudes');
