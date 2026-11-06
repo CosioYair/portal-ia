@@ -125,6 +125,23 @@ export type { OrgApplication, OrgBriefAttachment, OrgChange, OrgEvaluationBrief,
 /** Respuesta de decidir o deshacer una propuesta. */
 export interface OrgProposalResult { evaluation: OrgEvaluation; proposal: OrgProposalView }
 
+/** EN-011 · «Qué sabe hacer»: herramientas concedidas en lenguaje claro y estado del sandbox (no ejecuta nada). */
+export interface AgentCapabilityTool { tool: string; label: string; where: string | string[]; skill: string | null; description?: string }
+export interface AgentCapabilitiesView {
+  tools: AgentCapabilityTool[];
+  sandbox: { available: boolean; kind: string | null; detail: string | null; checkedAt?: string | null } | null;
+  note?: string;
+}
+/** EN-011 · Entrada de aprendizaje pendiente o relacionada (sigue esperando la verificación del propietario). */
+export interface AgentLearningEntry { id: string; title: string; text: string; detail: string; status: string; detector: string; at: string; processId: string | null; processTitle: string | null; link: 'evidencia' | 'paso' | null }
+export interface AgentLearningView { verified: { title: string; text: string; [k: string]: unknown }[]; pending: AgentLearningEntry[]; related: AgentLearningEntry[]; note: string }
+/** EN-011 · Resumen «Qué trae y qué aprendió» de una importación de ZIP (sin IA). */
+export interface ImportLearnedSkill { slug: string; name: string; description: string; base: boolean; note: string | null }
+export interface ImportLearned {
+  skillsNew: ImportLearnedSkill[]; skillsChanged: ImportLearnedSkill[]; memoryNew: { title: string; text: string }[];
+  changelogSince: { heading: string; text: string }[]; changelogMark: string | null; warnings: string[];
+}
+
 export const api = {
   health: () => request<{ ok: boolean; dataDir: string; repoRoot: string; version: string }>('/api/health'),
   providers: () => request<ProviderView[]>('/api/providers'),
@@ -162,6 +179,10 @@ export const api = {
   createClaudeCodeWorker: (slug: string, name: string, agentIds: string[]) => request<{ worker: ClaudeCodeWorkerView; token: string; setup: { cwd: string; command: string; args: string[] } }>(`/api/workspaces/${slug}/claude-code/workers`, { method: 'POST', body: JSON.stringify({ authorized: true, name, agentIds }) }),
   revokeClaudeCodeWorker: (slug: string, id: string) => request<ClaudeCodeWorkerView>(`/api/workspaces/${slug}/claude-code/workers/${id}`, { method: 'DELETE' }),
   agent: (slug: string, id: string) => request<Agent>(`/api/workspaces/${slug}/agents/${id}`),
+  /** EN-011 · Lo que sabe hacer el agente según sus herramientas concedidas y si el sandbox está disponible ahora. */
+  agentCapabilities: (slug: string, id: string) => request<AgentCapabilitiesView>(`/api/workspaces/${slug}/agents/${encodeURIComponent(id)}/capabilities`),
+  /** EN-011 · Aprendizaje verificado, pendiente y relacionado del agente (solo lectura: nada cambia de estado). */
+  agentLearning: (slug: string, id: string) => request<AgentLearningView>(`/api/workspaces/${slug}/agents/${encodeURIComponent(id)}/learning`),
   updateAgentConfig: (slug: string, id: string, config: AgentConfig) => request<Agent>(`/api/workspaces/${slug}/agents/${id}/config`, { method: 'PUT', body: JSON.stringify(config) }),
   createAgent: (slug: string, input: AgentCreateInput) => request<Agent>(`/api/workspaces/${slug}/agents`, { method: 'POST', body: JSON.stringify(input) }),
   deleteAgent: (slug: string, id: string) => request<{ ok: boolean }>(`/api/workspaces/${slug}/agents/${id}`, { method: 'DELETE' }),
