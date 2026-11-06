@@ -10,11 +10,11 @@ import { useLive } from '../lib/live.ts';
 import { TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
 import { HARNESSES } from '@portal-ia/domain';
 import { FolderPicker } from './FolderPicker.tsx';
-import { DocumentsTab, ImprovementsTab, OriginTab } from './ExternalAgent.tsx';
+import { DocumentsTab, OriginTab } from './ExternalAgent.tsx';
 import { AgentZipImport } from './AgentZipImport.tsx';
 import { ChatTab, FeedbackForm } from './AgentChat.tsx';
 import { INTEGRATION_LABEL } from '@portal-ia/domain';
-import { osApi, type AgentPanel as Panel, type Department, type FolderStatus, type HarnessOptions, type OfficeAgent, type WorkItem } from '../lib/osApi.ts';
+import { osApi, type AgentPanel as Panel, type Department, type FolderStatus, type HarnessOptions, type ImprovementHistoryItem, type OfficeAgent, type WorkItem } from '../lib/osApi.ts';
 
 /**
  * Panel de un agente: todo lo suyo en un sitio, sin navegar por seis pantallas.
@@ -22,15 +22,19 @@ import { osApi, type AgentPanel as Panel, type Department, type FolderStatus, ty
  * Cada acción que gasta (un mensaje, un encargo) lo dice antes; nada se autoriza solo.
  */
 const BASE_TABS = [['chat', 'Chat'], ['solicitudes', 'Solicitudes'], ['trabajo', 'Trabajo'], ['archivos', 'Archivos'], ['memoria', 'Memoria'], ['configuracion', 'Configuración']] as const;
-/** Agente externo (su carpeta original es la fuente): Documentos, Origen y Mejoras; «Archivos» es su carpeta original (en Origen). */
-const EXTERNAL_TABS = [['chat', 'Chat'], ['documentos', 'Documentos'], ['solicitudes', 'Solicitudes'], ['trabajo', 'Trabajo'], ['mejoras', 'Mejoras'], ['origen', 'Origen'], ['memoria', 'Memoria'], ['configuracion', 'Configuración']] as const;
+/**
+ * Agente externo (su carpeta original es la fuente): Documentos y Origen; «Archivos» es su carpeta original (en Origen).
+ * HU-181: Mejoras se retira; sus automejoras se ven (y se deshacen) en Memoria › Historial de automejoras.
+ */
+const EXTERNAL_TABS = [['chat', 'Chat'], ['documentos', 'Documentos'], ['solicitudes', 'Solicitudes'], ['trabajo', 'Trabajo'], ['origen', 'Origen'], ['memoria', 'Memoria'], ['configuracion', 'Configuración']] as const;
 type Tab = typeof BASE_TABS[number][0] | typeof EXTERNAL_TABS[number][0];
 /**
  * Portal IA 2.0: las pestañas se agrupan en cinco (Chat · Trabajo · Para revisar · Memoria · Ajustes). Cada nombre antiguo
- * sigue siendo una ruta válida (/oficina/agente/:id/documentos, …/mejoras, …/origen): abre su grupo con esa vista elegida.
+ * sigue siendo una ruta válida (/oficina/agente/:id/documentos, …/origen): abre su grupo con esa vista elegida.
+ * …/mejoras (HU-181) ya no es una pestaña: es un alias que abre Memoria con el historial de automejoras a la vista.
  */
 type Group = 'chat' | 'trabajo' | 'revisar' | 'memoria' | 'ajustes';
-const GROUP_OF: Record<Tab, Group> = { chat: 'chat', trabajo: 'trabajo', documentos: 'trabajo', solicitudes: 'revisar', mejoras: 'revisar', memoria: 'memoria', configuracion: 'ajustes', archivos: 'ajustes', origen: 'ajustes' };
+const GROUP_OF: Record<Tab, Group> = { chat: 'chat', trabajo: 'trabajo', documentos: 'trabajo', solicitudes: 'revisar', memoria: 'memoria', configuracion: 'ajustes', archivos: 'ajustes', origen: 'ajustes' };
 const GROUP_LABEL: Record<Group, string> = { chat: 'Chat', trabajo: 'Trabajo', revisar: 'Para revisar', memoria: 'Memoria', ajustes: 'Ajustes' };
 const GROUP_ORDER: Group[] = ['chat', 'trabajo', 'revisar', 'memoria', 'ajustes'];
 /** Vista con la que se abre cada grupo (va primera en su selector). */
@@ -45,8 +49,8 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
   const external = !!(p?.office?.integration ?? office?.integration);
   // Sin «documentos/» en su carpeta no hay banco de documentos.
   const TABS: readonly (readonly [Tab, string])[] = external ? EXTERNAL_TABS.filter(t => t[0] !== 'documentos' || p?.external?.hasOutputs !== false) : BASE_TABS;
-  const improvements = p?.office?.attention.filter(a => a.kind === 'improvement').length ?? 0;
-  const now = (TABS.some(t => t[0] === tab) ? tab : external && tab === 'archivos' ? 'origen' : 'chat') as Tab;
+  // Alias de la antigua pestaña Mejoras: abre Memoria (el historial de automejoras).
+  const now = (TABS.some(t => t[0] === tab) ? tab : tab === 'mejoras' ? 'memoria' : external && tab === 'archivos' ? 'origen' : 'chat') as Tab;
   const GROUPS = GROUP_ORDER.filter(g => TABS.some(t => GROUP_OF[t[0]] === g));
   const membersOf = (g: Group) => TABS.filter(t => GROUP_OF[t[0]] === g).sort((a, b) => Number(b[0] === GROUP_FIRST[g]) - Number(a[0] === GROUP_FIRST[g]));
   const current: Group = GROUP_OF[now];
@@ -98,7 +102,7 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
       </button>)}
     </div>
     {membersOf(current).length > 1 && <div className="agent-panel-sub"><div className="seg" role="group" aria-label={`Vistas de ${GROUP_LABEL[current]}`}>
-      {membersOf(current).map(([id, label]) => <button key={id} type="button" aria-pressed={now === id} onClick={() => onTab(id)}>{label}{id === 'mejoras' && improvements > 0 && <span className="tab-count" aria-label="mejoras pendientes de tu aprobación">{improvements}</span>}</button>)}
+      {membersOf(current).map(([id, label]) => <button key={id} type="button" aria-pressed={now === id} onClick={() => onTab(id)}>{label}</button>)}
     </div></div>}
     {error && <div style={{ padding: 12 }}><Notice kind="err">{error}</Notice></div>}
     {!p && !error && <div style={{ padding: 24 }}><Spinner /></div>}
@@ -111,8 +115,7 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
         {now === 'archivos' && <FilesTab slug={slug} p={p} onChanged={refresh} />}
         {now === 'documentos' && <DocumentsTab slug={slug} p={p} onChanged={refresh} onTab={onTab} />}
         {now === 'origen' && <OriginTab slug={slug} p={p} onChanged={refresh} />}
-        {now === 'mejoras' && <ImprovementsTab slug={slug} p={p} onChanged={refresh} onTab={onTab} />}
-        {now === 'memoria' && <MemoryTab slug={slug} p={p} onChanged={refresh} />}
+        {now === 'memoria' && <MemoryTab slug={slug} p={p} onChanged={refresh} focusHistory={tab === 'mejoras'} />}
         {now === 'configuracion' && <ConfigTab slug={slug} p={p} departments={departments} onChanged={refresh} />}
       </div>}
     </div>}
@@ -132,7 +135,7 @@ function RequestsTab({ p, onTab }: { p: Panel; onTab: (t: Tab) => void }) {
         {a.processId && <Link className="btn btn-secondary btn-sm" to={`/procesos/${a.processId}`}>Abrir y decidir</Link>}
         {a.kind === 'memory' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('memoria')}>Revisar en Memoria</button>}
         {a.kind === 'folder' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('archivos')}>Revisar en Archivos</button>}
-        {a.kind === 'improvement' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('mejoras')}>Revisar en Mejoras</button>}
+
         {a.kind === 'source' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('origen')}>Revisar en Origen</button>}
         {a.kind === 'action' && <button className="btn btn-secondary btn-sm" onClick={() => onTab('chat')}>Revisar en el Chat</button>}
       </div>
@@ -319,7 +322,57 @@ function ExportBox({ slug, agentId }: { slug: string; agentId: string }) {
 
 // ---------------------------------------------------------------- Memoria
 
-function MemoryTab({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: () => void }) {
+const ORIGIN_LABEL: Record<ImprovementHistoryItem['origin'], string> = { chat: 'Chat', reintento: 'Reintento' };
+const HISTORY_STATUS: Record<ImprovementHistoryItem['status'], string> = { applied: 'Aplicada', undone: 'Deshecha', archived: 'Archivada' };
+
+/**
+ * HU-181 · Historial de automejoras de un agente externo: una fila por cambio con fecha, origen (Chat o Reintento),
+ * archivos cambiados y resumen. Deshacer no usa la IA ni tiene costo, pero siempre pide confirmación. Solo se puede
+ * deshacer la última: si hay cambios posteriores, el servidor responde 409 (later_improvements) y se avisa en la fila.
+ */
+function ImprovementHistory({ slug, p, onChanged, focus }: { slug: string; p: Panel; onChanged: () => void; focus: boolean }) {
+  const { flash } = useApp();
+  const items = p.office?.improvementHistory;
+  const [confirm, setConfirm] = useState<string | null>(null); const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<{ id: string; text: string } | null>(null);
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => { if (focus) ref.current?.scrollIntoView({ block: 'start' }); }, [focus]);
+  const undo = async (pid: string) => {
+    setBusy(pid); setError(null);
+    try { await osApi.undoImprovement(slug, p.agent.id, pid); setConfirm(null); flash('Automejora deshecha: se restauró la versión anterior de sus archivos'); onChanged(); }
+    catch (e: any) {
+      setConfirm(null);
+      const later = (e?.status ?? e?.statusCode) === 409 || e?.body?.code === 'later_improvements';
+      setError({ id: pid, text: later ? 'Deshaz primero la última: hay automejoras posteriores a esta.' : (e?.message ?? 'No se pudo deshacer.') });
+    } finally { setBusy(null); }
+  };
+  return <section ref={ref} id="improvement-history" aria-labelledby="improvement-history-h" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <h3 className="h3" id="improvement-history-h" style={{ margin: 0 }}>Historial de automejoras{items ? ` (${items.length})` : ''}</h3>
+    <p className="small muted">Cambios que {p.agent.config.name} hizo en sus instrucciones y habilidades desde el chat o al reintentar un documento. Cada uno tiene respaldo y queda en CAMBIOS.md. Deshacer no usa la IA ni tiene costo.</p>
+    {!items && <Notice kind="err">No se pudo cargar el historial de automejoras. Vuelve a abrir el panel para reintentarlo.</Notice>}
+    {items && !items.length && <p className="small muted">Aún no hay automejoras.</p>}
+    {items?.map(it => <div key={it.id} className="work-card" aria-busy={busy === it.id}>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        <span className="small muted">{new Date(it.at).toLocaleString('es-MX')}</span>
+        <Chip xs>{ORIGIN_LABEL[it.origin]}</Chip>
+        <Chip xs tone={it.status === 'applied' ? 'ok' : 'soon'}>{HISTORY_STATUS[it.status]}</Chip>
+      </div>
+      <span>{it.summary || 'Sin resumen.'}</span>
+      {it.files.length > 0 ? <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>{it.files.map(f => <li key={f} className="mono">{f}</li>)}</ul> : <span className="small muted">Sin archivos cambiados.</span>}
+      {it.status === 'archived' && it.reason && <span className="small muted">Motivo: {it.reason}</span>}
+      {error?.id === it.id && <Notice kind="err">{error.text}</Notice>}
+      {it.status === 'applied' && !it.undone && (confirm === it.id
+        ? <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="small">¿Deshacer este cambio? Sus archivos vuelven a la versión anterior.</span>
+            <button type="button" className="btn btn-primary btn-sm" disabled={busy !== null} onClick={() => void undo(it.id)}>{busy === it.id ? 'Deshaciendo…' : 'Sí, deshacer'}</button>
+            <button type="button" className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => setConfirm(null)}>No</button>
+          </div>
+        : <button type="button" className="btn btn-secondary btn-sm" style={{ alignSelf: 'flex-start' }} disabled={busy !== null} title={it.canUndo ? undefined : 'Solo se puede deshacer la última automejora'} onClick={() => { setError(null); setConfirm(it.id); }}>Deshacer</button>)}
+    </div>)}
+  </section>;
+}
+
+function MemoryTab({ slug, p, onChanged, focusHistory = false }: { slug: string; p: Panel; onChanged: () => void; focusHistory?: boolean }) {
   const { flash } = useApp();
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const [edits, setEdits] = useState<Record<string, string>>({});
   const [adding, setAdding] = useState(false);
@@ -334,8 +387,9 @@ function MemoryTab({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: 
     </div>
   </div>;
   return <>
-    <p className="small muted">{p.external ? <>La memoria de {p.agent.config.name} es su propio archivo de memoria (en su carpeta original; lo cambian las mejoras que apruebas) más lo que verifiques aquí a partir de su trabajo.</> : <>La memoria de {p.agent.config.name} es lo que tú has verificado a partir de su trabajo. Se aplica con cualquier arnés y viaja en su carpeta (memory/MEMORY.md).</>} Nada generado por un modelo entra aquí solo.</p>
+    <p className="small muted">{p.external ? <>La memoria de {p.agent.config.name} es su propio archivo de memoria (en su carpeta original; lo cambian sus automejoras) más lo que verifiques aquí a partir de su trabajo.</> : <>La memoria de {p.agent.config.name} es lo que tú has verificado a partir de su trabajo. Se aplica con cualquier arnés y viaja en su carpeta (memory/MEMORY.md).</>} Nada generado por un modelo entra aquí solo.</p>
     {error && <Notice kind="err">{error}</Notice>}
+    {p.external && <ImprovementHistory slug={slug} p={p} onChanged={onChanged} focus={focusHistory} />}
     <div className="h3">Por verificar ({p.memory.proposed.length})</div>
     {p.memory.proposed.length ? p.memory.proposed.map(l => card(l, 'proposed')) : <p className="small muted">Nada pendiente.</p>}
     <div className="h3">Verificada ({p.memory.verified.length})</div>
@@ -423,6 +477,6 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
 const LEVEL: Record<string, string> = { yes: 'sí', partial: 'parcial', no: 'no' };
 const HARNESS_NAME: Record<string, string> = Object.fromEntries(HARNESSES.map(h => [h.id, h.name]));
 const EVENT_TEXT: Record<string, string> = { created: 'Creado', imported: 'Importado', exported: 'Exportado', harness_changed: 'Arnés cambiado', department_changed: 'Cambio de departamento', folder_created: 'Carpeta creada', folder_adopted: 'Cambios externos adoptados', folder_discarded: 'Cambios externos descartados', folder_restored: 'Vuelta a una revisión anterior', identity_updated: 'Identidad editada', memory_proposed: 'Aprendizaje propuesto', memory_verified: 'Aprendizaje verificado', memory_retired: 'Aprendizaje retirado', task_created: 'Encargo creado', chat: 'Conversación',
-  source_imported: 'Integrado desde su carpeta', source_adopted: 'Cambios externos adoptados', source_grants: 'Permisos cambiados', source_restored: 'Vuelta a una versión anterior', integration_state: 'Estado de integración', document_job: 'Documento', improvement_proposed: 'Mejora propuesta', improvement_applied: 'Mejora aplicada', improvement_rejected: 'Mejora rechazada' };
+  source_imported: 'Integrado desde su carpeta', source_adopted: 'Cambios externos adoptados', source_grants: 'Permisos cambiados', source_restored: 'Vuelta a una versión anterior', integration_state: 'Estado de integración', document_job: 'Documento', improvement_proposed: 'Automejora propuesta', improvement_applied: 'Automejora aplicada', improvement_rejected: 'Automejora archivada', improvement_undone: 'Automejora deshecha' };
 const INTEGRATION_TO: Record<string, string> = { pending: 'pendiente', evaluating: 'en evaluación', integrated: 'integrado' };
 const JOB_ACTION: Record<string, string> = { received: 'recibido', run: 'en proceso', ready: 'pasó las comprobaciones', rejected: 'no pasó las comprobaciones' };
