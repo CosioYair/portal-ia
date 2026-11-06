@@ -6,7 +6,7 @@ import { CAPABILITIES, PORTABLE_LIMITS, allowedBundlePath, allowedPortablePath, 
 import type { Agent, LessonStatus, PortableFiles, PortableMergeConflict, PortableMergeResult, PortableSkill } from '@portal-ia/domain';
 import { listZip, readZipEntry } from './zipFile.ts';
 import { agentsRepo } from '../db/workspace.ts';
-import { adoptedExtras, agentFoldersRepo, definitionFor, grantedTools, hashFiles, notAdoptedChanges, restoreRevision, syncAgentFolder, writeImportedRevision, type AgentRevision, type RowPatch } from './agentFolders.ts';
+import { adoptedExtras, agentFoldersRepo, definitionFor, grantedTools, hashFiles, importScopePreview, notAdoptedChanges, restoreRevision, syncAgentFolder, writeImportedRevision, type AgentRevision, type RowPatch } from './agentFolders.ts';
 import { importFromFiles, type ImportGrant } from './agentCreation.ts';
 import { lessonsRepo } from './lessons.ts';
 import { agentEvents, recordAgentEvent } from './agentEvents.ts';
@@ -227,8 +227,11 @@ export function previewZipImport(slug: string, uploaded: string, name: string) {
   const ok = !!d && !parsed.problems.some(p => p.blocking);
   const existing = existingAgent(slug, files, marker);
   const token = stage(slug, uploaded, name, hash);
+  // EN-014 · Ámbito que quedará tras importar (declarado en agent.yaml o, en un ZIP antiguo, el del agente existente o
+  // General si es nuevo). Un proyecto que no existe en este Portal solo se avisa: no bloquea.
+  const contextScope = importScopePreview(slug, files, existing);
   const common = {
-    token, hash, name, ok, files: Object.keys(files).sort(), problems: parsed.problems,
+    token, hash, name, ok, files: Object.keys(files).sort(), problems: parsed.problems, contextScope,
     agent: d ? { name: d.manifest.name, role: d.manifest.role, summary: d.manifest.summary, department: d.manifest.department, responsibilities: d.manifest.responsibilities, deliverables: d.manifest.deliverables, capabilities: d.manifest.capabilities.filter(c => CAPABILITIES.some(x => x.id === c)) } : null,
     requests: d ? { harness: d.manifest.harness.preferred, model: d.manifest.harness.model, tools: d.manifest.permissions.tools, autonomy: d.manifest.permissions.autonomy } : null,
     instructions: d?.instructions ?? '', skills: d?.skills.map(s => ({ slug: s.slug, name: s.name, description: s.description, body: s.body })) ?? [],

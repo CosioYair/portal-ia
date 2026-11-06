@@ -4,7 +4,7 @@ import { CAPABILITIES, DEFAULT_CONTEXT_SCOPE, contextScopeFromPortable, contextS
 import { config, REPO_ROOT } from '../config.ts';
 import { agentsRepo, projectsRepo } from '../db/workspace.ts';
 import { departmentsRepo } from './departments.ts';
-import { agentFoldersRepo, definitionFor, agentDefaultInstructions, hashFiles, readFolder, registerAgentFolder, writeRevision, adoptedExtras, companyNameOf, contextScopeOf, GENERAL_ONLY_SCOPE, type AgentExtras } from './agentFolders.ts';
+import { agentFoldersRepo, definitionFor, agentDefaultInstructions, hashFiles, readFolder, registerAgentFolder, writeRevision, adoptedExtras, companyNameOf, contextScopeOf, GENERAL_ONLY_SCOPE, importScopePreview, applyImportedContextScope, type AgentExtras } from './agentFolders.ts';
 import { harnessAvailability, harnessModels } from './harness/index.ts';
 import { inheritLatestTemplate } from './agentTemplates.ts';
 import { recordAgentEvent } from './agentEvents.ts';
@@ -134,6 +134,8 @@ export function importPreview(slug: string, dir: string) {
   return {
     path: abs, hash: hashFiles(files), files: Object.keys(files).sort(), ignored, problems: parsed.problems,
     ok: !!d && !parsed.problems.some(p => p.blocking),
+    // EN-014 · Ámbito que tendrá el agente nuevo (sin ámbito declarado: General); avisa sin bloquear si el proyecto no existe.
+    contextScope: importScopePreview(slug, files, null),
     agent: d ? { name: d.manifest.name, role: d.manifest.role, summary: d.manifest.summary, department: d.manifest.department, responsibilities: d.manifest.responsibilities, deliverables: d.manifest.deliverables, capabilities: d.manifest.capabilities.filter(c => CAPABILITIES.some(x => x.id === c)) } : null,
     requests: d ? { harness: d.manifest.harness.preferred, model: d.manifest.harness.model, tools: d.manifest.permissions.tools, autonomy: d.manifest.permissions.autonomy } : null,
     // Todo lo que llegaría a sus prompts, para leerlo ANTES de importar (instrucciones, habilidades y referencias completas).
@@ -164,7 +166,9 @@ export async function importFromFiles(slug: string, files: PortableFiles, origin
   // EN-014 · El ámbito declarado en agent.yaml se respeta; un ZIP o una carpeta antiguos sin él dejan al agente nuevo como General.
   let importedScope: AgentContextScope = GENERAL_ONLY_SCOPE;
   if (d.manifest.contextScope) {
-    const s = contextScopeFromPortable(d.manifest.contextScope).scope;
+    const s0 = contextScopeFromPortable(d.manifest.contextScope).scope;
+    // Un proyecto que no existe en este Portal se avisa en la vista previa pero no bloquea: se quita del ámbito.
+    const s: AgentContextScope = s0.project && !projectsRepo(slug).get(s0.project.id) ? { ...s0, project: null } : s0;
     importedScope = contextScopeOptions(s).length ? s : GENERAL_ONLY_SCOPE;
   }
   const agent = await createAgentFromWizard(slug, {
@@ -172,6 +176,8 @@ export async function importFromFiles(slug: string, files: PortableFiles, origin
     capabilities: grant.capabilities ?? [],
     instructions: d.instructions, skills: d.skills, references: d.knowledge, initials: d.manifest.initials, changelog: d.changelog ?? null
   }, 'import', note);
+  // EN-014 · Mismo criterio que la vista previa (ZIP y carpeta): ámbito declarado o, si no lo trae, General.
+  applyImportedContextScope(slug, agent.id, files, true);
   // La memoria de la carpeta llega como PROPUESTA (el propietario la verifica o la descarta).
   const lessons = lessonsRepo(slug); const ts = monotonicNow();
   for (const m of d.memory.slice(0, 50)) {
