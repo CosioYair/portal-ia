@@ -60,8 +60,11 @@ export async function assignmentRoutes(app: FastifyInstance) {
   });
   app.post('/api/workspaces/:slug/assignments/:id/accept', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
-    const body = z.object({ note: z.string().trim().max(1000).optional() }).safeParse(req.body ?? {});
-    try { await acceptAssignment(slug, id, body.success ? body.data.note || null : null); return assignmentView(slug, id); } catch (e) { return send(reply, e); }
+    // EN-009: ownerReason permite aceptar si la regla de cierre lo bloquea o si el encargo ya está integrado en main.
+    const body = z.object({ note: z.string().trim().max(1000).nullable().optional(), ownerReason: z.string().trim().max(1000).nullable().optional() }).passthrough().safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Datos no válidos: la nota y el motivo son textos de hasta 1000 caracteres.', code: 'invalid_body' });
+    // Los 409 (closingBlocker, owner_reason_required, active_process) conservan { error, code } para que la interfaz muestre el motivo.
+    try { await acceptAssignment(slug, id, body.data.note || null, { ownerReason: body.data.ownerReason || null }); return assignmentView(slug, id); } catch (e) { return send(reply, e); }
   });
   app.post('/api/workspaces/:slug/assignments/:id/changes', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;

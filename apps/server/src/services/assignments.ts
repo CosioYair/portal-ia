@@ -217,10 +217,32 @@ function recordKnowledge(slug: string, a: Assignment, p: Process) {
 /** Aceptar (listo para revisar). Si le falta un paso de la regla de cierre, solo con el motivo del propietario (queda en la nota). */
 export async function acceptAssignment(slug: string, id: string, note: string | null, opts: { ownerReason?: string | null } = {}): Promise<Assignment> {
   const a = syncAssignment(slug, id); if (!a) throw fail(404, 'Encargo no encontrado.', 'not_found');
-  if (a.status !== 'ready_for_review') throw fail(409, `Solo se acepta un encargo listo para revisar (está ${ASSIGNMENT_STATUS_LABEL[a.status]}).`, 'invalid_state');
-  const blocker = await closingBlocker(slug, a.processId ? processesRepo(slug).get(a.processId) : undefined, 'encargo');
-  if (blocker && (opts.ownerReason ?? '').trim().length < 3) throw fail(409, blocker.error, blocker.code);
-  return assignmentsRepo(slug).update(id, x => { x.status = 'accepted'; x.reason = note; x.events.push({ at: monotonicNow(), kind: 'accepted', message: `Aceptado por el propietario${note ? `: ${note}` : ''}. Integrar en main sigue siendo una decisión aparte.` }); });
+  const ownerReason = (opts.ownerReason ?? '').trim().slice(0, 1000);
+  const cur = a.processId ? processesRepo(slug).get(a.processId) : undefined;
+  // EN-009: un encargo cuyo proceso vigente ya está integrado en main se puede cerrar aunque no esté «listo para revisar»
+  // (p. ej. con cambios pedidos), solo con tu motivo y sin ninguna ejecución en marcha ni pendiente de autorizar.
+  let closingMerged = false;
+  if (a.status !== 'ready_for_review') {
+    const mergedState = ['changes_requested', 'needs_owner', 'failed'].includes(a.status) && !!cur?.result?.merged;
+    if (!mergedState) throw fail(409, `Solo se acepta un encargo listo para revisar o ya integrado en main (está ${ASSIGNMENT_STATUS_LABEL[a.status]}).`, 'invalid_state');
+    const ids = Array.from(new Set([...a.processIds, ...(a.processId ? [a.processId] : [])]));
+    const active = ids.map(pid => processesRepo(slug).get(pid)).find(p => p && (p.status === 'running' || p.status === 'pending_authorization'));
+    if (active) throw fail(409, 'El encargo tiene una ejecución en marcha o pendiente de autorizar: espera a que termine o cancélala antes de aceptarlo.', 'active_process');
+    if (ownerReason.length < 3) throw fail(409, `El encargo está ${ASSIGNMENT_STATUS_LABEL[a.status]}, pero su proceso ya está integrado en ${cur!.result!.merged!.into}. Para aceptarlo así, indica tu motivo (al menos 3 caracteres).`, 'owner_reason_required');
+    closingMerged = true;
+  }
+  const blocker = await closingBlocker(slug, cur, 'encargo');
+  if (blocker && ownerReason.length < 3) throw fail(409, blocker.error, blocker.code);
+  return assignmentsRepo(slug).update(id, x => {
+    if (closingMerged && x.iterationNote) {
+      x.events.push({ at: monotonicNow(), kind: 'status', processId: cur?.id, message: `Nota pendiente descartada al aceptar: ${x.iterationNote.slice(0, 300)}` });
+      x.iterationNote = null;
+    }
+    x.status = 'accepted'; x.reason = note ?? (ownerReason || null);
+    const why = ownerReason ? ` · motivo del propietario: ${ownerReason}` : '';
+    const merged = closingMerged ? ` Ya estaba integrado en ${cur!.result!.merged!.into}.` : ' Integrar en main sigue siendo una decisión aparte.';
+    x.events.push({ at: monotonicNow(), kind: 'accepted', processId: cur?.id, message: `Aceptado por el propietario${note ? `: ${note}` : ''}${why}.${merged}` });
+  });
 }
 
 /** Pedir cambios: queda la nota; la siguiente ejecución se prepara con ella (y se autoriza aparte). */
