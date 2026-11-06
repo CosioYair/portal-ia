@@ -186,7 +186,8 @@ nada. Código:
 - `agentCreation.ts`: `exportFiles` y `exportBundle`;
 - `documentJobs.ts`: `provenPlansForExport`.
 
-Pruebas: `apps/server/test/agente-portable-paquete.test.ts` y `apps/server/test/agente-portable-externo.test.ts`.
+Pruebas: `apps/server/test/agente-portable-paquete.test.ts`, `apps/server/test/agente-portable-externo.test.ts` y
+`apps/server/test/en010-rutas-sistema.test.ts` (EN-010: rutas del sistema y privadas, línea y fragmento, copia byte a byte).
 
 ```
 AGENTS.md             instrucciones; su primera línea remite a AUTOMEJORA.md
@@ -201,7 +202,8 @@ scripts/anotar-cambio.mjs   añade una entrada a CAMBIOS.md (Node, sin dependenc
 ```
 
 **Qué se excluye y por qué.** No sale nada que sea operativo del Portal o que pueda filtrar datos: ni el id del agente, ni
-UUID de procesos (pasan a «[interno]»), ni rutas locales o de `data/` («[ruta local]»), ni rutas `/api/` o nombres de tablas,
+UUID de procesos (pasan a «[interno]»), ni rutas locales o de la carpeta de datos del Portal («[ruta local]», ver §8 «Rutas
+del sistema y rutas privadas»), ni rutas `/api/` o nombres de tablas,
 ni el modelo, ni las herramientas concedidas, ni las lecciones propuestas o retiradas, ni ninguna credencial. Si tras limpiar
 queda algún secreto (`findSecret`), dato interno o ruta fuera de la lista blanca, **no se exporta**: el Portal responde 409
 con la lista de problemas y el panel la muestra. Los archivos de la carpeta portable se pueden volver a importar con
@@ -244,7 +246,9 @@ documentos convertidos.
   8. anotar lo aprendido en `memoria/` y en `CAMBIOS.md` según AUTOMEJORA.md.
 
   También indica qué necesita la plataforma: Python 3, los paquetes de `requirements*.txt` y los programas externos que
-  aparecen en los scripts (p. ej. LibreOffice). Y qué hacer donde no se pueden ejecutar scripts, como ChatGPT sin intérprete:
+  aparecen en los scripts (p. ej. LibreOffice). En «Requisitos de la plataforma» enumera además las **rutas del sistema** que
+  citan los `.py` (únicas, ordenadas, como mucho 20; p. ej. `C:\Windows\Fonts`, `/usr/share/fonts`). Pide comprobar que
+  existen en el equipo o ajustarlas si la instalación está en otra carpeta. Y qué hacer donde no se pueden ejecutar scripts, como ChatGPT sin intérprete:
   explicar los pasos sin prometer ni simular resultados. Solo cita rutas que existan en el ZIP, y la prueba lo comprueba.
 - **Topes.** Para un externo, `EXTERNAL_BUNDLE_LIMITS`:
   - por archivo, `EXTERNAL_TEXT_LIMIT`;
@@ -257,9 +261,56 @@ documentos convertidos.
 
 **Sin paquetes parciales.** `validatePortableBundle` revisa todos los archivos del paquete. Si alguno contiene un secreto,
 una ruta local, un UUID, el id del agente o una ruta o tabla interna, o si supera los topes, la exportación se niega
-**entera**. La respuesta es un 409 con `payload.problems` (archivo y motivo de cada problema), y el panel muestra esa lista.
-Nunca se quita un archivo en silencio. La solución es corregir el archivo en la carpeta del agente, adoptarlo y volver a
-exportar.
+**entera**. La respuesta es un 409 con `payload.problems`, y el panel muestra esa lista. Nunca se quita un archivo en
+silencio. La solución es corregir el archivo en la carpeta del agente, adoptarlo y volver a exportar.
+
+**Rutas del sistema y rutas privadas (EN-010).** `findLocalPaths(texto, { privatePaths })` recorre el texto línea a línea
+(`\r?\n`) y clasifica cada ruta que encuentra:
+- `system`: rutas genéricas del sistema. Son `C:\Windows\…`, `C:\Program Files\…`, `C:\Program Files (x86)\…`, `/usr/…`,
+  `/bin/…`, `/opt/…`, `/etc/…`, `/Library/Fonts` y `/System/Library/…`. En Windows no se distinguen mayúsculas, y se
+  aceptan `\`, `\\` (escapado) y `/`.
+- `profile`: el perfil del usuario: `X:\Users\<nombre>\…`, `/home/<nombre>/…` y `/Users/<nombre>/…`.
+- `source`: la carpeta original del agente externo (`src.root`).
+- `portal-data`: la carpeta de datos del Portal. Se detecta por su ruta absoluta (`config.dataDir`) o por
+  `data/workspaces`, `data/evidence`, `data/platform.sqlite` y `data/master.key`.
+- `other`: cualquier otra ruta local. Incluye otra unidad, una ruta de red UNC (`\\servidor\recurso`) y `/tmp`, `/var`,
+  `/mnt`, `/root` o `/private`.
+
+`privatePaths` se compara sin distinguir mayúsculas y con `/` como separador. Para un externo, `exportBundle` pasa como
+rutas privadas la carpeta original y `config.dataDir`. Para un interno no pasa ninguna.
+
+Qué bloquea:
+- En los scripts que se copian tal cual (`.py` y `.txt`) y en `GUIA.md`, las rutas `system` **no bloquean**: un script puede
+  citar `C:\Windows\Fonts`, `C:\Program Files\LibreOffice\program\soffice.exe` o `/usr/bin/soffice`.
+- En el resto de archivos, una ruta del sistema con unidad de Windows (`C:\Windows\…`) sigue bloqueando como antes.
+- Siempre bloquean, en cualquier archivo, `profile`, `source`, `portal-data` y `other`.
+- Tampoco cambia nada para los secretos (`findSecret`), los UUID, el id del agente, las rutas `/api/` ni las tablas internas.
+
+**La regla de `data/`.** Un «data/» cualquiera **ya no bloquea**: `os.path.join('data/', x)`, `metadata/` o `./data/input.csv`
+pasan. Solo bloquea cuando apunta a la carpeta de datos del Portal, como en los ejemplos de arriba. `scrub` usa la misma
+regla al limpiar los `.md`, y los scripts se siguen copiando **byte a byte**: ni `scrub` ni normalización. Una prueba lo
+comprueba con un `.py` que tiene CRLF, tabulaciones, espacios finales y una ruta del sistema.
+
+**Línea y fragmento.** Cada problema de ruta lleva estos campos:
+- `line`: la línea, contada desde 1;
+- `snippet`: el fragmento detectado, recortado a 80 caracteres; si parece un secreto se muestra «[oculto]»;
+- `reason`: el motivo;
+- `message`: `Línea N: «fragmento» — motivo`.
+
+Hay un problema por línea, con un máximo de 5 por archivo y un resumen «Y N línea(s) más». Los UUID y las rutas o tablas
+internas también indican su línea. En el 409, cada elemento del mensaje usa la forma `archivo:línea — mensaje`, y
+`payload.problems` trae `line`, `snippet` y `hint`. En Ajustes › **Origen** (y Ajustes › Archivos), la lista muestra `ruta:línea`,
+el fragmento y el motivo.
+
+**Automejora desde el chat.** Algunos archivos los escribió el propio agente: sus `.py`, `.txt` y `.md`, no los que genera
+el paquete. En esos archivos, el problema añade `hint`: «Puedes pedirle al agente en su chat que cambie la línea N de
+<archivo> (automejora con copia y Deshacer).». El panel lo muestra debajo de la lista. El Portal **nunca** cambia los scripts
+por su cuenta. El cambio lo pide el propietario en la pestaña Chat. Ese mensaje tiene el costo normal de una conversación y
+requiere su autorización. Queda como automejora, con respaldo, una entrada en CAMBIOS.md y Deshacer en Memoria › Historial
+de automejoras.
+
+**Privacidad del fragmento.** El fragmento puede mostrar el nombre del usuario o una carpeta privada. Se enseña solo en la
+respuesta 409 y en el panel local, y no debe guardarse en evidencias, registros de proceso ni conocimiento del proyecto.
 
 **Reimportar.** El ZIP de un externo sigue entrando por el flujo de HU-183. Los archivos propios del paquete no bloquean la
 importación. Al exportar o importar nunca salen ni cambian el id, el modelo, el arnés, los permisos concedidos ni los
