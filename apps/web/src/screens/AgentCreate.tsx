@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Agent, AgentConfig, ProviderId, Scope } from '@portal-ia/domain';
-import { CAPABILITIES, KNOWLEDGE, TOOLS } from '@portal-ia/domain';
+import type { Agent, AgentConfig, AgentContextScope, ProviderId, Scope } from '@portal-ia/domain';
+import { CAPABILITIES, DEFAULT_CONTEXT_SCOPE, KNOWLEDGE, TOOLS, workplaceLabel } from '@portal-ia/domain';
+import { ContextScopeFields, scopeIsEmpty } from './AgentWizard.tsx';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS, KNOWLEDGE_LABELS, TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
@@ -21,6 +22,7 @@ export function AgentCreate() {
   // Borrador del agente nuevo (por empresa y proyecto): sobrevive a recargar. La autorización de la propuesta con IA, no.
   const formDraft = useDraft(draftKey('agente.nuevo', ws.slug, project.id), {
     scope: 'project' as Scope, name: '', role: '', reportsTo: 'pj-coordinador', collab: [] as string[], evaluation: ['', '', ''], desc: '',
+    contextScope: DEFAULT_CONTEXT_SCOPE as AgentContextScope,
     cfg: {
       name: '', specialization: '', responsibilities: [], provider: (defaultProvider?.id ?? 'anthropic') as ProviderId,
       model: defaultProvider?.defaultModel ?? defaultProvider?.models[0]?.id ?? '', fallbacks: [], effort: 'medium', tools: { delegate: true }, knowledge: { objectives: true, context: true }, capabilities: ['consultar'],
@@ -32,6 +34,8 @@ export function AgentCreate() {
   const { scope, name, role, reportsTo, collab, evaluation, cfg, desc } = formDraft.value;
   const setScope = field('scope'); const setName = field('name'); const setRole = field('role'); const setReportsTo = field('reportsTo');
   const setCollab = field('collab'); const setEvaluation = field('evaluation'); const setCfg = field('cfg'); const setDesc = field('desc');
+  // EN-014 · Ámbito (contexto de sus instrucciones, habilidades y paquete); los borradores antiguos no lo traen.
+  const ctxScope: AgentContextScope = formDraft.value.contextScope ?? DEFAULT_CONTEXT_SCOPE; const setContextScope = field('contextScope');
   const [newResp, setNewResp] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,11 +77,14 @@ export function AgentCreate() {
         scope, projectId: scope === 'project' ? project.id : null, name: name.trim(), role: role.trim(), reportsTo, collaborates: collab,
         evaluation: evaluation.map(e => e.trim()).filter(Boolean), config: { ...cfg, name: name.trim(), responsibilities: cfg.responsibilities.filter(Boolean) }
       });
-      formDraft.clear(); flash(`Agente «${a.config.name}» creado · inactivo`); navigate(`/oficina/agente/${encodeURIComponent(a.id)}/configuracion`);
+      // Guardar el ámbito no tiene costo y no concede ni quita herramientas ni permisos.
+      let scopeSaved = true;
+      try { await api.setAgentContextScope(ws.slug, a.id, ctxScope); } catch { scopeSaved = false; }
+      formDraft.clear(); flash(scopeSaved ? `Agente «${a.config.name}» creado · inactivo` : `Agente «${a.config.name}» creado · inactivo · no se pudo guardar el ámbito: revísalo en su Configuración`); navigate(`/oficina/agente/${encodeURIComponent(a.id)}/configuracion`);
     } catch (e: any) { setError(e.message); } finally { setSaving(false); }
   };
 
-  const valid = name.trim().length >= 2 && role.trim().length >= 2 && cfg.specialization.trim().length > 0 && cfg.responsibilities.length > 0 && !!cfg.model && !!prov && prov.status === 'connected';
+  const valid = !scopeIsEmpty(ctxScope) && name.trim().length >= 2 && role.trim().length >= 2 && cfg.specialization.trim().length > 0 && cfg.responsibilities.length > 0 && !!cfg.model && !!prov && prov.status === 'connected';
 
   return (
     <Shell crumb="Formulario completo de agente">
@@ -112,10 +119,13 @@ export function AgentCreate() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(420px, 100%), 1fr))', gap: 20, alignItems: 'start' }}>
           <section className="card"><div className="card-h"><div className="h3">Identidad y ámbito</div></div>
             <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div><div className="label">Ámbito</div><div className="seg" role="group" aria-label="Ámbito">
-                <button aria-pressed={scope === 'project'} onClick={() => { setScope('project'); setReportsTo('pj-coordinador'); }}>Proyecto · {project.name}</button>
-                <button aria-pressed={scope === 'workspace'} onClick={() => { setScope('workspace'); setReportsTo('ws-gestor'); }}>Empresa · {ws.name}</button></div>
-                <div className="help">{scope === 'project' ? 'Solo accede al conocimiento y agentes de este proyecto.' : 'Accede a todos los proyectos de la empresa.'}</div></div>
+              <div><div className="label">Dónde trabaja en el Portal</div><div className="seg" role="group" aria-label="Dónde trabaja en el Portal">
+                <button aria-pressed={scope === 'project'} onClick={() => { setScope('project'); setReportsTo('pj-coordinador'); }}>{workplaceLabel('project')} · {project.name}</button>
+                <button aria-pressed={scope === 'workspace'} onClick={() => { setScope('workspace'); setReportsTo('ws-gestor'); }}>{workplaceLabel('workspace')} · {ws.name}</button></div>
+                <div className="help">{scope === 'project' ? 'Solo accede al conocimiento y agentes de este proyecto.' : 'Accede a todos los proyectos de la empresa.'} No cambia sus instrucciones, habilidades ni paquete: eso lo decide el bloque de abajo.</div></div>
+              <div className="card" style={{ padding: 12 }}>
+                <ContextScopeFields value={ctxScope} onChange={setContextScope} projects={[{ id: project.id, name: project.name }]} companyName={ws.name} idPrefix="n-scope" />
+              </div>
               <div><label className="label" htmlFor="n-name">Nombre</label><input id="n-name" className="input" value={name} onChange={e => setName(e.target.value)} placeholder="Ej.: Documentador Técnico" /></div>
               <div><label className="label" htmlFor="n-role">Rol organizacional</label><input id="n-role" className="input" value={role} onChange={e => setRole(e.target.value)} placeholder="Ej.: Documentación y comunicación técnica" /></div>
               <div><label className="label" htmlFor="n-spec">Especialización</label><textarea id="n-spec" className="input" value={cfg.specialization} onChange={e => edit({ specialization: e.target.value })} placeholder="Qué hace y qué no hace este agente." /></div>

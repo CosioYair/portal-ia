@@ -9,7 +9,8 @@ import { useApp } from '../lib/store.ts';
 import { useLive } from '../lib/live.ts';
 import { api, type AgentCapabilitiesView, type AgentLearningEntry, type AgentLearningView } from '../lib/api.ts';
 import { TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
-import { HARNESSES } from '@portal-ia/domain';
+import { HARNESSES, workplaceLabel } from '@portal-ia/domain';
+import { ContextScopeChips } from '../screens/AgentWizard.tsx';
 import { FolderPicker } from './FolderPicker.tsx';
 import { DocumentsTab, OriginTab } from './ExternalAgent.tsx';
 import { AgentZipImport } from './AgentZipImport.tsx';
@@ -93,6 +94,11 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
           {p?.office && <span className={`state-pill state-${p.office.state}`}>{STATE_TEXT[p.office.state]}</span>}
           {p?.office?.integration && <Chip xs tone={p.office.integration === 'integrated' ? 'ok' : 'soon'}>{INTEGRATION_LABEL[p.office.integration]}</Chip>}
         </div>
+        {/* EN-014 · Ámbito real (contextScope), no Template.scope. Solo presentación: no toca permisos ni gasta. */}
+        {(p || office) && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          <ContextScopeChips scope={p?.agent.contextScope ?? office?.contextScope} />
+          {p && <span className="small muted">Trabaja en: {workplaceLabel(p.agent.scope).toLowerCase()}</span>}
+        </div>}
         {p?.office?.activity && <span className="small muted">{p.office.activity}</span>}
       </div>
       <button type="button" className="xbtn" onClick={onClose} aria-label="Cerrar el panel">{Icon.x(16)}</button>
@@ -550,7 +556,7 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
     <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div className="h3">Permisos</div>
       <div className="small">Permisos concedidos: {tools.length ? tools.map(t => TOOL_LABELS[t]?.name ?? t).join(', ') : 'ninguno'}</div>
-      <div className="small">Ámbito: {p.agent.scope === 'workspace' ? 'toda la empresa' : 'su proyecto'} · las acciones externas, publicar o gastar siempre te piden aprobación.</div>
+      <div className="small">Trabaja en: {workplaceLabel(p.agent.scope).toLowerCase()} · las acciones externas, publicar o gastar siempre te piden aprobación.</div>
       <div className="small muted">Las instrucciones o habilidades de su carpeta nunca amplían estos permisos.</div>
     </section>
     <section style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
