@@ -190,7 +190,8 @@ test('interfaz: Configuración muestra «Ámbito» con tres opciones y Nuevo age
   assert.match(detail, /herramientas y permisos no cambian|no concede ni quita herramientas/);
   assert.match(wizard, /export function ContextScopeFields/); assert.match(wizard, /CONTEXT_SCOPE_OPTIONS/);
   assert.match(wizard, /d\.contextScope \?\? DEFAULT_CONTEXT_SCOPE/, 'por defecto Empresa + General');
-  assert.match(wizard, /contextScope\?: ScopePreview/, 'la vista previa de importación muestra el ámbito');
+  // Antes se buscaba el texto del cast «{ contextScope?: ScopePreview }». Ese cast desaparece porque ImportPreview ya tipa el campo (osApi.ts).
+  assert.match(wizard, /ScopePreview \| undefined = pv\?\.contextScope/, 'la vista previa de importación muestra el ámbito');
   assert.deepEqual(D.CONTEXT_SCOPE_OPTIONS.map((o: any) => o.id), ['project', 'company', 'general']);
   for (const o of D.CONTEXT_SCOPE_OPTIONS) assert.ok(String(o.text).length > 10, `${o.id}: línea explicativa`);
 });

@@ -42,6 +42,11 @@ const SKILL = z.object({ slug: z.string().max(64).default(''), name: z.string().
 const REF = z.object({ slug: z.string().max(64).default(''), title: z.string().trim().min(2).max(120), body: z.string().max(20_000).default('') });
 const HARNESS = z.enum(['api', 'claude-code', 'claude-code-terminal', 'codex']);
 const CAP = z.enum(CAPABILITIES.map(c => c.id) as [string, ...string[]]);
+/** EN-014 · Ámbito elegido en «Nuevo agente». Si está vacío, el servicio responde 400 («Elige al menos un ámbito»). */
+const CONTEXT_SCOPE_BODY = z.object({
+  project: z.object({ id: z.string().min(1).max(120), name: z.string().max(200).optional() }).nullable().default(null),
+  company: z.boolean().default(false), general: z.boolean().default(false)
+});
 const WIZARD = z.object({
   name: z.string().trim().min(2).max(80), role: z.string().trim().min(2).max(80), summary: z.string().trim().max(2000).default(''),
   responsibilities: z.array(z.string().trim().min(1).max(300)).max(30).default([]), deliverables: z.array(z.string().trim().min(1).max(200)).max(20).default([]),
@@ -51,6 +56,7 @@ const WIZARD = z.object({
   tools: z.array(z.string().max(40)).max(12).default([]), knowledge: z.array(z.string().max(40)).max(8).default([]), capabilities: z.array(CAP).max(6).default([]),
   autonomy: z.enum(['ask', 'within_scope']).default('ask'), instructions: z.string().max(20_000).nullable().optional(),
   skills: z.array(SKILL).max(20).default([]), references: z.array(REF).max(20).default([]), initials: z.string().max(2).nullable().optional(),
+  contextScope: CONTEXT_SCOPE_BODY.optional(),
   authorized: z.boolean()
 });
 

@@ -256,7 +256,7 @@ function ImportBox({ slug, projectId, harnesses, departments, onCancel, onDone }
     {pv && <>
       {pv.problems.map((p, i) => <Notice key={i} kind={p.blocking ? 'err' : 'warn'}>{p.path}: {p.message}</Notice>)}
       {pv.agent && <div className="small"><strong>{pv.agent.name}</strong> · {pv.agent.role} — {pv.agent.summary}</div>}
-      {(() => { const sp = (pv as ImportPreview & { contextScope?: ScopePreview }).contextScope; if (!sp) return null; return <div className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      {(() => { const sp: ScopePreview | undefined = pv?.contextScope; if (!sp) return null; return <div className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         <div><strong>Ámbito:</strong> {sp.label}{sp.declared ? '' : ' (no lo declara el paquete)'}</div>
         {sp.lines.length > 0 && <ul style={{ margin: 0, paddingLeft: 18 }}>{sp.lines.map((l, i) => <li key={i} className="muted">{l}</li>)}</ul>}
         {sp.warning && <Notice kind={sp.projectMissing ? 'warn' : 'info'}>{sp.warning}</Notice>}
