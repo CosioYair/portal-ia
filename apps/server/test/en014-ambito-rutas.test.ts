@@ -129,23 +129,43 @@ test('en014 · POST …/import-zip/preview muestra el ámbito y avisa, sin bloqu
   assert.ok(!(pv.problems ?? []).some((p: any) => p.blocking && p.path === 'agent.yaml'), `el aviso no bloquea: ${JSON.stringify(pv.problems)}`);
 });
 
-test('en014 · un ZIP antiguo sin ámbito: la vista previa no lo declara y, al importarlo, el agente nuevo queda General o el existente conserva el suyo', async () => {
+const IMPORT_GRANT = { department: 'Dirección', scope: 'workspace', projectId: null, harness: 'api', model: 'claude-sonnet-4-5', provider: 'anthropic', effort: 'medium', tools: [], knowledge: [], autonomy: 'ask', authorized: true };
+const withoutId = (yaml: string) => yaml.replace(/^id:.*\n?/m, '');
+
+test('en014 · ZIP antiguo sin ámbito ni id (agente nuevo): la vista previa no lo declara y el agente creado queda General', async () => {
   const NAME = 'Agente Nuevo EN014';
-  const y = stripScope(exported['agent.yaml']!).replace(/^name:.*$/m, `name: ${NAME}`);
+  const y = withoutId(stripScope(exported['agent.yaml']!)).replace(/^name:.*$/m, `name: ${NAME}`);
+  assert.ok(!/^context_scope:/m.test(y) && !/^id:/m.test(y), y);
   const r = await zipPreview(zipOf({ ...exported, 'agent.yaml': y })); assert.equal(r.statusCode, 200, r.body);
-  const pv = r.json(); assert.equal(pv.contextScope?.declared, false, 'sin context_scope no se declara ámbito');
+  const pv = r.json();
+  assert.equal(pv.mode, 'nuevo', 'sin id el ZIP es un agente nuevo');
+  assert.equal(pv.contextScope?.declared, false, 'sin context_scope no se declara ámbito');
+  assert.deepEqual(pv.contextScope.contextScope, GENERAL_ONLY, 'la vista previa anuncia General');
+  const before = new Set(agentIds());
+  const c = await app.inject({ method: 'POST', url: `${W}/agents/import-zip/confirm`, payload: { token: pv.token, hash: pv.hash, resolutions: {}, grant: IMPORT_GRANT } });
+  assert.equal(c.statusCode, 201, c.body); assert.equal(c.json().mode, 'nuevo');
+  const created = agentIds().filter(id => !before.has(id)).map(getAgent).find(a => a?.config?.name === NAME);
+  assert.ok(created, 'se creó el agente nuevo');
+  assert.deepEqual(created.contextScope, GENERAL_ONLY, 'agente nuevo de un ZIP antiguo: General');
+  assert.deepEqual((await panel(created.id)).contextScope, GENERAL_ONLY, 'y así lo muestra la API');
+});
+
+test('en014 · ZIP antiguo sin ámbito de un agente existente: tras importar un cambio en AGENTS.md conserva su ámbito', async () => {
+  const id = ids[0]!;
+  assert.deepEqual((await panel(id)).contextScope, COMPANY_GENERAL, 'punto de partida: Empresa + General');
+  const y = `id: ${JSON.stringify(id)}\n${withoutId(stripScope(exported['agent.yaml']!))}`;
+  assert.ok(!/^context_scope:/m.test(y), y);
+  const agentsMd = `${exported['AGENTS.md']!.replace(/\s+$/, '')}\n\nNota añadida fuera del Portal (EN-014).\n`;
+  const r = await zipPreview(zipOf({ ...exported, 'agent.yaml': y, 'AGENTS.md': agentsMd })); assert.equal(r.statusCode, 200, r.body);
+  const pv = r.json();
+  assert.equal(pv.mode, 'existente', `el id lleva al agente existente: ${r.body.slice(0, 300)}`); assert.equal(pv.agentId, id);
+  assert.equal(pv.contextScope?.declared, false, 'sin context_scope no se declara ámbito');
+  assert.deepEqual(pv.contextScope.contextScope, COMPANY_GENERAL, 'la vista previa anuncia el ámbito que conserva');
   const resolutions = Object.fromEntries(((pv.conflicts ?? []) as any[]).map(c => [c.path, 'zip']));
-  const grant = { department: 'Dirección', scope: 'workspace', projectId: null, harness: 'api', model: 'claude-sonnet-4-5', provider: 'anthropic', effort: 'medium', tools: [], knowledge: [], autonomy: 'ask', authorized: true };
-  const c = await app.inject({ method: 'POST', url: `${W}/agents/import-zip/confirm`, payload: { token: pv.token, hash: pv.hash, resolutions, grant } });
-  assert.ok(c.statusCode === 201 || c.statusCode === 200, c.body);
-  const created = agentIds().filter(id => !ids.includes(id)).map(getAgent).find(a => a?.config?.name === NAME);
-  if (created) {
-    assert.deepEqual(created.contextScope, GENERAL_ONLY, 'agente nuevo de un ZIP antiguo: General');
-    assert.deepEqual(pv.contextScope.contextScope, GENERAL_ONLY);
-  } else {
-    assert.deepEqual((await panel(ids[0]!)).contextScope, COMPANY_GENERAL, 'el agente existente conserva su ámbito');
-    assert.deepEqual(pv.contextScope.contextScope, COMPANY_GENERAL);
-  }
+  const c = await app.inject({ method: 'POST', url: `${W}/agents/import-zip/confirm`, payload: { token: pv.token, hash: pv.hash, resolutions } });
+  assert.equal(c.statusCode, 201, c.body); assert.equal(c.json().mode, 'existente');
+  assert.deepEqual(getAgent(id).contextScope, COMPANY_GENERAL, 'el agente existente conserva su ámbito');
+  assert.deepEqual((await panel(id)).contextScope, COMPANY_GENERAL, 'y así lo muestra la API');
 });
 
 test('en014 · POST …/agents/wizard guarda el ámbito elegido; sin él queda Empresa + General; vacío, 400', async () => {
