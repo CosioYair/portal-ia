@@ -321,7 +321,8 @@ export async function undoZipImport(slug: string, agentId: string, importN: numb
   const lessonIds = Array.isArray(detail.lessonIds) ? detail.lessonIds.filter((x): x is string => typeof x === 'string') : [];
   const lessonsNow = lessonsRepo(slug);
   const before = lessonIds.map(id => ({ id, status: lessonsNow.get(id)?.status ?? null }));
-  setLessons(slug, lessonIds, 'retired');
+  // Retirar la memoria importada con los estados que ya existen: validada → obsoleta, pendiente → rechazada (como agentLearning).
+  for (const b of before) if (b.status) setLessons(slug, [b.id], b.status === 'validated' ? 'obsolete' : 'rejected');
   let r: AgentRevision;
   try { r = await restoreRevision(slug, agentId, previous, onRow); }
   catch (e) { for (const b of before) if (b.status) setLessons(slug, [b.id], b.status); throw e; }
