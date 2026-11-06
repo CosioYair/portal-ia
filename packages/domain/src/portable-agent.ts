@@ -13,6 +13,9 @@
  * Los permisos que declare una carpeta son una PETICIÓN: solo el propietario los concede en el Portal.
  */
 
+import { CONTEXT_SCOPE_VALUES, contextScopeOptions } from './types.ts';
+import type { AgentContextScope, ContextScopeOption } from './types.ts';
+
 export const PORTABLE_AGENT_SCHEMA = 'portal-ia/agent@1';
 export type AgentAutonomy = 'ask' | 'within_scope';
 export type HarnessId = 'claude-code' | 'claude-code-terminal' | 'codex' | 'api';
@@ -29,10 +32,20 @@ export interface PortableAgentManifest {
   responsibilities: string[];
   deliverables: string[];
   capabilities: string[];
+  /**
+   * EN-014 · Ámbito (`context_scope` en agent.yaml). Es opcional: una carpeta o un ZIP sin él sigue siendo válido y el
+   * ámbito queda sin definir. Si aparece, debe tener al menos una opción válida.
+   */
+  contextScope?: PortableContextScope | undefined;
   harness: { preferred: HarnessId; model: string; effort: import('./types.ts').ReasoningEffort };
   permissions: { tools: string[]; autonomy: AgentAutonomy };
   createdAt: string;
 }
+/**
+ * Ámbito tal como viaja en agent.yaml: las opciones y los nombres. `project_name` solo se escribe si Proyecto está
+ * marcado y `company_name` solo si lo está Empresa; con solo General no se escribe ninguno de los dos.
+ */
+export interface PortableContextScope { options: ContextScopeOption[]; projectName: string | null; companyName: string | null }
 export interface PortableSkill { slug: string; name: string; description: string; body: string }
 export interface MemoryEntry { id: string; title: string; text: string; verifiedAt: string; verifiedBy: string; source: string }
 export interface PortableKnowledge { slug: string; title: string; body: string }
@@ -214,6 +227,7 @@ export function definitionToFiles(d: PortableAgentDefinition): PortableFiles {
     'agent.yaml': normalizeText(`# Agente portable de Portal IA (${PORTABLE_AGENT_SCHEMA}). Sin credenciales: los permisos los concede el propietario en el Portal.\n` + toYaml({
       schema: m.schema, id: m.id, name: m.name, role: m.role, department: m.department, initials: m.initials, summary: m.summary,
       responsibilities: m.responsibilities, deliverables: m.deliverables, capabilities: m.capabilities,
+      ...contextScopeYaml(m.contextScope),
       harness: { preferred: m.harness.preferred, model: m.harness.model, effort: m.harness.effort },
       permissions: { tools: m.permissions.tools, autonomy: m.permissions.autonomy },
       created: m.createdAt
@@ -230,6 +244,55 @@ export function definitionToFiles(d: PortableAgentDefinition): PortableFiles {
 const strList = (v: Y | undefined): string[] => Array.isArray(v) ? v.filter((x): x is string | number => typeof x === 'string' || typeof x === 'number').map(x => String(x).trim()).filter(Boolean) : [];
 const str = (v: Y | undefined, d = ''): string => typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : d;
 const HARNESSES: HarnessId[] = ['claude-code', 'claude-code-terminal', 'codex', 'api'];
+
+/** Claves de agent.yaml para el ámbito. Sin ámbito no se escribe nada, así el agent.yaml de antes no cambia. */
+function contextScopeYaml(p: PortableContextScope | undefined): { [k: string]: Y } {
+  if (!p || !p.options.length) return {};
+  const opts = CONTEXT_SCOPE_VALUES.filter(o => p.options.includes(o));
+  const out: { [k: string]: Y } = { context_scope: opts };
+  if (opts.includes('project') && p.projectName?.trim()) out.project_name = p.projectName.trim();
+  if (opts.includes('company') && p.companyName?.trim()) out.company_name = p.companyName.trim();
+  return out;
+}
+
+/**
+ * Lee `context_scope`. Si falta, el ámbito queda sin definir y no es un error (compatible con portal-ia/agent@1). Si
+ * está vacío, no es una lista o trae un valor desconocido, devuelve un error claro y el ámbito sin definir.
+ */
+function readContextScope(y: { [k: string]: Y }): { value: PortableContextScope | undefined; error: string | null } {
+  if (!Object.prototype.hasOwnProperty.call(y, 'context_scope')) return { value: undefined, error: null };
+  const raw = y.context_scope;
+  const known = `usa una lista con al menos una de: ${CONTEXT_SCOPE_VALUES.join(', ')}`;
+  if (!Array.isArray(raw)) return { value: undefined, error: `El ámbito (context_scope) debe ser una lista: ${known}.` };
+  if (!raw.length) return { value: undefined, error: `El ámbito (context_scope) está vacío: ${known}.` };
+  const bad = raw.filter(x => typeof x !== 'string' || !(CONTEXT_SCOPE_VALUES as readonly string[]).includes(x.trim()));
+  if (bad.length) return { value: undefined, error: `Ámbito desconocido «${bad.map(x => String(x)).join(', ')}» en context_scope: ${known}.` };
+  const set = new Set((raw as string[]).map(x => x.trim()));
+  const options = CONTEXT_SCOPE_VALUES.filter(o => set.has(o));
+  return { value: { options, projectName: set.has('project') ? (str(y.project_name) || null) : null, companyName: set.has('company') ? (str(y.company_name) || null) : null }, error: null };
+}
+
+/** Ámbito del agente → agent.yaml. El nombre de la empresa solo va si Empresa está marcada; el del proyecto, solo si lo está Proyecto. */
+export function contextScopeToPortable(scope: AgentContextScope | null | undefined, companyName?: string | null): PortableContextScope | undefined {
+  const options = contextScopeOptions(scope);
+  if (!scope || !options.length) return undefined;
+  return { options, projectName: scope.project ? (scope.project.name.trim() || null) : null, companyName: scope.company ? ((companyName ?? '').trim() || null) : null };
+}
+
+/**
+ * agent.yaml → ámbito del agente. El proyecto se busca por nombre entre los de este Portal. Si no existe, se conserva
+ * el nombre con el id vacío y `projectMissing` lo señala para avisar sin bloquear.
+ */
+export function contextScopeFromPortable(p: PortableContextScope, projects: readonly { id: string; name: string }[] = []): { scope: AgentContextScope; projectMissing: boolean } {
+  let project: { id: string; name: string } | null = null; let projectMissing = false;
+  if (p.options.includes('project')) {
+    const wanted = (p.projectName ?? '').trim().toLowerCase();
+    const found = wanted ? projects.find(x => x.name.trim().toLowerCase() === wanted) : undefined;
+    if (found) project = { id: found.id, name: found.name };
+    else { project = { id: '', name: (p.projectName ?? '').trim() }; projectMissing = true; }
+  }
+  return { scope: { project, company: p.options.includes('company'), general: p.options.includes('general') }, projectMissing };
+}
 
 /**
  * Lee una carpeta (sus archivos ya cargados). Devuelve la definición y los problemas encontrados; un problema con
@@ -258,13 +321,16 @@ export function filesToDefinition(files: PortableFiles): { definition: PortableA
   const preferred = HARNESSES.includes(str(h.preferred) as HarnessId) ? str(h.preferred) as HarnessId : 'claude-code';
   if (h.preferred && preferred !== h.preferred) problems.push({ path: 'agent.yaml', message: `Arnés desconocido «${str(h.preferred)}»: se usará ${preferred}.`, blocking: false });
   const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(str(h.effort)) ? str(h.effort) as import('./types.ts').ReasoningEffort : 'medium';
+  const cs = readContextScope(y);
+  if (cs.error) problems.push({ path: 'agent.yaml', message: cs.error, blocking: true });
   const manifest: PortableAgentManifest = {
     schema: PORTABLE_AGENT_SCHEMA, id: str(y.id), name, role, department: str(y.department) || null,
     initials: (str(y.initials) || name.split(/\s+/).map(w => w[0] ?? '').join('')).slice(0, 2).toUpperCase(), summary: str(y.summary),
     responsibilities: strList(y.responsibilities).slice(0, 30), deliverables: strList(y.deliverables).slice(0, 30), capabilities: strList(y.capabilities).slice(0, 12),
     harness: { preferred, model: str(h.model), effort },
     permissions: { tools: strList(pm.tools), autonomy: str(pm.autonomy) === 'within_scope' ? 'within_scope' : 'ask' },
-    createdAt: str(y.created)
+    createdAt: str(y.created),
+    ...(cs.value ? { contextScope: cs.value } : {})
   };
   const skills: PortableSkill[] = []; const knowledge: PortableKnowledge[] = [];
   for (const [p, c] of Object.entries(files)) {
