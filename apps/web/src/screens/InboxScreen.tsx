@@ -97,7 +97,7 @@ export function InboxScreen() {
         {assignmentsErr && <div className="notice notice-err" role="alert"><strong>No se pudieron cargar los encargos pendientes.</strong> {assignmentsErr}</div>}
 
         {assignments.length > 0 && <section className="dec-group card" aria-labelledby="dec-assignments">
-          <div className="card-h"><h2 className="h3" id="dec-assignments">Encargos que esperan tu decisión <span className="muted">({assignments.length})</span></h2><span className="small muted">Nada se ejecuta ni gasta hasta que lo autorices</span></div>
+          <div className="card-h"><h2 className="h3" id="dec-assignments">Encargos pendientes de ti <span className="muted">({assignments.length})</span></h2><span className="small muted">Nada se ejecuta ni gasta hasta que lo autorices</span></div>
           <ul className="inbox-list" aria-label="Encargos pendientes" style={{ listStyle: 'none', margin: 0, padding: 0 }}>{assignments.map(it => <li key={it.id} className="dec-item">
             <Tile icon={Icon.bell()} tone="attention" size="sm" />
             <div className="dec-item-text"><strong className="sm13">{it.code} · {it.title}{projectNames[it.projectId] ? <span className="small muted"> · {projectNames[it.projectId]}</span> : null}</strong>
