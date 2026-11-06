@@ -12,12 +12,17 @@ process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-e
 process.env.PORTAL_MOCK_PROVIDER = '1';
 process.env.LOG_LEVEL = 'warn';
 
+const D: any = await import('@portal-ia/domain');
+const { encryptSecret } = await import('../src/security/crypto.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
-const { workspacesRepo } = await import('../src/db/platform.ts');
+const { workspacesRepo, providersRepo } = await import('../src/db/platform.ts');
 const { agentsRepo, workspaceDb } = await import('../src/db/workspace.ts');
 const F: any = await import('../src/services/agentFolders.ts');
 const { runContextScopeMigration } = await import('../src/services/contextScopeStartup.ts');
 
+// runBootstrap exige un proveedor conectado (si no, lanza 409 en el nivel superior): proveedor simulado, sin llamadas ni costo.
+providersRepo.setCredential('anthropic', encryptSecret('sk-' + 'ant-test'), 'sk-…test');
+providersRepo.setConnected('anthropic', ['claude-opus-4-1', 'claude-sonnet-4-5'].map(id => D.classifyModel('anthropic', id)));
 runBootstrap();
 after(() => { try { fs.rmSync(process.env.PORTAL_DATA_DIR!, { recursive: true, force: true }); } catch { /* temporal */ } });
 
