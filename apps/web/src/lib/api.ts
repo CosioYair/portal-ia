@@ -360,6 +360,7 @@ export const api = {
     request<BudgetBalance>(`/api/budgets/${level}/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ workspace, limitUsd, authorized: true }) }),
   // HU-009 / HU-137 · bandeja de autorizaciones
   inbox: (slug: string) => request<PendingDecision[]>(`/api/workspaces/${slug}/inbox`),
+  inboxAssignments: (slug: string) => request<AssignmentPendingItem[]>(`/api/workspaces/${slug}/inbox/assignments`),
   decideInbox: (slug: string, kind: PendingDecisionKind, processId: string, verdict: DecisionVerdict, reason?: string, seenVersion?: string) =>
     request<InboxDecisionResult>(`/api/workspaces/${slug}/inbox/${kind}/${processId}/decision`, { method: 'POST', body: JSON.stringify({ verdict, reason: reason?.trim() ? reason.trim() : undefined, seenVersion }) }),
   // HU-161 · una autorización vigente por historia: historial (vigente + superadas) y restauración reversible sin costo.

@@ -184,3 +184,30 @@ test('(f) cableado de la web: iteración visible, pendiente único y confirmaci�
   assert.match(panel, /discardNote/);
   assert.match(api, /discardNote/); assert.match(api, /pending: AssignmentPendingState/); assert.match(api, /nextIteration: AssignmentNextIteration \| null/);
 });
+
+test('(g) Decisiones expone los encargos pendientes por su ruta y la pantalla los pinta (sin pasar por decide)', async () => {
+  const { a, p } = mkAssignment('decisiones por ruta', true);
+  const calls0 = calls();
+  const r0 = await inject('GET', `${W}/inbox/assignments`);
+  assert.equal(r0.statusCode, 200, r0.body);
+  const merged = (r0.json() as any[]).find(i => i.assignmentId === a.id);
+  assert.ok(merged, 'la ruta de Decisiones devuelve el encargo integrado sin aceptar');
+  assert.equal(merged.kind, 'merged_awaiting_acceptance'); assert.equal(merged.label, 'Integrado en main · falta aceptarlo');
+  await requestAssignmentChanges(S, a.id, 'Añadir un aviso al guardar');
+  const r1 = await inject('GET', `${W}/inbox/assignments`);
+  assert.equal(r1.statusCode, 200, r1.body);
+  const it = (r1.json() as any[]).find(i => i.assignmentId === a.id);
+  assert.equal(it?.kind, 'awaiting_iteration_authorization'); assert.equal(it?.note, 'Añadir un aviso al guardar');
+  assert.match(it?.link ?? '', new RegExp(`/procesos/${p.id}$`));
+  // No se mezcla con las decisiones de procesos (que se resuelven con decide()).
+  const inbox = await inject('GET', `${W}/inbox`);
+  assert.equal(inbox.statusCode, 200, inbox.body);
+  assert.ok(!(inbox.json() as any[]).some(d => String(d.id).includes(a.id)));
+  assert.equal(calls(), calls0, 'sin IA');
+  assert.equal((await inject('GET', `/api/workspaces/no-existe/inbox/assignments`)).statusCode, 404);
+  const web = path.join(here, '..', '..', 'web', 'src');
+  const screen = fs.readFileSync(path.join(web, 'screens', 'InboxScreen.tsx'), 'utf8');
+  const api = fs.readFileSync(path.join(web, 'lib', 'api.ts'), 'utf8');
+  assert.match(api, /\/inbox\/assignments/);
+  assert.match(screen, /api\.inboxAssignments\(/); assert.match(screen, /it\.label/);
+});

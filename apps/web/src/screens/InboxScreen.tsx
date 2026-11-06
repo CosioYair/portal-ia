@@ -2,7 +2,7 @@ import { useCallback, useContext, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useLive } from '../lib/live.ts';
 import type { DecisionVerdict, PendingDecision, PendingDecisionKind } from '@portal-ia/domain';
-import { api } from '../lib/api.ts';
+import { api, type AssignmentPendingItem } from '../lib/api.ts';
 import { osApi, type OfficeAgent } from '../lib/osApi.ts';
 import { AppContext } from '../lib/store.ts';
 import { useAttention } from '../lib/uiBus.ts';
@@ -28,6 +28,8 @@ export function InboxScreen() {
   const [load, setLoad] = useState<Load>({ phase: 'loading' });
   const [filter, setFilter] = useState<Filter>('all');
   const [agents, setAgents] = useState<OfficeAgent[] | null>(null); const [projectNames, setProjectNames] = useState<Record<string, string>>({});
+  // EN-012: encargos que esperan tu decisión (misma regla de «pendiente» que el Asistente y la tarjeta).
+  const [assignments, setAssignments] = useState<AssignmentPendingItem[]>([]); const [assignmentsErr, setAssignmentsErr] = useState<string | null>(null);
   const att = useAttention(slug);
 
   const refresh = useCallback(async () => {
@@ -36,6 +38,7 @@ export function InboxScreen() {
     try { setLoad({ phase: 'ready', items: await api.inbox(slug) }); }
     catch (e) { setLoad({ phase: 'error', message: e instanceof Error ? e.message : 'No se pudo cargar la bandeja.' }); }
     void osApi.office(slug, null).then(o => { setAgents(o.agents); setProjectNames(Object.fromEntries(o.projects.map(p => [p.id, p.name]))); }).catch(() => setAgents([]));
+    void api.inboxAssignments(slug).then(a => { setAssignments(a); setAssignmentsErr(null); }).catch((e: unknown) => setAssignmentsErr(e instanceof Error ? e.message : 'No se pudieron cargar los encargos pendientes.'));
   }, [slug]);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -51,12 +54,12 @@ export function InboxScreen() {
   const visible = filter === 'all' ? items : items.filter(i => i.kind === filter);
   const kinds = (Object.keys(KIND_LABEL) as PendingDecisionKind[]).filter(k => items.some(i => i.kind === k));
   const asks = (agents ?? []).flatMap(a => a.attention.filter(x => !x.processId).map(x => ({ agent: a, item: x })));
-  const nothing = load.phase === 'ready' && items.length === 0 && asks.length === 0 && !att.assistant;
+  const nothing = load.phase === 'ready' && items.length === 0 && asks.length === 0 && !att.assistant && assignments.length === 0 && !assignmentsErr;
 
   return (
     <Shell crumb="Decisiones">
       <main className="page screen" aria-labelledby="inbox-title" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        <PageHeader icon={Icon.bell(22)} tone={items.length + asks.length + att.assistant > 0 ? 'decisions' : 'idle'} eyebrow={ctx?.status.workspace?.name ?? 'Portal IA'} title="Decisiones" titleId="inbox-title"
+        <PageHeader icon={Icon.bell(22)} tone={items.length + asks.length + att.assistant + assignments.length > 0 ? 'decisions' : 'idle'} eyebrow={ctx?.status.workspace?.name ?? 'Portal IA'} title="Decisiones" titleId="inbox-title"
           description="Lo que espera tu respuesta. Aprobar o denegar aquí equivale a hacerlo desde el proceso."
           actions={<button className="btn btn-secondary btn-sm" onClick={() => void refresh()} disabled={load.phase === 'loading'}>Actualizar</button>} />
 
@@ -90,6 +93,19 @@ export function InboxScreen() {
             </ul>
           </section>
         )}
+
+        {assignmentsErr && <div className="notice notice-err" role="alert"><strong>No se pudieron cargar los encargos pendientes.</strong> {assignmentsErr}</div>}
+
+        {assignments.length > 0 && <section className="dec-group card" aria-labelledby="dec-assignments">
+          <div className="card-h"><h2 className="h3" id="dec-assignments">Encargos que esperan tu decisión <span className="muted">({assignments.length})</span></h2><span className="small muted">Nada se ejecuta ni gasta hasta que lo autorices</span></div>
+          <ul className="inbox-list" aria-label="Encargos pendientes" style={{ listStyle: 'none', margin: 0, padding: 0 }}>{assignments.map(it => <li key={it.id} className="dec-item">
+            <Tile icon={Icon.bell()} tone="attention" size="sm" />
+            <div className="dec-item-text"><strong className="sm13">{it.code} · {it.title}{projectNames[it.projectId] ? <span className="small muted"> · {projectNames[it.projectId]}</span> : null}</strong>
+              <span className="small med">{it.label}{it.where ? ` · Actúa ${it.where}` : ''}</span>
+              {it.note && <span className="small muted">Tu nota: «{it.note}»</span>}</div>
+            <Link className="btn btn-secondary btn-sm" to={it.link}>{it.kind === 'awaiting_iteration_authorization' ? 'Autorizar iteración' : 'Ir a aceptarlo'}</Link>
+          </li>)}</ul>
+        </section>}
 
         {asks.length > 0 && <section className="dec-group card" aria-labelledby="dec-agents">
           <div className="card-h"><h2 className="h3" id="dec-agents">Lo que te piden tus agentes <span className="muted">({asks.length})</span></h2><span className="small muted">Se resuelve en el panel de cada agente</span></div>
