@@ -75,7 +75,24 @@ export function verificationIssue(v: VerificationRun, responsible: string[]): Fl
   return { kind: 'build_failed', level: 'blocker', cause: 'code', command: v.command, title: 'El build falla', explanation: 'La aplicación no se puede construir con los cambios. No se integra (dejaría el Portal sin interfaz); el equipo debe corregirlo.', details: d.length ? d : [{ text: tailOf(v.output, 6) || `${v.command} terminó con código ${v.exitCode}` }], files: files(d).length ? files(d) : filesIn(v.output), evidence: tailOf(v.output), responsible };
 }
 
+/** Proceso de un encargo (EN-n): tiene encargo y no tiene historia del backlog. */
+export function isAssignmentProcess(p: Pick<Process, 'assignmentId' | 'backlogItemId'>): boolean {
+  return !!p.assignmentId && !p.backlogItemId;
+}
+/** Acciones que necesitan una historia: un encargo no tiene chat, ni tareas, ni historia que cerrar. */
+const STORY_ONLY = new Set<FlowActionId>(['ask_team', 'tasks_from_issue', 'close', 'close_resolved']);
+const ASSIGNMENT_FIX_TXT = 'Crea la petición de cambios del encargo con los pasos que fallaron y tus comentarios (puedes editarlos). La nueva ejecución queda pendiente de tu autorización: no gasta nada antes. Si ya está integrado en main, parte de main y no descarta nada.';
+
 export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
+  const flow = buildStoryFlowCore(p0, opts);
+  if (!isAssignmentProcess(p0)) return flow;
+  // Encargo: solo se ofrece lo que tiene un camino real (su petición de cambios); las historias no cambian.
+  const actions = flow.actions.filter(a => !STORY_ONLY.has(a.id)).map(a => a.id === 'request_fix' ? { ...a, description: ASSIGNMENT_FIX_TXT } : a);
+  const issue = flow.issue && flow.issue.kind === 'manual_failed' ? { ...flow.issue, explanation: 'Lo que marcaste con «Falla» y tus comentarios van al equipo como petición de cambios del encargo, pendiente de tu autorización y sin gasto previo.' } : flow.issue;
+  return { ...flow, issue, actions };
+}
+
+function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
   const p: Process = { ...p0, steps: p0.steps ?? [] };
   const r = p.result;
   const team = r?.team?.members ?? [];
