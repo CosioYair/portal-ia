@@ -64,6 +64,9 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const [cancelling, setCancelling] = useState(false);
   // EN-008 · Feedback de un encargo (sin historia): nota editable → petición de cambios del encargo.
   const [asgFeedback, setAsgFeedback] = useState<{ note: string; discard: boolean; needDiscard: string | null } | null>(null);
+  // EN-012 · Tras el feedback a un encargo integrado: la nueva iteración preparada espera tu autorización aquí mismo.
+  const [nextIt, setNextIt] = useState<{ note: string; estimatedUsd: number; steps: number; budget: string; ok: boolean } | null>(null);
+  useEffect(() => { setNextIt(null); }, [proc.id]);
   // Claude Code: estado real (configuración guardada, CLI, ejecutor, alcance, siguiente operación) y la última comprobación tras autorizar.
   const [cc, setCc] = useState<ProcessBackends | null>(null);
   const [verified, setVerified] = useState<string | null>(null);
@@ -96,16 +99,36 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
     if (note.length < 3) { setErr('Escribe al menos 3 caracteres con lo que debe cambiar el equipo.'); return; }
     setBusy('assignment_feedback'); setErr(null); setMsg(null);
     try {
-      await api.requestAssignmentChanges(slug, assignmentId, note, asgFeedback.discard);
+      const view = await api.requestAssignmentChanges(slug, assignmentId, note, asgFeedback.discard);
       setAsgFeedback(null);
-      setMsg(`Petición de cambios creada: la nueva ejecución del encargo queda pendiente de tu autorización en su tarjeta, sin gasto hasta entonces.${merged ? ' Parte de main y no se ha descartado nada.' : ''}`);
-      flash('Feedback enviado al equipo');
+      if (view?.nextIteration) {
+        const n = view.nextIteration;
+        setNextIt({ note: n.note, estimatedUsd: n.estimatedUsd, steps: n.steps, budget: Math.max(0.1, n.suggestedBudgetUsd || n.estimatedUsd * 2 || 0.5).toFixed(2), ok: false });
+        setMsg(null);
+        flash('Feedback enviado: nueva iteración esperando tu autorización');
+      } else {
+        setMsg(`Petición de cambios creada: la nueva ejecución del encargo queda pendiente de tu autorización en su tarjeta, sin gasto hasta entonces.${merged ? ' Parte de main y no se ha descartado nada.' : ''}`);
+        flash('Feedback enviado al equipo');
+      }
       await reload();
     } catch (e: any) {
       const code = e instanceof ApiError ? e.body?.code : undefined;
       if (code === 'discard_confirmation_required') setAsgFeedback(f => f && { ...f, needDiscard: e.message });
       else setErr(explainError(e));
     } finally { setBusy(null); }
+  };
+  const authorizeNextIteration = async () => {
+    if (!assignmentId || !nextIt) return;
+    const budgetUsd = Number(nextIt.budget);
+    if (!nextIt.ok || !(budgetUsd > 0)) { setErr('Marca la autorización e indica un presupuesto mayor que 0.'); return; }
+    setBusy('assignment_authorize'); setErr(null); setMsg(null);
+    try {
+      const r = await api.authorizeAssignment(slug, assignmentId, { budgetUsd });
+      setNextIt(null);
+      flash(`Iteración autorizada hasta ${fmtUsd(budgetUsd)}: el equipo trabaja con tu nota`);
+      const pid = r.assignment.processId;
+      if (pid && pid !== proc.id) navigate(`/procesos/${pid}`); else await reload();
+    } catch (e: any) { setErr(explainError(e)); } finally { setBusy(null); }
   };
   const issue = flow.issue;
   const cur = flow.stages.find(s => s.key === flow.current)!;
@@ -298,6 +321,18 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         <div className="sf-actions"><button className="btn btn-primary btn-sm" disabled={!okAuth || busy !== null || (needsAnswer && answer.trim().length < (confirming.id === 'register_external' ? 3 : 2))} onClick={() => void run(confirming)}>{busy === confirming.id ? <span className="spin spin-light" /> : Icon.check()}{confirming.id === 'register_external' ? 'Registrar y verificar (sin IA)' : confirming.id === 'integration_prepare' ? 'Preparar y verificar (sin IA)' : confirming.id === 'claude_code_fix' ? 'Autorizar y comprobar' : needsAnswer ? 'Enviar respuesta y continuar' : 'Confirmar y ejecutar'}</button><button className="btn btn-ghost btn-sm" onClick={() => setConfirming(null)} disabled={busy !== null}>Cancelar</button></div>
       </div>}
 
+      {nextIt && assignmentId && <div className="sf-confirm" aria-label="Nueva iteración esperando autorización" data-testid="assignment-next-iteration">
+        <strong>Nueva iteración esperando autorización</strong>
+        <p className="small">El equipo hará una nueva iteración del encargo con tu nota como contexto. {merged ? 'Parte de main; no se descarta nada. ' : ''}Mientras no la autorices, no se ejecuta ni se gasta nada.</p>
+        <div className="small"><strong>Tu nota:</strong> <span style={{ whiteSpace: 'pre-wrap' }}>{nextIt.note}</span></div>
+        <div className="small muted">Estimación sin IA: ≈ {fmtUsd(nextIt.estimatedUsd)} · {nextIt.steps} paso(s)</div>
+        <label className="small">Presupuesto máximo (USD) <input className="input mono" style={{ width: 110 }} type="number" min={0.1} step={0.5} value={nextIt.budget} onChange={e => { const v = e.target.value; setNextIt(n => n && { ...n, budget: v }); }} /></label>
+        <label className="ck small"><input className="cb" type="checkbox" checked={nextIt.ok} onChange={e => { const v = e.target.checked; setNextIt(n => n && { ...n, ok: v }); }} /><span>Autorizo esta iteración hasta <strong>{fmtUsd(Number(nextIt.budget) || 0)}</strong>.</span></label>
+        <div>
+          <button type="button" className="btn btn-primary btn-sm" disabled={!nextIt.ok || busy !== null || !(Number(nextIt.budget) > 0)} onClick={() => void authorizeNextIteration()}>{busy === 'assignment_authorize' ? 'Autorizando…' : 'Autorizar iteración'}</button>{' '}
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => { setNextIt(null); setMsg('La iteración sigue esperando tu autorización en la tarjeta del encargo; no se ha gastado nada.'); }}>Más tarde</button>
+        </div>
+      </div>}
       {asgFeedback && assignmentId && <div className="sf-confirm" aria-label="Feedback del encargo">
         <strong>Enviar feedback al equipo (nueva iteración del encargo)</strong>
         <p className="small">Crea la petición de cambios del encargo con esta nota. La nueva ejecución queda pendiente de tu autorización en la tarjeta del encargo: no se gasta nada hasta entonces.</p>

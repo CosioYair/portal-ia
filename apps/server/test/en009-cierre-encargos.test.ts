@@ -102,7 +102,10 @@ test('(c) integrado en main y en «cambios pedidos»: se acepta con motivo y la 
   const { a } = mkAssignment('integrado con cambios pedidos', tested);
   assignmentsRepo(S).update(a.id, x => { x.status = 'changes_requested'; x.iterationNote = 'Ajustar el texto del botón'; });
   await assert.rejects(acceptAssignment(S, a.id, null), (e: any) => e.statusCode === 409 && e.code === 'owner_reason_required');
-  const ok = await acceptAssignment(S, a.id, null, { ownerReason: 'Ya está en main y me sirve así' });
+  // EN-012: con una nota de cambios sin ejecutar, el motivo no basta: hay que confirmar explícitamente que se descarta.
+  await assert.rejects(acceptAssignment(S, a.id, null, { ownerReason: 'Ya está en main y me sirve así' }), (e: any) => e.statusCode === 409 && e.code === 'note_discard_confirmation_required');
+  assert.equal(assignmentsRepo(S).get(a.id)!.iterationNote, 'Ajustar el texto del botón', 'sin confirmar, la nota se conserva');
+  const ok = await acceptAssignment(S, a.id, null, { ownerReason: 'Ya está en main y me sirve así', discardNote: true });
   assert.equal(ok.status, 'accepted');
   assert.equal(ok.iterationNote, null);
   assert.ok(ok.events.some(e => /Nota pendiente descartada al aceptar: Ajustar el texto del botón/.test(e.message)), JSON.stringify(ok.events.map(e => e.message)));

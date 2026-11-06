@@ -14,7 +14,13 @@ const read = (rel: string) => fs.readFileSync(path.join(webSrc, rel), 'utf8');
 const calls = (src: string) => [...src.matchAll(/\b(api|osApi)\.([a-zA-Z]+)\(/g)].map(m => `${m[1]}.${m[2]}`);
 
 /** Lecturas que la navegación puede hacer (GET); cualquier otra llamada sería una acción. */
-const READ_ONLY = new Set(['api.inbox', 'osApi.office', 'api.backlog', 'api.usageToday', 'api.systemStatus']);
+// EN-012: Decisiones también lee los encargos que esperan al propietario (GET /inbox/assignments, solo lectura).
+const READ_ONLY = new Set(['api.inbox', 'api.inboxAssignments', 'osApi.office', 'api.backlog', 'api.usageToday', 'api.systemStatus']);
+
+test('EN-012: api.inboxAssignments es una lectura (GET sin cuerpo ni método)', () => {
+  const api = read('lib/api.ts');
+  assert.match(api, /inboxAssignments: \(slug: string\) => request<[A-Za-z[\]]+>\(`\/api\/workspaces\/\$\{slug\}\/inbox\/assignments`\),/);
+});
 
 test('la búsqueda, la campana, la barra superior, Decisiones y Ajustes no cambian nada: solo leen y navegan', () => {
   const shell = read('components/Shell.tsx');

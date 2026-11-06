@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { PENDING_DECISION_KINDS } from '@portal-ia/domain';
 import { workspacesRepo } from '../db/platform.ts';
-import { decide, InboxError, listPendingDecisions, listStoryDecisionHistory, restoreSupersededDecision, summarizePendingDecisions } from '../services/inbox.ts';
+import { decide, InboxError, listPendingAssignments, listPendingDecisions, listStoryDecisionHistory, restoreSupersededDecision, summarizePendingDecisions } from '../services/inbox.ts';
 
 const slugParams = z.object({ slug: z.string().min(1) });
 const decisionParams = z.object({ slug: z.string().min(1), kind: z.enum(PENDING_DECISION_KINDS), processId: z.string().min(1) });
@@ -23,6 +23,15 @@ export async function inboxRoutes(app: FastifyInstance) {
     if (!params.success) return reply.code(400).send({ error: 'Empresa no válida' });
     if (!workspacesRepo.get(params.data.slug)) return reply.code(404).send({ error: 'Empresa no encontrada' });
     try { return await listPendingDecisions(app, params.data.slug); } catch (e) { return fail(reply, e); }
+  });
+
+  // EN-012 · Encargos que esperan al propietario (iteración por autorizar o integrado sin aceptar). Solo lectura, sin IA.
+  // Lista aparte: no son PendingDecision ni se resuelven con decide(); se actúa en la tarjeta del encargo o en su proceso.
+  app.get('/api/workspaces/:slug/inbox/assignments', async (req, reply) => {
+    const params = slugParams.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: 'Empresa no válida' });
+    if (!workspacesRepo.get(params.data.slug)) return reply.code(404).send({ error: 'Empresa no encontrada' });
+    try { return await listPendingAssignments(app, params.data.slug); } catch (e) { return fail(reply, e); }
   });
 
   // HU-161 · Resumen de la bandeja con el invariante «una autorización vigente por historia» (solo lectura, sin IA).

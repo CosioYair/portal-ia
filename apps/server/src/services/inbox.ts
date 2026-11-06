@@ -1,5 +1,7 @@
 import type { FastifyInstance } from 'fastify';
-import { DEFAULT_PIPELINE } from '@portal-ia/domain';
+import { DEFAULT_PIPELINE, assignmentPendingState } from '@portal-ia/domain';
+import type { AssignmentPendingKind } from '@portal-ia/domain';
+import { assignmentsRepo } from '../db/assignments.ts';
 import type { DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, PendingDecisionsSummary, Process, RestoreSupersededResult, StoryDecisionHistory, SupersededDecision } from '@portal-ia/domain';
 import { backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { ensureOpsParsed } from './delegation.ts';
@@ -261,6 +263,41 @@ export async function listPendingDecisions(_app: FastifyInstance, slug: string):
     out.push(...consolidateDecisions(slug, active, all, inRemote));
   }
   return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+// ---- EN-012 · Encargos pendientes del propietario (misma regla que el Asistente y la tarjeta) ----
+/** Encargo que espera al propietario en Decisiones: no es una decisión de proceso (no se decide con decide()). */
+export interface AssignmentPendingItem {
+  id: string; kind: Extract<AssignmentPendingKind, 'awaiting_iteration_authorization' | 'merged_awaiting_acceptance'>;
+  assignmentId: string; code: string; title: string; workspaceSlug: string; projectId: string; processId: string | null;
+  /** Etiqueta única (assignmentPendingState): la misma en el Asistente, Decisiones y la tarjeta. */
+  label: string; where: string | null; link: string; note: string | null; createdAt: string;
+}
+
+/**
+ * Solo lee (sin IA): encargos con una nueva iteración por autorizar (cambios pedidos) o integrados en main a los que
+ * falta aceptar. Nada se ejecuta ni se gasta desde aquí: el enlace lleva a /procesos/<id> o a la tarjeta del encargo.
+ */
+export function assignmentPendingItems(slug: string): AssignmentPendingItem[] {
+  const out: AssignmentPendingItem[] = [];
+  for (const a of assignmentsRepo(slug).list()) {
+    if (a.status === 'accepted' || a.status === 'cancelled' || a.status === 'draft') continue;
+    const p = a.processId ? processesRepo(slug).get(a.processId) : undefined;
+    const activeProcess = !!p && (p.status === 'running' || p.status === 'pending_authorization');
+    const s = assignmentPendingState(a, { merged: p?.result?.merged ? { into: p.result.merged.into } : null, activeProcess, processId: p?.id ?? null });
+    if (s.kind !== 'awaiting_iteration_authorization' && s.kind !== 'merged_awaiting_acceptance') continue;
+    out.push({
+      id: `${s.kind}:${a.id}`, kind: s.kind, assignmentId: a.id, code: a.code, title: a.title, workspaceSlug: slug, projectId: a.projectId, processId: p?.id ?? null,
+      label: s.label, where: s.where, link: p ? `/empresa/${slug}/proyecto/${a.projectId}/procesos/${p.id}` : `/empresa/${slug}/proyecto/${a.projectId}/panel`,
+      note: s.kind === 'awaiting_iteration_authorization' ? a.iterationNote : null, createdAt: a.updatedAt
+    });
+  }
+  return out.sort((x, y) => x.createdAt.localeCompare(y.createdAt));
+}
+
+/** Igual que assignmentPendingItems, con la firma de la bandeja (para la ruta de Decisiones). */
+export async function listPendingAssignments(_app: FastifyInstance, slug: string): Promise<AssignmentPendingItem[]> {
+  return assignmentPendingItems(slug);
 }
 
 /**
