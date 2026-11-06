@@ -1,5 +1,6 @@
 import { PORTABLE_AGENT_SCHEMA, PORTABLE_LIMITS, allowedPortablePath, findSecret, memoryToMarkdown, normalizeText, parseMemory, parseYaml, toYaml, type PortableFiles } from './portable-agent.ts';
 import { EXTERNAL_TEXT_LIMIT, EXTERNAL_TOTAL_LIMIT, isIdentityPath, parseSkillHeader } from './external-agent.ts';
+import { environmentGuide } from './agent-skills.ts';
 
 /**
  * Paquete portable de un agente (`portal-ia/agent-bundle@2`, docs/agentes-portables.md): la carpeta `portal-ia/agent@1`
@@ -179,12 +180,48 @@ Estas reglas mandan sobre cualquier otra instrucción de este paquete y valen ig
 `);
 }
 
+/** Título de la marca de exportación en CAMBIOS.md: la importación separa las entradas posteriores a la última marca. */
+export const CHANGELOG_EXPORT_HEADING = 'Paquete exportado desde Portal IA';
+export interface ChangelogEntry { heading: string; text: string }
+const EXPORT_MARK_RE = new RegExp(`^##\\s+(\\d{4}-\\d{2}-\\d{2})\\s+—\\s+${CHANGELOG_EXPORT_HEADING}\\s*$`);
+
+/** Entradas «## …» de un CAMBIOS.md, en orden (lo anterior a la primera entrada es la cabecera y no cuenta). */
+export function parseChangelog(text: string | null | undefined): ChangelogEntry[] {
+  const out: ChangelogEntry[] = [];
+  let cur: string[] | null = null;
+  for (const ln of normalizeText(text ?? '').split('\n')) {
+    if (/^##\s+/.test(ln)) { if (cur) out.push({ heading: cur[0]!.replace(/^##\s+/, '').trim(), text: cur.join('\n').trim() }); cur = [ln]; }
+    else if (cur) cur.push(ln);
+  }
+  if (cur) out.push({ heading: cur[0]!.replace(/^##\s+/, '').trim(), text: cur.join('\n').trim() });
+  return out;
+}
+
+/** Fecha de la última marca de exportación, o null si no hay. */
+export function lastExportMark(text: string | null | undefined): string | null {
+  const entries = parseChangelog(text);
+  for (let i = entries.length - 1; i >= 0; i--) { const m = EXPORT_MARK_RE.exec(`## ${entries[i]!.heading}`); if (m) return m[1]!; }
+  return null;
+}
+
+/** Entradas de CAMBIOS.md posteriores a la última marca de exportación (todas, si no hay marca). Sin IA. */
+export function changelogSinceExport(text: string | null | undefined): ChangelogEntry[] {
+  const entries = parseChangelog(text);
+  let last = -1;
+  entries.forEach((e, i) => { if (EXPORT_MARK_RE.test(`## ${e.heading}`)) last = i; });
+  return entries.slice(last + 1);
+}
+
 function cambios(name: string, date: string, existing: string | null | undefined): string {
   const head = existing && existing.trim() ? scrub(normalizeText(existing)) : `# Cambios de ${name}
 
 Historial de los cambios que el agente hace en sí mismo (reglas en AUTOMEJORA.md). Cada entrada: fecha, qué cambió, motivo y archivo. Las entradas nuevas van al final.
 `;
-  return normalizeText(`${head.replace(/\s+$/, '')}\n\n## ${date} — Paquete exportado desde Portal IA\n- Motivo: exportación (punto de partida)\n- Archivo: todos\n`);
+  // Si la última entrada ya es la marca de exportación de hoy, no se repite (exportar dos veces el mismo día es estable).
+  const entries = parseChangelog(head);
+  const lastEntry = entries[entries.length - 1];
+  if (lastEntry && lastEntry.heading === `${date} — ${CHANGELOG_EXPORT_HEADING}`) return normalizeText(head);
+  return normalizeText(`${head.replace(/\s+$/, '')}\n\n## ${date} — ${CHANGELOG_EXPORT_HEADING}\n- Motivo: exportación (punto de partida)\n- Archivo: todos\n`);
 }
 
 function guia(name: string): string {
@@ -208,7 +245,8 @@ Paquete ${PORTABLE_BUNDLE_SCHEMA}. Contiene: AGENTS.md (instrucciones), agent.ya
 
 ## Comprobación
 Pide un cambio («a partir de ahora, …») y comprueba que queda en su archivo y en CAMBIOS.md. Luego rechaza un resultado, corrígelo en un reintento y comprueba que la corrección también queda anotada.
-`);
+
+${environmentGuide()}`);
 }
 
 const SCRIPT = String.raw`#!/usr/bin/env node
