@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { PORTABLE_AGENT_SCHEMA, PORTABLE_LIMITS, allowedPortablePath, baseSkillsFor, definitionToFiles, diffFiles, filesToDefinition, findSecret, isBaseSkill, normalizeText, slugify, toolCapabilities } from '@portal-ia/domain';
+import { PORTABLE_AGENT_SCHEMA, PORTABLE_LIMITS, allowedPortablePath, baseSkillsFor, buildDefaultInstructions, definitionToFiles, diffFiles, filesToDefinition, findSecret, isBaseSkill, normalizeText, slugify, toolCapabilities } from '@portal-ia/domain';
 import type { Agent, HarnessId, Lesson, MemoryEntry, PortableAgentDefinition, PortableFiles, PortableKnowledge, PortableSkill, ToolCapability } from '@portal-ia/domain';
 import { config } from '../config.ts';
 import { agentsRepo, processesRepo, workspaceDb, workspaceDbPath } from '../db/workspace.ts';
@@ -107,16 +107,38 @@ function writeFiles(dir: string, files: PortableFiles) {
 
 // ---------------------------------------------------------------- Definición del agente (fila + revisión adoptada)
 
-const DEFAULT_INSTRUCTIONS_MARK = '<!-- portal-ia: instrucciones por defecto; edítalas para darle instrucciones propias -->';
-/** AGENTS.md que genera el Portal cuando el agente no tiene instrucciones propias (no se inyecta en los prompts). */
+export const DEFAULT_INSTRUCTIONS_MARK = '<!-- portal-ia: instrucciones por defecto; edítalas para darle instrucciones propias -->';
+/** AGENTS.md mínimo (compatibilidad): nombre, resumen y marca. Lo vigente es agentDefaultInstructions. */
 export function defaultInstructions(name: string, summary: string) { return `# ${name}\n\n${summary || 'Agente de Portal IA.'}\n\n${DEFAULT_INSTRUCTIONS_MARK}`; }
 export const hasOwnInstructions = (text: string) => !!text.trim() && !text.includes(DEFAULT_INSTRUCTIONS_MARK);
+
+/**
+ * A quién reporta, en lenguaje llano y sin identificadores internos: «el propietario», el nombre del agente con esa clave
+ * (si hay varios, el del mismo proyecto) o, si no aparece, una descripción genérica (nunca la clave ni un id).
+ */
+export function reportsToName(slug: string, a: Agent): string {
+  const key = a.template.reportsTo;
+  if (!key || key === 'owner') return 'el propietario';
+  let all: Agent[] = [];
+  try { all = agentsRepo(slug).list(); } catch { all = []; }
+  const matches = all.filter(x => x.key === key && x.id !== a.id);
+  const pick = matches.find(x => x.projectId === a.projectId) ?? matches.find(x => x.projectId === null) ?? matches[0];
+  return pick ? pick.config.name : 'su responsable en el equipo';
+}
+
+/** AGENTS.md por defecto con los datos actuales del agente (sin IA ni IO salvo leer la fila; no se inyecta en los prompts). */
+export function agentDefaultInstructions(slug: string, a: Agent): string {
+  return buildDefaultInstructions({
+    name: a.config.name, role: a.template.role, specialization: a.config.specialization, responsibilities: a.config.responsibilities ?? [],
+    reportsTo: reportsToName(slug, a), tools: grantedTools(a), mark: DEFAULT_INSTRUCTIONS_MARK
+  });
+}
 
 /** El arnés de la carpeta: el backend concedido en la base (la API cuenta como «api»). */
 const harnessOf = (a: Agent): HarnessId => (a.config.backend ?? 'api') as HarnessId;
 
 export interface AgentExtras { instructions: string; skills: PortableSkill[]; memory: MemoryEntry[]; knowledge: PortableKnowledge[]; deliverables: string[]; autonomy: 'ask' | 'within_scope'; changelog?: string | undefined }
-const EMPTY_EXTRAS = (a: Agent): AgentExtras => ({ instructions: defaultInstructions(a.config.name, a.config.specialization), skills: [], memory: [], knowledge: [], deliverables: [], autonomy: 'ask' });
+const EMPTY_EXTRAS = (slug: string, a: Agent): AgentExtras => ({ instructions: agentDefaultInstructions(slug, a), skills: [], memory: [], knowledge: [], deliverables: [], autonomy: 'ask' });
 
 /** Herramientas concedidas en Configuración (la base es la fuente de verdad), ordenadas. */
 export const grantedTools = (a: Agent): string[] => Object.keys(a.config.tools).filter(k => a.config.tools[k]).sort();
@@ -129,6 +151,8 @@ export const grantedTools = (a: Agent): string[] => Object.keys(a.config.tools).
 export function definitionFor(slug: string, a: Agent, extras: AgentExtras): PortableAgentDefinition {
   const dep = departmentsRepo(slug).departmentOf(a);
   const tools = grantedTools(a);
+  // EN-013: unas instrucciones por defecto (con la marca, o vacías) se regeneran con los datos actuales; las propias no se tocan.
+  const instructions = hasOwnInstructions(extras.instructions) ? extras.instructions : agentDefaultInstructions(slug, a);
   return {
     manifest: {
       schema: PORTABLE_AGENT_SCHEMA, id: a.id, name: a.config.name, role: a.template.role, department: dep?.slug ?? null, initials: a.template.initials,
@@ -137,7 +161,7 @@ export function definitionFor(slug: string, a: Agent, extras: AgentExtras): Port
       permissions: { tools, autonomy: extras.autonomy },
       createdAt: a.createdAt
     },
-    instructions: extras.instructions, skills: [...baseSkillsFor(tools), ...extras.skills.filter(s => !isBaseSkill(s.slug))], memory: memoryOf(slug, a.id), knowledge: extras.knowledge, changelog: extras.changelog
+    instructions, skills: [...baseSkillsFor(tools), ...extras.skills.filter(s => !isBaseSkill(s.slug))], memory: memoryOf(slug, a.id), knowledge: extras.knowledge, changelog: extras.changelog
   };
 }
 
@@ -275,7 +299,7 @@ function writeRevisionUnlocked(slug: string, agentId: string, files: PortableFil
 /** Lo propio de la carpeta adoptada (o lo vacío si aún no tiene): lo que usan los prompts. */
 export function adoptedExtras(slug: string, a: Agent): AgentExtras {
   const ad = agentFoldersRepo(slug).adopted(a.id);
-  return (ad && extrasFromFiles(ad.files)) ?? EMPTY_EXTRAS(a);
+  return (ad && extrasFromFiles(ad.files)) ?? EMPTY_EXTRAS(slug, a);
 }
 
 /** Folder name único y estable a partir del nombre (no cambia si el agente se renombra). */
@@ -303,7 +327,7 @@ export async function syncAgentFolder(slug: string, a: Agent, note = 'Sincroniza
   }
   resolveWriting(slug, a.id);
   const adopted = repo.adopted(a.id);
-  const extras = (adopted && extrasFromFiles(adopted.files)) ?? EMPTY_EXTRAS(a);
+  const extras = (adopted && extrasFromFiles(adopted.files)) ?? EMPTY_EXTRAS(slug, a);
   const files = definitionToFiles(definitionFor(slug, a, extras));
   if (!adopted) {
     const rev = await writeRevision(slug, a.id, files, created ? 'migrated' : 'portal', created ? 'Carpeta creada a partir de la configuración existente del agente (sin cambiar la fila)' : note, 'portal');
