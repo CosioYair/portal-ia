@@ -440,7 +440,14 @@ export async function migrateAgentContextScopes(slug: string, companyName?: stri
   for (const row of changedRows) {
     try {
       const fresh = agentsRepo(slug).get(row.id) ?? row;
-      await syncAgentFolder(slug, fresh, contextScopeMigrationNote(company)); const migNote = contextScopeMigrationNote(company); const hasMigNote = Number((workspaceDb(slug).prepare(`SELECT COUNT(*) AS n FROM agent_revisions WHERE agent_id = ? AND note LIKE 'Ámbito inicial%'`).get(row.id) as any)?.n ?? 0) > 0; const adoptedNow = agentFoldersRepo(slug).adopted(row.id); if (!hasMigNote && adoptedNow) await writeRevision(slug, row.id, { ...adoptedNow.files }, 'portal', migNote, 'portal');
+      const migNote = contextScopeMigrationNote(company);
+      await syncAgentFolder(slug, fresh, migNote);
+      // Si los archivos no cambian (mismo hash), ni syncAgentFolder ni writeRevision crean revisión: se registra aquí,
+      // con los mismos archivos adoptados (la carpeta en disco no cambia), una sola vez por agente.
+      const hasMigNote = (workspaceDb(slug).prepare(`SELECT note FROM agent_revisions WHERE agent_id = ?`).all(row.id) as any[])
+        .some(r => String(r.note ?? '').startsWith('Ámbito inicial'));
+      const repo = agentFoldersRepo(slug); const adoptedNow = repo.adopted(row.id);
+      if (!hasMigNote && adoptedNow) { const n = repo.begin(row.id, { ...adoptedNow.files }, 'portal', migNote, 'portal'); repo.adopt(row.id, n); }
       migrated.push(row.id);
     } catch (e) { failed.push({ agentId: row.id, error: (e as Error).message }); }
   }
