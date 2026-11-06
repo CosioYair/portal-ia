@@ -6,6 +6,7 @@ import { ensureOpsParsed } from './delegation.ts';
 import { config } from '../config.ts';
 import { processVersion } from './revision.ts';
 import { InboxError } from './inboxError.ts';
+import { remoteInclusionChecker } from './publishedSync.ts';
 
 /** Error con código HTTP para que la ruta lo traduzca tal cual (definido en inboxError.ts; misma clase). */
 export { InboxError };
@@ -34,8 +35,11 @@ function requestedBy(p: Process): string {
   return p.delegation?.leadAgentName ?? p.steps[0]?.agentName ?? 'Equipo de agentes';
 }
 
-/** Función pura: qué decisiones del propietario espera un proceso (como máximo una a la vez). */
-export function decisionsFromProcess(slug: string, p: Process): PendingDecision[] {
+/**
+ * Función pura: qué decisiones del propietario espera un proceso (como máximo una a la vez). `inRemote` (opcional,
+ * precalculado sin red) indica si lo integrado ya está en la referencia local del remoto: entonces no se pide «Publicar».
+ */
+export function decisionsFromProcess(slug: string, p: Process, inRemote?: (p: Process) => boolean): PendingDecision[] {
   const make = (kind: PendingDecisionKind, createdAt: string, extra: Pick<PendingDecision, 'estimatedCost' | 'impact' | 'approveEffect' | 'denyEffect'>): PendingDecision => ({
     id: `${kind}:${p.id}`, kind, title: p.title, workspaceSlug: slug, projectId: p.projectId, processId: p.id, requestedBy: requestedBy(p), createdAt,
     storyId: p.backlogItemId ?? null, iteration: null, supersededCount: 0, ...extra, processVersion: processVersion(p)
@@ -74,7 +78,7 @@ export function decisionsFromProcess(slug: string, p: Process): PendingDecision[
         denyEffect: null
       })];
     }
-    if (r.merged && !r.published) {
+    if (r.merged && !r.published && !inRemote?.(p)) {
       return [make('publish', r.merged.mergedAt, {
         estimatedCost: null,
         impact: `Publicar en el remoto lo integrado en ${r.merged.into}${r.applied ? ` (rama ${r.applied.branch})` : ''}.`,
@@ -120,13 +124,13 @@ export function iterationNumbers(processes: Process[]): Map<string, number> {
 type Entry = { p: Process; d: PendingDecision };
 
 /** Agrupa las decisiones por historia: la vigente es la iteración más reciente no marcada como superada. */
-function storyGroups(slug: string, processes: Process[], all: Process[]) {
+function storyGroups(slug: string, processes: Process[], all: Process[], inRemote?: (p: Process) => boolean) {
   const iters = iterationNumbers(all);
   const loose: PendingDecision[] = [];
   const groups = new Map<string, Entry[]>();
   for (const p of processes) {
     const key = storyKey(p);
-    for (const d of decisionsFromProcess(slug, p)) {
+    for (const d of decisionsFromProcess(slug, p, inRemote)) {
       if (!key) { loose.push(d); continue; }
       const list = groups.get(key) ?? [];
       list.push({ p, d: { ...d, iteration: iters.get(p.id) ?? null } });
@@ -147,8 +151,8 @@ function storyGroups(slug: string, processes: Process[], all: Process[]) {
  * Función pura: como máximo una decisión pendiente por historia (la iteración vigente, con su número y el recuento
  * de superadas). Los procesos sin historia (evaluaciones, encargos) no se agrupan. `all` sirve para numerar iteraciones.
  */
-export function consolidateDecisions(slug: string, processes: Process[], all: Process[] = processes): PendingDecision[] {
-  const { loose, stories } = storyGroups(slug, processes, all);
+export function consolidateDecisions(slug: string, processes: Process[], all: Process[] = processes, inRemote?: (p: Process) => boolean): PendingDecision[] {
+  const { loose, stories } = storyGroups(slug, processes, all, inRemote);
   const out = [...loose];
   for (const g of stories.values()) if (g.current) out.push({ ...g.current.d, supersededCount: g.superseded.length });
   return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
@@ -241,7 +245,20 @@ export async function listPendingDecisions(_app: FastifyInstance, slug: string):
     // Todas las iteraciones (también archivadas) para numerar; las vigentes (sin archivar) para decidir.
     const all = repo.listLight(project.id, { archived: true });
     const active = all.filter(p => !p.archivedAt).map(p => p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p);
-    out.push(...consolidateDecisions(slug, active, all));
+    // EN-009: si lo integrado ya está en la referencia LOCAL del remoto (sin fetch), no se pide «Publicar».
+    // Solo se consulta git si hay procesos integrados sin publicar; la caché dura esta llamada.
+    const pendingPublish = active.filter(p => p.kind === 'story_execution' && p.status === 'done' && !!p.result?.merged && !p.result?.published);
+    let inRemote: ((p: Process) => boolean) | undefined;
+    const repoInfo = pendingPublish.length ? projectsRepo(slug).repository(project.id) : null;
+    if (repoInfo) {
+      try {
+        const check = await remoteInclusionChecker(repoInfo.path);
+        const included = new Set<string>();
+        for (const p of pendingPublish) if (await check(p.result!.merged!.commit, p.result!.merged!.into)) included.add(p.id);
+        if (included.size) inRemote = (p: Process) => included.has(p.id);
+      } catch { /* sin repositorio legible: la bandeja sigue como antes */ }
+    }
+    out.push(...consolidateDecisions(slug, active, all, inRemote));
   }
   return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
