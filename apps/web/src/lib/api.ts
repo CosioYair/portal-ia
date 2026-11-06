@@ -242,7 +242,8 @@ export const api = {
   assignment: (slug: string, id: string) => request<AssignmentView>(`/api/workspaces/${slug}/assignments/${id}`),
   assignmentAuthorization: (slug: string, id: string) => request<AssignmentAuthPreview>(`/api/workspaces/${slug}/assignments/${id}/authorization`),
   authorizeAssignment: (slug: string, id: string, body: { budgetUsd: number; maxSubscriptionCalls?: number; gauntlet?: { mode: 'auto' | 'off' | 'standard' | 'deep' }; discardApplied?: boolean }) => request<{ assignment: Assignment }>(`/api/workspaces/${slug}/assignments/${id}/authorize`, { method: 'POST', body: JSON.stringify({ ...body, authorized: true }) }),
-  acceptAssignment: (slug: string, id: string, note: string | null) => request<Assignment>(`/api/workspaces/${slug}/assignments/${id}/accept`, { method: 'POST', body: JSON.stringify(note ? { note } : {}) }),
+  /** EN-009 · `ownerReason`: tu motivo para aceptar aunque la regla de cierre lo bloquee o ya esté integrado con cambios pedidos (queda en sus eventos). */
+  acceptAssignment: (slug: string, id: string, note: string | null, ownerReason?: string | null) => request<Assignment>(`/api/workspaces/${slug}/assignments/${id}/accept`, { method: 'POST', body: JSON.stringify({ ...(note ? { note } : {}), ...(ownerReason?.trim() ? { ownerReason: ownerReason.trim() } : {}) }) }),
   requestAssignmentChanges: (slug: string, id: string, note: string, discardApplied = false) => request<Assignment>(`/api/workspaces/${slug}/assignments/${id}/changes`, { method: 'POST', body: JSON.stringify({ note, discardApplied }) }),
   cancelAssignment: (slug: string, id: string) => request<Assignment>(`/api/workspaces/${slug}/assignments/${id}/cancel`, { method: 'POST', body: JSON.stringify({}) }),
   claudeCodeUsage: () => request<UsageGateView>('/api/claude-code/usage'),
