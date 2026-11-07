@@ -6,7 +6,7 @@ import { filesIn } from './diagnostics.ts';
 import { readRepoFile } from './repoWrite.ts';
 import { CONSULT_EVIDENCE_CHARS, filesContext } from './storyPipeline.ts';
 import type { Agent, AssessmentEstimate, BacklogItem, BacklogOp, DelegationResult, ModelInfo, Process, ProviderId } from '@portal-ia/domain';
-import { PORTAL_CAPABILITIES, EFFORT_THINKING_TOKENS } from '@portal-ia/domain';
+import { PORTAL_CAPABILITIES, EFFORT_THINKING_TOKENS, agentPersonalName, normalizeAgentName } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
@@ -90,7 +90,10 @@ export function pickLeadAgent(slug: string, projectId: string | null, ref: any):
   const r = String(ref ?? '').trim().toLowerCase();
   const inScope = all.filter(a => a.scope === 'workspace' || !projectId || a.projectId === projectId);
   if (r) {
-    const hit = inScope.find(a => a.key.toLowerCase() === r || a.id === r) ?? inScope.find(a => a.config.name.toLowerCase() === r) ?? inScope.find(a => a.template.role.toLowerCase() === r) ?? inScope.find(a => a.config.name.toLowerCase().includes(r) || a.template.role.toLowerCase().includes(r));
+    // EN-015 · También por nombre propio («Lucía»), sin distinguir mayúsculas ni acentos (es único en la empresa).
+    const nr = normalizeAgentName(r);
+    const byPersonal = (a: Agent) => { const pn = agentPersonalName(a); return !!pn && normalizeAgentName(pn) === nr; };
+    const hit = inScope.find(a => a.key.toLowerCase() === r || a.id === r) ?? inScope.find(byPersonal) ?? inScope.find(a => a.config.name.toLowerCase() === r) ?? inScope.find(a => a.template.role.toLowerCase() === r) ?? inScope.find(a => a.config.name.toLowerCase().includes(r) || a.template.role.toLowerCase().includes(r));
     if (hit) return hit;
   }
   // Por defecto: el Coordinador del proyecto si hay proyecto; si no, el Gestor Organizacional.
@@ -293,7 +296,8 @@ Responde SOLO con JSON: {"accepted": boolean, "rejectionReason": string|null, "u
       const wanted: { agentKey: string; question: string }[] = Array.isArray(tri?.consults) ? tri.consults.filter((c: any) => c && c.agentKey && c.question) : [];
       for (let i = 0; i < consultSteps.length; i++) {
         const member = team[i]; const step = consultSteps[i];
-        const q = wanted.find(w => String(w.agentKey).toLowerCase() === member.key.toLowerCase() || String(w.agentKey).toLowerCase() === member.config.name.toLowerCase());
+        const memberPn = agentPersonalName(member);
+        const q = wanted.find(w => String(w.agentKey).toLowerCase() === member.key.toLowerCase() || String(w.agentKey).toLowerCase() === member.config.name.toLowerCase() || (!!memberPn && normalizeAgentName(String(w.agentKey)) === normalizeAgentName(memberPn)));
         if (!q) { procs.stepFinish(step.id, 'skipped', {}); continue; }
         if (isCancelled()) throw Object.assign(new Error('cancelado'), { cancelled: true });
         // Paquete de evidencia: el contenido de los archivos del repositorio que nombran el encargo o la pregunta.

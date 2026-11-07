@@ -1,4 +1,4 @@
-import { backendLabel, isRetired, type Agent, type AgentContextScope, type DelegationResult, type ExecutionBackend, type IntegrationState, type PendingDecision } from '@portal-ia/domain';
+import { agentDisplayName, agentPersonalName, backendLabel, isRetired, type Agent, type AgentContextScope, type DelegationResult, type ExecutionBackend, type IntegrationState, type PendingDecision } from '@portal-ia/domain';
 import { agentsRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
 import { agentBackend } from './claudeCode/backend.ts';
 import { lastDetection } from './claudeCode/detect.ts';
@@ -37,6 +37,10 @@ export interface OfficeAgent {
   improvementHistory?: ImprovementHistoryItem[];
   /** EN-014 · Ámbito real del agente (Proyecto/Empresa/General). No es `scope`, que indica dónde trabaja. null = sin ámbito. */
   contextScope?: AgentContextScope | null;
+  /** EN-015 · Nombre propio («Lucía»); `name` sigue siendo el puesto. null = sin nombre propio (como hoy). */
+  personalName: string | null;
+  /** EN-015 · «Lucía · Diseñador UX/UI», o solo el puesto si no tiene nombre propio. */
+  displayName: string;
 }
 
 /**
@@ -124,7 +128,8 @@ export function officeView(slug: string, decisions: PendingDecision[], opts: { p
       id: a.id, key: a.key, name: a.config.name, role: a.template.role, initials: a.template.initials, scope: a.scope, projectId: a.projectId,
       department: departmentLabelOf(a), departmentSlug: dep?.slug ?? '', harness, harnessLabel: backendLabel(harness, harness === 'codex' ? (codexBilling as any) : harness === 'api' ? null : ccBilling, a.config.provider), model: a.config.model,
       state, activity: working.get(a.id) ?? queued.get(a.id) ?? null, attention: att, harnessIssue: issue, hasFolder: !!f, custom: a.templateId === 'tpl.custom@1', integration: integration.get(a.id) ?? null,
-      contextScope
+      contextScope,
+      personalName: agentPersonalName(a) ?? null, displayName: agentDisplayName(a)
     };
   });
   // Coordinador de cada sala con los miembros ya calculados (sin volver a listar agentes por departamento).

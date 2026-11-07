@@ -1,5 +1,5 @@
 import type { Agent, AgentConfig, AgentCreateInput, Capability, ModelInfo, OrgAgentSnapshot, OrgApplication, OrgChange, OrgChangeKind, OrgEvaluation, OrgProposal, OrgProposalSpec, ProviderId } from '@portal-ia/domain';
-import { CAPABILITIES, ORG_ACTION_LABEL, ORG_TARGET_LABEL, TOOLS, departmentOf, isRetired, clampEffort } from '@portal-ia/domain';
+import { CAPABILITIES, ORG_ACTION_LABEL, ORG_TARGET_LABEL, TOOLS, departmentOf, isRetired, clampEffort, agentPersonalName } from '@portal-ia/domain';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, workspaceDb } from '../db/workspace.ts';
 import { orgEvaluationsRepo } from '../db/orgEvaluationSchema.ts';
@@ -59,6 +59,8 @@ function scopeAgents(slug: string, ev: OrgEvaluation): Agent[] {
 }
 const splitSubjects = (s: string) => s.split(/\s*\+\s*|\s*,\s*/).map(x => x.trim()).filter(Boolean);
 const uniqById = (list: Agent[]) => list.filter((a, i) => list.findIndex(b => b.id === a.id) === i);
+/** EN-015 · Coincide por puesto (config.name) o por nombre propio; si encaja con varios, el llamante lo marca como ambiguo. */
+const nameMatches = (a: Agent, q: string) => { const pn = agentPersonalName(a); return norm(a.config.name) === q || (!!pn && norm(pn) === q); };
 
 /** Agente activo del ámbito de la evaluación por clave o nombre (acepta «Nombre (clave)»). 422 si no existe o es ambiguo. */
 export function resolveSubject(slug: string, ev: OrgEvaluation, ref: string): Agent {
@@ -67,7 +69,7 @@ export function resolveSubject(slug: string, ev: OrgEvaluation, ref: string): Ag
   for (const cand of [inParens, ref].filter((x): x is string => !!x)) {
     const q = norm(cand);
     const byKey = pool.filter(a => norm(a.key) === q);
-    const hits = byKey.length ? byKey : pool.filter(a => norm(a.config.name) === q);
+    const hits = byKey.length ? byKey : pool.filter(a => nameMatches(a, q));
     if (hits.length === 1) return hits[0];
     if (hits.length > 1) throw httpError(422, `«${ref}» es ambiguo: coincide con ${hits.map(a => `${a.config.name} (${a.key})`).join(', ')}.`, 'invalid_subject');
   }
@@ -85,7 +87,7 @@ function resolveKey(all: Agent[], ref: string, projectId: string | null): string
   if (q === 'owner' || q === 'propietario') return 'owner';
   const active = all.filter(a => !isRetired(a.template) && (a.scope === 'workspace' || (projectId !== null && a.projectId === projectId)));
   const byKey = active.filter(a => norm(a.key) === q);
-  const hits = byKey.length ? byKey : active.filter(a => norm(a.config.name) === q);
+  const hits = byKey.length ? byKey : active.filter(a => nameMatches(a, q));
   if (hits.length === 1) return hits[0].key;
   if (hits.length > 1) throw httpError(422, `«${ref}» es ambiguo: coincide con ${hits.map(a => `${a.config.name} (${a.key})`).join(', ')}.`, 'invalid_spec');
   throw httpError(422, `«${ref}» no es un agente activo del ámbito al que se pueda reportar.`, 'invalid_spec');

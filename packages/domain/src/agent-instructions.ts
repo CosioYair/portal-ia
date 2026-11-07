@@ -1,5 +1,6 @@
 import { toolCapabilities } from './agent-skills.ts';
 import type { AgentContextScope } from './types.ts';
+import { findSecret } from './portable-agent.ts';
 
 /**
  * AGENTS.md por defecto de un agente del Portal (EN-013). Función pura y determinista: sin IA, sin IO y sin fechas, para
@@ -31,6 +32,8 @@ export interface DefaultInstructionsInput {
   /** Nombre y objetivos del proyecto (solo se usan con Proyecto). */
   projectName?: string | null;
   projectGoals?: readonly string[] | null;
+  /** EN-015 · Nombre propio del agente (p. ej. «Lucía»). Sin valor, el texto es idéntico al anterior. */
+  personalName?: string | null;
   /** Marca de instrucciones por defecto (la última línea). */
   mark: string;
 }
@@ -38,6 +41,190 @@ export interface DefaultInstructionsInput {
 export const INSTRUCTIONS_NO_GRANT = 'Estas instrucciones no conceden permisos: las herramientas se conceden en Configuración.';
 
 const clean = (s: string | null | undefined) => (s ?? '').replace(/\s+/g, ' ').trim();
+
+// ---------------------------------------------------------------- EN-015 · Nombre propio del agente
+
+/** Límites del nombre propio (en caracteres visibles). */
+export const AGENT_NAME_LIMITS = { min: 2, max: 30 } as const;
+
+/** Nombre tal como se guarda y se muestra: NFC, sin espacios dobles ni en los extremos. */
+export function cleanAgentName(s: string | null | undefined): string {
+  return (s ?? '').normalize('NFC').replace(/\s+/g, ' ').trim();
+}
+
+/** Clave de comparación: minúsculas, sin acentos (NFD) y sin espacios dobles. «Lucía» y «LUCIA» dan lo mismo. */
+export function normalizeAgentName(s: string | null | undefined): string {
+  return cleanAgentName(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
+export type AgentNameProblem = 'empty' | 'length' | 'chars' | 'id' | 'secret' | 'role' | 'taken';
+export interface AgentNameCheck {
+  ok: boolean;
+  /** El nombre limpio (el que se guardaría). */
+  name: string;
+  code: AgentNameProblem | null;
+  /** Motivo legible para el propietario, o null si es válido. */
+  reason: string | null;
+}
+export interface AgentNameContext {
+  /** Nombres propios de los OTROS agentes de la empresa. */
+  taken?: readonly (string | null | undefined)[];
+  /** Puestos de los agentes de la empresa: el nombre no puede coincidir con un puesto (haría ambigua «@puesto»). */
+  roles?: readonly (string | null | undefined)[];
+  /** Identificadores que no pueden aparecer como nombre (ids, claves de plantilla, slugs de carpeta…). */
+  ids?: readonly (string | null | undefined)[];
+}
+
+const UUID_LIKE = /[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}|[0-9a-f]{12,}/i;
+const NAME_CHARS = /^\p{L}[\p{L}\p{M}' ’.-]*$/u;
+
+/**
+ * Reglas del nombre propio (puras): de 2 a 30 caracteres, solo letras, espacios, apóstrofos, guiones y puntos (sin
+ * dígitos, así no cabe un id), sin aspecto de secreto ni de identificador, distinto de los puestos y único entre los
+ * demás nombres de la empresa sin distinguir mayúsculas ni acentos. `context` puede ser la lista de nombres ocupados.
+ */
+export function validateAgentName(raw: string | null | undefined, context: AgentNameContext | readonly (string | null | undefined)[] = {}): AgentNameCheck {
+  const ctx: AgentNameContext = Array.isArray(context) ? { taken: context as readonly (string | null | undefined)[] } : context as AgentNameContext;
+  const name = cleanAgentName(raw);
+  const fail = (code: AgentNameProblem, reason: string): AgentNameCheck => ({ ok: false, name, code, reason });
+  if (!name) return fail('empty', 'Escribe un nombre.');
+  if (findSecret(name)) return fail('secret', 'El nombre parece una credencial: elige otro.');
+  const norm = normalizeAgentName(name);
+  const ids = (ctx.ids ?? []).map(normalizeAgentName).filter(Boolean);
+  if ((UUID_LIKE.test(name) && /\d/.test(name)) || ids.includes(norm)) return fail('id', 'El nombre no puede ser un identificador: elige un nombre de persona.');
+  const len = Array.from(name).length;
+  if (len < AGENT_NAME_LIMITS.min || len > AGENT_NAME_LIMITS.max) return fail('length', `El nombre debe tener entre ${AGENT_NAME_LIMITS.min} y ${AGENT_NAME_LIMITS.max} caracteres.`);
+  if (!NAME_CHARS.test(name)) return fail('chars', 'Usa solo letras, espacios, apóstrofos, guiones o puntos (sin números ni símbolos).');
+  if ((ctx.roles ?? []).some(r => normalizeAgentName(r) === norm)) return fail('role', 'Ese nombre coincide con un puesto de la empresa: elige otro.');
+  if ((ctx.taken ?? []).some(t => normalizeAgentName(t) === norm)) return fail('taken', 'Otro agente de la empresa ya se llama así: pide otro nombre.');
+  return { ok: true, name, code: null, reason: null };
+}
+
+export interface AgentNameSource { name: string; personalName?: string | null | undefined }
+const nameSource = (a: AgentNameSource | { config: AgentNameSource }): AgentNameSource => 'config' in a ? a.config : a;
+
+/** El nombre propio limpio o null si no tiene. */
+export function agentPersonalName(a: AgentNameSource | { config: AgentNameSource }): string | null {
+  return cleanAgentName(nameSource(a).personalName) || null;
+}
+
+/** «Lucía · Diseñador UX/UI» si el agente tiene nombre propio; si no, el puesto tal cual (como hoy). */
+export function agentDisplayName(a: AgentNameSource | { config: AgentNameSource }): string {
+  const src = nameSource(a); const personal = agentPersonalName(src);
+  return personal ? `${personal} · ${clean(src.name)}` : src.name;
+}
+
+/** Agente mencionable en la barra de órdenes: su puesto (`name`) y, si lo tiene, su nombre propio. */
+export interface MentionAgent { id: string; name: string; personalName?: string | null }
+export type AgentMention<T extends MentionAgent> =
+  | { kind: 'agent'; agent: T; mention: string; rest: string }
+  | { kind: 'ambiguous'; options: T[]; mention: string; rest: string };
+
+const mentionKey = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+/**
+ * EN-015 · Resuelve «@Lucía revisa…» o «@Arquitecto revisa…» (pura). Claves: nombre propio y puesto completos y su
+ * primera palabra, sin distinguir mayúsculas ni acentos. Gana la clave más larga que encaja con lo escrito tras «@»
+ * (seguida de fin, espacio, coma o dos puntos); si esa clave encaja con varios agentes, el resultado es ambiguo.
+ * El texto se pasa a NFC y la mención se corta en su posición REAL dentro del texto (no por la longitud normalizada).
+ * Devuelve null si no empieza por «@» o nada coincide.
+ */
+export function resolveAgentMention<T extends MentionAgent>(text: string | null | undefined, agents: readonly T[]): AgentMention<T> | null {
+  const t = (text ?? '').normalize('NFC').trim();
+  if (!t.startsWith('@')) return null;
+  const after = t.slice(1);
+  const keysOf = (a: T): string[] => {
+    const ks = new Set<string>();
+    for (const s of [a.personalName ?? '', a.name]) {
+      const full = normalizeAgentName(s); if (!full) continue;
+      ks.add(full); ks.add(full.split(/[\s,]+/)[0] ?? '');
+    }
+    return [...ks].filter(k => k.length >= 2);
+  };
+  // Final (en el texto original) del prefijo cuya forma normalizada es exactamente k y va seguido de un separador.
+  const endOf = (k: string): number => {
+    let end = -1;
+    for (let i = 1; i <= after.length; i++) {
+      const p = mentionKey(after.slice(0, i));
+      if (p.length > k.length) break;
+      if (p === k && /^($|[\s,:])/.test(after.slice(i))) end = i;
+    }
+    return end;
+  };
+  let top = 0; let best: { a: T; end: number }[] = [];
+  for (const a of agents) for (const k of keysOf(a)) {
+    const end = endOf(k); if (end < 0) continue;
+    if (k.length > top) { top = k.length; best = [{ a, end }]; } else if (k.length === top) best.push({ a, end });
+  }
+  if (!best.length) return null;
+  const end = best[0]!.end;
+  const mention = after.slice(0, end);
+  const rest = after.slice(end).replace(/^[\s,:]+/, '');
+  const ids = [...new Set(best.map(b => b.a.id))];
+  if (ids.length === 1) return { kind: 'agent', agent: best[0]!.a, mention, rest };
+  return { kind: 'ambiguous', options: ids.map(id => best.find(b => b.a.id === id)!.a), mention, rest };
+}
+
+export interface NameProposalInput {
+  role: string;
+  specialization?: string | null;
+  responsibilities?: readonly string[] | null;
+  /** Nombres ya usados en la empresa (no puede repetirlos). */
+  taken?: readonly (string | null | undefined)[];
+  /** Puestos de la empresa (no puede usarlos como nombre). */
+  roles?: readonly (string | null | undefined)[];
+  /** Propuestas anteriores que el propietario no quiso («Pedir otro»). */
+  rejected?: readonly (string | null | undefined)[];
+}
+
+/** Prompt de la ÚNICA llamada con la que el agente propone su nombre. Pide JSON {name, reason}; sin ids ni rutas. */
+export function buildNameProposalPrompt(input: NameProposalInput): string {
+  const list = (xs: readonly (string | null | undefined)[] | undefined) => (xs ?? []).map(cleanAgentName).filter(Boolean);
+  const resp = (input.responsibilities ?? []).map(clean).filter(Boolean);
+  const taken = list(input.taken); const roles = list(input.roles); const rejected = list(input.rejected);
+  const out: string[] = [
+    `Eres «${clean(input.role) || 'un agente'}» en un equipo de agentes de IA. Elige tu propio nombre de pila, como el de una persona.`,
+    ''
+  ];
+  if (clean(input.specialization)) out.push(`Especialización: ${clean(input.specialization)}`);
+  if (resp.length) { out.push('Responsabilidades:'); for (const r of resp) out.push(`- ${r}`); }
+  out.push('', 'Reglas del nombre:');
+  out.push(`- Entre ${AGENT_NAME_LIMITS.min} y ${AGENT_NAME_LIMITS.max} caracteres, solo letras (puede llevar acentos y espacios); sin números ni símbolos.`);
+  out.push('- No uses tu puesto ni el de otro agente como nombre.');
+  if (taken.length) out.push(`- Ya están usados (no los repitas, aunque cambien mayúsculas o acentos): ${taken.join(', ')}.`);
+  if (roles.length) out.push(`- Puestos de la empresa: ${roles.join(', ')}.`);
+  if (rejected.length) out.push(`- El propietario ya descartó: ${rejected.join(', ')}. Propón uno distinto.`);
+  out.push('', 'Da un motivo breve (una frase) que relacione el nombre con tu papel.');
+  out.push('Responde SOLO con JSON válido, sin texto alrededor: {"name": "<tu nombre>", "reason": "<motivo breve>"}');
+  return out.join('\n');
+}
+
+export interface NameProposal { name: string; reason: string }
+const tidyName = (s: string) => cleanAgentName(s.replace(/[«»"“”*_`]/g, '')).replace(/^'+|'+$/g, '').replace(/[.,;:!¡?¿]+$/, '').trim();
+const tidyReason = (s: unknown) => typeof s === 'string' ? clean(s).slice(0, 240) : '';
+
+/** Lee la propuesta: el JSON {name, reason} (también dentro de un bloque de código) o líneas «Nombre: … / Motivo: …». */
+export function parseNameProposal(text: string | null | undefined): NameProposal | null {
+  const t = (text ?? '').replace(/```(?:json)?/gi, '').trim();
+  if (!t) return null;
+  const fromObj = (s: string): NameProposal | null => {
+    try {
+      const o = JSON.parse(s) as unknown;
+      if (!o || typeof o !== 'object' || Array.isArray(o)) return null;
+      const r = o as Record<string, unknown>;
+      const n = typeof r.name === 'string' ? r.name : typeof r.nombre === 'string' ? r.nombre : '';
+      const name = tidyName(n);
+      return name ? { name, reason: tidyReason(r.reason ?? r.motivo ?? r.razon ?? r['razón']) } : null;
+    } catch { return null; }
+  };
+  const whole = fromObj(t); if (whole) return whole;
+  for (const m of t.match(/\{[\s\S]*?\}/g) ?? []) { const p = fromObj(m); if (p) return p; }
+  const nm = t.match(/(?:^|\n)\s*[-*_]*\s*(?:nombre|name)\s*[*_]*\s*[:：]\s*(.+)/i);
+  if (!nm) return null;
+  const name = tidyName(nm[1] ?? ''); if (!name) return null;
+  const rm = t.match(/(?:^|\n)\s*[-*_]*\s*(?:motivo|raz[oó]n|reason|porque)\s*[*_]*\s*[:：]\s*(.+)/i);
+  return { name, reason: tidyReason(rm?.[1] ?? '') };
+}
 
 export function buildDefaultInstructions(input: DefaultInstructionsInput): string {
   const name = clean(input.name) || 'Agente';
@@ -48,8 +235,10 @@ export function buildDefaultInstructions(input: DefaultInstructionsInput): strin
   const caps = toolCapabilities(input.tools ?? []);
   const sandbox = caps.some(c => c.where.includes('sandbox'));
 
-  const out: string[] = [`# ${name}`, ''];
+  const personal = cleanAgentName(input.personalName);
+  const out: string[] = [personal ? `# ${personal} · ${name}` : `# ${name}`, ''];
   out.push('## Papel');
+  if (personal) out.push(`Te llamas ${personal} y eres ${name}.`, '');
   const scope = input.contextScope ?? null;
   const company = clean(input.companyName) || 'la empresa';
   const projectName = clean(input.projectName) || clean(scope?.project?.name);

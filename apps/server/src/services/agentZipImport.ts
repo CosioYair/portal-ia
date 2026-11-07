@@ -6,7 +6,7 @@ import { CAPABILITIES, PORTABLE_LIMITS, allowedBundlePath, allowedPortablePath, 
 import type { Agent, LessonStatus, PortableFiles, PortableMergeConflict, PortableMergeResult, PortableSkill } from '@portal-ia/domain';
 import { listZip, readZipEntry } from './zipFile.ts';
 import { agentsRepo } from '../db/workspace.ts';
-import { adoptedExtras, agentFoldersRepo, definitionFor, grantedTools, hashFiles, importScopePreview, notAdoptedChanges, restoreRevision, syncAgentFolder, writeImportedRevision, type AgentRevision, type RowPatch } from './agentFolders.ts';
+import { adoptedExtras, agentFoldersRepo, applyImportedPersonalName, definitionFor, grantedTools, hashFiles, importScopePreview, notAdoptedChanges, restoreRevision, syncAgentFolder, writeImportedRevision, type AgentRevision, type RowPatch } from './agentFolders.ts';
 import { importFromFiles, type ImportGrant } from './agentCreation.ts';
 import { lessonsRepo } from './lessons.ts';
 import { agentEvents, recordAgentEvent } from './agentEvents.ts';
@@ -271,10 +271,12 @@ export async function applyZipImport(slug: string, input: ZipConfirmInput, onRow
   let existing = existingAgent(slug, files, marker);
   if (!existing) {
     if (!input.grant) throw fail('Para un agente nuevo elige arnés, permisos y departamento.', 400);
-    const agent = await importFromFiles(slug, files, `ZIP «${st.name || 'agente.zip'}»`, input.grant, 'Importado desde ZIP (revisado por el propietario)');
+    const nameWarnings: string[] = [];
+    const agent = await importFromFiles(slug, files, `ZIP «${st.name || 'agente.zip'}»`, input.grant, 'Importado desde ZIP (revisado por el propietario)', w => { nameWarnings.push(w); });
     event(slug, agent.id, 'imported_zip', { mode: 'nuevo', hash: input.hash });
     unstage(input.token);
     const learned = learnedSummary(files, {}, null, (filesToDefinition(files).definition?.memory ?? []).map(m => ({ title: m.title, text: m.text })), changelog);
+    learned.warnings.push(...nameWarnings);
     return { mode: 'nuevo' as const, agent, revision: null as AgentRevision | null, undo: null, adopted: [] as string[], notAdopted: [] as string[], upToDate: false, memoryPending: 0, learned };
   }
   if (!agentFoldersRepo(slug).adopted(existing.id)) { await syncAgentFolder(slug, existing); existing = agentsRepo(slug).get(existing.id)!; }
@@ -303,6 +305,9 @@ export async function applyZipImport(slug: string, input: ZipConfirmInput, onRow
     return { mode: 'existente' as const, agent: target, revision: null as AgentRevision | null, undo: null, adopted, notAdopted: plan.notAdopted, upToDate: !lessonIds.length, memoryPending: lessonIds.length, learned };
   }
   const r = await writeImportedRevision(slug, target.id, merged, plan.adoptedN, onRowFor(target.id));
+  // EN-015 · Nombre propio de la revisión adoptada (idempotente): si choca o no es válido, aviso sin bloquear.
+  const pn = applyImportedPersonalName(slug, target.id, merged);
+  if (pn.warning) learned.warnings.push(pn.warning);
   const lessonIds = createPending();
   event(slug, target.id, 'imported_zip', { mode: 'existente', revision: r.revision.n, previous: r.previousN, lessonIds, adopted, resolved: input.resolutions, hash: input.hash, base: plan.base.n });
   unstage(input.token);

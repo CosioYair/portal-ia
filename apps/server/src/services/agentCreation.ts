@@ -4,7 +4,7 @@ import { CAPABILITIES, DEFAULT_CONTEXT_SCOPE, contextScopeFromPortable, contextS
 import { config, REPO_ROOT } from '../config.ts';
 import { agentsRepo, projectsRepo } from '../db/workspace.ts';
 import { departmentsRepo } from './departments.ts';
-import { agentFoldersRepo, definitionFor, agentDefaultInstructions, hashFiles, readFolder, registerAgentFolder, writeRevision, adoptedExtras, companyNameOf, contextScopeOf, GENERAL_ONLY_SCOPE, importScopePreview, applyImportedContextScope, type AgentExtras } from './agentFolders.ts';
+import { agentFoldersRepo, definitionFor, agentDefaultInstructions, hashFiles, readFolder, registerAgentFolder, writeRevision, adoptedExtras, companyNameOf, contextScopeOf, GENERAL_ONLY_SCOPE, importScopePreview, applyImportedContextScope, applyImportedPersonalName, type AgentExtras } from './agentFolders.ts';
 import { harnessAvailability, harnessModels } from './harness/index.ts';
 import { inheritLatestTemplate } from './agentTemplates.ts';
 import { recordAgentEvent } from './agentEvents.ts';
@@ -65,7 +65,7 @@ function validate(slug: string, i: WizardInput): { provider: ProviderId } {
   return { provider };
 }
 
-export async function createAgentFromWizard(slug: string, i: WizardInput, source: 'created' | 'import' = 'created', importNote = 'Importado desde una carpeta (revisado por el propietario)'): Promise<Agent> {
+export async function createAgentFromWizard(slug: string, i: WizardInput, source: 'created' | 'import' = 'created', importNote = 'Importado desde una carpeta (revisado por el propietario)', prepare?: (agent: Agent) => void): Promise<Agent> {
   const { provider } = validate(slug, i);
   const contextScope = resolveContextScope(slug, i.contextScope);
   const agents = agentsRepo(slug); const deps = departmentsRepo(slug);
@@ -85,7 +85,10 @@ export async function createAgentFromWizard(slug: string, i: WizardInput, source
   });
   // EN-014 · El ámbito se guarda ANTES de generar la carpeta: AGENTS.md por defecto, habilidades base y agent.yaml lo usan.
   const inherited = inheritLatestTemplate(slug, created);
-  const agent = agentsRepo(slug).setContextScope(inherited.id, contextScope);
+  const scoped = agentsRepo(slug).setContextScope(inherited.id, contextScope);
+  // EN-015 · El nombre propio de un paquete importado se valida y guarda ANTES de la carpeta: AGENTS.md y agent.yaml lo llevan.
+  if (prepare) prepare(scoped);
+  const agent = agentsRepo(slug).get(scoped.id) ?? scoped;
   // Carpeta portable: identidad + lo propio (instrucciones, habilidades, referencias, entregables, autonomía).
   registerAgentFolder(slug, agent);
   // EN-013 · Sin instrucciones propias, el AGENTS.md por defecto se genera sin IA a partir de los datos reales del agente
@@ -159,7 +162,7 @@ export async function importConfirm(slug: string, dir: string, expectHash: strin
  * Crea un agente NUEVO a partir de archivos portables ya leídos (de una carpeta o de un ZIP). `origin` describe de dónde
  * vienen (se guarda en la evidencia de la memoria propuesta). El id de la carpeta se ignora: el agente recibe uno nuevo.
  */
-export async function importFromFiles(slug: string, files: PortableFiles, origin: string, grant: ImportGrant, note = 'Importado desde una carpeta (revisado por el propietario)'): Promise<Agent> {
+export async function importFromFiles(slug: string, files: PortableFiles, origin: string, grant: ImportGrant, note = 'Importado desde una carpeta (revisado por el propietario)', onWarning?: (warning: string) => void): Promise<Agent> {
   const parsed = filesToDefinition(files);
   if (!parsed.definition || parsed.problems.some(p => p.blocking)) throw Object.assign(new Error(`No se puede importar: ${parsed.problems.filter(p => p.blocking).map(p => `${p.path} — ${p.message}`).join(' · ')}`), { statusCode: 400 });
   const d = parsed.definition;
@@ -175,7 +178,11 @@ export async function importFromFiles(slug: string, files: PortableFiles, origin
     ...grant, contextScope: importedScope, name: d.manifest.name, role: d.manifest.role, summary: d.manifest.summary, responsibilities: d.manifest.responsibilities, deliverables: d.manifest.deliverables,
     capabilities: grant.capabilities ?? [],
     instructions: d.instructions, skills: d.skills, references: d.knowledge, initials: d.manifest.initials, changelog: d.changelog ?? null
-  }, 'import', note);
+  }, 'import', note, a => {
+    // EN-015 · Se conserva manifest.personalName si es válido y único en la empresa; si choca, aviso sin bloquear.
+    const r = applyImportedPersonalName(slug, a.id, files);
+    if (r.warning) onWarning?.(r.warning);
+  });
   // EN-014 · Mismo criterio que la vista previa (ZIP y carpeta): ámbito declarado o, si no lo trae, General.
   applyImportedContextScope(slug, agent.id, files, true);
   // La memoria de la carpeta llega como PROPUESTA (el propietario la verifica o la descarta).

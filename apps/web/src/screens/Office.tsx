@@ -13,7 +13,7 @@ import { ContextScopeChips } from './AgentWizard.tsx';
 import { useApp } from '../lib/store.ts';
 import { useLive, useLiveConnection } from '../lib/live.ts';
 import { rememberOfficeView, OFFICE_VIEWS, tabFor } from '../lib/routes.ts';
-import { osApi, type Department, type OfficeAgent, type OfficeView } from '../lib/osApi.ts';
+import { osApi, officeDisplayName, type Department, type NamesBatchResult, type NamesEstimate, type OfficeAgent, type OfficeView } from '../lib/osApi.ts';
 import '../office.css';
 
 /**
@@ -38,13 +38,13 @@ export function Office({ view: routeView }: { view?: Exclude<View, 'planta'> }) 
   // La vista la decide la ruta (enlace directo, historial); con el panel de un agente abierto, la última vista sigue debajo.
   const mode: View = routeView ?? (agentId ? lastView : 'planta');
   useEffect(() => { if (!agentId) { lastView = mode; rememberOfficeView(mode); } }, [mode, agentId]);
-  const [dialog, setDialog] = useState<null | 'department' | 'harness' | { request: Department }>(null);
+  const [dialog, setDialog] = useState<null | 'department' | 'harness' | 'names' | { request: Department }>(null);
   const [filter, setFilter] = useState<Filter>(null);
   // Con muchos agentes: búsqueda y salas que muestran primero a quien te necesita o trabaja (12 por sala, «Ver todos»).
   const [q, setQ] = useState(''); const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const ROOM_MAX = 12;
   const norm = (x: string) => x.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
-  const matches = (a: OfficeAgent) => (!q.trim() || norm(`${a.name} ${a.role} ${a.department}`).includes(norm(q.trim())))
+  const matches = (a: OfficeAgent) => (!q.trim() || norm(`${a.personalName ?? ''} ${a.name} ${a.role} ${a.department}`).includes(norm(q.trim())))
     && (!filter || (filter === 'attention' ? a.attention.length > 0 : a.state === filter));
   const load = useCallback(() => osApi.office(ws.slug, project?.id ?? null).then(v => { setView(v); setError(null); }).catch(e => setError(e.message)), [ws.slug, project?.id]);
   useEffect(() => { void load(); }, [load]);
@@ -85,6 +85,7 @@ export function Office({ view: routeView }: { view?: Exclude<View, 'planta'> }) 
         <PageHeader icon={Icon.building(22)} tone="office" eyebrow="Tu empresa" title={ws.name}
           description="Tus departamentos y agentes, con lo que hacen ahora. Abre un puesto para conversar, encargar o revisar."
           actions={<>
+            <button type="button" className="btn btn-ghost btn-sm" disabled={!alive.length} onClick={() => setDialog('names')}>{Icon.agent()} Que elijan su nombre</button>
             <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDialog('harness')}>{Icon.sliders()} Motores de IA</button>
             <button type="button" className="btn btn-secondary btn-sm" onClick={() => setDialog('department')}>{Icon.plus()} Departamento</button>
             <NewAgentMenu disabled={!project} />
@@ -105,7 +106,7 @@ export function Office({ view: routeView }: { view?: Exclude<View, 'planta'> }) 
           <div className="card-h"><div className="h3" id="needs-h">Te necesitan</div><Link className="small" to="/autorizaciones">Ver todo en Decisiones →</Link></div>
           <div className="needs">{needs.slice(0, 5).map(a => { const first = a.attention[0]; return <div key={a.id} className="needs-row">
             <AgentFigure id={a.id} hue={hueOf(a.departmentSlug)} state={a.state} size={32} />
-            <div className="needs-text"><strong>{a.name}</strong><span>{first.label}{a.attention.length > 1 ? ` · y ${a.attention.length - 1} más` : ''}</span></div>
+            <div className="needs-text"><strong>{officeDisplayName(a)}</strong><span>{first.label}{a.attention.length > 1 ? ` · y ${a.attention.length - 1} más` : ''}</span></div>
             <button type="button" className="btn btn-secondary btn-sm" onClick={() => open(a.id, tabFor(first))}>Revisar</button>
           </div>; })}</div>
         </section>}
@@ -142,23 +143,105 @@ export function Office({ view: routeView }: { view?: Exclude<View, 'planta'> }) 
           const ms = view.agents.filter(a => a.departmentSlug === d.slug && a.state !== 'retired'); const coord = ms.find(a => a.id === d.coordinatorAgentId);
           return <section key={d.slug} className="card dept-card" style={deptStyle(d.hue)} aria-labelledby={`dep-${d.slug}`}>
             <div><h2 className="h3" id={`dep-${d.slug}`}>{d.name}</h2>{d.purpose && <p className="small med" style={{ marginTop: 4 }}>{d.purpose}</p>}</div>
-            <div className="small">{coord ? <>Coordina <strong>{coord.name}</strong></> : <span className="muted">Sin coordinador</span>} · {ms.length} {ms.length === 1 ? 'agente' : 'agentes'}{ms.some(m => m.attention.length) && <> · <span className="state-pill state-attention">te necesita</span></>}</div>
-            <div className="dept-faces">{ms.slice(0, 10).map(a => <button key={a.id} type="button" className="xbtn" style={{ width: 'auto', height: 'auto', padding: 2 }} onClick={() => open(a.id)} aria-label={`${a.name}: ${STATE_TEXT[a.state]}`} title={`${a.name} · ${STATE_TEXT[a.state]}`}><AgentFigure id={a.id} hue={d.hue} state={a.state} size={30} /></button>)}{!ms.length && <span className="small muted">Sala vacía</span>}</div>
+            <div className="small">{coord ? <>Coordina <strong>{officeDisplayName(coord)}</strong></> : <span className="muted">Sin coordinador</span>} · {ms.length} {ms.length === 1 ? 'agente' : 'agentes'}{ms.some(m => m.attention.length) && <> · <span className="state-pill state-attention">te necesita</span></>}</div>
+            <div className="dept-faces">{ms.slice(0, 10).map(a => <button key={a.id} type="button" className="xbtn" style={{ width: 'auto', height: 'auto', padding: 2 }} onClick={() => open(a.id)} aria-label={`${officeDisplayName(a)}: ${STATE_TEXT[a.state]}`} title={`${officeDisplayName(a)} · ${STATE_TEXT[a.state]}`}><AgentFigure id={a.id} hue={d.hue} state={a.state} size={30} /></button>)}{!ms.length && <span className="small muted">Sala vacía</span>}</div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               {ms.length > 0 && <button type="button" className="btn btn-secondary btn-sm" onClick={() => setDialog({ request: d })}>Pedir algo</button>}
               {project && <Link className="btn btn-ghost btn-sm" to={`/oficina/nuevo-agente?departamento=${encodeURIComponent(d.name)}`}>Añadir agente</Link>}
             </div>
           </section>;
         })}</div>}
-        {view && mode === 'organizacion' && <OrganizationView office={view.agents} onOpen={(id, t) => open(id, t)} />}
+        {view && mode === 'organizacion' && <OrganizationView office={view.agents.map(a => (a.personalName ? { ...a, name: officeDisplayName(a) } : a))} onOpen={(id, t) => open(id, t)} />}
         {view && mode === 'lista' && <OfficeList agents={view.agents.filter(matches)} onOpen={id => open(id)} current={agentId ?? null} />}
       </main>
       {agentId && <AgentPanel slug={ws.slug} agentId={agentId} tab={tab ?? 'chat'} office={current} departments={view?.departments ?? []} projects={view?.projects ?? []} onTab={t => navigate(`/oficina/agente/${agentId}/${t}`, { replace: true })} onClose={close} onChanged={() => void load()} />}
       {dialog === 'department' && <DepartmentDialog slug={ws.slug} onClose={() => setDialog(null)} onDone={() => { setDialog(null); void load(); flash('Departamento creado'); }} />}
       {dialog === 'harness' && <HarnessDialog onClose={() => setDialog(null)} />}
+      {dialog === 'names' && <NamesDialog slug={ws.slug} agents={alive} onClose={() => setDialog(null)} onChanged={() => void load()} />}
       {dialog && typeof dialog === 'object' && <DepartmentRequestDialog slug={ws.slug} department={dialog.request} agents={(view?.agents ?? []).filter(a => a.departmentSlug === dialog.request.slug && a.state !== 'retired')} projects={view?.projects ?? []} defaultProject={project?.id ?? null} onClose={() => setDialog(null)} onDone={id => { setDialog(null); flash('Petición enviada al departamento'); navigate(`/procesos/${id}`); }} />}
     </Shell>
   );
+}
+
+/**
+ * EN-015 · «Que elijan su nombre»: UNA autorización con el costo total y una llamada por agente elegido (por defecto, los
+ * que aún no tienen nombre). Cada propuesta se acepta en su fila o con «Aceptar todas»; las que no valen se marcan y se
+ * pueden escribir a mano (sin costo). Nada se guarda sin aceptar.
+ */
+function NamesDialog({ slug, agents, onClose, onChanged }: { slug: string; agents: OfficeAgent[]; onClose: () => void; onChanged: () => void }) {
+  const { flash } = useApp();
+  const MAX = 30;
+  const [sel, setSel] = useState<string[]>(() => agents.filter(a => !a.personalName).slice(0, MAX).map(a => a.id));
+  const [est, setEst] = useState<NamesEstimate | null>(null); const [estErr, setEstErr] = useState<string | null>(null);
+  const [auth, setAuth] = useState(false); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<NamesBatchResult | null>(null);
+  const [rows, setRows] = useState<Record<string, { accepted?: string; error?: string }>>({});
+  const [manual, setManual] = useState<Record<string, string>>({});
+  const selKey = sel.join(',');
+  useEffect(() => {
+    setEst(null); setEstErr(null); setAuth(false);
+    if (!sel.length) return;
+    let live = true;
+    osApi.namesEstimate(slug, sel).then(e => { if (live) setEst(e); }).catch((e: any) => { if (live) setEstErr(e.message); });
+    return () => { live = false; };
+  }, [slug, selKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const byId = new Map(agents.map(a => [a.id, a]));
+  const billable = !!est?.items.some(i => i.billable);
+  const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const propose = async () => {
+    setBusy(true); setError(null);
+    try { const r = await osApi.proposeNames(slug, sel); setResult(r); setRows({}); setAuth(false); onChanged(); }
+    catch (e: any) { setError(e.message); } finally { setBusy(false); }
+  };
+  const accept = async (id: string, name: string) => {
+    try { const r = await osApi.setName(slug, id, name); setRows(x => ({ ...x, [id]: { accepted: r.personalName ?? name } })); return true; }
+    catch (e: any) { setRows(x => ({ ...x, [id]: { error: e.message } })); return false; }
+  };
+  const acceptOne = async (id: string, name: string) => { setBusy(true); const ok = await accept(id, name); setBusy(false); if (ok) { flash(`Nombre aceptado: ${name}`); onChanged(); } };
+  const ready = (result?.items ?? []).filter(i => i.ok && i.proposal?.check.ok && !rows[i.agentId]?.accepted);
+  const acceptAll = async () => {
+    setBusy(true); let n = 0;
+    for (const i of ready) if (await accept(i.agentId, i.proposal!.name)) n++;
+    setBusy(false);
+    if (n) { flash(`${plural(n, 'nombre')} aceptado${n === 1 ? '' : 's'}`); onChanged(); }
+  };
+  const footer = result
+    ? <><button className="btn btn-ghost" onClick={onClose}>Cerrar</button><button className="btn btn-primary" disabled={busy || !ready.length} onClick={() => void acceptAll()}>{busy ? 'Guardando…' : `Aceptar todas (${ready.length})`}</button></>
+    : <><button className="btn btn-ghost" onClick={onClose}>Cancelar</button><button className="btn btn-primary" disabled={busy || !auth || !est || !sel.length} onClick={() => void propose()}>{busy ? 'Pidiendo propuestas…' : `Pedir ${plural(sel.length, 'propuesta')}`}</button></>;
+  return <Modal title="Que elijan su nombre" onClose={onClose} footer={footer}>
+    {error && <Notice kind="err">{error}</Notice>}
+    {!result && <>
+      <p className="small">Cada agente elegido propone su nombre propio con su motor de IA: una llamada por agente y una sola autorización. Su puesto y su carpeta no cambian, y no se guarda nada hasta que aceptes.</p>
+      <fieldset style={{ border: 0, padding: 0, margin: 0 }}><legend className="label">Agentes (máx. {MAX})</legend>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 260, overflowY: 'auto' }}>{agents.map(a => <label key={a.id} className="ck"><input className="cb" type="checkbox" checked={sel.includes(a.id)} disabled={busy || (!sel.includes(a.id) && sel.length >= MAX)} onChange={e => setSel(s => e.target.checked ? [...s, a.id] : s.filter(x => x !== a.id))} /> {officeDisplayName(a)} <span className="small muted">· {a.harnessLabel}{a.personalName ? ' · ya tiene nombre' : ''}</span></label>)}</div>
+      </fieldset>
+      {!sel.length ? <Notice kind="info">Elige al menos un agente.</Notice>
+        : estErr ? <Notice kind="err">No se pudo calcular el costo: {estErr}</Notice>
+        : !est ? <div className="small" role="status" style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Spinner /> Calculando el costo…</div>
+        : <Notice kind={billable ? 'warn' : 'info'}>{plural(est.calls, 'llamada')} (una por agente). {billable ? `≈ ${est.totalUsd.toFixed(3)} USD de la API en total, contra el límite mensual de cada agente; las de suscripción cuestan 0 USD.` : 'Todas van por tu suscripción: 0 USD.'}</Notice>}
+      <label className="ck"><input className="cb" type="checkbox" checked={auth} disabled={!est || !sel.length} onChange={e => setAuth(e.target.checked)} /> Autorizo {plural(sel.length, 'llamada')}{billable ? ' (algunas facturables por uso)' : ''} para que propongan su nombre.</label>
+    </>}
+    {result && <>
+      <p className="small muted">{plural(result.calls, 'llamada')} · {result.costUsd > 0 ? `${result.costUsd.toFixed(3)} USD` : '0 USD'}. Acepta cada propuesta o todas a la vez; las que no valen están marcadas.</p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{result.items.map(i => {
+        const a = byId.get(i.agentId); const r = rows[i.agentId]; const pr = i.proposal; const m = (manual[i.agentId] ?? '').trim();
+        return <div key={i.agentId} className="work-card">
+          <span className="small muted">{a ? officeDisplayName(a) : 'Agente'}</span>
+          {r?.accepted ? <Notice kind="ok">Ahora se llama {r.accepted}.</Notice> : <>
+            {!i.ok && <Notice kind="err">{i.error ?? 'No pudo proponer un nombre.'}</Notice>}
+            {pr && <div><strong>{pr.name}</strong>{pr.reason ? <span className="small"> — {pr.reason}</span> : null}</div>}
+            {pr && !pr.check.ok && <Notice kind="warn">No se puede usar: {pr.check.reason ?? 'nombre no válido'}. Pide otro desde su panel o escríbelo a mano.</Notice>}
+            {r?.error && <Notice kind="err">{r.error}</Notice>}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              {pr?.check.ok && <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => void acceptOne(i.agentId, pr.name)}>Aceptar</button>}
+              <input className="input" style={{ maxWidth: 200, height: 32 }} maxLength={30} aria-label={`Nombre a mano para ${a?.name ?? 'el agente'}`} placeholder="O escríbelo a mano" value={manual[i.agentId] ?? ''} onChange={e => setManual(x => ({ ...x, [i.agentId]: e.target.value }))} />
+              <button type="button" className="btn btn-ghost btn-sm" disabled={busy || m.length < 2 || m.length > 30} onClick={() => void acceptOne(i.agentId, m)}>Guardar a mano</button>
+            </div>
+          </>}
+        </div>;
+      })}</div>
+    </>}
+  </Modal>;
 }
 
 /** «Nuevo agente ▾»: crear, importar una carpeta portable o integrar un agente que ya trabaja en su carpeta. */
@@ -196,13 +279,13 @@ function Desks({ agents, name, hue, current, onOpen }: { agents: OfficeAgent[]; 
 }
 
 function Desk({ a, hue, current, tabbable, onFocus, onOpen }: { a: OfficeAgent; hue: number; current: boolean; tabbable: boolean; onFocus: () => void; onOpen: () => void }) {
-  const label = `${a.name}, ${a.role}${a.integration ? ` (${a.integration === 'integrated' ? 'agente externo integrado' : 'agente externo'})` : ''}. ${STATE_TEXT[a.state]}${a.state === 'unavailable' && a.harnessIssue ? `: ${a.harnessIssue}` : ''}${a.activity ? `: ${a.activity}` : ''}${a.attention.length ? `. ${a.attention.length} asunto(s) para ti` : ''}. Motor de IA: ${a.harnessLabel}.`;
+  const label = `${officeDisplayName(a)}, ${a.role}${a.integration ? ` (${a.integration === 'integrated' ? 'agente externo integrado' : 'agente externo'})` : ''}. ${STATE_TEXT[a.state]}${a.state === 'unavailable' && a.harnessIssue ? `: ${a.harnessIssue}` : ''}${a.activity ? `: ${a.activity}` : ''}${a.attention.length ? `. ${a.attention.length} asunto(s) para ti` : ''}. Motor de IA: ${a.harnessLabel}.`;
   return <button type="button" data-agent-id={a.id} className="desk" tabIndex={tabbable ? 0 : -1} onFocus={onFocus} aria-current={current} aria-label={label} title={a.activity ?? a.attention[0]?.label ?? a.harnessIssue ?? STATE_TEXT[a.state]} data-state={a.state} onClick={onOpen}>
     <StateBadge state={a.state} />
     {a.attention.length > 0 && <span className="desk-needs" aria-hidden="true">{a.attention.length}</span>}
     <AgentFigure id={a.id} hue={hue} state={a.state} />
     <span className="desk-body">
-      <span className="desk-name">{a.name}</span>
+      <span className="desk-name">{officeDisplayName(a)}</span>
       <span className="desk-role">{a.role}</span>
       <span className="desk-state">{STATE_TEXT[a.state]}</span>
       {(a.activity || (a.state === 'unavailable' && a.harnessIssue)) && <span className="desk-activity">{a.activity ?? a.harnessIssue}</span>}
@@ -218,7 +301,7 @@ function OfficeList({ agents, onOpen, current }: { agents: OfficeAgent[]; onOpen
     <caption className="sr">Agentes de la empresa con su estado</caption>
     <thead><tr><th scope="col">Agente</th><th scope="col">Departamento</th><th scope="col">Ámbito</th><th scope="col">Estado</th><th scope="col">Ahora</th><th scope="col">Motor de IA</th><th scope="col">Para ti</th></tr></thead>
     <tbody>{agents.map(a => <tr key={a.id} aria-current={a.id === current}>
-      <td><button type="button" className="lnk" onClick={() => onOpen(a.id)}>{a.name}</button><div className="small muted">{a.role}</div></td>
+      <td><button type="button" className="lnk" onClick={() => onOpen(a.id)}>{officeDisplayName(a)}</button><div className="small muted">{a.role}</div></td>
       <td data-label="Departamento">{a.department}</td>
       <td data-label="Ámbito"><ContextScopeChips scope={a.contextScope} align="start" /></td>
       <td data-label="Estado"><span className={`state-pill state-${a.state}`}>{STATE_TEXT[a.state]}</span></td>
@@ -257,7 +340,7 @@ function DepartmentRequestDialog({ slug, department, agents, projects, defaultPr
     <div><label className="label" htmlFor="dr-text">¿Qué necesitas?</label><textarea id="dr-text" className="input" rows={4} value={text} onChange={e => setText(e.target.value)} placeholder={`Ej.: «Investiga oportunidades para promocionar Orbiventt»`} autoFocus /></div>
     <div><label className="label" htmlFor="dr-project">Proyecto (donde se guarda el entregable)</label><select id="dr-project" className="input" value={projectId} onChange={e => setProjectId(e.target.value)}>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></div>
     <fieldset style={{ border: 0, padding: 0, margin: 0 }}><legend className="label">Quién participa (máx. 6)</legend>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>{agents.map(a => <label key={a.id} className="ck"><input className="cb" type="checkbox" checked={members.includes(a.id)} disabled={!members.includes(a.id) && members.length >= 6} onChange={e => setMembers(m => e.target.checked ? [...m, a.id] : m.filter(x => x !== a.id))} /> {a.name} <span className="small muted">· {a.role} · {a.harnessLabel}</span></label>)}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>{agents.map(a => <label key={a.id} className="ck"><input className="cb" type="checkbox" checked={members.includes(a.id)} disabled={!members.includes(a.id) && members.length >= 6} onChange={e => setMembers(m => e.target.checked ? [...m, a.id] : m.filter(x => x !== a.id))} /> {officeDisplayName(a)} <span className="small muted">· {a.role} · {a.harnessLabel}</span></label>)}</div>
     </fieldset>
     {preview && <Notice kind="info">Coordina <strong>{preview.coordinator.name}</strong>; {preview.estimate.steps.length} paso(s) (validación, consultas y entregable). {billable ? `≈ ${preview.estimate.estimatedUsd.toFixed(2)} USD por la API.` : 'Va por suscripción: sin USD de la API (cuenta en el tope de llamadas).'}</Notice>}
     {billable && <div><label className="label" htmlFor="dr-budget">Presupuesto de API (USD)</label><input id="dr-budget" className="input" type="number" min={0.1} step={0.1} value={budget} onChange={e => setBudget(Number(e.target.value))} /></div>}

@@ -9,14 +9,14 @@ import { useApp } from '../lib/store.ts';
 import { useLive } from '../lib/live.ts';
 import { api, type AgentCapabilitiesView, type AgentLearningEntry, type AgentLearningView } from '../lib/api.ts';
 import { TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
-import { HARNESSES, workplaceLabel } from '@portal-ia/domain';
+import { HARNESSES, agentDisplayName, workplaceLabel } from '@portal-ia/domain';
 import { ContextScopeChips } from '../screens/AgentWizard.tsx';
 import { FolderPicker } from './FolderPicker.tsx';
 import { DocumentsTab, OriginTab } from './ExternalAgent.tsx';
 import { AgentZipImport } from './AgentZipImport.tsx';
 import { ChatTab, FeedbackForm } from './AgentChat.tsx';
 import { INTEGRATION_LABEL } from '@portal-ia/domain';
-import { osApi, type AgentPanel as Panel, type Department, type FolderStatus, type HarnessOptions, type ImprovementHistoryItem, type OfficeAgent, type WorkItem } from '../lib/osApi.ts';
+import { osApi, officeDisplayName, type AgentPanel as Panel, type Department, type FolderStatus, type HarnessOptions, type ImprovementHistoryItem, type NameEstimate, type NameProposal, type OfficeAgent, type WorkItem } from '../lib/osApi.ts';
 
 /**
  * Panel de un agente: todo lo suyo en un sitio, sin navegar por seis pantallas.
@@ -86,7 +86,7 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
     <div className="agent-panel-head">
       <AgentFigure id={agentId} hue={hue} state={p?.office?.state ?? office?.state ?? 'idle'} size={56} />
       <div className="who">
-        <h2 id="agent-panel-title">{p?.agent.config.name ?? office?.name ?? 'Agente'}</h2>
+        <h2 id="agent-panel-title">{p?.displayName ?? (office ? officeDisplayName(office) : null) ?? (p ? agentDisplayName(p.agent) : null) ?? 'Agente'}</h2>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           <Chip xs>{p?.agent.template.role ?? office?.role}</Chip>
           <Chip xs tone="accent">{p?.department?.name ?? office?.department}</Chip>
@@ -508,7 +508,8 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
     {error && <Notice kind="err">{error}</Notice>}
     <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div className="h3">Identidad</div>
-      <div className="small"><strong>{p.agent.config.name}</strong> · {p.agent.template.role}</div>
+      <div className="small">{p.personalName ? <><strong>{p.personalName}</strong> · </> : null}<strong>{p.agent.config.name}</strong> · {p.agent.template.role}</div>
+      <NameSection slug={slug} p={p} onChanged={onChanged} />
       <div className="small muted">{p.agent.config.specialization}</div>
       {p.agent.config.responsibilities.length > 0 && <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13 }}>{p.agent.config.responsibilities.map((r, i) => <li key={i}>{r}</li>)}</ul>}
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -565,6 +566,97 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
       {!p.events.length && <span className="small muted">Sin eventos todavía.</span>}
     </section>
   </>;
+}
+/**
+ * EN-015 · Nombre propio, distinto del puesto (config.name no cambia y la carpeta no se renombra). «Que elija su nombre»
+ * hace UNA llamada con su arnés solo después de tu autorización en la tarjeta; escribirlo a mano no cuesta nada.
+ */
+type NameState = { kind: 'idle' } | { kind: 'authorize' } | { kind: 'loading' } | { kind: 'proposal'; proposal: NameProposal } | { kind: 'error'; message: string; clash: boolean };
+function NameSection({ slug, p, onChanged }: { slug: string; p: Panel; onChanged: () => void }) {
+  const { flash } = useApp();
+  const [st, setSt] = useState<NameState>({ kind: 'idle' });
+  const [est, setEst] = useState<NameEstimate | null>(p.nameEstimate ?? null); const [estErr, setEstErr] = useState<string | null>(null);
+  const [auth, setAuth] = useState(false); const [busy, setBusy] = useState(false);
+  const [rejected, setRejected] = useState<string[]>([]);
+  const [manualOpen, setManualOpen] = useState(false); const [manual, setManual] = useState(''); const [manualErr, setManualErr] = useState<string | null>(null);
+  const inputId = useId();
+  const current = p.personalName ?? null; const role = p.agent.config.name;
+  const m = manual.trim(); const manualOk = m.length >= 2 && m.length <= 30;
+  const openAuth = () => {
+    setAuth(false); setManualOpen(false); setSt({ kind: 'authorize' });
+    if (!est) { setEstErr(null); osApi.nameEstimate(slug, p.agent.id).then(setEst).catch((e: any) => setEstErr(e.message)); }
+  };
+  const propose = async () => {
+    setSt({ kind: 'loading' }); setAuth(false);
+    try { setSt({ kind: 'proposal', proposal: await osApi.proposeName(slug, p.agent.id, rejected) }); onChanged(); }
+    catch (e: any) { setSt({ kind: 'error', message: e.message, clash: false }); }
+  };
+  const another = (name: string) => { setRejected(r => [...r.filter(x => x !== name), name].slice(-10)); openAuth(); };
+  const save = async (name: string | null, fromManual: boolean) => {
+    setBusy(true); setManualErr(null);
+    try {
+      const r = await osApi.setName(slug, p.agent.id, name);
+      flash(name ? `${role} ahora se llama ${r.personalName ?? name}` : `${role} ya no tiene nombre propio`);
+      setSt({ kind: 'idle' }); setRejected([]); setManualOpen(false); setManual(''); onChanged();
+    } catch (e: any) {
+      const clash = e?.status === 409 || e?.body?.code === 'taken' || e?.body?.code === 'role';
+      if (fromManual && name !== null) setManualErr(e.message); else setSt({ kind: 'error', message: e.message, clash });
+    } finally { setBusy(false); }
+  };
+  const box = { padding: 10, display: 'flex', flexDirection: 'column', gap: 6 } as const;
+  return <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid var(--color-border)', paddingTop: 8, marginTop: 4 }} role="group" aria-labelledby={`${inputId}-h`}>
+    <div className="small" id={`${inputId}-h`}><strong>Nombre propio</strong></div>
+    <div className="small">{current ? <>Se llama <strong>{current}</strong>. Su puesto sigue siendo «{role}».</> : <>Aún no tiene nombre propio: se le muestra por su puesto, «{role}».</>}</div>
+    {st.kind === 'idle' && !manualOpen && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      <button type="button" className="btn btn-secondary btn-sm" disabled={p.retired || busy} onClick={openAuth}>Que elija su nombre</button>
+      <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setManualOpen(true); setManual(current ?? ''); }}>Escribirlo a mano</button>
+      {current && <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void save(null, false)}>Quitar el nombre</button>}
+    </div>}
+    {p.retired && st.kind === 'idle' && <span className="small muted">Está retirado: reactívalo para que proponga un nombre.</span>}
+    {st.kind === 'authorize' && <div className="card" style={box} role="group" aria-label="Autorizar la propuesta de nombre">
+      <strong className="small">Autorizar una llamada</strong>
+      <span className="small">{role} hará UNA llamada con su motor de IA{est ? ` (${est.label})` : ''} para proponer un nombre propio con un motivo breve. No se guarda nada hasta que lo aceptes.</span>
+      <span className="small">{estErr ? `No se pudo calcular el costo: ${estErr}` : !est ? 'Calculando el costo…' : est.billable ? `Costo estimado: ≈ ${est.estimatedUsd.toFixed(3)} USD de la API, contra su límite mensual.` : 'Costo: 0 USD (llamada de tu suscripción).'}</span>
+      {rejected.length > 0 && <span className="small muted">Le pediremos uno distinto de {rejected.map(r => `«${r}»`).join(', ')}.</span>}
+      <label className="ck small"><input className="cb" type="checkbox" checked={auth} disabled={!est} onChange={e => setAuth(e.target.checked)} /> Autorizo esta llamada{est?.billable ? ' facturable por uso' : ' con mi suscripción'}.</label>
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setSt({ kind: 'idle' })}>Cancelar</button>
+        <button type="button" className="btn btn-primary btn-sm" disabled={!auth || !est} onClick={() => void propose()}>Pedirle un nombre</button>
+      </div>
+    </div>}
+    {st.kind === 'loading' && <div className="small" role="status" style={{ display: 'flex', gap: 8, alignItems: 'center' }}><Spinner /> {role} está eligiendo su nombre…</div>}
+    {st.kind === 'proposal' && <div className="card" style={box} aria-live="polite">
+      <div><span className="small muted">Propone:</span> <strong style={{ fontSize: 16 }}>{st.proposal.name}</strong></div>
+      {st.proposal.reason && <span className="small">«{st.proposal.reason}»</span>}
+      <span className="small muted">{st.proposal.costUsd > 0 ? `Costó ${st.proposal.costUsd.toFixed(3)} USD` : 'Costó 0 USD (suscripción)'} · {st.proposal.tokensIn + st.proposal.tokensOut} tokens</span>
+      {!st.proposal.check.ok && <Notice kind="warn">No se puede usar: {st.proposal.check.reason ?? 'nombre no válido'}. Pide otro o escríbelo a mano.</Notice>}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button type="button" className="btn btn-primary btn-sm" disabled={busy || !st.proposal.check.ok} onClick={() => void save(st.proposal.name, false)}>{busy ? 'Guardando…' : 'Aceptar'}</button>
+        <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => another(st.proposal.name)}>Pedir otro</button>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setManual(st.proposal.check.ok ? st.proposal.name : ''); setSt({ kind: 'idle' }); setManualOpen(true); }}>Escribirlo a mano</button>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => setSt({ kind: 'idle' })}>Descartar</button>
+      </div>
+    </div>}
+    {st.kind === 'error' && <>
+      <Notice kind={st.clash ? 'warn' : 'err'}>{st.clash ? `Ese nombre no está libre: ${st.message} Pide otro o escríbelo a mano.` : st.message}</Notice>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        {!p.retired && <button type="button" className="btn btn-secondary btn-sm" onClick={openAuth}>Pedir otro</button>}
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => { setSt({ kind: 'idle' }); setManualOpen(true); }}>Escribirlo a mano</button>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => setSt({ kind: 'idle' })}>Volver</button>
+      </div>
+    </>}
+    {manualOpen && st.kind === 'idle' && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <label className="small" htmlFor={inputId}>Nombre propio (2–30 caracteres, sin costo ni IA)</label>
+      <input id={inputId} className="input" style={{ maxWidth: 260, height: 32 }} maxLength={30} value={manual} autoFocus
+        onChange={e => { setManual(e.target.value); setManualErr(null); }} onKeyDown={e => { if (e.key === 'Enter' && manualOk && !busy) void save(m, true); }} />
+      {m.length > 0 && !manualOk && <span className="small muted">Debe tener entre 2 y 30 caracteres.</span>}
+      {manualErr && <Notice kind="err">{manualErr}</Notice>}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button type="button" className="btn btn-primary btn-sm" disabled={busy || !manualOk} onClick={() => void save(m, true)}>{busy ? 'Guardando…' : 'Guardar'}</button>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setManualOpen(false); setManualErr(null); }}>Cancelar</button>
+      </div>
+    </div>}
+  </div>;
 }
 const LEVEL: Record<string, string> = { yes: 'sí', partial: 'parcial', no: 'no' };
 /** EN-011 · Tipo de sandbox en lenguaje claro; solo se muestra si está disponible (otros valores, como 'none', no se enseñan). */

@@ -1,5 +1,6 @@
 import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import type { BacklogItem, ProviderId } from '@portal-ia/domain';
+import { agentPersonalName } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { backlogRepo, knowledgeRepo, processesRepo } from '../db/workspace.ts';
@@ -73,9 +74,11 @@ function resolveOwner(slug: string, owner: string | null): string | null {
   const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
   const o = norm(owner);
   const byKey = agents.find(a => a.key === owner); if (byKey) return byKey.key;
-  const byName = agents.find(a => norm(a.config.name) === o || norm(a.template.role) === o); if (byName) return byName.key;
+  // EN-015 · El nombre propio («Lucía») también identifica al responsable.
+  const pn = (a: (typeof agents)[number]) => norm(agentPersonalName(a) ?? '');
+  const byName = agents.find(a => (!!pn(a) && pn(a) === o) || norm(a.config.name) === o || norm(a.template.role) === o); if (byName) return byName.key;
   const words = o.split(/\W+/).filter(w => w.length > 3);
-  const partial = agents.find(a => { const n = norm(a.config.name) + ' ' + norm(a.template.role); return words.some(w => n.includes(w)); });
+  const partial = agents.find(a => { const n = norm(a.config.name) + ' ' + norm(a.template.role) + (pn(a) ? ' ' + pn(a) : ''); return words.some(w => n.includes(w)); });
   return partial?.key ?? null;
 }
 
