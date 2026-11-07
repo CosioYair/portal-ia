@@ -201,7 +201,12 @@ test('importar como agente nuevo conserva el nombre propio (config.personalName 
 });
 
 test('importar por ZIP un nombre que choca: termina sin nombre y deja un aviso en learned.warnings', async () => {
+  // La prueba anterior dejó «Lucía» en el agente importado y a dev sin nombre: dev lo recupera para que el paquete lo lleve.
+  const prev = agentsRepo(S).list().find(x => x.id !== dev.id && x.config.personalName === 'Lucía');
+  if (prev) await N.setPersonalName(S, prev.id, null);
+  await N.setPersonalName(S, dev.id, 'Lucía');
   const files = await exportedAsNew();
+  assert.match(files['agent.yaml']!, /personal_name: Lucía/, 'el paquete lleva el nombre que choca con dev');
   const { zipBuffers } = await import('../src/services/zipFile.ts');
   const { previewZipImport, applyZipImport } = await import('../src/services/agentZipImport.ts');
   const zipPath = path.join(process.env.PORTAL_DATA_DIR!, 'en015-choque.zip');
