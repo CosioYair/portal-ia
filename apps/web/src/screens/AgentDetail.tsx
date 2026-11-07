@@ -124,7 +124,7 @@ export function AgentDetail() {
               <Avatar initials={agent.template.initials} ws={wsScope} lg />
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <h1 className="h1" style={{ fontSize: 24 }}>{cfg.name}</h1><div className="med">{agent.template.role}</div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}><ContextScopeChips scope={currentScope} companyName={companyName} /><Chip xs>Trabaja en: {workplaceLabel(agent.scope).toLowerCase()}</Chip><Chip xs dot={agent.status === 'active' ? 'ok' : ''}>Configurado · {agent.status === 'active' ? 'Activo' : 'Inactivo'}</Chip><Chip xs className="mono">{agent.templateId === 'tpl.custom@1' ? 'personalizado' : agent.templateId}</Chip></div>
+                <div className="chip-row chip-row-start"><ContextScopeChips scope={currentScope} companyName={companyName} /><Chip xs>Trabaja en: {workplaceLabel(agent.scope).toLowerCase()}</Chip><Chip xs dot={agent.status === 'active' ? 'ok' : ''}>Configurado · {agent.status === 'active' ? 'Activo' : 'Inactivo'}</Chip><Chip xs className="mono">{agent.templateId === 'tpl.custom@1' ? 'personalizado' : agent.templateId}</Chip></div>
               </div>
             </div>
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>

@@ -73,12 +73,15 @@ const SCOPE_TONE: Record<ContextScopeOption, '' | 'accent' | 'ok'> = { project: 
 /**
  * EN-014 · Chips del ámbito real (contextScope) para la Oficina, la Organización, la cabecera y el panel del agente.
  * Sin ámbito, «Sin ámbito» en tono de aviso. Es solo presentación: no concede ni quita herramientas ni permisos y no gasta nada.
+ * Estándar de estilo (docs/estilos-ui.md): fila `.chip-row` del sistema, sin estilos en línea ni envolturas; `align` elige
+ * 'start' (tablas, cabeceras, formularios) o 'center' (puestos y tarjetas en columna, también cuando pasa de línea).
  */
-export function ContextScopeChips({ scope, companyName }: { scope: AgentContextScope | null | undefined; companyName?: string | null }) {
+export function ContextScopeChips({ scope, companyName, align = 'start' }: { scope: AgentContextScope | null | undefined; companyName?: string | null; align?: 'start' | 'center' }) {
   const badges = contextScopeBadges(scope);
-  if (!badges.length) return <span title="Este agente aún no tiene ámbito: elígelo en su Configuración."><Chip tone="warn" xs>Sin ámbito</Chip></span>;
-  return <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }} aria-label={`Ámbito: ${badges.map(b => b.text).join(' + ')}`}>
-    {badges.map(b => <span key={b.id} title={b.id === 'company' && companyName ? `Empresa: ${companyName}` : undefined}><Chip tone={SCOPE_TONE[b.id]} xs>{b.text}</Chip></span>)}
+  const rowClass = `chip-row chip-row-${align}`;
+  if (!badges.length) return <span className={rowClass} aria-label="Ámbito: sin ámbito"><Chip tone="warn" xs title="Este agente aún no tiene ámbito: elígelo en su Configuración.">Sin ámbito</Chip></span>;
+  return <span className={rowClass} aria-label={`Ámbito: ${badges.map(b => b.text).join(' + ')}`}>
+    {badges.map(b => <Chip key={b.id} tone={SCOPE_TONE[b.id]} xs title={b.id === 'company' && companyName ? `Empresa: ${companyName}` : undefined}>{b.text}</Chip>)}
   </span>;
 }
 
