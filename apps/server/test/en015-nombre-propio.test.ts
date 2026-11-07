@@ -168,3 +168,55 @@ test('cableado de la interfaz: panel, Oficina, cliente y rutas', () => {
   const routes = read('../src/routes/agentsOs.ts');
   for (const s of ['/agents/:id/name/estimate', '/agents/:id/name/propose', '/agents/names/propose', "app.put('/api/workspaces/:slug/agents/:id/name'"]) assert.ok(routes.includes(s), `rutas: falta «${s}»`);
 });
+
+// ---- Importar: el nombre propio se conserva (agente nuevo) y, si choca, se importa sin él con un aviso.
+const IMPORT_GRANT = { department: 'Pruebas', scope: 'workspace' as const, projectId: null, harness: 'api' as const, model: 'claude-sonnet-4-5', provider: 'anthropic' as const, effort: 'medium' as const, tools: [] as string[], knowledge: [] as string[], autonomy: 'ask' as const, authorized: true as const, capabilities: [] };
+/** Paquete exportado del agente con su id cambiado por uno nuevo: se importa como agente NUEVO. */
+async function exportedAsNew(): Promise<Record<string, string>> {
+  const { randomUUID } = await import('node:crypto');
+  const { files } = await exportFiles(S, dev.id);
+  assert.ok(files['agent.yaml']!.includes(dev.id), 'agent.yaml lleva el id del agente');
+  const yaml = files['agent.yaml']!.split(dev.id).join(randomUUID());
+  assert.ok(!yaml.includes(dev.id));
+  return { ...files, 'agent.yaml': yaml };
+}
+
+test('importar como agente nuevo conserva el nombre propio (config.personalName y AGENTS.md)', async () => {
+  assert.equal(agentsRepo(S).get(dev.id)!.config.personalName, 'Lucía');
+  const files = await exportedAsNew();
+  assert.match(files['agent.yaml']!, /personal_name: Lucía/);
+  await N.setPersonalName(S, dev.id, null); // «Lucía» queda libre en la empresa
+  const c0 = mockCalls(); const warnings: string[] = [];
+  const { importFromFiles } = await import('../src/services/agentCreation.ts');
+  const imported = await importFromFiles(S, files, 'prueba EN-015', IMPORT_GRANT, 'Importado en la prueba EN-015', w => { warnings.push(w); });
+  assert.equal(mockCalls(), c0, 'importar no llama al modelo');
+  assert.notEqual(imported.id, dev.id, 'agente nuevo');
+  const a = agentsRepo(S).get(imported.id)!;
+  assert.equal(a.config.personalName, 'Lucía', 'el nombre propio se conserva');
+  assert.equal(a.config.name, agentsRepo(S).get(dev.id)!.config.name, 'el puesto es el del paquete');
+  assert.deepEqual(warnings, [], 'sin avisos');
+  const md = agentsMd(imported.id);
+  assert.ok(md.startsWith(`# Lucía · ${a.config.name}`), md.slice(0, 120));
+  assert.ok(md.includes('Lucía'));
+});
+
+test('importar por ZIP un nombre que choca: termina sin nombre y deja un aviso en learned.warnings', async () => {
+  const files = await exportedAsNew();
+  const { zipBuffers } = await import('../src/services/zipFile.ts');
+  const { previewZipImport, applyZipImport } = await import('../src/services/agentZipImport.ts');
+  const zipPath = path.join(process.env.PORTAL_DATA_DIR!, 'en015-choque.zip');
+  fs.writeFileSync(zipPath, zipBuffers(Object.keys(files).map(name => ({ name, data: Buffer.from(files[name]!, 'utf8') }))));
+  const c0 = mockCalls();
+  const pv = previewZipImport(S, zipPath, 'en015-choque.zip');
+  assert.equal(pv.mode, 'nuevo');
+  const r = await applyZipImport(S, { token: pv.token, hash: pv.hash, resolutions: {}, grant: IMPORT_GRANT }, () => () => {});
+  assert.equal(mockCalls(), c0, 'importar no llama al modelo');
+  assert.equal(r.mode, 'nuevo');
+  assert.equal(D.agentPersonalName(agentsRepo(S).get(r.agent.id)!), null, 'el nombre que choca no se guarda');
+  assert.ok(r.learned.warnings.length > pv.learned.warnings.length, `aviso del nombre: ${JSON.stringify(r.learned.warnings)}`);
+  assert.ok(!agentsMd(r.agent.id).includes('Te llamas'), 'AGENTS.md sin nombre propio');
+  // Se restaura el estado: el agente original vuelve a llamarse Lucía cuando se libera el nombre.
+  const holder = agentsRepo(S).list().find(x => x.id !== dev.id && x.config.personalName === 'Lucía');
+  if (holder) await N.setPersonalName(S, holder.id, null);
+  await N.setPersonalName(S, dev.id, 'Lucía');
+});
