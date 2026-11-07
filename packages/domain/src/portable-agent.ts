@@ -15,6 +15,7 @@
 
 import { CONTEXT_SCOPE_VALUES, contextScopeOptions } from './types.ts';
 import type { AgentContextScope, ContextScopeOption } from './types.ts';
+import { validateAgentName } from './agent-instructions.ts';
 
 export const PORTABLE_AGENT_SCHEMA = 'portal-ia/agent@1';
 export type AgentAutonomy = 'ask' | 'within_scope';
@@ -32,6 +33,11 @@ export interface PortableAgentManifest {
   responsibilities: string[];
   deliverables: string[];
   capabilities: string[];
+  /**
+   * EN-015 · Nombre propio (`personal_name` en agent.yaml), separado del puesto (`name`). Es opcional: sin él no se
+   * escribe la clave y agent.yaml queda igual que antes. Al importar, uno no válido se descarta con un aviso (no bloquea).
+   */
+  personalName?: string | undefined;
   /**
    * EN-014 · Ámbito (`context_scope` en agent.yaml). Es opcional: una carpeta o un ZIP sin él sigue siendo válido y el
    * ámbito queda sin definir. Si aparece, debe tener al menos una opción válida.
@@ -225,7 +231,8 @@ export function definitionToFiles(d: PortableAgentDefinition): PortableFiles {
   const m = d.manifest;
   const files: PortableFiles = {
     'agent.yaml': normalizeText(`# Agente portable de Portal IA (${PORTABLE_AGENT_SCHEMA}). Sin credenciales: los permisos los concede el propietario en el Portal.\n` + toYaml({
-      schema: m.schema, id: m.id, name: m.name, role: m.role, department: m.department, initials: m.initials, summary: m.summary,
+      schema: m.schema, id: m.id, name: m.name, ...(m.personalName?.trim() ? { personal_name: m.personalName.trim() } : {}),
+      role: m.role, department: m.department, initials: m.initials, summary: m.summary,
       responsibilities: m.responsibilities, deliverables: m.deliverables, capabilities: m.capabilities,
       ...contextScopeYaml(m.contextScope),
       harness: { preferred: m.harness.preferred, model: m.harness.model, effort: m.harness.effort },
@@ -322,6 +329,12 @@ export function filesToDefinition(files: PortableFiles): { definition: PortableA
   if (h.preferred && preferred !== h.preferred) problems.push({ path: 'agent.yaml', message: `Arnés desconocido «${str(h.preferred)}»: se usará ${preferred}.`, blocking: false });
   const effort = ['low', 'medium', 'high', 'xhigh', 'max'].includes(str(h.effort)) ? str(h.effort) as import('./types.ts').ReasoningEffort : 'medium';
   const cs = readContextScope(y);
+  let personalName: string | undefined;
+  if (Object.prototype.hasOwnProperty.call(y, 'personal_name') && y.personal_name !== null) {
+    const pn = validateAgentName(str(y.personal_name), { roles: [name] });
+    if (pn.ok) personalName = pn.name;
+    else problems.push({ path: 'agent.yaml', message: `Nombre propio (personal_name) no válido: ${pn.reason ?? 'elige otro nombre'} Se importa sin él; elige otro nombre.`, blocking: false });
+  }
   if (cs.error) problems.push({ path: 'agent.yaml', message: cs.error, blocking: true });
   const manifest: PortableAgentManifest = {
     schema: PORTABLE_AGENT_SCHEMA, id: str(y.id), name, role, department: str(y.department) || null,
@@ -330,7 +343,8 @@ export function filesToDefinition(files: PortableFiles): { definition: PortableA
     harness: { preferred, model: str(h.model), effort },
     permissions: { tools: strList(pm.tools), autonomy: str(pm.autonomy) === 'within_scope' ? 'within_scope' : 'ask' },
     createdAt: str(y.created),
-    ...(cs.value ? { contextScope: cs.value } : {})
+    ...(cs.value ? { contextScope: cs.value } : {}),
+    ...(personalName ? { personalName } : {})
   };
   const skills: PortableSkill[] = []; const knowledge: PortableKnowledge[] = [];
   for (const [p, c] of Object.entries(files)) {

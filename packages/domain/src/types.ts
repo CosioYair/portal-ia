@@ -144,6 +144,12 @@ export function defaultCapabilitiesFor(key: string): Capability[] {
 
 /** Configuración editable por el usuario; parte de la plantilla. */
 export interface AgentConfig {
+  /**
+   * EN-015 · Nombre propio del agente (p. ej. «Lucía»). Es opcional y está separado del puesto: `name` sigue siendo el
+   * puesto («Diseñador UX/UI») y la carpeta del agente no se renombra. Sin valor (o null), el agente funciona como antes.
+   * Lo propone el propio agente con una llamada autorizada o lo escribe el propietario; lo valida `validateAgentName`.
+   */
+  personalName?: string | null | undefined;
   name: string;
   specialization: string;
   responsibilities: string[];
