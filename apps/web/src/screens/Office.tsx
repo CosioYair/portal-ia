@@ -201,14 +201,14 @@ function Desk({ a, hue, current, tabbable, onFocus, onOpen }: { a: OfficeAgent; 
     <StateBadge state={a.state} />
     {a.attention.length > 0 && <span className="desk-needs" aria-hidden="true">{a.attention.length}</span>}
     <AgentFigure id={a.id} hue={hue} state={a.state} />
-    <span style={{ display: 'flex', flexDirection: 'column', alignItems: 'inherit', gap: 3, minWidth: 0 }}>
+    <span className="desk-body">
       <span className="desk-name">{a.name}</span>
       <span className="desk-role">{a.role}</span>
       <span className="desk-state">{STATE_TEXT[a.state]}</span>
       {(a.activity || (a.state === 'unavailable' && a.harnessIssue)) && <span className="desk-activity">{a.activity ?? a.harnessIssue}</span>}
       {a.integration && <span className="desk-ext">{a.integration === 'integrated' ? 'Externo · integrado' : 'Externo'}</span>}
-      {/* EN-014 · Su ámbito real (Proyecto · nombre / Empresa / General) a la vista, sin entrar en Ajustes. */}
-      <ContextScopeChips scope={a.contextScope} />
+      {/* EN-014 · Su ámbito real (Proyecto · nombre / Empresa / General) a la vista, sin entrar en Ajustes; centrado bajo el nombre. */}
+      <ContextScopeChips scope={a.contextScope} align="center" />
     </span>
   </button>;
 }
@@ -220,7 +220,7 @@ function OfficeList({ agents, onOpen, current }: { agents: OfficeAgent[]; onOpen
     <tbody>{agents.map(a => <tr key={a.id} aria-current={a.id === current}>
       <td><button type="button" className="lnk" onClick={() => onOpen(a.id)}>{a.name}</button><div className="small muted">{a.role}</div></td>
       <td data-label="Departamento">{a.department}</td>
-      <td data-label="Ámbito"><ContextScopeChips scope={a.contextScope} /></td>
+      <td data-label="Ámbito"><ContextScopeChips scope={a.contextScope} align="start" /></td>
       <td data-label="Estado"><span className={`state-pill state-${a.state}`}>{STATE_TEXT[a.state]}</span></td>
       <td data-label="Ahora" className="small">{a.activity ?? '—'}</td>
       <td data-label="Motor" className="small">{a.harnessLabel}</td>

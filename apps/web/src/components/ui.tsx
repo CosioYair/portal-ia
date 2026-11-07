@@ -99,8 +99,9 @@ export function Wordmark({ provisional }: { provisional?: boolean }) {
   return <div className="wordmark"><span className="mark" aria-hidden="true" /><span>Portal IA</span>{provisional && <span className="chip chip-soon chip-xs">nombre provisional</span>}</div>;
 }
 
-export function Chip({ tone = '', xs, dot, children, className = '' }: { tone?: '' | 'accent' | 'ok' | 'warn' | 'err' | 'soon' | 'working'; xs?: boolean; dot?: '' | 'ok' | 'warn' | 'err' | 'pulse'; children: ReactNode; className?: string }) {
-  return <span className={`chip ${tone ? 'chip-' + tone : ''} ${xs ? 'chip-xs' : ''} ${className}`}>{dot !== undefined && <span className={`dot ${dot === 'pulse' ? 'dot-working dot-pulse' : dot ? 'dot-' + dot : ''}`} aria-hidden="true" />}{children}</span>;
+/** Chip del sistema. `title` (opcional) da la explicación emergente sin envolverlo en otro <span>, porque eso rompe la alineación de .chip-row. */
+export function Chip({ tone = '', xs, dot, children, className = '', title }: { tone?: '' | 'accent' | 'ok' | 'warn' | 'err' | 'soon' | 'working'; xs?: boolean; dot?: '' | 'ok' | 'warn' | 'err' | 'pulse'; children: ReactNode; className?: string; title?: string }) {
+  return <span className={`chip ${tone ? 'chip-' + tone : ''} ${xs ? 'chip-xs' : ''} ${className}`} title={title}>{dot !== undefined && <span className={`dot ${dot === 'pulse' ? 'dot-working dot-pulse' : dot ? 'dot-' + dot : ''}`} aria-hidden="true" />}{children}</span>;
 }
 
 export function Notice({ kind, children }: { kind: 'info' | 'ok' | 'warn' | 'err'; children: ReactNode }) {
