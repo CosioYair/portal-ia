@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import type { AgentContextScope, Capability, ContextScopeOption, ExecutionBackend, PortableSkill, ProviderId } from '@portal-ia/domain';
-import { AGENT_ARCHETYPES, CAPABILITIES, CONTEXT_SCOPE_OPTIONS, DEFAULT_CONTEXT_SCOPE, DEPARTMENT_PRESETS, GENERAL_ARCHETYPE, HARNESSES, KNOWLEDGE, TOOLS, contextScopeLabel, suggestArchetypes, type AgentArchetype } from '@portal-ia/domain';
+import { AGENT_ARCHETYPES, CAPABILITIES, CONTEXT_SCOPE_OPTIONS, DEFAULT_CONTEXT_SCOPE, DEPARTMENT_PRESETS, GENERAL_ARCHETYPE, HARNESSES, KNOWLEDGE, TOOLS, contextScopeBadges, contextScopeLabel, suggestArchetypes, workplaceLabel, type AgentArchetype } from '@portal-ia/domain';
 import { FolderPicker } from '../components/FolderPicker.tsx';
 import { ExternalImportBox } from '../components/ExternalAgent.tsx';
 import { AgentZipImport } from '../components/AgentZipImport.tsx';
@@ -65,6 +65,21 @@ export function ContextScopeFields({ value, onChange, projects, companyName, idP
     {scopeIsEmpty(value) && <span className="small" role="alert" style={{ color: 'var(--color-err-text)' }}>Elige al menos una opción.</span>}
     <span className="small muted">Cambiarlo no concede ni quita herramientas ni permisos y no gasta nada.</span>
   </fieldset>;
+}
+
+/** Tono de cada chip del ámbito: Empresa y General se distinguen de Proyecto. */
+const SCOPE_TONE: Record<ContextScopeOption, '' | 'accent' | 'ok'> = { project: '', company: 'accent', general: 'ok' };
+
+/**
+ * EN-014 · Chips del ámbito real (contextScope) para la Oficina, la Organización, la cabecera y el panel del agente.
+ * Sin ámbito, «Sin ámbito» en tono de aviso. Es solo presentación: no concede ni quita herramientas ni permisos y no gasta nada.
+ */
+export function ContextScopeChips({ scope, companyName }: { scope: AgentContextScope | null | undefined; companyName?: string | null }) {
+  const badges = contextScopeBadges(scope);
+  if (!badges.length) return <span title="Este agente aún no tiene ámbito: elígelo en su Configuración."><Chip tone="warn" xs>Sin ámbito</Chip></span>;
+  return <span style={{ display: 'inline-flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }} aria-label={`Ámbito: ${badges.map(b => b.text).join(' + ')}`}>
+    {badges.map(b => <span key={b.id} title={b.id === 'company' && companyName ? `Empresa: ${companyName}` : undefined}><Chip tone={SCOPE_TONE[b.id]} xs>{b.text}</Chip></span>)}
+  </span>;
 }
 
 /** Ámbito que devuelve la vista previa de importación (el servidor lo añade a la respuesta). */
@@ -162,11 +177,14 @@ export function AgentWizard() {
           <fieldset style={{ border: 0, padding: 0, margin: 0 }}><legend className="label">Qué conocimiento necesita</legend>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>{KNOWLEDGE.map(k => <label key={k.id} className="ck small"><input className="cb" type="checkbox" checked={d.knowledge.includes(k.id)} onChange={e => set({ knowledge: e.target.checked ? [...d.knowledge, k.id] : d.knowledge.filter(x => x !== k.id) })} /> {KNOWLEDGE_LABELS[k.id] ?? k.id}</label>)}</div>
           </fieldset>
-          <fieldset style={{ border: 0, padding: 0, margin: 0 }}><legend className="label">Dónde trabaja</legend>
-            <label className="ck small"><input type="radio" name="scope" checked={d.scope === 'project' && !!project} disabled={!project} onChange={() => set({ scope: 'project' })} /> En el proyecto «{project?.name ?? '—'}»</label>
-            <label className="ck small"><input type="radio" name="scope" checked={d.scope === 'workspace' || !project} onChange={() => set({ scope: 'workspace' })} /> En toda la empresa</label>
+          <fieldset style={{ border: 0, padding: 0, margin: 0 }}><legend className="label">Dónde trabaja en el Portal</legend>
+            <span className="small muted" style={{ display: 'block', marginBottom: 4 }}>Indica con qué parte de la empresa trabaja aquí. No cambia sus instrucciones, habilidades ni paquete: eso lo decide el bloque de abajo.</span>
+            <label className="ck small"><input type="radio" name="scope" checked={d.scope === 'project' && !!project} disabled={!project} onChange={() => set({ scope: 'project' })} /> {workplaceLabel('project')} («{project?.name ?? '—'}»)</label>
+            <label className="ck small"><input type="radio" name="scope" checked={d.scope === 'workspace' || !project} onChange={() => set({ scope: 'workspace' })} /> {workplaceLabel('workspace')}</label>
           </fieldset>
-          <ContextScopeFields value={scope} onChange={contextScope => set({ contextScope })} projects={project ? [{ id: project.id, name: project.name }] : []} companyName={companyName} idPrefix="w-scope" />
+          <div className="card" style={{ padding: 12 }}>
+            <ContextScopeFields value={scope} onChange={contextScope => set({ contextScope })} projects={project ? [{ id: project.id, name: project.name }] : []} companyName={companyName} idPrefix="w-scope" />
+          </div>
         </section>}
 
         {step === 2 && <section className="card" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -202,7 +220,7 @@ export function AgentWizard() {
           <div className="summary-cols">
             <div><strong>Puede</strong><ul>{d.responsibilities.filter(Boolean).map((r, i) => <li key={i}>{r}</li>)}{canDo && <li>{canDo}</li>}<li>Conversar contigo y recibir encargos</li></ul></div>
             <div><strong>No puede</strong><ul><li>Ejecutar órdenes, instalar ni publicar por su cuenta</li><li>Ampliar sus permisos (ni desde sus archivos)</li><li>Gastar sin tu autorización</li>{d.harness === 'codex' && <li>Ejecutar historias o lotes (con Codex, todavía no)</li>}</ul></div>
-            <div><strong>Accede a</strong><ul>{d.knowledge.map(k => <li key={k}>{KNOWLEDGE_LABELS[k] ?? k}</li>)}<li>{d.scope === 'project' && project ? `El proyecto «${project.name}»` : 'La empresa (sin proyectos concretos)'}</li></ul></div>
+            <div><strong>Accede a</strong><ul>{d.knowledge.map(k => <li key={k}>{KNOWLEDGE_LABELS[k] ?? k}</li>)}<li>{d.scope === 'project' && project ? `${workplaceLabel('project')}: «${project.name}»` : workplaceLabel('workspace')}</li></ul></div>
             <div><strong>Necesita tu aprobación para</strong><ul>{d.tools.filter(t => RISKY.has(t)).map(t => <li key={t}>{TOOL_LABELS[t]?.name ?? t}</li>)}<li>Cada encargo (lo autorizas al crearlo)</li>{harness?.billing === 'api' && <li>Cada mensaje (es facturable)</li>}</ul></div>
           </div>
           <div className="small">Trabaja con <strong>{harness?.name}</strong> ({harness?.billing === 'subscription' ? 'tu suscripción, sin pago por uso' : harness?.billing === 'api' ? 'se paga por uso' : 'no verificable'}) · departamento <strong>{d.department}</strong> · ámbito <strong>{contextScopeLabel(scope)}</strong></div>

@@ -9,6 +9,7 @@ import { Modal } from '../components/Modal.tsx';
 import { HarnessDialog } from '../components/HarnessDialog.tsx';
 import { CommandBar } from '../components/CommandBar.tsx';
 import { OrganizationView } from './Team.tsx';
+import { ContextScopeChips } from './AgentWizard.tsx';
 import { useApp } from '../lib/store.ts';
 import { useLive, useLiveConnection } from '../lib/live.ts';
 import { rememberOfficeView, OFFICE_VIEWS, tabFor } from '../lib/routes.ts';
@@ -206,6 +207,8 @@ function Desk({ a, hue, current, tabbable, onFocus, onOpen }: { a: OfficeAgent; 
       <span className="desk-state">{STATE_TEXT[a.state]}</span>
       {(a.activity || (a.state === 'unavailable' && a.harnessIssue)) && <span className="desk-activity">{a.activity ?? a.harnessIssue}</span>}
       {a.integration && <span className="desk-ext">{a.integration === 'integrated' ? 'Externo · integrado' : 'Externo'}</span>}
+      {/* EN-014 · Su ámbito real (Proyecto · nombre / Empresa / General) a la vista, sin entrar en Ajustes. */}
+      <ContextScopeChips scope={a.contextScope} />
     </span>
   </button>;
 }
@@ -213,10 +216,11 @@ function Desk({ a, hue, current, tabbable, onFocus, onOpen }: { a: OfficeAgent; 
 function OfficeList({ agents, onOpen, current }: { agents: OfficeAgent[]; onOpen: (id: string) => void; current: string | null }) {
   return <div style={{ overflowX: 'auto' }}><table className="office-list">
     <caption className="sr">Agentes de la empresa con su estado</caption>
-    <thead><tr><th scope="col">Agente</th><th scope="col">Departamento</th><th scope="col">Estado</th><th scope="col">Ahora</th><th scope="col">Motor de IA</th><th scope="col">Para ti</th></tr></thead>
+    <thead><tr><th scope="col">Agente</th><th scope="col">Departamento</th><th scope="col">Ámbito</th><th scope="col">Estado</th><th scope="col">Ahora</th><th scope="col">Motor de IA</th><th scope="col">Para ti</th></tr></thead>
     <tbody>{agents.map(a => <tr key={a.id} aria-current={a.id === current}>
       <td><button type="button" className="lnk" onClick={() => onOpen(a.id)}>{a.name}</button><div className="small muted">{a.role}</div></td>
       <td data-label="Departamento">{a.department}</td>
+      <td data-label="Ámbito"><ContextScopeChips scope={a.contextScope} /></td>
       <td data-label="Estado"><span className={`state-pill state-${a.state}`}>{STATE_TEXT[a.state]}</span></td>
       <td data-label="Ahora" className="small">{a.activity ?? '—'}</td>
       <td data-label="Motor" className="small">{a.harnessLabel}</td>

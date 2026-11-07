@@ -1,11 +1,11 @@
-import { backendLabel, isRetired, type Agent, type DelegationResult, type ExecutionBackend, type IntegrationState, type PendingDecision } from '@portal-ia/domain';
+import { backendLabel, isRetired, type Agent, type AgentContextScope, type DelegationResult, type ExecutionBackend, type IntegrationState, type PendingDecision } from '@portal-ia/domain';
 import { agentsRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
 import { agentBackend } from './claudeCode/backend.ts';
 import { lastDetection } from './claudeCode/detect.ts';
 import { lastCodexDetection } from './harness/codex.ts';
 import { harnessAvailability } from './harness/index.ts';
 import { departmentsRepo, departmentLabelOf } from './departments.ts';
-import { agentFoldersRepo, diskHash, folderPath } from './agentFolders.ts';
+import { agentFoldersRepo, contextScopeOf, diskHash, folderPath } from './agentFolders.ts';
 import { ensureLessonsTable, lessonsRepo } from './lessons.ts';
 import { chatInFlight } from './agentChat.ts';
 import { documentJobsRunning, improvementHistory, pendingProposalCounts, settleLegacyProposals, type ImprovementHistoryItem } from './documentJobs.ts';
@@ -35,6 +35,8 @@ export interface OfficeAgent {
   integration: IntegrationState | null;
   /** HU-181 · Historial de automejoras (solo en el panel de un agente externo). */
   improvementHistory?: ImprovementHistoryItem[];
+  /** EN-014 · Ámbito real del agente (Proyecto/Empresa/General). No es `scope`, que indica dónde trabaja. null = sin ámbito. */
+  contextScope?: AgentContextScope | null;
 }
 
 /**
@@ -114,11 +116,15 @@ export function officeView(slug: string, decisions: PendingDecision[], opts: { p
     const harness = agentBackend(a); const dep = deps.departmentOf(a);
     let history: ImprovementHistoryItem[] | undefined;
     if (opts.onlyAgentId && integration.has(a.id)) { try { history = improvementHistory(slug, a.id); } catch { history = []; } }
+    // EN-014: ámbito real (solo lectura, sin IA). Si no se puede leer, la interfaz muestra «Sin ámbito».
+    let contextScope: AgentContextScope | null = null;
+    try { contextScope = contextScopeOf(slug, a); } catch { contextScope = null; }
     return {
       ...(history ? { improvementHistory: history } : {}),
       id: a.id, key: a.key, name: a.config.name, role: a.template.role, initials: a.template.initials, scope: a.scope, projectId: a.projectId,
       department: departmentLabelOf(a), departmentSlug: dep?.slug ?? '', harness, harnessLabel: backendLabel(harness, harness === 'codex' ? (codexBilling as any) : harness === 'api' ? null : ccBilling, a.config.provider), model: a.config.model,
-      state, activity: working.get(a.id) ?? queued.get(a.id) ?? null, attention: att, harnessIssue: issue, hasFolder: !!f, custom: a.templateId === 'tpl.custom@1', integration: integration.get(a.id) ?? null
+      state, activity: working.get(a.id) ?? queued.get(a.id) ?? null, attention: att, harnessIssue: issue, hasFolder: !!f, custom: a.templateId === 'tpl.custom@1', integration: integration.get(a.id) ?? null,
+      contextScope
     };
   });
   // Coordinador de cada sala con los miembros ya calculados (sin volver a listar agentes por departamento).

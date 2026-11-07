@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import type { Agent, AgentConfig, AgentContextScope, ClaudeCodeStatusView, ExecutionBackend, ProviderId } from '@portal-ia/domain';
-import { backendLabel, CAPABILITIES, KNOWLEDGE, TOOLS, EFFORT_LEVELS, effortLevelsFor, clampEffort, contextScopeLabel } from '@portal-ia/domain';
-import { ContextScopeFields, scopeIsEmpty } from './AgentWizard.tsx';
+import { backendLabel, CAPABILITIES, KNOWLEDGE, TOOLS, EFFORT_LEVELS, effortLevelsFor, clampEffort, contextScopeLabel, workplaceLabel } from '@portal-ia/domain';
+import { ContextScopeChips, ContextScopeFields, scopeIsEmpty } from './AgentWizard.tsx';
 import { api } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { EFFORT_LABELS, KNOWLEDGE_LABELS, TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
@@ -124,7 +124,7 @@ export function AgentDetail() {
               <Avatar initials={agent.template.initials} ws={wsScope} lg />
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <h1 className="h1" style={{ fontSize: 24 }}>{cfg.name}</h1><div className="med">{agent.template.role}</div>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}><Chip tone={wsScope ? 'accent' : ''} xs>{wsScope ? 'Ámbito: empresa' : 'Ámbito: proyecto'}</Chip><Chip xs dot={agent.status === 'active' ? 'ok' : ''}>Configurado · {agent.status === 'active' ? 'Activo' : 'Inactivo'}</Chip><Chip xs className="mono">{agent.templateId === 'tpl.custom@1' ? 'personalizado' : agent.templateId}</Chip></div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}><ContextScopeChips scope={currentScope} companyName={companyName} /><Chip xs>Trabaja en: {workplaceLabel(agent.scope).toLowerCase()}</Chip><Chip xs dot={agent.status === 'active' ? 'ok' : ''}>Configurado · {agent.status === 'active' ? 'Activo' : 'Inactivo'}</Chip><Chip xs className="mono">{agent.templateId === 'tpl.custom@1' ? 'personalizado' : agent.templateId}</Chip></div>
               </div>
             </div>
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -162,12 +162,12 @@ export function AgentDetail() {
                 <div><div className="label">Colabora con</div><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{agent.template.collaborates.map(chipLink)}</div></div>
               </div></section>
 
-            <section className="card"><div className="card-h"><div className="h3">Ámbito asignado</div><Chip tone={wsScope ? 'accent' : ''} xs>{wsScope ? 'Empresa' : 'Proyecto'}</Chip></div>
+            <section className="card"><div className="card-h"><div className="h3">Dónde trabaja en el Portal</div><Chip xs>{workplaceLabel(agent.scope)}</Chip></div>
               <div className="card-b">
                 <KV k="Empresa">{ws.name}</KV>
                 <KV k="Proyecto">{wsScope ? 'Todos los proyectos de la empresa' : status.project!.name}</KV>
-                <KV k="Fuera del ámbito"><Chip tone="err" xs>sin acceso</Chip></KV>
-                <div className="help" style={{ marginTop: 10 }}>El ámbito limita el conocimiento, las herramientas y los agentes con los que puede interactuar. Se define al crear el agente y no es editable aquí.</div>
+                <KV k="Fuera de ahí"><Chip tone="err" xs>sin acceso</Chip></KV>
+                <div className="help" style={{ marginTop: 10 }}>Dónde trabaja limita el conocimiento, las herramientas y los agentes con los que puede interactuar dentro del Portal. Se define al crear el agente y no es editable aquí. No cambia sus instrucciones, habilidades ni paquete exportado.</div>
               </div></section>
 
             <section className="card"><div className="card-h"><div className="h3">Modelo preferido</div></div>
@@ -284,7 +284,7 @@ export function AgentDetail() {
             <section className="card"><div className="card-h"><div className="h3">Acceso a conocimiento</div><span className="small muted">{knowOn} de {KNOWLEDGE.length}</span></div>
               <div className="card-b" style={{ display: 'flex', flexDirection: 'column' }}>
                 {KNOWLEDGE.map(k => <label key={k.id} className="krow"><input className="cb" type="checkbox" checked={!!cfg.knowledge[k.id]} onChange={e => edit({ knowledge: { ...cfg.knowledge, [k.id]: e.target.checked } })} /><span style={{ flex: 1 }}>{KNOWLEDGE_LABELS[k.id]}</span></label>)}
-                <div className="help" style={{ marginTop: 10 }}>Solo conocimiento dentro de su ámbito. El repositorio se ofrece en modo lectura; su escritura es una herramienta aparte.</div>
+                <div className="help" style={{ marginTop: 10 }}>Solo conocimiento de donde trabaja en el Portal. El repositorio se ofrece en modo lectura; su escritura es una herramienta aparte.</div>
               </div></section>
 
             <section className="card"><div className="card-h"><div className="h3">Criterios de evaluación</div><Chip tone="soon" xs>edición próximamente</Chip></div>

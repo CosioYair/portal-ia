@@ -257,6 +257,31 @@ export function contextScopeLabel(scope: AgentContextScope | null | undefined): 
   const opts = contextScopeOptions(scope);
   return opts.length ? opts.map(o => CONTEXT_SCOPE_OPTIONS.find(x => x.id === o)!.label).join(' + ') : 'Sin ámbito';
 }
+/** Un chip del ámbito real del agente (lo que pinta la interfaz en la Oficina, la Organización, la cabecera y el panel). */
+export interface ContextScopeBadge { id: ContextScopeOption; text: string }
+/**
+ * Chips del ámbito real (contextScope), en orden canónico: «Proyecto · <nombre>», «Empresa», «General». Devuelve una
+ * lista vacía si el ámbito es nulo o no tiene ninguna opción marcada (la interfaz muestra entonces «Sin ámbito»).
+ * No mira `Agent.scope` (Template.scope): eso es dónde trabaja en el Portal, no su ámbito.
+ */
+export function contextScopeBadges(scope: AgentContextScope | null | undefined): ContextScopeBadge[] {
+  return contextScopeOptions(scope).map(o => {
+    const label = CONTEXT_SCOPE_OPTIONS.find(x => x.id === o)!.label;
+    if (o !== 'project') return { id: o, text: label };
+    const name = (scope?.project?.name ?? '').replace(/\s+/g, ' ').trim();
+    return { id: o, text: name ? `${label} · ${name}` : label };
+  });
+}
+
+/** Rótulo de Template.scope en la interfaz: indica dónde trabaja en el Portal y no es el ámbito. */
+export const WORKPLACE_TITLE = 'Dónde trabaja';
+/** Texto de dónde trabaja el agente en el Portal según Template.scope (workspace/project). */
+export const WORKPLACE_LABELS: Record<Scope, string> = { workspace: 'Toda la empresa', project: 'Su proyecto' };
+/** «Toda la empresa» o «Su proyecto». Es la única definición de estos textos para todas las pantallas. */
+export function workplaceLabel(scope: Scope): string {
+  return WORKPLACE_LABELS[scope] ?? WORKPLACE_LABELS.workspace;
+}
+
 /**
  * Una línea por opción marcada, con lo que cambia («Empresa: …»). Con `names` se muestran también el nombre de la
  * empresa o del proyecto; con solo General no se nombra ninguno aunque lleguen.
