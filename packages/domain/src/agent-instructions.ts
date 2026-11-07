@@ -114,6 +114,57 @@ export function agentDisplayName(a: AgentNameSource | { config: AgentNameSource 
   return personal ? `${personal} · ${clean(src.name)}` : src.name;
 }
 
+/** Agente mencionable en la barra de órdenes: su puesto (`name`) y, si lo tiene, su nombre propio. */
+export interface MentionAgent { id: string; name: string; personalName?: string | null }
+export type AgentMention<T extends MentionAgent> =
+  | { kind: 'agent'; agent: T; mention: string; rest: string }
+  | { kind: 'ambiguous'; options: T[]; mention: string; rest: string };
+
+const mentionKey = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+/**
+ * EN-015 · Resuelve «@Lucía revisa…» o «@Arquitecto revisa…» (pura). Claves: nombre propio y puesto completos y su
+ * primera palabra, sin distinguir mayúsculas ni acentos. Gana la clave más larga que encaja con lo escrito tras «@»
+ * (seguida de fin, espacio, coma o dos puntos); si esa clave encaja con varios agentes, el resultado es ambiguo.
+ * El texto se pasa a NFC y la mención se corta en su posición REAL dentro del texto (no por la longitud normalizada).
+ * Devuelve null si no empieza por «@» o nada coincide.
+ */
+export function resolveAgentMention<T extends MentionAgent>(text: string | null | undefined, agents: readonly T[]): AgentMention<T> | null {
+  const t = (text ?? '').normalize('NFC').trim();
+  if (!t.startsWith('@')) return null;
+  const after = t.slice(1);
+  const keysOf = (a: T): string[] => {
+    const ks = new Set<string>();
+    for (const s of [a.personalName ?? '', a.name]) {
+      const full = normalizeAgentName(s); if (!full) continue;
+      ks.add(full); ks.add(full.split(/[\s,]+/)[0] ?? '');
+    }
+    return [...ks].filter(k => k.length >= 2);
+  };
+  // Final (en el texto original) del prefijo cuya forma normalizada es exactamente k y va seguido de un separador.
+  const endOf = (k: string): number => {
+    let end = -1;
+    for (let i = 1; i <= after.length; i++) {
+      const p = mentionKey(after.slice(0, i));
+      if (p.length > k.length) break;
+      if (p === k && /^($|[\s,:])/.test(after.slice(i))) end = i;
+    }
+    return end;
+  };
+  let top = 0; let best: { a: T; end: number }[] = [];
+  for (const a of agents) for (const k of keysOf(a)) {
+    const end = endOf(k); if (end < 0) continue;
+    if (k.length > top) { top = k.length; best = [{ a, end }]; } else if (k.length === top) best.push({ a, end });
+  }
+  if (!best.length) return null;
+  const end = best[0]!.end;
+  const mention = after.slice(0, end);
+  const rest = after.slice(end).replace(/^[\s,:]+/, '');
+  const ids = [...new Set(best.map(b => b.a.id))];
+  if (ids.length === 1) return { kind: 'agent', agent: best[0]!.a, mention, rest };
+  return { kind: 'ambiguous', options: ids.map(id => best.find(b => b.a.id === id)!.a), mention, rest };
+}
+
 export interface NameProposalInput {
   role: string;
   specialization?: string | null;

@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { resolveAgentMention } from '@portal-ia/domain';
 import { officeDisplayName } from '../lib/osApi.ts';
 import type { Department, OfficeAgent } from '../lib/osApi.ts';
 
@@ -15,20 +16,11 @@ export function CommandBar({ agents, departments, onAgent, onDepartment }: { age
   const route = useMemo(() => {
     const t = text.trim(); if (!t) return null;
     if (t.startsWith('@')) {
-      // El nombre propio o el puesto (o su primera palabra) más largo que coincide con lo escrito tras «@»:
-      // «@Lucía revisa…» o «@Arquitecto revisa…». Si esa coincidencia encaja con varios agentes, elige el propietario.
-      const after = norm(t.slice(1));
-      const keysOf = (x: OfficeAgent) => [x.personalName ?? '', x.name].filter(s => !!s.trim()).flatMap(s => [norm(s.trim()), norm(s.trim()).split(/[\s,]+/)[0]]);
-      const cands = agents.flatMap(x => keysOf(x).map(k => ({ x, k }))).filter(c => c.k.length >= 2 && after.startsWith(c.k) && /^($|[\s,:])/.test(after.slice(c.k.length)));
-      const top = cands.reduce((m, c) => Math.max(m, c.k.length), 0);
-      const best = cands.filter(c => c.k.length === top);
-      const ids = [...new Set(best.map(c => c.x.id))];
-      const rest = t.slice(1 + top).replace(/^[\s,:]+/, '');
-      if (ids.length === 1) return { kind: 'agent' as const, label: `Conversar con ${officeDisplayName(best[0].x)}`, id: best[0].x.id, rest };
-      if (ids.length > 1) {
-        const options = ids.map(id => agents.find(a => a.id === id)!).filter(Boolean);
-        return { kind: 'ambiguous' as const, label: `«@${t.slice(1, 1 + top)}» coincide con ${options.length} agentes: elige con quién conversar`, options, rest };
-      }
+      // «@Lucía revisa…» o «@Arquitecto revisa…»: resolución pura en el dominio (resolveAgentMention, con NFC).
+      // Si la coincidencia encaja con varios agentes, elige el propietario.
+      const m = resolveAgentMention(t, agents);
+      if (m?.kind === 'agent') return { kind: 'agent' as const, label: `Conversar con ${officeDisplayName(m.agent)}`, id: m.agent.id, rest: m.rest };
+      if (m?.kind === 'ambiguous') return { kind: 'ambiguous' as const, label: `«@${m.mention}» coincide con ${m.options.length} agentes: elige con quién conversar`, options: m.options, rest: m.rest };
     }
     const dm = norm(t).match(/^(?:equipo de |departamento de |el equipo de |el departamento de )?([^,:]{2,40})[,:]/);
     if (dm) { const d = departments.find(x => norm(x.name) === dm[1].trim()); if (d) return { kind: 'department' as const, label: `Petición al departamento ${d.name}`, dep: d, rest: t.replace(/^[^,:]+[,:]\s*/, '') }; }
