@@ -1534,6 +1534,8 @@ export interface PendingDecision {
   projectId: string;
   processId: string;
   requestedBy: string;
+  /** EN-015 · «Lucía · Diseñador UX/UI» si el agente que la pide tiene nombre propio; sin valor, se muestra requestedBy. */
+  agentDisplayName?: string | null;
   createdAt: string;
   /** Costo de IA que implica aprobar; null si aprobar no consume IA. */
   estimatedCost: { usd: number; budgetUsd: number } | null;

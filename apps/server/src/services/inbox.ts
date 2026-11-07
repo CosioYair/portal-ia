@@ -1,9 +1,9 @@
 import type { FastifyInstance } from 'fastify';
-import { DEFAULT_PIPELINE, assignmentPendingState } from '@portal-ia/domain';
+import { DEFAULT_PIPELINE, agentDisplayName, agentPersonalName, assignmentPendingState } from '@portal-ia/domain';
 import type { AssignmentPendingKind } from '@portal-ia/domain';
 import { assignmentsRepo } from '../db/assignments.ts';
 import type { DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, PendingDecisionsSummary, Process, RestoreSupersededResult, StoryDecisionHistory, SupersededDecision } from '@portal-ia/domain';
-import { backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
+import { agentsRepo, backlogRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { ensureOpsParsed } from './delegation.ts';
 import { config } from '../config.ts';
 import { processVersion } from './revision.ts';
@@ -35,6 +35,31 @@ const OP_NAMES: Record<string, string> = { add: 'añadir', update: 'modificar', 
 
 function requestedBy(p: Process): string {
   return p.delegation?.leadAgentName ?? p.steps[0]?.agentName ?? 'Equipo de agentes';
+}
+
+/** EN-015 · Id del agente que pide la decisión (el mismo que da requestedBy), o null. */
+function requesterAgentId(p: Process): string | null {
+  if (p.delegation) return p.delegation.leadAgentId || null;
+  const step = p.steps[0] as { agentId?: string | null } | undefined;
+  return step?.agentId ?? null;
+}
+
+type NamedAgent = { id: string; config: { name: string; personalName?: string | null } };
+
+/**
+ * EN-015 · Función pura: añade agentDisplayName («Lucía · Diseñador UX/UI») a las decisiones cuyo agente tiene nombre
+ * propio. Sin nombre propio no se añade nada: la decisión queda idéntica a la de antes.
+ */
+export function withAgentDisplayNames(decisions: PendingDecision[], processes: Process[], agents: readonly NamedAgent[]): PendingDecision[] {
+  const byProcess = new Map(processes.map(p => [p.id, p] as const));
+  const byAgent = new Map(agents.map(a => [a.id, a] as const));
+  return decisions.map(d => {
+    const p = byProcess.get(d.processId);
+    const id = p ? requesterAgentId(p) : null;
+    const agent = id ? byAgent.get(id) : undefined;
+    if (!agent || !agentPersonalName(agent)) return d;
+    return { ...d, agentDisplayName: agentDisplayName(agent) };
+  });
 }
 
 /**
@@ -243,6 +268,8 @@ async function fetchProcess(app: FastifyInstance, slug: string, id: string): Pro
 export async function listPendingDecisions(_app: FastifyInstance, slug: string): Promise<PendingDecision[]> {
   const out: PendingDecision[] = [];
   const repo = processesRepo(slug);
+  let agents: NamedAgent[] = [];
+  try { agents = agentsRepo(slug).list(); } catch { agents = []; }
   for (const project of projectsRepo(slug).list()) {
     // Todas las iteraciones (también archivadas) para numerar; las vigentes (sin archivar) para decidir.
     const all = repo.listLight(project.id, { archived: true });
@@ -260,7 +287,7 @@ export async function listPendingDecisions(_app: FastifyInstance, slug: string):
         if (included.size) inRemote = (p: Process) => included.has(p.id);
       } catch { /* sin repositorio legible: la bandeja sigue como antes */ }
     }
-    out.push(...consolidateDecisions(slug, active, all, inRemote));
+    out.push(...withAgentDisplayNames(consolidateDecisions(slug, active, all, inRemote), active, agents));
   }
   return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
