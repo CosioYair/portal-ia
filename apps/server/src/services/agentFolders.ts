@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PORTABLE_AGENT_SCHEMA, PORTABLE_LIMITS, allowedPortablePath, baseSkillsFor, buildDefaultInstructions, contextScopeFromPortable, contextScopeLabel, contextScopeOptions, contextScopeToPortable, definitionToFiles, describeContextScope, diffFiles, filesToDefinition, findSecret, isBaseSkill, normalizeText, slugify, toolCapabilities } from '@portal-ia/domain';
 import type { Agent, AgentContextScope, HarnessId, Lesson, MemoryEntry, PortableAgentDefinition, PortableFiles, PortableKnowledge, PortableSkill, ToolCapability } from '@portal-ia/domain';
+import { agentDisplayName, agentPersonalName, validateAgentName, type AgentNameContext } from '@portal-ia/domain';
 import { config } from '../config.ts';
 import { agentsRepo, contextScopeMigrationNote, processesRepo, projectsRepo, workspaceDb, workspaceDbPath } from '../db/workspace.ts';
 import type { SandboxStatus } from './sandbox.ts';
@@ -123,14 +124,57 @@ export function reportsToName(slug: string, a: Agent): string {
   try { all = agentsRepo(slug).list(); } catch { all = []; }
   const matches = all.filter(x => x.key === key && x.id !== a.id);
   const pick = matches.find(x => x.projectId === a.projectId) ?? matches.find(x => x.projectId === null) ?? matches[0];
-  return pick ? pick.config.name : 'su responsable en el equipo';
+  // EN-015: con nombre propio, «Lucía · Coordinador»; sin él, el puesto tal cual (como antes).
+  return pick ? agentDisplayName(pick) : 'su responsable en el equipo';
+}
+
+// ---------------------------------------------------------------- EN-015 · Nombre propio (no cambia puesto ni carpeta)
+
+/** Contexto de unicidad en la empresa: nombres de los otros agentes, puestos de todos e identificadores. */
+export function nameContextFor(slug: string, agentId: string | null, extraTaken: readonly string[] = []): AgentNameContext {
+  let all: Agent[] = [];
+  try { all = agentsRepo(slug).list(); } catch { all = []; }
+  let folderOf: (id: string) => string | null = () => null;
+  try { const repo = agentFoldersRepo(slug); folderOf = id => repo.folderOf(id)?.folder ?? null; } catch { /* sin carpetas */ }
+  return {
+    taken: [...all.filter(x => x.id !== agentId).map(x => x.config.personalName ?? null), ...extraTaken],
+    roles: all.flatMap(x => [x.config.name, x.template.role]),
+    ids: all.flatMap(x => [x.id, x.key, folderOf(x.id)])
+  };
+}
+
+/** Guarda (o borra) config.personalName sin marcar la configuración como editada y sin tocar config.name. */
+export function storePersonalName(slug: string, agentId: string, name: string | null): Agent {
+  const agents = agentsRepo(slug); const a = agents.get(agentId);
+  if (!a) throw Object.assign(new Error('Agente no encontrado'), { statusCode: 404 });
+  const { personalName: _drop, ...rest } = a.config;
+  const next = name ? { ...rest, personalName: name } : rest;
+  workspaceDb(slug).prepare(`UPDATE agents SET config_json = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(next), now(), agentId);
+  return agents.get(agentId)!;
+}
+
+/**
+ * Aplica el nombre propio de unos archivos importados (personal_name). Si no lo traen, se conserva el actual; si choca o
+ * no es válido, el agente se importa sin cambiarlo y se devuelve el aviso (la importación nunca se bloquea por esto).
+ */
+export function applyImportedPersonalName(slug: string, agentId: string, files: PortableFiles): { personalName: string | null; warning: string | null } {
+  const a = agentsRepo(slug).get(agentId); if (!a) return { personalName: null, warning: null };
+  const pn = filesToDefinition(files).definition?.manifest.personalName;
+  if (!pn) return { personalName: agentPersonalName(a), warning: null };
+  const check = validateAgentName(pn, nameContextFor(slug, agentId));
+  if (!check.ok) return { personalName: agentPersonalName(a), warning: `El nombre «${check.name}» del paquete no se aplicó: ${check.reason} Elige otro nombre en Configuración.` };
+  if (check.name !== agentPersonalName(a)) storePersonalName(slug, agentId, check.name);
+  return { personalName: check.name, warning: null };
 }
 
 /** AGENTS.md por defecto con los datos actuales del agente (sin IA ni IO salvo leer la fila; no se inyecta en los prompts). */
 export function agentDefaultInstructions(slug: string, a: Agent): string {
   // EN-014: sin ámbito, el texto es exactamente el de antes (la huella no cambia y no aparecen revisiones de más).
   const scope = contextScopeOf(slug, a);
+  // EN-015: sin nombre propio no se pasa nada y el texto es idéntico al anterior.
+  const personal = agentPersonalName(a);
   return buildDefaultInstructions({
+    ...(personal ? { personalName: personal } : {}),
     name: a.config.name, role: a.template.role, specialization: a.config.specialization, responsibilities: a.config.responsibilities ?? [],
     reportsTo: reportsToName(slug, a), tools: grantedTools(a), mark: DEFAULT_INSTRUCTIONS_MARK,
     ...(scope ? {
@@ -237,9 +281,11 @@ export function definitionFor(slug: string, a: Agent, extras: AgentExtras): Port
   // Los nombres de empresa y proyecto solo se escriben si su opción está marcada.
   const scope = contextScopeOf(slug, a);
   const portableScope = scope ? contextScopeToPortable(scope, scope.company ? companyNameOf(slug) : null) : undefined;
+  // EN-015: personal_name en agent.yaml (y en el ZIP) solo si lo tiene; `name` sigue siendo el puesto.
+  const personal = agentPersonalName(a);
   return {
     manifest: {
-      schema: PORTABLE_AGENT_SCHEMA, id: a.id, name: a.config.name, role: a.template.role, department: dep?.slug ?? null, initials: a.template.initials,
+      schema: PORTABLE_AGENT_SCHEMA, id: a.id, name: a.config.name, ...(personal ? { personalName: personal } : {}), role: a.template.role, department: dep?.slug ?? null, initials: a.template.initials,
       summary: a.config.specialization, responsibilities: a.config.responsibilities, deliverables: extras.deliverables, capabilities: a.config.capabilities ?? [],
       harness: { preferred: harnessOf(a), model: a.config.model, effort: a.config.effort },
       permissions: { tools, autonomy: extras.autonomy },
@@ -627,6 +673,8 @@ export async function writeImportedRevision(slug: string, agentId: string, files
       const prevScope = a.contextScope ?? null;
       applyImportedContextScope(slug, agentId, files, false);
       try {
+        // EN-015: el nombre propio del paquete se conserva si es válido y único (si falla algo, la fila se repone entera).
+        applyImportedPersonalName(slug, agentId, files);
         const fresh = agentsRepo(slug).get(agentId)!;
         const out = definitionToFiles(definitionFor(slug, fresh, { instructions: d.instructions, skills: d.skills, memory: [], knowledge: d.knowledge, deliverables: d.manifest.deliverables, autonomy: current.autonomy, changelog: d.changelog }));
         const revision = writeRevisionUnlocked(slug, agentId, out, 'import', note, by);

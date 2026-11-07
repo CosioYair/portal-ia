@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { CAPABILITIES, isRetired, slugify, type Agent } from '@portal-ia/domain';
+import { CAPABILITIES, agentDisplayName, agentPersonalName, isRetired, slugify, type Agent } from '@portal-ia/domain';
+import { checkName, estimateNameCost, estimateNamesCost, MAX_BATCH, proposeName, proposeNames, setPersonalName } from '../services/agentNames.ts';
 import { workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { listPendingDecisions } from '../services/inbox.ts';
@@ -80,7 +81,7 @@ export async function agentsOsRoutes(app: FastifyInstance) {
   app.get('/api/workspaces/:slug/departments', async (req, reply) => {
     const { slug } = req.params as any; if (!guard(slug, reply)) return;
     const deps = departmentsRepo(slug);
-    return deps.list().map(d => ({ ...d, coordinatorAgentId: deps.coordinatorOf(d.slug)?.id ?? null, members: deps.members(d.slug).map(a => ({ id: a.id, name: a.config.name, role: a.template.role })) }));
+    return deps.list().map(d => ({ ...d, coordinatorAgentId: deps.coordinatorOf(d.slug)?.id ?? null, members: deps.members(d.slug).map(a => ({ id: a.id, name: a.config.name, role: a.template.role, personalName: agentPersonalName(a), displayName: agentDisplayName(a) })) }));
   });
   app.post('/api/workspaces/:slug/departments', async (req, reply) => {
     const { slug } = req.params as any; if (!guard(slug, reply)) return;
@@ -150,13 +151,50 @@ export async function agentsOsRoutes(app: FastifyInstance) {
     const office = officeView(slug, decisions, { onlyAgentId: id }).agents[0] ?? null;
     const identity = identityParts(slug, a, null);
     return {
-      agent: a, office, department: departmentsRepo(slug).departmentOf(a), retired: isRetired(a.template),
+      agent: a, personalName: agentPersonalName(a), displayName: agentDisplayName(a), nameEstimate: (() => { try { return estimateNameCost(slug, id); } catch { return null; } })(),
+      office, department: departmentsRepo(slug).departmentOf(a), retired: isRetired(a.template),
       work: agentWork(slug, id), memory: agentMemory(slug, id), chat: { usage: chatUsageToday(slug, id), estimate: chatEstimate(slug, a, '') },
       identity: { hasInstructions: !!identity.instructions, skills: identity.skills.length, memory: identity.memory.length },
       folder: (() => { const s = folderStatus(slug, a); return { ...s, adopted: s.adopted ? { ...s.adopted, files: undefined, fileList: Object.keys(s.adopted.files).sort() } : null }; })(),
       events: agentEvents(slug, id, 30),
       external: (() => { const s = externalSource(slug, id); return s ? { state: s.state, hasOutputs: !!s.layout.outputs, root: s.root } : null; })()
     };
+  });
+
+  // ---------- EN-015 · Nombre propio: proponer cuesta una llamada autorizada; escribirlo o borrarlo es gratis.
+  app.get('/api/workspaces/:slug/agents/:id/name/estimate', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
+    try { return estimateNameCost(slug, id); } catch (e) { return err(reply, e); }
+  });
+  app.get('/api/workspaces/:slug/agents/:id/name/check', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
+    const q = z.object({ name: z.string().max(200) }).safeParse(req.query ?? {});
+    if (!q.success) return reply.code(400).send({ error: 'Indica el nombre que quieres comprobar.' });
+    try { return checkName(slug, id, q.data.name); } catch (e) { return err(reply, e); }
+  });
+  app.post('/api/workspaces/:slug/agents/:id/name/propose', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
+    const b = z.object({ authorized: z.boolean().default(false), rejected: z.array(z.string().max(60)).max(10).default([]) }).safeParse(req.body ?? {});
+    if (!b.success) return reply.code(400).send({ error: 'Datos no válidos.' });
+    try { return await proposeName(slug, id, b.data); } catch (e) { return err(reply, e); }
+  });
+  app.post('/api/workspaces/:slug/agents/names/estimate', async (req, reply) => {
+    const { slug } = req.params as any; if (!guard(slug, reply)) return;
+    const b = z.object({ agentIds: z.array(z.string().min(1).max(120)).min(1).max(MAX_BATCH) }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: `Elige entre 1 y ${MAX_BATCH} agentes.` });
+    try { return estimateNamesCost(slug, b.data.agentIds); } catch (e) { return err(reply, e); }
+  });
+  app.post('/api/workspaces/:slug/agents/names/propose', async (req, reply) => {
+    const { slug } = req.params as any; if (!guard(slug, reply)) return;
+    const b = z.object({ agentIds: z.array(z.string().min(1).max(120)).min(1).max(MAX_BATCH), authorized: z.boolean().default(false) }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: `Elige entre 1 y ${MAX_BATCH} agentes.` });
+    try { return await proposeNames(slug, b.data.agentIds, { authorized: b.data.authorized }); } catch (e) { return err(reply, e); }
+  });
+  app.put('/api/workspaces/:slug/agents/:id/name', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
+    const b = z.object({ name: z.string().max(200).nullable() }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'Indica el nombre (o null para quitarlo).' });
+    try { return await setPersonalName(slug, id, b.data.name); } catch (e) { return err(reply, e); }
   });
 
   // ---------- Arneses
