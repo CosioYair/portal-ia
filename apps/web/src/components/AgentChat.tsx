@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type DragEvent } from 'react';
 import { Link } from 'react-router-dom';
-import { HARNESSES, batchCountsAddUp, batchCountsSum, type DocumentBatchCountsLike } from '@portal-ia/domain';
+import { HARNESSES, agentDisplayName, batchCountsAddUp, batchCountsSum, type DocumentBatchCountsLike } from '@portal-ia/domain';
 import { Chip, Icon, Notice, Spinner } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
 import { useApp } from '../lib/store.ts';
@@ -56,6 +56,9 @@ export function ChatTab({ slug, p, projects, onChanged }: { slug: string; p: Pan
   useEffect(() => { end.current?.scrollIntoView({ block: 'end' }); }, [msgs?.length]);
   const pending = msgs?.some(m => m.status === 'running');
   const consoleOnly = p.agent.config.backend === 'claude-code-terminal';
+  // Nombre propio con su puesto («Lucía · Diseñador UX/UI»); sin nombre propio es el puesto tal cual (como hoy).
+  const who = agentDisplayName(p.agent);
+  const named = who !== p.agent.config.name;
   const images = sendsImages(p);
   const ready = drafts.filter(d => d.state === 'ready' && d.att);
   const uploading = drafts.some(d => d.state === 'uploading');
@@ -120,11 +123,12 @@ export function ChatTab({ slug, p, projects, onChanged }: { slug: string; p: Pan
     {dragging && <div className="chat-drop-hint" aria-hidden="true">Suelta aquí para adjuntar. {LIMITS_TEXT(limits)}</div>}
     <div className="agent-panel-body">
       {p.retired && <Notice kind="warn">Agente retirado: reactívalo desde Oficina › Organización para conversar.</Notice>}
-      {consoleOnly && <Notice kind="info">{p.agent.config.name} trabaja desde tu propia consola de Claude Code, así que no puede conversar aquí. Dale trabajo en la pestaña <strong>Trabajo</strong>, o cambia con qué IA trabaja en <strong>Configuración</strong>.</Notice>}
-      <div className="sr" role="status" aria-live="polite">{lastReply ? `${p.agent.config.name} respondió.` : ''}</div>
+      {consoleOnly && <Notice kind="info">{who} trabaja desde tu propia consola de Claude Code, así que no puede conversar aquí. Dale trabajo en la pestaña <strong>Trabajo</strong>, o cambia con qué IA trabaja en <strong>Configuración</strong>.</Notice>}
+      <div className="sr" role="status" aria-live="polite">{lastReply ? `${who} respondió.` : ''}</div>
       <div className="chat-log">
         {msgs === null ? <Spinner /> : msgs.length === 0 ? <p className="small muted">Aún no habéis hablado. Pregúntale lo que quieras sobre su especialidad, adjunta capturas o documentos, o dile qué debería mejorar. Para un trabajo con entregable, usa la pestaña Trabajo.</p>
           : msgs.map(m => <div key={m.id} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'owner' ? 'flex-end' : 'flex-start' }}>
+            {named && m.role === 'agent' && <span className="small muted">{who}</span>}
             {(m.content || m.role === 'agent') && <div className={`msg msg-${m.role}`}>{m.role === 'agent' && m.status === 'running' ? <span className="small">Pensando…</span> : m.role === 'agent' && m.content ? <Markdown text={m.content} /> : m.content}</div>}
             {!!m.attachments?.length && <MessageAttachments slug={slug} agentId={id} m={m} />}
             {!!m.actions?.length && <div className="chat-actions">{m.actions.map(a => <ActionCard key={a.id} slug={slug} agentId={id} a={a} external={!!p.external} onDone={() => { void load(); onChanged(); }} />)}</div>}
@@ -153,8 +157,8 @@ export function ChatTab({ slug, p, projects, onChanged }: { slug: string; p: Pan
           <button type="button" className="xbtn" onClick={() => remove(d)} aria-label={`Quitar ${d.name}`} title="Quitar">{Icon.x(12)}</button>
         </li>)}
       </ul>}
-      <label className="sr" htmlFor="chat-text">Mensaje para {p.agent.config.name}</label>
-      <textarea id="chat-text" className="input" rows={3} value={text} onChange={e => setText(e.target.value)} onPaste={onPaste} placeholder={`Escribe a ${p.agent.config.name}… (puedes pegar una captura o arrastrar archivos)`} disabled={p.retired} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void send(); } }} />
+      <label className="sr" htmlFor="chat-text">Mensaje para {who}</label>
+      <textarea id="chat-text" className="input" rows={3} value={text} onChange={e => setText(e.target.value)} onPaste={onPaste} placeholder={`Escribe a ${who}… (puedes pegar una captura o arrastrar archivos)`} disabled={p.retired} onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); void send(); } }} />
       <input ref={fileRef} type="file" multiple accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,.zip,.txt,.md,.csv,.json,.log,image/*,application/pdf,application/zip" style={{ display: 'none' }} onChange={e => { const fs = Array.from(e.target.files ?? []); e.target.value = ''; addFiles(fs); }} aria-hidden="true" tabIndex={-1} />
       <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' }}>
         <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }}>
