@@ -15,6 +15,8 @@ export interface OfficeAgent {
   contextScope?: AgentContextScope | null;
   /** EN-015 · Nombre propio («Lucía»); `name` sigue siendo el puesto. null/ausente = sin nombre propio (como hoy). */
   personalName?: string | null;
+  /** EN-015 · «Lucía · Diseñador UX/UI» calculado por el servidor (officeView), o solo el puesto. */
+  displayName?: string;
 }
 /** EN-015 · «Lucía · Diseñador UX/UI», o solo el puesto si no tiene nombre propio (igual que hoy). */
 export const officeDisplayName = (a: { name: string; personalName?: string | null }) => (a.personalName ? `${a.personalName} · ${a.name}` : a.name);
@@ -147,17 +149,8 @@ function streamUpload<T>(url: string, file: File, onProgress?: (fraction: number
 }
 const W = (slug: string) => `/api/workspaces/${encodeURIComponent(slug)}`;
 export const osApi = {
-  /** La oficina más el nombre propio de cada agente (EN-015: lo trae /departments; si falla, la oficina se ve como hoy). */
-  office: async (slug: string, projectId?: string | null): Promise<OfficeView> => {
-    const [v, deps] = await Promise.all([
-      request<OfficeView>(`${W(slug)}/office${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
-      request<{ members?: { id: string; personalName?: string | null }[] }[]>(`${W(slug)}/departments`).catch(() => null)
-    ]);
-    if (!deps) return v;
-    const names = new Map<string, string>();
-    for (const d of deps) for (const m of d.members ?? []) if (m.personalName) names.set(m.id, m.personalName);
-    return { ...v, agents: v.agents.map(a => (a.personalName !== undefined ? a : { ...a, personalName: names.get(a.id) ?? null })) };
-  },
+  /** La oficina; cada agente ya trae su nombre propio y su nombre a mostrar (EN-015, officeView en el servidor). */
+  office: (slug: string, projectId?: string | null) => request<OfficeView>(`${W(slug)}/office${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
   departments: (slug: string) => request<(Department & { members: { id: string; name: string; role: string; personalName?: string | null; displayName?: string }[] })[]>(`${W(slug)}/departments`),
   createDepartment: (slug: string, name: string, purpose: string) => request<Department>(`${W(slug)}/departments`, { method: 'POST', body: J({ name, purpose }) }),
   updateDepartment: (slug: string, id: string, patch: { name?: string; purpose?: string; coordinatorAgentId?: string | null }) => request<Department>(`${W(slug)}/departments/${id}`, { method: 'PUT', body: J(patch) }),
