@@ -9,7 +9,7 @@ import { useApp } from '../lib/store.ts';
 import { useLive } from '../lib/live.ts';
 import { api, type AgentCapabilitiesView, type AgentLearningEntry, type AgentLearningView } from '../lib/api.ts';
 import { TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
-import { HARNESSES, workplaceLabel } from '@portal-ia/domain';
+import { HARNESSES, agentDisplayName, workplaceLabel } from '@portal-ia/domain';
 import { ContextScopeChips } from '../screens/AgentWizard.tsx';
 import { FolderPicker } from './FolderPicker.tsx';
 import { DocumentsTab, OriginTab } from './ExternalAgent.tsx';
@@ -86,7 +86,7 @@ export function AgentPanel({ slug, agentId, tab, office, departments, projects, 
     <div className="agent-panel-head">
       <AgentFigure id={agentId} hue={hue} state={p?.office?.state ?? office?.state ?? 'idle'} size={56} />
       <div className="who">
-        <h2 id="agent-panel-title">{p?.displayName ?? (office ? officeDisplayName(office) : null) ?? p?.agent.config.name ?? 'Agente'}</h2>
+        <h2 id="agent-panel-title">{p?.displayName ?? (office ? officeDisplayName(office) : null) ?? (p ? agentDisplayName(p.agent) : null) ?? 'Agente'}</h2>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           <Chip xs>{p?.agent.template.role ?? office?.role}</Chip>
           <Chip xs tone="accent">{p?.department?.name ?? office?.department}</Chip>
@@ -604,7 +604,7 @@ function NameSection({ slug, p, onChanged }: { slug: string; p: Panel; onChanged
     } finally { setBusy(false); }
   };
   const box = { padding: 10, display: 'flex', flexDirection: 'column', gap: 6 } as const;
-  return <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid var(--color-border, rgba(0,0,0,.1))', paddingTop: 8, marginTop: 4 }} role="group" aria-labelledby={`${inputId}-h`}>
+  return <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid var(--color-border)', paddingTop: 8, marginTop: 4 }} role="group" aria-labelledby={`${inputId}-h`}>
     <div className="small" id={`${inputId}-h`}><strong>Nombre propio</strong></div>
     <div className="small">{current ? <>Se llama <strong>{current}</strong>. Su puesto sigue siendo «{role}».</> : <>Aún no tiene nombre propio: se le muestra por su puesto, «{role}».</>}</div>
     {st.kind === 'idle' && !manualOpen && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>

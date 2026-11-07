@@ -91,7 +91,7 @@ export function validateAgentName(raw: string | null | undefined, context: Agent
   if (findSecret(name)) return fail('secret', 'El nombre parece una credencial: elige otro.');
   const norm = normalizeAgentName(name);
   const ids = (ctx.ids ?? []).map(normalizeAgentName).filter(Boolean);
-  if (UUID_LIKE.test(name) || ids.includes(norm)) return fail('id', 'El nombre no puede ser un identificador: elige un nombre de persona.');
+  if ((UUID_LIKE.test(name) && /\d/.test(name)) || ids.includes(norm)) return fail('id', 'El nombre no puede ser un identificador: elige un nombre de persona.');
   const len = Array.from(name).length;
   if (len < AGENT_NAME_LIMITS.min || len > AGENT_NAME_LIMITS.max) return fail('length', `El nombre debe tener entre ${AGENT_NAME_LIMITS.min} y ${AGENT_NAME_LIMITS.max} caracteres.`);
   if (!NAME_CHARS.test(name)) return fail('chars', 'Usa solo letras, espacios, apóstrofos, guiones o puntos (sin números ni símbolos).');
