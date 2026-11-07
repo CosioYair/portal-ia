@@ -61,6 +61,12 @@ a.btn, a.navi, a.section-tab, a.side-link, a.tile-link, a.cmdk-item, a.desk-link
 .chip-err { background: var(--color-err-bg); border-color: var(--color-err-border); color: var(--color-err-text); }
 .chip-soon { background: transparent; border-style: dashed; color: var(--color-text-muted); }
 .chip-xs { height: 20px; font-size: 11px; padding: 0 8px; }
+/* Estándar de filas de chips (docs/estilos-ui.md): un solo contenedor con hueco y salto de línea, sin style en línea ni
+   <span> de envoltura (el título va en Chip). Por defecto se alinea al inicio, en tablas, cabeceras y formularios.
+   .chip-row-center ocupa todo el ancho y centra, en puestos y tarjetas en columna, también cuando pasa de línea. */
+.chip-row { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); max-width: 100%; min-width: 0; vertical-align: middle; line-height: 1; }
+.chip-row-start { justify-content: flex-start; }
+.chip-row-center { display: flex; width: 100%; justify-content: center; }
 .dot { width: 8px; height: 8px; border-radius: var(--radius-round); background: var(--color-dot); flex: none; }
 .dot-ok { background: var(--color-ok); } .dot-err { background: var(--color-err); } .dot-warn { background: var(--color-attention); }
 /* «En curso» late en verde azulado (el ámbar es «te necesita»); tres ciclos, luego se queda fijo (WCAG 2.2.2). */

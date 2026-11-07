@@ -53,6 +53,8 @@
 .desk[data-state="retired"] { border: 1px dashed var(--color-retired-border); background: var(--color-surface-alt); }
 .desk[data-state="retired"] .desk-name, .desk[data-state="retired"] .desk-role { color: var(--color-text-muted); }
 .desk > span:last-child { width: 100%; min-width: 0; }
+/* Columna de textos del puesto (nombre, rol, estado, chips del ámbito): centrada y sin style en línea. */
+.desk-body { display: flex; flex-direction: column; align-items: center; gap: var(--space-1); width: 100%; min-width: 0; }
 .desk-name { font-size: 12.5px; font-weight: 600; line-height: 1.2; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; }
 .desk-role { font-size: 11px; color: var(--color-text-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 100%; }
 .desk-state { font-size: 11px; font-weight: 600; display: inline-flex; gap: 4px; align-items: center; padding: 1px 8px; border-radius: var(--radius-pill); background: var(--color-idle-bg); color: var(--color-idle-text); }
@@ -108,6 +110,9 @@
   .office-list tr { padding: 8px 0; border-bottom: 1px solid var(--color-divider); }
   .office-list td { border: 0; padding: 4px 12px; }
   .office-list td[data-label]::before { content: attr(data-label) " · "; color: var(--color-text-muted); font-size: 12px; }
+  /* Tarjetas en móvil: la fila de chips del ámbito se alinea al inicio, pasa de línea y no se sale de la tarjeta. */
+  .office-list td .chip-row { justify-content: flex-start; max-width: 100%; }
+  .office-list td .chip-row .chip { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 }
 
 /* Panel del agente */
