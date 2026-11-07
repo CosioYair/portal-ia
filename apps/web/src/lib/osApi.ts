@@ -1,4 +1,4 @@
-import type { Agent, AgentContextScope, Capability, DocumentBatch, DocumentJob, ExecutionBackend, ExternalFileChange, ExternalGrants, ExternalLayout, ExternalProvenance, HarnessCapability, HarnessDescriptor, ImprovementProposal, IntegrationState, Lesson, Process, PortableFiles, PortableKnowledge, PortableSkill, ProviderId } from '@portal-ia/domain';
+import type { Agent, AgentContextScope, AgentNameCheck, Capability, DocumentBatch, DocumentJob, ExecutionBackend, ExternalFileChange, ExternalGrants, ExternalLayout, ExternalProvenance, HarnessCapability, HarnessDescriptor, ImprovementProposal, IntegrationState, Lesson, Process, PortableFiles, PortableKnowledge, PortableSkill, ProviderId } from '@portal-ia/domain';
 import { ApiError, apiRequest as request } from './api.ts';
 import { noteOwnerResponse, ownerHeaders } from './owner.ts';
 
@@ -13,7 +13,17 @@ export interface OfficeAgent {
   improvementHistory?: ImprovementHistoryItem[];
   /** EN-014 · Ámbito real del agente (Proyecto/Empresa/General). No es `scope`, que indica dónde trabaja. null = sin ámbito. */
   contextScope?: AgentContextScope | null;
+  /** EN-015 · Nombre propio («Lucía»); `name` sigue siendo el puesto. null/ausente = sin nombre propio (como hoy). */
+  personalName?: string | null;
 }
+/** EN-015 · «Lucía · Diseñador UX/UI», o solo el puesto si no tiene nombre propio (igual que hoy). */
+export const officeDisplayName = (a: { name: string; personalName?: string | null }) => (a.personalName ? `${a.personalName} · ${a.name}` : a.name);
+/** EN-015 · Nombre propio del agente (apps/server/src/services/agentNames.ts). */
+export interface NameEstimate { agentId: string; harness: string; label: string; billable: boolean; estimatedUsd: number }
+export interface NameProposal { agentId: string; name: string; reason: string; check: AgentNameCheck; harness: string; tokensIn: number; tokensOut: number; costUsd: number }
+export interface NamesEstimate { items: NameEstimate[]; totalUsd: number; calls: number }
+export interface NamesBatchResult { items: { agentId: string; ok: boolean; proposal: NameProposal | null; error: string | null }[]; calls: number; costUsd: number }
+export interface SetNameResult { agent: Agent; personalName: string | null; displayName: string }
 /** HU-181 · Una automejora aplicada, deshecha o archivada (apps/server/src/services/documentJobs.ts). */
 export interface ImprovementHistoryItem {
   id: string; at: string; origin: 'chat' | 'reintento'; files: string[]; summary: string;
@@ -57,7 +67,9 @@ export interface FolderStatus { folder: string | null; path: string | null; adop
 export interface AgentEvent { id: string; kind: string; detail: Record<string, unknown>; at: string; by: string }
 export interface AgentPanel { agent: Agent; office: OfficeAgent | null; department: { slug: string; name: string; purpose: string } | null; retired: boolean; work: WorkItem[];
   memory: { verified: Lesson[]; proposed: Lesson[]; retired: Lesson[] }; chat: { usage: { used: number; cap: number }; estimate: ChatEstimate }; identity: { hasInstructions: boolean; skills: number; memory: number }; folder: FolderStatus; events: AgentEvent[];
-  external: { state: IntegrationState; hasOutputs: boolean; root: string } | null }
+  external: { state: IntegrationState; hasOutputs: boolean; root: string } | null;
+  /** EN-015 · Nombre propio, nombre a mostrar y costo estimado de una propuesta (null si no se pudo calcular). */
+  personalName?: string | null; displayName?: string; nameEstimate?: NameEstimate | null }
 export interface WizardInput {
   name: string; role: string; summary: string; responsibilities: string[]; deliverables: string[]; department: string; departmentPurpose?: string | null;
   scope: 'workspace' | 'project'; projectId: string | null; harness: ExecutionBackend; model: string; provider?: ProviderId | null; effort: 'low' | 'medium' | 'high';
@@ -135,8 +147,18 @@ function streamUpload<T>(url: string, file: File, onProgress?: (fraction: number
 }
 const W = (slug: string) => `/api/workspaces/${encodeURIComponent(slug)}`;
 export const osApi = {
-  office: (slug: string, projectId?: string | null) => request<OfficeView>(`${W(slug)}/office${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
-  departments: (slug: string) => request<(Department & { members: { id: string; name: string; role: string }[] })[]>(`${W(slug)}/departments`),
+  /** La oficina más el nombre propio de cada agente (EN-015: lo trae /departments; si falla, la oficina se ve como hoy). */
+  office: async (slug: string, projectId?: string | null): Promise<OfficeView> => {
+    const [v, deps] = await Promise.all([
+      request<OfficeView>(`${W(slug)}/office${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ''}`),
+      request<{ members?: { id: string; personalName?: string | null }[] }[]>(`${W(slug)}/departments`).catch(() => null)
+    ]);
+    if (!deps) return v;
+    const names = new Map<string, string>();
+    for (const d of deps) for (const m of d.members ?? []) if (m.personalName) names.set(m.id, m.personalName);
+    return { ...v, agents: v.agents.map(a => (a.personalName !== undefined ? a : { ...a, personalName: names.get(a.id) ?? null })) };
+  },
+  departments: (slug: string) => request<(Department & { members: { id: string; name: string; role: string; personalName?: string | null; displayName?: string }[] })[]>(`${W(slug)}/departments`),
   createDepartment: (slug: string, name: string, purpose: string) => request<Department>(`${W(slug)}/departments`, { method: 'POST', body: J({ name, purpose }) }),
   updateDepartment: (slug: string, id: string, patch: { name?: string; purpose?: string; coordinatorAgentId?: string | null }) => request<Department>(`${W(slug)}/departments/${id}`, { method: 'PUT', body: J(patch) }),
   archiveDepartment: (slug: string, id: string) => request<{ ok: boolean }>(`${W(slug)}/departments/${id}`, { method: 'DELETE' }),
@@ -210,7 +232,17 @@ export const osApi = {
   applyProposal: (slug: string, id: string, pid: string) => request<{ revision: number; backup: string; files: ExternalFileChange[] }>(`${W(slug)}/agents/${id}/proposals/${pid}/apply`, { method: 'POST', body: J({ authorized: true }) }),
   rejectProposal: (slug: string, id: string, pid: string) => request<ImprovementProposal>(`${W(slug)}/agents/${id}/proposals/${pid}/reject`, { method: 'POST', body: J({}) }),
   /** HU-181 · Deshacer una automejora (solo la última; si hay posteriores, 409 later_improvements). */
-  undoImprovement: (slug: string, id: string, pid: string) => request<ImprovementProposal>(`${W(slug)}/agents/${id}/proposals/${pid}/undo`, { method: 'POST', body: J({ authorized: true }) })
+  undoImprovement: (slug: string, id: string, pid: string) => request<ImprovementProposal>(`${W(slug)}/agents/${id}/proposals/${pid}/undo`, { method: 'POST', body: J({ authorized: true }) }),
+  // EN-015 · Nombre propio. Proponer = UNA llamada autorizada con su arnés; comprobar, escribir o quitar no cuesta nada.
+  nameEstimate: (slug: string, id: string) => request<NameEstimate>(`${W(slug)}/agents/${encodeURIComponent(id)}/name/estimate`),
+  checkName: (slug: string, id: string, name: string) => request<AgentNameCheck>(`${W(slug)}/agents/${encodeURIComponent(id)}/name/check?name=${encodeURIComponent(name)}`),
+  /** Solo se llama tras marcar la autorización en la tarjeta. `rejected` = nombres que ya descartaste («Pedir otro»). */
+  proposeName: (slug: string, id: string, rejected: string[] = []) => request<NameProposal>(`${W(slug)}/agents/${encodeURIComponent(id)}/name/propose`, { method: 'POST', body: J({ authorized: true, rejected: rejected.slice(-10) }) }),
+  namesEstimate: (slug: string, agentIds: string[]) => request<NamesEstimate>(`${W(slug)}/agents/names/estimate`, { method: 'POST', body: J({ agentIds }) }),
+  /** Lote de la Oficina: una autorización, una llamada por agente; los errores vienen por agente. */
+  proposeNames: (slug: string, agentIds: string[]) => request<NamesBatchResult>(`${W(slug)}/agents/names/propose`, { method: 'POST', body: J({ agentIds, authorized: true }) }),
+  /** Acepta o escribe el nombre (null lo quita). Sin IA ni costo; 409 si choca con otro nombre o puesto. */
+  setName: (slug: string, id: string, name: string | null) => request<SetNameResult>(`${W(slug)}/agents/${encodeURIComponent(id)}/name`, { method: 'PUT', body: J({ name }) })
 };
 
 export interface ExternalPreview {
