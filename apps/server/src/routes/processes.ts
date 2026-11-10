@@ -422,7 +422,10 @@ export async function processRoutes(app: FastifyInstance) {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ authorized: z.literal(true) }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita (consume una llamada).' });
-    try { const p = await generateManualTest(slug, id, (o, m) => app.log.info(o, m)); return await withGuidance(slug, p); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    // HU-192 · `regenerate` opcional (los clientes que solo envían { authorized: true } siguen funcionando).
+    const regen = z.object({ regenerate: z.boolean().optional() }).passthrough().safeParse(req.body ?? {});
+    if (!regen.success) return reply.code(400).send({ error: 'El campo «regenerate» debe ser verdadero o falso.' });
+    try { const p = await generateManualTest(slug, id, (o, m) => app.log.info(o, m), { regenerate: regen.data.regenerate === true }); return await withGuidance(slug, p); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: typeof e.code === 'string' ? e.code : undefined }); }
   });
 
   // ---- Rechazar el diff de un proceso (la historia vuelve a pendiente) / devolver una historia a pendiente ----

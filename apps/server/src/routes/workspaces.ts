@@ -199,7 +199,9 @@ export async function workspaceRoutes(app: FastifyInstance) {
     cfg.fallbacks = cfg.fallbacks.filter(f => f !== cfg.model);
     // Esfuerzo: solo un nivel que el modelo admite de verdad (xhigh y max no existen en todos; nunca se inventa compatibilidad).
     // Elegido por el propietario: también se pasa a Claude Code (antes no se pasaba y la CLI usaba su predeterminado).
-    cfg.effortApplied = cfg.effort !== agent.config.effort || (req.body as any)?.effortApplied === true || !!agent.config.effortApplied;
+    // Solo se guarda la marca si aplica o si ya existía: guardar {...cfg, model} no añade campos que el agente no tenía (HU-198).
+    const effortApplied = cfg.effort !== agent.config.effort || (req.body as any)?.effortApplied === true || !!agent.config.effortApplied;
+    if (effortApplied || agent.config.effortApplied !== undefined) cfg.effortApplied = effortApplied; else delete cfg.effortApplied;
     const levels = effortLevelsFor(cfg.provider, cfg.model);
     if (!levels.includes(cfg.effort)) return reply.code(400).send({ error: `El modelo «${cfg.model}» no admite el esfuerzo «${cfg.effort}». Admite: ${levels.join(', ')}.`, code: 'effort_unsupported', levels });
     for (const k of Object.keys(cfg.tools)) if (!TOOLS.some(t => t.id === k)) return reply.code(400).send({ error: `Herramienta desconocida: ${k}` });

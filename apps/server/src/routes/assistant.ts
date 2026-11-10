@@ -6,6 +6,7 @@ import { conversationDetail, createConversation, createStoriesFrom, decide, deci
 import { createCompany, createProject } from '../services/companies.ts';
 import { workspacesRepo } from '../db/platform.ts';
 import { requireOwner } from '../services/ownerSession.ts';
+import { assistantPendingCount } from '@portal-ia/domain';
 
 export async function assistantRoutes(app: FastifyInstance) {
   // Conversaciones: la elegida (o la más reciente) con sus mensajes, decisiones, artefactos y encargos.
@@ -14,6 +15,17 @@ export async function assistantRoutes(app: FastifyInstance) {
       const q = req.query as any; const list = conversationsRepo.list();
       const id = typeof q.conversationId === 'string' ? q.conversationId : list.find(c => c.status === 'active')?.id ?? null;
       return { info: assistantInfo(), conversations: list, conversationId: id, messages: id ? assistantRepo.listLive(80, id) : [], detail: id ? conversationDetail(id) : null };
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+  // HU-189 · Solo lectura: cuántas acciones del chat esperan tu autorización (conversaciones activas o la indicada).
+  // La campana y Decisiones la piden con cada aviso en vivo, aunque el panel del Asistente esté cerrado.
+  app.get('/api/assistant/pending-count', async (req, reply) => {
+    const q = z.object({ conversationId: z.string().min(1).max(80).optional() }).safeParse(req.query ?? {});
+    if (!q.success) return reply.code(400).send({ error: 'Datos no válidos' });
+    try {
+      const ids = q.data.conversationId ? [q.data.conversationId] : conversationsRepo.list().filter(c => c.status === 'active').map(c => c.id);
+      const count = ids.reduce((n, id) => n + assistantPendingCount(assistantRepo.listLive(80, id)), 0);
+      return { count };
     } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   app.post('/api/assistant/conversations', async (req, reply) => {
@@ -73,11 +85,13 @@ export async function assistantRoutes(app: FastifyInstance) {
       })).max(4, 'Máximo 4 imágenes por mensaje.').optional(),
       /** Adjuntos de texto ya incorporados al mensaje por el cliente; aquí solo se registran. */
       files: z.array(z.object({ name: z.string().max(200), mediaType: z.string().max(100), bytes: z.number().int().nonnegative() })).max(6).optional(),
-      conversationId: z.string().max(80).nullable().optional()
+      conversationId: z.string().max(80).nullable().optional(),
+      /** HU-197: modelo de este mensaje (id del catálogo del proveedor). Si falta o es null, se usa el configurado. */
+      model: z.string().trim().min(1, 'El modelo está vacío.').max(120, 'El id del modelo es demasiado largo.').nullish()
     }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: `Mensaje no válido: ${body.error.issues.map(i => i.message).join(' ')}` });
-    try { const r = await chat(body.data.text, body.data.images ?? [], body.data.files ?? [], body.data.conversationId ?? null); app.log.info({ cost: r.assistant.costUsd.toFixed(4), actions: r.assistant.actions.length, images: body.data.images?.length ?? 0 }, 'asistente respondió'); return { ...r, info: assistantInfo() }; }
-    catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    try { const r = await chat(body.data.text, body.data.images ?? [], body.data.files ?? [], body.data.conversationId ?? null, { model: body.data.model ?? null }); app.log.info({ cost: r.assistant.costUsd.toFixed(4), model: r.assistant.model, actions: r.assistant.actions.length, images: body.data.images?.length ?? 0 }, 'asistente respondió'); return { ...r, info: assistantInfo() }; }
+    catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e.code }); }
   });
   // Marca una propuesta (ejecutar historia / aplicar cambios) como resuelta tras autorizarla desde la tarjeta del chat.
   app.post('/api/assistant/messages/:id/resolve', async (req, reply) => {

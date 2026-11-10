@@ -10,6 +10,9 @@ import type { Assignment, AssignmentPendingState, AssistantConversation, Convers
 export interface AssignmentNextIteration { note: string; estimatedUsd: number; suggestedBudgetUsd: number; steps: number; merged: boolean }
 /** EN-012: encargo pendiente del propietario en Decisiones (misma etiqueta que el Asistente y la tarjeta). */
 export interface AssignmentPendingItem { id: string; kind: 'awaiting_iteration_authorization' | 'merged_awaiting_acceptance'; assignmentId: string; code: string; title: string; workspaceSlug: string; projectId: string; processId: string | null; label: string; where: string | null; link: string; note: string | null; createdAt: string }
+/** HU-196: decisión ya resuelta (historial de la empresa, solo lectura y sin costo). */
+export type DecisionHistoryVerdict = 'approve' | 'deny' | 'superseded';
+export interface DecisionHistoryItem { id: string; kind: PendingDecisionKind; title: string; workspaceSlug: string; projectId: string; storyId: string | null; processId: string; conversationId: string | null; verdict: DecisionHistoryVerdict; reason: string | null; decidedAt: string }
 import type { DocumentBatch, DocumentJob, RemovalPreview, RemovalRecord } from '@portal-ia/domain';
 import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
 import { ownerNeeded, ownerToken, setOwnerToken } from './owner.ts';
@@ -72,7 +75,21 @@ async function request<T>(url: string, init0?: RequestInit): Promise<T> {
 
 export interface AssistantInfo { agentId: string; name: string; model: string; provider: string; monthlyLimitUsd: number; spentThisMonthUsd: number; estimatedPerMessageUsd: number;
   /** Backend del Asistente y su origen de facturación (se muestran antes de enviar). */
-  backend: ExecutionBackend; backendLabel: string; billing: 'api' | 'subscription'; available: boolean; unavailableReason: string | null }
+  backend: ExecutionBackend; backendLabel: string; billing: 'api' | 'subscription'; available: boolean; unavailableReason: string | null;
+  /** HU-198 · Catálogo que el servidor acepta como `model` por mensaje (vacío: solo el modelo configurado) y, si no se puede elegir, el motivo. */
+  models: AssistantModelOption[]; modelsReason: string | null }
+/** HU-198 · Modelo elegible en el chat del Asistente con su tipo de costo. */
+export interface AssistantModelOption { id: string; label: string; billing: 'api' | 'subscription'; estimatedPerMessageUsd: number }
+
+/** HU-198 · Petición al Asistente con un `model` opcional en el cuerpo (null: el configurado del agente). */
+function withModel(model: string | null | undefined) {
+  return <T,>(url: string, init?: RequestInit): Promise<T> => {
+    if (!model || !init?.body) return request<T>(url, init);
+    let body: any; try { body = JSON.parse(String(init.body)); } catch { return request<T>(url, init); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return request<T>(url, init);
+    return request<T>(url, { ...init, body: JSON.stringify({ ...body, model }) });
+  };
+}
 export type AssistantActionType = 'create_company' | 'create_project' | 'add_backlog_item' | 'propose_execution' | 'propose_apply' | 'propose_delegation' | 'propose_operation' | 'propose_local' | 'open_decision' | 'propose_assignment' | 'info';
 export interface AssistantAction {
   type: AssistantActionType; status: 'done' | 'failed' | 'pending' | 'running' | 'rejected'; label: string; detail?: string; link?: string;
@@ -277,9 +294,10 @@ export const api = {
   cancelAssignment: (slug: string, id: string) => request<Assignment>(`/api/workspaces/${slug}/assignments/${id}/cancel`, { method: 'POST', body: JSON.stringify({}) }),
   claudeCodeUsage: () => request<UsageGateView>('/api/claude-code/usage'),
   acknowledgeUsage: () => request<UsageGateView>('/api/claude-code/usage/acknowledge', { method: 'POST', body: JSON.stringify({ authorized: true }) }),
-  sendAssistant: (text: string, images: AssistantImage[] = [], files: AssistantAttachment[] = [], conversationId: string | null = null) => request<{ user: AssistantMessage; assistant: AssistantMessage; info: AssistantInfo; conversationId: string }>('/api/assistant/messages', { method: 'POST', body: JSON.stringify({ conversationId, text, images: images.length ? images : undefined, files: files.length ? files : undefined }) }),
+  sendAssistant: (text: string, images: AssistantImage[] = [], files: AssistantAttachment[] = [], conversationId: string | null = null, model: string | null = null) => withModel(model)<{ user: AssistantMessage; assistant: AssistantMessage; info: AssistantInfo; conversationId: string }>('/api/assistant/messages', { method: 'POST', body: JSON.stringify({ conversationId, text, images: images.length ? images : undefined, files: files.length ? files : undefined }) }),
   resolveAssistantProposal: (messageId: string, processId: string, status: 'done' | 'failed', detail?: string) => request<{ message: AssistantMessage }>(`/api/assistant/messages/${messageId}/resolve`, { method: 'POST', body: JSON.stringify({ processId, status, detail }) }),
   clearAssistant: () => request<{ ok: boolean }>('/api/assistant/messages', { method: 'DELETE' }),
+  assistantPendingCount: () => request<{ count: number }>('/api/assistant/pending-count'),
   addBacklogItem: (slug: string, projectId: string, input: { title: string; description?: string; criterion?: string; ownerKey?: string | null; estimate?: 'S' | 'M' | 'L' | null }) => request<BacklogItem>(`/api/workspaces/${slug}/projects/${projectId}/backlog`, { method: 'POST', body: JSON.stringify(input) }),
   patchBacklogItem: (slug: string, id: string, patch: Partial<Pick<BacklogItem, 'title' | 'criterion' | 'description' | 'ownerKey' | 'estimate' | 'dependsOn'>> & { status?: BacklogStatus }) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteBacklogItem: (slug: string, id: string) => request<{ ok: boolean }>(`/api/workspaces/${slug}/backlog/${id}`, { method: 'DELETE' }),
@@ -299,7 +317,8 @@ export const api = {
   manualTest: (slug: string, processId: string, checks: boolean[], note?: string | null) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/manual-test`, { method: 'POST', body: JSON.stringify({ checks, note }) }),
   manualTestSteps: (slug: string, processId: string, steps: string[]) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/manual-test`, { method: 'POST', body: JSON.stringify({ steps }) }),
   manualTestEstimate: (slug: string, processId: string) => request<{ agentName: string; model: string; estimatedUsd: number }>(`/api/workspaces/${slug}/processes/${processId}/manual-test/estimate`),
-  manualTestGenerate: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/manual-test/generate`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
+  /** HU-192 · `regenerate`: QA rehace una lista ya revisada para quitar los pasos que salen del Portal (409 si no hay ninguno). */
+  manualTestGenerate: (slug: string, processId: string, opts: { regenerate?: boolean } = {}) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/manual-test/generate`, { method: 'POST', body: JSON.stringify(opts.regenerate ? { authorized: true, regenerate: true } : { authorized: true }) }),
   rejectProcess: (slug: string, processId: string, reason?: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   resetStory: (slug: string, id: string, reason?: string) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/reset`, { method: 'POST', body: JSON.stringify({ reason }) }),
   recoverProcess: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/recover`, { method: 'POST' }),
@@ -367,6 +386,8 @@ export const api = {
   // HU-009 / HU-137 · bandeja de autorizaciones
   inbox: (slug: string) => request<PendingDecision[]>(`/api/workspaces/${slug}/inbox`),
   inboxAssignments: (slug: string) => request<AssignmentPendingItem[]>(`/api/workspaces/${slug}/inbox/assignments`),
+  /** HU-196 · Historial de decisiones resueltas de la empresa, de la más reciente a la más antigua (por defecto 200; máximo 500). Sin IA. */
+  inboxHistory: (slug: string, limit?: number) => request<DecisionHistoryItem[]>(`/api/workspaces/${slug}/inbox/history${limit ? `?limit=${encodeURIComponent(String(limit))}` : ''}`),
   decideInbox: (slug: string, kind: PendingDecisionKind, processId: string, verdict: DecisionVerdict, reason?: string, seenVersion?: string) =>
     request<InboxDecisionResult>(`/api/workspaces/${slug}/inbox/${kind}/${processId}/decision`, { method: 'POST', body: JSON.stringify({ verdict, reason: reason?.trim() ? reason.trim() : undefined, seenVersion }) }),
   // HU-161 · una autorización vigente por historia: historial (vigente + superadas) y restauración reversible sin costo.

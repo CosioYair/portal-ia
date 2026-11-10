@@ -18,23 +18,27 @@
 .mts-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 12px; min-width: 0; }
 .mts-num { flex: none; font-weight: 600; color: var(--color-text-med); }
 .mts-text { flex: 1 1 260px; min-width: 0; margin: 0; white-space: normal; overflow-wrap: anywhere; word-break: break-word; text-overflow: clip; overflow: visible; }
-/* HU-191 · Etiqueta informativa «fuera del Portal»: neutra, para no confundirse con el resultado OK/Falla/Observación */
+/* HU-192 · Acción en negrita y «Esperado:» en su propia línea (no empiezan por .mts-text) */
+.mts-action { font-weight: 600; }
+.mts-expected { display: block; margin-top: 4px; color: var(--color-text-med); overflow-wrap: anywhere; }
+.mts-expected > span { font-weight: 600; }
+/* HU-192 · Aviso «Este paso sale del Portal»: bloque claro de advertencia, con forma de texto y no de botón */
 .mts-outside {
-  flex: none;
-  align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  padding: 2px var(--space-2);
-  border: 1px solid var(--color-border-strong);
-  border-radius: var(--radius-pill);
-  background: var(--color-surface-muted);
-  color: var(--color-text-med);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 4px var(--space-2);
+  border: 1px solid var(--color-warn-border);
+  border-radius: var(--radius);
+  background: var(--color-warn-bg-soft);
+  color: var(--color-warn-text);
   font-size: var(--fs-small);
-  font-weight: 500;
   line-height: 1.5;
-  white-space: nowrap;
-  cursor: help;
+  overflow-wrap: anywhere;
 }
+.mts-outside-icon { flex: none; font-weight: 700; }
+.mts-outside-why { font-weight: 400; }
+.mts-regenerate { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .mts-actions { flex: 0 1 auto; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .mts-opt[aria-pressed="true"] { color: var(--color-on-dark); border-color: transparent; }
 .mts-opt-ok[aria-pressed="true"] { background: var(--color-ok-text); }
