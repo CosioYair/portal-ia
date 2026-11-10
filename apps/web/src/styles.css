@@ -163,6 +163,63 @@ button.chip:hover{border-color:var(--color-border-hover)}
 .dock-h .xbtn{flex:none}
 .msg-bubble{max-width:min(760px,100%);min-width:0;overflow-wrap:anywhere}
 .msg-bubble pre{max-width:100%;overflow:auto}
+/* HU-199 · Chat del Asistente: sin estilos en línea; solo tokens de tokens.css. Respuestas a ~72ch. */
+.assist-chat{flex:1;min-height:0;display:flex;flex-direction:column}
+.assist-head{padding:var(--space-2) var(--space-4);border-bottom:1px solid var(--color-divider)}
+.assist-head--compact{padding:var(--space-2) var(--space-3)}
+.assist-error{padding:var(--space-2) var(--space-3) 0}
+.assist-scroll{flex:1;overflow:auto;padding:var(--space-4);display:flex;flex-direction:column;gap:var(--space-3);min-width:0}
+.assist-scroll--compact{padding:var(--space-3)}
+.assist-empty{align-self:flex-start;max-width:min(72ch,100%)}
+.assist-examples{margin-top:var(--space-2)}
+.assist-msg{display:flex;flex-direction:column;align-items:flex-start;gap:var(--space-2);min-width:0}
+.assist-msg--user{align-items:flex-end}
+.msg-bubble--user{padding:var(--space-2) var(--space-3);border-radius:var(--radius-tile);background:var(--color-ink);color:var(--color-surface);border:0}
+.msg-bubble--assistant{max-width:min(72ch,100%);padding:var(--space-2) var(--space-3);border-radius:var(--radius-tile);background:var(--color-surface-alt);color:var(--color-ink);border:1px solid var(--color-border)}
+.assist-user-text{white-space:pre-wrap}
+.lnk.lnk-on-dark{color:var(--color-on-dark-link)}
+.assist-attach-row{display:flex;gap:var(--space-2);flex-wrap:wrap;margin-top:var(--space-2)}
+.chip.assist-attach-chip{background:var(--color-on-dark-chip);color:var(--color-on-dark);border:0}
+.assist-actions{display:flex;flex-direction:column;gap:var(--space-2);width:100%;max-width:min(72ch,100%);min-width:0}
+.assist-thinking{display:flex;gap:var(--space-2);align-items:center}
+.assist-form{display:flex;flex-direction:column;gap:var(--space-2);padding:var(--space-3);border-top:1px solid var(--color-divider)}
+.assist-form--compact{padding:var(--space-2)}
+.assist-form--dragging{background:var(--color-accent-soft)}
+.assist-thumbs{display:flex;gap:var(--space-2);flex-wrap:wrap}
+.assist-thumb{position:relative;width:72px;height:72px;border-radius:var(--radius-sm);overflow:hidden;border:1px solid var(--color-border);background:var(--color-surface-alt)}
+.assist-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.xbtn.assist-thumb-x{position:absolute;top:2px;right:2px;width:22px;height:22px;display:grid;place-items:center;background:var(--color-surface);border-radius:var(--radius-pill)}
+.chip.assist-file-chip{height:auto;padding:var(--space-1) var(--space-2) var(--space-1) var(--space-3);gap:var(--space-2)}
+.assist-attach-note{align-self:center}
+.assist-input-row{display:flex;gap:var(--space-2);min-width:0}
+textarea.input.assist-input{min-height:48px;height:48px;flex:1;min-width:0}
+.assist-foot{display:flex;justify-content:space-between;gap:var(--space-2)}
+.notice.action-row{padding:var(--space-2) var(--space-3)}
+.action-row__live{margin-top:2px}
+.action-row__phase{font-weight:600}
+/* HU-199 · Tarjeta de propuesta compacta: importe en la cabecera, una casilla, un botón y «Detalles» plegado */
+.card.proposal-card{border-color:var(--color-flow-waiting);background:var(--color-warn-bg-soft);min-width:0}
+.card-h.proposal-card__head{align-items:flex-start;flex-wrap:wrap;gap:var(--space-2)}
+.proposal-card__lead{display:flex;flex-direction:column;gap:var(--space-1);min-width:0;flex:1 1 220px}
+.h3.proposal-card__title{font-size:var(--fs-body);overflow-wrap:anywhere}
+.proposal-card__chips{display:flex;gap:var(--space-2);flex-wrap:wrap;justify-content:flex-end}
+.proposal-card__amount{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-1) var(--space-3);font-variant-numeric:tabular-nums}
+.proposal-card__max{font-size:var(--fs-section);font-weight:600;line-height:1.2;color:var(--color-text)}
+.proposal-card__est{font-size:var(--fs-small);color:var(--color-text-muted)}
+.card-b.proposal-card__body{display:flex;flex-direction:column;gap:var(--space-3);min-width:0}
+.proposal-card__warn{color:var(--color-err-text)}
+.proposal-card__actions{display:flex;gap:var(--space-3);align-items:center;flex-wrap:wrap}
+.proposal-card__details{border-top:1px solid var(--color-divider);padding-top:var(--space-1);min-width:0}
+.proposal-card__details>summary{list-style:none;display:flex;align-items:center;gap:var(--space-2);min-height:32px;cursor:pointer;font-size:var(--fs-small);font-weight:500;color:var(--color-text-med);border-radius:var(--radius-sm)}
+.proposal-card__details>summary::-webkit-details-marker{display:none}
+.proposal-card__details>summary::marker{content:""}
+.proposal-card__details>summary::before{content:"";flex:none;width:8px;height:8px;border:solid var(--color-text-muted);border-width:0 1.6px 1.6px 0;transform:rotate(-45deg);transition:transform var(--dur-fast)}
+.proposal-card__details[open]>summary::before{transform:rotate(45deg)}
+.proposal-card__details>summary:hover{color:var(--color-accent-hover)}
+.proposal-card__details>summary:focus-visible{outline:var(--focus-ring);outline-offset:2px}
+.proposal-card__details-body{display:flex;flex-direction:column;gap:var(--space-3);padding:var(--space-2) 0 var(--space-1);min-width:0;overflow-wrap:anywhere}
+.proposal-card__grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(200px,100%),1fr));gap:var(--space-3);align-items:end}
+.proposal-card__help{padding-bottom:var(--space-1)}
 
 /* Bandeja de autorizaciones (HU-009) */
 .inbox-list{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:12px}

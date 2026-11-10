@@ -102,23 +102,38 @@ function ProposalCard({ msgId, action, onResolved }: { msgId: string; action: As
 
   const link = action.link ? `/empresa/${action.workspaceSlug}/proyecto/${action.projectId}/procesos/${action.processId}` : null;
   return (
-    <div className="card" style={{ borderColor: 'var(--color-flow-waiting)', background: 'var(--color-warn-bg-soft)' }}>
-      <div className="card-h" style={{ alignItems: 'flex-start' }}><div><div className="h3" style={{ fontSize: 14 }}>{action.label}</div>{action.detail && <div className="small muted">{action.detail}</div>}</div><div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>{action.workspaceSlug && <Chip xs tone="accent">Empresa · {workspaces.find(w => w.slug === action.workspaceSlug)?.name ?? action.workspaceSlug}</Chip>}<Chip tone="warn" xs>{isExec ? 'consume IA' : 'escribe en git'} · requiere tu autorización</Chip></div></div>
-      <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div className="card proposal-card">
+      <div className="card-h proposal-card__head">
+        <div className="proposal-card__lead">
+          <div className="h3 proposal-card__title">{action.label}</div>
+          {action.detail && <div className="small muted">{action.detail}</div>}
+          {isExec && <div className="proposal-card__amount"><span className="proposal-card__max">máx. {fmtUsd(Number(budget) || 0)}</span><span className="proposal-card__est">≈ {fmtUsd(action.estimatedUsd ?? 0)} estimado</span></div>}
+        </div>
+        <div className="proposal-card__chips">{action.workspaceSlug && <Chip xs tone="accent">Empresa · {workspaces.find(w => w.slug === action.workspaceSlug)?.name ?? action.workspaceSlug}</Chip>}<Chip tone="warn" xs>{isExec ? 'consume IA' : 'escribe en git'} · requiere tu autorización</Chip></div>
+      </div>
+      <div className="card-b proposal-card__body">
         {err && <Notice kind="err"><strong>No se pudo {isExec ? 'iniciar la ejecución' : 'aplicar los cambios'}.</strong> {err}</Notice>}
-        {isExec && <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(200px, 100%), 1fr))', gap: 12, alignItems: 'end' }}>
-          <div><label className="label" htmlFor={`b-${action.processId}`}>Presupuesto máximo (USD)</label><input id={`b-${action.processId}`} className="input mono" type="number" min={0.1} step={0.5} value={budget} onChange={e => setBudget(e.target.value)} /></div>
-          <div className="help" style={{ paddingBottom: 6 }}>Estimado ≈ {fmtUsd(action.estimatedUsd ?? 0)}. El proceso se detiene entre pasos si se acerca al límite.{action.type === 'propose_execution' && ' Incluye aplicar en un worktree aislado, verificar en el sandbox y la validación de QA con evidencia (con hasta 2 correcciones). Nunca integra ni publica.'}</div>
-        </div>}
         <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>{isExec
           ? (isDeleg
-            ? <>Autorizo este <strong>análisis</strong> al agente responsable y a los agentes a su cargo, hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. Entrega un documento en Conocimiento y no cambia código; los cambios al backlog que proponga los aplicaré yo desde el proceso.</>
-            : <>Autorizo que el equipo del proyecto trabaje en <strong>{action.storyId}</strong> hasta <strong>{fmtUsd(Number(budget) || 0)}</strong> de API: aplica los cambios en un <strong>worktree aislado</strong> (rama propia), los verifica en el sandbox y QA los evalúa. No integra en main ni publica: eso lo decides después. Con Claude Code consume tu suscripción en lugar de API (hasta 60 llamadas, ampliable al continuar).</>)
-          : <>Autorizo aplicar <strong>{action.changes ?? 0} cambio(s)</strong> en una rama <span className="mono">portal-ia/hu-xxx</span> del repositorio (con commit). La rama no se integra en <span className="mono">main</span> sin mi intervención.</>}</span></label>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            ? <>Autorizo este <strong>análisis</strong> al agente responsable y a su equipo, hasta <strong>{fmtUsd(Number(budget) || 0)}</strong>. Entrega un documento en Conocimiento y no cambia código.</>
+            : <>Autorizo que el equipo trabaje en <strong>{action.storyId}</strong> hasta <strong>{fmtUsd(Number(budget) || 0)}</strong> de API, en un <strong>worktree aislado</strong>. No integra en main ni publica.</>)
+          : <>Autorizo aplicar <strong>{action.changes ?? 0} cambio(s)</strong> en una rama <span className="mono">portal-ia/hu-xxx</span> del repositorio (con commit). La rama no se integra en <span className="mono">main</span> sin mi intervención.{link && ' Revisa el diff (en «Detalles») antes de aplicar.'}</>}</span></label>
+        {isExec && !(Number(budget) > 0) && <div className="help proposal-card__warn">El presupuesto máximo no es válido: corrígelo en «Detalles».</div>}
+        <div className="proposal-card__actions">
           <button className="btn btn-primary btn-sm" onClick={run} disabled={!auth || busy || (isExec && !(Number(budget) > 0))}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}{busy ? (isExec ? 'Autorizando…' : 'Aplicando…') : (isDeleg ? 'Autorizar el análisis' : isExec ? 'Autorizar y ejecutar' : 'Aplicar cambios')}</button>
-          {link && <Link className="btn btn-ghost btn-sm" to={link}>{isExec ? 'Ver detalle del proceso' : 'Revisar el diff antes'}</Link>}
         </div>
+        {(isExec || link) && <details className="proposal-card__details">
+          <summary>Detalles</summary>
+          <div className="proposal-card__details-body">
+            {isExec && <div className="proposal-card__grid">
+              <div><label className="label" htmlFor={`b-${action.processId}`}>Presupuesto máximo (USD)</label><input id={`b-${action.processId}`} className="input mono" type="number" min={0.1} step={0.5} value={budget} onChange={e => setBudget(e.target.value)} /></div>
+              <div className="help proposal-card__help">Estimado ≈ {fmtUsd(action.estimatedUsd ?? 0)}. El proceso se detiene entre pasos si se acerca al límite.{action.type === 'propose_execution' && ' Incluye aplicar en un worktree aislado, verificar en el sandbox y la validación de QA con evidencia (con hasta 2 correcciones). Nunca integra ni publica.'}</div>
+            </div>}
+            {action.type === 'propose_execution' && <div className="help">Aplica los cambios en una rama propia, los verifica en el sandbox y QA los evalúa; integrar en main o publicar lo decides después. Con Claude Code consume tu suscripción en lugar de API (hasta 60 llamadas, ampliable al continuar).</div>}
+            {isDeleg && <div className="help">Participan el agente responsable y los agentes a su cargo. Los cambios al backlog que proponga el análisis los aplicarás tú desde el proceso.</div>}
+            {link && <Link className="lnk" to={link}>{isExec ? 'Ver detalle del proceso' : 'Revisar el diff antes'}</Link>}
+          </div>
+        </details>}
       </div>
     </div>
   );
@@ -128,9 +143,9 @@ function ActionRow({ a }: { a: AssistantAction }) {
   const ok = a.status === 'done';
   const live = a.live;
   const tone = live ? (live.tone === 'err' ? 'notice-err' : live.tone === 'warn' ? 'notice-warn' : live.tone === 'ok' ? 'notice-ok' : 'notice-info') : ok ? 'notice-ok' : 'notice-err';
-  return <div className={`notice ${tone}`} style={{ padding: '8px 12px' }}>{live ? (live.tone === 'err' ? Icon.alert() : live.tone === 'ok' ? Icon.okc() : live.tone === 'warn' ? Icon.warn() : Icon.info()) : ok ? Icon.okc() : Icon.alert()}<div>
+  return <div className={`notice ${tone} action-row`}>{live ? (live.tone === 'err' ? Icon.alert() : live.tone === 'ok' ? Icon.okc() : live.tone === 'warn' ? Icon.warn() : Icon.info()) : ok ? Icon.okc() : Icon.alert()}<div>
     <strong>{a.label}</strong>
-    {live ? <div style={{ marginTop: 2 }}><span style={{ fontWeight: 600 }}>{live.phase}.</span> {live.next}{a.link && <> <Link className="lnk" to={a.link}>{live.settled ? 'ver' : 'ir al proceso'}</Link></>}</div> : <>{a.detail && <> — {a.detail}</>}{a.link && ok && <> · <Link className="lnk" to={a.link}>abrir</Link></>}</>}
+    {live ? <div className="action-row__live"><span className="action-row__phase">{live.phase}.</span> {live.next}{a.link && <> <Link className="lnk" to={a.link}>{live.settled ? 'ver' : 'ir al proceso'}</Link></>}</div> : <>{a.detail && <> — {a.detail}</>}{a.link && ok && <> · <Link className="lnk" to={a.link}>abrir</Link></>}</>}
   </div></div>;
 }
 
@@ -311,28 +326,28 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
   const current = conversations.find(c => c.id === convId) ?? null;
 
   return (
-    <section className="card" style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-      <div style={{ padding: compact ? '8px 12px' : '10px 18px', borderBottom: '1px solid var(--color-divider)' }}>
+    <section className="card assist-chat">
+      <div className={`assist-head${compact ? ' assist-head--compact' : ''}`}>
         <ConversationBar conversations={conversations} current={current} onSelect={id => { setConvId(id); load(id).catch(e => setError(e.message)); }} onChanged={() => { load().catch(e => setError(e.message)); }} />
       </div>
       <UsageBanner />
       <div className={`assist-cols${compact ? '' : ' assist-wide'}`}>
       {detail && <div className="assist-side"><ConversationPanel detail={{ ...detail, assignments: detail.assignments.filter(x => !inMessages.has(x.id)) }} compact={compact} onChanged={() => { load().catch(e => setError(e.message)); }} /></div>}
       <div className="assist-main">
-      {error && <div style={{ padding: '10px 12px 0' }}><Notice kind="err">{error}</Notice></div>}
-      <div style={{ flex: 1, overflow: 'auto', padding: compact ? 12 : 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
-        {msgs.length === 0 && <div className="notice notice-info" style={{ alignSelf: 'flex-start', maxWidth: 760 }}>{Icon.info()}<div>
+      {error && <div className="assist-error"><Notice kind="err">{error}</Notice></div>}
+      <div className={`assist-scroll${compact ? ' assist-scroll--compact' : ''}`}>
+        {msgs.length === 0 && <div className="notice notice-info assist-empty">{Icon.info()}<div>
           Pídeme cosas en lenguaje natural. Puedo <strong>investigar una idea contigo</strong> y abrir las decisiones que haya que cerrar (las cierras tú, una a una), preparar la <strong>propuesta</strong> (el equipo la redacta y otro especialista la cuestiona), consultar al equipo y, con tu aprobación, <strong>crear las historias</strong>. Para un cambio concreto propongo un <strong>encargo de desarrollo</strong> sin historia (worktree aislado, sandbox, QA y Gauntlet). También respondo sobre el estado real, propongo ejecutar historias y encargo análisis al agente responsable. Todo lo que consume IA o cambia algo aparece como una tarjeta que <strong>tú autorizas aquí mismo</strong>; nada se hace solo por cómo lo escribas. Elige arriba la empresa y el proyecto de la conversación.
-          {!compact && <div className="small muted" style={{ marginTop: 6 }}>Ejemplos: «quiero un modo oscuro, ayúdame a decidir cómo» · «arregla el texto del pie y déjalo listo para revisar» · «¿por qué falló la última historia?» · «¿qué historias quedan por revisar?»</div>}
+          {!compact && <div className="small muted assist-examples">Ejemplos: «quiero un modo oscuro, ayúdame a decidir cómo» · «arregla el texto del pie y déjalo listo para revisar» · «¿por qué falló la última historia?» · «¿qué historias quedan por revisar?»</div>}
         </div></div>}
-        {msgs.map(m => <div key={m.id} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start', gap: 6 }}>
-          <div className="msg-bubble" style={{ padding: '10px 14px', borderRadius: 12, background: m.role === 'user' ? 'var(--color-ink)' : 'var(--color-surface-alt)', color: m.role === 'user' ? 'var(--color-surface)' : 'var(--color-ink)', border: m.role === 'user' ? 0 : '1px solid var(--color-border)' }}>
+        {msgs.map(m => <div key={m.id} className={`assist-msg ${m.role === 'user' ? 'assist-msg--user' : 'assist-msg--assistant'}`}>
+          <div className={`msg-bubble ${m.role === 'user' ? 'msg-bubble--user' : 'msg-bubble--assistant'}`}>
             {m.role === 'user'
-              ? <span style={{ whiteSpace: 'pre-wrap' }}>{m.content.length > 900 && !expanded[m.id] ? m.content.slice(0, 900) + '…' : m.content}{m.content.length > 900 && <> <button type="button" className="lnk" style={{ color: 'var(--color-on-dark-link)' }} onClick={() => setExpanded(x => ({ ...x, [m.id]: !x[m.id] }))}>{expanded[m.id] ? 'ver menos' : `ver todo (${m.content.length.toLocaleString()} caracteres)`}</button></>}</span>
+              ? <span className="assist-user-text">{m.content.length > 900 && !expanded[m.id] ? m.content.slice(0, 900) + '…' : m.content}{m.content.length > 900 && <> <button type="button" className="lnk lnk-on-dark" onClick={() => setExpanded(x => ({ ...x, [m.id]: !x[m.id] }))}>{expanded[m.id] ? 'ver menos' : `ver todo (${m.content.length.toLocaleString()} caracteres)`}</button></>}</span>
               : <Markdown text={m.content} />}
-            {m.attachments?.length > 0 && <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>{m.attachments.map((at, i) => <span key={i} className="chip chip-xs" style={{ background: 'var(--color-on-dark-chip)', color: 'var(--color-on-dark)', border: 0 }}>{at.mediaType.startsWith('image/') ? '🖼' : '📄'} {at.name} · {Math.max(1, Math.round(at.bytes / 1024))} KB</span>)}</div>}
+            {m.attachments?.length > 0 && <div className="assist-attach-row">{m.attachments.map((at, i) => <span key={i} className="chip chip-xs assist-attach-chip">{at.mediaType.startsWith('image/') ? '🖼' : '📄'} {at.name} · {Math.max(1, Math.round(at.bytes / 1024))} KB</span>)}</div>}
           </div>
-          {m.actions.length > 0 && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, width: '100%', maxWidth: 760 }}>
+          {m.actions.length > 0 && <div className="assist-actions">
             {m.actions.map((a, i) => a.type === 'propose_operation' && a.operation
               ? <OperationCard key={`${m.id}-${i}`} msgId={m.id} action={a} onResolved={replaceMsg} />
               : a.type === 'propose_local' && a.status === 'pending'
@@ -348,27 +363,27 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
           {m.role === 'assistant' && (() => { const meta = replyMeta(m, replyBilling[m.id] ?? null, labelOf); return meta ? <span className="small mono muted">{meta}</span> : null; })()}
           {m.id === 'tmp' && busy && <span className="small muted">enviando con {labelOf(chatModel)}</span>}
         </div>)}
-        {busy && <div style={{ display: 'flex', gap: 8, alignItems: 'center' }} className="muted sm13"><span className="spin" /> El asistente está pensando…</div>}
+        {busy && <div className="assist-thinking muted sm13" role="status" aria-live="polite"><span className="spin" aria-hidden="true" /> El asistente está pensando…</div>}
         <div ref={endRef} />
       </div>
-      <form style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: compact ? 10 : 12, borderTop: '1px solid var(--color-divider)', background: dragging ? 'var(--color-accent-soft)' : undefined }} onSubmit={e => { e.preventDefault(); void send(); }} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
-        {images.length > 0 && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          {images.map((im, i) => im.kind === 'image' ? <div key={i} style={{ position: 'relative', width: 72, height: 72, borderRadius: 8, overflow: 'hidden', border: '1px solid var(--color-border)', background: 'var(--color-surface-alt)' }}>
-            <img src={im.preview} alt={im.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-            <button type="button" className="xbtn" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label={`Quitar ${im.name}`} style={{ position: 'absolute', top: 2, right: 2, background: 'var(--color-surface)', borderRadius: 999, width: 22, height: 22, display: 'grid', placeItems: 'center' }}>{Icon.x(12)}</button>
-          </div> : <span key={i} className="chip" style={{ height: 'auto', padding: '4px 6px 4px 10px', gap: 8 }}>📄 {im.name} · {im.text.length.toLocaleString()} caracteres<button type="button" className="xbtn" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label={`Quitar ${im.name}`}>{Icon.x(12)}</button></span>)}
-          <span className="small muted" style={{ alignSelf: 'center' }}>Los adjuntos se envían al modelo del asistente y aumentan el costo del mensaje.</span>
+      <form className={`assist-form${compact ? ' assist-form--compact' : ''}${dragging ? ' assist-form--dragging' : ''}`} onSubmit={e => { e.preventDefault(); void send(); }} onDragOver={e => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop}>
+        {images.length > 0 && <div className="assist-thumbs">
+          {images.map((im, i) => im.kind === 'image' ? <div key={i} className="assist-thumb">
+            <img src={im.preview} alt={im.name} />
+            <button type="button" className="xbtn assist-thumb-x" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label={`Quitar ${im.name}`}>{Icon.x(12)}</button>
+          </div> : <span key={i} className="chip assist-file-chip">📄 {im.name} · {im.text.length.toLocaleString()} caracteres<button type="button" className="xbtn" onClick={() => setImages(images.filter((_, j) => j !== i))} aria-label={`Quitar ${im.name}`}>{Icon.x(12)}</button></span>)}
+          <span className="small muted assist-attach-note">Los adjuntos se envían al modelo del asistente y aumentan el costo del mensaje.</span>
         </div>}
-        <div style={{ display: 'flex', gap: 8 }}>
+        <div className="assist-input-row">
           <input ref={fileRef} type="file" accept={ACCEPT_ATTR} multiple hidden onChange={onPick} />
           <button type="button" className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy} title="Adjuntar imagen o archivo de texto (también puedes pegar o arrastrar)" aria-label="Adjuntar archivo">📎</button>
-          <textarea className="input" value={text} onChange={e => setText(e.target.value)} onPaste={onPaste} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} placeholder={compact ? 'Pídele algo al asistente… (arrastra o pega archivos)' : 'Escribe tu petición, pega una captura o arrastra un archivo .md/.txt… (Enter envía · Shift+Enter salto de línea)'} aria-label="Mensaje para el asistente" style={{ minHeight: 48, height: 48, flex: 1 }} disabled={busy} />
+          <textarea className="input assist-input" value={text} onChange={e => setText(e.target.value)} onPaste={onPaste} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} placeholder={compact ? 'Pídele algo al asistente… (arrastra o pega archivos)' : 'Escribe tu petición, pega una captura o arrastra un archivo .md/.txt… (Enter envía · Shift+Enter salto de línea)'} aria-label="Mensaje para el asistente" disabled={busy} />
           {!compact && <ModelPicker models={models} value={chatModel} defaultModel={info?.model ?? ''} billing={info?.billing ?? 'api'} loading={!info} disabled={busy} readOnlyReason={info?.modelsReason ?? null} savingDefault={savingDefault} onChange={pickModel} onSetDefault={m => { void setDefaultModel(m); }} />}
           <button className="btn btn-primary" type="submit" aria-label="Enviar" disabled={busy || (!text.trim() && !images.length)}>{Icon.arrow()}{compact ? '' : 'Enviar'}</button>
         </div>
         {compact && <div className="assist-model-row"><ModelPicker compact models={models} value={chatModel} defaultModel={info?.model ?? ''} billing={info?.billing ?? 'api'} loading={!info} disabled={busy} readOnlyReason={info?.modelsReason ?? null} savingDefault={savingDefault} onChange={pickModel} onSetDefault={m => { void setDefaultModel(m); }} /></div>}
         {(msgDraft.status === 'restored' || msgDraft.status === 'error') && !!text && <DraftNote status={msgDraft.status} onDiscard={msgDraft.clear} />}
-        {compact && info && <div className="small muted" style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>{info.backendLabel} · {info.billing === 'subscription' ? 'sin cargo a la API' : `≈ ${fmtUsd(info.estimatedPerMessageUsd)} por mensaje · mes ${fmtUsd(info.spentThisMonthUsd)} de ${fmtUsd(info.monthlyLimitUsd)}`}{!info.available && info.unavailableReason ? ` · ⚠ ${info.unavailableReason}` : ''}</span>{convId && <button type="button" className="lnk" onClick={() => void archive()} title="Se conserva todo; puedes reactivarla">archivar</button>}</div>}
+        {compact && info && <div className="small muted assist-foot"><span>{info.backendLabel} · {info.billing === 'subscription' ? 'sin cargo a la API' : `≈ ${fmtUsd(info.estimatedPerMessageUsd)} por mensaje · mes ${fmtUsd(info.spentThisMonthUsd)} de ${fmtUsd(info.monthlyLimitUsd)}`}{!info.available && info.unavailableReason ? ` · ⚠ ${info.unavailableReason}` : ''}</span>{convId && <button type="button" className="lnk" onClick={() => void archive()} title="Se conserva todo; puedes reactivarla">archivar</button>}</div>}
       </form>
       </div>
       </div>
