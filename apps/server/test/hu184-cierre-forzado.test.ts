@@ -48,7 +48,7 @@ function appliedNotMerged(title: string) {
 /** Mensajes del hilo de la historia (story_threads). */
 function threadOf(itemId: string): Array<{ role: string; content: string }> {
   const t = threadRepo(S) as any;
-  const fn = t.list ?? t.listFor ?? t.forItem;
+  const fn = t.messages ?? t.list ?? t.listFor ?? t.forItem;
   assert.equal(typeof fn, 'function', 'threadRepo debe exponer una lectura del hilo de la historia');
   const rows = fn.call(t, itemId);
   assert.ok(Array.isArray(rows), 'la lectura del hilo devuelve una lista');
