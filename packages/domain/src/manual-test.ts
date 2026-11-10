@@ -45,6 +45,31 @@ export function isOutsidePortalStep(text: string): boolean {
   return OUTSIDE_PORTAL_PATTERNS.some(re => re.test(norm));
 }
 
+/** Parte de un paso de la prueba manual: la acción y, si existe, el resultado esperado. */
+export interface ManualStepParts {
+  /** Acción del paso, sin el punto final. */
+  action: string;
+  /** Texto tras «Esperado:», o null si el paso no lo trae. */
+  expected: string | null;
+}
+
+/** Marcador «Esperado:» sin distinguir mayúsculas ni acentos («ESPERADO:», «esperado :», «Ésperado:»). Sin bandera «g». */
+const EXPECTED_MARK = /(?<![\p{L}\p{N}])[eéèêë]sperad[oóòôö]s?\s*:/iu;
+
+/**
+ * HU-192 · Separa un paso en acción y resultado esperado cortando por la primera aparición de «Esperado:».
+ * Sin «Esperado:» devuelve el texto completo (recortado) como acción y expected null. Función pura, sin IO.
+ */
+export function splitManualStep(text: string): ManualStepParts {
+  const src = String(text ?? '').normalize('NFC');
+  const m = EXPECTED_MARK.exec(src);
+  if (!m) return { action: src.trim(), expected: null };
+  const action = src.slice(0, m.index).trim().replace(/[\s.]+$/, '').trim();
+  const expected = src.slice(m.index + m[0].length).trim();
+  if (!action) return { action: src.trim(), expected: null };
+  return { action, expected: expected || null };
+}
+
 /** Une pasos, feedback (por clave de paso) y casillas antiguas: un ítem por paso, en orden. */
 export function buildManualTestSteps(
   steps: readonly string[],

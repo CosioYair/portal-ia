@@ -1,15 +1,22 @@
 import { useEffect, useState } from 'react';
 import type { ManualTestFeedbackEntry, Process } from '@portal-ia/domain';
-import { manualTestStepKey } from '@portal-ia/domain';
+import { isOutsidePortalStep, manualTestStepKey } from '@portal-ia/domain';
 import { api, type AssignmentView } from '../lib/api.ts';
 import { AcceptAssignmentAction } from './ConversationPanel.tsx';
 import { getManualTestFeedback, saveManualTestStepFeedback } from '../lib/manualTestFeedback.ts';
-import { ManualTestStepList } from './ManualTestStepList.tsx';
+import { ManualStepText, ManualTestStepList, OutsidePortalNote } from './ManualTestStepList.tsx';
 import { FeedbackToTeam } from './FeedbackToTeam.tsx';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
 import { CloseResolvedDialog } from './CloseResolvedDialog.tsx';
+
+/** HU-192 · Hash corto y estable del texto de los pasos (para la `key` de la lista: descarta borradores de una lista anterior). */
+function textHash(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
 
 /** HU-187 · Lleva la vista a la primera sección existente (la de integrar y, si no está, el recorrido) y la enfoca. */
 function focusSection(ids: string[]) {
@@ -39,6 +46,10 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
   const [note, setNote] = useState(r.manualTest?.note ?? '');
   const [genEst, setGenEst] = useState<{ agentName: string; model: string; estimatedUsd: number } | null>(null);
   const [genAuth, setGenAuth] = useState(false);
+  // HU-192 · «Regenerar con QA»: autorización y estado propios (independientes de genAuth).
+  const [regenAuth, setRegenAuth] = useState(false);
+  const [regenState, setRegenState] = useState<'idle' | 'running' | 'error'>('idle');
+  const [regenErr, setRegenErr] = useState<string | null>(null);
   const [manualText, setManualText] = useState('');
   const [writing, setWriting] = useState(false);
   // EN-009 · proceso de un encargo: se cierra aceptando el encargo (no hay historia que completar).
@@ -52,12 +63,31 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
   }, [slug, proc.assignmentId, proc.status, r.merged?.commit]);
   // HU-190 · Solo en el Portal: una lista que QA aún no revisó (la del Desarrollador o escrita a mano) puede revisarse con QA.
   const needsQaReview = isPortal && !!r.manualTest && r.manualTest.reviewedBy !== 'qa' && proc.status === 'done';
-  useEffect(() => { if ((!r.manualTest || needsQaReview) && proc.status === 'done') api.manualTestEstimate(slug, proc.id).then(setGenEst).catch(() => setGenEst(null)); }, [r.manualTest, needsQaReview, proc.id, proc.status, slug]);
+  // HU-192 · Si algún paso sale del Portal, QA puede regenerar la lista aunque ya la haya revisado (la estimación lo admite).
+  const hasOutside = !!r.manualTest?.steps.some(s => isOutsidePortalStep(s));
+  // Solo en el Portal (como needsQaReview): fuera de él el servidor rechaza la regeneración (409 manual_test_regenerate_portal_only).
+  const canRegenerate = isPortal && hasOutside && proc.status === 'done';
+  useEffect(() => { if ((!r.manualTest || needsQaReview || canRegenerate) && proc.status === 'done') api.manualTestEstimate(slug, proc.id).then(setGenEst).catch(() => setGenEst(null)); }, [r.manualTest, needsQaReview, canRegenerate, proc.id, proc.status, slug]);
+  const regenerate = async () => {
+    setRegenState('running'); setRegenErr(null);
+    try { const p = await api.manualTestGenerate(slug, proc.id, { regenerate: true }); onChange(p); setRegenState('idle'); flash('Lista regenerada por QA'); }
+    catch (e: any) { setRegenErr(e?.message ?? 'No se pudo regenerar la lista.'); setRegenState('error'); }
+    finally { setRegenAuth(false); }
+  };
   const generate = async () => { const reviewing = !!r.manualTest; setBusy(true); setErr(null); try { const p = await api.manualTestGenerate(slug, proc.id); onChange(p); flash(reviewing ? 'Lista revisada por QA' : 'Lista de prueba generada'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); setGenAuth(false); } };
   const saveSteps = async () => { const steps = manualText.split(/\r?\n/).map(l => l.replace(/^\s*\d+[.)]\s*/, '').trim()).filter(l => l.length > 3); if (!steps.length) return; setBusy(true); setErr(null); try { const p = await api.manualTestSteps(slug, proc.id, steps); onChange(p); setWriting(false); setManualText(''); flash('Pasos de prueba guardados'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
 
   const mt = r.manualTest;
   const tested = mt ? mt.checks.filter(Boolean).length : 0;
+  const stepsSig = mt ? textHash(mt.steps.join('\n')) : '';
+  const regenRunning = regenState === 'running';
+  const regenBlock = canRegenerate ? <div role="group" aria-label="Regenerar con QA" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <Notice kind="warn"><div>Hay pasos que salen del Portal. QA puede rehacer la lista para que todo se pruebe desde la interfaz{genEst ? ` (≈ ${genEst.estimatedUsd.toFixed(3)} USD, ${genEst.agentName})` : ''}. Las marcas empiezan de cero.</div></Notice>
+    <label className="ck"><input className="cb" type="checkbox" checked={regenAuth} disabled={regenRunning} onChange={e => setRegenAuth(e.target.checked)} /><span>Autorizo una llamada a {genEst?.agentName ?? 'QA'} para regenerar la lista de prueba{genEst ? ` (≈ ${genEst.estimatedUsd.toFixed(3)} USD)` : ''}.</span></label>
+    <div><button className="btn btn-primary btn-sm" onClick={regenerate} disabled={!regenAuth || regenRunning || busy}>{regenRunning ? <span className="spin spin-light" /> : Icon.arrow()}Regenerar con QA</button></div>
+    {regenRunning && <span className="small muted" role="status">QA está regenerando la lista…</span>}
+    {regenState === 'error' && regenErr && <Notice kind="err">No se pudo regenerar la lista: {regenErr}</Notice>}
+  </div> : null;
   const rejected = !!r.rejected && !r.applied;
   const phase = proc.guidance?.phase ?? '';
   // El orden de cierre y las acciones los dibuja el recorrido guiado (StoryFlowPanel, servidor: services/storyFlow.ts).
@@ -129,15 +159,16 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
           <div className="eyebrow">Qué probar, paso a paso · {tested} de {mt.steps.length}</div>
           {isPortal && mt.reviewedBy === 'qa' && <Chip tone="ok" xs>Lista revisada por QA</Chip>}
         </div>
-        {needsQaReview && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
+        {needsQaReview && !canRegenerate && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
           <Notice kind="info"><div>QA aún no ha revisado estos pasos. Puede revisarlos para que se sigan desde la interfaz del Portal, sin archivos ni terminal (una llamada corta{genEst ? `, ≈ ${genEst.estimatedUsd.toFixed(3)} USD, ${genEst.agentName}` : ''}). Si QA cambia los pasos, las marcas empiezan de cero.</div></Notice>
           <label className="ck"><input className="cb" type="checkbox" checked={genAuth} onChange={e => setGenAuth(e.target.checked)} /><span>Autorizo una llamada a {genEst?.agentName ?? 'QA'} para revisar los pasos del Desarrollador{genEst ? ` (≈ ${genEst.estimatedUsd.toFixed(3)} USD)` : ''}.</span></label>
           <div><button className="btn btn-primary btn-sm" onClick={generate} disabled={!genAuth || busy}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}Revisar la lista con QA</button></div>
         </div>}
-        {!testEnabled ? <details><summary className="small muted" style={{ cursor: 'pointer' }}>Se habilita cuando los cambios estén integrados{portalFlow ? ', activados y comprobados en ejecución' : ''}. Ver los {mt.steps.length} pasos</summary>
-          <ol className="sm13" style={{ margin: '8px 0 0', paddingLeft: 22, display: 'flex', flexDirection: 'column', gap: 4 }}>{mt.steps.map((t, i) => <li key={i}>{t}</li>)}</ol></details> : <>
+        {!testEnabled ? <>{regenBlock && <div style={{ marginBottom: 10 }}>{regenBlock}</div>}<details><summary className="small muted" style={{ cursor: 'pointer' }}>Se habilita cuando los cambios estén integrados{portalFlow ? ', activados y comprobados en ejecución' : ''}. Ver los {mt.steps.length} pasos</summary>
+          <ol className="sm13" style={{ margin: '8px 0 0', paddingLeft: 22, display: 'flex', flexDirection: 'column', gap: 4 }}>{mt.steps.map((t, i) => <li key={i}><ManualStepText text={t} />{isOutsidePortalStep(t) && <OutsidePortalNote />}</li>)}</ol></details></> : <>
         <div>
-          {feedback ? <ManualTestStepList key={`${proc.id}:${mt.steps.length}`} steps={mt.steps} checks={mt.checks} initialFeedback={feedback} onSave={onStepSave}
+          {feedback ? <ManualTestStepList key={`${proc.id}:${mt.steps.length}:${stepsSig}`} steps={mt.steps} checks={mt.checks} initialFeedback={feedback} onSave={onStepSave}
+            regenerateAction={regenBlock ?? undefined}
             failureActions={proc.backlogItemId ? ({ failed, flush }) => <FeedbackToTeam slug={slug} itemId={proc.backlogItemId!} failed={failed} flush={flush} /> : undefined} /> : <span className="small muted">Cargando feedback…</span>}
         </div>
         <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'center', flexWrap: 'wrap' }}>
