@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useLive } from '../lib/live.ts';
+import { attentionChange, useLive } from '../lib/live.ts';
 import type { DecisionVerdict, PendingDecision, PendingDecisionKind } from '@portal-ia/domain';
 import { api, type AssignmentPendingItem } from '../lib/api.ts';
 import { osApi, type OfficeAgent } from '../lib/osApi.ts';
@@ -45,8 +45,9 @@ export function InboxScreen() {
   }, [slug]);
 
   useEffect(() => { void refresh(); }, [refresh]);
-  // Una decisión nueva o resuelta (aquí, en otra pestaña, en un lote o desde el Asistente) aparece sin pulsar «Actualizar».
-  useLive(c => c.ws === slug && c.kind !== 'progress' && (c.entity === 'process' || c.entity === 'assignment' || c.entity === 'batch' || c.entity === 'agent' || c.entity === 'agent_chat' || c.entity === 'assistant'), () => refresh(), { minMs: 2000, enabled: !!slug });
+  // Una decisión nueva o resuelta (aquí, en otra pestaña, en un lote, en el backlog o desde el Asistente, con o sin
+  // empresa en su aviso) aparece sin pulsar «Actualizar», en menos de 3 s (HU-189).
+  useLive(attentionChange(slug), () => refresh(), { minMs: 1500, enabled: !!slug });
 
   const onResolved = useCallback((d: PendingDecision, verdict: DecisionVerdict) => {
     ctx?.flash(`${verdict === 'approve' ? 'Aprobada' : 'Denegada'}: ${d.title}`);
