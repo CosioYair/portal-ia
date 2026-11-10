@@ -300,7 +300,8 @@ export const api = {
   manualTest: (slug: string, processId: string, checks: boolean[], note?: string | null) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/manual-test`, { method: 'POST', body: JSON.stringify({ checks, note }) }),
   manualTestSteps: (slug: string, processId: string, steps: string[]) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/manual-test`, { method: 'POST', body: JSON.stringify({ steps }) }),
   manualTestEstimate: (slug: string, processId: string) => request<{ agentName: string; model: string; estimatedUsd: number }>(`/api/workspaces/${slug}/processes/${processId}/manual-test/estimate`),
-  manualTestGenerate: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/manual-test/generate`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
+  /** HU-192 · `regenerate`: QA rehace una lista ya revisada para quitar los pasos que salen del Portal (409 si no hay ninguno). */
+  manualTestGenerate: (slug: string, processId: string, opts: { regenerate?: boolean } = {}) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/manual-test/generate`, { method: 'POST', body: JSON.stringify(opts.regenerate ? { authorized: true, regenerate: true } : { authorized: true }) }),
   rejectProcess: (slug: string, processId: string, reason?: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/reject`, { method: 'POST', body: JSON.stringify({ reason }) }),
   resetStory: (slug: string, id: string, reason?: string) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/reset`, { method: 'POST', body: JSON.stringify({ reason }) }),
   recoverProcess: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/recover`, { method: 'POST' }),

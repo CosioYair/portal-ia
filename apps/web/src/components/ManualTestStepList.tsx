@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { buildFailureBlock, buildManualTestSteps, countDoneManualSteps, type ManualTestFeedbackEntry, type ManualTestResult, type ManualTestStepView } from '@portal-ia/domain';
+import { buildFailureBlock, buildManualTestSteps, countDoneManualSteps, splitManualStep, type ManualTestFeedbackEntry, type ManualTestResult, type ManualTestStepView } from '@portal-ia/domain';
 import '../manual-test-feedback.css';
 
 type SaveState = 'idle' | 'saving' | 'saved' | 'error';
@@ -28,10 +28,15 @@ interface Props {
    * escritos y aún no guardados y espera a que terminen los guardados en curso.
    */
   failureActions?: (ctx: { failed: ManualTestStepView[]; flush: () => Promise<void> }) => ReactNode;
+  /**
+   * HU-192 · Bloque «Regenerar con QA» (con su autorización y costo, construido fuera). Solo se muestra si algún paso
+   * sale del Portal.
+   */
+  regenerateAction?: ReactNode;
 }
 
 /** Lista «Qué probar, paso a paso»: cada ítem lleva en su fila OK, Falla, Observación y su comentario. */
-export function ManualTestStepList({ steps, checks, initialFeedback, onSave, onChange, failureActions }: Props) {
+export function ManualTestStepList({ steps, checks, initialFeedback, onSave, onChange, failureActions, regenerateAction }: Props) {
   const [drafts, setDrafts] = useState<Record<string, Draft>>(
     () => Object.fromEntries(initialFeedback.map(f => [f.stepKey, { result: f.result, comment: f.comment }]))
   );
@@ -104,20 +109,20 @@ export function ManualTestStepList({ steps, checks, initialFeedback, onSave, onC
   return (
     <section className="mts" aria-label="Qué probar, paso a paso">
       <p className="mts-summary small muted">{countDoneManualSteps(items)} de {items.length} pasos realizados</p>
+      {regenerateAction && items.some(i => i.outsidePortal) && <div className="mts-regenerate">{regenerateAction}</div>}
       <ol className="mts-list">
         {items.map(item => {
           const st = status[item.stepKey] ?? 'idle';
           const n = item.index + 1;
+          const parts = splitManualStep(item.text);
           return (
             <li key={item.stepKey} className={`mts-item${item.done ? ' is-done' : ''}${item.result === 'fail' ? ' is-fail' : ''}`} data-result={item.result ?? 'none'}>
               <div className="mts-row">
                 <span className="mts-num">{n}.</span>
-                <p className="mts-text">{item.text}</p>
-                {item.outsidePortal && (
-                  <span className="mts-outside" title="Este paso requiere abrir archivos, una terminal o un editor fuera del Portal">
-                    fuera del Portal
-                  </span>
-                )}
+                <div className="mts-text">
+                  <strong className="mts-action">{parts.action}</strong>
+                  {parts.expected && <div className="mts-expected"><span>Esperado:</span> {parts.expected}</div>}
+                </div>
                 <div className="mts-actions" role="group" aria-label={`Resultado del paso ${n}`}>
                   {OPTIONS.map(o => (
                     <button key={o.value} type="button" className={`btn btn-sm btn-secondary mts-opt mts-opt-${o.value}`} aria-pressed={item.result === o.value} onClick={() => pick(item.stepKey, o.value)}>
@@ -126,6 +131,12 @@ export function ManualTestStepList({ steps, checks, initialFeedback, onSave, onC
                   ))}
                 </div>
               </div>
+              {item.outsidePortal && (
+                <div role="note" className="mts-outside">
+                  <span className="mts-outside-icon" aria-hidden="true">⚠</span>
+                  <span>Este paso sale del Portal<span className="mts-outside-why">: pide abrir archivos, una terminal o un editor.</span></span>
+                </div>
+              )}
               <textarea className="input mts-comment" rows={2} maxLength={2000} placeholder="Comentario del paso (opcional)" aria-label={`Comentario del paso ${n}`}
                 value={item.comment} onChange={e => typeComment(item.stepKey, e.target.value)} onBlur={() => blurComment(item.stepKey)} />
               <div className="mts-status small" role="status" aria-live="polite">
