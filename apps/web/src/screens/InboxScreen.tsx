@@ -34,13 +34,20 @@ export function InboxScreen() {
   // EN-012: encargos que esperan tu decisión (misma regla de «pendiente» que el Asistente y la tarjeta).
   const [assignments, setAssignments] = useState<AssignmentPendingItem[]>([]); const [assignmentsErr, setAssignmentsErr] = useState<string | null>(null);
   const att = useAttention(slug);
+  // Fallo de un refresco con datos ya visibles: se conservan y se avisa con discreción (sin pantalla de error completa).
+  const [staleErr, setStaleErr] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!slug) return;
     setLoad(prev => (prev.phase === 'ready' ? prev : { phase: 'loading' }));
-    try { setLoad({ phase: 'ready', items: await api.inbox(slug) }); }
-    catch (e) { setLoad({ phase: 'error', message: e instanceof Error ? e.message : 'No se pudo cargar la bandeja.' }); }
-    void osApi.office(slug, null).then(o => { setAgents(o.agents); setProjectNames(Object.fromEntries(o.projects.map(p => [p.id, p.name]))); }).catch(() => setAgents([]));
+    try { const items = await api.inbox(slug); setLoad({ phase: 'ready', items }); setStaleErr(null); }
+    catch (e) {
+      const message = e instanceof Error ? e.message : 'No se pudo cargar la bandeja.';
+      // Solo la primera carga (o «Reintentar» desde el error) muestra la pantalla de error completa.
+      setLoad(prev => (prev.phase === 'ready' ? prev : { phase: 'error', message }));
+      setStaleErr(message);
+    }
+    void osApi.office(slug, null).then(o => { setAgents(o.agents); setProjectNames(Object.fromEntries(o.projects.map(p => [p.id, p.name]))); }).catch(() => setAgents(prev => prev ?? []));
     void api.inboxAssignments(slug).then(a => { setAssignments(a); setAssignmentsErr(null); }).catch((e: unknown) => setAssignmentsErr(e instanceof Error ? e.message : 'No se pudieron cargar los encargos pendientes.'));
   }, [slug]);
 
@@ -81,6 +88,10 @@ export function InboxScreen() {
               <div><button className="btn btn-secondary btn-sm" onClick={() => void refresh()}>Reintentar</button></div>
             </div>
           </div>
+        )}
+
+        {load.phase === 'ready' && staleErr && (
+          <div className="notice small muted" role="status">No se pudo actualizar la bandeja; se muestran los últimos datos cargados. Se volverá a intentar con el próximo cambio. <span className="muted">({staleErr})</span></div>
         )}
 
         {nothing && <div className="card"><EmptyState art="inbox" title="No hay nada pendiente">Cuando un proceso necesite tu autorización, un agente te pida revisar algo o el Asistente te proponga un paso, aparecerá aquí.</EmptyState></div>}
