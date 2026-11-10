@@ -6,6 +6,7 @@ import { conversationDetail, createConversation, createStoriesFrom, decide, deci
 import { createCompany, createProject } from '../services/companies.ts';
 import { workspacesRepo } from '../db/platform.ts';
 import { requireOwner } from '../services/ownerSession.ts';
+import { assistantPendingCount } from '@portal-ia/domain';
 
 export async function assistantRoutes(app: FastifyInstance) {
   // Conversaciones: la elegida (o la más reciente) con sus mensajes, decisiones, artefactos y encargos.
@@ -14,6 +15,17 @@ export async function assistantRoutes(app: FastifyInstance) {
       const q = req.query as any; const list = conversationsRepo.list();
       const id = typeof q.conversationId === 'string' ? q.conversationId : list.find(c => c.status === 'active')?.id ?? null;
       return { info: assistantInfo(), conversations: list, conversationId: id, messages: id ? assistantRepo.listLive(80, id) : [], detail: id ? conversationDetail(id) : null };
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+  // HU-189 · Solo lectura: cuántas acciones del chat esperan tu autorización (conversaciones activas o la indicada).
+  // La campana y Decisiones la piden con cada aviso en vivo, aunque el panel del Asistente esté cerrado.
+  app.get('/api/assistant/pending-count', async (req, reply) => {
+    const q = z.object({ conversationId: z.string().min(1).max(80).optional() }).safeParse(req.query ?? {});
+    if (!q.success) return reply.code(400).send({ error: 'Datos no válidos' });
+    try {
+      const ids = q.data.conversationId ? [q.data.conversationId] : conversationsRepo.list().filter(c => c.status === 'active').map(c => c.id);
+      const count = ids.reduce((n, id) => n + assistantPendingCount(assistantRepo.listLive(80, id)), 0);
+      return { count };
     } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   app.post('/api/assistant/conversations', async (req, reply) => {

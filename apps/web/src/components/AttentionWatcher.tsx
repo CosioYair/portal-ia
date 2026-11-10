@@ -3,7 +3,7 @@ import { api } from '../lib/api.ts';
 import { osApi } from '../lib/osApi.ts';
 import { useApp } from '../lib/store.ts';
 import { attentionChange, useLive } from '../lib/live.ts';
-import { setAttention } from '../lib/uiBus.ts';
+import { setAssistantPending, setAttention } from '../lib/uiBus.ts';
 
 /**
  * Cifras de «lo que te espera» en la empresa seleccionada, una sola vez para toda la aplicación (sustituye al botón
@@ -14,6 +14,8 @@ import { setAttention } from '../lib/uiBus.ts';
  * procesos, encargos, lotes, agentes, backlog y el Asistente. Las propuestas del Asistente llevan la empresa, pero sus
  * mensajes y acciones del chat llegan sin ella y también se aceptan. Como mucho una petición cada 1,5 s, para reflejar
  * los cambios en menos de 3 s. Cada respuesta se descarta si la empresa ya no es la seleccionada.
+ * Las acciones del chat que esperan aprobación (propose_*) no están en la bandeja: su cifra se pide a
+ * GET /api/assistant/pending-count y se publica con setAssistantPending, sin depender de que el chat esté montado.
  */
 const cache = new Map<string, { decisions: number; agentItems: number }>();
 export function AttentionWatcher() {
@@ -23,6 +25,7 @@ export function AttentionWatcher() {
   const load = useCallback(() => {
     if (!slug) return;
     const c = cache.get(slug); if (c) setAttention({ slug, ...c, known: true });
+    void api.assistantPendingCount().then(r => setAssistantPending(r.count)).catch(() => { /* se conserva la última cifra */ });
     void Promise.all([api.inbox(slug).catch(() => null), osApi.office(slug, null).catch(() => null)]).then(([inbox, office]) => {
       const agentItems = office ? office.agents.reduce((n, a) => n + a.attention.filter(x => !x.processId).length, 0) : (cache.get(slug)?.agentItems ?? 0);
       const decisions = inbox ? inbox.length : (cache.get(slug)?.decisions ?? 0);

@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState, type ClipboardEvent, type ChangeEve
 import { Link } from 'react-router-dom';
 import { DEFAULT_PIPELINE } from '@portal-ia/domain';
 import type { PendingDecision, Process, StoryDecisionHistory, SupersededDecision } from '@portal-ia/domain';
+import { assistantPendingCount } from '@portal-ia/domain';
 import type { AssistantConversation } from '@portal-ia/domain';
 import { api, type AssistantAction, type AssistantImage, type AssistantInfo, type AssistantMessage, type ConversationDetailView } from '../lib/api.ts';
 import { AssignmentCard, CardBoundary, ConversationBar, ConversationPanel, LocalChangeCard, UsageBanner } from './ConversationPanel.tsx';
@@ -201,7 +202,7 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
     setDecTick(t => t + 1);
     flash('Autorización restaurada como vigente · la anterior vigente pasa a superada');
   };
-  const pendingCount = msgs.reduce((n, m) => n + m.actions.filter(a => a.status === 'pending' && !(a.processId && superseded[a.processId])).length, 0);
+  const pendingCount = assistantPendingCount(msgs, pid => !!superseded[pid]);
   useEffect(() => { onPending?.(pendingCount); }, [pendingCount, onPending]);
 
   const addFiles = async (files: FileList | File[]) => {
