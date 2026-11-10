@@ -19,11 +19,12 @@ const webSrc = fileURLToPath(new URL('../../web/src/', import.meta.url));
 const read = (rel: string) => fs.readFileSync(path.join(webSrc, rel), 'utf8');
 
 test('live.ts exporta attentionChange con backlog y la rama del Asistente sin empresa', () => {
-  const live = read('lib/live.ts');
+  assert.match(read('lib/live.ts'), /export \{ attentionChange \} from '\.\/attention\.ts'/, 'live.ts vuelve a exportar el filtro compartido');
+  const live = read('lib/attention.ts');
   assert.match(live, /export function attentionChange\(slug: string \| null\): \(c: LiveChange\) => boolean/);
   const set = live.slice(live.indexOf('const ATTENTION_ENTITIES'), live.indexOf('export function attentionChange'));
   for (const e of ['process', 'assignment', 'batch', 'agent', 'agent_chat', 'backlog', 'assistant']) assert.ok(set.includes(`'${e}'`), `falta la entidad «${e}» en el filtro`);
-  const fn = live.slice(live.indexOf('export function attentionChange'), live.indexOf('export function useLatest'));
+  const fn = live.slice(live.indexOf('export function attentionChange'));
   assert.ok(fn.includes("c.kind === 'progress'") && fn.includes('return false'), 'los avisos de progreso no cuentan');
   assert.ok(fn.includes('c.ws === slug'), 'avisos de la propia empresa');
   assert.match(fn, /c\.entity === 'assistant' && c\.ws === null/, 'los avisos del Asistente sin empresa también cuentan');
@@ -88,7 +89,7 @@ test('una acción del chat pendiente (propose_*) cuenta en /api/assistant/pendin
   const { conversationsRepo } = await import('../src/db/conversations.ts');
   const { assistantRepo } = await import('../src/services/assistant.ts');
   const { subscribeLive, flushLiveNow } = await import('../src/services/live.ts');
-  const { attentionChange } = await import('../../web/src/lib/live.ts');
+  const { attentionChange } = await import('../../web/src/lib/attention.ts');
   const S = workspacesRepo.list()[0].slug;
   const project = projectsRepo(S).list()[0];
   const app = await buildApp();

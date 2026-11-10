@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { noteFailure, noteResponse } from './liveStatus.ts';
+import type { LiveChange } from './attention.ts';
+// HU-189 · El tipo y el filtro compartido viven en attention.ts (sin DOM) para que también los usen las pruebas del servidor.
+export type { LiveChange } from './attention.ts';
+export { attentionChange } from './attention.ts';
 
 /**
  * Tiempo real en la interfaz: UNA conexión (Server-Sent Events, /api/events) por pestaña visible. El servidor solo dice
@@ -11,7 +15,6 @@ import { noteFailure, noteResponse } from './liveStatus.ts';
  *   volver a verse se reconecta y vuelve a pedir todo.
  * - Los latidos llevan la hora del servidor: la pantalla sabe que está al día aunque no haga peticiones.
  */
-export interface LiveChange { ws: string | null; entity: 'process' | 'backlog' | 'batch' | 'assignment' | 'assistant' | 'system' | 'knowledge' | 'agent' | 'story' | 'usage' | 'department' | 'agent_chat'; id: string | null; projectId?: string | null; itemId?: string | null; kind?: 'state' | 'progress' }
 type Sub = { match: (c: LiveChange) => boolean; fire: (resync: boolean) => void };
 
 const subs = new Set<Sub>();
@@ -100,24 +103,9 @@ export function useLive(match: (c: LiveChange) => boolean, refetch: () => unknow
   }, [minMs, enabled]);
 }
 
-/** Entidades cuyos avisos pueden crear o cerrar algo que espera al propietario en una empresa. */
-const ATTENTION_ENTITIES: ReadonlySet<LiveChange['entity']> = new Set<LiveChange['entity']>(['process', 'assignment', 'batch', 'agent', 'agent_chat', 'backlog', 'assistant']);
 
-/**
- * HU-189 · Filtro compartido de Decisiones y de la campana: ¿este aviso puede cambiar lo que espera al propietario en
- * la empresa `slug`? Los avisos de progreso (`kind: 'progress'`) nunca cuentan.
- * - Avisos de la propia empresa sobre procesos, encargos, lotes, agentes, chats de agente, backlog o el Asistente.
- * - Avisos del Asistente SIN empresa (`ws: null`): los mensajes del chat y sus acciones pendientes, las conversaciones y
- *   los artefactos se publican sin empresa. Si se ignoraran, una acción que espera aprobación no aparecería hasta recargar.
- *   El precio es como mucho una petición de más cada `minMs`.
- */
-export function attentionChange(slug: string | null): (c: LiveChange) => boolean {
-  return (c: LiveChange) => {
-    if (!slug || c.kind === 'progress') return false;
-    if (c.ws === slug && ATTENTION_ENTITIES.has(c.entity)) return true;
-    return c.entity === 'assistant' && c.ws === null;
-  };
-}
+
+
 
 /**
  * Respuestas fuera de orden: solo se aplica la de la petición más reciente (una respuesta lenta y antigua nunca pisa a
