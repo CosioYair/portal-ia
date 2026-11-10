@@ -85,11 +85,13 @@ export async function assistantRoutes(app: FastifyInstance) {
       })).max(4, 'Máximo 4 imágenes por mensaje.').optional(),
       /** Adjuntos de texto ya incorporados al mensaje por el cliente; aquí solo se registran. */
       files: z.array(z.object({ name: z.string().max(200), mediaType: z.string().max(100), bytes: z.number().int().nonnegative() })).max(6).optional(),
-      conversationId: z.string().max(80).nullable().optional()
+      conversationId: z.string().max(80).nullable().optional(),
+      /** HU-197: modelo de este mensaje (id del catálogo del proveedor). Si falta o es null, se usa el configurado. */
+      model: z.string().trim().min(1, 'El modelo está vacío.').max(120, 'El id del modelo es demasiado largo.').nullish()
     }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: `Mensaje no válido: ${body.error.issues.map(i => i.message).join(' ')}` });
-    try { const r = await chat(body.data.text, body.data.images ?? [], body.data.files ?? [], body.data.conversationId ?? null); app.log.info({ cost: r.assistant.costUsd.toFixed(4), actions: r.assistant.actions.length, images: body.data.images?.length ?? 0 }, 'asistente respondió'); return { ...r, info: assistantInfo() }; }
-    catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    try { const r = await chat(body.data.text, body.data.images ?? [], body.data.files ?? [], body.data.conversationId ?? null, { model: body.data.model ?? null }); app.log.info({ cost: r.assistant.costUsd.toFixed(4), model: r.assistant.model, actions: r.assistant.actions.length, images: body.data.images?.length ?? 0 }, 'asistente respondió'); return { ...r, info: assistantInfo() }; }
+    catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e.code }); }
   });
   // Marca una propuesta (ejecutar historia / aplicar cambios) como resuelta tras autorizarla desde la tarjeta del chat.
   app.post('/api/assistant/messages/:id/resolve', async (req, reply) => {

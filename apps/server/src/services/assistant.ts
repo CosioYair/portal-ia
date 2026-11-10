@@ -446,7 +446,23 @@ export function executeActions(actionsReq: any[]): AssistantAction[] {
   return actions;
 }
 
-export async function chat(userText: string, images: { mediaType: string; data: string; name?: string }[] = [], files: AssistantAttachment[] = [], conversationId: string | null = null): Promise<{ user: AssistantMessage; assistant: AssistantMessage; conversationId: string }> {
+/** Error 400 tipado de la HU-197: el modelo pedido no está en el catálogo del proveedor del Asistente. */
+export function invalidModelError(requested: string, providerLabel: string): Error & { statusCode: number; code: 'invalid_model' } {
+  return Object.assign(new Error(`El modelo «${requested}» no está disponible en el catálogo de ${providerLabel}. Elige uno de la lista de modelos del proveedor.`), { statusCode: 400, code: 'invalid_model' as const });
+}
+
+/**
+ * HU-197 · Elige el modelo de un mensaje del chat. Sin modelo pedido, usa el configurado (`fallback`).
+ * Con modelo pedido, solo lo acepta si su id coincide exactamente con uno del catálogo del proveedor.
+ * Si no está, o si el catálogo está vacío, lanza invalidModelError.
+ */
+export function resolveChatModel(models: ModelInfo[], requested: string | null | undefined, fallback: string, providerLabel = 'su proveedor'): string {
+  if (requested === null || requested === undefined || requested === '') return fallback;
+  if (models.some(m => m.id === requested)) return requested;
+  throw invalidModelError(requested, providerLabel);
+}
+
+export async function chat(userText: string, images: { mediaType: string; data: string; name?: string }[] = [], files: AssistantAttachment[] = [], conversationId: string | null = null, opts: { model?: string | null } = {}): Promise<{ user: AssistantMessage; assistant: AssistantMessage; conversationId: string }> {
   const a = assistantAgent();
   const info = assistantInfo();
   if (info.billing === 'api' && info.spentThisMonthUsd >= info.monthlyLimitUsd) throw Object.assign(new Error(`El Asistente alcanzó su límite mensual (${info.monthlyLimitUsd.toFixed(2)} USD). Puedes ampliarlo en su ficha avanzada (Ajustes › Asistente de Empresa).`), { statusCode: 409 });
@@ -455,6 +471,8 @@ export async function chat(userText: string, images: { mediaType: string; data: 
   // Con la API, el proveedor debe estar conectado; con Claude Code NO se usa la API aunque esté conectada.
   if (info.backend === 'api' && (!cred || prow.status !== 'connected')) throw Object.assign(new Error('El proveedor del Asistente no está conectado.'), { statusCode: 409 });
   const models: ModelInfo[] = (() => { try { return JSON.parse(prow.models_json); } catch { return []; } })();
+  // HU-197: el modelo se resuelve antes de guardar nada o de llamar a la IA. El límite mensual ya se comprobó antes.
+  const chatModel = resolveChatModel(models, opts.model, a.config.model, providerId);
   const attachments: AssistantAttachment[] = [...images.map((im, i) => ({ name: im.name ?? `imagen-${i + 1}`, mediaType: im.mediaType, bytes: Math.round(im.data.length * 0.75) })), ...files];
   const conv = conversationId ? getConversation(conversationId) : (conversationsRepo.list().find(c => c.status === 'active') ?? createConversation(userText.slice(0, 60), null, null));
   if (conv.title === 'Nueva conversación' && !assistantRepo.list(1, conv.id).length) conversationsRepo.update(conv.id, { title: userText.replace(/\s+/g, ' ').trim().slice(0, 60) || conv.title });
@@ -483,7 +501,7 @@ ${await platformSnapshot({ workspaceSlug: conv.workspaceSlug, projectId: conv.pr
   const startedAt = new Date().toISOString();
   try {
     requirePolicy('ai_call', { slug: INTERNAL_WORKSPACE.slug, agentId: a.id, authorized: true }); // enviar el mensaje es la autorización (límite mensual ya comprobado)
-    const req = { model: a.config.model, system, user: prompt, maxTokens: 3000, effort: a.config.effort, supportsEffort: !!models.find(m => m.id === a.config.model)?.supportsEffort, images };
+    const req = { model: chatModel, system, user: prompt, maxTokens: 3000, effort: a.config.effort, supportsEffort: !!models.find(m => m.id === chatModel)?.supportsEffort, images };
     // Backend del Asistente: con Claude Code, la suscripción (sin cargo a la API); si no está disponible, se dice y NO se usa la API.
     // Con un proyecto fijado (y autorizado para Claude Code), el Asistente lee su repositorio con el puente de SOLO lectura
     // (las mismas rutas protegidas que los agentes: nunca .env, data/, credenciales): investiga antes de proponer. Carril
@@ -497,7 +515,7 @@ ${await platformSnapshot({ workspaceSlug: conv.workspaceSlug, projectId: conv.pr
     const res = caller
       ? await caller.complete({ ...req, system: req.system + readsWhat, images: images.length ? images : undefined, user: prompt })
       : await getAdapter(providerId)!.complete(decryptSecret(cred!.ciphertext), { workspaceId: prow.workspace_id }, req);
-    const cost = caller ? 0 : costUsd(providerId, a.config.model, res.inputTokens, res.outputTokens);
+    const cost = caller ? 0 : costUsd(providerId, chatModel, res.inputTokens, res.outputTokens);
     processesRepo(INTERNAL_WORKSPACE.slug).logExecution({ projectId: '', agentId: a.id, kind: 'assistant_chat', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
     const { reply, actions: actionsReq } = parseResponse(res.text);
     const done = performActions(actionsReq.filter(x => x?.type !== 'request_operation'), { conversationId: conv.id, workspaceSlug: conv.workspaceSlug, projectId: conv.projectId });
@@ -509,7 +527,7 @@ ${await platformSnapshot({ workspaceSlug: conv.workspaceSlug, projectId: conv.pr
     const deferred = en ? opsReq.filter(x => x?.capability === 'publish_main') : [];
     const later: AssistantAction[] = deferred.map(() => ({ type: 'info', status: 'done', label: 'Publicar main: pendiente hasta que el encargo esté integrado', detail: `No se preparó la tarjeta: publicaría el «main» actual, sin «${en!.label}». Cuando ese encargo esté integrado en main (y activo, si es el Portal), pide «publica main» y se preparará con ese main; no se propone sola.` }));
     const actions = [...done, ...later, ...(await prepareOperations(opsReq.filter(x => !deferred.includes(x)), { conversationId: conv.id, workspaceSlug: scoped.workspaceSlug, projectId: scoped.projectId }))];
-    const assistant = assistantRepo.add({ role: 'assistant', content: withReviewFacts(truthfulReply(reply, actions), actions), actions, attachments: [], tokensIn: res.inputTokens, tokensOut: res.outputTokens, costUsd: cost, model: a.config.model }, conv.id);
+    const assistant = assistantRepo.add({ role: 'assistant', content: withReviewFacts(truthfulReply(reply, actions), actions), actions, attachments: [], tokensIn: res.inputTokens, tokensOut: res.outputTokens, costUsd: cost, model: chatModel }, conv.id);
     linkPlans(assistant, conv.id);
     conversationsRepo.touch(conv.id); recomputeStage(conv.id);
     return { user, assistant, conversationId: conv.id };
@@ -517,7 +535,7 @@ ${await platformSnapshot({ workspaceSlug: conv.workspaceSlug, projectId: conv.pr
     processesRepo(INTERNAL_WORKSPACE.slug).logExecution({ projectId: '', agentId: a.id, kind: 'assistant_chat', status: 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });
     const msg = e instanceof ProviderRequestError ? e.error.message : (e as Error).message;
     // Un fallo del proveedor no congela la conversación: queda el error y se puede seguir escribiendo.
-    const assistant = assistantRepo.add({ role: 'assistant', content: `No pude responder: ${msg}`, actions: [], attachments: [], tokensIn: 0, tokensOut: 0, costUsd: 0, model: a.config.model }, conv.id);
+    const assistant = assistantRepo.add({ role: 'assistant', content: `No pude responder: ${msg}`, actions: [], attachments: [], tokensIn: 0, tokensOut: 0, costUsd: 0, model: chatModel }, conv.id);
     return { user, assistant, conversationId: conv.id };
   }
 }
