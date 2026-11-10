@@ -107,6 +107,37 @@ test('HU-188 · bandeja, campana, aprobar/denegar sin IA, 409, 404 y aviso en vi
   assert.equal(foreign.status, 404);
   assert.equal(decisionsRepo.get(dOther.id)!.status, 'open');
 
+  // h) sin recomendación ni opciones: aprobar devuelve 400 y la propuesta sigue abierta
+  const [dD, dE] = proposeDecisions(conv.id, null, [
+    { question: '¿Propuesta sin opciones ni recomendación?', options: [], recommendation: null, risks: [] },
+    { question: '¿Propuesta vista con una versión antigua?', options: opts, recommendation: 'Sí, adelante', risks: [] }
+  ]);
+  assert.ok(dD && dE, 'se crean las propuestas de los casos h) e i)');
+  const noAnswer = await inject('POST', decideUrl(dD.id), { verdict: 'approve' });
+  assert.equal(noAnswer.status, 400, JSON.stringify(noAnswer.body));
+  assert.equal(decisionsRepo.get(dD.id)!.status, 'open', 'sin respuesta posible no se aprueba');
+  assert.equal(decisionsRepo.get(dD.id)!.answer, null);
+
+  // i) versión vista desactualizada: 409, no se hace nada y sigue abierta
+  const seenItem = ((await inject('GET', `${W}/inbox`)).body as any[]).find(d => d.processId === dE.id);
+  assert.ok(seenItem, 'la propuesta aparece en la bandeja');
+  const seenOld = seenItem.processVersion as string;
+  assert.equal(seenOld, dE.updatedAt);
+  decisionsRepo.update(dE.id, x => { x.context = 'El Asistente añadió contexto después de que la vieras'; });
+  assert.notEqual(decisionsRepo.get(dE.id)!.updatedAt, seenOld, 'la propuesta cambió');
+  const stale = await inject('POST', decideUrl(dE.id), { verdict: 'approve', seenVersion: seenOld });
+  assert.equal(stale.status, 409, JSON.stringify(stale.body));
+  assert.equal(decisionsRepo.get(dE.id)!.status, 'open', 'con una versión antigua no se decide');
+  assert.equal(decisionsRepo.get(dE.id)!.answer, null);
+
+  // Con la versión vigente sí se decide; la de h) se deniega (sigue permitido sin respuesta).
+  const fresh = await inject('POST', decideUrl(dE.id), { verdict: 'approve', seenVersion: decisionsRepo.get(dE.id)!.updatedAt });
+  assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
+  assert.equal(decisionsRepo.get(dE.id)!.status, 'approved');
+  const denyD = await inject('POST', decideUrl(dD.id), { verdict: 'deny' });
+  assert.equal(denyD.status, 200, JSON.stringify(denyD.body));
+  assert.equal(decisionsRepo.get(dD.id)!.status, 'rejected');
+
   // La bandeja y la campana vuelven al punto de partida.
   assert.ok(!((await inject('GET', `${W}/inbox`)).body as any[]).some(d => d.kind === 'assistant_decision'));
   assert.equal((await inject('GET', `${W}/inbox/summary`)).body.total, total0);
