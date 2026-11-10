@@ -391,7 +391,10 @@ export async function processRoutes(app: FastifyInstance) {
     // Pasos escritos a mano por el propietario (o editados): reemplazan la lista y reinician las marcas.
     const steps = body.data.steps ?? cur?.steps; if (!steps) return reply.code(404).send({ error: 'Este proceso no tiene prueba manual; genera una o añade los pasos.' });
     const checks = steps.map((_, i) => body.data.steps ? false : !!(body.data.checks ?? cur?.checks ?? [])[i]);
-    procs.setResult(id, { ...proc.result, manualTest: { steps, checks, note: body.data.note === undefined ? (cur?.note ?? null) : body.data.note } });
+    // HU-190 · Cambiar marcas o la nota conserva la revisión de QA; reescribir los pasos la borra (null). Las listas que
+    // nunca la tuvieron (proyectos externos, datos antiguos) siguen sin el campo.
+    const reviewedBy = body.data.steps ? (cur?.reviewedBy !== undefined ? null : undefined) : cur?.reviewedBy;
+    procs.setResult(id, { ...proc.result, manualTest: { steps, checks, note: body.data.note === undefined ? (cur?.note ?? null) : body.data.note, ...(reviewedBy !== undefined ? { reviewedBy } : {}) } });
     return await withGuidance(slug, procs.get(id)!);
   });
   app.get('/api/workspaces/:slug/processes/:id/manual-test/estimate', async (req, reply) => {

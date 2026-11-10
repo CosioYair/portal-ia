@@ -39,8 +39,10 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
   };
   useEffect(() => { void loadAsg(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, proc.assignmentId, proc.status, r.merged?.commit]);
-  useEffect(() => { if (!r.manualTest && proc.status === 'done') api.manualTestEstimate(slug, proc.id).then(setGenEst).catch(() => setGenEst(null)); }, [r.manualTest, proc.id, proc.status, slug]);
-  const generate = async () => { setBusy(true); setErr(null); try { const p = await api.manualTestGenerate(slug, proc.id); onChange(p); flash('Lista de prueba generada'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); setGenAuth(false); } };
+  // HU-190 · Solo en el Portal: una lista que QA aún no revisó (la del Desarrollador o escrita a mano) puede revisarse con QA.
+  const needsQaReview = isPortal && !!r.manualTest && r.manualTest.reviewedBy !== 'qa' && proc.status === 'done';
+  useEffect(() => { if ((!r.manualTest || needsQaReview) && proc.status === 'done') api.manualTestEstimate(slug, proc.id).then(setGenEst).catch(() => setGenEst(null)); }, [r.manualTest, needsQaReview, proc.id, proc.status, slug]);
+  const generate = async () => { const reviewing = !!r.manualTest; setBusy(true); setErr(null); try { const p = await api.manualTestGenerate(slug, proc.id); onChange(p); flash(reviewing ? 'Lista revisada por QA' : 'Lista de prueba generada'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); setGenAuth(false); } };
   const saveSteps = async () => { const steps = manualText.split(/\r?\n/).map(l => l.replace(/^\s*\d+[.)]\s*/, '').trim()).filter(l => l.length > 3); if (!steps.length) return; setBusy(true); setErr(null); try { const p = await api.manualTestSteps(slug, proc.id, steps); onChange(p); setWriting(false); setManualText(''); flash('Pasos de prueba guardados'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
 
   const mt = r.manualTest;
@@ -113,7 +115,15 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
         </div>
       </div>}
       {mt && <div id="sec-test">
-        <div className="eyebrow" style={{ marginBottom: 6 }}>Qué probar, paso a paso · {tested} de {mt.steps.length}</div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6, flexWrap: 'wrap' }}>
+          <div className="eyebrow">Qué probar, paso a paso · {tested} de {mt.steps.length}</div>
+          {isPortal && mt.reviewedBy === 'qa' && <Chip tone="ok" xs>Lista revisada por QA</Chip>}
+        </div>
+        {needsQaReview && <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 10 }}>
+          <Notice kind="info"><div>QA aún no ha revisado estos pasos. Puede revisarlos para que se sigan desde la interfaz del Portal, sin archivos ni terminal (una llamada corta{genEst ? `, ≈ ${genEst.estimatedUsd.toFixed(3)} USD, ${genEst.agentName}` : ''}). Si QA cambia los pasos, las marcas empiezan de cero.</div></Notice>
+          <label className="ck"><input className="cb" type="checkbox" checked={genAuth} onChange={e => setGenAuth(e.target.checked)} /><span>Autorizo una llamada a {genEst?.agentName ?? 'QA'} para revisar los pasos del Desarrollador{genEst ? ` (≈ ${genEst.estimatedUsd.toFixed(3)} USD)` : ''}.</span></label>
+          <div><button className="btn btn-primary btn-sm" onClick={generate} disabled={!genAuth || busy}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}Revisar la lista con QA</button></div>
+        </div>}
         {!testEnabled ? <details><summary className="small muted" style={{ cursor: 'pointer' }}>Se habilita cuando los cambios estén integrados{portalFlow ? ', activados y comprobados en ejecución' : ''}. Ver los {mt.steps.length} pasos</summary>
           <ol className="sm13" style={{ margin: '8px 0 0', paddingLeft: 22, display: 'flex', flexDirection: 'column', gap: 4 }}>{mt.steps.map((t, i) => <li key={i}>{t}</li>)}</ol></details> : <>
         <div>

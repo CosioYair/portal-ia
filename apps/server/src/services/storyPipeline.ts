@@ -21,7 +21,8 @@ import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, q
 const QA_SCHEMA = { name: 'veredicto_qa', description: 'Veredicto de la puerta de calidad con hallazgos y evidencia.', schema: QA_VERDICT_SCHEMA as unknown as Record<string, unknown> };
 import { annotateChanges, applyChanges, changesSinceBase, checkStaleChanges, commitInWorktree, git, readRepoFile, safeRelPath, scanSecrets, type RawChange } from './repoWrite.ts';
 import { DEPS_MISSING_EXIT } from './sandbox.ts';
-import { DEV_MAX_TOKENS, FILE_FORMAT, PATCH_ONLY_FORMAT, sys } from './storyPrompts.ts';
+import { DEV_MAX_TOKENS, FILE_FORMAT, manualTestFormatFor, PATCH_ONLY_FORMAT, sys } from './storyPrompts.ts';
+import { isPortalRuntime } from './storyExecution.ts';
 import { runVerification, sandboxDeps } from './verification.ts';
 import { driftMessage, worktreeDrift } from './worktreeDrift.ts';
 import { agentBackend, claudeCodeComplete, claudeCodeGate, codexStoryRefusal, RECOVERED_NOTE, usesClaudeCode } from './claudeCode/backend.ts';
@@ -444,7 +445,7 @@ ${extraFiles ? `# Contenido ACTUAL de los archivos implicados\n${extraFiles}\n` 
 ${clip(previous, 30_000)}
 
 FORMATO DE RESPUESTA (texto plano; cada archivo con su bloque y su cierre):
-${partial ? PATCH_ONLY_FORMAT : FILE_FORMAT}`;
+${partial ? PATCH_ONLY_FORMAT : `${FILE_FORMAT}${manualTestFormatFor(isPortalRuntime(ctx.repoPath))}`}`;
 }
 
 /** Preguntas que solo puede responder el propietario (sus datos, credenciales, presupuesto o decisiones de negocio). */
@@ -519,7 +520,7 @@ ${clip(previous, 12_000)}
 Ahora entrega la implementación completa en el formato acordado. Si aún falta algo imprescindible, responde con la sección BLOQUEO indicando exactamente qué y por qué (no repitas la misma petición si ya se te dio).
 
 FORMATO DE RESPUESTA (texto plano; cada archivo con su bloque y su cierre):
-${FILE_FORMAT}`;
+${FILE_FORMAT}${manualTestFormatFor(isPortalRuntime(ctx.repoPath))}`;
 }
 
 /**

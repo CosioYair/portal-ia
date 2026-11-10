@@ -14,7 +14,7 @@ import { requirePolicy } from './executionPolicy.ts';
 import { currentPhase, phaseContext } from './operationalPhase.ts';
 import { buildRepoContext } from './repoContext.ts';
 import { annotateChanges, fileChangedSince, readRepoFile, type RawChange } from './repoWrite.ts';
-import { DEV_MAX_TOKENS, FILE_FORMAT, sys } from './storyPrompts.ts';
+import { buildManualTestQaPrompt, DEV_MAX_TOKENS, FILE_FORMAT, manualTestFormatFor, PORTAL_MANUAL_TEST_RULES, sys } from './storyPrompts.ts';
 import { assessDeveloperOutput, failureClassOf, mergeChanges, type ParsedDevOutput } from './devOutput.ts';
 import { callAgentStep, CONSULT_EVIDENCE_CHARS, filesContext, implementerOutputs, isTruncatedStop, newPipeline, pausePipeline, PipelinePause, planFiles, providerPause, runPipelineStages, settleImplementation, StoryFailure, updateResult, worstCaseCallUsd, type StoryRunCtx } from './storyPipeline.ts';
 export { parseFileBlocks, parseRuntimeChecks } from './devOutput.ts';
@@ -122,6 +122,15 @@ export function parseReview(text: string, stopReason: string | null): ReviewVerd
  * desde la que corre este Portal. Si apunta a otra carpeta, los agentes construirían un proyecto paralelo que nunca
  * llegaría a este Portal: se detiene aquí, con la corrección a un clic en el Resumen del proyecto. (PORTAL_ALLOW_FOREIGN_REPO=1 lo permite.)
  */
+/**
+ * HU-190 · El repositorio es la carpeta desde la que corre este Portal (mismo criterio que repoStatus.ts y preflightRepo:
+ * ruta resuelta, con «~» expandido y sin distinguir mayúsculas).
+ */
+export function isPortalRuntime(repoPath: string | null | undefined): boolean {
+  if (!repoPath) return false;
+  return path.resolve(expandHome(repoPath)).toLowerCase() === path.resolve(REPO_ROOT).toLowerCase();
+}
+
 export function preflightRepo(slug: string, repoPath: string) {
   if (slug !== INTERNAL_WORKSPACE.slug || process.env.PORTAL_ALLOW_FOREIGN_REPO === '1') return;
   const a = path.resolve(expandHome(repoPath)).toLowerCase(); const b = path.resolve(REPO_ROOT).toLowerCase();
@@ -383,7 +392,7 @@ ${filesCtx}
 Para archivos nuevos entrega el contenido íntegro (create). Para archivos existentes usa patch con bloques BUSCAR/REEMPLAZAR exactos (copia el fragmento tal cual está en el archivo); usa modify solo si reescribes casi todo un archivo pequeño. Nada de fragmentos con "...": lo que entregues es lo que se escribirá. Respeta las convenciones. Mantén el alcance mínimo que cumpla el criterio de aceptación.
 
 FORMATO DE RESPUESTA (texto plano, sin JSON ni bloques de código alrededor de los archivos):
-${FILE_FORMAT}`;
+${FILE_FORMAT}${manualTestFormatFor(isPortalRuntime(repo.path))}`;
     let implRes = await call(implStep.id, sys(dev, project, item), implPrompt, DEV_MAX_TOKENS);
     let implText = implRes.text;
     // Si la respuesta se cortó por longitud, pedimos continuar (hasta 2 veces) exactamente donde quedó.
@@ -602,7 +611,11 @@ export function estimateManualTest(slug: string, processId: string): { agentId: 
   const agent = agents.find(a => a.key === 'pj-qa') ?? agents.find(a => a.key === 'pj-coordinador');
   if (!agent) throw Object.assign(new Error('No hay agente de QA ni Coordinador en el proyecto.'), { statusCode: 409 });
   const p = estimatePricing(agent.config.provider, agent.config.model);
-  const inTok = estimateTokens(JSON.stringify(proc.result.plan ?? '') + (proc.result.implementationSummary ?? '') + proc.result.changes.map(c => c.path + (c.diff ?? '').slice(0, 2000)).join('')) + 800;
+  const repo = projectsRepo(slug).repository(proc.projectId);
+  const portal = !!repo && isPortalRuntime(repo.path);
+  const devSteps = portal ? (proc.result.manualTest?.steps ?? []) : [];
+  const portalExtra = portal ? estimateTokens(devSteps.join('\n') + PORTAL_MANUAL_TEST_RULES) + 150 : 0;
+  const inTok = estimateTokens(JSON.stringify(proc.result.plan ?? '') + (proc.result.implementationSummary ?? '') + proc.result.changes.map(c => c.path + (c.diff ?? '').slice(0, 2000)).join('')) + 800 + portalExtra;
   return { agentId: agent.id, agentName: agent.config.name, model: agent.config.model, estimatedUsd: (inTok * p.inPerM + 1500 * p.outPerM) / 1_000_000 };
 }
 
@@ -622,6 +635,12 @@ export async function generateManualTest(slug: string, processId: string, log: (
   if (!cc && (!cred || prow.status !== 'connected')) throw Object.assign(new Error(`El proveedor ${providerId} no está conectado.`), { statusCode: 409 });
   const models: ModelInfo[] = JSON.parse(prow.models_json);
   const r = proc.result!;
+  // HU-190 · Proyecto del Portal: QA recibe los pasos del Desarrollador y entrega la lista final. Externos: igual que siempre.
+  const repo = projectsRepo(slug).repository(proc.projectId);
+  const portal = !!repo && isPortalRuntime(repo.path);
+  const devSteps = portal ? (r.manualTest?.steps ?? []) : [];
+  // HU-190 · En el Portal, una lista ya revisada por QA no se vuelve a revisar (evita un gasto repetido por llamada directa o doble clic).
+  if (portal && r.manualTest?.reviewedBy === 'qa') throw Object.assign(new Error('La lista de prueba manual ya está revisada por QA; no se vuelve a revisar.'), { statusCode: 409, code: 'manual_test_already_reviewed' });
   const system = `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} del proyecto «${project.name}» en Portal IA. Escribes para el propietario, que no es técnico.`;
   const user = `Historia: ${item ? `${item.storyId} · ${item.title}` : proc.title}
 Criterio de aceptación: ${item?.criterion || '(no definido)'}
@@ -634,14 +653,16 @@ ${r.changes.slice(0, 8).map(c => `## ${c.path}\n${(c.diff ?? '').slice(0, 1500)}
 Responde SOLO con JSON: {"userFacing": string (3-8 líneas en lenguaje llano: qué cambia para quien usa el Portal y DÓNDE lo verá: menú, botón, pantalla o ruta exacta; si no hay nada visible, dilo), "steps": string[] (3-10 pasos numerados de prueba manual en el Portal, cada uno "acción. Esperado: resultado"; empieza por dónde entrar)}`;
   const startedAt = new Date().toISOString();
   requirePolicy('ai_call', { slug, agentId: agent.id, projectId: proc.projectId, authorized: true });
-  const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user, maxTokens: 2000, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
+  const qaUser = buildManualTestQaPrompt({ portal, base: user, devSteps }); const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user: qaUser, maxTokens: 2000, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
   const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
   procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
   procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'manual_test_gen', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
   const j = extractJson(res.text);
   const steps: string[] = Array.isArray(j?.steps) ? j.steps.map((s: any) => String(s).replace(/^\s*\d+[.)]\s*/, '').trim()).filter((s: string) => s.length > 3).slice(0, 12) : [];
   if (!steps.length) throw Object.assign(new Error('QA no devolvió pasos de prueba legibles; inténtalo de nuevo o añádelos a mano.'), { statusCode: 502 });
-  procs.setResult(processId, { ...r, userFacing: r.userFacing || (typeof j?.userFacing === 'string' ? j.userFacing : null), manualTest: { steps, checks: steps.map(() => false), note: null } });
+  procs.setResult(processId, { ...r, userFacing: r.userFacing || (typeof j?.userFacing === 'string' ? j.userFacing : null), manualTest: portal
+    ? { steps, checks: steps.map(() => false), note: null, reviewedBy: 'qa' as const }
+    : { steps, checks: steps.map(() => false), note: null } });
   log({ processId, steps: steps.length, cost: cost.toFixed(4) }, 'lista de prueba manual generada');
   return procs.get(processId)!;
 }

@@ -1206,7 +1206,11 @@ export interface ExecutionResult {
   /** Explicación para el propietario, sin tecnicismos: qué verá tras integrar y reconstruir, y dónde (menú, botón, ruta). */
   userFacing?: string | null;
   /** Prueba manual paso a paso que el propietario sigue y marca; la historia no se cierra hasta que todos los pasos estén probados. */
-  manualTest?: { steps: string[]; checks: boolean[]; note: string | null } | null;
+  manualTest?: {
+    steps: string[]; checks: boolean[]; note: string | null;
+    /** HU-190 · Solo en proyectos del Portal: 'qa' si QA revisó y entregó esta lista. Se conserva al marcar pasos o escribir la nota y se borra si se reescriben los pasos. */
+    reviewedBy?: 'qa' | null;
+  } | null;
   /** Comprobaciones en ejecución definidas por el equipo (http/ui) y sus resultados tras activar (M2). */
   runtimeChecks?: { checks: RuntimeCheck[]; results: RuntimeCheckResult[]; ranAt: string | null } | null;
   /** Estado de activación calculado al leer (no se persiste): ¿el Portal en marcha contiene el merge y la web fue reconstruida después? */

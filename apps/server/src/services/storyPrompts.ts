@@ -59,6 +59,44 @@ pregunta: (la pregunta concreta que lo resolvería)
 consultar: (agente o papel del equipo que podría saberlo, o «ninguno»)
 El equipo te dará ese contexto (o se lo preguntará al especialista o al propietario) y volverás a intentarlo. Los datos reales del propietario (carpeta data/, credenciales, .env) NO son accesibles para ningún agente.`;
 
+/**
+ * HU-190 · Reglas de la prueba manual en proyectos del Portal (el repositorio es la carpeta desde la que corre el Portal).
+ * El propietario prueba en la interfaz del Portal, nunca en archivos ni en la terminal. Las rutas de la interfaz
+ * (p. ej. «/backlog») se permiten; las de archivos, no. No cambia los bloques "=== ARCHIVO:" del formato de entrega.
+ */
+export const PORTAL_MANUAL_TEST_RULES = `REGLAS DE LA PRUEBA MANUAL (proyecto del Portal):
+- En las secciones "PRUEBA MANUAL" y "PARA EL PROPIETARIO", ningún paso puede mencionar rutas ni nombres de archivo, extensiones (.ts, .tsx, .json…), carpetas, la terminal o la consola, un editor de código ni órdenes como npm, git o node.
+- Sí puedes nombrar menús, botones, pestañas, pantallas de la interfaz y sus direcciones dentro del Portal (p. ej. «Backlog» o «/backlog»). La palabra «ruta» se refiere solo a esas pantallas, nunca a archivos.
+- Cada paso tiene esta forma: «acción en la interfaz del Portal. Esperado: resultado visible en pantalla».
+- Si algo solo puede comprobarse por dentro, dilo en lenguaje llano ("sin cambios visibles; afecta a X por dentro") y no pidas abrir archivos.
+- Estas reglas afectan solo a esas dos secciones: los bloques "=== ARCHIVO:" se escriben como siempre.`;
+
+/** Reglas que se añaden al formato del Desarrollador: '' en proyectos externos (su prompt no cambia). */
+export function manualTestFormatFor(portal: boolean): string {
+  return portal ? `\n${PORTAL_MANUAL_TEST_RULES}` : '';
+}
+
+/**
+ * Prompt de QA para la lista de prueba manual. `base` es el prompt de siempre: en proyectos externos se devuelve tal
+ * cual. En proyectos del Portal se añaden los pasos que propuso el Desarrollador (si hay), la orden de revisarlos y
+ * reescribirlos, y las reglas. QA devuelve la lista final en "steps".
+ */
+export function buildManualTestQaPrompt(input: { portal: boolean; base: string; devSteps?: string[] | null }): string {
+  if (!input.portal) return input.base;
+  const dev = (input.devSteps ?? []).map(s => s.trim()).filter(Boolean);
+  const review = dev.length
+    ? `Pasos de prueba manual propuestos por el Desarrollador (sin revisar):
+${dev.map((s, i) => `${i + 1}. ${s}`).join('\n')}
+
+Revisa estos pasos como QA: corrige los que no se puedan seguir en la interfaz del Portal, reescribe los que mencionen archivos, rutas de archivo, la terminal o un editor, añade lo que falte para comprobar el criterio de aceptación y quita lo que sobre. En "steps" devuelve la lista FINAL ya revisada, no la del Desarrollador.`
+    : 'El Desarrollador no propuso pasos de prueba manual: escribe tú la lista final en "steps".';
+  return `${input.base}
+
+${review}
+
+${PORTAL_MANUAL_TEST_RULES}`;
+}
+
 /** Descartar un entregable del plan con motivo (el alcance y los criterios no los cambia el agente: QA lo confirma). */
 export const DROP_FORMAT = `=== DESCARTE: ruta/del/plan ===
 (solo si ese archivo del plan NO hace falta: motivo verificable y qué lo sustituye; no cambia los criterios de aceptación)`;

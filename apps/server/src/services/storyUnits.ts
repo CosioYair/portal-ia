@@ -14,7 +14,8 @@ import { applyChanges, changesSinceBase, commitInWorktree, hashText, mainBranch,
 import { diagnoseFailure, diagnosisPrompt, failingTests, staleCorrectionUnits } from './failureDiagnosis.ts';
 import { isPreexisting, SENSITIVE_TEST, triageText, weakensTest } from './testTriage.ts';
 import { verificationEvidence, zeroTests } from './qaGate.ts';
-import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
+import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, manualTestFormatFor, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
+import { isPortalRuntime } from './storyExecution.ts';
 import { agentHeadroom, apiFallbackFor, attemptsSummary, checkCancelled, checkDuration, emit, isTruncatedStop, pickConsultant, PipelinePause, pipelineOf, settleUnit, sinceApplied, retryForeignFailure, stepCall, storyRunContext, updatePipeline, updateResult, verifyStage, type DevOutput, type Settled, type StoryRunCtx } from './storyPipeline.ts';
 import { usesClaudeCode } from './claudeCode/backend.ts';
 import { monotonicNow } from '../clock.ts';
@@ -244,7 +245,7 @@ Tamaño: esta unidad debería ocupar ≈ ${unit.estimatedOutputTokens} tokens de
 Si un archivo planificado NO hace falta (existe una alternativa equivalente), no lo inventes: decláralo con DESCARTE y un motivo verificable; el alcance y los criterios de aceptación no los cambias tú (QA lo revisa).
 
 FORMATO DE RESPUESTA (texto plano, sin JSON ni bloques de código alrededor de los archivos):
-${last ? `${FILE_FORMAT}\n${DROP_FORMAT}` : UNIT_FORMAT}`;
+${last ? `${FILE_FORMAT}${manualTestFormatFor(isPortalRuntime(ctx.repoPath))}\n${DROP_FORMAT}` : UNIT_FORMAT}`;
 }
 
 /**
