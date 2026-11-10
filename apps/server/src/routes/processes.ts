@@ -636,6 +636,22 @@ Proceso: ${proc.id}`, { processId: proc.id });
   });
   // Cierre de historia: solo cuando sus cambios están integrados en la rama principal (regla de cierre), salvo cierre
   // explícito «resuelta fuera del flujo» (force) que el propietario asume.
+  // HU-187 · Antes de «cerrar como resuelta»: qué comprobaciones se omitirían. Solo lectura, sin IA y sin requirePolicy.
+  // No cambia el estado de la historia ni añade mensajes al hilo. Usa el mismo «last» y la misma función que POST /done.
+  app.get('/api/workspaces/:slug/backlog/:id/close-preview', async (req, reply) => {
+    const params = z.object({ slug: z.string().min(1).max(120), id: z.string().min(1).max(120) }).safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: 'Parámetros no válidos.' });
+    const { slug, id } = params.data; if (!guard(slug, reply)) return;
+    const item = backlogRepo(slug).get(id);
+    if (!item) return reply.code(404).send({ error: 'Historia no encontrada' });
+    const procs = processesRepo(slug);
+    const last = (item.lastProcessId ? procs.get(item.lastProcessId) : undefined) ?? procs.list(item.projectId).find(p => p.backlogItemId === item.id && p.kind === 'story_execution');
+    try {
+      const omittedChecks = await omittedClosingChecks(slug, last);
+      return { omittedChecks, lastProcessId: last?.id ?? null, merged: !!last?.result?.merged };
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+
   app.post('/api/workspaces/:slug/backlog/:id/done', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ force: z.boolean().optional(), reason: z.string().max(300).optional() }).safeParse(req.body ?? {});
