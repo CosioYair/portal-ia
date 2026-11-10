@@ -22,6 +22,27 @@ export interface ManualTestStepView {
   checked: boolean;
   /** Paso realizado: OK cuenta; un resultado Falla/Observación explícito prevalece sobre la casilla antigua. */
   done: boolean;
+  /** El paso obliga a salir del Portal (rutas de código, abrir archivos, terminal o editor). Solo informativo. */
+  outsidePortal: boolean;
+}
+
+/**
+ * Patrones (sin IA) de pasos que obligan a salir del Portal. Se aplican sobre el texto en minúsculas y sin acentos.
+ * Sin bandera «g»: no guardan estado entre llamadas (lastIndex).
+ */
+export const OUTSIDE_PORTAL_PATTERNS: readonly RegExp[] = [
+  /[\w./-]+\.tsx?\b/,                       // rutas de archivos .ts / .tsx
+  /(?:^|[^\w/.-])apps\//,                   // apps/… (no «webapps/»)
+  /(?:^|[^\w/.-])docs\//,                   // docs/… (no «mydocs/»)
+  /\babr(?:e|ir|a|es|o)\s+el\s+archivo\b/,  // «abre el archivo», «abrir el archivo»…
+  /\bterminal\b/,                           // no «terminales»
+  /\beditor\b/                              // no «editorial»
+];
+
+/** true si el paso de la prueba manual obliga a salir del Portal (detector determinista, sin IO). */
+export function isOutsidePortalStep(text: string): boolean {
+  const norm = String(text ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  return OUTSIDE_PORTAL_PATTERNS.some(re => re.test(norm));
 }
 
 /** Une pasos, feedback (por clave de paso) y casillas antiguas: un ítem por paso, en orden. */
@@ -39,7 +60,8 @@ export function buildManualTestSteps(
     const checked = checks[index] === true;
     return {
       index, stepKey, text, result, comment: f?.comment ?? '', checked,
-      done: result === 'ok' || (result === null && checked)
+      done: result === 'ok' || (result === null && checked),
+      outsidePortal: isOutsidePortalStep(text)
     };
   });
 }

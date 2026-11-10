@@ -1,4 +1,5 @@
 import type { AgentBlocker, AgentFailureKind, DevOutputAssessment, DevOutputKind, RuntimeCheck } from '@portal-ia/domain';
+import { isOutsidePortalStep } from '@portal-ia/domain';
 import type { RawChange } from './repoWrite.ts';
 
 /**
@@ -26,6 +27,13 @@ export interface ParsedDevOutput {
   noChanges: string | null;
   /** Problemas de forma encontrados (bloque sin cierre, parche vacío, fragmento para un archivo existente…). */
   problems: string[];
+  /** Los mismos pasos que `manualSteps` (mismo orden y texto) marcados si obligan a salir del Portal (HU-191, sin IA). */
+  manualStepsMarked?: { text: string; outsidePortal: boolean }[];
+}
+
+/** Marca cada paso de PRUEBA MANUAL con `outsidePortal` (rutas .ts/.tsx, apps/, docs/, «abre el archivo», terminal, editor). */
+export function markOutsidePortalSteps(steps: readonly string[]): { text: string; outsidePortal: boolean }[] {
+  return steps.map(text => ({ text, outsidePortal: isOutsidePortalStep(text) }));
 }
 
 const OPS: Record<string, RawChange['action']> = {
@@ -199,9 +207,11 @@ function sections(text: string) {
   const section = (name: string) => t.match(new RegExp(`^[ \\t>*#_\`]*={3,}\\s*${name}\\s*={3,}[ \\t*_\`]*\\n([\\s\\S]*?)(?=^[ \\t>*#_\`]*={2,}\\s*(?:ARCHIVO|FILE|FICHERO|${SECTION_NAMES})|(?![\\s\\S]))`, 'mi'))?.[1]?.trim() ?? '';
   const verify = (t.match(/^[ \t>*#_`]*={3,}\s*VERIFICAR:\s*(.*?)\s*={3,}/mi)?.[1] ?? '').split(/[\s,]+/).map(v => v.trim().toLowerCase()).filter(Boolean);
   const manualSteps = section('PRUEBA MANUAL').split('\n').map(l => l.replace(/^\s*(?:\d+[.)]|[-*•])\s*/, '').trim()).filter(l => l.length > 3).slice(0, 12);
+  // HU-191: se deriva de la lista ya filtrada y recortada para que los índices coincidan con manualSteps y sus claves.
+  const manualStepsMarked = markOutsidePortalSteps(manualSteps);
   const noChangesRaw = /^[ \t>*#_`]*={3,}\s*SIN CAMBIOS\s*={3,}/mi.test(t) ? section('SIN CAMBIOS') : null;
   const drops = Array.from(t.matchAll(/^[ \t>*#_`]*={3,}\s*DESCARTE:\s*(.+?)\s*={3,}[ \t*_`]*\n([\s\S]*?)(?=^[ \t>*#_`]*={2,}\s*(?:ARCHIVO|FILE|FICHERO|RESUMEN|NOTAS|PARA EL PROPIETARIO|PRUEBA MANUAL|COMPROBACIONES|SIN CAMBIOS|BLOQUEO|VERIFICAR:|DESCARTE:)|(?![\s\S]))/gmi)).map(m => ({ path: cleanPath(m[1]), reason: m[2].trim().slice(0, 600) || 'sin motivo' })).filter(d => d.path);
-  return { summary: section('RESUMEN'), notes: section('NOTAS'), userFacing: section('PARA EL PROPIETARIO'), manualSteps, runtimeChecks: parseRuntimeChecks(section('COMPROBACIONES')), verify, noChanges: noChangesRaw === null ? null : (noChangesRaw || 'sin justificación'), drops };
+  return { summary: section('RESUMEN'), notes: section('NOTAS'), userFacing: section('PARA EL PROPIETARIO'), manualSteps, manualStepsMarked, runtimeChecks: parseRuntimeChecks(section('COMPROBACIONES')), verify, noChanges: noChangesRaw === null ? null : (noChangesRaw || 'sin justificación'), drops };
 }
 
 /** Lector canónico (compatibilidad): bloques estrictos con cierre; equivalente al de antes pero sin fusionar archivos cuando falta un cierre. */

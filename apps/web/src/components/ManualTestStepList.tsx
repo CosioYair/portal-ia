@@ -113,6 +113,11 @@ export function ManualTestStepList({ steps, checks, initialFeedback, onSave, onC
               <div className="mts-row">
                 <span className="mts-num">{n}.</span>
                 <p className="mts-text">{item.text}</p>
+                {item.outsidePortal && (
+                  <span className="mts-outside" title="Este paso requiere abrir archivos, una terminal o un editor fuera del Portal">
+                    fuera del Portal
+                  </span>
+                )}
                 <div className="mts-actions" role="group" aria-label={`Resultado del paso ${n}`}>
                   {OPTIONS.map(o => (
                     <button key={o.value} type="button" className={`btn btn-sm btn-secondary mts-opt mts-opt-${o.value}`} aria-pressed={item.result === o.value} onClick={() => pick(item.stepKey, o.value)}>

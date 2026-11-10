@@ -18,6 +18,23 @@
 .mts-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 12px; min-width: 0; }
 .mts-num { flex: none; font-weight: 600; color: var(--color-text-med); }
 .mts-text { flex: 1 1 260px; min-width: 0; margin: 0; white-space: normal; overflow-wrap: anywhere; word-break: break-word; text-overflow: clip; overflow: visible; }
+/* HU-191 · Etiqueta informativa «fuera del Portal»: neutra, para no confundirse con el resultado OK/Falla/Observación */
+.mts-outside {
+  flex: none;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-muted);
+  color: var(--color-text-med);
+  font-size: var(--fs-small);
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: help;
+}
 .mts-actions { flex: 0 1 auto; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
 .mts-opt[aria-pressed="true"] { color: var(--color-on-dark); border-color: transparent; }
 .mts-opt-ok[aria-pressed="true"] { background: var(--color-ok-text); }
