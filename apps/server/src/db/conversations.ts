@@ -51,20 +51,31 @@ export const conversationsRepo = {
   touch(id: string) { platform.prepare(`UPDATE assistant_conversations SET updated_at = ? WHERE id = ?`).run(monotonicNow(), id); changed({ ws: null, entity: 'assistant', id: null }); }
 };
 
+/** HU-188 · Espacio de la conversación (para que el aviso en vivo lleve su ws); null si no tiene espacio o no existe. */
+function wsOf(conversationId: string): string | null {
+  const r = platform.prepare(`SELECT workspace_slug FROM assistant_conversations WHERE id = ?`).get(conversationId) as any;
+  return r?.workspace_slug ?? null;
+}
+
 export const decisionsRepo = {
   list(conversationId: string): ConversationDecision[] { return (platform.prepare(`SELECT doc_json FROM assistant_decisions WHERE conversation_id = ? ORDER BY seq`).all(conversationId) as any[]).map(r => JSON.parse(r.doc_json)); },
+  /** HU-188 · Decisiones abiertas de las conversaciones activas de un espacio, con el proyecto de su conversación. Solo lee. */
+  listOpenByWorkspace(slug: string): { decision: ConversationDecision; projectId: string | null }[] {
+    const rows = platform.prepare(`SELECT d.doc_json AS doc_json, c.project_id AS project_id FROM assistant_decisions d JOIN assistant_conversations c ON c.id = d.conversation_id WHERE d.status = 'open' AND c.workspace_slug = ? AND c.status = 'active' ORDER BY d.created_at, d.seq`).all(slug) as any[];
+    return rows.map(r => ({ decision: JSON.parse(r.doc_json) as ConversationDecision, projectId: r.project_id ?? null }));
+  },
   get(id: string): ConversationDecision | null { const r = platform.prepare(`SELECT doc_json FROM assistant_decisions WHERE id = ?`).get(id) as any; return r ? JSON.parse(r.doc_json) : null; },
   add(conversationId: string, d: Omit<ConversationDecision, 'id' | 'conversationId' | 'seq' | 'status' | 'answer' | 'note' | 'history' | 'createdAt' | 'updatedAt' | 'decidedAt'>): ConversationDecision {
     const seq = ((platform.prepare(`SELECT MAX(seq) AS n FROM assistant_decisions WHERE conversation_id = ?`).get(conversationId) as any)?.n ?? 0) + 1;
     const at = monotonicNow();
     const doc: ConversationDecision = { ...d, id: crypto.randomUUID(), conversationId, seq, status: 'open', answer: null, note: null, history: [], createdAt: at, updatedAt: at, decidedAt: null };
-    platform.prepare(`INSERT INTO assistant_decisions (id, conversation_id, seq, doc_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(doc.id, conversationId, seq, JSON.stringify(doc), doc.status, at, at); changed({ ws: null, entity: 'assistant', id: null });
+    platform.prepare(`INSERT INTO assistant_decisions (id, conversation_id, seq, doc_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(doc.id, conversationId, seq, JSON.stringify(doc), doc.status, at, at); changed({ ws: wsOf(conversationId), entity: 'assistant', id: null });
     return doc;
   },
   update(id: string, fn: (d: ConversationDecision) => void): ConversationDecision {
     const d = this.get(id); if (!d) throw Object.assign(new Error('Decisión no encontrada'), { statusCode: 404 });
     fn(d); d.updatedAt = monotonicNow();
-    platform.prepare(`UPDATE assistant_decisions SET doc_json = ?, status = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(d), d.status, d.updatedAt, id); changed({ ws: null, entity: 'assistant', id: null });
+    platform.prepare(`UPDATE assistant_decisions SET doc_json = ?, status = ?, updated_at = ? WHERE id = ?`).run(JSON.stringify(d), d.status, d.updatedAt, id); changed({ ws: wsOf(d.conversationId), entity: 'assistant', id: null });
     return d;
   }
 };

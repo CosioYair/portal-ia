@@ -9,7 +9,8 @@ export const KIND_LABEL: Record<PendingDecisionKind, string> = {
   apply_diff: 'Aplicar diff',
   integrate: 'Integrar',
   publish: 'Publicar',
-  backlog_proposal: 'Propuesta al backlog'
+  backlog_proposal: 'Propuesta al backlog',
+  assistant_decision: 'Propuesta del Asistente'
 };
 
 const KIND_GLYPH: Record<PendingDecisionKind, string> = {
@@ -17,7 +18,8 @@ const KIND_GLYPH: Record<PendingDecisionKind, string> = {
   apply_diff: '±',
   integrate: '⇄',
   publish: '↑',
-  backlog_proposal: '≡'
+  backlog_proposal: '≡',
+  assistant_decision: '?'
 };
 
 type CardState =
@@ -182,7 +184,7 @@ export function PendingDecisionCard({ decision, onResolved, superseded = null, o
 
         <div>
           <div className="h3">{decision.title}</div>
-          <div className="small muted">Solicita: {decision.agentDisplayName || decision.requestedBy} · Proceso <span className="mono">{decision.processId.slice(0, 8)}</span></div>
+          <div className="small muted">Solicita: {decision.agentDisplayName || decision.requestedBy} · {decision.kind === 'assistant_decision' ? 'Propuesta' : 'Proceso'} <span className="mono">{decision.processId.slice(0, 8)}</span></div>
           {!superseded && older > 0 && (
             <div className="small muted">
               {older === 1 ? '1 autorización anterior superada' : `${older} autorizaciones anteriores superadas`}

@@ -22,9 +22,10 @@ const DECISION_CTA: Record<PendingDecisionKind, string> = {
   apply_diff: 'Revisar diff',
   integrate: 'Integrar',
   publish: 'Publicar',
-  backlog_proposal: 'Revisar y aplicar'
+  backlog_proposal: 'Revisar y aplicar',
+  assistant_decision: 'Responder'
 };
-const decisionTarget = (d: PendingDecision) => d.storyId ? `/historias/${d.storyId}${d.kind === 'process_authorization' ? '#iteraciones' : ''}` : `/procesos/${d.processId}`;
+const decisionTarget = (d: PendingDecision) => d.kind === 'assistant_decision' && !d.storyId ? '/autorizaciones' : d.storyId ? `/historias/${d.storyId}${d.kind === 'process_authorization' ? '#iteraciones' : ''}` : `/procesos/${d.processId}`;
 const supersededNote = (n: number) => n === 1 ? '1 autorización anterior superada' : `${n} autorizaciones anteriores superadas`;
 
 const backlogCache = new Map<string, { items: BacklogItem[]; procs: Process[] }>();

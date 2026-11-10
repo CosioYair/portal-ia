@@ -234,8 +234,10 @@ test('Q/R/S/X · un cambio llega a todas las pestañas conectadas (solo ids, sin
   const a = story('Historia RAPIDA en tiempo real'); // escribe en el backlog
   const p = await pending(a.id); // crea un proceso
   flushLiveNow();
-  await waitFor(() => t1.events.filter(e => e.event === 'message').length, n => n > 0, 'llega el aviso a la pestaña 1');
-  await waitFor(() => t2.events.filter(e => e.event === 'message').length, n => n > 0, 'y a la pestaña 2');
+  // Puede llegar antes un mensaje con actividad de fondo de pruebas anteriores (lotes): se espera el que trae ESTE cambio.
+  const hasOwn = (t: { events: { event: string; data: any }[] }) => { const cs = t.events.filter(e => e.event === 'message').flatMap(e => e.data.changes); return cs.some((c: any) => c.entity === 'process' && c.id === p.id) && cs.some((c: any) => c.entity === 'backlog' && c.id === a.id); };
+  await waitFor(() => hasOwn(t1), x => x, 'llega el aviso a la pestaña 1');
+  await waitFor(() => hasOwn(t2), x => x, 'y a la pestaña 2');
   const changes = t1.events.filter(e => e.event === 'message').flatMap(e => e.data.changes);
   assert.ok(changes.some((c: any) => c.entity === 'process' && c.id === p.id && c.itemId === a.id && c.ws === S), JSON.stringify(changes));
   assert.ok(changes.some((c: any) => c.entity === 'backlog' && c.id === a.id));

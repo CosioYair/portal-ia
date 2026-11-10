@@ -15,6 +15,9 @@ import { KIND_LABEL, PendingDecisionCard } from '../components/PendingDecisionCa
 type Load = { phase: 'loading' } | { phase: 'error'; message: string } | { phase: 'ready'; items: PendingDecision[] };
 type Filter = 'all' | PendingDecisionKind;
 
+/** HU-188 · Etiqueta visible de cada tipo; las propuestas del Asistente tienen la suya. */
+const kindLabel = (k: PendingDecisionKind): string => (k === 'assistant_decision' ? 'Propuesta del Asistente' : KIND_LABEL[k] ?? k);
+
 /**
  * Decisiones (Portal IA 2.0, antes «Autorizaciones»): TODO lo que espera al propietario en la empresa, agrupado.
  * - Autorizaciones de procesos: se aprueban o deniegan aquí con su tarjeta de siempre (cifra, riesgo y confirmación).
@@ -43,7 +46,7 @@ export function InboxScreen() {
 
   useEffect(() => { void refresh(); }, [refresh]);
   // Una decisión nueva o resuelta (aquí, en otra pestaña, en un lote o desde el Asistente) aparece sin pulsar «Actualizar».
-  useLive(c => c.ws === slug && c.kind !== 'progress' && (c.entity === 'process' || c.entity === 'assignment' || c.entity === 'batch' || c.entity === 'agent' || c.entity === 'agent_chat'), () => refresh(), { minMs: 2000, enabled: !!slug });
+  useLive(c => c.ws === slug && c.kind !== 'progress' && (c.entity === 'process' || c.entity === 'assignment' || c.entity === 'batch' || c.entity === 'agent' || c.entity === 'agent_chat' || c.entity === 'assistant'), () => refresh(), { minMs: 2000, enabled: !!slug });
 
   const onResolved = useCallback((d: PendingDecision, verdict: DecisionVerdict) => {
     ctx?.flash(`${verdict === 'approve' ? 'Aprobada' : 'Denegada'}: ${d.title}`);
@@ -52,7 +55,10 @@ export function InboxScreen() {
 
   const items = load.phase === 'ready' ? load.items : [];
   const visible = filter === 'all' ? items : items.filter(i => i.kind === filter);
-  const kinds = (Object.keys(KIND_LABEL) as PendingDecisionKind[]).filter(k => items.some(i => i.kind === k));
+  const kinds = Array.from(new Set(items.map(i => i.kind)));
+  // HU-188 · Las propuestas del Asistente van en su propia sección, con el enlace a su conversación.
+  const visibleProc = visible.filter(i => i.kind !== 'assistant_decision');
+  const visibleAssistant = visible.filter(i => i.kind === 'assistant_decision');
   const asks = (agents ?? []).flatMap(a => a.attention.filter(x => !x.processId).map(x => ({ agent: a, item: x })));
   const nothing = load.phase === 'ready' && items.length === 0 && asks.length === 0 && !att.assistant && assignments.length === 0 && !assignmentsErr;
 
@@ -84,12 +90,28 @@ export function InboxScreen() {
               <div className="seg" role="group" aria-label="Filtrar por tipo">
                 <button aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>Todas ({items.length})</button>
                 {kinds.map(k => (
-                  <button key={k} aria-pressed={filter === k} onClick={() => setFilter(k)}>{KIND_LABEL[k]} ({items.filter(i => i.kind === k).length})</button>
+                  <button key={k} aria-pressed={filter === k} onClick={() => setFilter(k)}>{kindLabel(k)} ({items.filter(i => i.kind === k).length})</button>
                 ))}
               </div>
             </div>
-            <ul className="inbox-list" aria-label="Decisiones pendientes">
-              {visible.map(d => <PendingDecisionCard key={d.id} decision={d} onResolved={onResolved} />)}
+            {visibleProc.length > 0 && <ul className="inbox-list" aria-label="Decisiones pendientes">
+              {visibleProc.map(d => <PendingDecisionCard key={d.id} decision={d} onResolved={onResolved} />)}
+            </ul>}
+          </section>
+        )}
+
+        {load.phase === 'ready' && visibleAssistant.length > 0 && (
+          <section className="dec-group" aria-labelledby="dec-assistant-proposals">
+            <div className="section-title"><h2 className="h2" id="dec-assistant-proposals">Propuestas del Asistente <span className="muted">({visibleAssistant.length})</span></h2>
+              <span className="small muted">Aprobar o denegar aquí no llama a la IA ni tiene costo</span></div>
+            <ul className="inbox-list" aria-label="Propuestas del Asistente pendientes" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+              {visibleAssistant.map(d => (
+                <li key={d.id} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <span className="chip chip-accent" style={{ alignSelf: 'flex-start' }}>{kindLabel(d.kind)}</span>
+                  <PendingDecisionCard as="div" decision={d} onResolved={onResolved} />
+                  {d.conversationId && <div><Link className="btn btn-secondary btn-sm" to={`/asistente?conversacion=${encodeURIComponent(d.conversationId)}`}>Ver conversación</Link></div>}
+                </li>
+              ))}
             </ul>
           </section>
         )}
