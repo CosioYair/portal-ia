@@ -10,6 +10,9 @@ import type { Assignment, AssignmentPendingState, AssistantConversation, Convers
 export interface AssignmentNextIteration { note: string; estimatedUsd: number; suggestedBudgetUsd: number; steps: number; merged: boolean }
 /** EN-012: encargo pendiente del propietario en Decisiones (misma etiqueta que el Asistente y la tarjeta). */
 export interface AssignmentPendingItem { id: string; kind: 'awaiting_iteration_authorization' | 'merged_awaiting_acceptance'; assignmentId: string; code: string; title: string; workspaceSlug: string; projectId: string; processId: string | null; label: string; where: string | null; link: string; note: string | null; createdAt: string }
+/** HU-196: decisión ya resuelta (historial de la empresa, solo lectura y sin costo). */
+export type DecisionHistoryVerdict = 'approve' | 'deny' | 'superseded';
+export interface DecisionHistoryItem { id: string; kind: PendingDecisionKind; title: string; workspaceSlug: string; projectId: string; storyId: string | null; processId: string; conversationId: string | null; verdict: DecisionHistoryVerdict; reason: string | null; decidedAt: string }
 import type { DocumentBatch, DocumentJob, RemovalPreview, RemovalRecord } from '@portal-ia/domain';
 import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
 import { ownerNeeded, ownerToken, setOwnerToken } from './owner.ts';
@@ -369,6 +372,8 @@ export const api = {
   // HU-009 / HU-137 · bandeja de autorizaciones
   inbox: (slug: string) => request<PendingDecision[]>(`/api/workspaces/${slug}/inbox`),
   inboxAssignments: (slug: string) => request<AssignmentPendingItem[]>(`/api/workspaces/${slug}/inbox/assignments`),
+  /** HU-196 · Historial de decisiones resueltas de la empresa, de la más reciente a la más antigua (por defecto 200; máximo 500). Sin IA. */
+  inboxHistory: (slug: string, limit?: number) => request<DecisionHistoryItem[]>(`/api/workspaces/${slug}/inbox/history${limit ? `?limit=${encodeURIComponent(String(limit))}` : ''}`),
   decideInbox: (slug: string, kind: PendingDecisionKind, processId: string, verdict: DecisionVerdict, reason?: string, seenVersion?: string) =>
     request<InboxDecisionResult>(`/api/workspaces/${slug}/inbox/${kind}/${processId}/decision`, { method: 'POST', body: JSON.stringify({ verdict, reason: reason?.trim() ? reason.trim() : undefined, seenVersion }) }),
   // HU-161 · una autorización vigente por historia: historial (vigente + superadas) y restauración reversible sin costo.

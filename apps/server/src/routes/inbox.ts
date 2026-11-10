@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { PENDING_DECISION_KINDS } from '@portal-ia/domain';
 import { workspacesRepo } from '../db/platform.ts';
-import { decide, InboxError, listPendingAssignments, listPendingDecisions, listStoryDecisionHistory, restoreSupersededDecision, summarizePendingDecisions } from '../services/inbox.ts';
+import { decide, DECISION_HISTORY_MAX_LIMIT, InboxError, listDecisionHistory, listPendingAssignments, listPendingDecisions, listStoryDecisionHistory, restoreSupersededDecision, summarizePendingDecisions } from '../services/inbox.ts';
 
 const slugParams = z.object({ slug: z.string().min(1) });
 const decisionParams = z.object({ slug: z.string().min(1), kind: z.enum(PENDING_DECISION_KINDS), processId: z.string().min(1) });
@@ -10,6 +10,7 @@ const decisionBody = z.object({ verdict: z.enum(['approve', 'deny']), reason: z.
 const storyParams = z.object({ slug: z.string().min(1), id: z.string().min(1) });
 const restoreParams = z.object({ slug: z.string().min(1), processId: z.string().min(1) });
 const restoreBody = z.object({ authorized: z.literal(true) });
+const historyQuery = z.object({ limit: z.coerce.number().int().min(1).max(DECISION_HISTORY_MAX_LIMIT).optional() });
 
 function fail(reply: FastifyReply, e: unknown) {
   if (e instanceof InboxError) return reply.code(e.status).send({ error: e.message });
@@ -41,6 +42,16 @@ export async function inboxRoutes(app: FastifyInstance) {
     if (!params.success) return reply.code(400).send({ error: 'Empresa no válida' });
     if (!workspacesRepo.get(params.data.slug)) return reply.code(404).send({ error: 'Empresa no encontrada' });
     try { return await summarizePendingDecisions(app, params.data.slug); } catch (e) { return fail(reply, e); }
+  });
+
+  // HU-196 · Historial de decisiones resueltas de la empresa (solo lectura, sin IA ni costo). limit opcional entre 1 y 500.
+  app.get('/api/workspaces/:slug/inbox/history', async (req, reply) => {
+    const params = slugParams.safeParse(req.params);
+    if (!params.success) return reply.code(400).send({ error: 'Empresa no válida' });
+    const query = historyQuery.safeParse(req.query ?? {});
+    if (!query.success) return reply.code(400).send({ error: `El límite debe ser un número entero entre 1 y ${DECISION_HISTORY_MAX_LIMIT}.` });
+    if (!workspacesRepo.get(params.data.slug)) return reply.code(404).send({ error: 'Empresa no encontrada' });
+    try { return listDecisionHistory(params.data.slug, { limit: query.data.limit }); } catch (e) { return fail(reply, e); }
   });
 
   // Aprobar o denegar una decisión: delega en las mismas rutas del proceso.

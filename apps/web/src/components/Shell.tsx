@@ -110,11 +110,11 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
     if (['ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key) || e.key.length === 1) byKeys.current = true;
     if (e.key === 'Enter') { const v = pick[which]; if (v) { e.preventDefault(); apply(which, v); } }
   };
-  const group = (g: Section['group']) => SECTIONS.filter(s => s.group === g && (!s.needsProject || project));
+  // HU-196 · Las secciones con inMenu === false (Decisiones) no se listan en el menú: se llega a ellas con la campana y Ctrl+K.
+  const group = (g: Section['group']) => SECTIONS.filter(s => s.group === g && s.inMenu !== false && (!s.needsProject || project));
   const navItem = (s: Section) => <Link key={s.id} to={s.id === 'oficina' ? officeHome() : s.path} className={`navi${section?.id === s.id ? ' is-active' : ''}`} aria-current={section?.id === s.id ? 'page' : undefined}
-    aria-label={s.id === 'decisiones' && pending ? `Decisiones, ${pending} pendiente${pending === 1 ? '' : 's'}` : undefined} title={s.hint}>
+    title={s.hint}>
     {sectionIcon(s)}<span className="navi-text">{s.label}</span>
-    {s.id === 'decisiones' && pending > 0 && <span className="navi-count" aria-hidden="true">{pending}</span>}
     {s.id === 'trabajo' && usage && usage.running > 0 && <span className="navi-live" title={`${usage.running} en ejecución`}><span className="live-dot" aria-hidden="true" /><span>{usage.running}</span><span className="sr-only"> en ejecución</span></span>}
   </Link>;
 
@@ -173,7 +173,8 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
             <button type="button" className="btn btn-primary btn-sm top-ask" onClick={() => openUi('assistant')} aria-label={att.assistant ? `Pedir al Asistente, ${att.assistant} propuestas pendientes` : 'Pedir al Asistente'}>
               {Icon.sparkles()}<span className="top-ask-text">Pedir</span>{att.assistant > 0 && <span className="top-badge" aria-hidden="true">{att.assistant}</span>}
             </button>
-            <Link className="top-icon" to="/autorizaciones" aria-label={pending ? `Decisiones, ${pending} pendiente${pending === 1 ? '' : 's'}` : 'Decisiones'} title="Decisiones">
+            <Link className="top-icon" to="/autorizaciones" aria-current={section?.id === 'decisiones' ? 'page' : undefined}
+              aria-label={pending ? `Decisiones: ${pending} pendiente${pending === 1 ? '' : 's'} e historial` : 'Decisiones: historial'} title="Decisiones pendientes e historial">
               {Icon.bell()}{pending > 0 && <span className="top-badge" aria-hidden="true">{pending > 99 ? '99+' : pending}</span>}
             </Link>
           </div>

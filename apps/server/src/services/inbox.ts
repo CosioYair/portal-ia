@@ -473,6 +473,88 @@ export function listStoryDecisionHistory(slug: string, storyId: string): StoryDe
   return { storyId, storyCode: item.storyId, current, superseded };
 }
 
+// ---- HU-196 · Historial de decisiones resueltas de la empresa (solo lectura, sin IA) ----
+export type DecisionHistoryVerdict = 'approve' | 'deny' | 'superseded';
+/** Decisión ya resuelta: qué se decidió, sobre qué y cuándo. Se toma de los datos que guarda cada proceso; nada se infiere con IA. */
+export interface DecisionHistoryItem {
+  id: string; kind: PendingDecisionKind; title: string; workspaceSlug: string; projectId: string; storyId: string | null;
+  processId: string; conversationId: string | null; verdict: DecisionHistoryVerdict; reason: string | null; decidedAt: string;
+}
+export const DECISION_HISTORY_DEFAULT_LIMIT = 200;
+export const DECISION_HISTORY_MAX_LIMIT = 500;
+
+/**
+ * Función pura: decisiones ya resueltas de un proceso, leídas de sus propios registros. Autorizar deja authorizedAt;
+ * denegar la autorización cancela el proceso sin authorizedAt; aplicar deja result.applied; rechazar el diff deja
+ * result.rejected con su motivo; integrar deja result.merged; publicar deja result.published; aplicar las propuestas
+ * al backlog deja delegation.opsApplied. Si el proceso es una iteración superada que aún esperaba decisión, cuenta como «superada».
+ */
+export function decisionHistoryFromProcess(slug: string, p: Process): DecisionHistoryItem[] {
+  const out: DecisionHistoryItem[] = [];
+  const add = (kind: PendingDecisionKind, verdict: DecisionHistoryVerdict, decidedAt: string, reason: string | null = null) => out.push({
+    id: `${kind}:${p.id}`, kind, title: p.title, workspaceSlug: slug, projectId: p.projectId, storyId: p.backlogItemId ?? null,
+    processId: p.id, conversationId: null, verdict, reason, decidedAt
+  });
+  const authorizedAt = (p as { authorizedAt?: string | null }).authorizedAt ?? null;
+  if (authorizedAt) add('process_authorization', 'approve', authorizedAt);
+  else if ((p.status as string) === 'cancelled') add('process_authorization', 'deny', p.finishedAt ?? p.createdAt);
+
+  const r = p.result;
+  if (p.kind === 'story_execution' && r) {
+    if (r.applied) add('apply_diff', 'approve', r.applied.appliedAt);
+    if (r.rejected) add('apply_diff', 'deny', r.rejected.at, r.rejected.reason?.trim() || null);
+    if (r.merged) add('integrate', 'approve', r.merged.mergedAt);
+    if (r.published) add('publish', 'approve', r.published.pushedAt);
+  }
+  const d = p.delegation;
+  if (p.kind === 'delegated_task' && d?.opsApplied) add('backlog_proposal', 'approve', d.opsApplied.at);
+
+  if (p.supersededBy) {
+    for (const pending of decisionsFromProcess(slug, p)) {
+      add(pending.kind, 'superseded', p.supersededAt ?? pending.createdAt);
+      out[out.length - 1].id = `superseded:${pending.kind}:${p.id}`;
+    }
+  }
+  return out;
+}
+
+/** Propuestas del Asistente ya aprobadas o rechazadas en las conversaciones de este espacio. Si su base falla, sin ellas. */
+function assistantHistory(slug: string): DecisionHistoryItem[] {
+  try {
+    const out: DecisionHistoryItem[] = [];
+    for (const c of conversationsRepo.list()) {
+      if (c.workspaceSlug !== slug) continue;
+      for (const d of decisionsRepo.list(c.id)) {
+        if (d.status !== 'approved' && d.status !== 'rejected') continue;
+        out.push({
+          id: `assistant_decision:${d.id}`, kind: 'assistant_decision', title: d.question, workspaceSlug: slug, projectId: c.projectId ?? '',
+          storyId: null, processId: d.id, conversationId: c.id, verdict: d.status === 'approved' ? 'approve' : 'deny',
+          reason: (d.status === 'approved' ? d.answer : d.note)?.trim() || null, decidedAt: d.decidedAt ?? d.updatedAt
+        });
+      }
+    }
+    return out;
+  } catch { return []; }
+}
+
+/**
+ * Historial de decisiones resueltas de todos los proyectos de la empresa, de la más reciente a la más antigua. Solo lee,
+ * sin IA y sin costo. Incluye los procesos archivados. Límite por defecto 200 y máximo 500.
+ */
+export function listDecisionHistory(slug: string, opts: { limit?: number } = {}): DecisionHistoryItem[] {
+  const raw = opts.limit;
+  const limit = typeof raw === 'number' && Number.isFinite(raw)
+    ? Math.min(DECISION_HISTORY_MAX_LIMIT, Math.max(1, Math.floor(raw)))
+    : DECISION_HISTORY_DEFAULT_LIMIT;
+  const out: DecisionHistoryItem[] = [];
+  const repo = processesRepo(slug);
+  for (const project of projectsRepo(slug).list()) {
+    for (const p of repo.listLight(project.id, { archived: true })) out.push(...decisionHistoryFromProcess(slug, p));
+  }
+  out.push(...assistantHistory(slug));
+  return out.sort((a, b) => b.decidedAt.localeCompare(a.decidedAt) || a.id.localeCompare(b.id)).slice(0, limit);
+}
+
 /** Restaura una autorización superada (reversible, sin costo de IA); la que era vigente pasa a superada. */
 export function restoreSupersededDecision(slug: string, processId: string): RestoreSupersededResult {
   const repo = processesRepo(slug);
