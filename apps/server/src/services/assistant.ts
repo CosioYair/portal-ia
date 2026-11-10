@@ -4,7 +4,8 @@ import { sameWorkRunning } from './executionLocks.ts';
 import path from 'node:path';
 import { REPO_ROOT } from '../config.ts';
 import { expandHome } from '../routes/fs.ts';
-import type { AssignmentStatus, ModelInfo, PipelinePhase, Process, ProviderId } from '@portal-ia/domain';
+import type { AssignmentStatus, ExecutionBackend, ModelInfo, PipelinePhase, Process, ProviderId } from '@portal-ia/domain';
+import { harnessModels } from './harness/index.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { platform, providersRepo, workspacesRepo } from '../db/platform.ts';
@@ -170,15 +171,29 @@ export function assistantInfo() {
     ...assistantModelChoice(a.config.provider as ProviderId, backend) };
 }
 
-/** Lo que el selector de modelo ofrece: solo modelos que resolveChatModel acepta; con suscripción, costo 0. */
-function assistantModelChoice(providerId: ProviderId, backend: string): { models: AssistantModelOption[]; modelsReason: string | null } {
+/**
+ * Lo que el selector de modelo ofrece: solo modelos que resolveChatModel acepta (catálogo del proveedor) Y, con un arnés
+ * de suscripción, que el PUT de configuración también acepta (misma regla que workspaces.ts: harnessModels del arnés para
+ * ese proveedor; si esa lista está vacía, no restringe). Así «usar por defecto» nunca falla con un modelo ofrecido.
+ */
+export function assistantModelChoice(providerId: ProviderId, backend: string): { models: AssistantModelOption[]; modelsReason: string | null } {
   const billing = backend === 'api' ? 'api' as const : 'subscription' as const;
-  const models: AssistantModelOption[] = assistantCatalog(providerId).map(m => {
+  const catalog = assistantCatalog(providerId);
+  let harnessIds: Set<string> | null = null;
+  if (backend !== 'api') {
+    try { const hm = harnessModels(backend as ExecutionBackend, providerId).find(g => g.provider === providerId)?.models ?? []; if (hm.length) harnessIds = new Set(hm.map(m => m.id)); } catch { harnessIds = null; }
+  }
+  const offered = harnessIds ? catalog.filter(m => harnessIds!.has(m.id)) : catalog;
+  const dropped = catalog.length - offered.length;
+  const models: AssistantModelOption[] = offered.map(m => {
     const mp = estimatePricing(providerId, m.id);
     return { id: m.id, label: (m as any).name || m.id, billing, estimatedPerMessageUsd: billing === 'api' ? (7000 * mp.inPerM + 900 * mp.outPerM) / 1_000_000 : 0 };
   });
+  const harnessName = backend === 'codex' ? 'Codex' : 'Claude Code';
   const modelsReason = backend === 'claude-code-terminal' ? 'La consola de Claude Code no atiende el chat: el modelo no se puede cambiar aquí.'
-    : !models.length ? 'El proveedor del Asistente no tiene un catálogo de modelos: se usa el modelo configurado del agente.' : null;
+    : !catalog.length ? 'El proveedor del Asistente no tiene un catálogo de modelos: se usa el modelo configurado del agente.'
+    : !models.length ? `Ningún modelo del catálogo del proveedor está disponible con ${harnessName}: se usa el modelo configurado del agente.`
+    : dropped > 0 ? `Se ocultan ${dropped} modelo${dropped === 1 ? '' : 's'} del proveedor que ${harnessName} no admite (no se podrían guardar como modelo por defecto).` : null;
   return { models, modelsReason };
 }
 

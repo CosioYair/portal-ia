@@ -24,7 +24,8 @@ const { costUsd, resetMockCalls } = await import('@portal-ia/ai-adapters');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
 const { agentsRepo } = await import('../src/db/workspace.ts');
-const { assistantInfo, assistantRepo, resolveChatModel } = await import('../src/services/assistant.ts');
+const { assistantInfo, assistantModelChoice, assistantRepo, resolveChatModel } = await import('../src/services/assistant.ts');
+const { harnessModels } = await import('../src/services/harness/index.ts');
 const { buildApp } = await import('./fixtures/owner-app.ts');
 
 const CATALOG = ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5'];
@@ -86,6 +87,25 @@ test('«usar por defecto» con {...cfg, model}: cambia solo el modelo y se conse
   assert.equal(afterCfg.model, next);
   assert.deepEqual({ ...afterCfg, model: before.model }, before, 'los demás campos se conservan');
   assert.equal((assistantInfo() as any).model, next, 'el Asistente usa el nuevo modelo por defecto');
+});
+
+test('suscripción: el menú solo ofrece modelos que el PUT de configuración acepta con el arnés (misma regla)', () => {
+  // Regla del PUT (workspaces.ts): con arnés ≠ api, el modelo debe estar en harnessModels(arnés, proveedor) si esa lista no está vacía.
+  const putAccepts = (backend: string, provider: any, model: string) => {
+    const hm = harnessModels(backend as any, provider).find((g: any) => g.provider === provider)?.models ?? [];
+    return !hm.length || hm.some((m: any) => m.id === model);
+  };
+  const cc = assistantModelChoice('anthropic', 'claude-code');
+  assert.ok(cc.models.length > 0, 'Claude Code ofrece modelos del catálogo');
+  for (const m of cc.models) {
+    assert.equal(m.billing, 'subscription'); assert.equal(m.estimatedPerMessageUsd, 0);
+    assert.ok(CATALOG.includes(m.id), `${m.id} lo acepta resolveChatModel`);
+    assert.ok(putAccepts('claude-code', 'anthropic', m.id), `${m.id} lo acepta «usar por defecto» con Claude Code`);
+  }
+  // Codex con OpenAI: su lista ('default' + detectados) no cruza con un catálogo de OpenAI vacío → nada que ofrecer, con motivo.
+  const cx = assistantModelChoice('openai', 'codex');
+  for (const m of cx.models) assert.ok(putAccepts('codex', 'openai', m.id), `${m.id} lo acepta «usar por defecto» con Codex`);
+  if (!cx.models.length) assert.ok(cx.modelsReason && cx.modelsReason.length > 0, 'sin modelos, se explica por qué');
 });
 
 const webSrc = fileURLToPath(new URL('../../web/src/', import.meta.url));
