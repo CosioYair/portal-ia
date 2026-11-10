@@ -9,7 +9,8 @@ export const KIND_LABEL: Record<PendingDecisionKind, string> = {
   apply_diff: 'Aplicar diff',
   integrate: 'Integrar',
   publish: 'Publicar',
-  backlog_proposal: 'Propuesta al backlog'
+  backlog_proposal: 'Propuesta al backlog',
+  assistant_decision: 'Propuesta del Asistente'
 };
 
 const KIND_GLYPH: Record<PendingDecisionKind, string> = {
@@ -17,7 +18,8 @@ const KIND_GLYPH: Record<PendingDecisionKind, string> = {
   apply_diff: '±',
   integrate: '⇄',
   publish: '↑',
-  backlog_proposal: '≡'
+  backlog_proposal: '≡',
+  assistant_decision: '?'
 };
 
 type CardState =
