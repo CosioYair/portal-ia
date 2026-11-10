@@ -52,6 +52,24 @@ const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish|con
 const CLOSURE_GUARDED = /\/processes\/:id\/(authorize|continue|accept-plan|recover|retry|apply|verify|verify\/install-and-retry)$/;
 
 /**
+ * HU-184 · Comprobaciones de la regla de cierre (services/closing.ts) que un cierre forzado se salta. Sin IA.
+ * Una historia aplicada sin integrar y sin prueba manual da ['integrar en main', 'prueba manual'].
+ */
+async function omittedClosingChecks(slug: string, last: Process | undefined): Promise<string[]> {
+  const r = last?.result;
+  const out: string[] = [];
+  if (!r?.applied) out.push('aplicar los cambios');
+  if (!r?.merged) out.push('integrar en main');
+  else {
+    const b = await closingBlocker(slug, last, 'historia').catch(() => null);
+    if (b?.code === 'not_activated') out.push('activar en el Portal');
+    else if (b?.code === 'not_runtime_verified') out.push('comprobar en ejecución');
+  }
+  if (!r?.manualTest || r.manualTest.checks.some(c => !c)) out.push('prueba manual');
+  return out;
+}
+
+/**
  * Procesos autorizados (HU-004). Un proceso nace 'pending_authorization' con una estimación; solo empieza a consumir
  * IA cuando el usuario lo autoriza con un presupuesto (POST /authorize). Puede cancelarse; se detiene entre pasos.
  */
@@ -622,10 +640,21 @@ Proceso: ${proc.id}`, { processId: proc.id });
     const procs = processesRepo(slug);
     const last = (item.lastProcessId ? procs.get(item.lastProcessId) : undefined) ?? procs.list(item.projectId).find(p => p.backlogItemId === item.id && p.kind === 'story_execution');
     // Regla de cierre única (también la usa la aceptación de un encargo): integrado, activo y probado.
-    if (!body.data?.force) { const blocker = await closingBlocker(slug, last, 'historia'); if (blocker) return reply.code(409).send(blocker); }
+    if (!body.success) return reply.code(400).send({ error: 'Datos no válidos: el motivo admite hasta 300 caracteres.', code: 'invalid_body' });
+    const force = !!body.data.force;
+    // HU-184: el cierre forzado exige un motivo escrito por el propietario; se valida antes de cualquier efecto.
+    const reason = (body.data.reason ?? '').replace(/\s+/g, ' ').trim();
+    if (force && !reason) return reply.code(400).send({ code: 'owner_reason_required', error: 'Indica el motivo' });
+    // Ya cerrada (doble clic, otra pestaña): no se vuelve a cerrar ni a registrar otro «Cierre forzado».
+    if (item.status === 'done') return { ...item, alreadyClosed: true };
+    if (!force) { const blocker = await closingBlocker(slug, last, 'historia'); if (blocker) return reply.code(409).send(blocker); }
+    const omitted = force ? await omittedClosingChecks(slug, last) : [];
+    // Se registra ANTES de cerrar: si el registro falla, la historia no queda cerrada sin rastro.
+    if (force) threadRepo(slug).add({ backlogItemId: item.id, role: 'system', agentId: null, agentName: null, content: omitted.length ? `Cierre forzado: se omitió ${omitted.join(', ')} · Motivo: ${reason}` : `Cierre forzado: no se omitió ninguna comprobación · Motivo: ${reason}`, processId: last?.id ?? null, costUsd: 0, tokens: 0, proposals: null });
     backlogRepo(slug).setStatus(id, 'done');
-    app.log.info({ story: item.storyId, force: !!body.data?.force, reason: body.data?.reason }, 'historia cerrada');
-    return backlogRepo(slug).get(id);
+    app.log.info({ story: item.storyId, force, reason: reason || undefined, omitted }, 'historia cerrada');
+    const closed = backlogRepo(slug).get(id);
+    return force ? { ...closed, forced: true, omittedChecks: omitted, reason } : closed;
   });
 
   // HU-165 · Cancelar historia: no se hará y queda en «Descartadas» (no en completadas). Exige motivo y no llama a la IA.
