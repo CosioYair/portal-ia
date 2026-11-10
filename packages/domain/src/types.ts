@@ -1520,7 +1520,8 @@ export interface BudgetBalance {
 
 // ---- HU-009 / HU-137 · Bandeja de autorizaciones ----
 /** Clases de decisión que esperan al propietario. */
-export const PENDING_DECISION_KINDS = ['process_authorization', 'apply_diff', 'integrate', 'publish', 'backlog_proposal'] as const;
+/** HU-188 · 'assistant_decision': propuesta abierta del Asistente (assistant_decisions); se decide sin IA. */
+export const PENDING_DECISION_KINDS = ['process_authorization', 'apply_diff', 'integrate', 'publish', 'backlog_proposal', 'assistant_decision'] as const;
 export type PendingDecisionKind = typeof PENDING_DECISION_KINDS[number];
 export type DecisionVerdict = 'approve' | 'deny';
 
@@ -1553,6 +1554,8 @@ export interface PendingDecision {
   denyEffect: string | null;
   /** Versión del proceso que muestra esta decisión: decidir la devuelve y, si el proceso cambió desde entonces, no se hace nada. */
   processVersion?: string;
+  /** HU-188 · Conversación del Asistente de la que sale la propuesta (solo kind 'assistant_decision'). */
+  conversationId?: string | null;
 }
 
 /** HU-161 · Decisión de una iteración anterior: no se puede aprobar, queda en el historial de la historia y se puede restaurar. */

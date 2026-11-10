@@ -9,6 +9,9 @@ import { config } from '../config.ts';
 import { processVersion } from './revision.ts';
 import { InboxError } from './inboxError.ts';
 import { remoteInclusionChecker } from './publishedSync.ts';
+import { conversationsRepo, decisionsRepo } from '../db/conversations.ts';
+import { decide as decideConversation } from './conversations.ts';
+import type { ConversationDecision } from '@portal-ia/domain';
 
 /** Error con código HTTP para que la ruta lo traduzca tal cual (definido en inboxError.ts; misma clase). */
 export { InboxError };
@@ -128,6 +131,58 @@ export function decisionsFromProcess(slug: string, p: Process, inRemote?: (p: Pr
     })];
   }
   return [];
+}
+
+// ---- HU-188 · Propuestas abiertas del Asistente ----
+/** Respuesta con la que se aprueba desde la bandeja: la recomendación o, si no hay, la primera opción. */
+const assistantAnswer = (d: ConversationDecision): string | null => (d.recommendation?.trim() || d.options[0]?.label?.trim() || null);
+
+/** Función pura: convierte cada decisión abierta del Asistente en una decisión pendiente de la bandeja (sin IA). */
+export function decisionsFromAssistant(slug: string, rows: { decision: ConversationDecision; projectId: string | null }[]): PendingDecision[] {
+  return rows.filter(r => r.decision.status === 'open').map(({ decision: d, projectId }) => {
+    const answer = assistantAnswer(d);
+    const opts = d.options.map(o => o.label).filter(Boolean);
+    const impact = d.recommendation
+      ? `Recomendación del Asistente: ${d.recommendation}`
+      : opts.length ? `Opciones: ${opts.join(' · ')}` : (d.context ?? 'Propuesta del Asistente pendiente de tu decisión.');
+    return {
+      id: `assistant_decision:${d.id}`, kind: 'assistant_decision', title: d.question, workspaceSlug: slug, projectId: projectId ?? '',
+      processId: d.id, conversationId: d.conversationId, requestedBy: 'Asistente de Empresa', createdAt: d.createdAt,
+      storyId: null, iteration: null, supersededCount: 0, estimatedCost: null, impact,
+      approveEffect: answer
+        ? `Se aprueba con «${answer}» en su conversación; no llama a la IA ni tiene costo.`
+        : 'Se aprueba en su conversación; no llama a la IA ni tiene costo.',
+      denyEffect: 'Se rechaza la propuesta; no se crea nada ni se llama a la IA.',
+      processVersion: d.updatedAt
+    } as PendingDecision;
+  });
+}
+
+/** Lee las propuestas abiertas del Asistente de un espacio; si la base del Asistente falla, la bandeja sigue como antes. */
+function assistantPending(slug: string): PendingDecision[] {
+  try { return decisionsFromAssistant(slug, decisionsRepo.listOpenByWorkspace(slug)); } catch { return []; }
+}
+
+/**
+ * Aprueba o deniega una propuesta del Asistente desde la bandeja. Antes comprueba que exista, que su conversación sea de
+ * este espacio (404), que siga abierta (409) y que no haya cambiado desde que la viste (409). Después delega en
+ * conversations.decide, que no llama a la IA.
+ */
+function decideAssistant(slug: string, id: string, verdict: DecisionVerdict, reason?: string, seenVersion?: string): InboxDecisionResult {
+  const d = decisionsRepo.get(id);
+  const conv = d ? conversationsRepo.get(d.conversationId) : null;
+  if (!d || !conv || conv.workspaceSlug !== slug) throw new InboxError(404, 'La propuesta del Asistente no existe en esta empresa.');
+  if (d.status !== 'open') throw new InboxError(409, 'Esta propuesta ya no está pendiente: ya se decidió.');
+  if (seenVersion && seenVersion !== d.updatedAt) throw new InboxError(409, 'Esta propuesta cambió desde que la viste: no se ha hecho nada. Revísala de nuevo.');
+  let out: ConversationDecision;
+  if (verdict === 'approve') {
+    const answer = assistantAnswer(d);
+    if (!answer) throw new InboxError(400, 'Esta propuesta no tiene recomendación ni opciones: indica tu respuesta en la conversación.');
+    out = decideConversation(d.conversationId, d.id, 'approve', { answer });
+  } else {
+    out = decideConversation(d.conversationId, d.id, 'reject', { note: reason?.trim() || null });
+  }
+  return { ok: true, kind: 'assistant_decision', processId: d.id, verdict, processStatus: out.status };
 }
 
 // ---- HU-161 · Una autorización vigente por historia ----
@@ -289,6 +344,8 @@ export async function listPendingDecisions(_app: FastifyInstance, slug: string):
     }
     out.push(...withAgentDisplayNames(consolidateDecisions(slug, active, all, inRemote), active, agents));
   }
+  // HU-188: una vez por espacio (no por proyecto), para que la campana sume exactamente 1 por propuesta.
+  out.push(...assistantPending(slug));
   return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
@@ -359,6 +416,7 @@ export async function summarizePendingDecisions(app: FastifyInstance, slug: stri
  * validaciones, auditoría y efectos son idénticos. Solo comprueba antes que la decisión siga pendiente.
  */
 export async function decide(app: FastifyInstance, slug: string, kind: PendingDecisionKind, processId: string, verdict: DecisionVerdict, reason?: string, auth: Record<string, string> = {}, seenVersion?: string): Promise<InboxDecisionResult> {
+  if (kind === 'assistant_decision') return decideAssistant(slug, processId, verdict, reason, seenVersion);
   const p = await fetchProcess(app, slug, processId);
   if (!p) throw new InboxError(404, 'El proceso no existe.');
   const current = decisionsFromProcess(slug, p).find(d => d.kind === kind);
@@ -391,6 +449,8 @@ export async function decide(app: FastifyInstance, slug: string, kind: PendingDe
     case 'backlog_proposal':
       res = await call(app, 'POST', `${base}/backlog-ops/apply`, { authorized: true }, auth);
       break;
+    default:
+      throw new InboxError(400, 'Tipo de decisión no admitido.');
   }
   if (res.status < 200 || res.status >= 300) {
     throw new InboxError(res.status >= 500 ? 502 : res.status, String(res.body?.error ?? 'No se pudo registrar la decisión.'));
