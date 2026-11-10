@@ -4,7 +4,8 @@ import { sameWorkRunning } from './executionLocks.ts';
 import path from 'node:path';
 import { REPO_ROOT } from '../config.ts';
 import { expandHome } from '../routes/fs.ts';
-import type { AssignmentStatus, ModelInfo, PipelinePhase, Process, ProviderId } from '@portal-ia/domain';
+import type { AssignmentStatus, ExecutionBackend, ModelInfo, PipelinePhase, Process, ProviderId } from '@portal-ia/domain';
+import { harnessModels } from './harness/index.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { platform, providersRepo, workspacesRepo } from '../db/platform.ts';
@@ -144,6 +145,17 @@ function assistantAgent() {
   return a;
 }
 
+/** HU-198 · Modelo que se puede elegir en el chat del Asistente, con su tipo de costo y su costo estimado por mensaje. */
+export interface AssistantModelOption { id: string; label: string; billing: 'api' | 'subscription'; estimatedPerMessageUsd: number }
+
+/** Catálogo del proveedor del Asistente: la MISMA fuente (models_json del proveedor) que valida resolveChatModel en sendMessage. */
+export function assistantCatalog(providerId: ProviderId): ModelInfo[] {
+  try {
+    const prow = providersRepo.get(providerId) as any; if (!prow?.models_json) return [];
+    const v = JSON.parse(prow.models_json); return Array.isArray(v) ? v.filter((m: any) => m && typeof m.id === 'string') : [];
+  } catch { return []; }
+}
+
 export function assistantInfo() {
   const a = assistantAgent();
   const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
@@ -155,7 +167,34 @@ export function assistantInfo() {
   const unavailableReason = backend === 'claude-code-terminal' ? 'La consola de Claude Code atiende tareas de procesos, no respuestas inmediatas: elige «Claude Code (gestionado)» o la API para el Asistente.' : gate && !gate.ok ? gate.reason : null;
   return { agentId: a.id, name: a.config.name, model: a.config.model, provider: a.config.provider, monthlyLimitUsd: a.config.monthlyLimitUsd, spentThisMonthUsd: spent,
     backend, backendLabel: backendLabel(backend, lastDetection()?.billing, a.config.provider), billing: backend === 'api' ? 'api' as const : 'subscription' as const, available, unavailableReason,
-    estimatedPerMessageUsd: backend === 'api' ? (7000 * p.inPerM + 900 * p.outPerM) / 1_000_000 : 0 };
+    estimatedPerMessageUsd: backend === 'api' ? (7000 * p.inPerM + 900 * p.outPerM) / 1_000_000 : 0,
+    ...assistantModelChoice(a.config.provider as ProviderId, backend) };
+}
+
+/**
+ * Lo que el selector de modelo ofrece: solo modelos que resolveChatModel acepta (catálogo del proveedor) Y, con un arnés
+ * de suscripción, que el PUT de configuración también acepta (misma regla que workspaces.ts: harnessModels del arnés para
+ * ese proveedor; si esa lista está vacía, no restringe). Así «usar por defecto» nunca falla con un modelo ofrecido.
+ */
+export function assistantModelChoice(providerId: ProviderId, backend: string): { models: AssistantModelOption[]; modelsReason: string | null } {
+  const billing = backend === 'api' ? 'api' as const : 'subscription' as const;
+  const catalog = assistantCatalog(providerId);
+  let harnessIds: Set<string> | null = null;
+  if (backend !== 'api') {
+    try { const hm = harnessModels(backend as ExecutionBackend, providerId).find(g => g.provider === providerId)?.models ?? []; if (hm.length) harnessIds = new Set(hm.map(m => m.id)); } catch { harnessIds = null; }
+  }
+  const offered = harnessIds ? catalog.filter(m => harnessIds!.has(m.id)) : catalog;
+  const dropped = catalog.length - offered.length;
+  const models: AssistantModelOption[] = offered.map(m => {
+    const mp = estimatePricing(providerId, m.id);
+    return { id: m.id, label: (m as any).name || m.id, billing, estimatedPerMessageUsd: billing === 'api' ? (7000 * mp.inPerM + 900 * mp.outPerM) / 1_000_000 : 0 };
+  });
+  const harnessName = backend === 'codex' ? 'Codex' : 'Claude Code';
+  const modelsReason = backend === 'claude-code-terminal' ? 'La consola de Claude Code no atiende el chat: el modelo no se puede cambiar aquí.'
+    : !catalog.length ? 'El proveedor del Asistente no tiene un catálogo de modelos: se usa el modelo configurado del agente.'
+    : !models.length ? `Ningún modelo del catálogo del proveedor está disponible con ${harnessName}: se usa el modelo configurado del agente.`
+    : dropped > 0 ? `Se ocultan ${dropped} modelo${dropped === 1 ? '' : 's'} del proveedor que ${harnessName} no admite (no se podrían guardar como modelo por defecto).` : null;
+  return { models, modelsReason };
 }
 
 /** Mapa de pantallas del Portal, para poder decir DÓNDE está cada cosa. */
