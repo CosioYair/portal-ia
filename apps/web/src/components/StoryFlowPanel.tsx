@@ -8,6 +8,7 @@ import { fmtUsd } from '../lib/labels.ts';
 import { callTiming, connection, serverNow, stepDurationMs } from '../lib/liveStatus.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
 import { IterationComposer } from './IterationComposer.tsx';
+import { CloseResolvedDialog } from './CloseResolvedDialog.tsx';
 import '../story-flow.css';
 
 const STATUS_TXT: Record<string, string> = { done: 'hecho', warning: 'hecho con advertencias', rejected: 'rechazado', failed: 'falló', blocked: 'bloqueado', waiting: 'espera tu autorización', running: 'en curso', current: 'toca ahora', pending: 'aún no disponible' };
@@ -62,6 +63,8 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const [msg, setMsg] = useState<string | null>(null);
   const [answer, setAnswer] = useState('');
   const [cancelling, setCancelling] = useState(false);
+  // HU-187 · «Cerrar como resuelta» abre el diálogo del Portal (lo omitido, motivo vacío, «Integrar primero»), sin prompt().
+  const [closingResolved, setClosingResolved] = useState(false);
   // EN-008 · Feedback de un encargo (sin historia): nota editable → petición de cambios del encargo.
   const [asgFeedback, setAsgFeedback] = useState<{ note: string; discard: boolean; needDiscard: string | null } | null>(null);
   // EN-012 · Tras el feedback a un encargo integrado: la nueva iteración preparada espera tu autorización aquí mismo.
@@ -168,7 +171,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       else if (a.id === 'tasks_from_issue') { if (!itemId) { needsStory(); return; } const t = await api.storyTasksFromIssue(slug, itemId); setMsg(t.length ? `${t.length} tarea(s) creadas a partir del problema.` : 'Ya existían tareas para estos hallazgos; no se duplican.'); }
       else if (a.id === 'reject') { const reason = prompt('¿Por qué rechazas esta iteración? (la historia vuelve a pendiente)', issue?.title ?? 'replanteada'); if (reason === null) return; onChange(await api.rejectProcess(slug, proc.id, reason.trim() || undefined)); }
       else if (a.id === 'close') { if (!itemId) { needsStory(); return; } await api.markStoryDone(slug, itemId); flash('Historia completada'); await reload(); }
-      else if (a.id === 'close_resolved') { if (!itemId) { needsStory(); return; } const reason = prompt('Cerrar como resuelta: indica brevemente por qué (queda registrado en Actividad).', ''); if (reason === null) return; try { await api.markStoryDone(slug, itemId, { force: true, reason: reason.trim() }); } catch (e: any) { setErr(explainError(e)); return; } flash('Historia cerrada como resuelta: el cierre forzado queda registrado en Actividad'); await reload(); }
+      else if (a.id === 'close_resolved') { if (!itemId) { needsStory(); return; } setConfirming(null); setComposer(null); setClosingResolved(true); return; }
       else if (a.id === 'accept_plan') { onChange(await api.acceptPlan(slug, proc.id, Math.max(0, Number(addBudget) || 0))); flash('Se implementa el plan aceptado; lo pendiente queda documentado'); }
       else if (a.id === 'convert_to_analysis') { const p = await api.convertToAnalysis(slug, proc.id); flash('Encargo de análisis preparado: revísalo y autorízalo'); navigate(`/procesos/${p.id}`); }
       else if (a.id === 'retry_process') { const p = await api.retryProcess(slug, proc.id); flash('Proceso nuevo creado: elige el presupuesto y autorízalo'); navigate(`/procesos/${p.id}`); }
@@ -357,6 +360,10 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         <button className="btn btn-ghost btn-sm" style={{ alignSelf: 'flex-start' }} onClick={() => setComposer(null)}>Cancelar</button>
       </div>}
 
+      {closingResolved && itemId && <CloseResolvedDialog slug={slug} item={{ id: itemId, storyId: story?.storyId ?? itemId, title: story?.title ?? proc.title }}
+        onClosed={async () => { setClosingResolved(false); flash('Historia cerrada como resuelta: el cierre forzado queda registrado en Actividad'); await reload(); }}
+        onIntegrateFirst={(processId: string) => { setClosingResolved(false); if (processId === proc.id) requestAnimationFrame(() => { if (document.getElementById('sec-git')) go('sec-git'); else go('sec-flow'); }); else navigate(`/procesos/${processId}#sec-git`); }}
+        onCancel={() => setClosingResolved(false)} />}
       {msg && <Notice kind="info"><div>{msg}{msg.includes('tarea') && itemId && <> <button className="lnk" onClick={() => navigate(`/historias/${itemId}#tareas`)}>Ver tareas</button></>}</div></Notice>}
       {err && <Notice kind="err">{err}</Notice>}
     </section>

@@ -78,9 +78,35 @@ test('close-preview enumera lo que se omitiría sin cambiar el estado ni el hilo
   assert.equal(threadOf(item.id).filter(m => m.role === 'system' && /Cierre forzado/.test(m.content)).length, 1);
 });
 
+test('close-preview por código visible («HU-NNN»): 200 con omittedChecks, igual que por id', async () => {
+  const { item, processId } = appliedNotMerged('previsualizar por código visible');
+  const code = backlogRepo(S).get(item.id)!.storyId;
+  assert.match(code, /^HU-\d+$/i, 'la historia tiene un código visible con forma HU-NNN');
+  const statusBefore = backlogRepo(S).get(item.id)!.status;
+
+  const byId = await preview(item.id);
+  assert.equal(byId.statusCode, 200, byId.body);
+  const byCode = await preview(code);
+  assert.equal(byCode.statusCode, 200, byCode.body);
+  assert.ok(byCode.body.includes('"omittedChecks":['), 'la respuesta contiene "omittedChecks"');
+  const body = byCode.json();
+  assert.deepEqual(body.omittedChecks, ['integrar en main', 'prueba manual']);
+  assert.equal(body.lastProcessId, processId, 'el código visible apunta a la misma historia');
+  assert.deepEqual(body, byId.json(), 'por código visible y por id se obtiene la misma previsualización');
+
+  // El código también se acepta en minúsculas.
+  const lower = await preview(code.toLowerCase());
+  assert.equal(lower.statusCode, 200, lower.body);
+  assert.deepEqual(lower.json(), byId.json());
+
+  assert.equal(backlogRepo(S).get(item.id)!.status, statusBefore, 'la previsualización no cambia el estado');
+});
+
 test('close-preview de una historia inexistente: 404', async () => {
   const r = await preview('no-existe-hu187');
   assert.equal(r.statusCode, 404, r.body);
+  const r2 = await preview('HU-999999');
+  assert.equal(r2.statusCode, 404, r2.body);
 });
 
 // ---- Cableado de las pantallas (lectura de fuentes, como backlog-cards-wiring) ----
