@@ -21,7 +21,7 @@ export { parseFileBlocks, parseRuntimeChecks } from './devOutput.ts';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { INTERNAL_WORKSPACE, EFFORT_THINKING_TOKENS } from '@portal-ia/domain';
+import { INTERNAL_WORKSPACE, EFFORT_THINKING_TOKENS, isOutsidePortalStep } from '@portal-ia/domain';
 import { setWorkStatus, workItemOf, type WorkItem } from './workItems.ts';
 import { REPO_ROOT } from '../config.ts';
 import { expandHome } from '../routes/fs.ts';
@@ -603,6 +603,20 @@ export async function reopenStory(slug: string, processId: string, reason: strin
   return procs.get(created.id) ?? created;
 }
 
+/**
+ * HU-192 · Instrucción extra del prompt de QA al regenerar una lista con pasos que salen del Portal: '' si no se regenera.
+ * QA debe sustituir esos pasos por pasos que se hagan desde la interfaz del Portal.
+ */
+export function manualTestRegenerateNote(outsideSteps: readonly string[], regenerate: boolean): string {
+  if (!regenerate || !outsideSteps.length) return '';
+  return `
+
+REGENERACIÓN DE LA LISTA (pedida por el propietario): la lista actual tiene pasos que obligan a salir del Portal:
+${outsideSteps.map((s, i) => `${i + 1}. ${s.trim()}`).join('\n')}
+
+Sustituye cada uno de esos pasos por pasos que se hagan solo desde la interfaz del Portal (menús, botones, pantallas), sin abrir archivos ni mencionar rutas de archivo, la terminal o un editor. Si algo solo se puede comprobar por dentro, dilo en lenguaje llano. Cada paso con la forma «Acción. Esperado: resultado visible». Devuelve en "steps" la lista COMPLETA nueva, sin ninguno de esos pasos.`;
+}
+
 /** Estimación de generar la lista de prueba manual (1 llamada corta del Especialista QA o, en su defecto, del Coordinador). */
 export function estimateManualTest(slug: string, processId: string): { agentId: string; agentName: string; model: string; estimatedUsd: number } {
   const proc = processesRepo(slug).get(processId);
@@ -623,7 +637,7 @@ export function estimateManualTest(slug: string, processId: string): { agentId: 
  * Genera, con una llamada autorizada, la explicación para el propietario y la prueba manual paso a paso de una
  * historia ya ejecutada que no las trae (procesos anteriores a v0.11). Guarda ambas en el resultado del proceso.
  */
-export async function generateManualTest(slug: string, processId: string, log: (o: any, m: string) => void): Promise<Process> {
+export async function generateManualTest(slug: string, processId: string, log: (o: any, m: string) => void, opts: { regenerate?: boolean } = {}): Promise<Process> {
   const procs = processesRepo(slug); const proc = procs.get(processId)!;
   const est = estimateManualTest(slug, processId);
   const agent = agentsRepo(slug).get(est.agentId)!;
@@ -640,7 +654,11 @@ export async function generateManualTest(slug: string, processId: string, log: (
   const portal = !!repo && isPortalRuntime(repo.path);
   const devSteps = portal ? (r.manualTest?.steps ?? []) : [];
   // HU-190 · En el Portal, una lista ya revisada por QA no se vuelve a revisar (evita un gasto repetido por llamada directa o doble clic).
-  if (portal && r.manualTest?.reviewedBy === 'qa') throw Object.assign(new Error('La lista de prueba manual ya está revisada por QA; no se vuelve a revisar.'), { statusCode: 409, code: 'manual_test_already_reviewed' });
+  // HU-192 · «Regenerar con QA»: solo en el Portal y solo si la lista tiene pasos que salen del Portal; se salta el 409 de lista revisada.
+  const regenerate = opts.regenerate === true;
+  const outsideSteps = (r.manualTest?.steps ?? []).filter(s => isOutsidePortalStep(s));
+  if (regenerate && (!portal || !outsideSteps.length)) throw Object.assign(new Error('La lista de prueba manual no tiene pasos que salgan del Portal: no hay nada que regenerar.'), { statusCode: 409, code: 'manual_test_nothing_to_regenerate' });
+  if (!regenerate && portal && r.manualTest?.reviewedBy === 'qa') throw Object.assign(new Error('La lista de prueba manual ya está revisada por QA; no se vuelve a revisar.'), { statusCode: 409, code: 'manual_test_already_reviewed' });
   const system = `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} del proyecto «${project.name}» en Portal IA. Escribes para el propietario, que no es técnico.`;
   const user = `Historia: ${item ? `${item.storyId} · ${item.title}` : proc.title}
 Criterio de aceptación: ${item?.criterion || '(no definido)'}
@@ -653,7 +671,7 @@ ${r.changes.slice(0, 8).map(c => `## ${c.path}\n${(c.diff ?? '').slice(0, 1500)}
 Responde SOLO con JSON: {"userFacing": string (3-8 líneas en lenguaje llano: qué cambia para quien usa el Portal y DÓNDE lo verá: menú, botón, pantalla o ruta exacta; si no hay nada visible, dilo), "steps": string[] (3-10 pasos numerados de prueba manual en el Portal, cada uno "acción. Esperado: resultado"; empieza por dónde entrar)}`;
   const startedAt = new Date().toISOString();
   requirePolicy('ai_call', { slug, agentId: agent.id, projectId: proc.projectId, authorized: true });
-  const qaUser = buildManualTestQaPrompt({ portal, base: user, devSteps }); const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user: qaUser, maxTokens: 2000, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
+  const qaUser = buildManualTestQaPrompt({ portal, base: user, devSteps }) + manualTestRegenerateNote(outsideSteps, regenerate); const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user: qaUser, maxTokens: 2000, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
   const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
   procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
   procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'manual_test_gen', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
