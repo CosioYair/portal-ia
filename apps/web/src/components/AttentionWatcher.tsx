@@ -8,8 +8,8 @@ import { setAttention } from '../lib/uiBus.ts';
 /**
  * Cifras de «lo que te espera» en la empresa seleccionada, una sola vez para toda la aplicación (sustituye al botón
  * flotante de Autorizaciones): decisiones de procesos (bandeja) y peticiones de los agentes que NO son de un proceso
- * (aprendizajes por verificar, mejoras, cambios en su carpeta, acciones del chat). Las propuestas del Asistente las
- * anota su panel. Se piden al cambiar de empresa y cuando algo puede crear o cerrar una decisión (tiempo real), nunca
+ * (aprendizajes por verificar, mejoras, cambios en su carpeta, acciones del chat). Las propuestas abiertas del Asistente
+ * llegan en la bandeja (avisos 'assistant' con ws del espacio). Se piden al cambiar de empresa y cuando algo puede crear o cerrar una decisión (tiempo real), nunca
  * en cada navegación. Cada respuesta se descarta si la empresa ya no es la seleccionada.
  */
 const cache = new Map<string, { decisions: number; agentItems: number }>();
@@ -29,6 +29,6 @@ export function AttentionWatcher() {
     });
   }, [slug]);
   useEffect(() => { load(); }, [load]);
-  useLive(c => c.ws === slug && c.kind !== 'progress' && (c.entity === 'process' || c.entity === 'assignment' || c.entity === 'batch' || c.entity === 'agent' || c.entity === 'agent_chat'), load, { minMs: 3000, enabled: !!slug });
+  useLive(c => c.ws === slug && c.kind !== 'progress' && (c.entity === 'process' || c.entity === 'assignment' || c.entity === 'batch' || c.entity === 'agent' || c.entity === 'agent_chat' || c.entity === 'assistant'), load, { minMs: 3000, enabled: !!slug });
   return null;
 }
