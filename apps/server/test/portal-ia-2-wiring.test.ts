@@ -15,7 +15,14 @@ const calls = (src: string) => [...src.matchAll(/\b(api|osApi)\.([a-zA-Z]+)\(/g)
 
 /** Lecturas que la navegación puede hacer (GET); cualquier otra llamada sería una acción. */
 // EN-012: Decisiones también lee los encargos que esperan al propietario (GET /inbox/assignments, solo lectura).
-const READ_ONLY = new Set(['api.inbox', 'api.inboxAssignments', 'osApi.office', 'api.backlog', 'api.usageToday', 'api.systemStatus']);
+// HU-189: la campana y Decisiones leen cuántas acciones del chat esperan tu autorización (GET /api/assistant/pending-count),
+// aunque el panel del Asistente esté cerrado.
+const READ_ONLY = new Set(['api.inbox', 'api.inboxAssignments', 'osApi.office', 'api.backlog', 'api.usageToday', 'api.systemStatus', 'api.assistantPendingCount']);
+
+test('HU-189: api.assistantPendingCount es una lectura (GET sin cuerpo ni método)', () => {
+  const api = read('lib/api.ts');
+  assert.match(api, /assistantPendingCount: \(\) => request<\{ count: number \}>\('\/api\/assistant\/pending-count'\),/);
+});
 
 test('EN-012: api.inboxAssignments es una lectura (GET sin cuerpo ni método)', () => {
   const api = read('lib/api.ts');

@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { noteFailure, noteResponse } from './liveStatus.ts';
+import type { LiveChange } from './attention.ts';
+// HU-189 · El tipo y el filtro compartido viven en attention.ts (sin DOM) para que también los usen las pruebas del servidor.
+export type { LiveChange } from './attention.ts';
+export { attentionChange } from './attention.ts';
 
 /**
  * Tiempo real en la interfaz: UNA conexión (Server-Sent Events, /api/events) por pestaña visible. El servidor solo dice
@@ -11,7 +15,6 @@ import { noteFailure, noteResponse } from './liveStatus.ts';
  *   volver a verse se reconecta y vuelve a pedir todo.
  * - Los latidos llevan la hora del servidor: la pantalla sabe que está al día aunque no haga peticiones.
  */
-export interface LiveChange { ws: string | null; entity: 'process' | 'backlog' | 'batch' | 'assignment' | 'assistant' | 'system' | 'knowledge' | 'agent' | 'story' | 'usage' | 'department' | 'agent_chat'; id: string | null; projectId?: string | null; itemId?: string | null; kind?: 'state' | 'progress' }
 type Sub = { match: (c: LiveChange) => boolean; fire: (resync: boolean) => void };
 
 const subs = new Set<Sub>();
@@ -99,6 +102,10 @@ export function useLive(match: (c: LiveChange) => boolean, refetch: () => unknow
     return () => { subs.delete(sub); if (timer) clearTimeout(timer); };
   }, [minMs, enabled]);
 }
+
+
+
+
 
 /**
  * Respuestas fuera de orden: solo se aplica la de la petición más reciente (una respuesta lenta y antigua nunca pisa a
