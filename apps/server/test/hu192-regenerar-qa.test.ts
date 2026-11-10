@@ -105,11 +105,24 @@ test('ruta: sin autorización no se llama a la IA; regenerate inválido se recha
   const url = `/api/workspaces/${slug}/processes/${id}/manual-test/generate`;
   const before = calls().length;
   const a = await app.inject({ method: 'POST', url, payload: { regenerate: true } });
-  assert.ok(a.statusCode >= 400, a.body);
+  assert.equal(a.statusCode, 400, a.body);
   const b = await app.inject({ method: 'POST', url, payload: { authorized: true, regenerate: 'sí' } });
-  assert.ok(b.statusCode >= 400, b.body);
+  assert.equal(b.statusCode, 400, b.body);
   assert.equal(calls().length, before, 'sin autorización válida no hay llamada');
   assert.equal(processesRepo(slug).get(id)!.result!.manualTest!.steps[0], OUTSIDE);
+  await app.close();
+});
+
+test('ruta: regenerar sin pasos marcados → 409 con code manual_test_nothing_to_regenerate y sin IA', async () => {
+  const id = reviewed(CLEAN);
+  const app = await buildApp();
+  const url = `/api/workspaces/${slug}/processes/${id}/manual-test/generate`;
+  const before = calls().length;
+  const r = await app.inject({ method: 'POST', url, payload: { authorized: true, regenerate: true } });
+  assert.equal(r.statusCode, 409, r.body);
+  assert.equal(r.json().code, 'manual_test_nothing_to_regenerate');
+  assert.equal(calls().length, before, 'sin pasos marcados no hay llamada');
+  assert.deepEqual(processesRepo(slug).get(id)!.result!.manualTest!.steps, CLEAN);
   await app.close();
 });
 
