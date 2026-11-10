@@ -20,11 +20,16 @@ import { INTERNAL_SLUG } from '../lib/routes.ts';
 /** HU-198 · Clave del modelo elegido para una conversación (independiente en cada una y conservado al recargar). */
 const modelKey = (convId: string | null) => `portal-ia.asistente.modelo.${convId ?? 'nueva'}`;
 
-/** HU-198 · Etiqueta de una respuesta: sale SIEMPRE del mensaje guardado (model y costUsd), nunca de la selección local. */
-function replyMeta(m: AssistantMessage, subscription: boolean, labelOf: (id: string) => string): string | null {
+/**
+ * HU-198 · Etiqueta de una respuesta: sale SIEMPRE del mensaje guardado (model y costUsd), nunca de la selección local.
+ * `billing` es el tipo de costo con que el servidor respondió ESE mensaje (si se conoce); nunca el actual del agente.
+ * Con costo 0 y tipo desconocido solo se muestra el modelo.
+ */
+function replyMeta(m: AssistantMessage, billing: 'api' | 'subscription' | null, labelOf: (id: string) => string): string | null {
   if (!m.model && !(m.costUsd > 0)) return null;
   const model = m.model ? labelOf(m.model) : 'modelo sin registrar';
-  return m.costUsd === 0 && subscription ? `${model} · Suscripción` : `${model} · ${m.tokensIn + m.tokensOut} tokens · ${fmtUsd(m.costUsd)}`;
+  if (m.costUsd > 0 || billing === 'api') return `${model} · ${m.tokensIn + m.tokensOut} tokens · ${fmtUsd(m.costUsd)}`;
+  return billing === 'subscription' ? `${model} · Suscripción` : model;
 }
 
 const MAX_IMAGES = 4;
@@ -154,6 +159,8 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
   const [modelSel, setModelSel] = useState<string | null>(() => { try { return localStorage.getItem(modelKey(convId)); } catch { return null; } });
   useEffect(() => { try { setModelSel(localStorage.getItem(modelKey(convId))); } catch { setModelSel(null); } }, [convId]);
   const [savingDefault, setSavingDefault] = useState(false);
+  // Tipo de costo con que el servidor respondió cada mensaje enviado en esta sesión (por id del mensaje guardado).
+  const [replyBilling, setReplyBilling] = useState<Record<string, 'api' | 'subscription'>>({});
   const pickModel = (m: string) => { setModelSel(m); try { localStorage.setItem(modelKey(convId), m); } catch { /* sin almacenamiento */ } };
   const resetModel = () => { setModelSel(null); try { localStorage.removeItem(modelKey(convId)); } catch { /* sin almacenamiento */ } };
   const load = async (id: string | null = convId) => {
@@ -283,7 +290,8 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
       const r = await api.sendAssistant(content, imgs.map(({ mediaType, data, name }) => ({ mediaType, data, name })), texts.map(f => ({ name: f.name, mediaType: f.mediaType, bytes: f.bytes })), convId, sendModel);
       // Solo tras una respuesta correcta se limpian el campo y los adjuntos.
       msgDraft.clear(); setImages([]);
-      if (modelSel && r.conversationId !== convId) { try { localStorage.setItem(modelKey(r.conversationId), modelSel); } catch { /* sin almacenamiento */ } }
+      if (modelSel && r.conversationId !== convId) { try { localStorage.setItem(modelKey(r.conversationId), modelSel); localStorage.removeItem(modelKey(null)); } catch { /* sin almacenamiento */ } }
+      setReplyBilling(b => ({ ...b, [r.assistant.id]: r.info.billing }));
       setMsgs(m => [...m.filter(x => x.id !== 'tmp'), r.user, r.assistant]); setInfo(r.info); onInfo?.(r.info);
       await load(r.conversationId).catch(() => null); // decisiones, etapa y siguiente acción al día
       if (r.assistant.actions.some(a => a.status === 'done' && (a.type === 'create_company' || a.type === 'create_project'))) await refreshStructure();
@@ -337,7 +345,7 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
               ? <ProposalCard key={`${m.id}-${i}`} msgId={m.id} action={a} onResolved={replaceMsg} />
               : <ActionRow key={`${m.id}-${i}`} a={a} />)}
           </div>}
-          {m.role === 'assistant' && (() => { const meta = replyMeta(m, info?.billing === 'subscription', labelOf); return meta ? <span className="small mono muted">{meta}</span> : null; })()}
+          {m.role === 'assistant' && (() => { const meta = replyMeta(m, replyBilling[m.id] ?? null, labelOf); return meta ? <span className="small mono muted">{meta}</span> : null; })()}
           {m.id === 'tmp' && busy && <span className="small muted">enviando con {labelOf(chatModel)}</span>}
         </div>)}
         {busy && <div style={{ display: 'flex', gap: 8, alignItems: 'center' }} className="muted sm13"><span className="spin" /> El asistente está pensando…</div>}
