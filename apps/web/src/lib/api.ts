@@ -16,6 +16,8 @@ import { ownerNeeded, ownerToken, setOwnerToken } from './owner.ts';
 
 /** Invocación real del arnés de un agente (lo que se le pasa de verdad, calculado en el servidor sin ejecutar nada). */
 export interface AgentInvocation { harness: ExecutionBackend; model: string; effort: string; modelLevels: string[]; cli: { version: string | null; billing: string; effortLevels: string[]; checkedAt: string } | null; effortPassed: string | null; note: string }
+/** HU-187 · Previsualización (solo lectura) de lo que omitiría cerrar una historia como resuelta. */
+export interface StoryClosePreview { omittedChecks: string[]; lastProcessId: string | null; merged: boolean }
 export class ApiError extends Error {
   constructor(public status: number, message: string, public body?: any) { super(message); }
 }
@@ -319,6 +321,8 @@ export const api = {
   systemSandbox: (force = false) => request<{ available: 'docker' | 'wsl' | 'host-min' | 'unavailable'; docker: boolean; wsl: boolean; detail: string; checkedAt: string }>(`/api/system/sandbox${force ? '?force=1' : ''}`),
   systemPolicy: () => request<{ op: string; level: 'local' | 'auth' | 'external'; tool: string | null; label: string }[]>('/api/system/policy'),
   markStoryDone: (slug: string, id: string, opts?: { force: boolean; reason?: string }) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/done`, { method: 'POST', body: opts ? JSON.stringify(opts) : undefined }),
+  /** HU-187 · Qué comprobaciones se omitirían al cerrar como resuelta (sin efectos). */
+  storyClosePreview: (slug: string, id: string) => request<StoryClosePreview>(`/api/workspaces/${slug}/backlog/${encodeURIComponent(id)}/close-preview`),
   /** HU-165 · Cancelar historia: queda en «Descartadas» con su motivo (sin IA). 409 si está en curso, completada o descartada. */
   discardStory: (slug: string, id: string, reason: string) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/discard`, { method: 'POST', body: JSON.stringify({ reason: reason.trim() }) }),
   // M6 · espacio de la historia

@@ -9,6 +9,17 @@ import { FeedbackToTeam } from './FeedbackToTeam.tsx';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
 import { Markdown } from './Markdown.tsx';
+import { CloseResolvedDialog } from './CloseResolvedDialog.tsx';
+
+/** HU-187 · Lleva la vista a la primera sección existente (la de integrar y, si no está, el recorrido) y la enfoca. */
+function focusSection(ids: string[]) {
+  const el = ids.map(i => document.getElementById(i)).find((x): x is HTMLElement => !!x);
+  if (!el) return;
+  const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+  el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+  if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
+  el.focus({ preventScroll: true });
+}
 
 /**
  * Resumen legible de una historia ejecutada y su orden de cierre (M2):
@@ -74,13 +85,12 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
   const saveNote = async () => { if (!mt) return; try { const p = await api.manualTest(slug, proc.id, mt.checks, note || null); onChange(p); } catch (e: any) { setErr(e.message); } };
   const storyClosed = /Historia completada|Historia descartada/.test(proc.guidance?.phase ?? '');
   const refresh = async () => { try { onChange(await api.process(slug, proc.id)); } catch { /* sin cambios */ } };
-  const closeResolved = async () => {
-    if (!proc.backlogItemId) return;
-    const reason = prompt('Cerrar la historia como resuelta (sin integrar esta iteración). Indica brevemente por qué; queda registrado:', legacy ? 'Lo que pedía ya funciona en el Portal (incluido en v0.12)' : 'resuelta fuera del flujo');
-    if (reason === null) return;
-    setBusy(true); setErr(null);
-    try { await api.markStoryDone(slug, proc.backlogItemId, { force: true, reason: reason.trim() }); flash('Historia cerrada como resuelta'); await refresh(); } catch (e: any) { setErr(e?.message ?? 'No se pudo cerrar la historia.'); } finally { setBusy(false); }
-  };
+  // HU-187 · «Cerrar como resuelta» abre el diálogo del Portal: muestra lo que se omitirá, pide un motivo (vacío) y propone integrar primero.
+  const [closingOpen, setClosingOpen] = useState(false);
+  const closeResolved = () => { if (!proc.backlogItemId) return; setErr(null); setClosingOpen(true); };
+  const onResolvedClosed = async () => { setClosingOpen(false); flash('Historia cerrada como resuelta'); await refresh(); };
+  const integrateFirst = () => { setClosingOpen(false); requestAnimationFrame(() => focusSection(['sec-git', 'sec-flow'])); };
+  const storyIdOf = proc.title.match(/\b[A-Z]{2,}-\d+[a-z]?\b/)?.[0] ?? 'la historia';
   const close = async () => { setBusy(true); setErr(null); try { await onClose(); flash('Historia completada'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
 
   return <section className="card" style={{ borderColor: 'var(--color-accent-border)' }}>
@@ -150,6 +160,8 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
         {!canClose && !storyClosed && !legacy && proc.backlogItemId && <button className="lnk small" onClick={closeResolved} disabled={busy} title="Si la historia ya está resuelta por otro camino, ciérrala indicando el motivo (queda registrado)">Cerrar como resuelta fuera del flujo</button>}
         </>}
       </div>
+      {closingOpen && proc.backlogItemId && <CloseResolvedDialog slug={slug} item={{ id: proc.backlogItemId, storyId: storyIdOf, title: proc.title }}
+        onClosed={onResolvedClosed} onIntegrateFirst={integrateFirst} onCancel={() => setClosingOpen(false)} />}
     </div>
   </section>;
 }

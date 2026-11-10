@@ -16,6 +16,26 @@ import { draftKey, useDraft } from '../lib/persist.ts';
 import { TeamReady } from '../components/TeamReady.tsx';
 import { StoryCard, STATUS_ICON, type StoryCardAction } from '../components/StoryCard.tsx';
 import { Disclosure } from '../components/Disclosure.tsx';
+import { CloseResolvedDialog } from '../components/CloseResolvedDialog.tsx';
+
+/**
+ * HU-187 · Tras navegar a un proceso, espera a que aparezca su sección de integración (o el recorrido) y la enfoca.
+ * Así «Integrar primero» abre la historia directamente en la etapa Integrar.
+ */
+function focusSectionSoon(ids: string[], tries = 40) {
+  const tick = (n: number) => {
+    const el = ids.map(i => document.getElementById(i)).find((x): x is HTMLElement => !!x);
+    if (el) {
+      const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+      el.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+      if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
+      el.focus({ preventScroll: true });
+      return;
+    }
+    if (n > 0) setTimeout(() => tick(n - 1), 150);
+  };
+  tick(tries);
+}
 
 const DECISION_CTA: Record<PendingDecisionKind, string> = {
   process_authorization: 'Autorizar',
@@ -53,6 +73,8 @@ export function Backlog() {
   const [auth, setAuth] = useState(false);
   const [pipeline, setPipeline] = useState<PipelineConfig>(DEFAULT_PIPELINE);
   const [busy, setBusy] = useState(false);
+  // HU-187 · Historia cuyo «Cerrar como resuelta» está abierto en el diálogo del Portal.
+  const [closing, setClosing] = useState<BacklogItem | null>(null);
   // Borradores (por empresa y proyecto): la solicitud nueva y el análisis pedido al equipo sobreviven a recargar.
   const newDraft = useDraft(draftKey('backlog.nueva', ws.slug, projectId), { title: '', crit: '' });
   const newTitle = newDraft.value.title; const newCrit = newDraft.value.crit;
@@ -117,12 +139,15 @@ export function Backlog() {
   const delegate = async () => { if (delegText.trim().length < 8) return; setBusy(true); try { const p = await api.createDelegation(ws.slug, { projectId, request: delegText.trim() }); delegDraft.clear(); flash('Encargo creado: autorízalo con un presupuesto'); navigate(`/procesos/${p.id}`); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   const resetItem = async (it: BacklogItem) => { const reason = prompt(`Devolver ${it.storyId} a pendiente (su diff pendiente queda rechazado). Motivo:`, 'alcance replanteado'); if (reason === null) return; setBusy(true); try { await api.resetStory(ws.slug, it.id, reason.trim() || undefined); flash(`${it.storyId} devuelta a pendiente`); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); } };
   const closeStory = async (it: BacklogItem, force: boolean) => {
-    if (force) { const reason = prompt(`Cerrar ${it.storyId} como resuelta fuera del flujo (sin ejecutarla ni integrar cambios). Indica brevemente por qué:`); if (reason === null) return; setBusy(true); try { await api.markStoryDone(ws.slug, it.id, { force: true, reason: reason.trim() }); flash(`${it.storyId} cerrada`); await load(); } catch (e: any) { flash(e?.message ?? 'No se pudo cerrar la historia.', 'err'); } finally { setBusy(false); } return; }
+    // HU-187 · El cierre forzado abre el diálogo (lo que se omitirá, motivo vacío y «Integrar primero»), no un prompt del navegador.
+    if (force) { setClosing(it); return; }
     setBusy(true); try { await api.markStoryDone(ws.slug, it.id); flash(`${it.storyId} completada`); await load(); } catch (e: any) { flash(e.message, 'err'); } finally { setBusy(false); }
   };
+  const onResolvedClosed = async () => { const it = closing; setClosing(null); flash(`${it?.storyId ?? 'Historia'} cerrada como resuelta`); try { await load(); } catch { /* el tiempo real lo vuelve a pedir */ } };
+  const integrateFirst = (processId: string) => { setClosing(null); navigate(`/procesos/${processId}#sec-git`); focusSectionSoon(['sec-git', 'sec-flow']); };
   // HU-165 · Cancelar = «no se hará»: queda en Descartadas (no en Completadas). No consume IA; el servidor deja el motivo en el hilo.
   const cancelStory = async (it: BacklogItem) => {
-    if (!confirm(`¿Cancelar ${it.storyId} · ${it.title}?\n\nNo se hará: la historia queda en «Descartadas», no en Completadas.\nSi ya está resuelta por otra vía, usa «Cerrar sin ejecutar».`)) return;
+    if (!confirm(`¿Cancelar ${it.storyId} · ${it.title}?\n\nNo se hará: la historia queda en «Descartadas», no en Completadas.\nSi ya está resuelta por otra vía, usa «Cerrar como resuelta».`)) return;
     const reason = prompt(`Motivo para cancelar ${it.storyId} (mínimo 3 caracteres):`);
     if (reason === null) return;
     if (reason.trim().length < 3) { flash('Indica un motivo de al menos 3 caracteres para cancelar la historia', 'err'); return; }
@@ -184,7 +209,7 @@ export function Backlog() {
     if (it.status !== 'done' && it.status !== 'in_progress' && it.status !== 'discarded') {
       // «Cancelar historia» nunca es la acción principal: solo va en «Más acciones».
       secondary.push({ label: 'Cancelar historia', title: 'No se hará: la historia queda en Descartadas (pide confirmación y motivo)', onClick: () => cancelStory(it), disabled: busy });
-      secondary.push({ label: 'Cerrar sin ejecutar', title: 'Cerrar sin ejecutar: la historia ya está resuelta por otra vía y queda en Completadas', onClick: () => closeStory(it, true), disabled: busy });
+      secondary.push({ label: 'Cerrar como resuelta', title: 'La historia ya está resuelta por otra vía: muestra lo que se omitiría y permite integrar primero', onClick: () => closeStory(it, true), disabled: busy });
     }
     return { primary, secondary };
   };
@@ -296,6 +321,9 @@ export function Backlog() {
               </div>
             </div>
           )}
+
+          {closing && <CloseResolvedDialog slug={ws.slug} item={{ id: closing.id, storyId: closing.storyId, title: closing.title }}
+            onClosed={onResolvedClosed} onIntegrateFirst={integrateFirst} onCancel={() => setClosing(null)} />}
 
           <aside style={{ flex: '1 1 320px', maxWidth: 400, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
             <section className="card">
