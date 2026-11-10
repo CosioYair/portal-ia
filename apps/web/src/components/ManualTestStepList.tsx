@@ -35,6 +35,27 @@ interface Props {
   regenerateAction?: ReactNode;
 }
 
+/** HU-192 · Texto de un paso: la acción en negrita y, si existe, «Esperado:» en una línea propia. */
+export function ManualStepText({ text }: { text: string }) {
+  const parts = splitManualStep(text);
+  return (
+    <div className="mts-text">
+      <strong className="mts-action">{parts.action}</strong>
+      {parts.expected && <div className="mts-expected"><span>Esperado:</span> {parts.expected}</div>}
+    </div>
+  );
+}
+
+/** HU-192 · Aviso de un paso marcado como fuera del Portal. */
+export function OutsidePortalNote() {
+  return (
+    <div role="note" className="mts-outside">
+      <span className="mts-outside-icon" aria-hidden="true">⚠</span>
+      <span>Este paso sale del Portal<span className="mts-outside-why">: pide abrir archivos, una terminal o un editor.</span></span>
+    </div>
+  );
+}
+
 /** Lista «Qué probar, paso a paso»: cada ítem lleva en su fila OK, Falla, Observación y su comentario. */
 export function ManualTestStepList({ steps, checks, initialFeedback, onSave, onChange, failureActions, regenerateAction }: Props) {
   const [drafts, setDrafts] = useState<Record<string, Draft>>(
@@ -114,15 +135,11 @@ export function ManualTestStepList({ steps, checks, initialFeedback, onSave, onC
         {items.map(item => {
           const st = status[item.stepKey] ?? 'idle';
           const n = item.index + 1;
-          const parts = splitManualStep(item.text);
           return (
             <li key={item.stepKey} className={`mts-item${item.done ? ' is-done' : ''}${item.result === 'fail' ? ' is-fail' : ''}`} data-result={item.result ?? 'none'}>
               <div className="mts-row">
                 <span className="mts-num">{n}.</span>
-                <div className="mts-text">
-                  <strong className="mts-action">{parts.action}</strong>
-                  {parts.expected && <div className="mts-expected"><span>Esperado:</span> {parts.expected}</div>}
-                </div>
+                <ManualStepText text={item.text} />
                 <div className="mts-actions" role="group" aria-label={`Resultado del paso ${n}`}>
                   {OPTIONS.map(o => (
                     <button key={o.value} type="button" className={`btn btn-sm btn-secondary mts-opt mts-opt-${o.value}`} aria-pressed={item.result === o.value} onClick={() => pick(item.stepKey, o.value)}>
@@ -131,12 +148,7 @@ export function ManualTestStepList({ steps, checks, initialFeedback, onSave, onC
                   ))}
                 </div>
               </div>
-              {item.outsidePortal && (
-                <div role="note" className="mts-outside">
-                  <span className="mts-outside-icon" aria-hidden="true">⚠</span>
-                  <span>Este paso sale del Portal<span className="mts-outside-why">: pide abrir archivos, una terminal o un editor.</span></span>
-                </div>
-              )}
+              {item.outsidePortal && <OutsidePortalNote />}
               <textarea className="input mts-comment" rows={2} maxLength={2000} placeholder="Comentario del paso (opcional)" aria-label={`Comentario del paso ${n}`}
                 value={item.comment} onChange={e => typeComment(item.stepKey, e.target.value)} onBlur={() => blurComment(item.stepKey)} />
               <div className="mts-status small" role="status" aria-live="polite">

@@ -657,7 +657,8 @@ export async function generateManualTest(slug: string, processId: string, log: (
   // HU-192 · «Regenerar con QA»: solo en el Portal y solo si la lista tiene pasos que salen del Portal; se salta el 409 de lista revisada.
   const regenerate = opts.regenerate === true;
   const outsideSteps = (r.manualTest?.steps ?? []).filter(s => isOutsidePortalStep(s));
-  if (regenerate && (!portal || !outsideSteps.length)) throw Object.assign(new Error('La lista de prueba manual no tiene pasos que salgan del Portal: no hay nada que regenerar.'), { statusCode: 409, code: 'manual_test_nothing_to_regenerate' });
+  if (regenerate && !portal) throw Object.assign(new Error('«Regenerar con QA» solo está disponible en el Portal.'), { statusCode: 409, code: 'manual_test_regenerate_portal_only' });
+  if (regenerate && !outsideSteps.length) throw Object.assign(new Error('La lista de prueba manual no tiene pasos que salgan del Portal: no hay nada que regenerar.'), { statusCode: 409, code: 'manual_test_nothing_to_regenerate' });
   if (!regenerate && portal && r.manualTest?.reviewedBy === 'qa') throw Object.assign(new Error('La lista de prueba manual ya está revisada por QA; no se vuelve a revisar.'), { statusCode: 409, code: 'manual_test_already_reviewed' });
   const system = `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} del proyecto «${project.name}» en Portal IA. Escribes para el propietario, que no es técnico.`;
   const user = `Historia: ${item ? `${item.storyId} · ${item.title}` : proc.title}

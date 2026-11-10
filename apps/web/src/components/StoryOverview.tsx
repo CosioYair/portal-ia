@@ -4,7 +4,7 @@ import { isOutsidePortalStep, manualTestStepKey } from '@portal-ia/domain';
 import { api, type AssignmentView } from '../lib/api.ts';
 import { AcceptAssignmentAction } from './ConversationPanel.tsx';
 import { getManualTestFeedback, saveManualTestStepFeedback } from '../lib/manualTestFeedback.ts';
-import { ManualTestStepList } from './ManualTestStepList.tsx';
+import { ManualStepText, ManualTestStepList, OutsidePortalNote } from './ManualTestStepList.tsx';
 import { FeedbackToTeam } from './FeedbackToTeam.tsx';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
@@ -65,7 +65,8 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
   const needsQaReview = isPortal && !!r.manualTest && r.manualTest.reviewedBy !== 'qa' && proc.status === 'done';
   // HU-192 · Si algún paso sale del Portal, QA puede regenerar la lista aunque ya la haya revisado (la estimación lo admite).
   const hasOutside = !!r.manualTest?.steps.some(s => isOutsidePortalStep(s));
-  const canRegenerate = hasOutside && proc.status === 'done';
+  // Solo en el Portal (como needsQaReview): fuera de él el servidor rechaza la regeneración (409 manual_test_regenerate_portal_only).
+  const canRegenerate = isPortal && hasOutside && proc.status === 'done';
   useEffect(() => { if ((!r.manualTest || needsQaReview || canRegenerate) && proc.status === 'done') api.manualTestEstimate(slug, proc.id).then(setGenEst).catch(() => setGenEst(null)); }, [r.manualTest, needsQaReview, canRegenerate, proc.id, proc.status, slug]);
   const regenerate = async () => {
     setRegenState('running'); setRegenErr(null);
@@ -164,7 +165,7 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
           <div><button className="btn btn-primary btn-sm" onClick={generate} disabled={!genAuth || busy}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}Revisar la lista con QA</button></div>
         </div>}
         {!testEnabled ? <>{regenBlock && <div style={{ marginBottom: 10 }}>{regenBlock}</div>}<details><summary className="small muted" style={{ cursor: 'pointer' }}>Se habilita cuando los cambios estén integrados{portalFlow ? ', activados y comprobados en ejecución' : ''}. Ver los {mt.steps.length} pasos</summary>
-          <ol className="sm13" style={{ margin: '8px 0 0', paddingLeft: 22, display: 'flex', flexDirection: 'column', gap: 4 }}>{mt.steps.map((t, i) => <li key={i}>{t}</li>)}</ol></details></> : <>
+          <ol className="sm13" style={{ margin: '8px 0 0', paddingLeft: 22, display: 'flex', flexDirection: 'column', gap: 4 }}>{mt.steps.map((t, i) => <li key={i}><ManualStepText text={t} />{isOutsidePortalStep(t) && <OutsidePortalNote />}</li>)}</ol></details></> : <>
         <div>
           {feedback ? <ManualTestStepList key={`${proc.id}:${mt.steps.length}:${stepsSig}`} steps={mt.steps} checks={mt.checks} initialFeedback={feedback} onSave={onStepSave}
             regenerateAction={regenBlock ?? undefined}
