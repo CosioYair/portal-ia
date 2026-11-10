@@ -77,7 +77,9 @@ test('enviar «hola» con otro modelo: el mensaje guardado lleva ese modelo y su
 
 test('«usar por defecto» con {...cfg, model}: cambia solo el modelo y se conservan los demás ajustes', async () => {
   const before = structuredClone(cfgOf()) as any;
-  const next = CATALOG.find(m => m !== before.model)!;
+  // Un modelo que no sea el actual ni un alternativo (la ruta nunca deja el principal entre sus alternativos).
+  const next = CATALOG.find(m => m !== before.model && !(before.fallbacks ?? []).includes(m))!;
+  assert.ok(next, 'hay un modelo del catálogo distinto del actual y de sus alternativos');
   const put = await inject('PUT', `${W}/agents/${asst.id}/config`, { ...before, model: next });
   assert.equal(put.status, 200, JSON.stringify(put.body));
   const afterCfg = cfgOf() as any;
