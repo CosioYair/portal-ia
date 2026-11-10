@@ -77,7 +77,7 @@ export function StoryOverview({ proc, onChange, onClose }: { proc: Process; onCh
     const reason = prompt('Cerrar la historia como resuelta (sin integrar esta iteración). Indica brevemente por qué; queda registrado:', legacy ? 'Lo que pedía ya funciona en el Portal (incluido en v0.12)' : 'resuelta fuera del flujo');
     if (reason === null) return;
     setBusy(true); setErr(null);
-    try { await api.markStoryDone(slug, proc.backlogItemId, { force: true, reason: reason.trim() || 'resuelta fuera del flujo' }); flash('Historia cerrada como resuelta'); await refresh(); } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
+    try { await api.markStoryDone(slug, proc.backlogItemId, { force: true, reason: reason.trim() }); flash('Historia cerrada como resuelta'); await refresh(); } catch (e: any) { setErr(e?.message ?? 'No se pudo cerrar la historia.'); } finally { setBusy(false); }
   };
   const close = async () => { setBusy(true); setErr(null); try { await onClose(); flash('Historia completada'); } catch (e: any) { setErr(e.message); } finally { setBusy(false); } };
 
