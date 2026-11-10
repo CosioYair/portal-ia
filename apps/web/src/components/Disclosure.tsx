@@ -6,14 +6,18 @@ import type { ReactNode } from 'react';
  * El navegador gestiona el teclado (Tab para enfocar, Intro o Espacio para abrir y cerrar)
  * y anuncia el estado expandido. No añade dependencias.
  */
-export function Disclosure({ title, hint, defaultOpen = false, children }: {
+export function Disclosure({ title, hint, defaultOpen = false, className, testId, children }: {
   title: string;
   hint?: string;
   defaultOpen?: boolean;
+  /** HU-201 · Clases extra que se suman a «disclosure» (opcional; sin ellas el marcado no cambia). */
+  className?: string;
+  /** HU-201 · Se pone en data-testid del <details> (opcional). */
+  testId?: string;
   children: ReactNode;
 }) {
   return (
-    <details className="disclosure" open={defaultOpen ? true : undefined}>
+    <details className={className ? `disclosure ${className}` : 'disclosure'} open={defaultOpen ? true : undefined} data-testid={testId}>
       <summary className="disclosure-summary">
         <span className="disclosure-marker" aria-hidden="true" />
         <span className="disclosure-text">

@@ -12,6 +12,7 @@ import { GAUNTLET_MODE } from '../components/Gauntlet.tsx';
 import { BatchStoryPicker, STATUS_LABEL } from '../components/BatchStoryPicker.tsx';
 import { Chip, DraftNote, Icon, Notice } from '../components/ui.tsx';
 import { EmptyState, Tile, WorkTabs } from '../components/kit.tsx';
+import { Disclosure } from '../components/Disclosure.tsx';
 import { draftKey, useDraft, usePersistentState } from '../lib/persist.ts';
 import { officeHome } from '../lib/routes.ts';
 
@@ -64,7 +65,7 @@ export function Batches() {
             </div>
           {!creating && <div className="page-head-actions"><button className="btn btn-primary" onClick={() => setCreating(true)} disabled={!!active} title={active ? 'Ya hay un lote activo en este proyecto' : undefined}>{Icon.activity()}Nuevo lote</button></div>}
         </div><WorkTabs /></header>
-        <details className="disclosure"><summary className="disclosure-summary"><span className="disclosure-marker" aria-hidden="true" /><span className="disclosure-text"><span className="disclosure-title">Cómo funciona un lote</span></span></summary><div className="sm13 muted" style={{ maxWidth: '75ch', padding: '0 0 8px 24px' }}>Autorizas una vez un alcance acotado (historias, presupuesto, límites, Gauntlet, qué operaciones git) y el coordinador del lote, sin IA, las ejecuta en orden seguro, integra de una en una y te deja cada historia lista para <strong>tu aceptación</strong>, que es distinta de QA.</div></details>
+        <Disclosure title="Cómo funciona un lote"><div className="sm13 muted" style={{ maxWidth: '75ch' }}>Autorizas una vez un alcance acotado (historias, presupuesto, límites, Gauntlet, qué operaciones git) y el coordinador del lote, sin IA, las ejecuta en orden seguro, integra de una en una y te deja cada historia lista para <strong>tu aceptación</strong>, que es distinta de QA.</div></Disclosure>
         {creating && <BatchWizard onClose={() => setCreating(false)} onCreated={() => { setCreating(false); void load(); }} />}
         {active && !creating && <Notice kind="info">Lote activo: <Link to={`/lotes/${active.id}`}><strong>{active.title}</strong></Link> · {STATUS[active.status].label}{active.reason ? ` · ${active.reason}` : ''}</Notice>}
         <section className="card">
@@ -176,8 +177,8 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
               <div className="eyebrow">1 · Historias</div>
               {!all ? <span className="spin" /> : !items.some(i => i.status === 'pending' || i.status === 'blocked') ? <div className="small muted">No hay historias pendientes en el backlog.</div> :
                 <BatchStoryPicker items={items} owners={owners} selected={sel} onAdd={add} onRemove={remove} onClear={() => setSel([])} persistKey={`portal-ia.lote.filtros.${ws.slug}.${projectId}`} />}
-              {sel.length > 0 && <details open={sel.length <= 12} data-testid="batch-order">
-                <summary className="small" style={{ cursor: 'pointer' }}><strong>Orden de la selección ({sel.length})</strong> · {custom ? 'orden manual' : 'orden del backlog (su prioridad)'}; el plan pone siempre las dependencias antes</summary>
+              {sel.length > 0 && <Disclosure testId="batch-order" defaultOpen={sel.length <= 12} title={`Orden de la selección (${sel.length})`} hint={`${custom ? 'orden manual' : 'orden del backlog (su prioridad)'}; el plan pone siempre las dependencias antes`}>
+                
                 <div className="small muted" style={{ display: 'flex', gap: 8, margin: '6px 0', alignItems: 'center', flexWrap: 'wrap' }}>{custom && <button type="button" className="btn btn-ghost btn-sm" onClick={resetOrder}>Volver al orden del backlog</button>}<span>Cambiar «depende de» se guarda en la historia del backlog (también para lotes futuros), aunque no autorices este lote.</span></div>
                 <datalist id="bw-story-ids">{items.map(i => <option key={i.id} value={i.storyId}>{i.title}</option>)}</datalist>
                 <ol className="bw-selected">
@@ -195,7 +196,7 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
                       <button type="button" className="bw-icon-btn" onClick={() => remove([id])} aria-label={`Quitar ${it.storyId} de la selección`}>×</button>
                     </li>); })}
                 </ol>
-              </details>}
+              </Disclosure>}
             </div>
 
             <div className="bw-section" data-testid="batch-sources">
@@ -254,13 +255,13 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
               <label className="ck"><input className="cb" type="checkbox" checked={!!g.publish} disabled={!g.merge} onChange={e => set({ git: { ...g, publish: e.target.checked } })} /><span><strong>Publicar en GitHub</strong> tras integrar: es una operación externa y visible.{!g.merge ? ' (exige integrar)' : ''}</span></label>
             </div>
 
-            {preview && fresh && <details data-testid="batch-preview">
-              <summary className="small" style={{ cursor: 'pointer' }}><strong>Plan detallado ({preview.plan.length} historia(s))</strong> · orden, oleadas, llamadas y motivo de cada una</summary>
+            {preview && fresh && <Disclosure testId="batch-preview" title={`Plan detallado (${preview.plan.length} historia(s))`} hint="orden, oleadas, llamadas y motivo de cada una">
+              
               <div className="bw-table-wrap" style={{ marginTop: 8 }}><table className="tbl"><thead><tr><th>#</th><th>Historia</th><th>Oleada</th><th>Gauntlet</th><th>Llamadas</th><th>API</th><th>Estado</th></tr></thead><tbody>
                 {preview.plan.map(p => <tr key={p.id}><td className="mono">{p.order + 1}</td><td className="small"><span className="mono">{p.storyId}</span> {p.title}{p.dependsOn ? <span className="muted"> · tras {p.dependsOn}{p.dependsInBatch ? '' : ' (fuera del lote)'}</span> : null}</td><td className="mono">{p.wave + 1}</td><td className="small" title={p.gauntlet?.reason ?? undefined}>{p.gauntlet ? GAUNTLET_MODE[p.gauntlet.mode].label : '—'}</td><td className="mono small">{range(p.calls)}</td><td className="mono small">{p.estimatedUsd == null ? '—' : fmtUsd(p.estimatedUsd)}</td>
                   <td className="small">{p.executable ? 'se ejecutará' : <><Chip xs tone="err">{p.blockedReason ? 'bloqueada' : 'no empezará'}</Chip> {p.problems.join(' ')}</>}</td></tr>)}
               </tbody></table></div>
-            </details>}
+            </Disclosure>}
           </div>
 
           <aside className="bw-aside" aria-label="Resumen del lote" id="bw-summary">
@@ -378,11 +379,10 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><Chip xs tone={b.lifecycle.phase === 'done' ? 'ok' : b.lifecycle.phase === 'acceptance' ? 'warn' : 'accent'}>{PHASE[b.lifecycle.phase]}</Chip><strong className="sm13">{b.lifecycle.headline}</strong></div>
           {b.lifecycle.next && (() => { const n = b.items.find(i => i.itemId === b.lifecycle.next); return n ? <div className="small">Siguiente a revisar: <a className="lnk" href={`#item-${n.storyId}`}><span className="mono">{n.storyId}</span> {n.title}</a></div> : null; })()}
         </section>
-        {b.integrationPlan && b.integrationPlan.order.length > 0 && <details className="card card-b" data-testid="batch-integration-plan">
-          <summary className="small" style={{ cursor: 'pointer' }}><strong>Orden de integración</strong> · sin IA, por {b.integrationPlan.basis.actual ? 'los archivos reales de cada rama' : b.integrationPlan.basis.planned ? 'los archivos de los planes' : 'los archivos que menciona cada historia'}; no es el orden de los identificadores</summary>
+        {b.integrationPlan && b.integrationPlan.order.length > 0 && <section className="card card-b"><Disclosure testId="batch-integration-plan" title="Orden de integración" hint={`sin IA, por ${b.integrationPlan.basis.actual ? 'los archivos reales de cada rama' : b.integrationPlan.basis.planned ? 'los archivos de los planes' : 'los archivos que menciona cada historia'}; no es el orden de los identificadores`}>
           <ol className="bw-list" style={{ marginTop: 6 }}>{b.integrationPlan.order.map(iid => { const x = b.items.find(i => i.itemId === iid); const notes = b.integrationPlan!.notes.filter(n => n.itemId === iid); return x ? <li key={iid}><span className="mono">{x.storyId}</span> {x.title} <Chip xs tone={TONE[x.state]}>{x.label}</Chip>{notes.map((n, k) => <div key={k} className="small muted">{n.text}</div>)}</li> : null; })}</ol>
           {b.integrationPlan.overlaps.length > 0 && <div className="small muted">Comparten archivos: {b.integrationPlan.overlaps.slice(0, 8).map(o => `${b.items.find(i => i.itemId === o.a)?.storyId}↔${b.items.find(i => i.itemId === o.b)?.storyId} (${o.files.slice(0, 2).join(', ')}${o.files.length > 2 ? '…' : ''})`).join(' · ')}</div>}
-        </details>}
+        </Disclosure></section>}
         {b.reason && b.reason !== b.lifecycle.headline && <Notice kind={b.status === 'paused' || idle ? 'warn' : b.status === 'revoked' ? 'err' : 'info'}><span>{b.reason}{b.reasonFix ? <> <Link className="lnk" to={b.reasonFix.href}>{b.reasonFix.label}</Link></> : null}</span></Notice>}
         {!closed && <PolicyCard b={b} onChange={setB} />}
         {(b.status === 'paused' || b.status === 'completed' || idle) && !closed && b.items.some(i => ['queued', 'waiting_dependency', 'needs_owner', 'awaiting_integration'].includes(i.state)) && <ResumeEffects b={b} />}
