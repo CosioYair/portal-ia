@@ -27,6 +27,14 @@ const { agentsRepo } = await import('../src/db/workspace.ts');
 const { assistantInfo, assistantModelChoice, assistantRepo, resolveChatModel } = await import('../src/services/assistant.ts');
 const { harnessModels } = await import('../src/services/harness/index.ts');
 const { buildApp } = await import('./fixtures/owner-app.ts');
+const { getClaudeCodeSettings, saveClaudeCodeSettings } = await import('../src/services/claudeCode/settings.ts');
+const { resetDetectionCache } = await import('../src/services/claudeCode/detect.ts');
+// CLI de Claude Code SIMULADA (suscripción, sin red): la misma que usa assistant-operations.test.ts.
+const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-hu198-cc-'));
+const FAKE = path.join(fakeDir, 'claude.mjs');
+fs.copyFileSync(fileURLToPath(new URL('./fixtures/fake-claude.mjs', import.meta.url)), FAKE);
+const ccScenario = (s: Record<string, unknown>) => fs.writeFileSync(path.join(fakeDir, 'fake-claude.scenario.json'), JSON.stringify(s));
+const apiCalls = () => fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean) : [];
 
 const CATALOG = ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5'];
 providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');
@@ -106,6 +114,46 @@ test('suscripción: el menú solo ofrece modelos que el PUT de configuración ac
   const cx = assistantModelChoice('openai', 'codex');
   for (const m of cx.models) assert.ok(putAccepts('codex', 'openai', m.id), `${m.id} lo acepta «usar por defecto» con Codex`);
   if (!cx.models.length) assert.ok(cx.modelsReason && cx.modelsReason.length > 0, 'sin modelos, se explica por qué');
+});
+
+test('suscripción (Claude Code simulado): menú con «Suscripción» a 0 USD, envío con otro modelo guardado con costUsd 0 y catálogo vacío explicado', async () => {
+  saveClaudeCodeSettings({ ...getClaudeCodeSettings(), cliPath: FAKE, maxConcurrent: 1 });
+  ccScenario({ auth: 'subscription', defaultText: 'Hola desde Claude Code.' }); resetDetectionCache();
+  try {
+    assert.equal((await inject('PUT', '/api/claude-code/settings', { enabled: true, authorized: true })).status, 200);
+    const sw = await inject('PUT', `${W}/agents/${asst.id}/backend`, { backend: 'claude-code', authorized: true });
+    assert.equal(sw.status, 200, JSON.stringify(sw.body));
+
+    const info = assistantInfo() as any;
+    assert.equal(info.billing, 'subscription', 'el backend del Asistente es la suscripción');
+    assert.ok(info.models.length > 0, 'con catálogo hay modelos que elegir');
+    for (const m of info.models) { assert.equal(m.billing, 'subscription'); assert.equal(m.estimatedPerMessageUsd, 0, `${m.id} sin costo por mensaje`); }
+    assert.equal(info.modelsReason ?? null, null, 'con modelos, el selector no queda en solo lectura');
+
+    const before = structuredClone(cfgOf());
+    const chosen = info.models.map((m: any) => m.id).find((id: string) => id !== before.model)!;
+    assert.ok(chosen, 'hay otro modelo que elegir');
+    try { fs.unlinkSync(logPath); } catch { /* vacío */ }
+    const r = await inject('POST', '/api/assistant/messages', { text: 'hola', conversationId: conv.id, model: chosen });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const a = r.body.assistant;
+    assert.equal(a.content, 'Hola desde Claude Code.', 'respondió la CLI simulada');
+    const saved = assistantRepo.get(a.id)!;
+    assert.equal(saved.model, chosen, 'modelo elegido persistido en SQLite');
+    assert.equal(saved.costUsd, 0, 'con suscripción el mensaje guardado cuesta 0 USD (la etiqueta muestra «Suscripción»)');
+    assert.equal(apiCalls().length, 0, 'ninguna llamada a la API');
+    assert.deepEqual(cfgOf(), before, 'sin «usar por defecto» la configuración del agente no cambia');
+
+    // Catálogo del proveedor vacío con suscripción: nada que ofrecer y se explica por qué (solo lectura con motivo).
+    providersRepo.setConnected('anthropic', []);
+    try {
+      const empty = assistantModelChoice('anthropic', 'claude-code');
+      assert.equal(empty.models.length, 0, 'sin catálogo no se ofrecen modelos inventados');
+      assert.ok(empty.modelsReason && empty.modelsReason.length > 0, 'sin modelos, se explica por qué');
+    } finally { providersRepo.setConnected('anthropic', CATALOG.map(id => classifyModel('anthropic', id))); }
+  } finally {
+    await inject('PUT', `${W}/agents/${asst.id}/backend`, { backend: 'api' });
+  }
 });
 
 const webSrc = fileURLToPath(new URL('../../web/src/', import.meta.url));
