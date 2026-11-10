@@ -63,7 +63,7 @@ async function omittedClosingChecks(slug: string, last: Process | undefined): Pr
   else {
     const b = await closingBlocker(slug, last, 'historia').catch(() => null);
     if (b?.code === 'not_activated') out.push('activar en el Portal');
-    else if (b?.code === 'not_runtime_verified') out.push('verificación en ejecución');
+    else if (b?.code === 'not_runtime_verified') out.push('comprobar en ejecución');
   }
   if (!r?.manualTest || r.manualTest.checks.some(c => !c)) out.push('prueba manual');
   return out;
@@ -645,6 +645,8 @@ Proceso: ${proc.id}`, { processId: proc.id });
     // HU-184: el cierre forzado exige un motivo escrito por el propietario; se valida antes de cualquier efecto.
     const reason = (body.data.reason ?? '').replace(/\s+/g, ' ').trim();
     if (force && !reason) return reply.code(400).send({ code: 'owner_reason_required', error: 'Indica el motivo' });
+    // Ya cerrada (doble clic, otra pestaña): no se vuelve a cerrar ni a registrar otro «Cierre forzado».
+    if (item.status === 'done') return { ...item, alreadyClosed: true };
     if (!force) { const blocker = await closingBlocker(slug, last, 'historia'); if (blocker) return reply.code(409).send(blocker); }
     const omitted = force ? await omittedClosingChecks(slug, last) : [];
     // Se registra ANTES de cerrar: si el registro falla, la historia no queda cerrada sin rastro.
