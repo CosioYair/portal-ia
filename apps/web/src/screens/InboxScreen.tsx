@@ -1,8 +1,9 @@
-import { useCallback, useContext, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import type { KeyboardEvent as RKeyboardEvent } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { attentionChange, useLive } from '../lib/live.ts';
 import type { DecisionVerdict, PendingDecision, PendingDecisionKind } from '@portal-ia/domain';
-import { api, type AssignmentPendingItem } from '../lib/api.ts';
+import { api, type AssignmentPendingItem, type DecisionHistoryItem, type DecisionHistoryVerdict } from '../lib/api.ts';
 import { osApi, type OfficeAgent } from '../lib/osApi.ts';
 import { AppContext } from '../lib/store.ts';
 import { useAttention } from '../lib/uiBus.ts';
@@ -14,9 +15,105 @@ import { KIND_LABEL, PendingDecisionCard } from '../components/PendingDecisionCa
 
 type Load = { phase: 'loading' } | { phase: 'error'; message: string } | { phase: 'ready'; items: PendingDecision[] };
 type Filter = 'all' | PendingDecisionKind;
+type Tab = 'pendientes' | 'historial';
+type HistLoad = { phase: 'loading' } | { phase: 'error'; message: string } | { phase: 'ready'; items: DecisionHistoryItem[] };
+/** HU-196 · Resultado visible de cada decisión resuelta. */
+const VERDICT_LABEL: Record<DecisionHistoryVerdict, string> = { approve: 'Aprobada', deny: 'Denegada', superseded: 'Superada' };
+const VERDICT_CLASS: Record<DecisionHistoryVerdict, string> = { approve: 'chip chip-ok', deny: 'chip chip-err', superseded: 'chip' };
+const norm = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+const fmtDate = (iso: string) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? iso : d.toLocaleString('es', { dateStyle: 'medium', timeStyle: 'short' }); };
 
 /** HU-188 · Etiqueta visible de cada tipo; las propuestas del Asistente tienen la suya. */
 const kindLabel = (k: PendingDecisionKind): string => (k === 'assistant_decision' ? 'Propuesta del Asistente' : KIND_LABEL[k] ?? k);
+
+/**
+ * HU-196 · Historial de decisiones resueltas de la empresa (solo lectura, sin IA ni costo). Se carga al abrir la pestaña;
+ * los filtros (tipo, resultado y texto) se aplican en el navegador. Se refresca solo cuando se resuelve una decisión.
+ */
+function HistoryPanel({ slug, projectNames }: { slug: string; projectNames: Record<string, string> }) {
+  const [load, setLoad] = useState<HistLoad>({ phase: 'loading' });
+  const [kind, setKind] = useState<'all' | PendingDecisionKind>('all');
+  const [verdict, setVerdict] = useState<'all' | DecisionHistoryVerdict>('all');
+  const [q, setQ] = useState('');
+  const searchRef = useRef<HTMLInputElement>(null);
+  const [staleErr, setStaleErr] = useState<string | null>(null);
+
+  const loadHistory = useCallback(async () => {
+    setLoad(prev => (prev.phase === 'ready' ? prev : { phase: 'loading' }));
+    try { const items = await api.inboxHistory(slug); setLoad({ phase: 'ready', items }); setStaleErr(null); }
+    catch (e) {
+      const message = e instanceof Error ? e.message : 'No se pudo cargar el historial.';
+      setLoad(prev => (prev.phase === 'ready' ? prev : { phase: 'error', message }));
+      setStaleErr(message);
+    }
+  }, [slug]);
+  useEffect(() => { void loadHistory(); }, [loadHistory]);
+  useLive(attentionChange(slug), () => loadHistory(), { minMs: 1500 });
+
+  const items = load.phase === 'ready' ? load.items : [];
+  const kinds = useMemo(() => Array.from(new Set(items.map(i => i.kind))), [items]);
+  const visible = useMemo(() => {
+    const needle = norm(q.trim());
+    return items.filter(i => (kind === 'all' || i.kind === kind) && (verdict === 'all' || i.verdict === verdict)
+      && (!needle || norm([i.title, i.reason ?? '', i.storyId ?? '', projectNames[i.projectId] ?? '', kindLabel(i.kind)].join(' ')).includes(needle)));
+  }, [items, kind, verdict, q, projectNames]);
+  const filtered = kind !== 'all' || verdict !== 'all' || q.trim() !== '';
+  const clear = () => { setKind('all'); setVerdict('all'); setQ(''); searchRef.current?.focus(); };
+
+  if (load.phase === 'loading') return <div className="card card-b" role="status" style={{ display: 'flex', gap: 10, alignItems: 'center' }}><span className="spin" aria-hidden="true" /> Cargando el historial de decisiones…</div>;
+  if (load.phase === 'error') return (
+    <div className="notice notice-err" role="alert">
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div><strong>No se pudo cargar el historial.</strong> {load.message}</div>
+        <div><button className="btn btn-secondary btn-sm" onClick={() => void loadHistory()}>Reintentar</button></div>
+      </div>
+    </div>
+  );
+  if (items.length === 0) return <div className="card"><EmptyState art="inbox" title="Aún no hay decisiones resueltas">Cuando apruebes o deniegues algo, o una autorización quede superada, aparecerá aquí.</EmptyState></div>;
+
+  return (
+    <section className="dec-group" aria-labelledby="dec-history" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div className="section-title"><h2 className="h2" id="dec-history">Historial <span className="muted">({items.length})</span></h2>
+        <button className="btn btn-secondary btn-sm" onClick={() => void loadHistory()}>Actualizar</button></div>
+      {staleErr && <div className="notice small muted" role="status">No se pudo actualizar el historial; se muestran los últimos datos cargados. <span className="muted">({staleErr})</span></div>}
+      <div role="group" aria-label="Filtrar el historial" style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'flex-end' }}>
+        <div><label className="label" htmlFor="hist-q">Buscar</label>
+          <input id="hist-q" ref={searchRef} className="input" type="search" value={q} onChange={e => setQ(e.target.value)} placeholder="Título, historia o motivo" /></div>
+        <div><label className="label" htmlFor="hist-kind">Tipo</label>
+          <select id="hist-kind" className="input" value={kind} onChange={e => setKind(e.target.value as 'all' | PendingDecisionKind)}>
+            <option value="all">Todos</option>
+            {kinds.map(k => <option key={k} value={k}>{kindLabel(k)}</option>)}
+          </select></div>
+        <div><label className="label" htmlFor="hist-verdict">Resultado</label>
+          <select id="hist-verdict" className="input" value={verdict} onChange={e => setVerdict(e.target.value as 'all' | DecisionHistoryVerdict)}>
+            <option value="all">Todos</option>
+            <option value="approve">Aprobada</option>
+            <option value="deny">Denegada</option>
+            <option value="superseded">Superada</option>
+          </select></div>
+        {filtered && <button className="btn btn-ghost btn-sm" onClick={clear}>Limpiar filtros</button>}
+      </div>
+      <p className="small muted" role="status" style={{ margin: 0 }}>{visible.length} de {items.length} decisiones</p>
+      {visible.length === 0
+        ? <div className="card card-b" role="status"><strong>Sin resultados con estos filtros.</strong> <button className="btn btn-ghost btn-sm" onClick={clear}>Limpiar filtros</button></div>
+        : <ul className="inbox-list" aria-label="Decisiones resueltas" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+          {visible.map(it => <li key={it.id} className="dec-item">
+            <Tile icon={Icon.bell()} tone="idle" size="sm" />
+            <div className="dec-item-text">
+              <strong className="sm13">{it.title}{projectNames[it.projectId] ? <span className="small muted"> · {projectNames[it.projectId]}</span> : null}</strong>
+              <span className="small med"><time dateTime={it.decidedAt}>{fmtDate(it.decidedAt)}</time> · {kindLabel(it.kind)} · <span className={VERDICT_CLASS[it.verdict]}>{VERDICT_LABEL[it.verdict]}</span></span>
+              {it.reason && <span className="small muted">Motivo: «{it.reason}»</span>}
+            </div>
+            {it.conversationId
+              ? <Link className="btn btn-secondary btn-sm" to={`/asistente?conversacion=${encodeURIComponent(it.conversationId)}`}>Ver conversación</Link>
+              : it.storyId
+                ? <Link className="btn btn-secondary btn-sm" to={`/historias/${encodeURIComponent(it.storyId)}`}>Ver historia</Link>
+                : <Link className="btn btn-secondary btn-sm" to={`/procesos/${encodeURIComponent(it.processId)}`}>Ver proceso</Link>}
+          </li>)}
+        </ul>}
+    </section>
+  );
+}
 
 /**
  * Decisiones (Portal IA 2.0, antes «Autorizaciones»): TODO lo que espera al propietario en la empresa, agrupado.
@@ -36,6 +133,20 @@ export function InboxScreen() {
   const att = useAttention(slug);
   // Fallo de un refresco con datos ya visibles: se conservan y se avisa con discreción (sin pantalla de error completa).
   const [staleErr, setStaleErr] = useState<string | null>(null);
+  // HU-196 · Pestaña en la URL (?vista=historial) para poder enlazarla; «Pendientes» por defecto.
+  const [params, setParams] = useSearchParams();
+  const tab: Tab = params.get('vista') === 'historial' ? 'historial' : 'pendientes';
+  const setTab = (t: Tab) => {
+    const next = new URLSearchParams(params);
+    if (t === 'historial') next.set('vista', 'historial'); else next.delete('vista');
+    setParams(next, { replace: true });
+  };
+  const onTabKey = (e: RKeyboardEvent<HTMLButtonElement>) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const t: Tab = e.key === 'Home' ? 'pendientes' : e.key === 'End' ? 'historial' : tab === 'pendientes' ? 'historial' : 'pendientes';
+    setTab(t); document.getElementById(`tab-${t}`)?.focus();
+  };
 
   const refresh = useCallback(async () => {
     if (!slug) return;
@@ -75,7 +186,20 @@ export function InboxScreen() {
       <main className="page screen" aria-labelledby="inbox-title" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
         <PageHeader icon={Icon.bell(22)} tone={items.length + asks.length + att.assistant + assignments.length > 0 ? 'decisions' : 'idle'} eyebrow={ctx?.status.workspace?.name ?? 'Portal IA'} title="Decisiones" titleId="inbox-title"
           description="Lo que espera tu respuesta. Aprobar o denegar aquí equivale a hacerlo desde el proceso."
-          actions={<button className="btn btn-secondary btn-sm" onClick={() => void refresh()} disabled={load.phase === 'loading'}>Actualizar</button>} />
+          actions={tab === 'pendientes' ? <button className="btn btn-secondary btn-sm" onClick={() => void refresh()} disabled={load.phase === 'loading'}>Actualizar</button> : undefined} />
+
+        <div className="seg" role="tablist" aria-label="Decisiones">
+          <button type="button" role="tab" id="tab-pendientes" aria-selected={tab === 'pendientes'} aria-controls="panel-pendientes" tabIndex={tab === 'pendientes' ? 0 : -1} aria-pressed={tab === 'pendientes'} onClick={() => setTab('pendientes')} onKeyDown={onTabKey}>
+            Pendientes ({items.length + asks.length + att.assistant + assignments.length})</button>
+          <button type="button" role="tab" id="tab-historial" aria-selected={tab === 'historial'} aria-controls="panel-historial" tabIndex={tab === 'historial' ? 0 : -1} aria-pressed={tab === 'historial'} onClick={() => setTab('historial')} onKeyDown={onTabKey}>
+            Historial</button>
+        </div>
+
+        {tab === 'historial' && <div role="tabpanel" id="panel-historial" aria-labelledby="tab-historial" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+          {slug ? <HistoryPanel slug={slug} projectNames={projectNames} /> : <div className="card card-b" role="status">Elige una empresa para ver su historial.</div>}
+        </div>}
+
+        {tab === 'pendientes' && <div role="tabpanel" id="panel-pendientes" aria-labelledby="tab-pendientes" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
 
         {load.phase === 'loading' && (
           <div className="card card-b" role="status" style={{ display: 'flex', gap: 10, alignItems: 'center' }}><span className="spin" aria-hidden="true" /> Cargando decisiones pendientes…</div>
@@ -94,7 +218,8 @@ export function InboxScreen() {
           <div className="notice small muted" role="status">No se pudo actualizar la bandeja; se muestran los últimos datos cargados. Se volverá a intentar con el próximo cambio. <span className="muted">({staleErr})</span></div>
         )}
 
-        {nothing && <div className="card"><EmptyState art="inbox" title="No hay nada pendiente">Cuando un proceso necesite tu autorización, un agente te pida revisar algo o el Asistente te proponga un paso, aparecerá aquí.</EmptyState></div>}
+        {nothing && <div className="card"><EmptyState art="inbox" title="No hay nada pendiente">Cuando un proceso necesite tu autorización, un agente te pida revisar algo o el Asistente te proponga un paso, aparecerá aquí.</EmptyState>
+          <div style={{ display: 'flex', justifyContent: 'center', paddingBottom: 16 }}><button className="btn btn-secondary btn-sm" onClick={() => setTab('historial')}>Ver historial</button></div></div>}
 
         {load.phase === 'ready' && items.length > 0 && (
           <section className="dec-group" aria-labelledby="dec-proc">
@@ -155,6 +280,7 @@ export function InboxScreen() {
             <div className="dec-item-text"><strong className="sm13" id="dec-assistant">El Asistente te propone {att.assistant} paso{att.assistant === 1 ? '' : 's'}</strong><span className="small med">En su conversación abierta (es global: cada propuesta dice a qué empresa va). Revísalos y autorízalos allí.</span></div>
             <Link className="btn btn-secondary btn-sm" to="/asistente">Abrir el Asistente</Link></div>
         </section>}
+        </div>}
       </main>
     </Shell>
   );

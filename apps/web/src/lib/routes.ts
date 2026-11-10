@@ -16,10 +16,12 @@ export interface Section {
   /** Rutas (pathname) que pertenecen a la sección: el menú la marca como activa. */
   match: RegExp;
   hint: string;
+  /** HU-196 · false: la sección no aparece en el menú lateral, pero sigue en las migas, el «Atrás», sectionRoot y Ctrl+K. */
+  inMenu?: boolean;
 }
 export const SECTIONS: Section[] = [
   { id: 'oficina', label: 'Oficina', path: '/oficina', icon: 'building', group: 'main', needsProject: false, match: /^\/(oficina|equipo)(\/|$)/, hint: 'Tu empresa: departamentos, agentes y organización' },
-  { id: 'decisiones', label: 'Decisiones', path: '/autorizaciones', icon: 'bell', group: 'main', needsProject: false, match: /^\/(autorizaciones|decisiones)(\/|$)/, hint: 'Todo lo que espera tu respuesta' },
+  { id: 'decisiones', label: 'Decisiones', path: '/autorizaciones', icon: 'bell', group: 'main', needsProject: false, match: /^\/(autorizaciones|decisiones)(\/|$)/, hint: 'Pendientes e historial de tus decisiones (campana)', inMenu: false },
   { id: 'asistente', label: 'Asistente', path: '/asistente', icon: 'sparkles', group: 'main', needsProject: false, match: /^\/asistente(\/|$)/, hint: 'Pide en lenguaje natural; el Portal decide a quién le toca' },
   { id: 'resumen', label: 'Resumen', path: '/panel', icon: 'gauge', group: 'project', needsProject: true, match: /^\/(panel|etapa|mantenimiento)(\/|$)/, hint: 'Estado del proyecto, atención, equipo y repositorio' },
   { id: 'trabajo', label: 'Trabajo', path: '/backlog', icon: 'kanban', group: 'project', needsProject: true, match: /^\/(backlog|historias|lotes|actividad|procesos|archivo)(\/|$)/, hint: 'Backlog, lotes, actividad y archivo' },
