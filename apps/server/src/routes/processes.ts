@@ -70,6 +70,23 @@ async function omittedClosingChecks(slug: string, last: Process | undefined): Pr
 }
 
 /**
+ * HU-187 · Busca una historia del backlog por su id interno (uuid) y, si no aparece, por su código visible («HU-187»)
+ * en los proyectos del espacio. Solo prueba el código si el valor tiene la forma «HU-NNN». Sin coincidencia: undefined.
+ */
+function findBacklogItem(slug: string, idOrCode: string) {
+  const repo = backlogRepo(slug);
+  const byId = repo.get(idOrCode);
+  if (byId) return byId;
+  if (!/^HU-\d+$/i.test(idOrCode)) return undefined;
+  const code = idOrCode.toUpperCase();
+  for (const p of projectsRepo(slug).list()) {
+    const found = repo.listAll(p.id).find(i => i.storyId.toUpperCase() === code);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
  * Procesos autorizados (HU-004). Un proceso nace 'pending_authorization' con una estimación; solo empieza a consumir
  * IA cuando el usuario lo autoriza con un presupuesto (POST /authorize). Puede cancelarse; se detiene entre pasos.
  */
@@ -405,7 +422,10 @@ export async function processRoutes(app: FastifyInstance) {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const body = z.object({ authorized: z.literal(true) }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita (consume una llamada).' });
-    try { const p = await generateManualTest(slug, id, (o, m) => app.log.info(o, m)); return await withGuidance(slug, p); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+    // HU-192 · `regenerate` opcional (los clientes que solo envían { authorized: true } siguen funcionando).
+    const regen = z.object({ regenerate: z.boolean().optional() }).passthrough().safeParse(req.body ?? {});
+    if (!regen.success) return reply.code(400).send({ error: 'El campo «regenerate» debe ser verdadero o falso.' });
+    try { const p = await generateManualTest(slug, id, (o, m) => app.log.info(o, m), { regenerate: regen.data.regenerate === true }); return await withGuidance(slug, p); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: typeof e.code === 'string' ? e.code : undefined }); }
   });
 
   // ---- Rechazar el diff de un proceso (la historia vuelve a pendiente) / devolver una historia a pendiente ----
@@ -642,7 +662,7 @@ Proceso: ${proc.id}`, { processId: proc.id });
     const params = z.object({ slug: z.string().min(1).max(120), id: z.string().min(1).max(120) }).safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: 'Parámetros no válidos.' });
     const { slug, id } = params.data; if (!guard(slug, reply)) return;
-    const item = backlogRepo(slug).get(id);
+    const item = findBacklogItem(slug, id);
     if (!item) return reply.code(404).send({ error: 'Historia no encontrada' });
     const procs = processesRepo(slug);
     const last = (item.lastProcessId ? procs.get(item.lastProcessId) : undefined) ?? procs.list(item.projectId).find(p => p.backlogItemId === item.id && p.kind === 'story_execution');
