@@ -14,7 +14,7 @@ process.env.PORTAL_MOCK_PROVIDER = '1';
 process.env.LOG_LEVEL = 'warn';
 
 const { encryptSecret } = await import('../src/security/crypto.ts');
-const { classifyModel } = await import('@portal-ia/domain');
+const { classifyModel, INTERNAL_WORKSPACE } = await import('@portal-ia/domain');
 const ai = await import('@portal-ia/ai-adapters');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
@@ -77,6 +77,20 @@ test('HU-196 · decisionHistoryFromProcess lee denegaciones, rechazos con motivo
   assert.ok(done.every(d => d.verdict === 'approve' && d.storyId === 'b1'));
 });
 
+test('HU-196 · comprobación en ejecución: historial de la empresa real con limit=1 da 200 y un array JSON', async () => {
+  // Replica la línea de COMPROBACIONES «- http GET /api/workspaces/portal-ia/inbox/history?limit=1 | /^\[/».
+  assert.equal(S, INTERNAL_WORKSPACE.slug, 'la empresa de runBootstrap es la empresa interna del Portal');
+  assert.equal(S, 'portal-ia', 'el slug declarado en COMPROBACIONES coincide con el real');
+  const r = await app.inject({ method: 'GET', url: `/api/workspaces/${INTERNAL_WORKSPACE.slug}/inbox/history?limit=1` });
+  assert.equal(r.statusCode, 200, 'el verificador en ejecución solo acepta 2xx');
+  assert.match(String(r.headers['content-type'] ?? ''), /application\/json/);
+  assert.match(r.body, /^\[/, 'el cuerpo serializado es un array JSON');
+  const body = JSON.parse(r.body);
+  assert.ok(Array.isArray(body), 'el cuerpo es un array');
+  assert.ok(body.length <= 1, 'respeta limit=1');
+});
+
+// Casos negativos SOLO como prueba unitaria: no se declaran en COMPROBACIONES (el verificador trata todo no-2xx como fallo).
 test('HU-196 · ruta: 400 con límite no válido y 404 si la empresa no existe', async () => {
   for (const bad of ['0', '501', 'abc']) assert.equal((await inject('GET', `${W}/inbox/history?limit=${bad}`)).status, 400, `limit=${bad}`);
   assert.equal((await inject('GET', '/api/workspaces/no-existe-hu196/inbox/history')).status, 404);
