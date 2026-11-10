@@ -29,7 +29,8 @@ const { runBootstrap } = await import('../src/routes/bootstrap.ts');
 const { agentsRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
 const { createCompany, createProject } = await import('../src/services/companies.ts');
 const { REPO_ROOT } = await import('../src/config.ts');
-const { generateManualTest, isPortalRuntime } = await import('../src/services/storyExecution.ts');
+const { generateManualTest, isPortalRuntime, createStoryProcess, runStory } = await import('../src/services/storyExecution.ts');
+const { addManualItem } = await import('../src/services/backlog.ts');
 const { buildManualTestQaPrompt, manualTestFormatFor, PORTAL_MANUAL_TEST_RULES, FILE_FORMAT } = await import('../src/services/storyPrompts.ts');
 const { buildApp } = await import('./fixtures/owner-app.ts');
 
@@ -118,4 +119,36 @@ test('ruta manual-test: marcas y nota conservan reviewedBy; reescribir los pasos
   assert.equal(c.statusCode, 200, c.body);
   assert.ok(!('reviewedBy' in processesRepo(slug).get(old)!.result!.manualTest!));
   await app.close();
+});
+
+test('prompt real del Desarrollador: lleva las reglas en el Portal y no en un proyecto externo', async () => {
+  const PLAN = JSON.stringify({ summary: 'Nota HU-190', tasks: ['Crear hu190-nota.txt'], filesToRead: [], filesToChange: ['hu190-nota.txt'], acceptance: ['existe la nota'], risks: [] });
+  const IMPL = '=== RESUMEN ===\nAñade una nota.\n=== ARCHIVO: hu190-nota.txt | create ===\nnota\n=== FIN ARCHIVO ===\n=== PARA EL PROPIETARIO ===\nSin cambios visibles.\n=== PRUEBA MANUAL ===\n1. Abre Backlog. Esperado: se ve la lista.\n2. Pulsa «Ejecutar». Esperado: se abre el diálogo.\n=== VERIFICAR: typecheck ===';
+  fs.writeFileSync(process.env.PORTAL_MOCK_SCRIPT!, JSON.stringify({ markers: ['REGLAS DE LA PRUEBA MANUAL', '=== PRUEBA MANUAL ==='], rules: [
+    { match: 'plan técnico', text: PLAN },
+    { match: 'Implementa la historia', text: IMPL },
+    { match: 'Revisa los cambios propuestos', text: JSON.stringify({ approve: true, summary: 'Bien', issues: [], suggestedTests: [] }) },
+    { match: '.', text: JSON.stringify({ steps: QA_STEPS, userFacing: 'x' }) }] }));
+  const devCall = async (repoPath: string) => {
+    const project = createProject(slug, `Dev ${Math.random().toString(36).slice(2, 7)}`, 'x', []);
+    projectsRepo(slug).setRepository(project.id, repoPath, 'main');
+    const it = addManualItem(slug, project.id, { title: 'Nota HU-190', criterion: 'existe la nota' });
+    const p = createStoryProcess(slug, project.id, it.id);
+    processesRepo(slug).authorize(p.id, 1);
+    fs.writeFileSync(process.env.PORTAL_MOCK_LOG!, '');
+    await runStory(slug, p.id, () => undefined, () => false).catch(() => undefined);
+    const calls = fs.readFileSync(process.env.PORTAL_MOCK_LOG!, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l));
+    const dev = calls.find(c => c.rule === 'Implementa la historia');
+    assert.ok(dev, `no hubo llamada del Desarrollador (${calls.map(c => c.rule).join(', ')})`);
+    return dev;
+  };
+  const portal = await devCall(REPO_ROOT);
+  assert.ok(portal.markers.includes('=== PRUEBA MANUAL ==='), 'el Desarrollador recibe FILE_FORMAT');
+  assert.ok(portal.markers.includes('REGLAS DE LA PRUEBA MANUAL'), 'en el Portal el prompt del Desarrollador lleva las reglas');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-hu190-dev-'));
+  fs.writeFileSync(path.join(dir, 'README.md'), '# demo\n');
+  execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm Base', { cwd: dir });
+  const ext = await devCall(dir);
+  assert.ok(ext.markers.includes('=== PRUEBA MANUAL ==='), 'el Desarrollador recibe FILE_FORMAT');
+  assert.ok(!ext.markers.includes('REGLAS DE LA PRUEBA MANUAL'), 'en un proyecto externo el prompt del Desarrollador no cambia');
 });
