@@ -639,6 +639,8 @@ export async function generateManualTest(slug: string, processId: string, log: (
   const repo = projectsRepo(slug).repository(proc.projectId);
   const portal = !!repo && isPortalRuntime(repo.path);
   const devSteps = portal ? (r.manualTest?.steps ?? []) : [];
+  // HU-190 · En el Portal, una lista ya revisada por QA no se vuelve a revisar (evita un gasto repetido por llamada directa o doble clic).
+  if (portal && r.manualTest?.reviewedBy === 'qa') throw Object.assign(new Error('La lista de prueba manual ya está revisada por QA; no se vuelve a revisar.'), { statusCode: 409, code: 'manual_test_already_reviewed' });
   const system = `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} del proyecto «${project.name}» en Portal IA. Escribes para el propietario, que no es técnico.`;
   const user = `Historia: ${item ? `${item.storyId} · ${item.title}` : proc.title}
 Criterio de aceptación: ${item?.criterion || '(no definido)'}
@@ -659,7 +661,7 @@ Responde SOLO con JSON: {"userFacing": string (3-8 líneas en lenguaje llano: qu
   const steps: string[] = Array.isArray(j?.steps) ? j.steps.map((s: any) => String(s).replace(/^\s*\d+[.)]\s*/, '').trim()).filter((s: string) => s.length > 3).slice(0, 12) : [];
   if (!steps.length) throw Object.assign(new Error('QA no devolvió pasos de prueba legibles; inténtalo de nuevo o añádelos a mano.'), { statusCode: 502 });
   procs.setResult(processId, { ...r, userFacing: r.userFacing || (typeof j?.userFacing === 'string' ? j.userFacing : null), manualTest: portal
-    ? (steps.length ? { steps, checks: steps.map(() => false), note: null, reviewedBy: 'qa' as const } : (r.manualTest ?? { steps, checks: steps.map(() => false), note: null }))
+    ? { steps, checks: steps.map(() => false), note: null, reviewedBy: 'qa' as const }
     : { steps, checks: steps.map(() => false), note: null } });
   log({ processId, steps: steps.length, cost: cost.toFixed(4) }, 'lista de prueba manual generada');
   return procs.get(processId)!;
