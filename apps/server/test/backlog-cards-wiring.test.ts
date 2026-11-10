@@ -45,12 +45,13 @@ test('StoryCard tiene como máximo 2 accionables visibles: la principal y «Más
 
 test('no se pierde ninguna acción y las destructivas solo están en «Más acciones»', () => {
   const bl = read('screens/Backlog.tsx');
-  for (const l of ['Cerrar historia', 'Continuar', 'Revisar diff', 'Devolver a pendiente', 'Cerrar sin ejecutar', 'Espacio de la historia', 'Ver proceso', 'Ver', 'Ejecutar']) {
+  // HU-187: «Cerrar sin ejecutar» pasa a llamarse «Cerrar como resuelta» y abre el diálogo del Portal.
+  for (const l of ['Cerrar historia', 'Continuar', 'Revisar diff', 'Devolver a pendiente', 'Cerrar como resuelta', 'Espacio de la historia', 'Ver proceso', 'Ver', 'Ejecutar']) {
     assert.ok(bl.includes(`'${l}'`), `falta la acción «${l}»`);
   }
   assert.match(bl, /secondary\.push\(\{ label: 'Devolver a pendiente'/);
-  assert.match(bl, /secondary\.push\(\{ label: 'Cerrar sin ejecutar'/);
-  assert.ok(!/primary = \{ label: '(Devolver a pendiente|Cerrar sin ejecutar)'/.test(bl), 'una acción destructiva no puede ser la principal');
+  assert.match(bl, /secondary\.push\(\{ label: 'Cerrar como resuelta'/);
+  assert.ok(!/primary = \{ label: '(Devolver a pendiente|Cerrar como resuelta)'/.test(bl), 'una acción destructiva no puede ser la principal');
   assert.match(bl, /primary = \{ label: 'Ejecutar', onClick: \(\) => setSel\(it\)/, '«Ejecutar» solo abre el diálogo');
 });
 
@@ -116,7 +117,7 @@ test('iteración 2: título enlazado, espacio de la historia siempre, «Cancelar
   const cond = bl.indexOf("if (it.status !== 'done' && it.status !== 'in_progress' && it.status !== 'discarded')", fn);
   const cancel = bl.indexOf("label: 'Cancelar historia'", fn);
   assert.ok(cond > 0 && cancel > cond, '«Cancelar historia» solo si no está en curso, completada ni descartada');
-  assert.match(bl, /secondary\.push\(\{ label: 'Cerrar sin ejecutar'/, 'se conserva «Cerrar sin ejecutar»');
+  assert.match(bl, /secondary\.push\(\{ label: 'Cerrar como resuelta'/, 'se conserva «Cerrar como resuelta» (antes «Cerrar sin ejecutar», HU-187)');
   const cs = bl.indexOf('const cancelStory = async');
   const body = bl.slice(cs, bl.indexOf('const decisions =', cs));
   assert.ok(cs > 0 && body.includes('confirm(') && body.includes('prompt(') && body.includes('api.discardStory('), 'cancelar pide confirmación y motivo y llama a discardStory');

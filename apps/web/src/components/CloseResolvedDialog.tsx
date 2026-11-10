@@ -33,6 +33,7 @@ export function CloseResolvedDialog({ slug, item, onClosed, onIntegrateFirst, on
   useEffect(() => { if (preview?.lastProcessId) primaryRef.current?.focus(); }, [preview?.lastProcessId]);
 
   const lastProcessId = preview?.lastProcessId ?? null;
+  const integrateFirst = () => { if (lastProcessId) onIntegrateFirst(lastProcessId); };
   const canClose = reason.trim().length > 0 && !busy && !loading;
   const close = async () => {
     if (!canClose) return;
@@ -43,7 +44,7 @@ export function CloseResolvedDialog({ slug, item, onClosed, onIntegrateFirst, on
   };
 
   const footer = <>
-    {lastProcessId && <button ref={primaryRef} className="btn btn-primary" disabled={busy} onClick={() => onIntegrateFirst(lastProcessId)}>Integrar primero</button>}
+    {lastProcessId && <button ref={primaryRef} className="btn btn-primary" disabled={busy} onClick={integrateFirst}>Integrar primero</button>}
     <button className="btn" disabled={!canClose} title={reason.trim() ? undefined : 'Indica el motivo para cerrar'} onClick={() => void close()}>{busy ? 'Cerrando…' : lastProcessId ? 'Cerrar sin integrar' : 'Cerrar sin ejecutar'}</button>
     <button className="btn" disabled={busy} onClick={onCancel}>Cancelar</button>
   </>;
