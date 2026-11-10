@@ -14,6 +14,18 @@ import { fmtUsd } from '../lib/labels.ts';
 import { Chip, DraftNote, Icon, KV, Notice } from './ui.tsx';
 import { draftKey, useDraft } from '../lib/persist.ts';
 import { Markdown } from './Markdown.tsx';
+import { ModelPicker } from './ModelPicker.tsx';
+import { INTERNAL_SLUG } from '../lib/routes.ts';
+
+/** HU-198 · Clave del modelo elegido para una conversación (independiente en cada una y conservado al recargar). */
+const modelKey = (convId: string | null) => `portal-ia.asistente.modelo.${convId ?? 'nueva'}`;
+
+/** HU-198 · Etiqueta de una respuesta: sale SIEMPRE del mensaje guardado (model y costUsd), nunca de la selección local. */
+function replyMeta(m: AssistantMessage, subscription: boolean, labelOf: (id: string) => string): string | null {
+  if (!m.model && !(m.costUsd > 0)) return null;
+  const model = m.model ? labelOf(m.model) : 'modelo sin registrar';
+  return m.costUsd === 0 && subscription ? `${model} · Suscripción` : `${model} · ${m.tokensIn + m.tokensOut} tokens · ${fmtUsd(m.costUsd)}`;
+}
 
 const MAX_IMAGES = 4;
 const MAX_FILES = 6;
@@ -138,6 +150,12 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
   // Los adjuntos no se guardan (pueden ser grandes o privados).
   const msgDraft = useDraft(draftKey('asistente.mensaje', convId ?? 'nueva'), '');
   const text = msgDraft.value; const setText = msgDraft.set;
+  // HU-198 · Modelo de esta conversación. Si no hay ninguno guardado, o el guardado ya no está en el catálogo, se usa el del agente.
+  const [modelSel, setModelSel] = useState<string | null>(() => { try { return localStorage.getItem(modelKey(convId)); } catch { return null; } });
+  useEffect(() => { try { setModelSel(localStorage.getItem(modelKey(convId))); } catch { setModelSel(null); } }, [convId]);
+  const [savingDefault, setSavingDefault] = useState(false);
+  const pickModel = (m: string) => { setModelSel(m); try { localStorage.setItem(modelKey(convId), m); } catch { /* sin almacenamiento */ } };
+  const resetModel = () => { setModelSel(null); try { localStorage.removeItem(modelKey(convId)); } catch { /* sin almacenamiento */ } };
   const load = async (id: string | null = convId) => {
     const r = await api.assistant(id).catch(e => { if (id && e?.status === 404) return api.assistant(null); throw e; });
     setInfo(r.info); onInfo?.(r.info); setMsgs(r.messages); setConversations(r.conversations); setConvId(r.conversationId); setDetail(r.detail);
@@ -230,6 +248,25 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
   };
   const onPick = (e: ChangeEvent<HTMLInputElement>) => { if (e.target.files) void addFiles(e.target.files); e.target.value = ''; };
 
+  const models = info?.models ?? [];
+  const chatModel = modelSel && models.some(x => x.id === modelSel) ? modelSel : (info?.model ?? '');
+  const labelOf = (id: string) => models.find(x => x.id === id)?.label ?? id;
+
+  // «Usar por defecto»: única vía para cambiar el agente. Se lee la configuración actual del servidor justo antes y se
+  // envía completa con solo `model` cambiado (la ruta reemplaza la configuración entera).
+  const setDefaultModel = async (model: string) => {
+    if (!info) return;
+    setSavingDefault(true); setError(null);
+    try {
+      const agent = await api.agent(INTERNAL_SLUG, info.agentId);
+      const cfg = agent.config;
+      await api.updateAgentConfig(INTERNAL_SLUG, info.agentId, { ...cfg, model });
+      await load();
+      flash(`Modelo por defecto del Asistente: ${labelOf(model)} · los demás ajustes se conservan`);
+    } catch (e: any) { setError(`No se pudo guardar el modelo por defecto: ${e.message}. La configuración del agente no cambió.`); }
+    finally { setSavingDefault(false); }
+  };
+
   const send = async () => {
     const t = text.trim(); if ((!t && !images.length) || busy) return;
     const imgs = images.filter((x): x is Extract<Pending, { kind: 'image' }> => x.kind === 'image');
@@ -238,16 +275,25 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
     // Los archivos de texto viajan dentro del mensaje, delimitados, para que el modelo los lea íntegros.
     const content = base + texts.map(f => `\n\n--- Adjunto «${f.name}» ---\n${f.text}\n--- Fin de «${f.name}» ---`).join('');
     const all = images;
-    setBusy(true); setError(null); msgDraft.clear(); setImages([]);
+    // null si coincide con el configurado: el servidor usa el modelo del agente.
+    const sendModel = chatModel && chatModel !== info?.model ? chatModel : null;
+    setBusy(true); setError(null);
     setMsgs(m => [...m, { id: 'tmp', role: 'user', content, actions: [], attachments: all.map(i => ({ name: i.name ?? 'adjunto', mediaType: i.mediaType, bytes: i.bytes })), tokensIn: 0, tokensOut: 0, costUsd: 0, model: null, createdAt: new Date().toISOString() }]);
     try {
-      const r = await api.sendAssistant(content, imgs.map(({ mediaType, data, name }) => ({ mediaType, data, name })), texts.map(f => ({ name: f.name, mediaType: f.mediaType, bytes: f.bytes })), convId);
+      const r = await api.sendAssistant(content, imgs.map(({ mediaType, data, name }) => ({ mediaType, data, name })), texts.map(f => ({ name: f.name, mediaType: f.mediaType, bytes: f.bytes })), convId, sendModel);
+      // Solo tras una respuesta correcta se limpian el campo y los adjuntos.
+      msgDraft.clear(); setImages([]);
+      if (modelSel && r.conversationId !== convId) { try { localStorage.setItem(modelKey(r.conversationId), modelSel); } catch { /* sin almacenamiento */ } }
       setMsgs(m => [...m.filter(x => x.id !== 'tmp'), r.user, r.assistant]); setInfo(r.info); onInfo?.(r.info);
       await load(r.conversationId).catch(() => null); // decisiones, etapa y siguiente acción al día
       if (r.assistant.actions.some(a => a.status === 'done' && (a.type === 'create_company' || a.type === 'create_project'))) await refreshStructure();
       const opened = r.assistant.actions.filter(a => a.type === 'open_decision' && a.status === 'done').length; const pend = r.assistant.actions.filter(a => a.status === 'pending').length; // al responder nada queda hecho: solo se abre o se propone
       if (opened || pend) flash([opened ? `${opened} decisión(es) abierta(s)` : '', pend ? `${pend} propuesta(s) esperan tu autorización` : ''].filter(Boolean).join(' · '));
-    } catch (e: any) { if (e?.body?.code !== 'owner_required') setError(e.message); setMsgs(m => m.filter(x => x.id !== 'tmp')); setText(t); setImages(all); }
+    } catch (e: any) {
+      if (e?.body?.code !== 'owner_required') setError(sendModel ? `${e.message} · No se envió. Tu texto se conserva y el selector vuelve al modelo configurado (${labelOf(info?.model ?? '')}).` : `${e.message} · No se envió; tu texto se conserva.`);
+      if (sendModel) resetModel();
+      setMsgs(m => m.filter(x => x.id !== 'tmp'));
+    }
     finally { setBusy(false); }
   };
   const replaceMsg = (m: AssistantMessage) => setMsgs(list => list.map(x => x.id === m.id ? m : x));
@@ -291,7 +337,8 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
               ? <ProposalCard key={`${m.id}-${i}`} msgId={m.id} action={a} onResolved={replaceMsg} />
               : <ActionRow key={`${m.id}-${i}`} a={a} />)}
           </div>}
-          {m.role === 'assistant' && m.costUsd > 0 && <span className="small mono muted">{m.tokensIn + m.tokensOut} tokens · {fmtUsd(m.costUsd)}</span>}
+          {m.role === 'assistant' && (() => { const meta = replyMeta(m, info?.billing === 'subscription', labelOf); return meta ? <span className="small mono muted">{meta}</span> : null; })()}
+          {m.id === 'tmp' && busy && <span className="small muted">enviando con {labelOf(chatModel)}</span>}
         </div>)}
         {busy && <div style={{ display: 'flex', gap: 8, alignItems: 'center' }} className="muted sm13"><span className="spin" /> El asistente está pensando…</div>}
         <div ref={endRef} />
@@ -308,8 +355,10 @@ export function AssistantChat({ compact = false, onInfo, onPending, initialText 
           <input ref={fileRef} type="file" accept={ACCEPT_ATTR} multiple hidden onChange={onPick} />
           <button type="button" className="btn btn-ghost" onClick={() => fileRef.current?.click()} disabled={busy} title="Adjuntar imagen o archivo de texto (también puedes pegar o arrastrar)" aria-label="Adjuntar archivo">📎</button>
           <textarea className="input" value={text} onChange={e => setText(e.target.value)} onPaste={onPaste} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(); } }} placeholder={compact ? 'Pídele algo al asistente… (arrastra o pega archivos)' : 'Escribe tu petición, pega una captura o arrastra un archivo .md/.txt… (Enter envía · Shift+Enter salto de línea)'} aria-label="Mensaje para el asistente" style={{ minHeight: 48, height: 48, flex: 1 }} disabled={busy} />
+          {!compact && <ModelPicker models={models} value={chatModel} defaultModel={info?.model ?? ''} billing={info?.billing ?? 'api'} loading={!info} disabled={busy} readOnlyReason={info?.modelsReason ?? null} savingDefault={savingDefault} onChange={pickModel} onSetDefault={m => { void setDefaultModel(m); }} />}
           <button className="btn btn-primary" type="submit" aria-label="Enviar" disabled={busy || (!text.trim() && !images.length)}>{Icon.arrow()}{compact ? '' : 'Enviar'}</button>
         </div>
+        {compact && <div className="assist-model-row"><ModelPicker compact models={models} value={chatModel} defaultModel={info?.model ?? ''} billing={info?.billing ?? 'api'} loading={!info} disabled={busy} readOnlyReason={info?.modelsReason ?? null} savingDefault={savingDefault} onChange={pickModel} onSetDefault={m => { void setDefaultModel(m); }} /></div>}
         {(msgDraft.status === 'restored' || msgDraft.status === 'error') && !!text && <DraftNote status={msgDraft.status} onDiscard={msgDraft.clear} />}
         {compact && info && <div className="small muted" style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><span>{info.backendLabel} · {info.billing === 'subscription' ? 'sin cargo a la API' : `≈ ${fmtUsd(info.estimatedPerMessageUsd)} por mensaje · mes ${fmtUsd(info.spentThisMonthUsd)} de ${fmtUsd(info.monthlyLimitUsd)}`}{!info.available && info.unavailableReason ? ` · ⚠ ${info.unavailableReason}` : ''}</span>{convId && <button type="button" className="lnk" onClick={() => void archive()} title="Se conserva todo; puedes reactivarla">archivar</button>}</div>}
       </form>
