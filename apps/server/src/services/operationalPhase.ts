@@ -277,7 +277,25 @@ export function phaseContext(slug: string, projectId: string, maxChars = 8000): 
 El trabajo activo se reinició al empezar esta etapa: ${cur.summary.archivedStories.length} historias y ${cur.summary.archivedProcesses.length} procesos de la etapa anterior están ARCHIVADOS (histórico consultable, no son trabajo pendiente; no los propongas para ejecutar salvo que el propietario los restaure). El proyecto SÍ tiene implementación: el código de la rama principal${cur.gitHead ? ` (commit ${cur.gitHead.slice(0, 7)} al iniciar la etapa)` : ''} es la base verificada. Los nuevos ids de historia continúan la numeración; nunca reutilices uno archivado.`;
   if (!doc) return head;
   const room = Math.max(0, maxChars - head.length - 120);
-  return `${head}\n## Línea base («${doc.title}», en Conocimiento)\n${doc.body.length > room ? `${doc.body.slice(0, room)}\n…(continúa en Conocimiento)` : doc.body}`;
+  const title = `${head}\n## Línea base («${doc.title}», en Conocimiento)\n`;
+  if (doc.body.length <= room) return `${title}${doc.body}`;
+  // Las limitaciones conocidas van al final del documento: al recortar se conservan siempre (todo agente debe recibirlas).
+  const lim = limitationsSection(doc.body);
+  const keep = lim && lim.length < room / 2 ? lim : '';
+  const cut = Math.max(0, room - keep.length - 40);
+  const alreadyIn = keep && doc.body.indexOf(keep) >= 0 && doc.body.indexOf(keep) + keep.length <= cut;
+  return `${title}${doc.body.slice(0, cut)}\n…(continúa en Conocimiento)${keep && !alreadyIn ? `\n\n${keep}` : ''}`;
+}
+
+/** Sección «Limitaciones» de la línea base: desde su título (## o ###) hasta el siguiente «## » o el final. Vacía si no hay. */
+function limitationsSection(body: string): string {
+  const start = body.search(/^##+ [^\n]*Limitaciones/m);
+  if (start < 0) return '';
+  const rest = body.slice(start);
+  const nl = rest.indexOf('\n');
+  if (nl < 0) return rest.trim();
+  const next = rest.slice(nl + 1).search(/^## /m);
+  return (next < 0 ? rest : rest.slice(0, nl + 1 + next)).trim();
 }
 
 /** Para el asistente global: etapa de cada proyecto de cada empresa (sin cuerpo completo). */
