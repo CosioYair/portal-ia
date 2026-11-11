@@ -158,6 +158,8 @@ export interface AgentCapabilitiesView {
 /** EN-011 · Entrada de aprendizaje pendiente o relacionada (sigue esperando la verificación del propietario). */
 export interface AgentLearningEntry { id: string; title: string; text: string; detail: string; status: string; detector: string; at: string; processId: string | null; processTitle: string | null; link: 'evidencia' | 'paso' | null }
 export interface AgentLearningView { verified: { title: string; text: string; [k: string]: unknown }[]; pending: AgentLearningEntry[]; related: AgentLearningEntry[]; note: string }
+/** HU-202 · Resumen de una depuración del Curador de Aprendizaje (sin IA, 0 USD). */
+export interface LessonCurateSummary { applied: number; merged: number; discarded: number; groups: number; appliedIds: string[] }
 /** EN-011 · Resumen «Qué trae y qué aprendió» de una importación de ZIP (sin IA). */
 export interface ImportLearnedSkill { slug: string; name: string; description: string; base: boolean; note: string | null }
 export interface ImportLearned {
@@ -371,6 +373,8 @@ export const api = {
   lessonObsolete: (slug: string, id: string) => request<Lesson>(`/api/workspaces/${slug}/lessons/${id}/obsolete`, { method: 'POST' }),
   lessonPromote: (slug: string, id: string, targetKey?: string | null) => request<AgentTemplateVersion>(`/api/workspaces/${slug}/lessons/${id}/promote`, { method: 'POST', body: JSON.stringify({ authorized: true, targetKey }) }),
   detectLessons: (slug: string, processId: string) => request<Lesson[]>(`/api/workspaces/${slug}/processes/${processId}/detect-lessons`, { method: 'POST' }),
+  /** HU-202 · El Curador agrupa y aplica (o descarta) todas las detecciones pendientes con una sola confirmación. Sin IA, 0 USD. */
+  lessonsCurate: (slug: string, projectId: string | null) => request<LessonCurateSummary>(`/api/workspaces/${slug}/lessons/curate`, { method: 'POST', body: JSON.stringify({ authorized: true, projectId }) }),
   // M5 · plantillas versionadas
   agentTemplate: (slug: string, id: string, to?: string) => request<{ current: AgentTemplateVersion | null; latest: AgentTemplateVersion | null; versions: AgentTemplateVersion[]; history: { fromVersion: string | null; toVersion: string; at: string; by: string }[]; diff: { from: string | null; to: string; added: string[]; removed: string[]; diffMd: string } | null; templateVersion: string | null }>(`/api/workspaces/${slug}/agents/${id}/template${to ? `?to=${encodeURIComponent(to)}` : ''}`),
   setAgentTemplateVersion: (slug: string, id: string, version: string) => request<Agent>(`/api/workspaces/${slug}/agents/${id}/template-version`, { method: 'POST', body: JSON.stringify({ authorized: true, version }) }),

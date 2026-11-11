@@ -14,6 +14,7 @@ import { failingTests, testRunSummary } from './failureDiagnosis.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall, withWatchdog } from './providerCalls.ts';
 import { injectLessons, recordDetections, recordLessonOutcomes } from './lessons.ts';
+import { curateAfterTask } from './lessonCurator.ts';
 import { gauntletStage, toCorrection } from './gauntlet.ts';
 import { callMetricsRepo, promptHash } from '../db/callMetrics.ts';
 import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, testsEvidence, verificationEvidence } from './qaGate.ts';
@@ -826,7 +827,7 @@ export async function triageAgainstBase(ctx: StoryRunCtx, failed: VerificationRu
     else if (triage.accepted) emit(ctx, 'environment', `«test»: los ${triage.preexisting.length} fallo(s) ya ocurren en la base ${triage.baseCommit.slice(0, 7)}, sin esta historia y con el mismo error: no los causó ella. No se gasta ninguna corrección; se sigue y quedan señalados en la revisión (integrar exigirá que lo confirmes; conviene corregirlos aparte).`, { detail: triageText(triage) });
     else emit(ctx, 'verify', `«test»: ${mine} fallo(s) son de esta historia (comparados con la base ${triage.baseCommit.slice(0, 7)})${triage.preexisting.length ? `; otros ${triage.preexisting.length} ya fallaban sin ella y no se tocan` : ''}.`, { phase: 'verifying', detail: triageText(triage) });
     // Lección (sin IA) solo de lo que la historia causó: con todo preexistente, nada que aprender de ella.
-    if (!triage.accepted) { try { recordDetections(ctx.slug, ctx.processId, ctx.repoPath); } catch { /* sin lección */ } }
+    if (!triage.accepted) { try { recordDetections(ctx.slug, ctx.processId, ctx.repoPath); } catch { /* sin lección */ } try { curateAfterTask(ctx.slug, ctx.processId); } catch { /* el curado nunca rompe el pipeline */ } }
   }
   return { accepted: triage.accepted, run: { ...failed, triage } };
 }
@@ -1127,5 +1128,6 @@ export async function resumeStory(slug: string, processId: string, log: (o: any,
     // Detección determinista (sin IA) también al reanudar: bloqueos, negativas, plazos, verificaciones fallidas.
     try { const ls = recordDetections(slug, processId, repo.path); if (ls.length) log({ processId, lessons: ls.map(l => l.detector) }, 'lecciones detectadas'); } catch (e: any) { log({ err: e.message }, 'detección de lecciones fallida'); }
     try { const o = recordLessonOutcomes(slug, processId, repo.path); if (o.held.length || o.recurred.length) log({ processId, held: o.held.length, recurred: o.recurred.length, refuted: o.refuted.length }, 'lecciones medidas en una tarea posterior'); } catch (e: any) { log({ err: e.message }, 'medición de lecciones fallida'); }
+    try { const c = curateAfterTask(slug, processId); if (c && c.groups) log({ processId, applied: c.applied, merged: c.merged, discarded: c.discarded }, 'lecciones curadas'); } catch (e: any) { log({ err: e.message }, 'curado de lecciones fallido'); }
   }
 }

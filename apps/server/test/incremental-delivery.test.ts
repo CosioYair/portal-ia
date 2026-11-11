@@ -504,12 +504,21 @@ test('HU-155 (procesos sin manifiesto): la reparación de una entrega cortada pi
   for (const f of ['src/contract.mjs', 'src/cli.mjs', 'package.json', 'test/service.test.mjs', 'docs/qa-guide.md', 'docs/incident.md']) assert.ok(rep.markers.includes(`- ${f}`), `la reparación pide también ${f} (antes solo pedía el archivo cortado: 2 de 8)`);
 });
 
-test('lecciones: los problemas de HU-155 quedan como evidencia «detectada» (nunca validada sola)', () => {
+test('lecciones (HU-202): los problemas de HU-155 se detectan y el Curador los cura solo: ninguna pendiente, como mucho una aplicada por causa', () => {
   const all = lessonsRepo(S).list(project.id);
+  assert.equal(all.filter(l => l.status === 'detected').length, 0, 'tras cada ejecución no queda ninguna detección pendiente');
   for (const d of ['oversized_response', 'output_exhausted', 'regenerated_completed', 'incomplete_delivery', 'ineffective_correction', 'missing_tests']) {
     const ls = all.filter(l => l.detector === d);
     assert.ok(ls.length >= 1, `lección detectada: ${d}`);
-    for (const l of ls) { assert.equal(l.status, 'detected'); assert.equal(l.lessonText, null); assert.equal(l.validatedAt, null); }
+    const byRole = new Map<string, number>();
+    for (const l of ls) {
+      assert.ok(['validated', 'rejected', 'refuted'].includes(l.status), `${d}: curada (${l.status})`);
+      if (l.status === 'validated') {
+        assert.equal(l.source, 'curator'); assert.ok(l.lessonText, `${d}: aplicada con texto`); assert.ok(l.validatedAt);
+        byRole.set(l.role ?? '', (byRole.get(l.role ?? '') ?? 0) + 1);
+      }
+    }
+    for (const [r, n] of byRole) assert.ok(n <= 1, `${d}/${r}: como mucho una lección aplicada por causa`);
   }
   // Entrega incremental: un parche que no encaja dentro de una unidad sigue dando su lección (antes solo se miraba el diff final).
   assert.ok(all.some(l => l.detector === 'patch_mismatch' && l.evidence.processId === pK), 'parche que no encaja (corrección de K) detectado desde el manifiesto');
