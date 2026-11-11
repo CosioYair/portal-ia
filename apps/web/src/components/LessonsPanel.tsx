@@ -2,7 +2,17 @@ import { useEffect, useState } from 'react';
 import type { Lesson } from '@portal-ia/domain';
 import { api, type LessonCurateSummary } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
-import { Chip, Icon, Notice } from './ui.tsx';
+import { Chip, Notice } from './ui.tsx';
+
+/** EN-020: alcance de cada lección aplicada (lo añade el servidor). */
+type LessonReach = Lesson & { templateVersion?: string | null; agents?: number };
+const agentsText = (n: number) => `${n} ${n === 1 ? 'agente' : 'agentes'}`;
+function reachText(l: LessonReach): string {
+  if (typeof l.agents !== 'number') return 'Alcance sin datos todavía';
+  if (!l.role) return `Sin papel: se añade a todos los prompts del proyecto, no a una plantilla · llega a ${agentsText(l.agents)}`;
+  if (l.templateVersion) return `En la plantilla ${l.templateVersion} · llega a ${agentsText(l.agents)}`;
+  return 'Aún no está en la plantilla de su papel: el Portal la añade solo';
+}
 
 const STATUS: Record<string, { label: string; tone: '' | 'ok' | 'warn' | 'err' | 'accent' }> = { detected: { label: 'detectada', tone: 'warn' }, proposed: { label: 'propuesta', tone: 'accent' }, validated: { label: 'aplicada', tone: 'ok' }, rejected: { label: 'rechazada', tone: '' }, obsolete: { label: 'obsoleta', tone: '' }, refuted: { label: 'retirada: el error volvió', tone: 'warn' } };
 const ROLE: Record<string, string> = { planner: 'planificador', implementer: 'implementador', reviewer: 'revisor', consultant: 'consultor' };
@@ -14,7 +24,7 @@ const ROLE: Record<string, string> = { planner: 'planificador', implementer: 'im
 export function LessonsPanel({ projectId }: { projectId: string }) {
   const { status, flash } = useApp();
   const slug = status.workspace!.slug;
-  const [lessons, setLessons] = useState<Lesson[] | null>(null);
+  const [lessons, setLessons] = useState<LessonReach[] | null>(null);
   const [pending, setPending] = useState<number | null>(null);
   const [curating, setCurating] = useState(false);
   const [curateErr, setCurateErr] = useState<string | null>(null);
@@ -48,7 +58,7 @@ export function LessonsPanel({ projectId }: { projectId: string }) {
 
   return <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-start' }}>
     <div style={{ flex: '1 1 300px', maxWidth: 380, display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div className="small muted" data-testid="lecciones-aplicadas">Lecciones aplicadas ({shown.length}). El Curador de Aprendizaje las aplica solo al terminar cada tarea y se inyectan en los prompts según el papel.</div>
+      <div className="small muted" data-testid="lecciones-aplicadas">Lecciones aplicadas ({shown.length}). El Curador de Aprendizaje las aplica solo al terminar cada tarea. Cada lección con papel entra sola en la plantilla de su papel y llega a sus agentes, sin que tengas que hacer nada.</div>
       {pending !== null && pending > 0 && <Notice kind="warn"><div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><span>{pending} {pending === 1 ? 'detección sin depurar' : 'detecciones sin depurar'}.</span><div><button className="btn btn-secondary btn-sm" disabled={curating || busy !== null} onClick={() => void runCurate()}>{curating ? <span className="spin" /> : null}Depurar con el Curador (sin IA, 0 USD)</button></div></div></Notice>}
       {curating && <p className="small muted" style={{ margin: 0 }}>Depurando las detecciones pendientes…</p>}
       {curateErr && <Notice kind="err">No se pudo depurar: {curateErr}</Notice>}
@@ -56,7 +66,7 @@ export function LessonsPanel({ projectId }: { projectId: string }) {
       {lessons === null && <p className="muted sm13" style={{ margin: '8px 0' }}>Cargando lecciones…</p>}
       {lessons && shown.length === 0 && <p className="muted sm13" style={{ margin: '8px 0' }}>Aún no hay lecciones aplicadas. El Curador las aplica solo al terminar cada tarea.</p>}
       {shown.map(l => <button key={l.id} className={`rail-i ${l.id === sel ? 'is-active' : ''}`} onClick={() => setSel(l.id)} style={{ alignItems: 'flex-start' }}>
-        <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, gap: 2 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{l.title}</span><span className="small muted"><Chip tone={l.provenAt ? 'ok' : ''} xs>{l.provenAt ? 'Demostrada' : 'Sin demostrar aún'}</Chip> {l.role ? ROLE[l.role] ?? l.role : 'todos los papeles'} · usada {l.usedCount ?? 0} {(l.usedCount ?? 0) === 1 ? 'vez' : 'veces'}{l.recurrenceCount ? ` · ⚠ reincidió ${l.recurrenceCount}×` : ''}{l.promotedTo ? ` · práctica ${l.promotedTo}` : ''}</span></span></button>)}
+        <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, gap: 2 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{l.title}</span><span className="small muted"><Chip tone={l.provenAt ? 'ok' : ''} xs>{l.provenAt ? 'Demostrada' : 'Sin demostrar aún'}</Chip> {l.role ? ROLE[l.role] ?? l.role : 'todos los papeles'} · usada {l.usedCount ?? 0} {(l.usedCount ?? 0) === 1 ? 'vez' : 'veces'}{l.recurrenceCount ? ` · ⚠ reincidió ${l.recurrenceCount}×` : ''}</span><span className="small muted" data-testid="leccion-alcance">{reachText(l)}</span></span></button>)}
       <details style={{ marginTop: 8 }}><summary className="small muted" style={{ cursor: 'pointer' }}>Escribir una lección a mano</summary>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
           <input className="input" placeholder="Título" value={newTitle} onChange={e => setNewTitle(e.target.value)} />
@@ -78,6 +88,7 @@ export function LessonsPanel({ projectId }: { projectId: string }) {
             {cur.status === 'validated' || cur.status === 'rejected' || cur.status === 'obsolete' || cur.status === 'refuted' ? <div className="sm13" style={{ padding: 10, background: 'var(--color-surface-alt)', borderRadius: 8 }}>{cur.lessonText ?? '—'}</div>
               : <textarea className="input" style={{ minHeight: 80 }} value={text} onChange={e => setText(e.target.value)} placeholder="Escríbela tú o pide una propuesta al Coordinador (una llamada de IA, con tu autorización)." />}
           </div>
+          {cur.status === 'validated' && <div className="small" data-testid="leccion-alcance-detalle"><strong>Dónde está:</strong> {reachText(cur)}.</div>}
           {cur.status === 'validated' && <div className="small muted">Medición: {cur.usedCount ? <>inyectada en {cur.usedCount} paso(s); {cur.recurrenceCount ? `el mismo error volvió a ocurrir ${cur.recurrenceCount} vez/veces con ella presente.` : 'sin reincidencias: por ahora el error no se ha repetido con ella presente.'}</> : 'aún sin medir: ninguna historia la ha usado desde que se validó.'}</div>}
           {/* Aprendida solo cuando una tarea POSTERIOR la demuestra (terminó verificada sin repetir su error). */}
           {cur.status === 'validated' && <div className="small" data-testid="leccion-prueba">{cur.provenAt ? <><strong>Aprendida:</strong> la demostró una tarea posterior el {new Date(cur.provenAt).toLocaleDateString('es-MX')} (terminó verificada sin repetir su error).{cur.proof?.at(-1)?.result === 'recurred' ? ' Después su error volvió a ocurrir con ella presente: si se repite otra vez seguida, se retirará sola.' : ''}</> : <><strong>Validada, pendiente de demostrar:</strong> se considerará aprendida cuando una tarea posterior que la lleve termine verificada sin repetir su error.</>}</div>}
@@ -90,9 +101,7 @@ export function LessonsPanel({ projectId }: { projectId: string }) {
             <details><summary className="small muted" style={{ cursor: 'pointer' }}>Editar (crea la versión {cur.version + 1}; la {cur.version} queda obsoleta)</summary>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}><textarea className="input" style={{ minHeight: 70 }} value={text} onChange={e => setText(e.target.value)} /><div><button className="btn btn-secondary btn-sm" disabled={busy !== null || text.trim().length < 10 || text.trim() === cur.lessonText} onClick={() => { if (!confirm(`Guardar el texto editado como versión ${cur.version + 1}: es la que se inyectará desde ahora y la ${cur.version} queda obsoleta.`)) return; void act('edit', () => api.lessonValidate(slug, cur.id, { lessonText: text.trim() }), `Versión ${cur.version + 1} creada`); }}>Guardar nueva versión</button></div></div></details>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-              {!cur.promotedTo && cur.role && <button className="btn btn-primary btn-sm" disabled={busy !== null} onClick={() => { if (!confirm(`Promover a práctica de la plantilla del ${ROLE[cur.role!]}: se crea una versión nueva de la plantilla. Los agentes existentes NO cambian hasta que los actualices; los nuevos la heredan.`)) return; void act('promote', () => api.lessonPromote(slug, cur.id), 'Práctica añadida a una nueva versión de la plantilla'); }}>{Icon.arrow()}Promover a práctica de plantilla</button>}
-              {cur.promotedTo && <Chip tone="ok" xs>práctica en {cur.promotedTo}</Chip>}
-              <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => { if (!confirm('Retirar esta lección: deja de inyectarse en los prompts y desaparece de esta lista. El Curador no volverá a aplicar sola la misma causa.')) return; void act('obsolete', () => api.lessonObsolete(slug, cur.id), 'Lección retirada: ya no se inyecta'); }}>Retirar</button>
+              <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => { if (!confirm('Retirar esta lección: deja de inyectarse en los prompts, sale de la plantilla de su papel (versión nueva que sus agentes adoptan solos) y desaparece de esta lista. El Curador no volverá a aplicar sola la misma causa.')) return; void act('obsolete', () => api.lessonObsolete(slug, cur.id), 'Lección retirada: ya no se inyecta ni está en la plantilla'); }}>Retirar</button>
             </div></div>}
         </div>
       </div>}

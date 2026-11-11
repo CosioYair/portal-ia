@@ -17,6 +17,15 @@ import { buildRepoContext } from './repoContext.ts';
 import { addManualItem, resetStory } from './backlog.ts';
 import { phaseContext } from './operationalPhase.ts';
 import { callTimeoutMs, maybeBilled, registerCall, unregisterCall, withWatchdog } from './providerCalls.ts';
+import { buildLessonContext } from './lessons.ts';
+import { ROLE_TEMPLATE, templateKeyFor } from './agentTemplates.ts';
+import type { TeamRole } from '@portal-ia/domain';
+
+/** EN-020: papel del agente según la plantilla que sigue (null si no corresponde a ningún papel). */
+function roleOfAgent(a: Agent): TeamRole | null {
+  const key = templateKeyFor(a); if (!key) return null;
+  return (Object.keys(ROLE_TEMPLATE) as TeamRole[]).find(r => ROLE_TEMPLATE[r] === key) ?? null;
+}
 
 /**
  * Encargos delegados: el Asistente (o el propietario) encarga una tarea a un agente responsable —revisar y replantear
@@ -204,9 +213,17 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
   const involved = Array.from(new Set(proc.steps.map(s => s.agentId)));
   involved.forEach(id => agents.setStatus(id, 'active'));
   let finalStatus: Process['status'] = 'done'; let finalError: string | null = null;
+  // EN-020: lecciones y prácticas del papel de cada agente (cada texto una sola vez), calculadas una vez por agente.
+  const lessonCtx = new Map<string, { block: string; used: string[] }>();
+  const lessonsOf = (agent: Agent) => {
+    let c = lessonCtx.get(agent.id);
+    if (!c) { try { c = buildLessonContext(slug, { projectId: proc.projectId || projectId, role: roleOfAgent(agent), agent }); } catch { c = { block: '', used: [] }; } lessonCtx.set(agent.id, c); }
+    return c;
+  };
 
   const call = async (stepIdx: number, system: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[], role: string | null = null) => {
     const step = proc.steps[stepIdx]; const agent = agents.get(step.agentId)!;
+    const lc = lessonsOf(agent); system = system + lc.block;
     const providerId = agent.config.provider as ProviderId;
     const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
     // Una consulta («consultant») que agota los turnos se recupera UNA vez sin herramientas (claudeCode/backend.ts).
@@ -221,6 +238,7 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
     // Lo no confirmado (llamadas abortadas que pudieron facturarse) cuenta como gastado al decidir.
     if (!cc && cur.spentUsd + (cur.unconfirmedUsd ?? 0) + stepEst * 0.5 > cur.budgetUsd) throw Object.assign(new Error(`Presupuesto insuficiente para «${step.title}» (gastado ${cur.spentUsd.toFixed(2)} de ${cur.budgetUsd.toFixed(2)} USD).`), { budget: true });
     procs.stepStart(step.id); const startedAt = new Date().toISOString();
+    if (lc.used.length) { try { procs.setStepLessons(step.id, lc.used); } catch { /* el registro no debe romper el encargo */ } }
     // Plazo proporcional y cancelación real: «Cancelar» aborta esta petición (ver providerCalls.ts).
     const ctrl = registerCall(processId);
     try {
