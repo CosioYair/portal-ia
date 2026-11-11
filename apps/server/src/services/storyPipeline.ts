@@ -101,11 +101,11 @@ export function budgetCheck(slug: string, processId: string, agent: Agent, syste
 function stepSystem(slug: string, proc: Process, stepId: string, agent: Agent, system0: string, injected: Map<string, string>): string {
   if (!injected.has(stepId)) {
     const role = (proc.steps.find(s => s.id === stepId)!.role ?? 'implementer') as TeamRole;
+    // EN-021 · Sello Portal IA, solo la línea 1 (pasos estructurados: nunca la línea 2). Se aplica UNA vez, aquí, al
+    // guardar en caché y después de las lecciones (no las repite); las llamadas del paso reutilizan el texto ya sellado.
     injected.set(stepId, sealForStep(injectLessons(slug, stepId, system0, { projectId: proc.projectId, role, tags: [] }, practicesFor(slug, agent)).system));
   }
-  // EN-021 · Sello Portal IA, solo la línea 1 (pasos estructurados: nunca la línea 2). Se aplica después de las
-  // lecciones y no las repite. withSeal es idempotente por marca, así que una llamada encadenada no lo duplica.
-  return sealForStep(injected.get(stepId)!);
+  return injected.get(stepId)!;
 }
 
 /** ¿El agente usa un origen que el lote de este proceso no autoriza? (p. ej. lo cambiaron a la API a mitad de la historia). */
