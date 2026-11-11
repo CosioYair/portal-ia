@@ -5,6 +5,7 @@ import { agentsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { createManualLesson, estimatePropose, lessonsRepo, proposeLesson, recordDetections, setLessonStatus, validateLesson } from '../services/lessons.ts';
 import { effectiveVersion, promoteLesson, setAgentTemplateVersion, templatesRepo, versionDiff } from '../services/agentTemplates.ts';
 import { PolicyError } from '../services/executionPolicy.ts';
+import { curatePending } from '../services/lessonCurator.ts';
 
 /** M4 · Lecciones validadas y M5 · plantillas versionadas. Ninguna ruta llama a la IA salvo /propose (autorizada). */
 /** La memoria de un agente (lessons.agent_id) se gestiona en su panel; estas rutas son de la organización. */
@@ -24,6 +25,22 @@ export async function learningRoutes(app: FastifyInstance) {
     const body = z.object({ projectId: z.string().nullable().optional(), title: z.string().trim().min(3).max(200), lessonText: z.string().trim().min(10).max(1500), role: z.enum(['planner', 'implementer', 'reviewer', 'consultant']).nullable().optional(), tags: z.array(z.string().max(40)).max(6).optional(), correctiveAction: z.string().max(1000).nullable().optional() }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Lección no válida', issues: body.error.issues });
     try { return reply.code(201).send(createManualLesson(slug, { ...body.data, projectId: body.data.projectId ?? null })); } catch (e: any) { return fail(reply, e); }
+  });
+  /**
+   * HU-202 · Limpieza inicial con una sola confirmación del propietario: el Curador agrupa por causa todas las
+   * detecciones pendientes, aplica las útiles y descarta el ruido y los duplicados. Por reglas: sin IA y a 0 USD.
+   */
+  app.post('/api/workspaces/:slug/lessons/curate', async (req, reply) => {
+    const { slug } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ authorized: z.literal(true), projectId: z.string().min(1).nullable().optional() }).safeParse(req.body ?? {});
+    if (!body.success) return reply.code(403).send({ error: 'Depurar las lecciones pendientes requiere tu confirmación explícita (sin IA, 0 USD).', code: 'authorization_required' });
+    const projectId = body.data.projectId ?? null;
+    const startedAt = new Date().toISOString();
+    try {
+      const summary = curatePending(slug, { projectId, by: 'owner' });
+      if (projectId) { try { processesRepo(slug).logExecution({ projectId, agentId: '', kind: 'lesson_curate', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt }); } catch { /* el registro no debe romper la depuración */ } }
+      return summary;
+    } catch (e: any) { return fail(reply, e); }
   });
   /** Detección manual sobre un proceso (idempotente). */
   app.post('/api/workspaces/:slug/processes/:id/detect-lessons', async (req, reply) => {

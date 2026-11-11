@@ -1,44 +1,62 @@
 import { useEffect, useState } from 'react';
 import type { Lesson } from '@portal-ia/domain';
-import { api } from '../lib/api.ts';
+import { api, type LessonCurateSummary } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
 
-const STATUS: Record<string, { label: string; tone: '' | 'ok' | 'warn' | 'err' | 'accent' }> = { detected: { label: 'detectada', tone: 'warn' }, proposed: { label: 'propuesta', tone: 'accent' }, validated: { label: 'validada', tone: 'ok' }, rejected: { label: 'rechazada', tone: '' }, obsolete: { label: 'obsoleta', tone: '' }, refuted: { label: 'retirada: el error volvió', tone: 'warn' } };
+const STATUS: Record<string, { label: string; tone: '' | 'ok' | 'warn' | 'err' | 'accent' }> = { detected: { label: 'detectada', tone: 'warn' }, proposed: { label: 'propuesta', tone: 'accent' }, validated: { label: 'aplicada', tone: 'ok' }, rejected: { label: 'rechazada', tone: '' }, obsolete: { label: 'obsoleta', tone: '' }, refuted: { label: 'retirada: el error volvió', tone: 'warn' } };
 const ROLE: Record<string, string> = { planner: 'planificador', implementer: 'implementador', reviewer: 'revisor', consultant: 'consultor' };
 
 /**
- * Lecciones de la organización (M4): detectadas sin IA → propuestas (una llamada autorizada) → validadas por el
- * propietario (se inyectan en los prompts por papel) → promovidas a práctica de plantilla (M5).
+ * Lecciones de la organización (HU-202): se detectan sin IA y el Curador de Aprendizaje las agrupa y aplica solo al
+ * terminar cada tarea (0 USD). Aquí solo se ven las aplicadas; el propietario puede editarlas o retirarlas.
  */
 export function LessonsPanel({ projectId }: { projectId: string }) {
   const { status, flash } = useApp();
   const slug = status.workspace!.slug;
   const [lessons, setLessons] = useState<Lesson[] | null>(null);
-  const [filter, setFilter] = useState<'open' | 'validated' | 'all'>('open');
+  const [pending, setPending] = useState<number | null>(null);
+  const [curating, setCurating] = useState(false);
+  const [curateErr, setCurateErr] = useState<string | null>(null);
+  const [curateRes, setCurateRes] = useState<LessonCurateSummary | null>(null);
   const [sel, setSel] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [text, setText] = useState('');
-  const [auth, setAuth] = useState(false);
-  const [est, setEst] = useState<{ agentName: string; estimatedUsd: number } | null>(null);
+
+
   const [newTitle, setNewTitle] = useState(''); const [newText, setNewText] = useState(''); const [newRole, setNewRole] = useState<string>('implementer');
 
-  const load = async () => { try { const l = await api.lessons(slug, projectId); setLessons(l); } catch (e: any) { setErr(e.message); setLessons([]); } };
+  const load = async () => {
+    try { const l = await api.lessons(slug, projectId, 'validated'); setLessons(l); } catch (e: any) { setErr(e.message); setLessons([]); }
+    try { const d = await api.lessons(slug, projectId, 'detected'); setPending(d.length); } catch { setPending(null); }
+  };
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, projectId]);
   const cur = lessons?.find(l => l.id === sel) ?? null;
-  useEffect(() => { setText(cur?.lessonText ?? ''); setAuth(false); setEst(null); if (cur && cur.status === 'detected') api.lessonProposeEstimate(slug, cur.id).then(setEst).catch(() => setEst(null)); }, [cur?.id, cur?.lessonText, cur?.status, slug]);
+  useEffect(() => { setText(cur?.lessonText ?? ''); }, [cur?.id, cur?.lessonText]);
 
   const act = async (key: string, fn: () => Promise<any>, msg: string) => { setBusy(key); setErr(null); try { await fn(); flash(msg); await load(); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } };
-  const shown = (lessons ?? []).filter(l => filter === 'all' ? true : filter === 'validated' ? l.status === 'validated' : l.status === 'detected' || l.status === 'proposed' || l.status === 'refuted');
+  const shown = (lessons ?? []).filter(l => l.status === 'validated');
+  const runCurate = async () => {
+    if (!confirm(`El Curador de Aprendizaje agrupará por causa las ${pending ?? 0} detecciones sin depurar: aplicará una lección por causa útil y descartará los duplicados y el ruido del proveedor. No llama a la IA (0 USD). ¿Continuar?`)) return;
+    setCurating(true); setCurateErr(null); setCurateRes(null);
+    try { const r = await api.lessonsCurate(slug, projectId); setCurateRes(r); flash(`Curador: ${r.applied} aplicadas, ${r.merged} agrupadas, ${r.discarded} descartadas`); await load(); }
+    catch (e: any) { setCurateErr(e.message); }
+    finally { setCurating(false); }
+  };
 
   return <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16, alignItems: 'flex-start' }}>
     <div style={{ flex: '1 1 300px', maxWidth: 380, display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{(['open', 'validated', 'all'] as const).map(f => <button key={f} className={`btn btn-sm ${filter === f ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setFilter(f)}>{f === 'open' ? `Pendientes (${(lessons ?? []).filter(l => l.status === 'detected' || l.status === 'proposed' || l.status === 'refuted').length})` : f === 'validated' ? `Validadas (${(lessons ?? []).filter(l => l.status === 'validated').length})` : 'Todas'}</button>)}</div>
-      {lessons && shown.length === 0 && <p className="muted sm13" style={{ margin: '8px 0' }}>{filter === 'open' ? 'Sin lecciones pendientes. Se detectan solas cuando una historia falla de forma objetiva (parche que no encaja, QA no aprueba, verificación fallida, brecha con evidencia del Evaluador Gauntlet…).' : 'Nada aquí todavía.'}</p>}
+      <div className="small muted" data-testid="lecciones-aplicadas">Lecciones aplicadas ({shown.length}). El Curador de Aprendizaje las aplica solo al terminar cada tarea y se inyectan en los prompts según el papel.</div>
+      {pending !== null && pending > 0 && <Notice kind="warn"><div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><span>{pending} {pending === 1 ? 'detección sin depurar' : 'detecciones sin depurar'}.</span><div><button className="btn btn-secondary btn-sm" disabled={curating || busy !== null} onClick={() => void runCurate()}>{curating ? <span className="spin" /> : null}Depurar con el Curador (sin IA, 0 USD)</button></div></div></Notice>}
+      {curating && <p className="small muted" style={{ margin: 0 }}>Depurando las detecciones pendientes…</p>}
+      {curateErr && <Notice kind="err">No se pudo depurar: {curateErr}</Notice>}
+      {curateRes && <Notice kind="ok">Depuración hecha: {curateRes.applied} aplicadas, {curateRes.merged} agrupadas y {curateRes.discarded} descartadas ({curateRes.groups} causas).</Notice>}
+      {lessons === null && <p className="muted sm13" style={{ margin: '8px 0' }}>Cargando lecciones…</p>}
+      {lessons && shown.length === 0 && <p className="muted sm13" style={{ margin: '8px 0' }}>Aún no hay lecciones aplicadas. El Curador las aplica solo al terminar cada tarea.</p>}
       {shown.map(l => <button key={l.id} className={`rail-i ${l.id === sel ? 'is-active' : ''}`} onClick={() => setSel(l.id)} style={{ alignItems: 'flex-start' }}>
-        <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, gap: 2 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{l.title}</span><span className="small muted"><Chip tone={STATUS[l.status]?.tone ?? ''} xs>{STATUS[l.status]?.label ?? l.status}</Chip> v{l.version}{l.role ? ` · ${ROLE[l.role] ?? l.role}` : ''}{l.usedCount ? ` · usada ${l.usedCount}×` : ''}{l.recurrenceCount ? ` · ⚠ reincidió ${l.recurrenceCount}×` : ''}{l.promotedTo ? ` · práctica ${l.promotedTo}` : ''}</span></span></button>)}
+        <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, gap: 2 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{l.title}</span><span className="small muted"><Chip tone={l.provenAt ? 'ok' : ''} xs>{l.provenAt ? 'Demostrada' : 'Sin demostrar aún'}</Chip> {l.role ? ROLE[l.role] ?? l.role : 'todos los papeles'} · usada {l.usedCount ?? 0} {(l.usedCount ?? 0) === 1 ? 'vez' : 'veces'}{l.recurrenceCount ? ` · ⚠ reincidió ${l.recurrenceCount}×` : ''}{l.promotedTo ? ` · práctica ${l.promotedTo}` : ''}</span></span></button>)}
       <details style={{ marginTop: 8 }}><summary className="small muted" style={{ cursor: 'pointer' }}>Escribir una lección a mano</summary>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
           <input className="input" placeholder="Título" value={newTitle} onChange={e => setNewTitle(e.target.value)} />
@@ -49,7 +67,7 @@ export function LessonsPanel({ projectId }: { projectId: string }) {
     </div>
     <div style={{ flex: '999 1 420px', minWidth: 0 }}>
       {err && <Notice kind="err">{err}</Notice>}
-      {!cur && <p className="muted sm13">Selecciona una lección. Solo las <strong>validadas</strong> se inyectan en los prompts de los agentes (por proyecto y papel); cada paso registra cuáles usó, y si el mismo error vuelve a ocurrir con la lección presente, se marca como reincidencia.</p>}
+      {!cur && <p className="muted sm13">Selecciona una lección. Solo las <strong>aplicadas</strong> se inyectan en los prompts de los agentes (por proyecto y papel); cada paso registra cuáles usó, y si el mismo error vuelve a ocurrir con la lección presente, se marca como reincidencia.</p>}
       {cur && <div className="card">
         <div className="card-h"><div><div className="h3">{cur.title}</div><div className="small muted">Detector <span className="mono">{cur.detector}</span> · origen {cur.source} · versión {cur.version} · {new Date(cur.createdAt).toLocaleString()}</div></div><Chip tone={STATUS[cur.status]?.tone ?? ''}>{STATUS[cur.status]?.label}</Chip></div>
         <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -64,27 +82,17 @@ export function LessonsPanel({ projectId }: { projectId: string }) {
           {/* Aprendida solo cuando una tarea POSTERIOR la demuestra (terminó verificada sin repetir su error). */}
           {cur.status === 'validated' && <div className="small" data-testid="leccion-prueba">{cur.provenAt ? <><strong>Aprendida:</strong> la demostró una tarea posterior el {new Date(cur.provenAt).toLocaleDateString('es-MX')} (terminó verificada sin repetir su error).{cur.proof?.at(-1)?.result === 'recurred' ? ' Después su error volvió a ocurrir con ella presente: si se repite otra vez seguida, se retirará sola.' : ''}</> : <><strong>Validada, pendiente de demostrar:</strong> se considerará aprendida cuando una tarea posterior que la lleve termine verificada sin repetir su error.</>}</div>}
           {(cur.proof?.length ?? 0) > 0 && <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{cur.proof!.slice(-4).map(p => <li key={p.processId}>{p.result === 'held' ? '✓' : '✗'} {p.processTitle ?? p.processId}: {p.detail}</li>)}</ul>}
-          {cur.status === 'refuted' && <Notice kind="err">Retirada sola: se aplicó en tareas posteriores y el mismo error volvió a ocurrir. Ya no se inyecta en ningún prompt. Corrígela y valídala de nuevo, o recházala.</Notice>}
-          {cur.status === 'refuted' && <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><textarea className="input" style={{ minHeight: 70 }} value={text} onChange={e => setText(e.target.value)} /><div style={{ display: 'flex', gap: 8 }}><button className="btn btn-secondary btn-sm" disabled={busy !== null || text.trim().length < 10 || text.trim() === cur.lessonText} onClick={() => act('validate', () => api.lessonValidate(slug, cur.id, { lessonText: text.trim() }), 'Lección corregida y validada de nuevo')}>Validar corregida</button><button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => act('reject', () => api.lessonReject(slug, cur.id), 'Lección rechazada')}>Rechazar</button></div></div>}
+
+
           {cur.recurrenceCount > 0 && cur.status === 'validated' && <Notice kind="warn">Esta lección estaba inyectada y el mismo error volvió a ocurrir {cur.recurrenceCount} vez/veces: candidata a obsoleta. Revísala, edítala (crea una versión nueva) o márcala obsoleta.</Notice>}
-          {cur.status === 'detected' && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /><span>Autorizo una llamada a {est?.agentName ?? 'el Coordinador'} ({est ? `≈ ${est.estimatedUsd.toFixed(3)} USD` : 'estimación…'}) para proponer causa raíz, acción correctiva y texto de la lección.</span></label>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button className="btn btn-primary btn-sm" disabled={!auth || busy !== null} onClick={() => act('propose', () => api.lessonPropose(slug, cur.id), 'Propuesta recibida: revísala y valida')}>{busy === 'propose' ? <span className="spin spin-light" /> : Icon.arrow()}Proponer con IA</button>
-              <button className="btn btn-secondary btn-sm" disabled={busy !== null || text.trim().length < 10} onClick={() => act('validate', () => api.lessonValidate(slug, cur.id, { lessonText: text.trim() }), 'Lección validada: se inyectará en los prompts')}>Validar con mi texto</button>
-              <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => act('reject', () => api.lessonReject(slug, cur.id), 'Lección rechazada')}>Rechazar</button>
-            </div></div>}
-          {cur.status === 'proposed' && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button className="btn btn-primary btn-sm" disabled={busy !== null || text.trim().length < 10} onClick={() => act('validate', () => api.lessonValidate(slug, cur.id, { lessonText: text.trim() }), 'Lección validada: se inyectará en los prompts')}>{Icon.check()}Validar (editable arriba)</button>
-            <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => act('reject', () => api.lessonReject(slug, cur.id), 'Lección rechazada')}>Rechazar</button>
-          </div>}
+
           {cur.status === 'validated' && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <details><summary className="small muted" style={{ cursor: 'pointer' }}>Editar (crea la versión {cur.version + 1}; la {cur.version} queda obsoleta)</summary>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}><textarea className="input" style={{ minHeight: 70 }} value={text} onChange={e => setText(e.target.value)} /><div><button className="btn btn-secondary btn-sm" disabled={busy !== null || text.trim().length < 10 || text.trim() === cur.lessonText} onClick={() => act('edit', () => api.lessonValidate(slug, cur.id, { lessonText: text.trim() }), `Versión ${cur.version + 1} creada`)}>Guardar nueva versión</button></div></div></details>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}><textarea className="input" style={{ minHeight: 70 }} value={text} onChange={e => setText(e.target.value)} /><div><button className="btn btn-secondary btn-sm" disabled={busy !== null || text.trim().length < 10 || text.trim() === cur.lessonText} onClick={() => { if (!confirm(`Guardar el texto editado como versión ${cur.version + 1}: es la que se inyectará desde ahora y la ${cur.version} queda obsoleta.`)) return; void act('edit', () => api.lessonValidate(slug, cur.id, { lessonText: text.trim() }), `Versión ${cur.version + 1} creada`); }}>Guardar nueva versión</button></div></div></details>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
               {!cur.promotedTo && cur.role && <button className="btn btn-primary btn-sm" disabled={busy !== null} onClick={() => { if (!confirm(`Promover a práctica de la plantilla del ${ROLE[cur.role!]}: se crea una versión nueva de la plantilla. Los agentes existentes NO cambian hasta que los actualices; los nuevos la heredan.`)) return; void act('promote', () => api.lessonPromote(slug, cur.id), 'Práctica añadida a una nueva versión de la plantilla'); }}>{Icon.arrow()}Promover a práctica de plantilla</button>}
               {cur.promotedTo && <Chip tone="ok" xs>práctica en {cur.promotedTo}</Chip>}
-              <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => act('obsolete', () => api.lessonObsolete(slug, cur.id), 'Lección marcada obsoleta')}>Marcar obsoleta</button>
+              <button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => { if (!confirm('Retirar esta lección: deja de inyectarse en los prompts y desaparece de esta lista. El Curador no volverá a aplicar sola la misma causa.')) return; void act('obsolete', () => api.lessonObsolete(slug, cur.id), 'Lección retirada: ya no se inyecta'); }}>Retirar</button>
             </div></div>}
         </div>
       </div>}
