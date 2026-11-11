@@ -8,6 +8,7 @@ import { fmtUsd } from '../lib/labels.ts';
 import { callTiming, connection, serverNow, stepDurationMs } from '../lib/liveStatus.ts';
 import { Chip, Icon, Notice } from './ui.tsx';
 import { IterationComposer } from './IterationComposer.tsx';
+import { Disclosure } from './Disclosure.tsx';
 import { CloseResolvedDialog } from './CloseResolvedDialog.tsx';
 import '../story-flow.css';
 
@@ -243,6 +244,14 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const secondary = actions.filter(a => !a.primary);
   // HU-166 · Siempre hay un botón principal en la cabecera: si el servidor no trae ninguno, solo se navega al proceso (no se ejecuta nada).
   const fallback = variant === 'story' && !primary && !readOnly;
+  // HU-193 · El avance se dice una sola vez: barra de etapas en el resumen y esta línea de «Siguiente paso».
+  const iterationNo = (proc as Process & { iteration?: number | null }).iteration ?? null;
+  const runningNow = proc.status === 'running';
+  const unitNow = runningNow ? flow.delivery?.currentUnit ?? null : null;
+  const nextText = primary ? primary.label
+    : unitNow ? `${unitNow.kind === 'correction' ? 'Corrección dirigida' : `Unidad ${unitNow.index} de ${unitNow.total}`}: ${unitNow.title} — ${unitNow.agentName}`
+    : runningNow ? 'el equipo trabaja en esta etapa; no tienes que hacer nada'
+    : (cur.statusText ?? STATUS_TXT[cur.status]);
   // Con un formulario abierto (confirmación o autorización), el botón principal es el de ese formulario.
   const subForm = !!confirming || !!authorizeSlot;
   const details = issue ? (showAll ? issue.details : issue.details.slice(0, 6)) : [];
@@ -254,50 +263,51 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
 
   return (
     <section className="sf" aria-label="Estado de la historia">
-      <div className="sf-top">
-        <div className="sf-title">
+      <div className="sf-summary" aria-label="Resumen de la historia"><div className="sf-top">
+        <div className="sf-title">{iterationNo !== null && <Chip xs className="sf-it">It. {iterationNo}</Chip>}
           <div className="eyebrow">{story ? <>{variant === 'process' ? <Link className="lnk" to={`/historias/${story.id}`}>{story.storyId}</Link> : story.storyId}</> : 'Historia'}{flow.iteration ? ` · iteración ${flow.iteration.number} de ${flow.iteration.total}` : ''} · etapa {curIdx + 1} de {flow.stages.length}</div>
           <div className="h3">{story ? story.title : proc.title}</div>
         </div>
         <div className="sf-meta">
           <Chip xs className="mono">{fmtUsd(proc.spentUsd)} de {fmtUsd(proc.budgetUsd)} autorizados</Chip>
           {(proc.unconfirmedUsd ?? 0) > 0 && <span title="Costo posible de llamadas interrumpidas o fallidas que el proveedor no confirmó. No se suma al gasto real, pero sí se reserva del presupuesto."><Chip xs tone="warn" className="mono">≈ {fmtUsd(proc.unconfirmedUsd!)} sin confirmar</Chip></span>}
-          <Chip xs>{flow.progress.done} de {flow.progress.total} etapas</Chip>
+          <Chip tone={STATUS_TONE[cur.status]} xs>{cur.statusText ?? STATUS_TXT[cur.status]}</Chip>
           {variant === 'story' ? !fallback && <Link className="btn btn-ghost btn-sm" to={`/procesos/${proc.id}`}>Ver el proceso y los agentes</Link> : itemId && <Link className="btn btn-ghost btn-sm" to={`/historias/${itemId}`}>{Icon.back()} Espacio de la historia</Link>}
         </div>
       </div>
 
-      <ol className="sf-stages" style={{ ['--n' as any]: flow.stages.length }} aria-label="Etapas">
+      <ol className="sf-stages sf-stages-compact" style={{ ['--n' as any]: flow.stages.length }} aria-label={`Etapas: ${curIdx + 1} de ${flow.stages.length}, ${cur.label}`}>
         {flow.stages.map(s => <li key={s.key} className={`sf-stage${s.key === flow.current ? ' is-current' : ''}`} data-status={s.status} title={`${s.label}: ${s.statusText ?? STATUS_TXT[s.status]}${s.detail ? ` · ${s.detail}` : ''}`} aria-current={s.key === flow.current ? 'step' : undefined}>
           <span className="sf-bar" /><span className="sf-stage-label">{s.label}{s.statusText ? ` · ${s.statusText}` : ''}</span>
         </li>)}
       </ol>
 
+      </div>
       {flow.headline && <div className={`sf-headline${proc.result?.pipeline?.state === 'verified' ? ' is-ok' : ''}`} role="status" aria-label="Estado del pipeline">{proc.result?.pipeline?.state === 'verified' ? Icon.okc() : proc.status === 'running' ? <span className="spin" /> : Icon.info()}<span>{flow.headline}</span></div>}
 
-      <div className="sf-now" aria-label="Etapa actual">
-        <div className="sf-now-head"><strong>Ahora: {cur.label}</strong><Chip tone={STATUS_TONE[cur.status]} xs>{cur.statusText ?? STATUS_TXT[cur.status]}</Chip></div>
+      <div className="sf-next" aria-label="Siguiente paso">
+        <p className="sf-next-line">{runningNow && <span className="spin" />}<strong>Siguiente paso:</strong> <span>{nextText}</span></p>
         {cur.detail && <span className="small muted">{cur.detail}</span>}
         {flow.responsible.length > 0 && <span className="small">{flow.responsible.map(r => `${r.agentName} (${r.role})`).join(' · ')} — {flow.responsible[0].status}</span>}
         {flow.stages.filter(s => s.status === 'warning' || s.status === 'rejected').filter(s => s.key !== flow.current).map(s => <span key={s.key} className="small" style={{ color: 'var(--color-warn-text)' }}>⚠ {s.label}: {s.detail}</span>)}
       </div>
 
-      {flow.delivery && <DeliveryPanel d={flow.delivery} running={proc.status === 'running' && !orphan} next={issue && primary ? primary.label : null} />}
+      {flow.delivery && <DeliveryPanel d={flow.delivery} />}
 
       {cancelling && proc.status === 'running' && <div className="sf-headline" role="status" aria-label="Cancelando"><span className="spin" /><span>Cancelando… se abortó la llamada en curso; el proceso se cierra en cuanto el paso lo registre.</span></div>}
 
       {proc.status === 'running' && <ConnectionNotice />}
 
-      {liveSteps.map(s => <LiveCallCard key={s.id} step={s} proc={proc} cancelling={cancelling} />)}
+      {liveSteps.length > 0 && <Disclosure title={`Llamada en curso · ${liveSteps.map(s => s.live ? LIVE_TXT[cancelling ? 'cancelling' : s.live.state] : 'en curso').join(' · ')}`} hint={liveSteps.map(s => s.agentName).join(' · ')} className="sf-fold" testId="sf-live-call">{liveSteps.map(s => <LiveCallCard key={s.id} step={s} proc={proc} cancelling={cancelling} />)}</Disclosure>}
 
-      {(proc.status === 'running' || proc.status === 'pending_authorization') && <div className="sf-agents" aria-label="Agentes">
+      {(proc.status === 'running' || proc.status === 'pending_authorization') && <Disclosure title={`Agentes · ${agents.length}`} hint={proc.status === 'running' ? 'trabajando ahora' : 'esperan tu autorización'} className="sf-fold" testId="sf-agents-fold"><div className="sf-agents" aria-label="Agentes">
         {agents.map(s => <div key={s.id} className="sf-agent">
           <span>{s.status === 'done' ? Icon.check(14) : s.status === 'running' ? (orphan ? '!' : <span className="spin" />) : s.status === 'failed' ? '✕' : '·'}</span>
           <span><strong>{s.agentName}</strong> · {ROLE[s.role ?? ''] ?? s.title}{s.status === 'running' ? ` · ${s.title}` : ''}</span>
           {/* En curso: duración hasta ahora y, si ya hubo llamadas en este paso (continuación), su uso confirmado rotulado. */}
           <span className="small muted mono">{s.status === 'pending' ? 'en espera' : `${secs(stepDurationMs(s, serverNow()) ?? 0)}${s.inputTokens + s.outputTokens ? ` · ${s.inputTokens + s.outputTokens} tokens · ${fmtUsd(s.costUsd)}${s.status === 'running' ? ' confirmados antes' : ''}` : ''}`}</span>
         </div>)}
-      </div>}
+      </div></Disclosure>}
 
       {proc.result?.pipeline && <PipelineActivity proc={proc} />}
 
@@ -321,7 +331,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       {!readOnly && (!closed || fallback) && (flow.actions.length > 0 || fallback) && <div className="sf-actions" aria-label="Acciones">
         {primary && <button className={`btn ${subForm ? 'btn-secondary' : 'btn-primary'} btn-sm`} onClick={() => void run(primary)} disabled={busy !== null} title={primary.description}>{busy === primary.id ? <span className={subForm ? 'spin' : 'spin spin-light'} /> : Icon.arrow()}{primary.label}</button>}
         {fallback && <Link className="btn btn-primary btn-sm" to={`/procesos/${proc.id}`}>{Icon.arrow()}Ver el proceso y los agentes</Link>}
-        {secondary.map(a => <button key={a.id} className="btn btn-secondary btn-sm" onClick={() => void run(a)} disabled={busy !== null} title={a.description}>{busy === a.id ? <span className="spin" /> : null}{a.label}</button>)}
+        {secondary.length > 0 && <Disclosure title="Más acciones" hint={`${secondary.length}`} className="sf-more" testId="sf-more-actions"><div className="sf-actions">{secondary.map(a => <button key={a.id} className="btn btn-secondary btn-sm" onClick={() => void run(a)} disabled={busy !== null} title={a.description}>{busy === a.id ? <span className="spin" /> : null}{a.label}</button>)}</div></Disclosure>}
       </div>}
       {!readOnly && authorizeSlot}
       {!readOnly && primary && !confirming && !composer && !authorizeSlot && <span className="small muted">{primary.description}{primary.requires.length ? ` · ${primary.requires.map(r => REQ[r]).join(', ')}` : ''}</span>}
@@ -497,7 +507,12 @@ const CHECK_ICON: Record<string, string> = { passed: '✓', failed: '✕', not_a
  * Entrega por entregables (procesos con manifiesto): qué está entregado de verdad en el worktree y qué falta, qué unidad
  * se trabaja y quién, y tres niveles que no se confunden: compila ≠ funcionalidad completa ≠ QA aprobó los criterios.
  */
-function DeliveryPanel({ d, running, next }: { d: DeliveryProgress; running: boolean; next: string | null }) {
+function DeliveryPanel({ d }: { d: DeliveryProgress }) {
+  return <Disclosure title="Detalle de la entrega" hint={`${d.delivered} de ${d.total} entregables`} className="sf-fold" testId="sf-delivery"><DeliveryDetail d={d} /></Disclosure>;
+}
+
+/** HU-193 · Contenido del plegable «Detalle de la entrega»: solo archivos, partes, niveles y gasto de la entrega. */
+function DeliveryDetail({ d, next = null }: { d: DeliveryProgress; next?: string | null }) {
   const level = (ok: boolean | null, yes: string, no: string, unknown: string) => <li data-ok={ok === null ? 'unknown' : String(ok)}><span aria-hidden="true">{ok ? '✓' : ok === false ? '✕' : '…'}</span><span>{ok ? yes : ok === false ? no : unknown}</span></li>;
   const pct = d.total ? Math.round(d.delivered / d.total * 100) : 0;
   return <div className="sf-del" aria-label="Entregables">
@@ -506,7 +521,7 @@ function DeliveryPanel({ d, running, next }: { d: DeliveryProgress; running: boo
       <span className="sf-del-bar" role="progressbar" aria-valuemin={0} aria-valuemax={d.total} aria-valuenow={d.delivered} aria-label="Entregables entregados"><span style={{ width: `${pct}%` }} /></span>
       <span className="small muted">unidades {d.units.done} de {d.units.total}</span>
     </div>
-    {running && d.currentUnit && <div className="small" aria-label="Unidad en curso"><span className="spin" /> {d.currentUnit.kind === 'correction' ? 'Corrección dirigida' : `Unidad ${d.currentUnit.index} de ${d.currentUnit.total}`}: {d.currentUnit.title} — <strong>{d.currentUnit.agentName}</strong></div>}
+    {/* HU-193 · La unidad en curso se muestra en «Siguiente paso», no aquí. */}
     <ul className="sf-del-levels" aria-label="Niveles de verificación">
       {level(d.levels.compiles, 'El código compila (typecheck y build en el sandbox)', 'El código no compila', 'Compilación aún sin verificar')}
       {level(d.levels.complete, 'Toda la funcionalidad planificada está entregada', 'Falta funcionalidad por entregar', '')}
@@ -528,6 +543,12 @@ function DeliveryPanel({ d, running, next }: { d: DeliveryProgress; running: boo
 
 /** Actividad del pipeline como una sola actividad coordinada: eventos breves, intentos, QA y presupuesto. */
 function PipelineActivity({ proc }: { proc: Process }) {
+  const body = PipelineActivityBody({ proc });
+  if (!body) return null;
+  return <Disclosure title="Actividad" hint={proc.status === 'running' ? 'el equipo trabaja' : undefined} className="sf-fold" testId="sf-activity">{body}</Disclosure>;
+}
+
+function PipelineActivityBody({ proc }: { proc: Process }) {
   const pl = proc.result!.pipeline!; const review = proc.result!.review;
   // Hitos siempre visibles (recuperación, reparación, aplicación, correcciones, QA, pausas, final) y los últimos pasos;
   // el detalle rutinario (cada comando verificado) queda en el registro técnico plegado.
