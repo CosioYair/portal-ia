@@ -261,10 +261,12 @@ test('nunca sin tu aceptación: una historia que termina con el lote en pausa qu
   const x = await get(b0.id);
   assert.equal(x.items[0].state, 'ready', x.items[0].reason);
   assert.equal(execSync('git rev-parse main', { cwd: repo, encoding: 'utf8' }).trim(), main0, 'main no cambió');
-  // Aplazar y recuperar: decisión tomada sin IA; el lote no se da por terminado con ella sin resolver… y sí al aplazarla.
+  // Aplazar: decisión tomada sin IA, pero la historia no está aceptada, cerrada ni cancelada en el Backlog (HU-203):
+  // el lote no se da por terminado, queda «necesita tu decisión».
   const pp = await post(`/batches/${b0.id}/items/${x.items[0].itemId}/postpone`, { note: 'La veo la semana que viene' });
   assert.equal(pp.items[0].state, 'postponed');
-  const done = await waitFor(() => get(b0.id), y => y.status === 'completed', 'lote resuelto con la aplazada');
+  const done = await waitFor(() => get(b0.id), y => y.status === 'needs_decision', 'lote con la aplazada: necesita tu decisión');
+  assert.notEqual(done.status, 'completed');
   assert.match(done.reason, /1 aplazada/);
 });
 

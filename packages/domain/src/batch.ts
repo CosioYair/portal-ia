@@ -564,12 +564,13 @@ export const BACKLOG_SETTLED: readonly string[] = ['done', ...BACKLOG_CLOSED];
 /**
  * ¿Está el lote terminado de verdad? Solo si TODAS sus historias están aceptadas o canceladas en el lote, o cerradas o
  * canceladas en el Backlog (o, si se siguieron fuera del lote, terminadas allí). Pendientes de aceptación, fallidas,
- * bloqueadas, aplazadas o no aceptadas → no (el lote «necesita tu decisión»). Sin IO.
+ * bloqueadas o no aceptadas → no (el lote «necesita tu decisión»). Una historia aplazada NO se da por resuelta por su
+ * estado en el lote: decide su estado en el Backlog (BACKLOG_SETTLED). Sin IO.
  */
 export function isBatchSettled(items: { state: BatchItemState; backlogStatus?: string | null }[]): boolean {
   return items.every(i => {
-    // Aplazada por ti: cuenta como decisión tomada (no se integra en este lote; puedes recuperarla).
-    if (i.state === 'accepted' || i.state === 'cancelled' || i.state === 'postponed') return true;
+    if (i.state === 'accepted' || i.state === 'cancelled') return true;
+    // Aplazada (y cualquier otro estado): resuelta solo si el Backlog la tiene terminada, cerrada o cancelada.
     const bs = i.backlogStatus ?? null;
     // Aceptada (done), cerrada o cancelada en el Backlog: resuelta, se ejecutara dentro o fuera del lote.
     return !!bs && BACKLOG_SETTLED.includes(bs);
