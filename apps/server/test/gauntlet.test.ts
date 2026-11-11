@@ -464,7 +464,10 @@ test('R · una brecha con evidencia la cura el Curador (por causa, nunca pendien
   l = lessonsRepo(S).get(id)!;
   const usedHere = p.steps.filter(s => usesLesson(s.lessonsUsed, id));
   assert.ok(usedHere.length >= 2 && usedHere.every(s => s.role === 'implementer'), 'también la corrección dirigida la recibe (la hace el constructor)');
-  assert.equal(l.usedCount, base.usedCount + 1 + usedHere.length, 'se cuenta por paso'); assert.ok(l.recurrenceCount >= base.recurrenceCount + 1);
+  assert.equal(l.usedCount, base.usedCount + 1 + usedHere.length, 'se cuenta por paso');
+  // EN-022: la brecha intermedia la corrige el mismo proceso, que termina verificado: no cuenta como reincidencia (cuenta como cumplida).
+  assert.equal(l.recurrenceCount, base.recurrenceCount, 'un fallo intermedio corregido en el mismo proceso verificado no es reincidencia');
+  assert.ok((l.proof ?? []).some(x => x.processId === p.id && x.result === 'held'), 'la tarea verificada cuenta como cumplida');
   assert.equal(l.status, 'validated', 'una sola reincidencia no la retira (REFUTE_AFTER = 2)');
   const fresh = of('R validada con reincidencia')[0];
   assert.equal(fresh.status, 'rejected', 'la nueva brecha la agrupa el Curador con la lección aplicada de su causa'); assert.ok(fresh.tags.includes('agrupada'));

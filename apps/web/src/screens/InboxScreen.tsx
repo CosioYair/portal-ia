@@ -4,6 +4,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { attentionChange, useLive } from '../lib/live.ts';
 import type { DecisionVerdict, PendingDecision, PendingDecisionKind } from '@portal-ia/domain';
 import { api, type AssignmentPendingItem, type DecisionHistoryItem, type DecisionHistoryVerdict } from '../lib/api.ts';
+import { LessonImprovementsInbox } from '../components/LessonImprovementsInbox.tsx';
 import { osApi, type OfficeAgent } from '../lib/osApi.ts';
 import { AppContext } from '../lib/store.ts';
 import { useAttention } from '../lib/uiBus.ts';
@@ -130,6 +131,8 @@ export function InboxScreen() {
   const [agents, setAgents] = useState<OfficeAgent[] | null>(null); const [projectNames, setProjectNames] = useState<Record<string, string>>({});
   // EN-012: encargos que esperan tu decisión (misma regla de «pendiente» que el Asistente y la tarjeta).
   const [assignments, setAssignments] = useState<AssignmentPendingItem[]>([]); const [assignmentsErr, setAssignmentsErr] = useState<string | null>(null);
+  // EN-022: mejoras de lecciones pendientes de tu decisión (una por lección; aceptar = 1 llamada).
+  const [lessonState, setLessonState] = useState<{ count: number; error: boolean }>({ count: 0, error: false });
   const att = useAttention(slug);
   // Fallo de un refresco con datos ya visibles: se conservan y se avisa con discreción (sin pantalla de error completa).
   const [staleErr, setStaleErr] = useState<string | null>(null);
@@ -179,18 +182,19 @@ export function InboxScreen() {
   const visibleProc = visible.filter(i => i.kind !== 'assistant_decision');
   const visibleAssistant = visible.filter(i => i.kind === 'assistant_decision');
   const asks = (agents ?? []).flatMap(a => a.attention.filter(x => !x.processId).map(x => ({ agent: a, item: x })));
-  const nothing = load.phase === 'ready' && items.length === 0 && asks.length === 0 && !att.assistant && assignments.length === 0 && !assignmentsErr;
+  const nothing = load.phase === 'ready' && items.length === 0 && asks.length === 0 && !att.assistant && assignments.length === 0 && !assignmentsErr && lessonState.count === 0 && !lessonState.error;
+  const pendingTotal = items.length + asks.length + att.assistant + assignments.length + lessonState.count;
 
   return (
     <Shell crumb="Decisiones">
       <main className="page screen" aria-labelledby="inbox-title" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        <PageHeader icon={Icon.bell(22)} tone={items.length + asks.length + att.assistant + assignments.length > 0 ? 'decisions' : 'idle'} eyebrow={ctx?.status.workspace?.name ?? 'Portal IA'} title="Decisiones" titleId="inbox-title"
+        <PageHeader icon={Icon.bell(22)} tone={pendingTotal > 0 ? 'decisions' : 'idle'} eyebrow={ctx?.status.workspace?.name ?? 'Portal IA'} title="Decisiones" titleId="inbox-title"
           description="Lo que espera tu respuesta. Aprobar o denegar aquí equivale a hacerlo desde el proceso."
           actions={tab === 'pendientes' ? <button className="btn btn-secondary btn-sm" onClick={() => void refresh()} disabled={load.phase === 'loading'}>Actualizar</button> : undefined} />
 
         <div className="seg" role="tablist" aria-label="Decisiones">
           <button type="button" role="tab" id="tab-pendientes" aria-selected={tab === 'pendientes'} aria-controls="panel-pendientes" tabIndex={tab === 'pendientes' ? 0 : -1} aria-pressed={tab === 'pendientes'} onClick={() => setTab('pendientes')} onKeyDown={onTabKey}>
-            Pendientes ({items.length + asks.length + att.assistant + assignments.length})</button>
+            Pendientes ({pendingTotal})</button>
           <button type="button" role="tab" id="tab-historial" aria-selected={tab === 'historial'} aria-controls="panel-historial" tabIndex={tab === 'historial' ? 0 : -1} aria-pressed={tab === 'historial'} onClick={() => setTab('historial')} onKeyDown={onTabKey}>
             Historial</button>
         </div>
@@ -265,6 +269,8 @@ export function InboxScreen() {
             <Link className="btn btn-secondary btn-sm" to={it.link}>{it.kind === 'awaiting_iteration_authorization' ? 'Autorizar iteración' : 'Ir a aceptarlo'}</Link>
           </li>)}</ul>
         </section>}
+
+        {slug && <LessonImprovementsInbox slug={slug} projectNames={projectNames} onState={setLessonState} />}
 
         {asks.length > 0 && <section className="dec-group card" aria-labelledby="dec-agents">
           <div className="card-h"><h2 className="h3" id="dec-agents">Lo que te piden tus agentes <span className="muted">({asks.length})</span></h2><span className="small muted">Se resuelve en el panel de cada agente</span></div>

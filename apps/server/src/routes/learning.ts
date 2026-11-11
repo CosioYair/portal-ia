@@ -6,6 +6,7 @@ import { createManualLesson, estimatePropose, lessonsRepo, proposeLesson, record
 import { effectiveVersion, promoteLesson, setAgentTemplateVersion, templatesRepo, versionDiff } from '../services/agentTemplates.ts';
 import { PolicyError } from '../services/executionPolicy.ts';
 import { curatePending } from '../services/lessonCurator.ts';
+import { acceptImprovement, getAutoImproveAuthorization, pendingImprovementItems, revertImprovement, setAutoImproveAuthorization } from '../services/lessonImprover.ts';
 import { lessonTemplateReach } from '../services/lessonPractices.ts';
 import { activeAgents } from '../services/activeAgents.ts';
 
@@ -54,6 +55,41 @@ export async function learningRoutes(app: FastifyInstance) {
       if (projectId) { try { processesRepo(slug).logExecution({ projectId, agentId: '', kind: 'lesson_curate', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt }); } catch { /* el registro no debe romper la depuración */ } }
       return summary;
     } catch (e: any) { return fail(reply, e); }
+  });
+  // ---- EN-022 · Mejora automática de las lecciones ----
+  /** Autorización permanente (Ajustes): desactivada por defecto; leerla no tiene costo. */
+  app.get('/api/workspaces/:slug/lessons/auto-improve', async (req, reply) => {
+    const { slug } = req.params as any; if (!guard(slug, reply)) return;
+    try { return getAutoImproveAuthorization(slug); } catch (e: any) { return fail(reply, e); }
+  });
+  app.put('/api/workspaces/:slug/lessons/auto-improve', async (req, reply) => {
+    const { slug } = req.params as any; if (!guard(slug, reply)) return;
+    const raw = (req.body ?? {}) as any;
+    if (raw.authorized !== true) return reply.code(403).send({ error: 'Cambiar la autorización de la mejora automática requiere tu confirmación explícita.', code: 'authorization_required' });
+    const body = z.object({ authorized: z.literal(true), enabled: z.boolean(), monthlyCallCap: z.number().int().min(0).max(10_000), monthlyUsdCap: z.number().min(0).max(10_000) }).safeParse(raw);
+    if (!body.success) return reply.code(400).send({ error: 'Los topes deben ser números mayores o iguales que 0.', issues: body.error.issues });
+    try { return setAutoImproveAuthorization(slug, { enabled: body.data.enabled, monthlyCallCap: body.data.monthlyCallCap, monthlyUsdCap: body.data.monthlyUsdCap }); } catch (e: any) { return fail(reply, e); }
+  });
+  /** Mejoras pendientes de decisión: lista aparte de la bandeja (como /inbox/assignments); no pasa por decide(). */
+  app.get('/api/workspaces/:slug/inbox/lessons', async (req, reply) => {
+    const { slug } = req.params as any; if (!guard(slug, reply)) return;
+    try { return pendingImprovementItems(slug); } catch (e: any) { return fail(reply, e); }
+  });
+  /** «Aceptar mejora (1 llamada)»: autorización explícita de UNA llamada; pasa por requirePolicy en el servicio. */
+  app.post('/api/workspaces/:slug/lessons/:id/improvement/accept', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const g = agentMemoryGuard(slug, id); if (g) return reply.code(409).send({ error: g });
+    const body = z.object({ authorized: z.literal(true) }).safeParse(req.body ?? {});
+    if (!body.success) return reply.code(403).send({ error: 'Aceptar la mejora llama a la IA: requiere autorización explícita.', code: 'authorization_required' });
+    try { return await acceptImprovement(slug, id, { authorized: true }); } catch (e: any) { return fail(reply, e); }
+  });
+  /** Volver a la versión anterior (sin IA, 0 USD): reactiva la madre y deja obsoleta la mejora. */
+  app.post('/api/workspaces/:slug/lessons/:id/improvement/revert', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const g = agentMemoryGuard(slug, id); if (g) return reply.code(409).send({ error: g });
+    const body = z.object({ confirm: z.literal(true) }).safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Confirma que quieres volver a la versión anterior.' });
+    try { return revertImprovement(slug, id); } catch (e: any) { return fail(reply, e); }
   });
   /** Detección manual sobre un proceso (idempotente). */
   app.post('/api/workspaces/:slug/processes/:id/detect-lessons', async (req, reply) => {

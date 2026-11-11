@@ -1688,6 +1688,56 @@ export type LessonStatus = 'detected' | 'proposed' | 'validated' | 'rejected' | 
  * Lo que pasó en una tarea POSTERIOR que llevaba la lección inyectada: `held` = terminó verificada sin que su error
  * volviera a ocurrir (la lección cambió el comportamiento); `recurred` = el mismo error volvió a ocurrir con ella presente.
  */
+// ---- EN-022 · Automejora de las lecciones ----
+/**
+ * Autorización permanente que el propietario fija una vez en Ajustes para que el Curador redacte solo la versión
+ * siguiente de una lección que reincide o queda refutada. Viene desactivada por defecto. Sin ella, o con el tope del
+ * mes agotado, no se hace ninguna llamada: la mejora queda como una decisión pendiente.
+ */
+export interface LessonAutoImproveAuthorization {
+  enabled: boolean;
+  /** Tope de llamadas al mes (suscripción y API juntas). 0 = ninguna. */
+  monthlyCallCap: number;
+  /** Tope de USD de la API al mes. 0 = ninguno. */
+  monthlyUsdCap: number;
+  /** Lo usado en el mes en curso (month = «AAAA-MM»). Cambia de mes y empieza de cero. */
+  usage: { month: string; calls: number; usd: number };
+  updatedAt: string | null;
+}
+export const DEFAULT_LESSON_AUTO_IMPROVE: LessonAutoImproveAuthorization = { enabled: false, monthlyCallCap: 0, monthlyUsdCap: 0, usage: { month: '', calls: 0, usd: 0 }, updatedAt: null };
+/** Por qué se mejora una lección: reincidió en 2 o más tareas distintas, o quedó refutada. */
+export type LessonImprovementReason = 'recurred' | 'refuted';
+/** applied: versión nueva aplicada sola · pending_decision: espera un clic en Decisiones · reverted: se volvió a la anterior. */
+export type LessonImprovementState = 'applied' | 'pending_decision' | 'reverted';
+export interface LessonImprovement {
+  state: LessonImprovementState;
+  reason: LessonImprovementReason;
+  /** Tareas (procesos) distintas en las que reincidió. */
+  tasks: number;
+  /** Versión de la que parte la mejora (null si no se conoce). */
+  fromVersion: number | null;
+  /** Id de la lección anterior (para volver a ella). */
+  fromId?: string | null;
+  at: string;
+  /** Resumen breve de lo que cambió (opcional). */
+  summary?: string | null;
+}
+/** Mejora de una lección pendiente de decisión del propietario: una por lección, en una lista aparte de la bandeja. */
+export interface LessonImprovementPendingItem {
+  lessonId: string;
+  title: string;
+  projectId: string | null;
+  role: TeamRole | null;
+  version: number;
+  reason: LessonImprovementReason;
+  tasks: number;
+  /** Texto actual de la lección (lo que se reescribirá). */
+  lessonText: string | null;
+  /** Aceptar hace exactamente una llamada a un modelo. */
+  estimatedCalls: 1;
+  at: string;
+}
+
 export interface LessonProof { processId: string; processTitle: string | null; result: 'held' | 'recurred'; detail: string; at: string }
 export interface LessonEvidence { processId: string | null; processTitle: string | null; stepId: string | null; agentId: string | null; agentName: string | null; file: string | null; detail: string; at: string }
 export interface Lesson {
@@ -1703,6 +1753,10 @@ export interface Lesson {
   agentId?: string | null;
   /** Evidencia de tareas posteriores (ver LessonProof). */
   proof?: LessonProof[];
+  /** EN-022 · Procesos distintos en los que reincidió sin terminar verificados (recurrenceCount es su longitud). */
+  recurrenceProcesses?: string[];
+  /** EN-022 · Estado de la mejora automática de esta lección (null o ausente = ninguna). */
+  improvement?: LessonImprovement | null;
   /** Aprendida: la primera tarea posterior que la llevó terminó verificada sin repetir su error. Validada sin esto = pendiente de demostrar. */
   provenAt?: string | null;
 }
