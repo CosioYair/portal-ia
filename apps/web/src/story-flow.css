@@ -39,6 +39,10 @@
 .sf-more { flex: 1 1 100%; }
 .sf-more .sf-actions { padding-top: 6px; }
 .sf-fold { min-width: 0; }
+/* HU-194 · Modo proceso: cabecera compacta con «Ver historia»; el resumen y el siguiente paso no se muestran (hidden gana a display:flex). */
+.sf-process-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; min-width: 0; }
+.sf-process-warn { flex-basis: 100%; color: var(--color-warn-text); }
+.sf-summary[hidden], .sf-next[hidden] { display: none; }
 .sf-issue { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: var(--radius-card); border: 1px solid var(--color-err-border); background: var(--color-err-bg-soft); }
 .sf-issue[data-cause="environment"] { border-color: var(--color-warn-border); background: var(--color-warn-bg-soft); }
 .sf-issue[data-level="warning"] { border-color: var(--color-warn-border); background: var(--color-warn-bg-soft); }

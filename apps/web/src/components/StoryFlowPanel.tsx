@@ -91,6 +91,9 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   useEffect(() => { if (proc.status !== 'running') setCancelling(false); }, [proc.status]);
   if (!flow) return null;
   const itemId = proc.backlogItemId ?? story?.id ?? null;
+  // HU-194 · En /procesos/<id> el resumen (etapas, gasto, estado) y «Siguiente paso:» ya están en la historia y en ProcessHeader: aquí solo la actividad técnica.
+  const processMode = variant === 'process';
+  const stageWarnings = processMode ? flow.stages.filter(s => (s.status === 'warning' || s.status === 'rejected') && s.key !== flow.current) : [];
   const assignmentId = proc.assignmentId ?? null;
   const merged = !!proc.result?.merged;
   const NEEDS_STORY = 'Esta acción necesita una historia y este proceso es de un encargo (EN-n): usa su tarjeta o «Enviar feedback al equipo».';
@@ -263,7 +266,12 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
 
   return (
     <section className="sf" aria-label="Estado de la historia">
-      <div className="sf-summary" aria-label="Resumen de la historia"><div className="sf-top">
+      {processMode && <div className="sf-process-head" data-process-mode aria-label="Actividad técnica del proceso">
+        <span className="small muted">Actividad técnica del proceso{story?.storyId ? <> · <span className="mono">{story.storyId}</span></> : null}</span>
+        {itemId && <Link className="btn btn-ghost btn-sm" to={`/historias/${itemId}`} data-ver-historia>{Icon.back()} Ver historia</Link>}
+        {stageWarnings.map(s => <span key={s.key} className="small sf-process-warn">⚠ {s.label}: {s.detail}</span>)}
+      </div>}
+      <div className="sf-summary" hidden={processMode} aria-label="Resumen de la historia"><div className="sf-top">
         <div className="sf-title">{flow.iteration && <Chip xs className="sf-it">It. {flow.iteration.number}/{flow.iteration.total}</Chip>}
           <div className="eyebrow">{story ? <>{variant === 'process' ? <Link className="lnk" to={`/historias/${story.id}`}>{story.storyId}</Link> : story.storyId}</> : 'Historia'}</div>
           {variant === 'process' && <div className="h3">{story ? story.title : proc.title}</div>}
@@ -272,7 +280,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
           <Chip xs className="mono">{fmtUsd(proc.spentUsd)} de {fmtUsd(proc.budgetUsd)} autorizados</Chip>
           {(proc.unconfirmedUsd ?? 0) > 0 && <span title="Costo posible de llamadas interrumpidas o fallidas que el proveedor no confirmó. No se suma al gasto real, pero sí se reserva del presupuesto."><Chip xs tone="warn" className="mono">≈ {fmtUsd(proc.unconfirmedUsd!)} sin confirmar</Chip></span>}
           <Chip tone={STATUS_TONE[cur.status]} xs>{cur.statusText ?? STATUS_TXT[cur.status]}</Chip>
-          {variant === 'story' ? !fallback && <Link className="btn btn-ghost btn-sm" to={`/procesos/${proc.id}`}>Ver el proceso y los agentes</Link> : itemId && <Link className="btn btn-ghost btn-sm" to={`/historias/${itemId}`}>{Icon.back()} Espacio de la historia</Link>}
+          {variant === 'story' ? !fallback && <Link className="btn btn-ghost btn-sm" to={`/procesos/${proc.id}`}>Ver el proceso y los agentes</Link> : null}
         </div>
       </div>
 
@@ -285,7 +293,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       </div>
       {flow.headline && <div className={`sf-headline${proc.result?.pipeline?.state === 'verified' ? ' is-ok' : ''}`} role="status" aria-label="Estado del pipeline">{proc.result?.pipeline?.state === 'verified' ? Icon.okc() : proc.status === 'running' ? <span className="spin" /> : Icon.info()}<span>{flow.headline}</span></div>}
 
-      <div className="sf-next" aria-label="Siguiente paso">
+      <div className="sf-next" hidden={processMode} aria-label="Siguiente paso">
         <p className="sf-next-line">{runningNow && <span className="spin" />}<strong>Siguiente paso:</strong> <span>{nextText}</span></p>
         {(cur.detail || flow.responsible.length > 0) && <span className="small muted sf-next-sub">{[cur.detail || null, flow.responsible.length > 0 ? `${flow.responsible.map(r => r.agentName).join(' · ')} — ${flow.responsible[0].status}` : null].filter(Boolean).join(' · ')}</span>}
         
