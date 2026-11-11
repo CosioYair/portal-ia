@@ -80,7 +80,9 @@ export function curatePending(slug: string, opts: { projectId?: string | null; b
       // EN-022: con firma de causa, la lección es específica de esa causa (título y texto con el caso).
       const sig = causeOfTags(keep.tags);
       const text = sig ? `${entry!.text} Caso: ${sig}.` : entry!.text;
-      repo.update(keep.id, { status: 'validated', ...(sig ? { title: `${entry!.title}: ${sig.slice(0, 140)}` } : {}), lessonText: text, correctiveAction: text, role: keep.role ?? entry!.role, tags: Array.from(new Set([...keep.tags, ...entry!.tags, 'curador'])), validatedAt: isoNow(), source: 'curator' });
+      // La brecha del Evaluador ya trae en su título el texto original del hallazgo (más legible que el findingKey normalizado).
+      const specificTitle = sig && detector !== 'gauntlet_gap' ? `${entry!.title}: ${sig.slice(0, 140)}` : null;
+      repo.update(keep.id, { status: 'validated', ...(specificTitle ? { title: specificTitle } : {}), lessonText: text, correctiveAction: text, role: keep.role ?? entry!.role, tags: Array.from(new Set([...keep.tags, ...entry!.tags, 'curador'])), validatedAt: isoNow(), source: 'curator' });
       out.applied++; out.appliedIds.push(keep.id);
       for (const l of rest) { reject(l, 'agrupada'); out.merged++; }
     }

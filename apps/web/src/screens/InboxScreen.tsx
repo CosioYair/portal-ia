@@ -3,7 +3,8 @@ import type { KeyboardEvent as RKeyboardEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { attentionChange, useLive } from '../lib/live.ts';
 import type { DecisionVerdict, PendingDecision, PendingDecisionKind } from '@portal-ia/domain';
-import { api, type AssignmentPendingItem, type DecisionHistoryItem, type DecisionHistoryVerdict, type LessonImprovementInboxItem } from '../lib/api.ts';
+import { api, type AssignmentPendingItem, type DecisionHistoryItem, type DecisionHistoryVerdict } from '../lib/api.ts';
+import { LessonImprovementsInbox } from '../components/LessonImprovementsInbox.tsx';
 import { osApi, type OfficeAgent } from '../lib/osApi.ts';
 import { AppContext } from '../lib/store.ts';
 import { useAttention } from '../lib/uiBus.ts';
@@ -131,8 +132,7 @@ export function InboxScreen() {
   // EN-012: encargos que esperan tu decisión (misma regla de «pendiente» que el Asistente y la tarjeta).
   const [assignments, setAssignments] = useState<AssignmentPendingItem[]>([]); const [assignmentsErr, setAssignmentsErr] = useState<string | null>(null);
   // EN-022: mejoras de lecciones pendientes de tu decisión (una por lección; aceptar = 1 llamada).
-  const [lessonItems, setLessonItems] = useState<LessonImprovementInboxItem[]>([]); const [lessonsErr, setLessonsErr] = useState<string | null>(null);
-  const [accepting, setAccepting] = useState<string | null>(null); const [acceptErr, setAcceptErr] = useState<{ id: string; message: string } | null>(null);
+  const [lessonState, setLessonState] = useState<{ count: number; error: boolean }>({ count: 0, error: false });
   const att = useAttention(slug);
   // Fallo de un refresco con datos ya visibles: se conservan y se avisa con discreción (sin pantalla de error completa).
   const [staleErr, setStaleErr] = useState<string | null>(null);
@@ -163,7 +163,6 @@ export function InboxScreen() {
     }
     void osApi.office(slug, null).then(o => { setAgents(o.agents); setProjectNames(Object.fromEntries(o.projects.map(p => [p.id, p.name]))); }).catch(() => setAgents(prev => prev ?? []));
     void api.inboxAssignments(slug).then(a => { setAssignments(a); setAssignmentsErr(null); }).catch((e: unknown) => setAssignmentsErr(e instanceof Error ? e.message : 'No se pudieron cargar los encargos pendientes.'));
-    void api.inboxLessons(slug).then(l => { setLessonItems(l); setLessonsErr(null); }).catch((e: unknown) => setLessonsErr(e instanceof Error ? e.message : 'No se pudieron cargar las mejoras de lecciones.'));
   }, [slug]);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -183,19 +182,8 @@ export function InboxScreen() {
   const visibleProc = visible.filter(i => i.kind !== 'assistant_decision');
   const visibleAssistant = visible.filter(i => i.kind === 'assistant_decision');
   const asks = (agents ?? []).flatMap(a => a.attention.filter(x => !x.processId).map(x => ({ agent: a, item: x })));
-  const nothing = load.phase === 'ready' && items.length === 0 && asks.length === 0 && !att.assistant && assignments.length === 0 && !assignmentsErr && lessonItems.length === 0 && !lessonsErr;
-  const pendingTotal = items.length + asks.length + att.assistant + assignments.length + lessonItems.length;
-  const acceptLesson = async (it: LessonImprovementInboxItem) => {
-    if (!slug || accepting) return;
-    setAccepting(it.lessonId); setAcceptErr(null);
-    try {
-      const v = await api.acceptLessonImprovement(slug, it.lessonId);
-      ctx?.flash(`Mejora aplicada: «${it.title}» pasa a la versión ${v.version}`);
-      setLessonItems(prev => prev.filter(x => x.lessonId !== it.lessonId));
-      window.setTimeout(() => { void refresh(); }, 900);
-    } catch (e) { setAcceptErr({ id: it.lessonId, message: e instanceof Error ? e.message : 'No se pudo aplicar la mejora.' }); }
-    finally { setAccepting(null); }
-  };
+  const nothing = load.phase === 'ready' && items.length === 0 && asks.length === 0 && !att.assistant && assignments.length === 0 && !assignmentsErr && lessonState.count === 0 && !lessonState.error;
+  const pendingTotal = items.length + asks.length + att.assistant + assignments.length + lessonState.count;
 
   return (
     <Shell crumb="Decisiones">
@@ -282,21 +270,7 @@ export function InboxScreen() {
           </li>)}</ul>
         </section>}
 
-        {lessonsErr && <div className="notice notice-err" role="alert"><strong>No se pudieron cargar las mejoras de lecciones.</strong> {lessonsErr}</div>}
-
-        {lessonItems.length > 0 && <section className="dec-group card" aria-labelledby="dec-lessons">
-          <div className="card-h"><h2 className="h3" id="dec-lessons">Mejoras de lecciones <span className="muted">({lessonItems.length})</span></h2><span className="small muted">Sin autorización permanente en Ajustes no se llama a la IA: aceptar redacta la versión nueva con 1 llamada</span></div>
-          <ul className="inbox-list" aria-label="Mejoras de lecciones pendientes" style={{ listStyle: 'none', margin: 0, padding: 0 }}>{lessonItems.map(it => <li key={it.lessonId} className="dec-item">
-            <Tile icon={Icon.sparkles()} tone="attention" size="sm" />
-            <div className="dec-item-text"><strong className="sm13">{it.title} · v{it.version}{it.projectId && projectNames[it.projectId] ? <span className="small muted"> · {projectNames[it.projectId]}</span> : null}</strong>
-              <span className="small med">{it.reason === 'refuted' ? `Quedó refutada: el error se repitió con ella en ${it.tasks} tarea${it.tasks === 1 ? '' : 's'}` : `Reincidió en ${it.tasks} tareas distintas con la lección aplicada`}</span>
-              {it.lessonText && <span className="small muted">Texto actual: «{it.lessonText}»</span>}
-              <span className="small muted">Costo estimado: {it.estimatedUsd != null ? `≈ ${it.estimatedUsd.toFixed(4)} USD` : 'no disponible'} · La versión actual queda obsoleta y podrás volver a ella desde Lecciones.</span>
-              {acceptErr?.id === it.lessonId && <span className="small" role="alert" style={{ color: 'var(--err, #b42318)' }}>{acceptErr.message}</span>}</div>
-            <button className="btn btn-primary btn-sm" onClick={() => void acceptLesson(it)} disabled={accepting !== null} aria-busy={accepting === it.lessonId}>
-              {accepting === it.lessonId ? 'Redactando…' : 'Aceptar mejora (1 llamada)'}</button>
-          </li>)}</ul>
-        </section>}
+        {slug && <LessonImprovementsInbox slug={slug} projectNames={projectNames} onState={setLessonState} />}
 
         {asks.length > 0 && <section className="dec-group card" aria-labelledby="dec-agents">
           <div className="card-h"><h2 className="h3" id="dec-agents">Lo que te piden tus agentes <span className="muted">({asks.length})</span></h2><span className="small muted">Se resuelve en el panel de cada agente</span></div>
