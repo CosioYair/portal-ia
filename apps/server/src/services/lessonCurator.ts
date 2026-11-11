@@ -1,16 +1,18 @@
 import type { Lesson, TeamRole } from '@portal-ia/domain';
-import { lessonsRepo } from './lessons.ts';
+import { causeOfTags, lessonsRepo } from './lessons.ts';
+import { maybeImproveLessons } from './lessonImprover.ts';
 import { agentsRepo, processesRepo, workspaceDb } from '../db/workspace.ts';
 import { syncLessonPracticesSafe } from './lessonPractices.ts';
 
 /**
- * HU-202 · Curador de Aprendizaje (sin IA, 0 USD, sin autorización de gasto).
- * Agrupa las detecciones pendientes por causa (proyecto + detector + papel) y, por reglas:
+ * HU-202 · Curador de Aprendizaje (la curación no usa IA y cuesta 0 USD).
+ * Agrupa las detecciones pendientes por causa (proyecto + detector + papel + firma de causa, EN-022) y, por reglas:
  *  - aplica (validated, source 'curator') la lección del catálogo a la detección más reciente de cada causa útil;
  *  - rechaza el resto del grupo («agrupada»), el ruido del proveedor («descartada:ruido»), los detectores sin catálogo
  *    («descartada:sin-catalogo») y las causas ya refutadas o retiradas por el propietario (no se reaplican en bucle).
  * Las filas rechazadas conservan su dedupeKey: volver a detectar el mismo error no crea copias.
- * Solo depende de lessons.ts y workspace.ts: no puede llamar a ningún adaptador de IA.
+ * La curación no llama a ningún modelo. EN-022: tras cada tarea dispara maybeImproveLessons (lessonImprover.ts), el único
+ * sitio con llamada de IA, y solo dentro de la autorización permanente de Ajustes; si no, deja una decisión pendiente.
  */
 export interface CatalogEntry { title: string; text: string; role: TeamRole; tags: string[] }
 
@@ -32,12 +34,18 @@ export const LESSON_CATALOG: Record<string, CatalogEntry> = {
   incomplete_delivery: { title: 'Entregar todos los archivos del plan', role: 'implementer', tags: ['completitud', 'plan', 'implementar'], text: 'Entrega todos los archivos que el plan incluye en tu ámbito; si alguno no hace falta, decláralo con DESCARTE y un motivo verificable.' },
   ineffective_correction: { title: 'Correcciones con cambios aplicables', role: 'implementer', tags: ['corrección', 'costo', 'implementar'], text: 'En cada corrección, entrega cambios aplicables que ataquen el diagnóstico recibido; no repitas la entrega anterior ni respondas solo con explicaciones.' },
   missing_tests: { title: 'Pruebas para el código nuevo', role: 'implementer', tags: ['pruebas', 'calidad', 'implementar'], text: 'Acompaña el código nuevo con pruebas nuevas en apps/server/test (node --test) que cubran su comportamiento principal.' },
-  gauntlet_gap: { title: 'Cerrar las brechas del Evaluador', role: 'implementer', tags: ['gauntlet', 'implementar'], text: 'Antes de entregar, comprueba cada criterio con evidencia en el diff (código, prueba o texto visible); no des por cumplido un criterio sin esa evidencia.' }
+  gauntlet_gap: { title: 'Cerrar las brechas del Evaluador', role: 'implementer', tags: ['gauntlet', 'implementar'], text: 'Antes de entregar, comprueba cada criterio con evidencia en el diff (código, prueba o texto visible); no des por cumplido un criterio sin esa evidencia.' },
+  max_turns_exhausted: { title: 'Entregar antes de agotar los turnos', role: 'implementer', tags: ['turnos', 'claude-code', 'implementar'], text: 'Acota la exploración y entrega antes de agotar los turnos: lee solo los archivos imprescindibles, agrupa las lecturas en pocas llamadas y entrega los cambios en cuanto tengas lo necesario.' },
+  correction_cap_reached: { title: 'Correcciones que atacan el diagnóstico', role: 'implementer', tags: ['corrección', 'tope', 'implementar'], text: 'Ataca el diagnóstico concreto en cada corrección: lee el error exacto (archivo, prueba y mensaje), corrige esa causa y comprueba que tu cambio la resuelve antes de entregar.' }
 };
 
 export const NOISE = new Set(['provider_refusal', 'provider_timeout', 'provider_unavailable', 'provider_credentials', 'excessive_context']);
 
-export const causeKey = (l: Pick<Lesson, 'projectId' | 'detector' | 'role'>) => `${l.projectId ?? ''}:${l.detector}:${l.role ?? ''}`;
+/** EN-022: proyecto:detector:papel[:firma]. Sin firma de causa conserva la clave antigua. */
+export const causeKey = (l: Pick<Lesson, 'projectId' | 'detector' | 'role'> & { tags?: string[] }) => {
+  const base = `${l.projectId ?? ''}:${l.detector}:${l.role ?? ''}`; const sig = causeOfTags(l.tags);
+  return sig ? `${base}:${sig}` : base;
+};
 
 export interface CurateSummary { applied: number; merged: number; discarded: number; groups: number; appliedIds: string[] }
 
@@ -69,7 +77,10 @@ export function curatePending(slug: string, opts: { projectId?: string | null; b
       if (why) { for (const l of ls) reject(l, why); if (why === 'agrupada') out.merged += ls.length; else out.discarded += ls.length; continue; }
       const sorted = [...ls].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       const [keep, ...rest] = sorted;
-      repo.update(keep.id, { status: 'validated', lessonText: entry!.text, correctiveAction: entry!.text, role: keep.role ?? entry!.role, tags: Array.from(new Set([...keep.tags, ...entry!.tags, 'curador'])), validatedAt: isoNow(), source: 'curator' });
+      // EN-022: con firma de causa, la lección es específica de esa causa (título y texto con el caso).
+      const sig = causeOfTags(keep.tags);
+      const text = sig ? `${entry!.text} Caso: ${sig}.` : entry!.text;
+      repo.update(keep.id, { status: 'validated', ...(sig ? { title: `${entry!.title}: ${sig.slice(0, 140)}` } : {}), lessonText: text, correctiveAction: text, role: keep.role ?? entry!.role, tags: Array.from(new Set([...keep.tags, ...entry!.tags, 'curador'])), validatedAt: isoNow(), source: 'curator' });
       out.applied++; out.appliedIds.push(keep.id);
       for (const l of rest) { reject(l, 'agrupada'); out.merged++; }
     }
@@ -91,6 +102,8 @@ export function curateAfterTask(slug: string, processId: string): CurateSummary 
     const procs = processesRepo(slug); const proc = procs.get(processId);
     if (!proc) return null;
     const summary = curatePending(slug, { projectId: proc.projectId, by: 'curator' });
+    // EN-022: mejora de las lecciones que reinciden o quedan refutadas (en segundo plano; nunca lanza error).
+    void maybeImproveLessons(slug, proc.projectId).catch(() => undefined);
     let agentId = '';
     try { agentId = agentsRepo(slug).list().find(a => a.key === 'pj-curador-de-aprendizaje' && (a.projectId === proc.projectId || a.projectId === null))?.id ?? ''; } catch { /* sin agente */ }
     try { procs.logExecution({ projectId: proc.projectId, agentId, kind: 'lesson_curate', status: 'done', tokensIn: 0, tokensOut: 0, cost: 0, startedAt }); } catch { /* el registro no debe romper la tarea */ }
