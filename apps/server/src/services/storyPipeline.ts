@@ -101,7 +101,7 @@ export function budgetCheck(slug: string, processId: string, agent: Agent, syste
 function stepSystem(slug: string, proc: Process, stepId: string, agent: Agent, system0: string, injected: Map<string, string>): string {
   if (!injected.has(stepId)) {
     const role = (proc.steps.find(s => s.id === stepId)!.role ?? 'implementer') as TeamRole;
-    injected.set(stepId, injectLessons(slug, stepId, system0, { projectId: proc.projectId, role, tags: [] }, practicesFor(slug, agent)).system);
+    injected.set(stepId, sealForStep(injectLessons(slug, stepId, system0, { projectId: proc.projectId, role, tags: [] }, practicesFor(slug, agent)).system));
   }
   // EN-021 · Sello Portal IA, solo la línea 1 (pasos estructurados: nunca la línea 2). Se aplica después de las
   // lecciones y no las repite. withSeal es idempotente por marca, así que una llamada encadenada no lo duplica.

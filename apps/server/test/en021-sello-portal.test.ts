@@ -117,7 +117,7 @@ fs.writeFileSync(path.join(root, 'AGENTS.md'), '# Agente con instrucciones propi
 test('(2)(3) chat: primera respuesta con L1 y L2, segunda solo L1; mismo sello con y sin AGENTS.md; carpeta, hash y revisión intactos', async () => {
   settingsRepo.set('owner.email', EMAIL);
   const pv = (await inject('POST', `${W}/agents/external/preview`, { path: root })).json;
-  const imp = await inject('POST', `${W}/agents/external`, { path: root, hash: pv.hash, name: 'Sellado', role: 'Pruebas del sello', summary: '', department: 'Documentos', harness: 'claude-code', model: 'claude-sonnet-4-5', grants: { writeDocuments: true }, authorized: true });
+  const imp = await inject('POST', `${W}/agents/external`, { path: root, hash: pv.hash, name: 'Sellado', role: 'Pruebas del sello', summary: '', department: 'Documentos', harness: 'claude-code', model: 'claude-sonnet-4-5', grants: { writeDocuments: true, runScripts: false, applyImprovements: false }, authorized: true });
   assert.ok(imp.status < 300, JSON.stringify(imp.json));
   const extId = imp.json.id as string; const EXT = `${W}/agents/${extId}`;
   const agentsMdBefore = fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
