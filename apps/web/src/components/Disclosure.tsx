@@ -19,7 +19,7 @@ export function Disclosure({ id, title, hint, defaultOpen = false, className, te
   children: ReactNode;
 }) {
   return (
-    <details id={id} className={className ? `disclosure ${className}` : 'disclosure'} open={defaultOpen ? true : undefined} data-testid={testId}>
+    <details className={className ? `disclosure ${className}` : 'disclosure'} id={id} open={defaultOpen ? true : undefined} data-testid={testId}>
       <summary className="disclosure-summary">
         <span className="disclosure-marker" aria-hidden="true" />
         <span className="disclosure-text">

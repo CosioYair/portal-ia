@@ -72,7 +72,7 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
   }, [slug, storyId, active]);
   // La pestaña vive en el hash (#estado, #iteraciones…): así navegar a /historias/:id#iteraciones desde cualquier pestaña
   // (p. ej. tras enviar el feedback de la prueba) siempre la abre y recarga el contexto.
-  // HU-195 · Cada sección es un <details> (id sec-<t>): se abre y se lleva la vista hasta ella, aunque el hash no cambie.
+  // HU-195 · Cada sección es un Disclosure (plegable nativo, id sec-<t>): se abre y se lleva la vista hasta ella, aunque el hash no cambie.
   const revealSection = (t: Tab) => requestAnimationFrame(() => {
     const el = document.getElementById(`sec-${t}`);
     if (el instanceof HTMLDetailsElement) el.open = true;

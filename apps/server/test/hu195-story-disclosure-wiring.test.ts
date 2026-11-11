@@ -48,6 +48,6 @@ test('HU-195: el hash y las acciones abren la sección y llevan la vista hasta e
 test('HU-195: Disclosure acepta un id opcional y sigue cerrado por defecto', () => {
   const d = read('components/Disclosure.tsx');
   assert.match(d, /id\?: string;/);
-  assert.ok(d.includes('<details id={id}'), 'el id se pasa al <details>');
+  assert.match(d, /<details className=[^>]*\bid=\{id\}/, 'el id se pasa al <details>');
   assert.ok(d.includes('defaultOpen = false'), 'cerrado por defecto');
 });
