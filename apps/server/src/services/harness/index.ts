@@ -57,7 +57,9 @@ export function affectedWork(slug: string, agentId: string) {
     WHERE s.agent_id = ? AND p.status IN ('running', 'pending_authorization') AND p.archived_at IS NULL`).all(agentId) as any[]);
   const inFlight = running.filter(r => r.step === 'running').map(r => ({ id: r.id, title: r.title }));
   const open = Array.from(new Map(running.map(r => [r.id, { id: r.id, title: r.title, status: r.status as string }])).values());
-  const batches = batchesRepo(slug).list().filter(b => b.status === 'running' || b.status === 'paused').map(b => ({ id: b.id, title: b.title, status: b.status, sources: b.auth.backends }));
+  // Lotes que se siguen (en marcha, en pausa o esperando tu decisión): uno en 'needs_decision' puede reanudarse o
+  // desbloquearse solo dentro de su autorización, con el arnés que fijó al autorizarse (HU-203).
+  const batches = batchesRepo(slug).followed().map(b => ({ id: b.id, title: b.title, status: b.status, sources: b.auth.backends }));
   return { inFlight, open, batches };
 }
 
