@@ -1,4 +1,4 @@
-import { BATCH_LIMITS, DEPENDENCY_BROKEN, DEPENDENCY_SATISFIED, INTERNAL_WORKSPACE, backendLabel, verificationPassed, verificationsForApplied, batchBudget, batchLifecycle, batchMoving, integrationPolicy, batchSourceOf, batchSummary, classifyStop, DEFAULT_GAUNTLET, gauntletOverhead, normalizeGauntlet, normalizePipeline, planBatch, type Batch, type BatchAgentCheck, type BatchAuthorization, type BatchFailureClass, type BatchItem, type BatchItemState, type BatchPreview, type BatchPreviewStory, type CallRange, type CandidateFreshness, type GauntletConfig, type PipelinePauseKind, type Process, type ProviderId, type RuntimeCheck, type RuntimeCheckResult } from '@portal-ia/domain';
+import { BATCH_LIMITS, DEPENDENCY_BROKEN, DEPENDENCY_SATISFIED, INTERNAL_WORKSPACE, isBatchSettled, backendLabel, verificationPassed, verificationsForApplied, batchBudget, batchLifecycle, batchMoving, integrationPolicy, batchSourceOf, batchSummary, classifyStop, DEFAULT_GAUNTLET, gauntletOverhead, normalizeGauntlet, normalizePipeline, planBatch, type Batch, type BatchAgentCheck, type BatchAuthorization, type BatchFailureClass, type BatchItem, type BatchItemState, type BatchPreview, type BatchPreviewStory, type CallRange, type CandidateFreshness, type GauntletConfig, type PipelinePauseKind, type Process, type ProviderId, type RuntimeCheck, type RuntimeCheckResult } from '@portal-ia/domain';
 import { revisionStatus } from './revision.ts';
 import { acquireWork, forgetLeases, workConflict } from './executionLocks.ts';
 import { batchesRepo } from '../db/batches.ts';
@@ -344,7 +344,7 @@ export function createBatch(slug: string, projectId: string, input: BatchInput):
   const auth = normalizeAuth(projectId, input, projectGauntlet(slug, projectId));
   const { selected, backlog } = selection(slug, projectId, auth.itemIds);
   const repo = batchesRepo(slug);
-  const open = repo.active().find(b => b.projectId === projectId);
+  const open = repo.followed().find(b => b.projectId === projectId && blocksNewBatch(slug, b));
   if (open) throw fail(409, `Ya hay un lote activo en este proyecto («${open.title}»): termínalo, cancélalo o revócalo antes de autorizar otro.`, 'batch_active');
   // La misma comprobación que la vista previa: no se autoriza un lote con historias cuyo equipo no puede ejecutar.
   const pv = previewBatch(slug, projectId, input);
@@ -731,7 +731,7 @@ const ADOPTABLE: BatchItemState[] = ['queued', 'needs_owner', 'failed', 'rejecte
 function outsideIteration(slug: string, b: Batch, it: BatchItem): Process | null {
   // Las del lote, la que ya sigue y las de fuera que ya se resolvieron (canceladas o rechazadas) no se adoptan otra vez.
   const mine = new Set([...it.processIds, it.nextProcessId ?? '', it.resumeProcessId ?? '', it.followedProcessId ?? '', ...(it.dismissedProcessIds ?? [])]);
-  const others = new Set(batchesRepo(slug).active().filter(x => x.id !== b.id).flatMap(x => x.items.flatMap(i => [...i.processIds, i.nextProcessId ?? ''])));
+  const others = new Set(batchesRepo(slug).followed().filter(x => x.id !== b.id).flatMap(x => x.items.flatMap(i => [...i.processIds, i.nextProcessId ?? ''])));
   const since = it.startedAt ?? b.createdAt;
   const latest = processesRepo(slug).listByBacklogItem(it.itemId).filter(p => p.kind === 'story_execution').at(-1);
   if (!latest || mine.has(latest.id) || others.has(latest.id) || latest.status === 'cancelled' || latest.createdAt <= since) return null;
@@ -1169,7 +1169,7 @@ function maybeComplete(slug: string, id: string) {
     // Solo se termina con TODO resuelto: aceptadas (integradas y cerradas), no aceptadas, aplazadas o canceladas. Nunca con
     // trabajo aceptado sin integrar ni decisiones tuyas pendientes; mientras, el resumen dice qué falta.
     const life = batchLifecycle(b.items, 'on_acceptance', b.integrationPlan?.order ?? []);
-    if (life.phase === 'done') return setStatus(slug, id, 'completed', `Lote terminado: ${life.headline}`, 'completed');
+    if (life.phase === 'done') return closeFaithfully(slug, id, life.headline);
     if (b.reason !== life.headline) batchesRepo(slug).update(id, x => { x.reason = life.headline; if (life.technicallyComplete && !x.events.some(e => e.kind === 'item' && e.message === life.headline)) x.events.push({ at: now(), kind: 'item', message: life.headline }); });
     return;
   }
@@ -1186,13 +1186,126 @@ function maybeComplete(slug: string, id: string) {
     return;
   }
   const s = batchSummary(b.items);
-  setStatus(slug, id, 'completed', `Lote terminado: ${s.awaiting_acceptance} pendiente(s) de tu aceptación, ${s.accepted} aceptada(s), ${s.rejected} no aceptada(s), ${s.failed} fallida(s), ${s.blocked} bloqueada(s), ${s.cancelled} cancelada(s).`, 'completed');
+  closeFaithfully(slug, id, `${s.awaiting_acceptance} pendiente(s) de tu aceptación, ${s.accepted} aceptada(s), ${s.rejected} no aceptada(s), ${s.failed} fallida(s), ${s.blocked} bloqueada(s), ${s.cancelled} cancelada(s).`);
 }
 
 // ---------------------------------------------------------------- Control del propietario
 
 const controllable = (b: Batch) => { if (b.status === 'cancelled' || b.status === 'revoked') throw fail(409, `El lote está ${b.status === 'cancelled' ? 'cancelado' : 'revocado'}.`, 'closed'); };
 export function getBatch(slug: string, id: string): Batch { const b = batchesRepo(slug).get(id); if (!b) throw fail(404, 'Lote no encontrado.', 'not_found'); return b; }
+
+// ---------------------------------------------------------------- HU-203: estado fiel al Backlog y desbloqueo automático
+
+/** Estado de una historia en el Backlog (null si no se puede leer). */
+function backlogStatusOf(slug: string, itemId: string): string | null {
+  try {
+    const r = (backlogRepo(slug) as unknown as { get?: (id: string) => { status?: string } | null | undefined }).get?.(itemId);
+    return r?.status ?? null;
+  } catch { return null; }
+}
+/** ¿Está terminada en el Backlog una historia de fuera del lote (por su storyId)? */
+function backlogDoneByStory(slug: string, projectId: string, storyId: string): boolean {
+  try {
+    const rows = (backlogRepo(slug) as unknown as { list?: (projectId: string) => { storyId?: string; status?: string }[] }).list?.(projectId) ?? [];
+    return rows.some(r => r.storyId === storyId && r.status === 'done');
+  } catch { return false; }
+}
+const withBacklog = (slug: string, b: Batch) => b.items.map(i => ({ state: i.state, backlogStatus: backlogStatusOf(slug, i.itemId) }));
+
+/** Cierre fiel al Backlog: 'completed' solo si todo está aceptado, cerrado o cancelado; si no, 'needs_decision'. */
+function closeFaithfully(slug: string, id: string, detail: string) {
+  const b = batchesRepo(slug).get(id)!;
+  const rows = withBacklog(slug, b);
+  if (isBatchSettled(rows)) return setStatus(slug, id, 'completed', `Lote terminado: ${detail}`, 'completed');
+  const open = rows.filter(r => !isBatchSettled([r])).length;
+  return setStatus(slug, id, 'needs_decision', `Necesita tu decisión: ${open} historia(s) sin aceptar, cerrar ni cancelar en el Backlog. ${detail}`, 'pause');
+}
+
+/**
+ * ¿Puede el lote lanzar trabajo sin ti? Hay historias en cola, en marcha (también fuera del lote) o bloqueadas o en espera
+ * de una dependencia del lote que no está fallida, cancelada, no aceptada ni aplazada.
+ */
+export function canLaunchWork(slug: string, b: Batch): boolean {
+  const by = new Map(b.items.map(i => [i.storyId, i]));
+  const dead: BatchItemState[] = [...DEPENDENCY_BROKEN, 'rejected', 'postponed'];
+  return b.items.some(i => {
+    if (i.state === 'queued' || i.state === 'running' || i.state === 'integrating' || i.state === 'revalidating') return true;
+    if (i.state === 'external') { const pid = currentProcessId(i); return !!pid && processesRepo(slug).get(pid)?.status === 'running'; }
+    if ((i.state === 'waiting_dependency' || (i.state === 'blocked' && i.failureClass === 'dependency')) && i.dependsOn) {
+      const d = by.get(i.dependsOn);
+      return !!d && !dead.includes(d.state);
+    }
+    return false;
+  });
+}
+
+/** Regla única de lote abierto: en marcha o en pausa, o esperando tu decisión pero con trabajo que puede lanzar solo. */
+export function blocksNewBatch(slug: string, b: Batch): boolean {
+  if (b.status === 'running' || b.status === 'paused') return true;
+  return b.status === 'needs_decision' && canLaunchWork(slug, b);
+}
+
+/** 409 si OTRO lote del mismo proyecto bloquea (reanudar, reintentar, iterar). */
+function assertNoOtherBlocking(slug: string, id: string) {
+  const b = getBatch(slug, id);
+  const other = batchesRepo(slug).followed().find(x => x.id !== id && x.projectId === b.projectId && blocksNewBatch(slug, x));
+  if (other) throw fail(409, `Ya hay un lote activo en este proyecto («${other.title}»): termínalo, cancélalo o revócalo antes de continuar este.`, 'batch_active');
+}
+
+/** ¿Impide la autorización vigente seguir? (presupuesto, tope de llamadas, duración). Devuelve el motivo o null. */
+function authorizationStop(slug: string, b: Batch, items: BatchItem[]): string | null {
+  if (b.revokedAt) return 'La autorización del lote está revocada.';
+  if (items.some(i => i.usesApi !== false) && !budgetOf(slug, b).canStart) return `Presupuesto del lote agotado: no cabe otra historia (${b.auth.perStoryBudgetUsd} USD por historia). Amplíalo y reanuda.`;
+  if (subscriptionCalls(slug, b) >= b.auth.maxSubscriptionCalls) return `Se alcanzó el tope de ${b.auth.maxSubscriptionCalls} llamadas a la suscripción autorizado en el lote. Amplíalo y reanuda.`;
+  if (batchDeps.now() - Date.parse(b.createdAt) > b.auth.maxDurationMin * 60_000) return `Se superó la duración máxima autorizada (${b.auth.maxDurationMin} min).`;
+  return null;
+}
+
+/** Bloqueadas por una dependencia que ya se completó (dentro o fuera del lote) → de nuevo en cola. */
+function unlockDependents(slug: string, b: Batch): BatchItem[] {
+  const by = new Map(b.items.map(i => [i.storyId, i]));
+  const out: BatchItem[] = [];
+  for (const it of b.items) {
+    if (it.state !== 'blocked' || it.failureClass !== 'dependency' || !it.dependsOn) continue;
+    const dep = by.get(it.dependsOn);
+    const ok = dep ? DEPENDENCY_SATISFIED.includes(dep.state) : backlogDoneByStory(slug, b.projectId, it.dependsOn);
+    if (!ok) continue;
+    setItem(slug, b.id, it.itemId, { state: 'queued', failureClass: null, finishedAt: null, reason: `Su dependencia ${it.dependsOn} se completó: vuelve a la cola y se ejecuta sola dentro de la autorización del lote.` }, `desbloqueada: ${it.dependsOn} se completó.`);
+    out.push(it);
+  }
+  return out;
+}
+
+/**
+ * Sin IA: sincroniza el lote con el Backlog y sus procesos (también lo que se ejecuta fuera del lote, sin crear otro
+ * proceso), desbloquea dependientes y, si esperaba tu decisión, vuelve a 'running' dentro de la autorización vigente
+ * (o se pausa con el motivo si se agotó). Lo llama el temporizador para cada lote de followed().
+ */
+export async function syncFromBacklog(slug: string, id: string): Promise<void> {
+  const repo = batchesRepo(slug);
+  let b = repo.get(id); if (!b) return;
+  if (b.status === 'needs_decision') { await reconcileBatch(slug, id); b = repo.get(id); if (!b) return; }
+  if (b.status !== 'running' && b.status !== 'paused' && b.status !== 'needs_decision') return;
+  const unlocked = unlockDependents(slug, b);
+  b = repo.get(id)!;
+  if (b.status !== 'needs_decision') return;
+  if (isBatchSettled(withBacklog(slug, b))) { setStatus(slug, id, 'completed', 'Lote terminado: todas sus historias están aceptadas, cerradas o canceladas en el Backlog.', 'completed'); return; }
+  const queued = b.items.filter(i => i.state === 'queued');
+  if (!unlocked.length && !queued.length) return;
+  const why = authorizationStop(slug, b, queued);
+  if (why) { setStatus(slug, id, 'paused', why, 'budget'); return; }
+  setStatus(slug, id, 'running', `${unlocked.map(i => i.storyId).join(', ') || 'Historias en cola'}: su dependencia se completó; el lote sigue solo dentro de la autorización vigente.`, 'resume');
+}
+
+/** Acción explícita tuya sobre un lote que esperaba tu decisión: vuelve a 'running' si la autorización lo permite. */
+function ownerReopen(slug: string, id: string) {
+  assertNoOtherBlocking(slug, id);
+  const b = getBatch(slug, id);
+  if (b.status !== 'needs_decision') return;
+  const why = authorizationStop(slug, b, b.items);
+  if (why) setStatus(slug, id, 'paused', why, 'budget');
+  else setStatus(slug, id, 'running', 'Retomado por tu decisión dentro de la autorización vigente.', 'resume');
+}
 
 // ---------------------------------------------------------------- Reconciliación y cierre manual (EN-002, sin IA)
 
@@ -1255,12 +1368,12 @@ function finishWithEvent(slug: string, id: string, kind: 'completed' | 'close', 
  */
 export async function reconcileBatch(slug: string, id: string): Promise<Batch> {
   const b = getBatch(slug, id);
-  if (b.status !== 'paused' && b.status !== 'running') return b;
+  if (b.status !== 'paused' && b.status !== 'running' && b.status !== 'needs_decision') return b;
   if (b.activation?.state === 'requested') return b;
   const c = await integrationCheck(slug, b);
   if (!c.ok) return b;
   const cur = getBatch(slug, id);
-  if (cur.status !== 'paused' && cur.status !== 'running') return cur;
+  if (cur.status !== 'paused' && cur.status !== 'running' && cur.status !== 'needs_decision') return cur;
   const internal = slug === INTERNAL_WORKSPACE.slug;
   const message = internal
     ? 'Lote completado: todas sus historias están integradas en main y activas en el Portal. Falta tu aceptación de cada una (no se ha usado IA).'
@@ -1314,6 +1427,28 @@ export function pauseBatch(slug: string, id: string): Batch {
 }
 /** Reanudar (autorizado): con presupuesto o tope de suscripción ampliados si se indican; la duración cuenta desde ahora. */
 export function resumeBatch(slug: string, id: string, extra: { addBudgetUsd?: number; addSubscriptionCalls?: number; expectPolicy?: string | null } = {}): Batch {
+  assertNoOtherBlocking(slug, id);
+  const before = getBatch(slug, id);
+  const fromDecision = before.status === 'needs_decision';
+  if (fromDecision) batchesRepo(slug).update(id, x => { x.status = 'paused'; });
+  let out: Batch;
+  try { out = resumeBatchCore(slug, id, extra); } catch (e) {
+    if (fromDecision) batchesRepo(slug).update(id, x => { if (x.status === 'paused') x.status = 'needs_decision'; });
+    throw e;
+  }
+  if (fromDecision) {
+    // Reanudar vuelve a encolar lo que se puede retomar (fallidas y bloqueadas reintentables).
+    for (const it of out.items) {
+      if (it.state !== 'failed' && it.state !== 'blocked') continue;
+      const pid = currentProcessId(it);
+      if (!retryable(it, pid ? processesRepo(slug).get(pid)?.status : null)) continue;
+      try { retryItem(slug, id, it.itemId); } catch (e: any) { logger({ batchId: id, itemId: it.itemId, err: e?.message }, 'lote: no se pudo reencolar al reanudar'); }
+    }
+    for (const it of unlockDependents(slug, getBatch(slug, id))) logger({ batchId: id, itemId: it.itemId }, 'lote: desbloqueada al reanudar');
+  }
+  return getBatch(slug, id);
+}
+function resumeBatchCore(slug: string, id: string, extra: { addBudgetUsd?: number; addSubscriptionCalls?: number; expectPolicy?: string | null } = {}): Batch {
   const b = getBatch(slug, id); controllable(b);
   // Reanudas con la política que tenías delante: si cambió (otra pestaña), no se reanuda con otra distinta.
   if (extra.expectPolicy && extra.expectPolicy !== integrationPolicy(b.auth)) throw fail(409, `La política de integración del lote cambió (ahora: ${POLICY_LABEL[integrationPolicy(b.auth)]}): revisa qué hará al reanudar y vuelve a intentarlo.`, 'policy_changed');
@@ -1431,6 +1566,7 @@ const canResume = (slug: string, it: BatchItem) => requeueMode(slug, it) !== nul
 
 /** Reintentar UNA historia dentro del lote (mismos límites): vuelve a la cola y se comprueban otra vez su equipo y orígenes. */
 export function retryItem(slug: string, id: string, itemId: string): Batch {
+  ownerReopen(slug, id);
   const b = getBatch(slug, id); controllable(b);
   const it = b.items.find(i => i.itemId === itemId); if (!it) throw fail(404, 'La historia no está en el lote.', 'not_found');
   if (it.state === 'external') throw fail(409, `${it.storyId} sigue fuera del lote con la iteración que autorizaste: decide desde su proceso (el lote no la repite).`, 'external');
@@ -1583,6 +1719,7 @@ export function reopenItem(slug: string, id: string, itemId: string): Batch {
  * iteración con tu nota y los pasos que fallaron, y el lote la ejecuta en su turno. Las demás no se repiten.
  */
 export async function iterateItem(slug: string, id: string, itemId: string, note: string, revision?: string | null): Promise<Batch> {
+  ownerReopen(slug, id);
   const b = getBatch(slug, id); controllable(b);
   const it = b.items.find(i => i.itemId === itemId);
   const wasIntegrated = !!it && (!!it.mergedCommit || DEPENDENCY_SATISFIED.includes(it.state));
@@ -1804,7 +1941,7 @@ export function startBatchScheduler(log: (o: any, m: string) => void, everyMs = 
   logger = log;
   if (timer) clearInterval(timer);
   timer = setInterval(() => {
-    for (const ws of workspacesRepo.list()) { try { for (const b of batchesRepo(ws.slug).active()) if (b.status === 'running') void scheduleTick(ws.slug, b.id); } catch { /* espacio sin base */ } }
+    for (const ws of workspacesRepo.list()) { try { for (const b of batchesRepo(ws.slug).followed()) void syncFromBacklog(ws.slug, b.id).then(() => { if (batchesRepo(ws.slug).get(b.id)?.status === 'running') return scheduleTick(ws.slug, b.id); }).catch(e => logger({ batchId: b.id, err: e?.message }, 'lote: no se pudo sincronizar con el Backlog')); } catch { /* espacio sin base */ } }
   }, everyMs);
   timer.unref();
 }
