@@ -116,7 +116,7 @@ function ProcessViewOf({ processId }: { processId: string }) {
             <ProcessHeader proc={proc} status={st} onNext={goNext} />
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            {proc.kind === 'story_execution' && proc.backlogItemId && <Link className="btn btn-secondary" to={`/historias/${proc.backlogItemId}`}>Espacio de la historia {Icon.arrow()}</Link>}
+            {proc.kind === 'story_execution' && proc.backlogItemId && <Link className="btn btn-secondary" to={`/historias/${proc.backlogItemId}`}>Ver historia {Icon.arrow()}</Link>}
             {proc.status === 'running' && !proc.archivedAt && <button className="btn btn-secondary" onClick={cancel}>Cancelar proceso</button>}
             {proc.status === 'done' && proc.kind === 'initial_assessment' && <Link className="btn btn-primary" to="/backlog">Ver backlog y ejecutar {Icon.arrow()}</Link>}
             {proc.kind === 'story_execution' && <Link className="btn btn-secondary" to="/backlog">Volver al backlog</Link>}
