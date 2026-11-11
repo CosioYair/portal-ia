@@ -58,6 +58,10 @@ test('sandbox_help se explica en el Portal sin mandar a docs/sandbox.md', () => 
 test('close_resolved sigue abriendo CloseResolvedDialog (HU-187)', () => {
   assert.match(code, /import \{ CloseResolvedDialog \} from '\.\/CloseResolvedDialog\.tsx'/);
   assert.ok(code.includes('<CloseResolvedDialog'), 'el panel debe pintar CloseResolvedDialog');
-  assert.ok(branch('close_resolved', 'close_resolved').length >= 0 || true);
+  const at = code.indexOf("a.id === 'close_resolved'");
+  assert.ok(at > 0, "no se encontró la rama 'close_resolved' de run()");
+  const rama = code.slice(at, code.indexOf('}', code.indexOf('setClosingResolved(true)', at)));
+  assert.ok(rama.includes('setClosingResolved(true)'), 'la rama close_resolved de run() abre el diálogo del Portal');
+  assert.ok(!rama.includes('api.'), 'close_resolved no llama a la API antes de que el diálogo lo confirme');
   assert.ok(code.includes('setClosingResolved(true)'), 'close_resolved abre el diálogo');
 });

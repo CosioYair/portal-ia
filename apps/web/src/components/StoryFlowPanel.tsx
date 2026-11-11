@@ -199,7 +199,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         // HU-185 · Reutiliza la publicación existente del repositorio (sin IA). Se envía el main y el remoto que se ven ahora, para no publicar algo distinto.
         const pid = proc.projectId;
         if (!pid) { setErr('Este proceso no tiene proyecto asociado: publica desde la tarjeta del repositorio del proyecto.'); return; }
-        if (!publishing) { const cur = await api.repoStatus(slug, pid); setConfirming(null); setPublishing({ action: a, mainCommit: cur.mainCommit ?? '', remoteUrl: cur.remoteUrl ?? null, ahead: cur.aheadOfRemote ?? null }); return; }
+        if (!publishing) { setPublishing(await api.repoStatus(slug, pid).then(cur => ({ action: a, mainCommit: cur.mainCommit ?? '', remoteUrl: cur.remoteUrl ?? null, ahead: cur.aheadOfRemote ?? null }))); setConfirming(null); return; }
         // Se publica exactamente lo autorizado en el diálogo: si main cambió entretanto, el servidor lo rechaza y no se publica nada.
         const st = { mainCommit: publishing.mainCommit, remoteUrl: publishing.remoteUrl }; setPublishing(null);
         const r = await api.repoPublishMain(slug, pid, st.mainCommit ?? '', st.remoteUrl ?? null);
