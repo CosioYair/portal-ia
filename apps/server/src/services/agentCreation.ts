@@ -30,6 +30,8 @@ export interface WizardInput {
   initials?: string | null; authorized: boolean;
   /** CAMBIOS.md de una carpeta o ZIP importado (se conserva tal cual). */
   changelog?: string | null;
+  /** HU-204 · Texto de «¿Qué debería conseguir este agente?». Solo para la trazabilidad: nunca concede permisos. */
+  need?: string | null;
   /** EN-014 · Ámbito (Proyecto/Empresa/General, combinables). Sin valor: DEFAULT_CONTEXT_SCOPE (Empresa + General). */
   contextScope?: { project?: { id: string; name?: string } | null; company: boolean; general: boolean } | AgentContextScope | null;
 }
@@ -46,6 +48,21 @@ function resolveContextScope(slug: string, raw: WizardInput['contextScope']): Ag
   const scope = normalizeContextScope({ project, company: raw.company === true, general: raw.general === true }, project);
   if (!scope || !contextScopeOptions(scope).length) throw Object.assign(new Error('Elige al menos un ámbito: Proyecto, Empresa o General.'), { statusCode: 400 });
   return scope;
+}
+
+/** HU-204 · Slug de la referencia con la necesidad original: knowledge/necesidad-original.md en la carpeta portable. */
+export const NEED_REFERENCE_SLUG = 'necesidad-original';
+const NEED_MAX = 4000;
+
+/** HU-204 · Referencia con el texto de la necesidad, o null si no hay texto. Sin IA ni IO. */
+export function needReference(need: string | null | undefined, at: string = new Date().toISOString()): PortableKnowledge | null {
+  const text = (need ?? '').trim().slice(0, NEED_MAX);
+  if (!text) return null;
+  const quoted = text.split(/\r?\n/).map(l => `> ${l}`).join('\n');
+  return {
+    slug: NEED_REFERENCE_SLUG, title: 'Necesidad original',
+    body: `# Necesidad original\n\nTexto con el que el propietario pidió este agente (${at.slice(0, 10)}). Se guarda para la trazabilidad; no concede permisos ni herramientas.\n\n${quoted}\n`
+  } as PortableKnowledge;
 }
 
 const initialsOf = (name: string) => name.split(/\s+/).filter(w => w.length > 2 && !/^(de|del|la|el|los|las|y|en|para)$/i.test(w)).map(w => w[0]!.toUpperCase()).slice(0, 2).join('') || name.slice(0, 2).toUpperCase();
@@ -95,14 +112,17 @@ export async function createAgentFromWizard(slug: string, i: WizardInput, source
   // ya creado (papel, especialización, responsabilidades, a quién reporta y habilidades según las herramientas concedidas).
   // Un AGENTS.md importado con la marca de por defecto también se regenera en definitionFor con los datos de ESTE agente.
   // Uno sin la marca (propio) se conserva tal cual. Las instrucciones nunca conceden permisos: estos salen solo de la fila.
+  // HU-204 · La necesidad del propietario queda en knowledge/necesidad-original.md (carpeta portable e historial de revisiones).
+  const needRef = source === 'created' ? needReference(i.need) : null;
+  const references = (i.references ?? []).map(k => ({ ...k, slug: slugify(k.slug || k.title).slice(0, 60) })).filter(k => !needRef || k.slug !== NEED_REFERENCE_SLUG);
   const extras: AgentExtras = {
     instructions: i.instructions?.trim() ? i.instructions.trim() : agentDefaultInstructions(slug, agent),
-    skills: (i.skills ?? []).map(s => ({ ...s, slug: slugify(s.slug || s.name).slice(0, 60) })), memory: [], knowledge: (i.references ?? []).map(k => ({ ...k, slug: slugify(k.slug || k.title).slice(0, 60) })),
+    skills: (i.skills ?? []).map(s => ({ ...s, slug: slugify(s.slug || s.name).slice(0, 60) })), memory: [], knowledge: needRef ? [...references, needRef] : references,
     deliverables: i.deliverables.map(d => d.trim()).filter(Boolean).slice(0, 20), autonomy: i.autonomy,
     changelog: i.changelog?.trim() ? i.changelog : undefined
   };
   await writeRevision(slug, agent.id, definitionToFiles(definitionFor(slug, agent, extras)), source === 'import' ? 'import' : 'created', source === 'import' ? importNote : 'Creado con el asistente de la oficina');
-  recordAgentEvent(slug, agent.id, source === 'import' ? 'imported' : 'created', { harness: i.harness, model: i.model, department: dep.name, tools: i.tools, autonomy: i.autonomy, scope: i.scope });
+  recordAgentEvent(slug, agent.id, source === 'import' ? 'imported' : 'created', { harness: i.harness, model: i.model, department: dep.name, tools: i.tools, autonomy: i.autonomy, scope: i.scope, ...(needRef ? { need: (i.need ?? '').trim().slice(0, NEED_MAX) } : {}) });
   return agentsRepo(slug).get(agent.id)!;
 }
 

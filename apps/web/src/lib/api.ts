@@ -474,3 +474,31 @@ export interface BatchPolicyView {
 
 /** Para los clientes de API de otras áreas (lib/osApi.ts): mismas cabeceras, errores y control de versiones. */
 export { request as apiRequest };
+
+// ---------- HU-204 · «Redactar con IA» en «Nuevo agente» (apps/server/src/routes/agentsOs.ts)
+/** Motor y costo de la redacción. Pedirlo no llama a ningún modelo. */
+export interface WizardDraftEstimate {
+  agentId: string; byAgent: string; harness: string; label: string; provider: string; model: string;
+  costKind: 'subscription' | 'usd'; estimatedUsd: number; calls: 1;
+}
+/** Propuesta ya limpia en el servidor: sin permisos, herramientas, arnés, modelo ni autonomía (`discarded` dice qué se quitó). */
+export interface WizardDraftResult {
+  draft: import('@portal-ia/domain').AgentWizardDraft; discarded: string[];
+  byAgent: string; harness: string; model: string; tokensIn: number; tokensOut: number; costUsd: number;
+}
+/** Datos de «Nuevo agente» más el texto de la necesidad (se guarda en knowledge/necesidad-original.md). */
+export type WizardCreateInput = import('./osApi.ts').WizardInput & { need?: string | null };
+
+const wsUrl = (slug: string) => `/api/workspaces/${encodeURIComponent(slug)}`;
+
+/** Sin costo: solo devuelve el motor (agente, arnés, modelo) y el costo estimado. */
+export const wizardDraftEstimate = (slug: string, need?: string | null) =>
+  request<WizardDraftEstimate>(`${wsUrl(slug)}/agents/wizard-draft/estimate${need?.trim() ? `?need=${encodeURIComponent(need.trim().slice(0, 4000))}` : ''}`);
+
+/** UNA llamada al modelo. Úsalo SOLO desde el botón «Autorizar y redactar»: es lo único que envía authorized:true. */
+export const wizardDraft = (slug: string, need: string, maxUsd: number) =>
+  request<WizardDraftResult>(`${wsUrl(slug)}/agents/wizard-draft`, { method: 'POST', body: JSON.stringify({ need, authorized: true, maxUsd }) });
+
+/** Crea el agente (sin IA) y envía también la necesidad y las habilidades (las del perfil y las añadidas a mano). */
+export const createAgentWizard = (slug: string, input: WizardCreateInput) =>
+  request<import('@portal-ia/domain').Agent>(`${wsUrl(slug)}/agents/wizard`, { method: 'POST', body: JSON.stringify({ ...input, need: input.need?.trim() ? input.need.trim().slice(0, 4000) : null, skills: input.skills ?? [] }) });

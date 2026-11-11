@@ -13,6 +13,7 @@ import { chatEstimate, chatMessages, chatUsageToday, sendChat } from '../service
 import { adoptExternal, agentCapabilities, agentFoldersRepo, agentLearning, discardExternal, ensureAgentFolders, folderStatus, restoreRevision, setAgentContextScope, syncAgentFolder, updateExtras } from '../services/agentFolders.ts';
 import { detectSandbox } from '../services/sandbox.ts';
 import { createAgentFromWizard, exportBundle, exportFiles, exportTo, importConfirm, importPreview } from '../services/agentCreation.ts';
+import { draftWizardProposal, estimateWizardDraft } from '../services/agentWizardDraft.ts';
 import { applyZipImport, previewZipImport, undoZipImport, ZIP_UPLOAD_MAX } from '../services/agentZipImport.ts';
 import { acceptOctetStream, streamToTemp, uploadName } from './uploads.ts';
 import { proposeFromFeedback, retireMemory, verifyMemory } from '../services/agentLearning.ts';
@@ -58,8 +59,12 @@ const WIZARD = z.object({
   autonomy: z.enum(['ask', 'within_scope']).default('ask'), instructions: z.string().max(20_000).nullable().optional(),
   skills: z.array(SKILL).max(20).default([]), references: z.array(REF).max(20).default([]), initials: z.string().max(2).nullable().optional(),
   contextScope: CONTEXT_SCOPE_BODY.optional(),
+  /** HU-204 · Texto de la necesidad: se guarda en la carpeta portable; no concede nada. */
+  need: z.string().max(4000).nullable().optional(),
   authorized: z.boolean()
 });
+/** HU-204 · «Redactar con IA»: una llamada solo con authorized:true y un tope en USD. Sin eso, 400 y no se llama a nada. */
+const WIZARD_DRAFT = z.object({ need: z.string().trim().min(10).max(4000), authorized: z.literal(true), maxUsd: z.number().min(0).max(5) });
 
 /** Lo que concede el propietario a un agente importado nuevo: nunca sale de la carpeta ni del ZIP. */
 const GRANT = z.object({ department: z.string().trim().min(2).max(60), scope: z.enum(['workspace', 'project']), projectId: z.string().nullable(), harness: HARNESS, model: z.string().trim().min(1).max(120), provider: z.enum(['anthropic', 'openai']).nullable().optional(), effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('medium'), tools: z.array(z.string().max(40)).max(12).default([]), knowledge: z.array(z.string().max(40)).max(8).default([]), capabilities: z.array(CAP).max(6).nullable().optional(), autonomy: z.enum(['ask', 'within_scope']).default('ask'), authorized: z.boolean() });
@@ -339,6 +344,20 @@ export async function agentsOsRoutes(app: FastifyInstance) {
     const p = AGENT_PARAMS.safeParse(req.params); if (!p.success) return reply.code(400).send({ error: 'Parámetros no válidos.' });
     const { slug, id } = p.data; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
     try { return agentLearning(slug, id); } catch (e) { return err(reply, e); }
+  });
+
+  // ---------- HU-204 · Redactar con IA en «Nuevo agente»: estimar no cuesta; redactar es UNA llamada autorizada.
+  app.get('/api/workspaces/:slug/agents/wizard-draft/estimate', async (req, reply) => {
+    const { slug } = req.params as any; if (!guard(slug, reply)) return;
+    const q = z.object({ need: z.string().max(4000).optional() }).safeParse(req.query ?? {});
+    if (!q.success) return reply.code(400).send({ error: 'La necesidad admite como máximo 4000 caracteres.' });
+    try { return estimateWizardDraft(slug, q.data.need ?? null); } catch (e) { return err(reply, e); }
+  });
+  app.post('/api/workspaces/:slug/agents/wizard-draft', async (req, reply) => {
+    const { slug } = req.params as any; if (!guard(slug, reply)) return;
+    const b = WIZARD_DRAFT.safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'Redactar con IA necesita la necesidad (10–4000 caracteres), un tope en USD y tu autorización explícita.' });
+    try { return await draftWizardProposal(slug, b.data.need, { authorized: b.data.authorized, maxUsd: b.data.maxUsd }); } catch (e) { return err(reply, e); }
   });
 
   // ---------- Crear, importar, exportar
