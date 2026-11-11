@@ -71,6 +71,9 @@ test('B1 · detección objetiva sin IA: parche que no encaja, módulo sin import
   // HU-202: al terminar la tarea el Curador cura solo (sin IA): ninguna detección queda pendiente; una lección aplicada por causa
   assert.ok(ls.every(l => l.status !== 'detected'), 'ninguna detección queda pendiente');
   assert.equal(det('patch_mismatch')[0].status, 'validated'); assert.equal(det('patch_mismatch')[0].source, 'curator'); assert.ok(det('patch_mismatch')[0].lessonText);
+  // EN-022: firma de causa del parche (el archivo) y lección específica de esa causa
+  assert.ok(det('patch_mismatch')[0].tags.includes('causa:apps/web/src/screens/Backlog.tsx'), 'patch_mismatch lleva el archivo en su firma');
+  assert.match(det('patch_mismatch')[0].lessonText!, /Caso: apps\/web\/src\/screens\/Backlog\.tsx/);
   // Idempotente: volver a detectar no duplica
   assert.equal(recordDetections('portal-ia', p.id, dir).length, 0);
   // Verificación fallida, ejecución fallida, activación fallida, devuelta a pendiente (sobre un resultado sintético)
@@ -78,6 +81,7 @@ test('B1 · detección objetiva sin IA: parche que no encaja, módulo sin import
   procs.setResult(p.id, { ...p.result!, verifications: [{ command: 'typecheck', exitCode: 2, output: 'error TS2304', startedAt: 't', finishedAt: 't', durationMs: 1, isolation: 'host-min' }], runtimeChecks: { checks: [{ kind: 'http', path: '/x', expect: 'y' }], results: [{ check: { kind: 'http', path: '/x', expect: 'y' }, status: 'fail', detail: 'HTTP 404', at: 't' }], ranAt: 't' } });
   const more = recordDetections('portal-ia', p.id, dir, { resetReason: 'no era lo pedido', updateFailedLog: 'npm run build terminó con código 1' });
   assert.deepEqual(more.map(l => l.detector).sort(), ['activation_failed', 'runtime_failed', 'story_reset', 'verification_failed']);
+  assert.ok(more.find(l => l.detector === 'verification_failed')!.tags.includes('causa:typecheck'), 'firma de causa: el comando (la salida no nombra archivo)');
   assert.equal(more.find(l => l.detector === 'story_reset')!.role, 'planner');
   // Una lección que no está validada NUNCA se inyecta (las detecciones nuevas aún sin curar)
   const injectedIds = (role: any) => lessonsFor('portal-ia', { projectId: internal.id, role }).map(l => l.id);
@@ -145,7 +149,12 @@ test('B3/B4 · inyección y mejora medible: con L1 inyectada el parche encaja (e
   script([{ match: 'plan técnico', text: PLAN }, { match: 'Implementa la historia', text: BAD_PATCH }, { match: 'Revisa los cambios propuestos', text: QA_OK }]);
   const p3 = await runF('Añadir campo nota al formulario de nueva solicitud (3)');
   assert.equal(p3.status, 'done');
-  assert.equal(lessonsRepo('portal-ia').get(active.id)!.recurrenceCount, 1, 'reincidencia contada: candidata a obsoleta');
+  // EN-022: una reincidencia por proceso; si el proceso terminó verificado, su fallo intermedio no cuenta
+  const expected = p3.result?.pipeline?.state === 'verified' ? 0 : 1;
+  assert.equal(lessonsRepo('portal-ia').get(active.id)!.recurrenceCount, expected, 'reincidencia contada una vez por proceso');
+  recordDetections('portal-ia', p3.id, dir); recordDetections('portal-ia', p3.id, dir);
+  assert.equal(lessonsRepo('portal-ia').get(active.id)!.recurrenceCount, expected, 'repetir la detección (pausas, reintentos) no suma otra');
+  assert.deepEqual(lessonsRepo('portal-ia').get(active.id)!.recurrenceProcesses ?? [], expected ? [p3.id] : []);
 });
 
 test('C1/C2 · plantillas versionadas (EN-020): la lección aplicada ya está en la última pj-dev sin promover; promover no da 409; los existentes pasan solos (by portal); la vuelta atrás funciona; el prompt la lleva una vez; retirarla la saca', async () => {
