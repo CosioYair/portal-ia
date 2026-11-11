@@ -15,6 +15,24 @@ if (fs.existsSync(envFile)) {
   }
 }
 
+/**
+ * HU-205 · Edición del Portal. «studio» (por defecto) conserva la automejora: reconstruir, reiniciar y activar su propio
+ * código. «distributable» la desactiva sin bifurcar el código. Solo el valor «distributable» (sin distinguir mayúsculas)
+ * activa la edición distribuible; cualquier otro valor, o su ausencia, da «studio».
+ */
+export type PortalEdition = 'studio' | 'distributable';
+export function resolvePortalEdition(v: string | undefined): PortalEdition {
+  return (v ?? '').trim().toLowerCase() === 'distributable' ? 'distributable' : 'studio';
+}
+export const PORTAL_EDITION: PortalEdition = resolvePortalEdition(process.env.PORTAL_EDITION);
+/** ¿Puede el Portal reconstruirse, reiniciarse y activar cambios sobre su propio código? Solo en la edición Estudio. */
+export const SELF_IMPROVEMENT_ENABLED = PORTAL_EDITION === 'studio';
+export const EDITION_DISABLED_REASON = 'Esta es la edición distribuible del Portal: no se reconstruye, no se reinicia ni activa cambios sobre sí misma. La automejora solo existe en la edición Estudio (PORTAL_EDITION=studio).';
+/** Error 403 de la edición distribuible, con code «edition_distributable». */
+export function editionError(): Error & { statusCode: number; code: string } {
+  return Object.assign(new Error(EDITION_DISABLED_REASON), { statusCode: 403, code: 'edition_distributable' });
+}
+
 function resolveDataDir(v: string | undefined): string {
   const raw = v && v.trim() ? v.trim() : './data';
   return path.isAbsolute(raw) ? raw : path.resolve(REPO_ROOT, raw);
@@ -39,6 +57,8 @@ function resolveWorktreesDir(v: string | undefined): string {
 
 export const config = {
   port: Number(process.env.PORTAL_PORT ?? 4310),
+  /** Edición del Portal (HU-205): «studio» con automejora o «distributable» sin ella. */
+  edition: PORTAL_EDITION,
   host: process.env.PORTAL_HOST ?? '127.0.0.1',
   dataDir: resolveDataDir(process.env.PORTAL_DATA_DIR),
   /** Rama destino de toda integración (HU-143). Nunca se deduce de la rama activa. */

@@ -4,6 +4,10 @@ import { runningEverywhere, startUpdate, systemStatus } from '../services/system
 import { buildOutcome, computeStartCommands, scheduleShutdown } from '../services/lifecycle.ts';
 import { PolicyError, policyTable, requirePolicy } from '../services/executionPolicy.ts';
 import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
+import { EDITION_DISABLED_REASON, SELF_IMPROVEMENT_ENABLED } from '../config.ts';
+
+/** HU-205 · En la edición distribuible no hay automejora: reconstruir, reiniciar y activar responden 403 antes de validar nada. */
+const editionDisabled = () => ({ error: EDITION_DISABLED_REASON, code: 'edition_distributable' as const });
 
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
@@ -22,6 +26,7 @@ export async function systemRoutes(app: FastifyInstance) {
   app.get('/api/system/lifecycle', async () => ({ ...buildOutcome(), startCommands: computeStartCommands().commands }));
   // HU-144 · «Reiniciar»: responde 202 y después apaga limpio (o sale con el código 75 si hay supervisor).
   app.post('/api/system/restart', async (req, reply) => {
+    if (!SELF_IMPROVEMENT_ENABLED) return reply.code(403).send(editionDisabled());
     if (!LOOPBACK.has(req.ip)) return reply.code(403).send({ error: 'Solo se puede reiniciar desde la propia máquina.' });
     const body = z.object({ confirm: z.literal(true), interruptRunning: z.boolean().optional(), expectedHead: EXPECTED_HEAD }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere confirmación explícita y el commit que viste.' });
@@ -34,6 +39,7 @@ export async function systemRoutes(app: FastifyInstance) {
     return reply.code(202).send(outcome);
   });
   app.post('/api/system/update', async (req, reply) => {
+    if (!SELF_IMPROVEMENT_ENABLED) return reply.code(403).send(editionDisabled());
     const body = z.object({ authorized: z.literal(true), install: z.boolean().optional(), restart: z.boolean().optional(), interruptRunning: z.boolean().optional(), expectedHead: EXPECTED_HEAD }).safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita y el commit que viste.' });
     // Reiniciar interrumpiría los procesos en marcha: solo con tu confirmación expresa (no se cancelan; quedan en pausa).
@@ -47,7 +53,7 @@ export async function systemRoutes(app: FastifyInstance) {
       const install = body.data.install ?? st.changedFiles.some(f => /(^|\/)package(-lock)?\.json$/.test(f));
       const u = await startUpdate({ install, restart: body.data.restart ?? true, interruptRunning: !!body.data.interruptRunning }, (o, m) => app.log.info(o, m));
       return { update: u, install };
-    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError ? e.code : undefined }); }
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, code: e instanceof PolicyError || e?.code === 'edition_distributable' ? e.code : undefined }); }
   });
   /** Tabla de la política de ejecución (qué operaciones existen, su nivel y la herramienta que exigen). Solo lectura. */
   app.get('/api/system/policy', async () => policyTable());
