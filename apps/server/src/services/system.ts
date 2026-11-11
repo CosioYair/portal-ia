@@ -6,7 +6,7 @@ import { changed } from './live.ts';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import type { ActivationState, SystemStatus } from '@portal-ia/domain';
-import { REPO_ROOT } from '../config.ts';
+import { editionError, REPO_ROOT, SELF_IMPROVEMENT_ENABLED } from '../config.ts';
 import { git } from './repoWrite.ts';
 import { buildOutcome, RESTART_EXIT_CODE, shutdown } from './lifecycle.ts';
 import { detectSandbox } from './sandbox.ts';
@@ -174,6 +174,8 @@ function run(cmd: string, args: string[], onLine: (l: string) => void, timeoutMs
  * relanzando este mismo proceso. Requiere autorización explícita (herramienta «Ejecución»).
  */
 export async function startUpdate(opts: { install: boolean; restart: boolean; interruptRunning?: boolean }, log: (o: any, m: string) => void) {
+  // HU-205 · Defensa en profundidad: en la edición distribuible nadie (ni rutas ni lotes) reconstruye ni activa el Portal.
+  if (!SELF_IMPROVEMENT_ENABLED) throw editionError();
   if (update?.status === 'running') throw Object.assign(new Error('Ya hay una actualización en curso.'), { statusCode: 409 });
   const outcome = opts.restart ? buildOutcome() : null;
   update = { status: 'running', log: '', startedAt: new Date().toISOString(), finishedAt: null, outcome };

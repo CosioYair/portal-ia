@@ -25,7 +25,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { INTERNAL_WORKSPACE, EFFORT_THINKING_TOKENS, isOutsidePortalStep } from '@portal-ia/domain';
 import { setWorkStatus, workItemOf, type WorkItem } from './workItems.ts';
-import { REPO_ROOT } from '../config.ts';
+import { editionError, REPO_ROOT, SELF_IMPROVEMENT_ENABLED } from '../config.ts';
 import { expandHome } from '../routes/fs.ts';
 
 /**
@@ -129,11 +129,19 @@ export function parseReview(text: string, stopReason: string | null): ReviewVerd
  * ruta resuelta, con «~» expandido y sin distinguir mayúsculas).
  */
 export function isPortalRuntime(repoPath: string | null | undefined): boolean {
+  // HU-205 · En la edición distribuible ningún repositorio es «el Portal en marcha»: no hay automejora.
+  if (!SELF_IMPROVEMENT_ENABLED) return false;
   if (!repoPath) return false;
   return path.resolve(expandHome(repoPath)).toLowerCase() === path.resolve(REPO_ROOT).toLowerCase();
 }
 
 export function preflightRepo(slug: string, repoPath: string) {
+  // HU-205 · Edición distribuible: la regla se invierte. Ningún proyecto puede trabajar sobre la carpeta del propio
+  // Portal (sería automejora); cualquier otra carpeta es válida.
+  if (!SELF_IMPROVEMENT_ENABLED) {
+    if (path.resolve(expandHome(repoPath)).toLowerCase() === path.resolve(REPO_ROOT).toLowerCase()) throw editionError();
+    return;
+  }
   if (slug !== INTERNAL_WORKSPACE.slug || process.env.PORTAL_ALLOW_FOREIGN_REPO === '1') return;
   const a = path.resolve(expandHome(repoPath)).toLowerCase(); const b = path.resolve(REPO_ROOT).toLowerCase();
   if (a !== b) throw Object.assign(new Error(`El repositorio registrado del proyecto interno (${repoPath}) no es la carpeta desde la que corre este Portal (${REPO_ROOT}). Las mejoras del Portal deben hacerse sobre su propio código: en el Resumen del proyecto, pulsa «Usar la carpeta de esta instalación» y vuelve a intentarlo.`), { statusCode: 409, code: 'foreign_repo' });
