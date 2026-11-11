@@ -247,12 +247,13 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
     const rdx = opts.backends;
     if (rdx?.team.length && rdx.team.every(t => t.backend !== 'api') && rdx.fallback !== 'api') for (const a of actions) if (a.id === 'pipeline_resume' && a.requires.includes('ai_budget')) { a.requires = a.requires.filter(x => x !== 'ai_budget'); delete a.suggestedBudgetUsd; }
     const stages: FlowStage[] = keys.map(k => ({ key: k, label: LABELS[k], ...st[k] }));
-    const current = forced ?? (stages.find(s => !['done', 'warning'].includes(s.status)) ?? stages[stages.length - 1]).key;
+    // HU-185 · «Publicar» es opcional y no bloqueante: nunca es la etapa actual (el cierre sigue igual).
+    const current = forced ?? (stages.find(s => s.key !== 'publish' && !['done', 'warning'].includes(s.status)) ?? stages[stages.length - 1]).key;
     if (st[current]?.status === 'pending') st[current].status = 'current';
     const stages2: FlowStage[] = keys.map(k => ({ key: k, label: LABELS[k], ...st[k] }));
     if (actions.length && !actions.some(a => a.primary)) actions[0].primary = true;
     const resp = responsible.length ? responsible : (issue?.responsible ?? []).map(n => ({ agentName: n, role: devs.includes(n) ? 'implementa' : qa.includes(n) ? 'revisa' : 'responsable', status: 'responsable de corregirlo' }));
-    return { stages: stages2, current, progress: { done: stages2.filter(s => s.status === 'done' || s.status === 'warning').length, total: stages2.length }, issue, actions, responsible: resp, iteration: opts.iteration ?? null, headline, delivery };
+    return { stages: stages2, current, progress: { done: stages2.filter(s => s.key !== 'publish' && (s.status === 'done' || s.status === 'warning')).length, total: stages2.filter(s => s.key !== 'publish').length }, issue, actions, responsible: resp, iteration: opts.iteration ?? null, headline, delivery };
   };
   if (p.status !== 'done' || !r) return finish();
 
