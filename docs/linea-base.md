@@ -43,6 +43,27 @@ Documento versionado en git: describe qué ES hoy Portal IA para que cualquier a
 - **Activación** (`services/system.ts`): integrar no es activar. Una historia del Portal cuenta como activa cuando el servidor en marcha y la interfaz compilada contienen su commit («Reconstruir y reiniciar» compila a `dist.next` y conserva `dist.prev`). Después se comprueba en ejecución (HTTP y navegador con Playwright, capturas en `data/evidence/`).
 - Protecciones de escritura: rutas protegidas (`.env` reales, claves, `data/`), escaneo de posibles secretos, bloqueo de reemplazos sobre archivos que cambiaron después de leerse.
 
+### Paquete distribuible (HU-206)
+
+Ninguna edición lleva credenciales. El árbol que se empaqueta para la edición distribuible (`PORTAL_EDITION=distributable`) tiene una única fuente de verdad: `apps/server/src/services/packageTree.ts`. No tiene dependencias ni usa `REPO_ROOT`: quien lo llama le pasa la raíz.
+
+- **Qué incluye** (`PACKAGE_INCLUDE`): `package.json`, `package-lock.json`, `README.md`, `.env.example` y `tsconfig.base.json`; las carpetas `docs/`, `docker/` y `scripts/`; el código y la configuración de cada paquete (`packages/*/src`, `package.json`, `tsconfig.json`), del servidor (`apps/server/src`, `scripts`, `tools`, `package.json`, `tsconfig.json`) y de la web (`apps/web/src`, `index.html`, `package.json`, `tsconfig.json`, `vite.config.ts`). Solo entran archivos de texto y nunca enlaces simbólicos. `listPackageFiles(raíz)` devuelve rutas relativas con «/», ordenadas y sin duplicados.
+- **Qué excluye y por qué** (`PACKAGE_EXCLUDE`; `packageExclusion(ruta)` da el motivo):
+  - `apps/server/test/**`, incluida la prueba de extremo a extremo: las pruebas no se distribuyen.
+  - `apps/web/dist`, `dist.prev` y `dist.next`: se generan al construir.
+  - `node_modules`: las dependencias se instalan en destino.
+  - `data/`: son los datos locales del Portal.
+  - `.git`: es el historial.
+  - Los `.env` reales: solo se distribuye `.env.example`.
+  - `scripts/preview-runner.mjs`: solo sirve a la vista previa de automejora.
+- **Vista previa en la edición distribuible:** la automejora está desactivada. Por eso la vista previa de candidatos (`services/preview.ts`) responde 403 `edition_distributable` antes de copiar `preview-runner.mjs`. En la edición studio funciona igual que antes.
+- **Guarda de secretos:** la prueba `apps/server/test/hu206-paquete-sin-secretos.test.ts` se ejecuta en `npm test` y comprueba lo siguiente:
+  - Aplica `findSecret` (`@portal-ia/domain`) a cada archivo de `listPackageFiles(raíz)` y falla si alguno queda marcado. El mensaje da la ruta y el tipo, nunca el valor.
+  - Verifica que las pruebas y el runner quedan fuera y que el código del servidor, la web y los paquetes está dentro.
+  - Incluye un control: construye una clave de muestra sin literales y comprueba que el detector la marca.
+  - Comprueba el 403 de la vista previa.
+  - Si se añade al árbol un archivo con un literal que parezca una clave, `npm test` falla.
+
 ## 5 · Aprendizaje organizacional
 
 - Lecciones (`services/lessons.ts`, `lessonCurator.ts`): sin IA y a 0 USD, se detectan los errores y, al terminar cada tarea, el Curador los agrupa por causa, aplica la del catálogo y descarta ruido y duplicados. Solo las aplicadas se inyectan (proyecto y papel); se retiran solas si fallan 2 veces. El propietario puede editarlas o retirarlas.
@@ -69,3 +90,4 @@ Documento versionado en git: describe qué ES hoy Portal IA para que cualquier a
 - Pruebas del servidor (`apps/server/test/*.test.ts`): política y fail-closed, worktrees, sandbox Docker con aislamiento real (en Windows con Docker Desktop), composición de equipos, lecciones y plantillas, espacio de la historia e iteraciones, recorrido guiado y recuperación de errores, bandeja de autorizaciones, presupuestos, migraciones, etapas y archivo (`phase-transition.test.ts`), contrato de salida y pipeline autorizado (`autonomous-pipeline.test.ts`: recuperación local, reparación acotada, pipeline completo en Docker, corrección de un error de código, dependencias, presupuesto, fallo repetido) y salida estructurada en los adaptadores (`structured-output.test.ts`, sin red); fallos de agentes y del proveedor (`agent-failures.test.ts`).
 - E2E de automejora: una copia del Portal arrancada con el supervisor recorre solicitud → ejecución → aplicar → verificar en sandbox → integrar → reconstruir y reiniciar → comprobar en ejecución (HTTP y navegador) → prueba manual → cerrar, más los escenarios de fallo (verificación, activación, parche, ejecución).
 - Interfaz: recorridos con Playwright sobre instancias aisladas (recorrido guiado A–F, iteraciones, etapa y archivo, fallos de agentes).
+- Paquete distribuible sin secretos: `hu206-paquete-sin-secretos.test.ts` comprueba el contenido y las exclusiones del árbol, que `findSecret` no marca nada y el 403 de la vista previa en la edición distribuible (ver «Paquete distribuible (HU-206)» en el apartado 4).
