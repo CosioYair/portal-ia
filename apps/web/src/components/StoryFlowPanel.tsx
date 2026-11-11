@@ -63,8 +63,13 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const [msg, setMsg] = useState<string | null>(null);
   const [answer, setAnswer] = useState('');
   const [cancelling, setCancelling] = useState(false);
-  // HU-187 · «Cerrar como resuelta» abre el diálogo del Portal (lo omitido, motivo vacío, «Integrar primero»), sin prompt().
+  // HU-187 · «Cerrar como resuelta» abre el diálogo del Portal (lo omitido, motivo vacío, «Integrar primero»), sin diálogos del navegador.
   const [closingResolved, setClosingResolved] = useState(false);
+  // HU-186 · Diálogos del Portal: publicar main (con lo que se autoriza), omitir publicar, rechazar la iteración y cancelar.
+  const [publishing, setPublishing] = useState<{ action: FlowAction; mainCommit: string; remoteUrl: string | null; ahead: number | null } | null>(null);
+  const [skipAsk, setSkipAsk] = useState<FlowAction | null>(null);
+  const [rejecting, setRejecting] = useState<{ action: FlowAction; reason: string } | null>(null);
+  const [cancelAsk, setCancelAsk] = useState<{ action: FlowAction; orphan: boolean } | null>(null);
   // EN-008 · Feedback de un encargo (sin historia): nota editable → petición de cambios del encargo.
   const [asgFeedback, setAsgFeedback] = useState<{ note: string; discard: boolean; needDiscard: string | null } | null>(null);
   // EN-012 · Tras el feedback a un encargo integrado: la nueva iteración preparada espera tu autorización aquí mismo.
@@ -80,7 +85,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   useEffect(() => { setVerified(null); }, [proc.id]);
   const [, tick] = useState(0);
   useEffect(() => { if (proc.status !== 'running') return; const t = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(t); }, [proc.status]);
-  useEffect(() => { setConfirming(null); setComposer(null); setAsgFeedback(null); setErr(null); setMsg(null); setOkAuth(false); setAnswer(''); }, [proc.id, flow?.current, flow?.issue?.kind]);
+  useEffect(() => { setConfirming(null); setComposer(null); setAsgFeedback(null); setErr(null); setMsg(null); setOkAuth(false); setAnswer(''); setPublishing(null); setSkipAsk(null); setRejecting(null); setCancelAsk(null); }, [proc.id, flow?.current, flow?.issue?.kind]);
   const ackNow = mergeAcknowledgementsOf(proc);
   useEffect(() => { if (proc.status !== 'running') setCancelling(false); }, [proc.status]);
   if (!flow) return null;
@@ -148,13 +153,13 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
     if (a.id === 'apply') return go('sec-apply');
     if (a.id === 'manual_test') return go('sec-test');
     if (a.id === 'rebuild') { window.scrollTo({ top: 0, behavior: 'smooth' }); setMsg('Usa «Reconstruir y reiniciar» en la barra amarilla de arriba: construye la versión nueva aparte y reinicia el Portal; si el build falla, la versión anterior sigue en marcha.'); return; }
-    if (a.id === 'sandbox_help') { setShowAll(true); setMsg('Guía completa: docs/sandbox.md en la carpeta del Portal. Cuando Docker Desktop diga «Engine running», pulsa «Comprobar el sandbox de nuevo».'); return; }
+    if (a.id === 'sandbox_help') { setShowAll(true); setMsg('Cómo dejar listo el sandbox: 1) abre Docker Desktop; 2) espera a que diga «Engine running»; 3) pulsa «Comprobar el sandbox de nuevo»; 4) si la verificación dice que faltan dependencias (código 86), usa «Instalar dependencias y repetir». No es un error del código y no gasta IA.'); return; }
     if (a.id === 'authorize') { if (variant === 'story' && onAuthorize) onAuthorize(); else if (variant === 'story' && onOpenIterations) onOpenIterations(); else go('sec-authorize'); return; }
     if (a.id === 'ask_team') { if (!itemId) { needsStory(); return; } if (onAsk) onAsk(askText); else navigate(`/historias/${itemId}#chat`, { state: { ask: askText } }); return; }
     if ((a.id === 'request_fix' || a.id === 'new_iteration') && !itemId) { if (assignmentId) openAssignmentFeedback(); else needsStory(); return; }
     if (a.id === 'request_fix' || a.id === 'new_iteration') { if (!itemId) { needsStory(); return; } setBusy(a.id); try { setComposer(await api.story(slug, itemId)); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } return; }
     // El resto se ejecuta aquí: las que exigen autorización/red piden confirmación explícita antes
-    if (a.requires.some(r => r === 'authorization' || r === 'network') && confirming?.id !== a.id) { setConfirming(a); setOkAuth(false); setAnswer(''); setAddBudget((a.suggestedBudgetUsd ?? 0.5).toFixed(2)); setAllowInstall(!!a.pipeline?.allowInstall); return; }
+    if (a.requires.some(r => r === 'authorization' || r === 'network') && confirming?.id !== a.id && a.id !== 'publish' && a.id !== 'skip_publish' && a.id !== 'reject' && a.id !== 'cancel') { setConfirming(a); setOkAuth(false); setAnswer(''); setAddBudget((a.suggestedBudgetUsd ?? 0.5).toFixed(2)); setAllowInstall(!!a.pipeline?.allowInstall); return; }
     setBusy(a.id);
     try {
       if (a.id === 'install_and_retry') { const p = await api.installAndRetry(slug, proc.id, a.commands ?? []); onChange(p); const v = p.result?.verifications ?? []; const inst = v.filter(x => x.command === 'install').at(-1); flash(inst?.exitCode === 0 ? 'Dependencias instaladas; verificación repetida' : 'La instalación no terminó bien: revisa el detalle', inst?.exitCode === 0 ? 'ok' : 'err'); }
@@ -169,7 +174,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       else if (a.id === 'runtime_check') { const p = await api.runtimeCheck(slug, proc.id); onChange(p); }
       else if (a.id === 'refresh_sandbox') { const s = await api.systemSandbox(true); await reload(); flash(s.available === 'unavailable' ? 'Sigue sin sandbox: arranca Docker Desktop' : `Sandbox disponible: ${s.available}`, s.available === 'unavailable' ? 'err' : 'ok'); }
       else if (a.id === 'tasks_from_issue') { if (!itemId) { needsStory(); return; } const t = await api.storyTasksFromIssue(slug, itemId); setMsg(t.length ? `${t.length} tarea(s) creadas a partir del problema.` : 'Ya existían tareas para estos hallazgos; no se duplican.'); }
-      else if (a.id === 'reject') { const reason = prompt('¿Por qué rechazas esta iteración? (la historia vuelve a pendiente)', issue?.title ?? 'replanteada'); if (reason === null) return; onChange(await api.rejectProcess(slug, proc.id, reason.trim() || undefined)); }
+      else if (a.id === 'reject') { if (!rejecting) { setConfirming(null); setRejecting({ action: a, reason: '' }); return; } const reason = rejecting.reason.trim(); setRejecting(null); onChange(await api.rejectProcess(slug, proc.id, reason || undefined)); flash('Iteración rechazada: la historia vuelve a pendiente'); }
       else if (a.id === 'close') { if (!itemId) { needsStory(); return; } await api.markStoryDone(slug, itemId); flash('Historia completada'); await reload(); }
       else if (a.id === 'close_resolved') { if (!itemId) { needsStory(); return; } setConfirming(null); setComposer(null); setClosingResolved(true); return; }
       else if (a.id === 'accept_plan') { onChange(await api.acceptPlan(slug, proc.id, Math.max(0, Number(addBudget) || 0))); flash('Se implementa el plan aceptado; lo pendiente queda documentado'); }
@@ -194,13 +199,17 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         // HU-185 · Reutiliza la publicación existente del repositorio (sin IA). Se envía el main y el remoto que se ven ahora, para no publicar algo distinto.
         const pid = proc.projectId;
         if (!pid) { setErr('Este proceso no tiene proyecto asociado: publica desde la tarjeta del repositorio del proyecto.'); return; }
-        const st = await api.repoStatus(slug, pid);
+        if (!publishing) { const cur = await api.repoStatus(slug, pid); setConfirming(null); setPublishing({ action: a, mainCommit: cur.mainCommit ?? '', remoteUrl: cur.remoteUrl ?? null, ahead: cur.aheadOfRemote ?? null }); return; }
+        // Se publica exactamente lo autorizado en el diálogo: si main cambió entretanto, el servidor lo rechaza y no se publica nada.
+        const st = { mainCommit: publishing.mainCommit, remoteUrl: publishing.remoteUrl }; setPublishing(null);
         const r = await api.repoPublishMain(slug, pid, st.mainCommit ?? '', st.remoteUrl ?? null);
         flash(`Publicado en ${r.remote}: ${r.branches.join(', ')}`);
+        await reload();
         await reload();
       }
       else if (a.id === 'skip_publish') {
         // HU-185 · Lo decide el propietario y no tiene costo. No bloquea el cierre: la etapa queda como «omitida».
+        if (!skipAsk) { setConfirming(null); setSkipAsk(a); return; } setSkipAsk(null);
         onChange(await api.skipPublish(slug, proc.id));
         flash('Publicar omitido: puedes publicar más tarde desde el repositorio del proyecto');
       }
@@ -214,7 +223,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       else if (a.id === 'register_external' && a.external) { const p = await api.registerExternalCorrection(slug, proc.id, { commit: a.external.commit, note: answer.trim() }); onChange(p); flash('Corrección externa registrada: se verifica en el sandbox sin IA y se detiene antes de QA'); }
       else if (a.id === 'cancel') {
         const orphan = issue?.kind === 'process_interrupted';
-        if (!confirm(orphan ? '¿Cerrar el proceso interrumpido? Lo terminado se conserva; nada se reenvía.' : '¿Cancelar el proceso? Se aborta la llamada en curso al proveedor; lo terminado se conserva.')) return;
+        if (!cancelAsk) { setConfirming(null); setCancelAsk({ action: a, orphan: !!orphan }); return; } setCancelAsk(null);
         await api.cancelProcess(slug, proc.id);
         if (orphan) { await reload(); flash('Proceso interrumpido cerrado'); } else { setCancelling(true); flash('Cancelando: se aborta la llamada en curso'); }
       }
@@ -374,6 +383,57 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         <button className="btn btn-ghost btn-sm" style={{ alignSelf: 'flex-start' }} onClick={() => setComposer(null)}>Cancelar</button>
       </div>}
 
+      {publishing && <div className="sf-confirm" role="dialog" aria-label="Autorizar publicación">
+        <strong>Publicar main en el remoto</strong>
+        <ul className="sf-details small">
+          <li>Rama: <strong>main</strong>{publishing.mainCommit ? <> · commit <span className="mono">{publishing.mainCommit.slice(0, 7)}</span></> : null}</li>
+          <li>Remoto: <span className="mono">{publishing.remoteUrl ?? 'el remoto configurado'}</span></li>
+          <li>{publishing.ahead === -1 ? 'main nunca se ha publicado' : publishing.ahead && publishing.ahead > 0 ? `${publishing.ahead} commit(s) de main sin publicar` : 'main sin publicar'}</li>
+        </ul>
+        <p className="small muted">No gasta IA, pero cambia el remoto: quien tenga acceso verá estos commits. Si main cambia antes de publicar, no se publica nada y tendrás que volver a autorizar.</p>
+        <div className="sf-actions">
+          <button type="button" className="btn btn-primary btn-sm" disabled={busy !== null} onClick={() => void run(publishing.action)}>{busy === 'publish' ? 'Publicando…' : 'Autorizar y publicar'}</button>{' '}
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => setPublishing(null)}>Cancelar</button>
+        </div>
+      </div>}
+      {skipAsk && <div className="sf-confirm" role="dialog" aria-label="Omitir publicar">
+        <strong>Omitir publicar</strong>
+        <ul className="sf-details small">
+          <li>Falta: publicar main en el remoto. Main solo queda en tu equipo.</li>
+          <li>La etapa Publicar queda «omitida». Puedes publicar más tarde desde el repositorio del proyecto.</li>
+        </ul>
+        <div className="sf-actions">
+          <button type="button" className="btn btn-primary btn-sm" disabled={busy !== null} onClick={() => void run(skipAsk)}>{busy === 'skip_publish' ? 'Guardando…' : 'Omitir publicar'}</button>{' '}
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => setSkipAsk(null)}>Volver</button>
+        </div>
+      </div>}
+      {rejecting && <div className="sf-confirm" role="dialog" aria-label="Rechazar iteración">
+        <strong>Rechazar esta iteración</strong>
+        <ul className="sf-details small">
+          <li>Se descarta: esta iteración. Sus cambios no se integran en main.</li>
+          <li>La historia vuelve a pendiente y necesitará una iteración nueva.</li>
+          {issue && <li>Falta: {issue.title}</li>}
+        </ul>
+        <label className="small" style={{ display: 'block' }}>Motivo (opcional; queda registrado en la historia)
+          <textarea rows={3} maxLength={500} style={{ width: '100%' }} value={rejecting.reason} onChange={e => { const v = e.target.value; setRejecting(r => r && { ...r, reason: v }); }} />
+        </label>
+        <div className="sf-actions">
+          <button type="button" className="btn btn-primary btn-sm" disabled={busy !== null} onClick={() => void run(rejecting.action)}>{busy === 'reject' ? 'Rechazando…' : 'Rechazar iteración'}</button>{' '}
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => setRejecting(null)}>Volver</button>
+        </div>
+      </div>}
+      {cancelAsk && <div className="sf-confirm" role="dialog" aria-label={cancelAsk.orphan ? 'Cerrar el proceso interrumpido' : 'Cancelar el proceso'}>
+        <strong>{cancelAsk.orphan ? 'Cerrar el proceso interrumpido' : 'Cancelar el proceso'}</strong>
+        <ul className="sf-details small">
+          {cancelAsk.orphan
+            ? <><li>Se conserva lo terminado: pasos completados, cambios aplicados y gasto confirmado.</li><li>No se reenvía nada ni se gasta IA. Después podrás continuar o volver a ejecutar.</li></>
+            : <><li>Se aborta la llamada en curso al proveedor. Su costo puede quedar sin confirmar.</li><li>Se conserva lo ya entregado y aplicado.</li><li>Falta: lo que el equipo aún no ha terminado queda sin hacer.</li></>}
+        </ul>
+        <div className="sf-actions">
+          <button type="button" className="btn btn-primary btn-sm" disabled={busy !== null} onClick={() => void run(cancelAsk.action)}>{busy === 'cancel' ? 'Cancelando…' : cancelAsk.orphan ? 'Cerrar el proceso interrumpido' : 'Cancelar el proceso'}</button>{' '}
+          <button type="button" className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => setCancelAsk(null)}>Volver</button>
+        </div>
+      </div>}
       {closingResolved && itemId && <CloseResolvedDialog slug={slug} item={{ id: itemId, storyId: story?.storyId ?? itemId, title: story?.title ?? proc.title }}
         onClosed={async () => { setClosingResolved(false); flash('Historia cerrada como resuelta: el cierre forzado queda registrado en Actividad'); await reload(); }}
         onIntegrateFirst={(processId: string) => { setClosingResolved(false); if (processId === proc.id) requestAnimationFrame(() => { if (document.getElementById('sec-git')) go('sec-git'); else go('sec-flow'); }); else navigate(`/procesos/${processId}#sec-git`); }}
