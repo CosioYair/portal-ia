@@ -26,7 +26,8 @@ const { classifyModel, DEFAULT_PIPELINE, normalizePipeline } = await import('@po
 const { resetMockCalls } = await import('@portal-ia/ai-adapters');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
-const { processesRepo, projectsRepo, workspaceDb } = await import('../src/db/workspace.ts');
+const { agentsRepo, processesRepo, projectsRepo, workspaceDb } = await import('../src/db/workspace.ts');
+const { templatesRepo } = await import('../src/services/agentTemplates.ts');
 const { buildApp } = await import('./fixtures/owner-app.ts');
 const { addManualItem } = await import('../src/services/backlog.ts');
 const { createStoryProcess, runStory } = await import('../src/services/storyExecution.ts');
@@ -148,12 +149,18 @@ test('d · la detección de la historia 1 se aplica sola y llega al paso del imp
   assert.ok(lesson, 'el Curador la aplicó al terminar la historia 1, sin aprobación del propietario');
   assert.equal(lesson.source, 'curator'); assert.equal(lesson.role, 'implementer'); assert.equal(lesson.lessonText, LESSON_CATALOG.agent_blocked.text);
   lessonId = lesson.id;
+  // EN-020: aplicada por el Curador → práctica de pj-dev sin promover, y el implementador existente sube solo (by 'portal')
+  const tpl = templatesRepo(S).latest('pj-dev')!;
+  assert.ok(tpl.version > 1 && tpl.practices.some(p => p.lessonId === lessonId), 'la lección aplicada entra sola en la plantilla');
+  const devAgent = agentsRepo(S).list().find(a => a.key === 'pj-dev' && a.projectId === project.id)!;
+  assert.equal(devAgent.templateVersion, tpl.id); assert.equal(templatesRepo(S).history(devAgent.id).at(-1)!.by, 'portal');
   assert.equal(pendingIn(project.id).length, 0);
   script({ text: PATCH });
   const p2 = await run('d2 · historia siguiente'); p2Id = p2.id;
   assert.equal(p2.result!.pipeline!.state, 'verified', p2.result!.pipeline!.reason ?? '');
   const impl = p2.steps.find(s => s.role === 'implementer')!;
-  assert.ok((impl.lessonsUsed ?? []).includes(lessonId), 'el paso deja constancia de la lección usada');
+  assert.ok((impl.lessonsUsed ?? []).some(id => id === lessonId || id.endsWith(`:${lessonId}`)), 'el paso deja constancia de la lección usada (como práctica de plantilla)');
+  assert.equal((impl.lessonsUsed ?? []).filter(id => id === lessonId || id.endsWith(`:${lessonId}`)).length, 1, 'una sola vez');
   const dev = calls().filter(c => c.rule === R.dev);
   assert.ok(dev.length >= 1 && dev[0].markers.includes(MARK), 'el texto del catálogo llegó al prompt del implementador');
   assert.ok(calls().filter(c => c.rule === R.plan).every(c => !c.markers.includes(MARK)), 'solo se inyecta al papel de la lección');
@@ -193,6 +200,7 @@ test('f · una lección curada que reincide REFUTE_AFTER veces seguidas se retir
   const r2 = recur('f2 · reincide otra vez');
   assert.ok(r2.out.refuted.includes(lessonId)); assert.equal(lessonsRepo(S).get(lessonId)!.status, 'refuted');
   assert.ok(!lessonsFor(S, { projectId: project.id, role: 'implementer' }).some(l => l.id === lessonId), 'deja de inyectarse');
+  assert.ok(!templatesRepo(S).latest('pj-dev')!.practices.some(p => p.lessonId === lessonId), 'EN-020: la refutada sale de la plantilla');
   const d2 = lessonsRepo(S).list(project.id).find(l => l.detector === 'agent_blocked' && l.evidence.processId === r2.id)!;
   assert.equal(d2.status, 'rejected'); assert.ok(d2.tags.includes('descartada:refutada'), 'la causa refutada no se reaplica en bucle');
   assert.ok(!lessonsRepo(S).list(project.id, 'validated').some(l => l.detector === 'agent_blocked' && l.role === 'implementer'));

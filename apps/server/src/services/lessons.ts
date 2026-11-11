@@ -184,6 +184,10 @@ function grepRepo(repoPath: string, needle: string, exceptPath: string): boolean
   } catch (e: any) { return e?.status === 1 ? false : true; } // 1 = sin coincidencias; otro código = no se pudo comprobar
 }
 
+/** EN-020: id de la lección detrás de una entrada de lessons_used (las prácticas van como practice:<key>@<v>:<lessonId>). */
+export const lessonIdOf = (id: string): string => id.startsWith('practice:') ? id.split(':').slice(2).join(':') : id;
+const realLessonIds = (ids: string[]): string[] => Array.from(new Set(ids.map(lessonIdOf).filter(x => !!x && x !== 'null' && x !== 'undefined')));
+
 /** Detecta y guarda (sin IA). Devuelve las lecciones nuevas. Contabiliza reincidencias de lecciones ya inyectadas en el paso. */
 export function recordDetections(slug: string, processId: string, repoPath: string | null, extra: Parameters<typeof detectInProcess>[3] = {}): Lesson[] {
   const proc = processesRepo(slug).get(processId); if (!proc) return [];
@@ -191,7 +195,7 @@ export function recordDetections(slug: string, processId: string, repoPath: stri
   for (const d of detectInProcess(slug, proc, repoPath, extra)) {
     const step = proc.steps.find(s => s.id === d.evidence.stepId);
     // Reincidencia: una lección validada con la misma etiqueta de detector ya iba inyectada en ese paso.
-    for (const id of step?.lessonsUsed ?? []) { const l = repo.get(id); if (l && l.status === 'validated' && (l.detector === d.detector || l.tags.includes(d.detector))) repo.bumpRecurrence(id); }
+    for (const id of realLessonIds(step?.lessonsUsed ?? [])) { const l = repo.get(id); if (l && l.status === 'validated' && (l.detector === d.detector || l.tags.includes(d.detector))) repo.bumpRecurrence(id); }
     const l = repo.insert({ projectId: proc.projectId, role: d.role, tags: d.tags, status: 'detected', version: 1, parentId: null, title: d.title, detector: d.detector, evidence: d.evidence, rootCause: null, correctiveAction: null, lessonText: null, source: 'detector', promotedTo: null, dedupeKey: d.dedupeKey });
     if (l) created.push(l);
   }
@@ -211,7 +215,7 @@ export function recordLessonOutcomes(slug: string, processId: string, repoPath: 
   const out = { held: [] as string[], recurred: [] as string[], refuted: [] as string[] };
   const proc = processesRepo(slug).get(processId);
   if (!proc || proc.kind !== 'story_execution') return out;
-  const used = new Set(proc.steps.flatMap(s => s.lessonsUsed ?? []));
+  const used = new Set(realLessonIds(proc.steps.flatMap(s => s.lessonsUsed ?? [])));
   if (!used.size) return out;
   const repo = lessonsRepo(slug);
   const fired = new Set(detectInProcess(slug, proc, repoPath).map(d => d.detector));
@@ -319,7 +323,7 @@ export function lessonsBlock(lessons: Lesson[]): string {
 export function injectLessons(slug: string, stepId: string, system: string, q: { projectId: string | null; role: TeamRole | null; tags?: string[] }, practices: { id: string; text: string }[] = []): { system: string; used: string[] } {
   const ls = withoutPractices(lessonsFor(slug, q), practices);
   const used = [...ls.map(l => l.id), ...practices.map(p => p.id)];
-  if (used.length) { processesRepo(slug).setStepLessons(stepId, used); lessonsRepo(slug).bumpUsed(ls.map(l => l.id)); }
+  if (used.length) { processesRepo(slug).setStepLessons(stepId, used); lessonsRepo(slug).bumpUsed(realLessonIds(used)); }
   return { system: system + lessonsBlock(ls) + practicesBlock(practices), used };
 }
 /**
@@ -329,6 +333,7 @@ export function injectLessons(slug: string, stepId: string, system: string, q: {
 export function buildLessonContext(slug: string, q: { projectId: string | null; role: TeamRole | null; agent?: Agent | null; tags?: string[] }): { block: string; used: string[] } {
   const practices = q.agent ? practicesFor(slug, q.agent) : [];
   const ls = withoutPractices(lessonsFor(slug, { projectId: q.projectId, role: q.role, tags: q.tags }), practices);
-  if (ls.length) lessonsRepo(slug).bumpUsed(ls.map(l => l.id));
-  return { block: lessonsBlock(ls) + practicesBlock(practices), used: [...ls.map(l => l.id), ...practices.map(p => p.id)] };
+  const used = [...ls.map(l => l.id), ...practices.map(p => p.id)];
+  if (used.length) lessonsRepo(slug).bumpUsed(realLessonIds(used));
+  return { block: lessonsBlock(ls) + practicesBlock(practices), used };
 }
