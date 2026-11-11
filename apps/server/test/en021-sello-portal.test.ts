@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -16,6 +17,7 @@ import { fileURLToPath } from 'node:url';
  */
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-en021-'));
 process.env.PORTAL_MOCK_PROVIDER = '1';
+process.env.PORTAL_ALLOW_FOREIGN_REPO = '1';
 process.env.LOG_LEVEL = 'warn';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-en021-cc-'));
@@ -29,13 +31,25 @@ const D = await import('@portal-ia/domain');
 const { encryptSecret } = await import('../src/security/crypto.ts');
 const { providersRepo, settingsRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
-const { agentsRepo } = await import('../src/db/workspace.ts');
+const { agentsRepo, processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
 const { buildApp } = await import('./fixtures/owner-app.ts');
 const { REPO_ROOT } = await import('../src/config.ts');
 const { getClaudeCodeSettings, saveClaudeCodeSettings } = await import('../src/services/claudeCode/settings.ts');
 const { resetDetectionCache, verifiedDetection } = await import('../src/services/claudeCode/detect.ts');
 const { sourcesRepo } = await import('../src/services/externalAgents.ts');
 const { OWNER_NAME_KEY, ownerDisplayName, saveOwnerDisplayName, sealForOwner, sealForStep } = await import('../src/services/portalSeal.ts');
+const { addManualItem } = await import('../src/services/backlog.ts');
+const { createStoryProcess } = await import('../src/services/storyExecution.ts');
+const { callAgentStep, newPipeline } = await import('../src/services/storyPipeline.ts');
+const { createDelegation, runDelegation, pickLeadAgent } = await import('../src/services/delegation.ts');
+const { setBridgeUrl } = await import('../src/services/claudeCode/backend.ts');
+const { getAdapter } = await import('@portal-ia/ai-adapters');
+
+/** API simulada: se registra el system real de cada llamada (el registro de mock.ts no lo guarda). */
+const apiCalls: { system: string; hay: string }[] = [];
+const mockAd: any = (getAdapter as any)('anthropic');
+const origComplete = mockAd.complete.bind(mockAd);
+mockAd.complete = (k: any, o: any, req: any, s: any) => { apiCalls.push({ system: String(req.system ?? ''), hay: `${(req.history ?? []).map((h: any) => h.content).join('\n')}\n${req.user ?? ''}` }); return origComplete(k, o, req, s); };
 
 providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');
 providersRepo.setConnected('anthropic', ['claude-opus-4-1', 'claude-sonnet-4-5'].map(id => D.classifyModel('anthropic', id)));
@@ -182,4 +196,104 @@ test('(6) panel del agente y Ajustes: sello en solo lectura desde el dominio y c
   assert.ok(!panel.includes('la memoria verificada que recibes'), 'el panel no duplica el texto');
   assert.equal(D.SEAL_NOTE, 'Lo añade el Portal a todos los agentes');
   assert.match(src('apps/web/src/screens/Settings.tsx'), /Tu nombre/);
+});
+
+/** System de la última llamada por la API simulada cuyo prompt contiene `text`. */
+function apiSystemFor(text: string, prefer?: string): string {
+  const all = apiCalls.filter(c => c.hay.includes(text) || c.system.includes(text));
+  const best = prefer ? all.filter(c => `${c.system}\n${c.hay}`.includes(prefer)) : [];
+  const call = (best.length ? best : all).at(-1);
+  assert.ok(call, `la API simulada recibió la llamada con «${text}»`);
+  return call!.system;
+}
+const checkStep = (sys: string, where: string) => {
+  assert.equal(count(sys, D.SEAL_L1_MARK), 1, `${where}: L1 una vez`);
+  assert.equal(count(sys, D.SEAL_L2_MARK), 0, `${where}: nunca L2`);
+  assert.ok(!sys.includes(EMAIL), `${where}: sin correo`);
+};
+
+test('(7) Asistente con el proveedor simulado: primera respuesta L1+L2, segunda solo L1 y un hilo reutilizado con respuesta previa sin L2', async () => {
+  settingsRepo.set('owner.email', EMAIL);
+  saveOwnerDisplayName('Yair');
+  const conv = (await inject('POST', '/api/assistant/conversations', { title: 'EN-021 sello' })).json;
+  assert.ok(conv?.id, JSON.stringify(conv));
+  const ask = async (text: string) => {
+    const r = await inject('POST', '/api/assistant/messages', { text, conversationId: conv.id });
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    return apiSystemFor(text, 'Cómo trabajar en esta conversación');
+  };
+  const first = await ask('EN021-ASIS-PRIMERA hola');
+  assert.equal(count(first, D.SEAL_L1_MARK), 1, 'L1 una vez'); assert.equal(count(first, D.SEAL_L2_MARK), 1, 'L2 una vez en la primera respuesta');
+  assert.match(first, /llama al propietario por su nombre: Yair\./); assert.ok(!first.includes(EMAIL));
+  const second = await ask('EN021-ASIS-SEGUNDA sigue');
+  assert.equal(count(second, D.SEAL_L1_MARK), 1); assert.equal(count(second, D.SEAL_L2_MARK), 0, 'sin L2 en la segunda respuesta');
+  // Hilo reutilizado: se vacía el historial reciente, pero la conversación ya tiene una respuesta guardada.
+  await inject('DELETE', '/api/assistant/messages');
+  const reused = await ask('EN021-ASIS-REUTILIZADO vuelvo');
+  assert.equal(count(reused, D.SEAL_L1_MARK), 1); assert.equal(count(reused, D.SEAL_L2_MARK), 0, 'sin L2 en un hilo con respuesta previa');
+  saveOwnerDisplayName('');
+});
+
+const project = projectsRepo(S).list()[0];
+const setBackend = async (id: string, backend: 'api' | 'claude-code') => { const r = await inject('PUT', `${W}/agents/${id}/backend`, { backend, authorized: true }); assert.equal(r.status, 200, JSON.stringify(r.json)); };
+let readyP: Promise<void> | null = null;
+/** Repositorio, puente y autorización de Claude Code para el proyecto (pasos y encargos). */
+const ready = () => readyP ??= (async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-en021-repo-'));
+  const uniq = `en021-${Date.now().toString(36)}`;
+  fs.mkdirSync(path.join(repo, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(repo, 'src/a.ts'), 'export const a = 1;\n');
+  fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({ name: uniq, version: '1.0.0', private: true }, null, 2));
+  execSync('git init -q -b main && git add -A && git -c user.email=t@t -c user.name=t commit -qm Base', { cwd: repo });
+  projectsRepo(S).setRepository(project.id, repo, 'main');
+  await app.listen({ port: 0, host: '127.0.0.1' });
+  setBridgeUrl(`http://127.0.0.1:${(app.server.address() as any).port}`);
+  const st = await inject('PUT', '/api/claude-code/settings', { enabled: true, authorized: true, maxDurationSec: 120 }); assert.equal(st.status, 200, JSON.stringify(st.json));
+  const pj = await inject('PUT', `${W}/claude-code/projects`, { authorized: true, projectIds: [project.id] }); assert.equal(pj.status, 200, JSON.stringify(pj.json));
+})();
+
+test('(8) pasos por callAgentStep ejecutados con Claude Code simulado y API simulada: L1 una vez, nunca L2', async () => {
+  await ready();
+  const it = addManualItem(S, project.id, { title: 'Historia EN021-SELLO-PASO', criterion: 'el sello llega al paso' });
+  const proc: any = createStoryProcess(S, project.id, it.id);
+  processesRepo(S).setResult(proc.id, { ...proc.result, pipeline: newPipeline(D.normalizePipeline({ ...D.DEFAULT_PIPELINE, backends: ['api', 'claude_code'] } as any)) } as any);
+  processesRepo(S).authorize(proc.id, 1);
+  const step = proc.steps.find((s: any) => s.role === 'implementer');
+  assert.ok(step, 'la historia tiene paso de implementación');
+  try {
+    await setBackend(step.agentId, 'claude-code');
+    scenario({ auth: 'subscription', defaultText: '=== RESUMEN ===\nPaso simulado.' });
+    await callAgentStep(S, proc.id, step.id, 'Eres el Desarrollador. Entrega el diff.', 'EN021-PASO-CC entrega el diff', 1000, { injected: new Map(), log: () => undefined } as any);
+    const run = ccRuns().filter(c => String(c.prompt).includes('EN021-PASO-CC')).at(-1);
+    assert.ok(run, 'Claude Code simulado recibió el paso');
+    checkStep(String(run.system ?? ''), 'paso por Claude Code');
+    await setBackend(step.agentId, 'api');
+    await callAgentStep(S, proc.id, step.id, 'Eres el Desarrollador. Entrega el diff.', 'EN021-PASO-API entrega el diff', 1000, { injected: new Map(), log: () => undefined } as any);
+    checkStep(apiSystemFor('EN021-PASO-API'), 'paso por la API');
+  } finally { processesRepo(S).finish(proc.id, 'done', null); }
+});
+
+test('(9) análisis delegado ejecutado con Claude Code simulado y API simulada: L1 una vez, nunca L2', async () => {
+  await ready();
+  const lead: any = pickLeadAgent(S, project.id, 'pj-coordinador');
+  assert.ok(lead?.id, 'hay agente responsable');
+  const TRIAGE = JSON.stringify({ accepted: true, rejectionReason: null, understanding: 'Análisis breve del sello.', plan: ['Entregar'], consults: [] });
+
+  await setBackend(lead.id, 'claude-code');
+  scenario({ auth: 'subscription', rules: [{ match: 'Valida el encargo', text: TRIAGE }, { match: 'Entrega el resultado del encargo', text: 'Entregable EN021.' }], defaultText: TRIAGE });
+  const d1: any = createDelegation(S, project.id, 'pj-coordinador', 'EN021-DELEGA-CC analiza el sello del Portal');
+  processesRepo(S).authorize(d1.id, 1);
+  await runDelegation(S, d1.id, () => undefined, () => false).catch(() => undefined);
+  const runs = ccRuns().filter(c => `${c.prompt ?? ''}\n${c.system ?? ''}`.includes('EN021-DELEGA-CC'));
+  assert.ok(runs.length >= 1, `el encargo llamó a Claude Code simulado (${processesRepo(S).get(d1.id)?.error ?? ''})`);
+  for (const r of runs) checkStep(String(r.system ?? ''), 'delegación por Claude Code');
+
+  await setBackend(lead.id, 'api');
+  const n0 = apiCalls.length;
+  const d2: any = createDelegation(S, project.id, 'pj-coordinador', 'EN021-DELEGA-API analiza el sello del Portal');
+  processesRepo(S).authorize(d2.id, 1);
+  await runDelegation(S, d2.id, () => undefined, () => false).catch(() => undefined);
+  const calls = apiCalls.slice(n0).filter(c => `${c.system}\n${c.hay}`.includes('EN021-DELEGA-API'));
+  assert.ok(calls.length >= 1, `el encargo llamó a la API simulada (${processesRepo(S).get(d2.id)?.error ?? ''})`);
+  for (const c of calls) checkStep(c.system, 'delegación por la API');
 });
