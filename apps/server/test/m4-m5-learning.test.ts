@@ -173,7 +173,7 @@ test('C1/C2 · plantillas versionadas (EN-020): la lección aplicada ya está en
   assert.equal(custom.templateVersion, latest.id); assert.equal(practicesFor('portal-ia', custom).length, latest.practices.length);
   // Ya está al día: sin diferencias pendientes; la vuelta atrás y el «Actualizar» del propietario siguen funcionando
   const info = await app.inject({ method: 'GET', url: `/api/workspaces/portal-ia/agents/${dev.id}/template` });
-  assert.equal(info.json().current.id, latest.id); assert.equal(info.json().latest.id, latest.id); assert.deepEqual(info.json().diff.added, []);
+  assert.equal(info.json().current.id, latest.id); assert.equal(info.json().latest.id, latest.id); assert.equal(info.json().diff?.added?.length ?? 0, 0, 'al día: sin diferencias pendientes (la ruta devuelve diff null)');
   const back = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/agents/${dev.id}/template-version`, payload: { authorized: true, version: 'pj-dev@1' } });
   assert.equal(back.statusCode, 200, back.body); assert.equal(back.json().templateVersion, 'pj-dev@1'); assert.equal(practicesFor('portal-ia', agentsRepo('portal-ia').get(dev.id)!).length, 0);
   assert.equal(templatesRepo('portal-ia').history(dev.id).length, h0.length + 1); assert.equal(templatesRepo('portal-ia').history(dev.id).at(-1)!.by, 'owner');
