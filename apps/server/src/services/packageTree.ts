@@ -2,8 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 /**
- * HU-206 · Árbol a empaquetar en la edición distribuible: única fuente de verdad. Sin dependencias ni REPO_ROOT: quien
- * lo use pasa la raíz. Toda ruta va relativa y con «/». La guarda HU-206 aplica findSecret a cada archivo de esta lista.
+ * HU-206 · Árbol a empaquetar en la edición distribuible: única fuente de verdad. Sin dependencias ni la raíz de la
+ * instalación: quien lo use pasa la raíz. Toda ruta va relativa y con «/». La guarda HU-206 aplica findSecret a cada
+ * archivo de esta lista.
  */
 
 /** Lo que se empaqueta: archivos sueltos y carpetas (recorridas enteras salvo lo excluido). «packages/*» = cada paquete. */
