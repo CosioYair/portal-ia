@@ -103,9 +103,9 @@ function stepSystem(slug: string, proc: Process, stepId: string, agent: Agent, s
     const role = (proc.steps.find(s => s.id === stepId)!.role ?? 'implementer') as TeamRole;
     // EN-021 · Sello Portal IA, solo la línea 1 (pasos estructurados: nunca la línea 2). Se aplica UNA vez, aquí, al
     // guardar en caché y después de las lecciones (no las repite); las llamadas del paso reutilizan el texto ya sellado.
-    injected.set(stepId, sealForStep(injectLessons(slug, stepId, system0, { projectId: proc.projectId, role, tags: [] }, practicesFor(slug, agent)).system));
+    injected.set(stepId, injectLessons(slug, stepId, system0, { projectId: proc.projectId, role, tags: [] }, practicesFor(slug, agent)).system);
   }
-  return injected.get(stepId)!;
+  return sealForStep(injected.get(stepId)!);
 }
 
 /** ¿El agente usa un origen que el lote de este proceso no autoriza? (p. ej. lo cambiaron a la API a mitad de la historia). */
