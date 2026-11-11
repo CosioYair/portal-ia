@@ -10,6 +10,16 @@ try { const { runBacklogMaintenance } = await import('./services/backlogMaintena
 try { const { recoverInterruptedProcesses } = await import('./services/interruptions.ts'); const n = recoverInterruptedProcesses((o, m) => app.log.info(o, m)); if (n) app.log.warn({ interrupted: n }, 'procesos interrumpidos por el reinicio: pausados sin reenviar nada'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'recuperación de procesos interrumpidos omitida'); }
 // EN-014: ámbito inicial de los agentes (Empresa con el nombre registrado + General); idempotente, sin IA ni costo.
 try { const { runContextScopeMigration } = await import('./services/contextScopeStartup.ts'); const r = await runContextScopeMigration((o, m) => app.log.info(o, m)); if (r.migrated) app.log.info({ migrated: r.migrated }, 'ámbito de los agentes migrado'); if (r.failed) app.log.warn({ failed: r.failed }, 'migración del ámbito: algunos agentes no se migraron'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'migración del ámbito de los agentes omitida'); }
+// EN-020: las lecciones aplicadas pasan a prácticas de sus plantillas y los agentes a la última versión.
+// Es idempotente y sin IA. La primera ejecución deja una marca por espacio; cada espacio falla por separado sin bloquear el arranque.
+try {
+  const { workspacesRepo } = await import('./db/platform.ts');
+  const { syncLessonPractices } = await import('./services/lessonPractices.ts');
+  for (const ws of workspacesRepo.list()) {
+    try { const r = syncLessonPractices(ws.slug, { migration: true }); if (r.created.length || r.moved.length) app.log.info({ workspace: ws.slug, versions: r.created, agents: r.moved.length, first: r.migration }, 'lecciones aplicadas incorporadas a las plantillas'); }
+    catch (e) { app.log.warn({ workspace: ws.slug, err: (e as Error).message }, 'migración de lecciones a plantillas omitida en este espacio'); }
+  }
+} catch (e) { app.log.warn({ err: (e as Error).message }, 'migración de lecciones a plantillas omitida'); }
 // Revisiones del proyecto que se estaban ejecutando: quedan «a medias» (reanudables) y su tarjeta del Asistente lo dice.
 try { const { recoverInterruptedPlans } = await import('./services/projectMaintenance.ts'); const n = recoverInterruptedPlans(); if (n) app.log.warn({ interrupted: n }, 'revisiones del proyecto interrumpidas por el reinicio: quedan a medias, reanudables'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'recuperación de revisiones interrumpidas omitida'); }
 // Worktrees temporales (línea base, run_checks) que dejó un apagado brusco: son del Portal y se retiran.

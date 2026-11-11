@@ -14,6 +14,15 @@ import { recordAgentEvent } from './agentEvents.ts';
 import { monotonicNow } from '../clock.ts';
 import { attachmentsOfMessages, harnessSendsImages, linkToMessage, listAttachments, MAX_IMAGE_BYTES_PER_MESSAGE, modelContext, resolveForMessage, type ChatAttachment } from './agentAttachments.ts';
 import { actionsOfMessages, actionsPrompt, extractAction, registerAction, workContext, type AgentAction } from './agentActions.ts';
+import { buildLessonContext } from './lessons.ts';
+import { ROLE_TEMPLATE, templateKeyFor } from './agentTemplates.ts';
+import type { TeamRole } from '@portal-ia/domain';
+
+/** EN-020: papel del agente según la plantilla que sigue (null si no corresponde a ningún papel). */
+function roleOfAgent(a: Agent): TeamRole | null {
+  const key = templateKeyFor(a); if (!key) return null;
+  return (Object.keys(ROLE_TEMPLATE) as TeamRole[]).find(r => ROLE_TEMPLATE[r] === key) ?? null;
+}
 
 /**
  * Conversación directa con un agente (pestaña «Chat» de la oficina). Cada mensaje que envía el propietario es UNA llamada
@@ -135,9 +144,13 @@ export async function sendChat(slug: string, agentId: string, input: { text: str
   while (hist.length && hist[0].role === 'assistant') hist.shift();
   for (let i = hist.length - 1; i > 0; i--) if (hist[i].role === hist[i - 1].role) { hist[i - 1] = { ...hist[i - 1], content: `${hist[i - 1].content}\n\n${hist[i].content}` }; hist.splice(i, 1); }
   if (hist.length && hist[hist.length - 1].role === 'user') hist.pop();
-  const system = systemFor(slug, a, projectId);
+  // EN-020: lecciones del papel (y las que no tienen papel) junto con las prácticas de su plantilla, cada texto una sola vez.
+  let lessonCtx: { block: string; used: string[] } = { block: '', used: [] };
+  try { lessonCtx = buildLessonContext(slug, { projectId, role: roleOfAgent(a), agent: a }); } catch { /* sin lecciones: el chat sigue */ }
+  const system = systemFor(slug, a, projectId) + lessonCtx.block;
+  const lessonsUsed = lessonCtx.used;
   const ts = now(); const ownerId = crypto.randomUUID(); const replyId = crypto.randomUUID();
-  db.prepare(`INSERT INTO agent_messages (id, agent_id, role, content, status, harness, model, project_id, created_at, finished_at, meta_json) VALUES (?, ?, 'owner', ?, 'done', NULL, NULL, ?, ?, ?, ?)`).run(ownerId, agentId, text, projectId, ts, ts, JSON.stringify({ sent: ctx.sent, delivered: null }));
+  db.prepare(`INSERT INTO agent_messages (id, agent_id, role, content, status, harness, model, project_id, created_at, finished_at, meta_json) VALUES (?, ?, 'owner', ?, 'done', NULL, NULL, ?, ?, ?, ?)`).run(ownerId, agentId, text, projectId, ts, ts, JSON.stringify({ sent: ctx.sent, delivered: null, lessonsUsed }));
   linkToMessage(slug, ownerId, atts);
   db.prepare(`INSERT INTO agent_messages (id, agent_id, role, content, status, harness, model, reply_to, project_id, created_at) VALUES (?, ?, 'agent', '', 'running', ?, ?, ?, ?, ?)`).run(replyId, agentId, harness, a.config.model, ownerId, projectId, now());
   inFlight.set(replyId, { slug, agentId, messageId: replyId });
@@ -147,7 +160,7 @@ export async function sendChat(slug: string, agentId: string, input: { text: str
     db.prepare(`UPDATE agent_messages SET status = ?, content = ?, error = ?, tokens_in = ?, tokens_out = ?, cost_usd = ?, finished_at = ? WHERE id = ?`)
       .run(status, patch.content ?? '', patch.error ?? null, patch.tokensIn ?? 0, patch.tokensOut ?? 0, patch.cost ?? 0, now(), replyId);
     // «El modelo recibió…» solo cuenta si la llamada terminó bien.
-    db.prepare(`UPDATE agent_messages SET meta_json = ? WHERE id = ?`).run(JSON.stringify({ sent: ctx.sent, delivered: status === 'done' }), ownerId);
+    db.prepare(`UPDATE agent_messages SET meta_json = ? WHERE id = ?`).run(JSON.stringify({ sent: ctx.sent, delivered: status === 'done', lessonsUsed }), ownerId);
     inFlight.delete(replyId);
     try { processesRepo(slug).logExecution({ projectId: projectId ?? '', agentId, kind: 'agent_chat', status, tokensIn: patch.tokensIn ?? 0, tokensOut: patch.tokensOut ?? 0, cost: patch.cost ?? 0, startedAt }); } catch { /* auditoría */ }
     changed({ ws: slug, entity: 'agent_chat', id: agentId }); changed({ ws: slug, entity: 'agent', id: agentId, kind: 'progress' }); changed({ ws: slug, entity: 'usage', id: null });

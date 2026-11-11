@@ -1,6 +1,7 @@
 import type { Lesson, TeamRole } from '@portal-ia/domain';
 import { lessonsRepo } from './lessons.ts';
 import { agentsRepo, processesRepo, workspaceDb } from '../db/workspace.ts';
+import { syncLessonPracticesSafe } from './lessonPractices.ts';
 
 /**
  * HU-202 · Curador de Aprendizaje (sin IA, 0 USD, sin autorización de gasto).
@@ -73,6 +74,9 @@ export function curatePending(slug: string, opts: { projectId?: string | null; b
       for (const l of rest) { reject(l, 'agrupada'); out.merged++; }
     }
     db.exec('RELEASE lesson_curate');
+    // EN-020: una sola sincronización por curación. Las lecciones aplicadas llegan solas a la plantilla y a los agentes.
+    // El Curador solo rechaza detecciones sin aplicar, que nunca han estado en una plantilla.
+    if (out.applied) syncLessonPracticesSafe(slug);
   } catch (e) {
     try { db.exec('ROLLBACK TO lesson_curate'); db.exec('RELEASE lesson_curate'); } catch { /* el savepoint ya no existía */ }
     throw e;
