@@ -1219,11 +1219,46 @@ function backlogDoneByStory(slug: string, projectId: string, storyId: string): b
 }
 const withBacklog = (slug: string, b: Batch) => b.items.map(i => ({ state: i.state, backlogStatus: backlogStatusOf(slug, i.itemId) }));
 
+/**
+ * HU-203 · Un lote en 'needs_decision' se vuelve a evaluar con su estado GUARDADO (no con una copia anterior) hasta que
+ * deja de estarlo: si todo está aceptado, cerrado, cancelado o aplazado → 'completed'; si no, se sincroniza con el
+ * Backlog y se programa una pasada (una dependencia completada fuera del lote desbloquea y ejecuta a su dependiente
+ * dentro de la autorización vigente). Sin IA ni coste; se detiene solo y no mantiene vivo el proceso.
+ */
+const decisionWatchers = new Map<string, ReturnType<typeof setInterval>>();
+function watchDecision(slug: string, id: string) {
+  const key = `${slug}:${id}`;
+  if (decisionWatchers.has(key)) return;
+  let busy = false;
+  const stop = () => { const t = decisionWatchers.get(key); if (t) clearInterval(t); decisionWatchers.delete(key); };
+  const t = setInterval(() => {
+    if (busy) return;
+    let cur: Batch | null = null;
+    try { cur = batchesRepo(slug).get(id); } catch { stop(); return; }
+    if (!cur || cur.status !== 'needs_decision') { stop(); return; }
+    if (isBatchSettled(withBacklog(slug, cur))) {
+      stop();
+      setStatus(slug, id, 'completed', 'Lote terminado: todas sus historias están aceptadas, cerradas o canceladas en el Backlog.', 'completed');
+      return;
+    }
+    busy = true;
+    void syncFromBacklog(slug, id)
+      .then(() => { const st = batchesRepo(slug).get(id)?.status; if (st === 'running' || st === 'needs_decision') return scheduleTick(slug, id); })
+      .catch(() => undefined)
+      .finally(() => { busy = false; });
+  }, 300);
+  (t as { unref?: () => void }).unref?.();
+  decisionWatchers.set(key, t);
+}
+
 /** Cierre fiel al Backlog: 'completed' solo si todo está aceptado, cerrado o cancelado; si no, 'needs_decision'. */
 function closeFaithfully(slug: string, id: string, detail: string) {
   const b = batchesRepo(slug).get(id)!;
   const rows = withBacklog(slug, b);
   if (isBatchSettled(rows)) return setStatus(slug, id, 'completed', `Lote terminado: ${detail}`, 'completed');
+  // Se vuelve a evaluar con el estado guardado: una decisión tomada a la vez (aceptar, aplazar, cerrar en el Backlog)
+  // no deja el lote en «necesita tu decisión» con un motivo viejo.
+  watchDecision(slug, id);
   const open = rows.filter(r => !isBatchSettled([r])).length;
   return setStatus(slug, id, 'needs_decision', `Necesita tu decisión: ${open} historia(s) sin aceptar, cerrar ni cancelar en el Backlog. ${detail}`, 'pause');
 }
