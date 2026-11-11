@@ -70,6 +70,23 @@ async function omittedClosingChecks(slug: string, last: Process | undefined): Pr
 }
 
 /**
+ * HU-187 · Busca una historia del backlog por su id interno (uuid) y, si no aparece, por su código visible («HU-187»)
+ * en los proyectos del espacio. Solo prueba el código si el valor tiene la forma «HU-NNN». Sin coincidencia: undefined.
+ */
+function findBacklogItem(slug: string, idOrCode: string) {
+  const repo = backlogRepo(slug);
+  const byId = repo.get(idOrCode);
+  if (byId) return byId;
+  if (!/^HU-\d+$/i.test(idOrCode)) return undefined;
+  const code = idOrCode.toUpperCase();
+  for (const p of projectsRepo(slug).list()) {
+    const found = repo.listAll(p.id).find(i => i.storyId.toUpperCase() === code);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
  * Procesos autorizados (HU-004). Un proceso nace 'pending_authorization' con una estimación; solo empieza a consumir
  * IA cuando el usuario lo autoriza con un presupuesto (POST /authorize). Puede cancelarse; se detiene entre pasos.
  */
@@ -645,7 +662,7 @@ Proceso: ${proc.id}`, { processId: proc.id });
     const params = z.object({ slug: z.string().min(1).max(120), id: z.string().min(1).max(120) }).safeParse(req.params);
     if (!params.success) return reply.code(400).send({ error: 'Parámetros no válidos.' });
     const { slug, id } = params.data; if (!guard(slug, reply)) return;
-    const item = backlogRepo(slug).get(id);
+    const item = findBacklogItem(slug, id);
     if (!item) return reply.code(404).send({ error: 'Historia no encontrada' });
     const procs = processesRepo(slug);
     const last = (item.lastProcessId ? procs.get(item.lastProcessId) : undefined) ?? procs.list(item.projectId).find(p => p.backlogItemId === item.id && p.kind === 'story_execution');

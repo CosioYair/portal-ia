@@ -75,7 +75,21 @@ async function request<T>(url: string, init0?: RequestInit): Promise<T> {
 
 export interface AssistantInfo { agentId: string; name: string; model: string; provider: string; monthlyLimitUsd: number; spentThisMonthUsd: number; estimatedPerMessageUsd: number;
   /** Backend del Asistente y su origen de facturación (se muestran antes de enviar). */
-  backend: ExecutionBackend; backendLabel: string; billing: 'api' | 'subscription'; available: boolean; unavailableReason: string | null }
+  backend: ExecutionBackend; backendLabel: string; billing: 'api' | 'subscription'; available: boolean; unavailableReason: string | null;
+  /** HU-198 · Catálogo que el servidor acepta como `model` por mensaje (vacío: solo el modelo configurado) y, si no se puede elegir, el motivo. */
+  models: AssistantModelOption[]; modelsReason: string | null }
+/** HU-198 · Modelo elegible en el chat del Asistente con su tipo de costo. */
+export interface AssistantModelOption { id: string; label: string; billing: 'api' | 'subscription'; estimatedPerMessageUsd: number }
+
+/** HU-198 · Petición al Asistente con un `model` opcional en el cuerpo (null: el configurado del agente). */
+function withModel(model: string | null | undefined) {
+  return <T,>(url: string, init?: RequestInit): Promise<T> => {
+    if (!model || !init?.body) return request<T>(url, init);
+    let body: any; try { body = JSON.parse(String(init.body)); } catch { return request<T>(url, init); }
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return request<T>(url, init);
+    return request<T>(url, { ...init, body: JSON.stringify({ ...body, model }) });
+  };
+}
 export type AssistantActionType = 'create_company' | 'create_project' | 'add_backlog_item' | 'propose_execution' | 'propose_apply' | 'propose_delegation' | 'propose_operation' | 'propose_local' | 'open_decision' | 'propose_assignment' | 'info';
 export interface AssistantAction {
   type: AssistantActionType; status: 'done' | 'failed' | 'pending' | 'running' | 'rejected'; label: string; detail?: string; link?: string;
@@ -280,7 +294,7 @@ export const api = {
   cancelAssignment: (slug: string, id: string) => request<Assignment>(`/api/workspaces/${slug}/assignments/${id}/cancel`, { method: 'POST', body: JSON.stringify({}) }),
   claudeCodeUsage: () => request<UsageGateView>('/api/claude-code/usage'),
   acknowledgeUsage: () => request<UsageGateView>('/api/claude-code/usage/acknowledge', { method: 'POST', body: JSON.stringify({ authorized: true }) }),
-  sendAssistant: (text: string, images: AssistantImage[] = [], files: AssistantAttachment[] = [], conversationId: string | null = null) => request<{ user: AssistantMessage; assistant: AssistantMessage; info: AssistantInfo; conversationId: string }>('/api/assistant/messages', { method: 'POST', body: JSON.stringify({ conversationId, text, images: images.length ? images : undefined, files: files.length ? files : undefined }) }),
+  sendAssistant: (text: string, images: AssistantImage[] = [], files: AssistantAttachment[] = [], conversationId: string | null = null, model: string | null = null) => withModel(model)<{ user: AssistantMessage; assistant: AssistantMessage; info: AssistantInfo; conversationId: string }>('/api/assistant/messages', { method: 'POST', body: JSON.stringify({ conversationId, text, images: images.length ? images : undefined, files: files.length ? files : undefined }) }),
   resolveAssistantProposal: (messageId: string, processId: string, status: 'done' | 'failed', detail?: string) => request<{ message: AssistantMessage }>(`/api/assistant/messages/${messageId}/resolve`, { method: 'POST', body: JSON.stringify({ processId, status, detail }) }),
   clearAssistant: () => request<{ ok: boolean }>('/api/assistant/messages', { method: 'DELETE' }),
   assistantPendingCount: () => request<{ count: number }>('/api/assistant/pending-count'),
