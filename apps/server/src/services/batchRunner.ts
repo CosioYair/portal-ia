@@ -390,6 +390,18 @@ async function tick(slug: string, id: string) {
   // HU-203: un lote que espera tu decisión se da por terminado en cuanto todas sus historias están aceptadas, canceladas,
   // aplazadas o cerradas en el Backlog (también si se cerraron fuera del lote). Se lee el Backlog directamente.
   if (b.status === 'needs_decision' && isBatchSettled(b.items.map(i => ({ state: i.state, backlogStatus: backlogRepo(slug).get(i.itemId)?.status ?? null })))) {
+    // El estado de cada historia en el lote coincide con el Backlog: lo cerrado fuera del lote se anota aquí (sin crear ni
+    // enlazar procesos). Aceptada en el Backlog → aceptada; cerrada o cancelada allí → cancelada.
+    repo.update(id, x => {
+      for (const it of x.items) {
+        if (it.state === 'accepted' || it.state === 'cancelled' || it.state === 'postponed') continue;
+        const bs = backlogRepo(slug).get(it.itemId)?.status ?? null;
+        if (!bs) continue;
+        if (bs === 'done') { it.state = 'accepted'; it.reason = 'Aceptada en el Backlog (fuera del lote).'; }
+        else { it.state = 'cancelled'; it.reason = `Cerrada en el Backlog (${bs}) fuera del lote.`; }
+        it.finishedAt = it.finishedAt ?? now();
+      }
+    });
     setStatus(slug, id, 'completed', 'Lote terminado: todas sus historias están aceptadas, cerradas o canceladas en el Backlog.', 'completed');
     return;
   }

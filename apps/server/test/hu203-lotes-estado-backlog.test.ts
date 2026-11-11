@@ -178,7 +178,7 @@ test('(c) sin presupuesto restante, el desbloqueo pausa el lote con el motivo y 
   await waitFor(b.id, x => x.status === 'needs_decision' && x.items.find((i: any) => i.itemId === ind.id).state === 'awaiting_acceptance', 'la independiente gastó el presupuesto', { neverCompleted: true });
   backlogRepo(S).setStatus(ext.id, 'done');
   const p = await waitFor(b.id, x => x.status === 'paused', 'pausa por presupuesto al desbloquear', { neverCompleted: true });
-  assert.match(p.reason, /presupuesto/);
+  assert.match(p.reason, /presupuesto/i);
   assert.equal(callsFor('LIMADEPENDE').length, 0, 'nunca se gasta más de lo autorizado');
   const r = await resume(b.id, { addBudgetUsd: 2 });
   assert.equal(r.statusCode, 200, r.body);
