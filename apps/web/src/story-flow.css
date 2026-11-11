@@ -107,3 +107,16 @@
 .sf-del-checks li[data-state="failed"] { color: var(--color-text-alert); }
 .sf-del-checks li[data-state="undetermined"] { color: var(--color-warn-text); }
 .sf-del-checks li[data-state="not_applicable"] { color: var(--color-text-soft); }
+/* HU-200 · Barra de etapas a 375 px: solo .sf-stages-compact y solo hasta 480 px. La regla global de 720 px (.sf-stage-label { display: none; }) no cambia.
+   Estos selectores (4-5 clases) ganan por especificidad a esa regla: la etapa actual muestra su nombre en una línea con «…»;
+   las demás se ven como puntos de 8 px y conservan su nombre accesible (clip, no display:none) además del title y aria-current del componente. */
+@media (max-width: 480px) {
+  .sf-stages-compact { display: flex; flex-wrap: nowrap; align-items: flex-start; gap: 4px; min-width: 0; max-width: 100%; flex-basis: 100%; overflow: hidden; }
+  .sf-stages-compact .sf-stage:not(.is-current) { flex: none; width: 8px; position: relative; }
+  .sf-stages-compact .sf-stage:not(.is-current) .sf-bar { flex: none; width: 8px; height: 8px; border-radius: var(--radius-pill); }
+  .sf-stages-compact .sf-stage:not(.is-current) .sf-stage-label { display: block; position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .sf-stages-compact .sf-stage.is-current { flex: 1 1 auto; min-width: 0; }
+  .sf-stages-compact .sf-stage.is-current .sf-bar { height: 8px; }
+  .sf-stages-compact .sf-stage.is-current .sf-stage-label, .sf-stages-compact .sf-stage.is-current:nth-last-child(-n+2) .sf-stage-label { display: block; width: auto; max-width: 100%; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; align-self: stretch; }
+  .sf-summary .sf-title { max-width: 100%; }
+}
