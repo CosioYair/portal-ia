@@ -185,3 +185,39 @@ test('(c) sin presupuesto restante, el desbloqueo pausa el lote con el motivo y 
   await waitFor(b.id, x => x.status === 'needs_decision' && x.items.every((i: any) => i.state === 'awaiting_acceptance'), 'la dependiente termina tras reanudar', { neverCompleted: true });
   assert.ok(callsFor('LIMADEPENDE').length > 0);
 });
+
+test('(e) una historia del lote que se ejecuta FUERA de él mientras el lote espera tu decisión: el lote la sigue («sigue fuera del lote»), sin otro proceso, y al terminar refleja el Backlog', async () => {
+  const o = story('Historia OSCARFUERA');
+  setScript(['OSCARFUERA']);
+  const b = await authorize({ itemIds: [o.id], title: 'Lote E' });
+  const w = await waitFor(b.id, x => x.status === 'needs_decision' && x.items[0].state === 'awaiting_acceptance', 'E espera tu aceptación', { neverCompleted: true });
+  const lotPids = w.items[0].processIds.length;
+  const procsBefore = processesRepo(S).list(project.id).length;
+  await new Promise(r => setTimeout(r, 20)); // el proceso externo es posterior a lo que hizo el lote
+  // Fuera del lote: autorizas una iteración de la historia desde su espacio (proceso story_execution en marcha).
+  const ext = processesRepo(S).create({ projectId: project.id, kind: 'story_execution', title: 'Historia OSCARFUERA (iteración fuera del lote)', estimatedUsd: 0, backlogItemId: o.id, steps: [] } as any);
+  processesRepo(S).authorize(ext.id, 1);
+  assert.equal(processesRepo(S).get(ext.id)!.status, 'running', 'la iteración externa está en marcha');
+  // El temporizador del lote (sin llamadas manuales) la sigue: «sigue fuera del lote», enlazada a ESE proceso.
+  const v = await waitFor(b.id, x => x.items[0].state === 'external' && x.items[0].followedProcessId === ext.id, 'el lote sigue la iteración externa', { neverCompleted: true });
+  assert.equal(v.status, 'needs_decision', 'con la historia en marcha fuera, el lote no está terminado');
+  assert.equal(v.items[0].followedProcessId, ext.id);
+  assert.equal(processesRepo(S).list(project.id).length, procsBefore + 1, 'solo existe el proceso externo: el lote no creó otro');
+  const running = processesRepo(S).list(project.id).filter(p => p.kind === 'story_execution' && p.backlogItemId === o.id && p.status === 'running');
+  assert.equal(running.length, 1, 'un solo proceso en marcha para la historia');
+  assert.equal(running[0].id, ext.id);
+  assert.equal(v.items[0].processIds.length, lotPids, 'el lote no enlazó ni lanzó otro proceso');
+  // Sigue igual al cabo de varias vueltas del temporizador (el lote no la ejecuta otra vez ni se da por terminado).
+  await new Promise(r => setTimeout(r, 400));
+  const still = await get(b.id);
+  assert.equal(still.status, 'needs_decision'); assert.equal(still.items[0].state, 'external');
+  // Termina la iteración externa y la historia queda hecha en el Backlog: el lote sigue al Backlog.
+  processesRepo(S).finish(ext.id, 'done', null as any);
+  backlogRepo(S).setStatus(o.id, 'done');
+  const done = await waitFor(b.id, x => x.status === 'completed', 'el lote refleja el Backlog tras terminar la iteración externa');
+  assert.equal(backlogRepo(S).get(o.id)!.status, 'done');
+  assert.equal(done.items[0].state, 'accepted', 'el estado en el lote coincide con el Backlog (hecha)');
+  assert.equal(done.items[0].followedProcessId, ext.id, 'conserva el proceso que siguió');
+  assert.equal(processesRepo(S).list(project.id).length, procsBefore + 1, 'tampoco al terminar se creó otro proceso');
+  assert.equal(done.items[0].processIds.length, lotPids);
+});
