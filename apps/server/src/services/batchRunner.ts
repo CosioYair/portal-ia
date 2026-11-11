@@ -1284,7 +1284,12 @@ function unlockDependents(slug: string, b: Batch): BatchItem[] {
 export async function syncFromBacklog(slug: string, id: string): Promise<void> {
   const repo = batchesRepo(slug);
   let b = repo.get(id); if (!b) return;
-  if (b.status === 'needs_decision') { await reconcileBatch(slug, id); b = repo.get(id); if (!b) return; }
+  if (b.status === 'needs_decision') {
+    await reconcileBatch(slug, id); b = repo.get(id); if (!b) return;
+    // HU-203: tras sincronizar con el Backlog, si todas sus historias están aceptadas, cerradas o canceladas, el lote
+    // queda terminado ya (antes de cualquier otra salida del temporizador).
+    if (b.status === 'needs_decision' && isBatchSettled(withBacklog(slug, b))) { setStatus(slug, id, 'completed', 'Lote terminado: todas sus historias están aceptadas, cerradas o canceladas en el Backlog.', 'completed'); return; }
+  }
   if (b.status !== 'running' && b.status !== 'paused' && b.status !== 'needs_decision') return;
   const unlocked = unlockDependents(slug, b);
   b = repo.get(id)!;

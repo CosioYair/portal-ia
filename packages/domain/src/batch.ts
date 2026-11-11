@@ -570,8 +570,8 @@ export function isBatchSettled(items: { state: BatchItemState; backlogStatus?: s
   return items.every(i => {
     if (i.state === 'accepted' || i.state === 'cancelled') return true;
     const bs = i.backlogStatus ?? null;
-    if (bs && BACKLOG_CLOSED.includes(bs)) return true;
-    return i.state === 'external' && !!bs && BACKLOG_SETTLED.includes(bs);
+    // Aceptada (done), cerrada o cancelada en el Backlog: resuelta, se ejecutara dentro o fuera del lote.
+    return !!bs && BACKLOG_SETTLED.includes(bs);
   });
 }
 
