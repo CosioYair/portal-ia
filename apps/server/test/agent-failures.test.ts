@@ -16,7 +16,7 @@ import { execSync } from 'node:child_process';
  *  H reinicio: se marca sin reenviar nada ni contabilizar dos veces · I reintentos acotados de errores transitorios ·
  *  J un proceso sin ejecución viva no aparece como sano · K costo confirmado y no confirmado separados ·
  *  L el presupuesto detiene las llamadas · M/N la puerta de QA y el pipeline previo siguen igual (autonomous-pipeline) ·
- *  O las lecciones se detectan como evidencia y nunca se validan solas.
+ *  O las lecciones se detectan y el Curador las cura solo, sin IA (HU-202): ruido descartado, una aplicada por causa.
  */
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-fail-'));
 process.env.PORTAL_ALLOW_FOREIGN_REPO = '1';
@@ -501,21 +501,36 @@ test('G2/K · cancelar una evaluación inicial también aborta la llamada en cur
   assert.equal(calls().length, 1, 'los pasos siguientes no se ejecutan');
 });
 
-test('O · lecciones: los fallos clasificados quedan como evidencia «detectada», nunca validada ni inyectada', async () => {
-  const all = lessonsRepo(S).list(project.id);
+test('O · lecciones: los fallos clasificados se detectan y el Curador los cura solo (HU-202)', async () => {
+  const { curatePending, causeKey } = await import('../src/services/lessonCurator.ts');
+  const { recordDetections } = await import('../src/services/lessons.ts');
+  const all = lessonsRepo(S).list(project.id).filter(l => l.projectId === project.id);
   const byDetector = (d: string) => all.filter(l => l.detector === d);
   assert.ok(byDetector('provider_refusal').length >= 1, 'negativa del proveedor');
   assert.ok(byDetector('agent_blocked').length >= 2, 'bloqueos (información y permiso)');
   assert.ok(byDetector('provider_timeout').length >= 1, 'plazo agotado');
   assert.ok(byDetector('provider_unavailable').length >= 1, 'conexión agotada');
   assert.ok(byDetector('provider_credentials').length >= 1, 'credencial rechazada: del proveedor, no un bloqueo del agente');
-  for (const l of [...byDetector('provider_refusal'), ...byDetector('agent_blocked'), ...byDetector('provider_timeout'), ...byDetector('provider_unavailable'), ...byDetector('provider_credentials')]) {
-    assert.equal(l.status, 'detected'); assert.equal(l.validatedAt, null); assert.equal(l.lessonText, null, 'sin texto de lección: lo redacta y valida el propietario');
-  }
+  const provider = [...byDetector('provider_refusal'), ...byDetector('provider_timeout'), ...byDetector('provider_unavailable'), ...byDetector('provider_credentials')];
+  // Ninguna detección de un fallo clasificado queda pendiente: el Curador la curó al terminar su tarea.
+  for (const l of [...provider, ...byDetector('agent_blocked')]) assert.notEqual(l.status, 'detected', `${l.detector} · ${l.evidence.processTitle}: el Curador la cura al terminar la tarea`);
+  // El ruido del proveedor se descarta: nunca se convierte en lección.
+  for (const l of provider) { assert.equal(l.status, 'rejected', `${l.detector} · ${l.evidence.processTitle}`); assert.ok(l.tags.includes('descartada:ruido')); assert.equal(l.validatedAt, null); assert.equal(l.lessonText, null); }
+  // Como mucho una lección aplicada por causa (detector + papel), con su texto.
+  const perCause = new Map<string, number>();
+  for (const l of all.filter(x => x.status === 'validated' && x.source === 'curator')) perCause.set(causeKey(l), (perCause.get(causeKey(l)) ?? 0) + 1);
+  for (const [k, c] of perCause) assert.ok(c <= 1, `${k}: ${c} lecciones aplicadas`);
+  for (const l of byDetector('agent_blocked').filter(x => x.status === 'validated')) assert.ok((l.lessonText ?? '').length >= 10, 'la lección aplicada lleva su texto');
+  for (const l of byDetector('agent_blocked').filter(x => x.status === 'rejected')) assert.ok(l.tags.some(t => t === 'agrupada' || t.startsWith('descartada:')), 'el descarte dice su motivo');
   const perm = all.find(l => l.detector === 'agent_blocked' && /permiso/.test(l.title))!;
   assert.match(perm.evidence.detail, /PERMISSION_REQUIRED/); assert.match(perm.evidence.detail, /heurística/);
-  // Deduplicación por proceso: volver a detectar no crea copias.
-  const n = all.length; const { recordDetections } = await import('../src/services/lessons.ts');
+  // Limpieza en una sola operación (lo que se detectó fuera de una ejecución de historia, p. ej. tras una recuperación).
+  curatePending(S, { projectId: project.id });
+  assert.equal(lessonsRepo(S).list(project.id, 'detected').filter(l => l.projectId === project.id).length, 0, 'ninguna detección queda pendiente');
+  // Idempotencia: volver a detectar y a curar no crea copias ni cambia nada.
+  const n = lessonsRepo(S).list(project.id).length;
   for (const l of all) if (l.evidence.processId) recordDetections(S, l.evidence.processId, repo);
+  const again = curatePending(S, { projectId: project.id });
+  assert.equal(again.applied, 0);
   assert.equal(lessonsRepo(S).list(project.id).length, n);
 });

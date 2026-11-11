@@ -11,7 +11,7 @@ import { execSync } from 'node:child_process';
  * C hallazgos con evidencia (los demás no motivan correcciones) · D rondas acotadas y pausa con lo pendiente · E sin
  * repetir trabajo (ni QA tras una corrección del Evaluador, ni la evaluación de un commit ya decidido) · Q el Evaluador
  * solo existe con aprobación explícita, con permisos mínimos y su jefe · R las brechas entran en el ciclo de lecciones
- * existente (detectada → validada por el propietario → inyectada → medida), nunca solas.
+ * (detectada → el Curador la agrupa por causa sin IA → inyectada → medida; el propietario puede editarla o retirarla).
  */
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-gauntlet-'));
 process.env.PORTAL_ALLOW_FOREIGN_REPO = '1';
@@ -29,7 +29,7 @@ const { buildApp } = await import('./fixtures/owner-app.ts'); // con el propieta
 const { addManualItem } = await import('../src/services/backlog.ts');
 const { createStoryProcess } = await import('../src/services/storyExecution.ts');
 const { parseGauntlet, projectEvaluator } = await import('../src/services/gauntlet.ts');
-const { lessonsRepo, validateLesson } = await import('../src/services/lessons.ts');
+const { lessonsRepo, setLessonStatus, validateLesson } = await import('../src/services/lessons.ts');
 const { sandboxDeps } = await import('../src/services/verification.ts');
 
 const S = 'portal-ia'; const W = `/api/workspaces/${S}`;
@@ -419,42 +419,51 @@ test('lote con Gauntlet automático: se resuelve historia a historia (sin IA) y 
 });
 
 // ---------- R · Aprendizaje: las brechas del Evaluador entran en el ciclo de lecciones existente ----------
-test('R · una brecha con evidencia queda «detectada» y no se inyecta; validada por el propietario se reutiliza y se mide si cambia el comportamiento', async () => {
+test('R · una brecha con evidencia la cura el Curador (por causa, nunca pendiente); la lección del propietario se inyecta y se mide si cambia el comportamiento', async () => {
   const gaps = () => lessonsRepo(S).list(project.id).filter(l => l.detector === 'gauntlet_gap');
   const of = (title: string) => gaps().filter(l => (l.evidence.processTitle ?? '').endsWith(title));
   // Del ciclo A+C+E: la brecha corregida en la ronda 2. Del D+E: la que persistió tras corregirla. Nunca la que no tenía evidencia.
   const [fixed] = of('A-C-E ciclo');
   assert.ok(fixed, gaps().map(l => l.evidence.processTitle).join(' | '));
-  assert.equal(fixed.status, 'detected'); assert.equal(fixed.role, 'implementer'); assert.match(fixed.title, /FALTA-DOBLE/);
+  assert.notEqual(fixed.status, 'detected', 'el Curador la curó al terminar la tarea'); assert.equal(fixed.role, 'implementer'); assert.match(fixed.title, /FALTA-DOBLE/);
   assert.match(fixed.evidence.detail, /^Resultado: corregida en la ronda 2\. Evaluó .+ \(ronda 1, modo standard\)\. Criterio: existe doble/);
   assert.match(fixed.evidence.detail, /Evidencia: src\/a\.ts:1/); assert.equal(fixed.evidence.file, 'src/a.ts');
   assert.equal(of('A-C-E ciclo').length, 1, 'una lección por brecha y proceso, aunque se detecte en varias paradas');
   assert.match(of('D acotado')[0].evidence.detail, /^Resultado: persistió tras la corrección \(ronda 2\)/);
   assert.ok(!gaps().some(l => /SIN-EVIDENCIA/.test(l.title)), 'un hallazgo sin evidencia no es lección');
+  // HU-202: nada queda pendiente, como mucho una aplicada por causa y cada descarte dice su motivo.
+  assert.ok(!gaps().some(l => l.status === 'detected'), 'ninguna brecha queda pendiente');
+  assert.ok(gaps().filter(l => l.status === 'validated' && l.source === 'curator').length <= 1, 'una lección aplicada por causa');
+  for (const g of gaps().filter(x => x.status === 'rejected')) assert.ok(g.tags.some(t => t === 'agrupada' || t.startsWith('descartada:')), g.tags.join(','));
+  // El propietario puede retirar las aplicadas: así se mide el comportamiento sin la lección.
+  for (const g of gaps().filter(x => x.status === 'validated')) setLessonStatus(S, g.id, 'obsolete');
   const lessonText = 'LECCION-R: antes de entregar, comprueba que cada criterio de aceptación tiene su código (cada export pedido existe).';
   MARKERS.push('LECCION-R');
-  // Sin validar no contamina: no llega a ningún prompt.
+  // Sin lección aplicada no contamina: no llega a ningún prompt.
   setScript([PASS]);
   let { p } = await authorize('R sin validar', { gauntlet: { mode: 'standard' } });
-  assert.ok(!(p.steps.find(s => s.role === 'implementer')!.lessonsUsed ?? []).includes(fixed.id));
+  const gapIds = new Set(gaps().map(g => g.id));
+  assert.ok(!(p.steps.find(s => s.role === 'implementer')!.lessonsUsed ?? []).some(id => gapIds.has(id)));
   assert.ok(!byRule(R.dev)[0].markers.includes('LECCION-R'));
-  // Validada por el propietario: se inyecta al implementador (no al Evaluador, que conserva su contexto nuevo).
-  validateLesson(S, fixed.id, { lessonText });
+  // Editada por el propietario: se inyecta al implementador (no al Evaluador, que conserva su contexto nuevo).
+  const id = validateLesson(S, fixed.id, { lessonText }).id;
+  const base = lessonsRepo(S).get(id)!;
   setScript([PASS]);
   ({ p } = await authorize('R validada sin reincidir', { gauntlet: { mode: 'standard' } }));
-  assert.ok(p.steps.find(s => s.role === 'implementer')!.lessonsUsed!.includes(fixed.id), 'el paso deja constancia de la lección usada');
+  assert.ok(p.steps.find(s => s.role === 'implementer')!.lessonsUsed!.includes(id), 'el paso deja constancia de la lección usada');
   assert.ok(byRule(R.dev)[0].markers.includes('LECCION-R')); assert.ok(!byRule(R.ev)[0].markers.includes('LECCION-R'));
-  let l = lessonsRepo(S).get(fixed.id)!;
-  assert.equal(l.usedCount, 1); assert.equal(l.recurrenceCount, 0, 'el Evaluador no volvió a encontrar la brecha: la lección cambió el comportamiento');
-  // Con la lección presente vuelve la misma clase de brecha: se mide como reincidencia (candidata a obsoleta), sin tocar al agente.
+  let l = lessonsRepo(S).get(id)!;
+  assert.equal(l.usedCount, base.usedCount + 1); assert.equal(l.recurrenceCount, base.recurrenceCount, 'el Evaluador no volvió a encontrar la brecha: la lección cambió el comportamiento');
+  // Con la lección presente vuelve la misma clase de brecha: se mide como reincidencia, sin tocar al agente.
   setScript([GAPS, PASS]);
   ({ p } = await authorize('R validada con reincidencia', { gauntlet: { mode: 'standard' } }));
   assert.equal(p.result?.pipeline?.state, 'verified', `${p.status} · ${p.result?.pipeline?.pauseKind} · ${p.result?.pipeline?.reason ?? p.error}`);
   assert.equal(p.result!.gauntlet!.status, 'passed');
-  l = lessonsRepo(S).get(fixed.id)!;
-  const usedHere = p.steps.filter(s => s.lessonsUsed?.includes(fixed.id));
+  l = lessonsRepo(S).get(id)!;
+  const usedHere = p.steps.filter(s => s.lessonsUsed?.includes(id));
   assert.ok(usedHere.length >= 2 && usedHere.every(s => s.role === 'implementer'), 'también la corrección dirigida la recibe (la hace el constructor)');
-  assert.equal(l.usedCount, 1 + usedHere.length, 'se cuenta por paso'); assert.equal(l.recurrenceCount, 1);
-  assert.equal(l.status, 'validated', 'medir no cambia nada solo: decide el propietario');
-  assert.equal(of('R validada con reincidencia')[0].status, 'detected', 'la nueva brecha vuelve a empezar el ciclo como detectada');
+  assert.equal(l.usedCount, base.usedCount + 1 + usedHere.length, 'se cuenta por paso'); assert.ok(l.recurrenceCount >= base.recurrenceCount + 1);
+  assert.equal(l.status, 'validated', 'una sola reincidencia no la retira (REFUTE_AFTER = 2)');
+  const fresh = of('R validada con reincidencia')[0];
+  assert.equal(fresh.status, 'rejected', 'la nueva brecha la agrupa el Curador con la lección aplicada de su causa'); assert.ok(fresh.tags.includes('agrupada'));
 });
