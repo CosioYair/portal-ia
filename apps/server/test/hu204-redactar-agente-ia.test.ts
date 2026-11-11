@@ -16,7 +16,7 @@ process.env.LOG_LEVEL = 'warn';
 
 const { encryptSecret } = await import('../src/security/crypto.ts');
 const { classifyModel } = await import('@portal-ia/domain');
-const { mockAdapter } = await import('@portal-ia/ai-adapters');
+const { mockAdapter, costUsd } = await import('@portal-ia/ai-adapters');
 const { providersRepo } = await import('../src/db/platform.ts');
 const { runBootstrap } = await import('../src/routes/bootstrap.ts');
 const { agentsRepo, workspaceDb } = await import('../src/db/workspace.ts');
@@ -62,7 +62,7 @@ const runs = () => workspaceDb(S).prepare(`SELECT status, cost_usd AS cost FROM 
 
 const BASE = {
   department: 'Ingeniería', scope: 'workspace', projectId: null, harness: 'api', model: 'claude-haiku-4-5', provider: 'anthropic', effort: 'medium',
-  tools: ['repo_read'], knowledge: [], capabilities: [], autonomy: 'ask', authorized: true
+  tools: ['read_repo'], knowledge: [], capabilities: [], autonomy: 'ask', authorized: true
 };
 const filesOf = (id: string): Record<string, string> => (agentFoldersRepo(S).adopted(id)?.files ?? {}) as Record<string, string>;
 const grantsOf = (id: string) => { const a = agentsRepo(S).get(id)!; const c = a.config as any; return { tools: c.tools, knowledge: c.knowledge, capabilities: c.capabilities ?? null, autonomy: c.autonomy ?? null, backend: c.backend ?? 'api', model: c.model }; };
@@ -96,8 +96,12 @@ test('(b) con autorización la propuesta rellena los campos y descarta permisos,
   assert.equal(draft.skills[0].slug, 'auditoria-wcag'); assert.match(draft.skills[0].body, /contraste/);
   assert.match(draft.instructions, /INSTRUCCIONES-PROPUESTAS-HU204/);
   for (const k of ['tools', 'autonomy', 'model', 'harness', 'capabilities']) assert.ok(r.body.discarded.includes(k), `descarta ${k}`);
-  assert.equal(r.body.costUsd, 0, 'el simulado cuesta 0 USD');
-  const log = runs(); assert.equal(log.length, 1); assert.equal(log[0].status, 'done'); assert.equal(log[0].cost, 0);
+  // El simulado no gasta dinero real, pero la llamada por API se cuenta con el precio de catálogo del modelo (como el resto de servicios).
+  const expected = costUsd('anthropic', 'claude-haiku-4-5', r.body.tokensIn, r.body.tokensOut);
+  assert.ok(r.body.tokensIn > 0 && r.body.tokensOut > 0, 'registra tokens');
+  assert.equal(r.body.costUsd, expected, 'costo calculado con complete() y los tokens devueltos');
+  assert.ok(r.body.costUsd > 0 && r.body.costUsd <= 1, 'dentro del tope autorizado');
+  const log = runs(); assert.equal(log.length, 1); assert.equal(log[0].status, 'done'); assert.equal(log[0].cost, expected);
 });
 
 test('(c) crear con la propuesta y una habilidad añadida: mismos permisos que sin IA, AGENTS.md propuesto y la necesidad guardada', async () => {
