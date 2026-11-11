@@ -68,7 +68,9 @@ test('B1 · detección objetiva sin IA: parche que no encaja, módulo sin import
   assert.equal(det('patch_mismatch').length, 1, 'parche que no encaja'); assert.equal(det('patch_mismatch')[0].evidence.file, 'apps/web/src/screens/Backlog.tsx'); assert.equal(det('patch_mismatch')[0].evidence.agentName, 'Desarrollador Full Stack'); assert.equal(det('patch_mismatch')[0].role, 'implementer');
   assert.equal(det('unused_module').length, 1, 'módulo nuevo sin importar');
   assert.equal(det('qa_rejected').length, 1);
-  assert.ok(ls.every(l => l.status === 'detected'));
+  // HU-202: al terminar la tarea el Curador cura solo (sin IA): ninguna detección queda pendiente; una lección aplicada por causa
+  assert.ok(ls.every(l => l.status !== 'detected'), 'ninguna detección queda pendiente');
+  assert.equal(det('patch_mismatch')[0].status, 'validated'); assert.equal(det('patch_mismatch')[0].source, 'curator'); assert.ok(det('patch_mismatch')[0].lessonText);
   // Idempotente: volver a detectar no duplica
   assert.equal(recordDetections('portal-ia', p.id, dir).length, 0);
   // Verificación fallida, ejecución fallida, activación fallida, devuelta a pendiente (sobre un resultado sintético)
@@ -77,8 +79,9 @@ test('B1 · detección objetiva sin IA: parche que no encaja, módulo sin import
   const more = recordDetections('portal-ia', p.id, dir, { resetReason: 'no era lo pedido', updateFailedLog: 'npm run build terminó con código 1' });
   assert.deepEqual(more.map(l => l.detector).sort(), ['activation_failed', 'runtime_failed', 'story_reset', 'verification_failed']);
   assert.equal(more.find(l => l.detector === 'story_reset')!.role, 'planner');
-  // Una lección que no está validada NUNCA se inyecta
-  assert.equal(lessonsFor('portal-ia', { projectId: internal.id, role: 'implementer' }).length, 0);
+  // Una lección que no está validada NUNCA se inyecta (las detecciones nuevas aún sin curar)
+  const injectedIds = (role: any) => lessonsFor('portal-ia', { projectId: internal.id, role }).map(l => l.id);
+  assert.ok(!more.some(m => injectedIds('implementer').includes(m.id) || injectedIds('planner').includes(m.id)), 'detectada: no se inyecta');
   assert.equal(adapters.mockCalls, callsAfterRun, 'la detección no llama a la IA');
   // Sin falsos positivos: un módulo nuevo que ya se menciona en otro archivo del repositorio (fuera del diff) no es «sin importar»
   fs.mkdirSync(path.join(dir, 'apps/web/src/lib'), { recursive: true }); fs.writeFileSync(path.join(dir, 'apps/web/src/lib/usa.ts'), "import { Ayuda } from '../components/Ayuda.tsx';\nexport const x = Ayuda;\n");
@@ -93,6 +96,8 @@ test('B1 · detección objetiva sin IA: parche que no encaja, módulo sin import
 test('B2 · ciclo de validación: proponer solo con autorización (1 llamada), validar, editar crea versión 2 y conserva la 1, rechazar/obsoleta no se inyectan', async () => {
   const app = await buildApp();
   const l = lessonsRepo('portal-ia').list(internal.id).find(x => x.detector === 'patch_mismatch')!;
+  // HU-202: el propietario retira las demás lecciones del proyecto (curadas o pendientes) para aislar el ciclo manual; el Curador no las reaplica
+  for (const o of lessonsRepo('portal-ia').list(internal.id)) if (o.id !== l.id && (o.status === 'validated' || o.status === 'detected')) lessonsRepo('portal-ia').update(o.id, { status: 'obsolete' });
   script([{ match: 'Error detectado', text: `{"rootCause":"El Desarrollador citó un fragmento que no existía.","correctiveAction":"Copiar literalmente.","lessonText":"${L1}","role":"implementer","tags":["patch"]}` }]);
   adapters.resetMockCalls();
   const noAuth = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/lessons/${l.id}/propose`, payload: {} });
@@ -129,7 +134,7 @@ test('B3/B4 · inyección y mejora medible: con L1 inyectada el parche encaja (e
   const p2 = await runF('Añadir campo nota al formulario de nueva solicitud (2)');
   assert.equal(p2.status, 'done', p2.error ?? '');
   const impl = p2.steps.find(s => s.role === 'implementer')!;
-  const active = lessonsFor('portal-ia', { projectId: internal.id, role: 'implementer' })[0];
+  const active = lessonsFor('portal-ia', { projectId: internal.id, role: 'implementer' }).find(x => (x.lessonText ?? '').startsWith(L1))!;
   assert.deepEqual(impl.lessonsUsed, [active.id], 'lessons_used registra la lección inyectada');
   assert.ok(mockLog().find(l => l.rule === 'Implementa la historia')!.markers.includes('Lecciones de esta organización (obligatorias)'));
   assert.equal(p2.result!.changes.filter(c => c.error).length, 0, 'patch_fail_rate = 0 con la lección (sin ella fue 1 en B1)');
@@ -144,7 +149,7 @@ test('B3/B4 · inyección y mejora medible: con L1 inyectada el parche encaja (e
 
 test('C1/C2 · plantillas versionadas: promover L1 crea pj-dev@2 con diff; los agentes nuevos heredan; los existentes siguen en v1 hasta opt-in (con diff y vuelta atrás); el prompt incluye la práctica', async () => {
   const app = await buildApp();
-  const active = lessonsFor('portal-ia', { projectId: internal.id, role: 'implementer' })[0];
+  const active = lessonsFor('portal-ia', { projectId: internal.id, role: 'implementer' }).find(x => (x.lessonText ?? '').startsWith(L1))!;
   const dev = agentsRepo('portal-ia').list().find(a => a.key === 'pj-dev' && a.projectId === internal.id)!;
   assert.equal(templatesRepo('portal-ia').latest('pj-dev')!.version, 1);
   const pr = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/lessons/${active.id}/promote`, payload: { authorized: true } });
@@ -175,13 +180,13 @@ test('C1/C2 · plantillas versionadas: promover L1 crea pj-dev@2 con diff; los a
   // C2 · ejecución con pj-dev@2: el prompt lleva la práctica aunque la lección no se inyecte por recuperación (la obsoletamos)
   await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/agents/${dev.id}/template-version`, payload: { authorized: true, version: 'pj-dev@2' } });
   await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/lessons/${active.id}/obsolete` });
-  assert.equal(lessonsFor('portal-ia', { projectId: internal.id, role: 'implementer' }).length, 0);
+  assert.ok(!lessonsFor('portal-ia', { projectId: internal.id, role: 'implementer' }).some(x => x.id === active.id), 'la lección retirada no se inyecta');
   const dir = repoF(); projectsRepo('portal-ia').setRepository(internal.id, dir, 'main');
   script([{ match: 'plan técnico', text: PLAN }, { match: 'Implementa la historia', requires: 'Copia el fragmento BUSCAR literalmente', text: GOOD_PATCH, otherwise: BAD_PATCH }, { match: 'Revisa los cambios propuestos', text: QA_OK }], ['Prácticas de la organización (plantilla)']);
   const p4 = await runF('Añadir campo nota (4, con práctica de plantilla)');
   assert.equal(p4.status, 'done', p4.error ?? '');
   const impl = p4.steps.find(s => s.role === 'implementer')!;
-  assert.deepEqual(impl.lessonsUsed, [`practice:pj-dev@2:${active.id}`]);
+  assert.ok(impl.lessonsUsed!.includes(`practice:pj-dev@2:${active.id}`), 'la práctica de plantilla llega al prompt'); assert.ok(!impl.lessonsUsed!.includes(active.id));
   assert.ok(mockLog().find(l => l.rule === 'Implementa la historia')!.markers.includes('Prácticas de la organización (plantilla)'));
   assert.equal(p4.result!.changes.filter(c => c.error).length, 0, 'la práctica heredada evita el fallo');
   await app.close();
