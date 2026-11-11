@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import type { AgentContextScope, Capability, ContextScopeOption, ExecutionBackend, PortableSkill, ProviderId } from '@portal-ia/domain';
-import { AGENT_ARCHETYPES, CAPABILITIES, CONTEXT_SCOPE_OPTIONS, DEFAULT_CONTEXT_SCOPE, DEPARTMENT_PRESETS, GENERAL_ARCHETYPE, HARNESSES, KNOWLEDGE, TOOLS, contextScopeBadges, contextScopeLabel, suggestArchetypes, workplaceLabel, type AgentArchetype } from '@portal-ia/domain';
+import { AGENT_ARCHETYPES, CAPABILITIES, CONTEXT_SCOPE_OPTIONS, DEFAULT_CONTEXT_SCOPE, DEPARTMENT_PRESETS, GENERAL_ARCHETYPE, HARNESSES, KNOWLEDGE, TOOLS, contextScopeBadges, contextScopeLabel, slugify, suggestArchetypes, workplaceLabel, type AgentArchetype } from '@portal-ia/domain';
 import { FolderPicker } from '../components/FolderPicker.tsx';
 import { ExternalImportBox } from '../components/ExternalAgent.tsx';
 import { AgentZipImport } from '../components/AgentZipImport.tsx';
 import { DraftNote } from '../components/ui.tsx';
+import { AgentDraftReview, type DraftApplied } from '../components/AgentDraftReview.tsx';
 const HARNESS_NAME: Record<string, string> = Object.fromEntries(HARNESSES.map(h => [h.id, h.name]));
 import { Shell } from '../components/Shell.tsx';
 import { Chip, Icon, Notice, Spinner } from '../components/ui.tsx';
@@ -109,6 +110,10 @@ export function AgentWizard() {
   // «Nuevo agente ▾» de la Oficina puede abrir directamente la importación (?importar=portable|externo).
   const [importing, setImporting] = useState<false | 'portable' | 'external' | 'zip'>(() => params.get('importar') === 'portable' ? 'portable' : params.get('importar') === 'externo' ? 'external' : params.get('importar') === 'zip' ? 'zip' : false);
   const [showDevTools, setShowDevTools] = useState(false);
+  // HU-204 · «Redactar con IA»: panel abierto, nota del costo real y editor de una habilidad nueva.
+  const [drafting, setDrafting] = useState(false);
+  const [aiNote, setAiNote] = useState<string | null>(null);
+  const [newSkill, setNewSkill] = useState<{ name: string; description: string; body: string } | null>(null);
   useEffect(() => { osApi.harnesses().then(r => setHarnesses(r.harnesses)).catch(e => setError(e.message)); osApi.departments(ws.slug).then(l => setDepartments(l.map(x => x.name))).catch(() => undefined); }, [ws.slug]);
   const suggestions = useMemo(() => suggestArchetypes(d.need), [d.need]);
   const urlDep = params.get('departamento');
@@ -128,11 +133,25 @@ export function AgentWizard() {
     setBusy(true); setError(null);
     try {
       const body = { name: d.name, role: d.role, summary: d.summary, responsibilities: d.responsibilities.filter(Boolean), deliverables: d.deliverables.filter(Boolean), department: d.department, scope: d.scope === 'project' && project ? 'project' : 'workspace', projectId: d.scope === 'project' && project ? project.id : null,
-        harness: d.harness!, model: d.model, provider: d.provider, effort: d.effort, tools: d.tools, knowledge: d.knowledge, capabilities: d.capabilities, autonomy: d.autonomy, instructions: d.instructions || null, skills: d.skills, authorized: true,
+        harness: d.harness!, model: d.model, provider: d.provider, effort: d.effort, tools: d.tools, knowledge: d.knowledge, capabilities: d.capabilities, autonomy: d.autonomy, instructions: d.instructions || null, skills: d.skills, authorized: true, need: d.need.trim().slice(0, 4000) || null,
         contextScope: { project: scope.project ? { id: scope.project.id, name: scope.project.name } : null, company: scope.company, general: scope.general } };
       const a = await osApi.createAgent(ws.slug, body as unknown as Parameters<typeof osApi.createAgent>[1]);
       draft.clear(); setCreated({ id: a.id, name: a.config.name, firstTask: archetype?.firstTask ?? GENERAL_ARCHETYPE.firstTask }); setStep(4); flash(`«${a.config.name}» ya está en la oficina`);
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
+  };
+  /** HU-204 · Solo las partes aceptadas rellenan los campos de texto; arnés, herramientas, permisos y autonomía no se tocan. */
+  const applyDraft = (r: DraftApplied) => {
+    set({ archetype: d.archetype ?? 'general', ...r.parts });
+    if (r.parts.instructions) setAdvanced(true);
+    setDrafting(false);
+    setAiNote(`Propuesta de ${r.byAgent} aplicada (${Object.keys(r.parts).length} parte(s)) · ${r.costKind === 'subscription' ? '1 llamada de tu suscripción (0 USD de API)' : `${r.costUsd.toFixed(4)} USD de API`}. Puedes seguir editándola en los pasos siguientes.`);
+  };
+  const addSkill = () => {
+    if (!newSkill || newSkill.name.trim().length < 2) return;
+    const base = slugify(newSkill.name.trim()) || 'habilidad'; let s = base; let n = 2;
+    while (d.skills.some(x => x.slug === s)) s = `${base}-${n++}`;
+    set({ skills: [...d.skills, { slug: s, name: newSkill.name.trim(), description: newSkill.description.trim(), body: newSkill.body.trim() }] });
+    setNewSkill(null);
   };
   const canDo = d.capabilities.includes('implementar') ? 'Proponer cambios de código (el Portal los aplica en un worktree aislado y los verifica)' : null;
   return (
@@ -145,6 +164,12 @@ export function AgentWizard() {
         {step === 0 && !importing && <section className="card" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
           <label className="h3" htmlFor="need">¿Qué debería conseguir este agente?</label>
           <textarea id="need" className="input" rows={3} value={d.need} onChange={e => set({ need: e.target.value })} placeholder="Ej.: «Ayudarme a promocionar Orbiventt en redes» o «Revisar la arquitectura de mis proyectos»" autoFocus />
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button type="button" className="btn btn-secondary btn-sm" disabled={d.need.trim().length < 10 || drafting} onClick={() => { setAiNote(null); setDrafting(true); }}>Redactar con IA</button>
+            <span className="small muted">{d.need.trim().length < 10 ? 'Escribe al menos 10 caracteres para poder redactar con IA (opcional).' : 'Opcional: antes de llamar verás el motor y el costo, y tendrás que autorizarlo.'}</span>
+          </div>
+          {drafting && <AgentDraftReview slug={ws.slug} need={d.need} onApply={applyDraft} onClose={() => setDrafting(false)} />}
+          {aiNote && <Notice kind="ok">{aiNote}</Notice>}
           <div className="small muted">Ejemplos:</div>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>{AGENT_ARCHETYPES.slice(0, 6).map(a => <button key={a.id} type="button" className="btn btn-ghost btn-sm" onClick={() => { set({ need: a.label }); choose(a); }}>{a.label}</button>)}</div>
           {(suggestions.length > 0 || d.need.trim().length >= 3) && <>
@@ -175,7 +200,19 @@ export function AgentWizard() {
           <ListEditor label="Responsabilidades" items={d.responsibilities} onChange={responsibilities => set({ responsibilities })} placeholder="Qué hace" />
           <ListEditor label="Entregables" items={d.deliverables} onChange={deliverables => set({ deliverables })} placeholder="Qué te entrega" />
           <fieldset style={{ border: 0, padding: 0, margin: 0 }}><legend className="label">Habilidades</legend>
-            {d.skills.length ? d.skills.map((s, i) => <label key={i} className="ck"><input className="cb" type="checkbox" checked onChange={() => set({ skills: d.skills.filter((_, j) => j !== i) })} /> <strong>{s.name}</strong> <span className="small muted">— {s.description}</span></label>) : <span className="small muted">Sin habilidades: podrás añadirlas después en su pestaña Archivos.</span>}
+            {d.skills.length ? d.skills.map((s, i) => <label key={i} className="ck"><input className="cb" type="checkbox" checked onChange={() => set({ skills: d.skills.filter((_, j) => j !== i) })} /> <strong>{s.name}</strong> <span className="small muted">— {s.description}</span></label>) : <span className="small muted">Sin habilidades todavía: añádelas aquí o después en su pestaña Archivos.</span>}
+            {newSkill ? <div className="card" style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
+              <label className="label" htmlFor="w-skill-name">Nombre de la habilidad</label>
+              <input id="w-skill-name" className="input" value={newSkill.name} onChange={e => setNewSkill({ ...newSkill, name: e.target.value })} />
+              <label className="label" htmlFor="w-skill-desc">Descripción (cuándo usarla)</label>
+              <input id="w-skill-desc" className="input" value={newSkill.description} onChange={e => setNewSkill({ ...newSkill, description: e.target.value })} />
+              <label className="label" htmlFor="w-skill-body">Contenido (pasos concretos, Markdown)</label>
+              <textarea id="w-skill-body" className="input" rows={5} value={newSkill.body} onChange={e => setNewSkill({ ...newSkill, body: e.target.value })} />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button type="button" className="btn btn-secondary btn-sm" disabled={newSkill.name.trim().length < 2} onClick={addSkill}>Añadir</button>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => setNewSkill(null)}>Cancelar</button>
+              </div>
+            </div> : <button type="button" className="btn btn-ghost btn-sm" style={{ alignSelf: 'flex-start', marginTop: 4 }} onClick={() => setNewSkill({ name: '', description: '', body: '' })}>+ Añadir habilidad</button>}
           </fieldset>
           <fieldset style={{ border: 0, padding: 0, margin: 0 }}><legend className="label">Qué conocimiento necesita</legend>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>{KNOWLEDGE.map(k => <label key={k.id} className="ck small"><input className="cb" type="checkbox" checked={d.knowledge.includes(k.id)} onChange={e => set({ knowledge: e.target.checked ? [...d.knowledge, k.id] : d.knowledge.filter(x => x !== k.id) })} /> {KNOWLEDGE_LABELS[k.id] ?? k.id}</label>)}</div>
@@ -227,7 +264,8 @@ export function AgentWizard() {
             <div><strong>Necesita tu aprobación para</strong><ul>{d.tools.filter(t => RISKY.has(t)).map(t => <li key={t}>{TOOL_LABELS[t]?.name ?? t}</li>)}<li>Cada encargo (lo autorizas al crearlo)</li>{harness?.billing === 'api' && <li>Cada mensaje (es facturable)</li>}</ul></div>
           </div>
           <div className="small">Trabaja con <strong>{harness?.name}</strong> ({harness?.billing === 'subscription' ? 'tu suscripción, sin pago por uso' : harness?.billing === 'api' ? 'se paga por uso' : 'no verificable'}) · departamento <strong>{d.department}</strong> · ámbito <strong>{contextScopeLabel(scope)}</strong></div>
-          <div className="small muted">Se guardará su carpeta portable (agent.yaml, AGENTS.md, habilidades y memoria) y un registro de la creación. Crear no llama a ningún modelo.</div>
+          <div className="small muted">Se guardará su carpeta portable (agent.yaml, AGENTS.md, habilidades y memoria) y un registro de la creación. Crear no llama a ningún modelo; «Redactar con IA» solo llama tras tu autorización.</div>
+          {d.need.trim() && <div className="small muted">Tu texto original de la necesidad se guardará en su carpeta (knowledge/necesidad-original.md) y en el registro de la creación.</div>}
           <label className="ck"><input className="cb" type="checkbox" checked={auth} onChange={e => setAuth(e.target.checked)} /> Autorizo crear a {d.name} con {harness?.name} y estos permisos.</label>
         </section>}
 
