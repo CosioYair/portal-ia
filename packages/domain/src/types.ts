@@ -501,10 +501,14 @@ export interface ProcessGuidance {
 }
 
 // ---- Recorrido guiado de la historia (una sola fuente de verdad: services/storyFlow.ts) ----
-export type FlowStageKey = 'execute' | 'review' | 'apply' | 'verify' | 'integrate' | 'activate' | 'runtime' | 'manual' | 'close';
+export type FlowStageKey = 'execute' | 'review' | 'apply' | 'verify' | 'integrate' | 'activate' | 'runtime' | 'manual' | 'publish' | 'close';
 /** done: completada · warning: completada con advertencias · rejected · failed · blocked: falta un requisito previo · waiting: espera tu autorización · running · current: es lo que toca · pending: aún no disponible. */
 export type FlowStageStatus = 'done' | 'warning' | 'rejected' | 'failed' | 'blocked' | 'waiting' | 'running' | 'current' | 'pending';
-export interface FlowStage { key: FlowStageKey; label: string; status: FlowStageStatus; detail: string }
+export interface FlowStage { key: FlowStageKey; label: string; status: FlowStageStatus; detail: string;
+  /** Texto corto opcional que la barra muestra tras la etiqueta (p. ej. «Publicar · pendiente»). */
+  statusText?: string }
+/** HU-185 · Estado de publicación de main (sin red): ¿hay remoto? y commits de main por delante (-1 = main nunca publicada). */
+export type PublishInfo = { hasRemote: boolean; aheadOfRemote: number | null };
 export type FlowIssueKind =
   | 'deps_missing' | 'sandbox_unavailable' | 'sandbox_timeout' | 'typecheck_failed' | 'test_failed' | 'build_failed' | 'qa_rejected' | 'patch_failed'
   | 'merge_conflict' | 'activation_failed' | 'runtime_failed' | 'runtime_unavailable' | 'manual_failed' | 'budget_exceeded'
@@ -539,7 +543,7 @@ export interface FlowIssue {
 export type FlowActionId =
   | 'authorize' | 'cancel' | 'review_diff' | 'apply' | 'reject' | 'install_and_retry' | 'verify' | 'retry_verification'
   | 'sandbox_help' | 'refresh_sandbox' | 'request_fix' | 'ask_team' | 'tasks_from_issue' | 'merge' | 'rebuild'
-  | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'accept_plan' | 'retry_process' | 'recover' | 'new_iteration'
+  | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'publish' | 'skip_publish' | 'accept_plan' | 'retry_process' | 'recover' | 'new_iteration'
   | 'pipeline_resume' | 'repair_output'
   /** La historia no cambia código (lo concluyó el Coordinador): encargo de análisis pendiente de tu autorización, sin IA hasta entonces. */
   | 'convert_to_analysis'
@@ -1232,6 +1236,8 @@ export interface ExecutionResult {
   mergeError?: { at: string; message: string; files: string[] } | null;
   /** Publicación en el remoto (git push), autorizada por el propietario. */
   published?: { remote: string; url: string | null; branches: string[]; pushedAt: string } | null;
+  /** HU-185 · El propietario decidió omitir «Publicar» (no bloquea el cierre). */
+  publishSkipped?: { at: string } | null;
   /** HU-146 · Intentos de «Corregir y revalidar» dentro de esta misma historia. */
   repairs?: ValidationRepairAttempt[];
   /** El propietario rechazó este diff (o replanteó la historia): no se aplicará; la historia volvió a pendiente. */
