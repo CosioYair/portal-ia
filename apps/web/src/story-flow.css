@@ -17,8 +17,28 @@
 .sf-stage-label { font-size: 11px; line-height: 1.25; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .sf-stage.is-current .sf-stage-label { color: var(--color-text); font-weight: 600; }
 @keyframes sf-run { to { background-position: -200% 0; } }
-.sf-now { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: var(--radius-card); background: var(--color-surface-alt); }
-.sf-now-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+/* HU-193 · Resumen en una línea: id · iteración · etapas · gasto · estado. Se parte en dos por debajo de 900 px. */
+.sf-summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; }
+.sf-summary > .sf-top { display: contents; }
+.sf-summary .sf-title { order: 0; flex-direction: row; align-items: center; gap: 6px; flex: 0 1 auto; max-width: 42%; min-width: 0; overflow: hidden; }
+.sf-summary .sf-title > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0; }
+.sf-summary .sf-it { order: 1; flex: none; }
+.sf-summary .sf-meta { order: 2; }
+.sf-stages-compact { order: 1; flex: 1 1 220px; min-width: 160px; gap: 3px; align-items: start; }
+.sf-stages-compact .sf-stage { gap: 3px; }
+.sf-stages-compact .sf-stage.is-current .sf-bar { height: 8px; }
+.sf-stages-compact .sf-stage:not(.is-current) .sf-stage-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.sf-stages-compact .sf-stage.is-current .sf-stage-label { display: block; width: max-content; max-width: 260px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sf-stages-compact .sf-stage.is-current:nth-last-child(-n+2) .sf-stage-label { align-self: flex-end; }
+@media (max-width: 900px) { .sf-summary .sf-title { max-width: 100%; } .sf-stages-compact { order: 3; flex-basis: 100%; } }
+@media (prefers-reduced-motion: reduce) { .sf-stage[data-status="running"] .sf-bar { animation: none; } }
+/* HU-193 · Siguiente paso (una línea) y plegables de la cabecera */
+.sf-next { display: flex; flex-direction: column; gap: 2px; }
+.sf-next-line { margin: 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 14px; min-width: 0; }
+.sf-next-sub { display: block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sf-more { flex: 1 1 100%; }
+.sf-more .sf-actions { padding-top: 6px; }
+.sf-fold { min-width: 0; }
 .sf-issue { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: var(--radius-card); border: 1px solid var(--color-err-border); background: var(--color-err-bg-soft); }
 .sf-issue[data-cause="environment"] { border-color: var(--color-warn-border); background: var(--color-warn-bg-soft); }
 .sf-issue[data-level="warning"] { border-color: var(--color-warn-border); background: var(--color-warn-bg-soft); }
