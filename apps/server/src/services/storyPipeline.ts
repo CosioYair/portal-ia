@@ -14,6 +14,7 @@ import { failingTests, testRunSummary } from './failureDiagnosis.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled, providerFailureClass, registerCall, sleepAbortable, unregisterCall, withWatchdog } from './providerCalls.ts';
 import { injectLessons, recordDetections, recordLessonOutcomes } from './lessons.ts';
+import { sealForStep } from './portalSeal.ts';
 import { curateAfterTask } from './lessonCurator.ts';
 import { gauntletStage, toCorrection } from './gauntlet.ts';
 import { callMetricsRepo, promptHash } from '../db/callMetrics.ts';
@@ -102,7 +103,9 @@ function stepSystem(slug: string, proc: Process, stepId: string, agent: Agent, s
     const role = (proc.steps.find(s => s.id === stepId)!.role ?? 'implementer') as TeamRole;
     injected.set(stepId, injectLessons(slug, stepId, system0, { projectId: proc.projectId, role, tags: [] }, practicesFor(slug, agent)).system);
   }
-  return injected.get(stepId)!;
+  // EN-021 · Sello Portal IA, solo la línea 1 (pasos estructurados: nunca la línea 2). Se aplica después de las
+  // lecciones y no las repite. withSeal es idempotente por marca, así que una llamada encadenada no lo duplica.
+  return sealForStep(injected.get(stepId)!);
 }
 
 /** ¿El agente usa un origen que el lote de este proceso no autoriza? (p. ej. lo cambiaron a la API a mitad de la historia). */

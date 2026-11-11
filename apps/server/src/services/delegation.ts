@@ -2,6 +2,7 @@ import { externalSource } from './externalAgents.ts';
 import { agentBackend, agentCaller, completeWith, RECOVERED_NOTE } from './claudeCode/backend.ts';
 import { agentFoldersRepo } from './agentFolders.ts';
 import { identityBlock } from './agentIdentity.ts';
+import { sealForStep } from './portalSeal.ts';
 import { filesIn } from './diagnostics.ts';
 import { readRepoFile } from './repoWrite.ts';
 import { CONSULT_EVIDENCE_CHARS, filesContext } from './storyPipeline.ts';
@@ -223,7 +224,7 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
 
   const call = async (stepIdx: number, system: string, user: string, maxTokens: number, history?: { role: 'user' | 'assistant'; content: string }[], role: string | null = null) => {
     const step = proc.steps[stepIdx]; const agent = agents.get(step.agentId)!;
-    const lc = lessonsOf(agent); system = system + lc.block;
+    const lc = lessonsOf(agent); system = sealForStep(system + lc.block);
     const providerId = agent.config.provider as ProviderId;
     const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
     // Una consulta («consultant») que agota los turnos se recupera UNA vez sin herramientas (claudeCode/backend.ts).
