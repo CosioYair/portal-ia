@@ -15,6 +15,7 @@ import { FolderPicker } from './FolderPicker.tsx';
 import { DocumentsTab, OriginTab } from './ExternalAgent.tsx';
 import { AgentZipImport } from './AgentZipImport.tsx';
 import { ChatTab, FeedbackForm } from './AgentChat.tsx';
+import { PortalSealPanel } from './AgentConfigPanel.tsx';
 import { INTEGRATION_LABEL } from '@portal-ia/domain';
 import { osApi, officeDisplayName, type AgentPanel as Panel, type Department, type FolderStatus, type HarnessOptions, type ImprovementHistoryItem, type NameEstimate, type NameProposal, type OfficeAgent, type WorkItem } from '../lib/osApi.ts';
 
@@ -519,6 +520,8 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
       </div>
       <Link className="lnk small" to={`/equipo/${encodeURIComponent(p.agent.id)}`}>Ajustes avanzados (modelo, herramientas, límites, capacidades)</Link>
     </section>
+    {/* EN-021 · Sello Portal IA en solo lectura: igual para agentes propios y externos (EXTERNAL_TABS también abre ConfigTab). */}
+    <PortalSealPanel />
     <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 10 }} aria-labelledby="harness-h">
       <div className="h3" id="harness-h">Motor de IA (cómo trabaja)</div>
       {!opts ? <Spinner /> : <>

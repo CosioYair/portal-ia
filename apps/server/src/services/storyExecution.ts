@@ -2,6 +2,7 @@ import { agentCaller, completeWith, RECOVERED_NOTE } from './claudeCode/backend.
 import type { Agent, AssessmentEstimate, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, Process, ProcessStep, ProviderId, ReviewVerdict, RuntimeCheck, StoryPlan, TeamOverride, TeamRole } from '@portal-ia/domain';
 import { composeTeam, orderedMembers, type StoryText } from './teamComposer.ts';
 import { injectLessons, recordDetections, recordLessonOutcomes } from './lessons.ts';
+import { sealForStep } from './portalSeal.ts';
 import { curateAfterTask } from './lessonCurator.ts';
 import { practicesFor } from './agentTemplates.ts';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
@@ -664,7 +665,7 @@ export async function generateManualTest(slug: string, processId: string, log: (
   if (regenerate && !portal) throw Object.assign(new Error('«Regenerar con QA» solo está disponible en el Portal.'), { statusCode: 409, code: 'manual_test_regenerate_portal_only' });
   if (regenerate && !outsideSteps.length) throw Object.assign(new Error('La lista de prueba manual no tiene pasos que salgan del Portal: no hay nada que regenerar.'), { statusCode: 409, code: 'manual_test_nothing_to_regenerate' });
   if (!regenerate && portal && r.manualTest?.reviewedBy === 'qa') throw Object.assign(new Error('La lista de prueba manual ya está revisada por QA; no se vuelve a revisar.'), { statusCode: 409, code: 'manual_test_already_reviewed' });
-  const system = `Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} del proyecto «${project.name}» en Portal IA. Escribes para el propietario, que no es técnico.`;
+  const system = sealForStep(`Eres «${agent.config.name}», ${agent.template.role.toLowerCase()} del proyecto «${project.name}» en Portal IA. Escribes para el propietario, que no es técnico.`);
   const user = `Historia: ${item ? `${item.storyId} · ${item.title}` : proc.title}
 Criterio de aceptación: ${item?.criterion || '(no definido)'}
 Plan: ${r.plan?.summary ?? '—'}
