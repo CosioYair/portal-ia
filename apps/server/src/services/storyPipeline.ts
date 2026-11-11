@@ -105,7 +105,9 @@ function stepSystem(slug: string, proc: Process, stepId: string, agent: Agent, s
     // guardar en caché y después de las lecciones (no las repite); las llamadas del paso reutilizan el texto ya sellado.
     injected.set(stepId, sealForStep(injectLessons(slug, stepId, system0, { projectId: proc.projectId, role, tags: [] }, practicesFor(slug, agent)).system));
   }
-  return injected.get(stepId)!;
+  // El texto en caché ya está sellado y withSeal no repite líneas, así que esta llamada no lo duplica.
+  // Garantiza el sello aunque otra vía haya guardado en la caché un texto sin sellar.
+  return sealForStep(injected.get(stepId)!);
 }
 
 /** ¿El agente usa un origen que el lote de este proceso no autoriza? (p. ej. lo cambiaron a la API a mitad de la historia). */
