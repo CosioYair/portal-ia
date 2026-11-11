@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { lessonCardState } from '@portal-ia/domain';
 import type { Lesson } from '@portal-ia/domain';
 import { api, type LessonCurateSummary } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
@@ -44,6 +46,9 @@ export function LessonsPanel({ projectId }: { projectId: string }) {
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [slug, projectId]);
   const cur = lessons?.find(l => l.id === sel) ?? null;
+  const curCard = cur ? lessonCardState(cur) : null;
+  const imp = cur?.improvement ?? null;
+  const reasonText = (reason: string, tasks: number) => reason === 'refuted' ? 'quedó refutada' : `reincidió en ${tasks} ${tasks === 1 ? 'tarea' : 'tareas'}`;
   useEffect(() => { setText(cur?.lessonText ?? ''); }, [cur?.id, cur?.lessonText]);
 
   const act = async (key: string, fn: () => Promise<any>, msg: string) => { setBusy(key); setErr(null); try { await fn(); flash(msg); await load(); } catch (e: any) { setErr(e.message); } finally { setBusy(null); } };
@@ -66,7 +71,7 @@ export function LessonsPanel({ projectId }: { projectId: string }) {
       {lessons === null && <p className="muted sm13" style={{ margin: '8px 0' }}>Cargando lecciones…</p>}
       {lessons && shown.length === 0 && <p className="muted sm13" style={{ margin: '8px 0' }}>Aún no hay lecciones aplicadas. El Curador las aplica solo al terminar cada tarea.</p>}
       {shown.map(l => <button key={l.id} className={`rail-i ${l.id === sel ? 'is-active' : ''}`} onClick={() => setSel(l.id)} style={{ alignItems: 'flex-start' }}>
-        <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, gap: 2 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{l.title}</span><span className="small muted"><Chip tone={l.provenAt ? 'ok' : ''} xs>{l.provenAt ? 'Demostrada' : 'Sin demostrar aún'}</Chip> {l.role ? ROLE[l.role] ?? l.role : 'todos los papeles'} · usada {l.usedCount ?? 0} {(l.usedCount ?? 0) === 1 ? 'vez' : 'veces'}{l.recurrenceCount ? ` · ⚠ reincidió ${l.recurrenceCount}×` : ''}</span><span className="small muted" data-testid="leccion-alcance">{reachText(l)}</span></span></button>)}
+        <span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, gap: 2 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{l.title}</span><span className="small muted"><Chip tone={l.provenAt ? 'ok' : ''} xs>{l.provenAt ? 'Demostrada' : 'Sin demostrar aún'}</Chip> {l.role ? ROLE[l.role] ?? l.role : 'todos los papeles'} · usada {l.usedCount ?? 0} {(l.usedCount ?? 0) === 1 ? 'vez' : 'veces'}{lessonCardState(l).recurrenceBadge ? ` · ⚠ reincidió en ${lessonCardState(l).recurredTasks} ${lessonCardState(l).recurredTasks === 1 ? 'tarea' : 'tareas'}` : ''}</span><span className="small muted" data-testid="leccion-alcance">{reachText(l)}</span></span></button>)}
       <details style={{ marginTop: 8 }}><summary className="small muted" style={{ cursor: 'pointer' }}>Escribir una lección a mano</summary>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 6 }}>
           <input className="input" placeholder="Título" value={newTitle} onChange={e => setNewTitle(e.target.value)} />
@@ -91,11 +96,13 @@ export function LessonsPanel({ projectId }: { projectId: string }) {
           {cur.status === 'validated' && <div className="small" data-testid="leccion-alcance-detalle"><strong>Dónde está:</strong> {reachText(cur)}.</div>}
           {cur.status === 'validated' && <div className="small muted">Medición: {cur.usedCount ? <>inyectada en {cur.usedCount} paso(s); {cur.recurrenceCount ? `el mismo error volvió a ocurrir ${cur.recurrenceCount} vez/veces con ella presente.` : 'sin reincidencias: por ahora el error no se ha repetido con ella presente.'}</> : 'aún sin medir: ninguna historia la ha usado desde que se validó.'}</div>}
           {/* Aprendida solo cuando una tarea POSTERIOR la demuestra (terminó verificada sin repetir su error). */}
-          {cur.status === 'validated' && <div className="small" data-testid="leccion-prueba">{cur.provenAt ? <><strong>Aprendida:</strong> la demostró una tarea posterior el {new Date(cur.provenAt).toLocaleDateString('es-MX')} (terminó verificada sin repetir su error).{cur.proof?.at(-1)?.result === 'recurred' ? ' Después su error volvió a ocurrir con ella presente: si se repite otra vez seguida, se retirará sola.' : ''}</> : <><strong>Validada, pendiente de demostrar:</strong> se considerará aprendida cuando una tarea posterior que la lleve termine verificada sin repetir su error.</>}</div>}
+          {cur.status === 'validated' && <div className="small" data-testid="leccion-prueba">{curCard?.learned ? <><strong>Aprendida:</strong> la {curCard.heldTasks === 1 ? 'demostró 1 tarea posterior' : `demostraron ${curCard.heldTasks} tareas posteriores`}{cur.provenAt ? ` (la primera, el ${new Date(cur.provenAt).toLocaleDateString('es-MX')})` : ''}: terminaron verificadas sin repetir su error.</> : curCard?.recurrenceBadge ? <><strong>Reincidió en {curCard.recurredTasks} {curCard.recurredTasks === 1 ? 'tarea' : 'tareas'}:</strong> su error volvió a ocurrir con ella presente y la tarea no terminó verificada. Por eso aún no cuenta como aprendida.</> : <><strong>Validada, pendiente de demostrar:</strong> se considerará aprendida cuando una tarea posterior que la lleve termine verificada sin repetir su error.</>}</div>}
           {(cur.proof?.length ?? 0) > 0 && <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>{cur.proof!.slice(-4).map(p => <li key={p.processId}>{p.result === 'held' ? '✓' : '✗'} {p.processTitle ?? p.processId}: {p.detail}</li>)}</ul>}
 
 
-          {cur.recurrenceCount > 0 && cur.status === 'validated' && <Notice kind="warn">Esta lección estaba inyectada y el mismo error volvió a ocurrir {cur.recurrenceCount} vez/veces: candidata a obsoleta. Revísala, edítala (crea una versión nueva) o márcala obsoleta.</Notice>}
+          {cur.status === 'validated' && imp?.state === 'applied' && <Notice kind="ok"><div style={{ display: 'flex', flexDirection: 'column', gap: 6 }} data-testid="leccion-mejora"><span>Versión {cur.version} aplicada automáticamente{imp.fromVersion ? ` (sustituye a la ${imp.fromVersion})` : ''}: la anterior {reasonText(imp.reason, imp.tasks)}. Ya está en la plantilla y llega sola a los agentes.</span>{cur.parentId && <div><button className="btn btn-ghost btn-sm" disabled={busy !== null} onClick={() => { if (!confirm(`Volver a la versión anterior: se reactivará en la plantilla y en los agentes, y la versión ${cur.version} quedará obsoleta. No llama a la IA.`)) return; void act('revert', () => api.revertLessonImprovement(slug, cur.id), 'Se volvió a la versión anterior'); }}>Volver a la versión anterior</button></div>}</div></Notice>}
+          {cur.status === 'validated' && imp?.state === 'pending_decision' && <Notice kind="warn"><span data-testid="leccion-mejora">Mejora pendiente de tu decisión: {reasonText(imp.reason, imp.tasks)}. La mejora automática no está autorizada o se agotó su tope, así que no se hizo ninguna llamada. <Link className="lnk" to="/autorizaciones">Decídela en Decisiones</Link> (aceptarla es una llamada a la IA).</span></Notice>}
+          {cur.status === 'validated' && !imp && curCard?.recurrenceBadge && <Notice kind="warn"><span data-testid="leccion-mejora">Su error volvió a ocurrir en {curCard.recurredTasks} {curCard.recurredTasks === 1 ? 'tarea' : 'tareas'} con ella presente. Si reincide en 2 o más tareas, el Curador redactará solo su versión siguiente (dentro de tu autorización en Ajustes; si no la hay, te lo dejará en Decisiones).</span></Notice>}
 
           {cur.status === 'validated' && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <details><summary className="small muted" style={{ cursor: 'pointer' }}>Editar (crea la versión {cur.version + 1}; la {cur.version} queda obsoleta)</summary>
