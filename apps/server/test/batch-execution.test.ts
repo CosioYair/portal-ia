@@ -144,7 +144,7 @@ test('F · la autorización es explícita, persistida y auditable; un lote activ
   assert.equal(b.auth.git.publish, false);
   const second = await app.inject({ method: 'POST', url: `${W}/projects/${project.id}/batches`, payload: { authorized: true, itemIds: [story('Otra F').id], totalBudgetUsd: 1, perStoryBudgetUsd: 1 } });
   assert.equal(second.statusCode, 409); assert.equal(second.json().code, 'batch_active');
-  const done = await waitFor(() => get(b.id), x => x.status === 'completed', 'lote F completado');
+  const done = await waitFor(() => get(b.id), x => x.status === 'needs_decision', 'lote F espera tu aceptación (HU-203: sin aceptar no está terminado)');
   assert.equal(done.items[0].state, 'awaiting_acceptance', done.items[0].reason);
   const audit = (await import('../src/db/workspace.ts')).workspaceDb(S).prepare(`SELECT kind FROM execution_history WHERE kind LIKE 'batch_%'`).all() as any[];
   assert.ok(audit.some(r => r.kind === `batch_authorized:${b.id}`) && audit.some(r => r.kind === `batch_story_started:${b.id}`));
@@ -155,7 +155,7 @@ test('G + J · progresión automática sin intervención: cada historia se ejecu
   setScript([1, 2, 3].map(n => ({ key: `GOLF${n}`, file: `src/golf${n}.ts`, dev: create(`src/golf${n}.ts`, `export const golf${n} = ${n};`) })));
   const before = mainLog().length;
   const b = await authorize({ itemIds: [a.id, c.id, d.id], title: 'Lote G' });
-  const done = await waitFor(() => get(b.id), x => x.status === 'completed', 'lote G completado');
+  const done = await waitFor(() => get(b.id), x => x.status === 'needs_decision', 'lote G espera tu aceptación');
   assert.deepEqual(done.items.map((i: any) => i.state), ['awaiting_acceptance', 'awaiting_acceptance', 'awaiting_acceptance']);
   assert.equal(mainLog().length - before, 3, 'tres integraciones en main');
   for (const n of [1, 2, 3]) assert.equal(fs.readFileSync(path.join(repo, `src/golf${n}.ts`), 'utf8').replace(/\r\n/g, '\n'), `export const golf${n} = ${n};\n`);
@@ -175,7 +175,7 @@ test('H · dependencias en ejecución real: la dependiente empieza tras integrar
   // La dependiente va PRIMERA en tu orden: el plan la pone después.
   const b = await authorize({ itemIds: [bItem.id, a.id], title: 'Lote H', concurrency: 2 });
   assert.equal(b.items[0].storyId, a.storyId); assert.equal(b.items[1].state, 'waiting_dependency');
-  const done = await waitFor(() => get(b.id), x => x.status === 'completed', 'lote H completado');
+  const done = await waitFor(() => get(b.id), x => x.status === 'needs_decision', 'lote H espera tu aceptación');
   assert.deepEqual(done.items.map((i: any) => i.state), ['awaiting_acceptance', 'awaiting_acceptance'], JSON.stringify(done.items.map((i: any) => i.reason)));
   assert.equal(fs.readFileSync(path.join(repo, 'src/hotel.ts'), 'utf8').replace(/\r\n/g, '\n'), 'export const hotel = 2;\n', 'el parche de la dependiente solo aplica sobre el cambio de su dependencia');
   const startDep = done.events.find((e: any) => e.itemId === bItem.id && /empieza/.test(e.message)).at;
@@ -189,7 +189,7 @@ test('I + J · dos historias en paralelo (worktrees separados) y la integración
   maxActive = 0;
   const b = await authorize({ itemIds: [a.id, c.id], title: 'Lote I', concurrency: 2 });
   const running = await waitFor(() => get(b.id), x => x.items.filter((i: any) => i.state === 'running').length === 2 || settled(x), 'dos en marcha');
-  const done = await waitFor(() => get(b.id), x => x.status === 'completed', 'lote I completado');
+  const done = await waitFor(() => get(b.id), x => x.status === 'needs_decision', 'lote I espera tu aceptación');
   assert.deepEqual(done.items.map((i: any) => i.state), ['awaiting_acceptance', 'awaiting_acceptance']);
   const wts = done.items.map((i: any) => processesRepo(S).get(i.processId)!.result!.applied!.worktree);
   assert.notEqual(wts[0], wts[1], 'cada historia en su propio worktree');
@@ -214,7 +214,7 @@ test('K · reinicio durante la verificación (sin llamadas en curso): se retoma 
   assert.equal(processesRepo(S).get(pid)!.result!.pipeline!.pauseKind, 'interrupted');
   const callsBefore = calls().length;
   assert.equal(await resumeBatches(() => undefined), 1, 'retomada sola');
-  const done = await waitFor(() => get(b.id), x => x.status === 'completed', 'lote K completado');
+  const done = await waitFor(() => get(b.id), x => x.status === 'needs_decision', 'lote K espera tu aceptación');
   assert.equal(done.items[0].state, 'awaiting_acceptance', done.items[0].reason);
   assert.equal(done.items[0].autoResumes, 1);
   const extra = calls().slice(callsBefore);
@@ -273,7 +273,7 @@ test('L · presupuesto agotado: el lote se pausa antes de empezar otra historia 
   assert.equal(noAuth.statusCode, 400, 'reanudar es gastar: exige autorización');
   const res = await app.inject({ method: 'POST', url: `${W}/batches/${b.id}/resume`, payload: { authorized: true, addBudgetUsd: 2 } });
   assert.equal(res.statusCode, 200, res.body); assert.equal(res.json().auth.totalBudgetUsd, 3);
-  const done = await waitFor(() => get(b.id), x => x.status === 'completed', 'lote L completado');
+  const done = await waitFor(() => get(b.id), x => x.status === 'needs_decision', 'lote L espera tu aceptación');
   assert.equal(done.items[1].state, 'awaiting_acceptance');
 });
 
@@ -325,7 +325,7 @@ test('N · fallo parcial: la que falla no detiene a las independientes y sus dep
   };
   try {
     const b = await authorize({ itemIds: [a.id, dep.id, ind.id], title: 'Lote N' });
-    const done = await waitFor(() => get(b.id), x => x.status === 'completed', 'lote N completado');
+    const done = await waitFor(() => get(b.id), x => x.status === 'needs_decision', 'lote N necesita tu decisión (fallida y bloqueada)');
     const by = Object.fromEntries(done.items.map((i: any) => [i.storyId, i]));
     assert.equal(by[a.storyId].state, 'failed'); assert.equal(by[a.storyId].failureClass, 'failure');
     assert.equal(by[dep.storyId].state, 'blocked'); assert.match(by[dep.storyId].reason, new RegExp(`Depende de ${a.storyId}, que quedó fallida`));
@@ -355,6 +355,12 @@ test('O · aceptación del propietario, distinta de QA: solo tras la terminació
   const reopened = await app.inject({ method: 'POST', url: `${W}/batches/${lote.id}/items/${g2.itemId}/reopen` });
   assert.equal(reopened.json().items[1].state, 'awaiting_acceptance'); assert.equal(backlogRepo(S).get(g2.itemId)!.status, 'review');
   assert.equal(g3.state, 'awaiting_acceptance');
+  // HU-203: el lote solo queda «terminado» cuando TODAS sus historias están aceptadas.
+  assert.notEqual((await get(lote.id)).status, 'completed', 'con historias sin aceptar el lote no está terminado');
+  const all = await app.inject({ method: 'POST', url: `${W}/batches/${lote.id}/accept`, payload: { itemIds: [g2.itemId, g3.itemId] } });
+  assert.equal(all.statusCode, 200, all.body);
+  const closed = await waitFor(async () => { await scheduleTick(S, lote.id); return get(lote.id); }, x => x.status === 'completed', 'lote G terminado tras aceptar todas');
+  assert.deepEqual(closed.items.map((i: any) => i.state), ['accepted', 'accepted', 'accepted']);
 });
 
 test('P · no aceptar crea tareas con los pasos que fallaron e iterar SOLO esa historia dentro del lote', async () => {
@@ -364,7 +370,7 @@ test('P · no aceptar crea tareas con los pasos que fallaron e iterar SOLO esa h
     { key: 'PAPA', file: 'src/papa.ts', dev: [create('src/papa.ts', 'export const papa = 1;'), patch('src/papa.ts', 'export const papa = 1;', 'export const papa = 2;')] }
   ]);
   const b = await authorize({ itemIds: [a.id, c.id], title: 'Lote P' });
-  await waitFor(() => get(b.id), x => x.status === 'completed', 'lote P completado');
+  await waitFor(() => get(b.id), x => x.status === 'needs_decision', 'lote P espera tu aceptación');
   const otraCalls = callsFor('PAPA-OTRA').length;
   const rej = await app.inject({ method: 'POST', url: `${W}/batches/${b.id}/items/${a.id}/reject`, payload: { note: 'El valor debe ser 2', failedSteps: ['Revisa el valor: muestra 1'] } });
   assert.equal(rej.statusCode, 200, rej.body);
@@ -375,7 +381,7 @@ test('P · no aceptar crea tareas con los pasos que fallaron e iterar SOLO esa h
   assert.equal(noAuth.statusCode, 400);
   const it = await app.inject({ method: 'POST', url: `${W}/batches/${b.id}/items/${a.id}/iterate`, payload: { authorized: true, note: 'El valor debe ser 2' } });
   assert.equal(it.statusCode, 200, it.body); assert.equal(it.json().status, 'running');
-  const done = await waitFor(() => get(b.id), x => x.status === 'completed', 'iteración completada');
+  const done = await waitFor(() => get(b.id), x => x.status === 'needs_decision' && settled(x), 'iteración terminada técnicamente');
   const p = done.items.find((i: any) => i.itemId === a.id);
   assert.equal(p.state, 'awaiting_acceptance', p.reason); assert.equal(p.processIds.length, 2, 'una iteración más, en el mismo elemento');
   assert.equal(fs.readFileSync(path.join(repo, 'src/papa.ts'), 'utf8').replace(/\r\n/g, '\n'), 'export const papa = 2;\n');
@@ -429,7 +435,7 @@ test('activación serializada (Portal interno): con nada en marcha se reconstruy
   assert.equal(req2.items[0].state, 'awaiting_acceptance'); assert.equal(req2.items[0].activated, true);
   assert.ok(processesRepo(S).get(req2.items[0].processId)!.result!.runtimeChecks!.results.every(r => r.status === 'ok'));
   await resumeBatches(() => undefined);
-  const done = await waitFor(() => get(b.id), x => x.status === 'completed', 'lote S completado');
+  const done = await waitFor(() => get(b.id), x => x.status === 'needs_decision', 'lote S espera tu aceptación');
   assert.deepEqual(done.items.map((i: any) => [i.state, i.activated]), [['awaiting_acceptance', true], ['awaiting_acceptance', true]]);
   assert.equal(activations, 2, 'una activación por integración, de una en una');
   await scheduleTick(S, b.id);
