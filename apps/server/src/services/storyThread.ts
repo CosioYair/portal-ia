@@ -24,6 +24,7 @@ import { phaseContext } from './operationalPhase.ts';
 import { REPO_ROOT } from '../config.ts';
 import path from 'node:path';
 import { monotonicNow } from '../clock.ts';
+import { getPublishInfo } from './publishState.ts';
 
 /**
  * Espacio de la historia (M6): un solo lugar por historia con contexto, equipo, iteraciones (procesos), prueba manual
@@ -84,12 +85,15 @@ export async function storyContext(slug: string, itemId: string): Promise<StoryC
   // La interfaz decide con estos campos si muestra «Autorizar», no con el texto de la guía.
   const iters = iterationNumbers(procs);
   const supersededOf = (p: Process) => p.supersededBy ? { byProcessId: p.supersededBy, byIteration: iters.get(p.supersededBy) ?? null, at: p.supersededAt ?? null } : null;
+  // HU-185 · Estado de publicación de main (sin red): una sola vez por historia y solo si alguna iteración está integrada.
+  // Igual en el Portal y en los proyectos externos; si falla, cuenta como «sin remoto» (no aplica). No bloquea el cierre.
+  const publish = procs.some(p => p.result?.merged) ? await getPublishInfo(repo?.path ?? null).catch(() => ({ hasRemote: false, aheadOfRemote: null })) : null;
   const enriched = await Promise.all(procs.map(async (p, i) => {
     let q = p;
     if (runtime && p.result?.merged) { const activation = await activationOf(p.result.merged.commit, p.result.merged.mergedAt).catch(() => null); q = { ...p, result: { ...p.result, activation } }; }
     const fo = await flowOptions(slug, q, item);
     const superseded = supersededOf(p);
-    return { ...q, version: processVersion(q), iteration: iters.get(p.id) ?? procs.length - i, superseded, guidance: describeProcess(q, { isPortalRepo: isPortal, storyStatus: q.id === item.lastProcessId || !item.lastProcessId || q.id === procs[0]?.id ? item.status : null, ...fo, supersededByIteration: superseded?.byIteration ?? null }) };
+    return { ...q, version: processVersion(q), iteration: iters.get(p.id) ?? procs.length - i, superseded, guidance: describeProcess(q, { isPortalRepo: isPortal, storyStatus: q.id === item.lastProcessId || !item.lastProcessId || q.id === procs[0]?.id ? item.status : null, ...fo, publish: q.result?.merged ? publish : null, supersededByIteration: superseded?.byIteration ?? null }) };
   }));
   // La iteración «actual» es la más reciente (también si está pendiente de autorización), no la última que llegó a ejecutarse.
   const last = enriched[0] ?? null;

@@ -22,7 +22,7 @@ const LIVE_TXT: Record<LiveCall['state'], string> = { preparing: 'Preparando la 
 const LIVE_NEXT: Record<LiveCall['state'], string> = { preparing: 'enviar la solicitud al proveedor', queued: 'que termine otra ejecución de Claude Code y se libere un hueco', sending: 'que el proveedor confirme la recepción', waiting: 'que el proveedor empiece a responder (o abortar al llegar al plazo)', receiving: 'terminar de recibir la respuesta', processing: 'validar la entrega y pasar a la siguiente etapa', retrying: 'reenviar la solicitud', cancelling: 'detener el proceso' };
 const go = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 /** Acciones que esta versión de la interfaz sabe ejecutar. Una desconocida (servidor más nuevo) se dice, no se ignora. */
-const HANDLED = new Set<FlowActionId>(['authorize', 'cancel', 'review_diff', 'apply', 'reject', 'install_and_retry', 'verify', 'retry_verification', 'sandbox_help', 'refresh_sandbox', 'request_fix', 'ask_team', 'tasks_from_issue', 'merge', 'rebuild', 'runtime_check', 'manual_test', 'close', 'close_resolved', 'accept_plan', 'retry_process', 'recover', 'new_iteration', 'pipeline_resume', 'repair_output', 'claude_code_fix', 'register_external', 'open_settings', 'integration_prepare', 'integration_resolve', 'convert_to_analysis']);
+const HANDLED = new Set<FlowActionId>(['authorize', 'cancel', 'review_diff', 'apply', 'reject', 'install_and_retry', 'verify', 'retry_verification', 'sandbox_help', 'refresh_sandbox', 'request_fix', 'ask_team', 'tasks_from_issue', 'merge', 'rebuild', 'runtime_check', 'manual_test', 'close', 'close_resolved', 'accept_plan', 'retry_process', 'recover', 'new_iteration', 'pipeline_resume', 'repair_output', 'claude_code_fix', 'register_external', 'open_settings', 'integration_prepare', 'integration_resolve', 'convert_to_analysis', 'publish', 'skip_publish']);
 const AUTH_TXT: Record<string, string> = { 'claude.ai': 'sesión de tu suscripción', oauth_token: 'token OAuth', api_key: 'clave de API (no válida aquí)', none: 'sin sesión' };
 
 interface Props {
@@ -190,6 +190,20 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
           else setErr(`La autorización se guardó, pero el equipo todavía no puede usar Claude Code: ${rd.team.find(t => !t.ready)?.reason ?? 'motivo desconocido'}`);
         } catch (e: any) { if (e instanceof ApiError && e.body?.readiness) setCc(e.body.readiness); throw e; }
       }
+      else if (a.id === 'publish') {
+        // HU-185 · Reutiliza la publicación existente del repositorio (sin IA). Se envía el main y el remoto que se ven ahora, para no publicar algo distinto.
+        const pid = proc.projectId;
+        if (!pid) { setErr('Este proceso no tiene proyecto asociado: publica desde la tarjeta del repositorio del proyecto.'); return; }
+        const st = await api.repoStatus(slug, pid);
+        const r = await api.repoPublishMain(slug, pid, st.mainCommit ?? '', st.remoteUrl ?? null);
+        flash(`Publicado en ${r.remote}: ${r.branches.join(', ')}`);
+        await reload();
+      }
+      else if (a.id === 'skip_publish') {
+        // HU-185 · Lo decide el propietario y no tiene costo. No bloquea el cierre: la etapa queda como «omitida».
+        onChange(await api.skipPublish(slug, proc.id));
+        flash('Publicar omitido: puedes publicar más tarde desde el repositorio del proyecto');
+      }
       else if (a.id === 'integration_prepare') {
         // Candidato de integración: main se incorpora en la rama (sin IA) y se verifica; con conflictos, la API los dice.
         try { const p = await api.integrationPrepare(slug, proc.id); onChange(p); flash(p.note ?? 'Candidato de integración preparado: se verifica en el sandbox sin IA'); }
@@ -245,15 +259,15 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       </div>
 
       <ol className="sf-stages" style={{ ['--n' as any]: flow.stages.length }} aria-label="Etapas">
-        {flow.stages.map(s => <li key={s.key} className={`sf-stage${s.key === flow.current ? ' is-current' : ''}`} data-status={s.status} title={`${s.label}: ${STATUS_TXT[s.status]}${s.detail ? ` · ${s.detail}` : ''}`} aria-current={s.key === flow.current ? 'step' : undefined}>
-          <span className="sf-bar" /><span className="sf-stage-label">{s.label}</span>
+        {flow.stages.map(s => <li key={s.key} className={`sf-stage${s.key === flow.current ? ' is-current' : ''}`} data-status={s.status} title={`${s.label}: ${s.statusText ?? STATUS_TXT[s.status]}${s.detail ? ` · ${s.detail}` : ''}`} aria-current={s.key === flow.current ? 'step' : undefined}>
+          <span className="sf-bar" /><span className="sf-stage-label">{s.label}{s.statusText ? ` · ${s.statusText}` : ''}</span>
         </li>)}
       </ol>
 
       {flow.headline && <div className={`sf-headline${proc.result?.pipeline?.state === 'verified' ? ' is-ok' : ''}`} role="status" aria-label="Estado del pipeline">{proc.result?.pipeline?.state === 'verified' ? Icon.okc() : proc.status === 'running' ? <span className="spin" /> : Icon.info()}<span>{flow.headline}</span></div>}
 
       <div className="sf-now" aria-label="Etapa actual">
-        <div className="sf-now-head"><strong>Ahora: {cur.label}</strong><Chip tone={STATUS_TONE[cur.status]} xs>{STATUS_TXT[cur.status]}</Chip></div>
+        <div className="sf-now-head"><strong>Ahora: {cur.label}</strong><Chip tone={STATUS_TONE[cur.status]} xs>{cur.statusText ?? STATUS_TXT[cur.status]}</Chip></div>
         {cur.detail && <span className="small muted">{cur.detail}</span>}
         {flow.responsible.length > 0 && <span className="small">{flow.responsible.map(r => `${r.agentName} (${r.role})`).join(' · ')} — {flow.responsible[0].status}</span>}
         {flow.stages.filter(s => s.status === 'warning' || s.status === 'rejected').filter(s => s.key !== flow.current).map(s => <span key={s.key} className="small" style={{ color: 'var(--color-warn-text)' }}>⚠ {s.label}: {s.detail}</span>)}

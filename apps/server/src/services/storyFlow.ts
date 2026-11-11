@@ -1,4 +1,5 @@
-import type { FlowAction, FlowActionId, FlowIssue, FlowIssueDetail, FlowStage, FlowStageKey, FlowStageStatus, Isolation, IssueSeverity, Process, StoryFlow, VerificationRun, WorktreeDrift, BranchIntegration } from '@portal-ia/domain';
+import type { FlowAction, FlowActionId, FlowIssue, FlowIssueDetail, FlowStage, FlowStageKey, FlowStageStatus, Isolation, IssueSeverity, Process, PublishInfo, StoryFlow, VerificationRun, WorktreeDrift, BranchIntegration } from '@portal-ia/domain';
+import { publishStageFor } from './publishState.ts';
 import { revisionStatus, reviewStageText } from './revision.ts';
 import { GAUNTLET_LIMITS, gauntletReviewed, verificationPassed, verificationsForApplied } from '@portal-ia/domain';
 import { filesIn, parseBuildErrors, parseFailingTests, parseTypeScriptErrors, qaSeverity, tailOf } from './diagnostics.ts';
@@ -32,12 +33,14 @@ export interface FlowOptions {
   drift?: WorktreeDrift | null;
   /** Integración con la rama principal (git, sin IA): avanzó main, se combina limpio o hay conflictos reales. */
   integration?: BranchIntegration | null;
+  /** HU-185 · Estado de publicación de main (sin red). Sin valor: la etapa «Publicar» solo usa lo que guarda el proceso. */
+  publish?: PublishInfo | null;
 }
 
 const LABELS: Record<FlowStageKey, string> = {
   execute: 'Planificar e implementar (agentes)', review: 'Revisar los cambios y QA', apply: 'Aplicar en un worktree aislado',
   verify: 'Verificar en sandbox', integrate: 'Integrar en main', activate: 'Activar el Portal (reconstruir y reiniciar)',
-  runtime: 'Comprobar en ejecución', manual: 'Prueba de aceptación paso a paso', close: 'Cerrar o iterar'
+  runtime: 'Comprobar en ejecución', manual: 'Prueba de aceptación paso a paso', publish: 'Publicar', close: 'Cerrar o iterar'
 };
 const usd = (n: number | null | undefined) => (n ?? 0).toFixed(2);
 /** Margen tras el plazo de una llamada antes de declararla «sin cerrar»: vigilante (15 s por defecto) + 30 s. */
@@ -80,11 +83,31 @@ export function isAssignmentProcess(p: Pick<Process, 'assignmentId' | 'backlogIt
   return !!p.assignmentId && !p.backlogItemId;
 }
 /** Acciones que necesitan una historia: un encargo no tiene chat, ni tareas, ni historia que cerrar. */
-const STORY_ONLY = new Set<FlowActionId>(['ask_team', 'tasks_from_issue', 'close', 'close_resolved']);
+const STORY_ONLY = new Set<FlowActionId>(['ask_team', 'tasks_from_issue', 'close', 'close_resolved', 'publish', 'skip_publish']);
 const ASSIGNMENT_FIX_TXT = 'Crea la petición de cambios del encargo con los pasos que fallaron y tus comentarios (puedes editarlos). La nueva ejecución queda pendiente de tu autorización: no gasta nada antes. Si ya está integrado en main, parte de main y no descarta nada.';
 
+/**
+ * HU-185 · Etapa «Publicar» (guiada y no bloqueante): se rellena después del recorrido, sin tocar closingBlocker ni la
+ * acción 'close'. Pendiente / hecha / no aplica / omitida van en statusText; nunca 'warning', 'blocked' ni 'failed'.
+ */
+function withPublishStage(flow: StoryFlow, p: Process, opts: FlowOptions): StoryFlow {
+  if (!flow.stages.some(s => s.key === 'publish')) return flow;
+  const r = p.result;
+  const pub = r?.merged ? publishStageFor(opts.publish ?? null, r) : null;
+  if (!pub) {
+    const detail = r?.merged ? 'Integrada: estado del remoto sin comprobar' : 'Tras integrar';
+    return { ...flow, stages: flow.stages.map(s => s.key === 'publish' ? { ...s, status: 'pending' as FlowStageStatus, detail } : s) };
+  }
+  const stages = flow.stages.map(s => s.key === 'publish' ? { ...s, status: pub.status, detail: pub.detail, statusText: pub.statusText } : s);
+  if (pub.statusText !== 'pendiente' || flow.actions.some(a => a.id === 'publish')) return { ...flow, stages };
+  const actions = [...flow.actions,
+    act('publish', 'Publicar en GitHub', `${pub.detail}. Publica main en el remoto con la operación de siempre (sin IA). Es opcional: no bloquea el cierre.`, ['authorization']),
+    act('skip_publish', 'Omitir publicar', 'Marca la etapa como omitida (sin IA). Podrás publicar más tarde desde el repositorio.')];
+  return { ...flow, stages, actions };
+}
+
 export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
-  const flow = buildStoryFlowCore(p0, opts);
+  const flow = withPublishStage(buildStoryFlowCore(p0, opts), p0, opts);
   if (!isAssignmentProcess(p0)) return flow;
   // Encargo: solo se ofrece lo que tiene un camino real (su petición de cambios); las historias no cambian.
   const actions = flow.actions.filter(a => !STORY_ONLY.has(a.id)).map(a => a.id === 'request_fix' ? { ...a, description: ASSIGNMENT_FIX_TXT } : a);
@@ -104,7 +127,7 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
   // turnos agotados se presenta como tal (sin ofrecer repetir el mismo encargo). Solo al leer: el dato guardado no cambia.
   const pl0 = r?.pipeline ?? null;
   const pl = pl0 && pl0.state === 'paused' && pl0.pauseKind === 'provider_error' && /m[aá]ximo de turnos|agot[oó] los turnos/i.test(pl0.reason ?? '') ? { ...pl0, pauseKind: 'max_turns' as const, failureClass: 'CLAUDE_CODE_MAX_TURNS_EXHAUSTED' as const } : pl0;
-  const keys: FlowStageKey[] = [...(pl ? ['execute', 'apply', 'verify', 'review'] as FlowStageKey[] : ['execute', 'review', 'apply', 'verify'] as FlowStageKey[]), 'integrate', ...(opts.isPortalRepo ? ['activate', 'runtime'] as FlowStageKey[] : []), 'manual', 'close'];
+  const keys: FlowStageKey[] = [...(pl ? ['execute', 'apply', 'verify', 'review'] as FlowStageKey[] : ['execute', 'review', 'apply', 'verify'] as FlowStageKey[]), 'integrate', ...(opts.isPortalRepo ? ['activate', 'runtime'] as FlowStageKey[] : []), 'manual', 'publish', 'close'];
   const st: Record<string, { status: FlowStageStatus; detail: string }> = Object.fromEntries(keys.map(k => [k, { status: 'pending' as FlowStageStatus, detail: '' }]));
   const set = (k: FlowStageKey, status: FlowStageStatus, detail = '') => { if (st[k]) st[k] = { status, detail }; };
   let issue: FlowIssue | null = null; const actions: FlowAction[] = [];
@@ -224,12 +247,13 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
     const rdx = opts.backends;
     if (rdx?.team.length && rdx.team.every(t => t.backend !== 'api') && rdx.fallback !== 'api') for (const a of actions) if (a.id === 'pipeline_resume' && a.requires.includes('ai_budget')) { a.requires = a.requires.filter(x => x !== 'ai_budget'); delete a.suggestedBudgetUsd; }
     const stages: FlowStage[] = keys.map(k => ({ key: k, label: LABELS[k], ...st[k] }));
-    const current = forced ?? (stages.find(s => !['done', 'warning'].includes(s.status)) ?? stages[stages.length - 1]).key;
+    // HU-185 · «Publicar» es opcional y no bloqueante: nunca es la etapa actual (el cierre sigue igual).
+    const current = forced ?? (stages.find(s => s.key !== 'publish' && !['done', 'warning'].includes(s.status)) ?? stages[stages.length - 1]).key;
     if (st[current]?.status === 'pending') st[current].status = 'current';
     const stages2: FlowStage[] = keys.map(k => ({ key: k, label: LABELS[k], ...st[k] }));
     if (actions.length && !actions.some(a => a.primary)) actions[0].primary = true;
     const resp = responsible.length ? responsible : (issue?.responsible ?? []).map(n => ({ agentName: n, role: devs.includes(n) ? 'implementa' : qa.includes(n) ? 'revisa' : 'responsable', status: 'responsable de corregirlo' }));
-    return { stages: stages2, current, progress: { done: stages2.filter(s => s.status === 'done' || s.status === 'warning').length, total: stages2.length }, issue, actions, responsible: resp, iteration: opts.iteration ?? null, headline, delivery };
+    return { stages: stages2, current, progress: { done: stages2.filter(s => s.key !== 'publish' && (s.status === 'done' || s.status === 'warning')).length, total: stages2.filter(s => s.key !== 'publish').length }, issue, actions, responsible: resp, iteration: opts.iteration ?? null, headline, delivery };
   };
   if (p.status !== 'done' || !r) return finish();
 

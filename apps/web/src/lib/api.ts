@@ -333,6 +333,8 @@ export const api = {
   /** `expectedCommit`: el commit que viste; `acknowledge`: confirmas lo que la línea base dejó pasar (ver mergeAcknowledgementsOf). */
   mergeProcess: (slug: string, processId: string, skipVerification = false, opts: { expectedCommit?: string | null; acknowledge?: { preexisting?: boolean; testUpdates?: boolean } } = {}) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/merge`, { method: 'POST', body: JSON.stringify({ authorized: true, skipVerification, ...(opts.expectedCommit ? { expectedCommit: opts.expectedCommit } : {}), ...(opts.acknowledge ? { acknowledge: opts.acknowledge } : {}) }) }),
   publishProcess: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/publish`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
+  /** HU-185 · El propietario omite publicar (sin IA ni git; no cambia el cierre). */
+  skipPublish: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/skip-publish`, { method: 'POST', body: JSON.stringify({ confirm: true }) }),
   applyChanges: (slug: string, processId: string, branch?: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/apply`, { method: 'POST', body: JSON.stringify({ authorized: true, branch }) }),
   verifyProcess: (slug: string, processId: string, command: 'install' | 'typecheck' | 'test' | 'build', allowNetwork = false) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/verify`, { method: 'POST', body: JSON.stringify({ authorized: true, command, allowNetwork }) }),
   /** M2 · el Portal se comprueba a sí mismo (HTTP y navegador) una vez activado el cambio. */
