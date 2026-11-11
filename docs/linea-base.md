@@ -42,6 +42,14 @@ Documento versionado en git: describe qué ES hoy Portal IA para que cualquier a
 - **Verificación antes de integrar**: no se integra sin `typecheck` correcto en la rama; el proyecto interno exige además `test` y `build` en sandbox real.
 - **Activación** (`services/system.ts`): integrar no es activar. Una historia del Portal cuenta como activa cuando el servidor en marcha y la interfaz compilada contienen su commit («Reconstruir y reiniciar» compila a `dist.next` y conserva `dist.prev`). Después se comprueba en ejecución (HTTP y navegador con Playwright, capturas en `data/evidence/`).
 - Protecciones de escritura: rutas protegidas (`.env` reales, claves, `data/`), escaneo de posibles secretos, bloqueo de reemplazos sobre archivos que cambiaron después de leerse.
+- **Árbol a empaquetar** (`services/packageTree.ts`, HU-206): es la única fuente de verdad de lo que lleva la edición distribuible. `PACKAGE_INCLUDE` incluye los manifiestos raíz (`package.json`, `package-lock.json`, `README.md`, `.env.example`, `tsconfig.base.json`), `docs/`, `docker/`, `scripts/`, el `src/` y los manifiestos de cada paquete de `packages/`, `apps/server/src`, `apps/server/scripts` y `apps/server/tools`, y el código de `apps/web` (`src/`, `index.html`, `vite.config.ts` y sus manifiestos). `PACKAGE_EXCLUDE` deja fuera, con su motivo:
+  - `apps/server/test/` (las pruebas no se distribuyen, incluida la e2e de automejora);
+  - `apps/web/dist`, `dist.prev` y `dist.next` (se generan al construir);
+  - `node_modules/`, `data/`, `.git/` y cualquier `.env` salvo `.env.example`;
+  - `scripts/preview-runner.mjs` (solo sirve a la vista previa de automejora).
+  `listPackageFiles(raíz)` devuelve los archivos de texto del árbol con rutas relativas y «/», ordenadas.
+- **Guarda de secretos del paquete** (HU-206, `apps/server/test/hu206-paquete-sin-secretos.test.ts`, en `npm test`): aplica `findSecret` a cada archivo de `listPackageFiles(raíz)` y falla si alguno se marca. El mensaje da la ruta y el tipo de secreto, nunca el valor. La prueba también comprueba que las pruebas y el runner quedan fuera, y que el detector sí marca una clave construida sin literales (control). En la edición distribuible, `startPreview` (`services/preview.ts`) responde 403 `edition_distributable` antes de copiar el runner, así que excluirlo no rompe nada.
+- Deuda conocida: algunas pruebas (fuera del paquete) y el runner conservan literales que el escáner del puente marca. O se limpian, o el escáner ignora esas rutas. Además, todavía no hay un script de empaquetado: cuando exista, debe usar `listPackageFiles`.
 
 ## 5 · Aprendizaje organizacional
 
