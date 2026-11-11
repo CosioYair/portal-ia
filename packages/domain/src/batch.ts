@@ -10,7 +10,15 @@ import type { BacklogStatus, PipelinePauseKind, PreviewRecord } from './types.ts
  * independiente y deja cada historia lista para la ACEPTACIÓN del propietario, que es distinta de QA.
  */
 
-export type BatchStatus = 'running' | 'paused' | 'completed' | 'cancelled' | 'revoked';
+/**
+ * 'needs_decision': ninguna historia avanza sola y alguna no está aceptada, cerrada ni cancelada en el Backlog (pendiente
+ * de tu aceptación, fallida, bloqueada…). El lote NO está terminado: se sigue sincronizando con el Backlog y, si una
+ * dependencia se completa, vuelve a 'running' dentro de la autorización vigente.
+ */
+export type BatchStatus = 'running' | 'paused' | 'needs_decision' | 'completed' | 'cancelled' | 'revoked';
+export const BATCH_STATUS_LABEL: Record<BatchStatus, string> = {
+  running: 'en marcha', paused: 'en pausa', needs_decision: 'necesita tu decisión', completed: 'terminado', cancelled: 'cancelado', revoked: 'revocado'
+};
 export type BatchItemState =
   /** En cola, con sus dependencias satisfechas o pendientes de empezar. */
   | 'queued'
@@ -548,6 +556,32 @@ export const DEPENDENCY_SATISFIED: BatchItemState[] = ['awaiting_acceptance', 'a
 /** Estados de una dependencia que bloquean definitivamente a quien depende de ella. */
 export const DEPENDENCY_BROKEN: BatchItemState[] = ['failed', 'blocked', 'cancelled'];
 
+/** Estados del Backlog que cierran una historia sin aceptarla en el lote (cerrada o cancelada). */
+export const BACKLOG_CLOSED: readonly string[] = ['cancelled', 'canceled', 'closed', 'discarded'];
+/** Estados del Backlog que dan por resuelta una historia que se siguió fuera del lote. */
+export const BACKLOG_SETTLED: readonly string[] = ['done', ...BACKLOG_CLOSED];
+
+/**
+ * ¿Está el lote terminado de verdad? Solo si TODAS sus historias están aceptadas o canceladas en el lote, o cerradas o
+ * canceladas en el Backlog (o, si se siguieron fuera del lote, terminadas allí). Pendientes de aceptación, fallidas,
+ * bloqueadas o no aceptadas → no (el lote «necesita tu decisión»). Una historia aplazada NO se da por resuelta por su
+ * estado en el lote: decide su estado en el Backlog (BACKLOG_SETTLED). Sin IO.
+ */
+export function isBatchSettled(items: { state: BatchItemState; backlogStatus?: string | null }[]): boolean {
+  return items.every(i => {
+    if (i.state === 'accepted' || i.state === 'cancelled') return true;
+    // Aplazada (y cualquier otro estado): resuelta solo si el Backlog la tiene terminada, cerrada o cancelada.
+    const bs = i.backlogStatus ?? null;
+    // Aceptada (done), cerrada o cancelada en el Backlog: resuelta, se ejecutara dentro o fuera del lote.
+    return !!bs && BACKLOG_SETTLED.includes(bs);
+  });
+}
+
+/** ¿Queda trabajo en el lote? (misma regla en el servidor y en la interfaz para mostrar «Reanudar»). */
+export function batchHasWork(items: { state: BatchItemState; backlogStatus?: string | null }[]): boolean {
+  return !isBatchSettled(items);
+}
+
 // ---------------------------------------------------------------- Presupuesto
 
 /**
@@ -626,6 +660,11 @@ export interface BatchItemView extends BatchItem {
   } | null;
 }
 export interface BatchView extends Omit<Batch, 'items'> {
+  /**
+   * Calculado por el servidor con la misma regla que el 409 batch_active: el lote impide autorizar otro (en marcha,
+   * en pausa, o esperando tu decisión pero aún capaz de lanzar trabajo solo). La interfaz no lo recalcula.
+   */
+  blocksNewBatch?: boolean;
   items: BatchItemView[];
   summary: Record<BatchItemState, number>;
   lifecycle: BatchLifecycle;

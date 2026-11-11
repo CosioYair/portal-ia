@@ -43,7 +43,11 @@ const BOOT = crypto.randomUUID(); // este proceso del servidor (un plan «en eje
 const ARCHIVE = 'refs/portal-ia/archivo';
 const ZERO = '0000000000000000000000000000000000000000';
 const OPEN_STORY = (s: string) => s !== 'done' && s !== 'discarded';
-const OPEN_BATCH = (b: Batch) => b.status === 'running' || b.status === 'paused';
+/** Lote abierto: en marcha, en pausa o esperando tu decisión (HU-203). Un lote en 'needs_decision' NO está cerrado: sus
+ *  historias pueden seguir sin aceptar o desbloquearse solas, así que sus ramas y carpetas siguen protegidas. */
+const OPEN_BATCH = (b: Batch) => b.status === 'running' || b.status === 'paused' || b.status === 'needs_decision';
+/** Un lote que no corre ahora (en pausa o esperando tu decisión) se puede cerrar desde la revisión. */
+const STILL_BATCH = (b: Batch) => b.status === 'paused' || b.status === 'needs_decision';
 const ACTIVE_PROC = (p?: Process | null) => !!p && (p.status === 'running' || p.status === 'pending_authorization');
 /** Iteración aplicada en su rama y aún sin integrar ni descartar: su carpeta y su rama hacen falta (verificar, integrar). */
 const PENDING_INTEGRATION = (p?: Process | null) => !!p?.result?.applied && !p.result.merged && !p.result.rejected;
@@ -311,7 +315,7 @@ async function classify(slug: string, inv: Inventory): Promise<MaintenanceItem[]
   const storyRef = (s: BacklogItem | null) => s ? { id: s.id, storyId: s.storyId ?? '', title: s.title, status: s.status } : null;
   const wtByBranch = new Map(inv.worktrees.filter(w => w.branch).map(w => [w.branch!, w]));
   const protectedNames = new Set([inv.main, inv.registered, 'main', 'master', inv.current, inv.remoteDefault].filter(Boolean) as string[]);
-  const batchLabel = (b: Batch) => `«${b.title}» (${b.status === 'paused' ? 'en pausa' : 'en marcha'})`;
+  const batchLabel = (b: Batch) => `«${b.title}» (${b.status === 'paused' ? 'en pausa' : b.status === 'needs_decision' ? 'necesita tu decisión' : 'en marcha'})`;
   const keepItem = (base: any, id: string, category: MaintenanceItem['category'], status: string, reason: string, fingerprint: string) => items.push({ ...base, id, category, status, reason, options: [O.keep], defaultOption: 'keep', consequences: 'Se conserva.', recovery: null, fingerprint });
   const assignments = assignmentsRepo(slug).list(inv.projectId);
 
@@ -336,7 +340,7 @@ async function classify(slug: string, inv: Inventory): Promise<MaintenanceItem[]
       const newer = s.lastProcessId && s.lastProcessId !== p?.id ? getProc(s.lastProcessId) : null;
       if (newer && newer.status !== 'cancelled' && !newer.result?.rejected) { keepItem(base, id, 'decision', 'Tiene una iteración más reciente fuera del lote', `Decídelo en la historia o en el lote «${bi.batch.title}»: el lote no conoce esa iteración.`, fp); continue; }
       // En un lote en pausa, cualquier cambio toca ese lote: nunca se marca solo; elegirlo es incluir el lote en tu decisión.
-      const paused = bi.batch.status === 'paused';
+      const paused = STILL_BATCH(bi.batch);
       const inBatch = `En el lote «${bi.batch.title}»${paused ? ' (en pausa: elegir una acción aquí cambia ese lote)' : ''}`;
       if (st === 'awaiting_acceptance') {
         // Reabierta (la devolviste a pendiente): nunca se ofrece como hecha.
@@ -432,7 +436,7 @@ async function classify(slug: string, inv: Inventory): Promise<MaintenanceItem[]
   const needLabel = (id: string) => { const it = items.find(i => i.id === id); if (!it) return id;
     return it.kind === 'batch' ? `cerrar el lote «${it.name}»` : it.kind === 'story' ? `cancelar ${it.story?.storyId || it.name}` : it.kind === 'iteration' ? `descartar la iteración de ${it.name.replace(/^Iteración de /, '')}` : it.kind === 'worktree' ? `retirar «${it.name}»` : it.name; };
   /** Un lote en pausa que se puede cerrar en esta revisión deja de proteger lo suyo si eliges cerrarlo. */
-  const batchNeed = (b: Batch) => b.status === 'paused' && items.some(i => i.id === `batch:${b.id}` && i.options.some(o => o.id === 'close_batch')) ? `batch:${b.id}` : null;
+  const batchNeed = (b: Batch) => STILL_BATCH(b) && items.some(i => i.id === `batch:${b.id}` && i.options.some(o => o.id === 'close_batch')) ? `batch:${b.id}` : null;
   /** Qué decisión libera una iteración aplicada sin integrar: cancelar su historia abierta o descartar la iteración suelta. */
   const releaseOf = (p: Process): string | null => {
     const s = storyOf(p);

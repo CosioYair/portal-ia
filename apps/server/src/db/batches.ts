@@ -57,6 +57,10 @@ export function batchesRepo(slug: string) {
     },
     active(): Batch[] {
       return (d.prepare(`SELECT doc_json FROM batches WHERE status IN ('running', 'paused') ORDER BY created_at`).all() as any[]).map(r => JSON.parse(r.doc_json));
+    },
+    /** Lotes que se siguen con el Backlog (también los que esperan tu decisión): temporizador y regla de lote abierto. */
+    followed(): Batch[] {
+      return (d.prepare(`SELECT doc_json FROM batches WHERE status IN ('running', 'paused', 'needs_decision') ORDER BY created_at`).all() as any[]).map(r => JSON.parse(r.doc_json));
     }
   };
 }

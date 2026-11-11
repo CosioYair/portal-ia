@@ -3,7 +3,7 @@ import { useEntryTitle } from '../lib/nav.ts';
 import { useLatest, useLive } from '../lib/live.ts';
 import { Link, useParams } from 'react-router-dom';
 import type { BacklogItem, BatchItemState, BatchItemView, BatchPreview, BatchView, GauntletConfig } from '@portal-ia/domain';
-import { BATCH_LIMITS, INTERNAL_WORKSPACE, batchMoving, normalizeGauntlet } from '@portal-ia/domain';
+import { BATCH_LIMITS, INTERNAL_WORKSPACE, batchHasWork, batchMoving, normalizeGauntlet } from '@portal-ia/domain';
 import { api, type BatchPolicyView, type BatchRequest } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
@@ -17,8 +17,10 @@ import { draftKey, useDraft, usePersistentState } from '../lib/persist.ts';
 import { officeHome } from '../lib/routes.ts';
 
 const STATUS: Record<BatchView['status'], { label: string; tone: '' | 'ok' | 'warn' | 'err' | 'accent' }> = {
-  running: { label: 'en marcha', tone: 'accent' }, paused: { label: 'en pausa', tone: 'warn' }, completed: { label: 'terminado', tone: 'ok' }, cancelled: { label: 'cancelado', tone: '' }, revoked: { label: 'autorización revocada', tone: 'err' }
+  running: { label: 'en marcha', tone: 'accent' }, paused: { label: 'en pausa', tone: 'warn' }, needs_decision: { label: 'necesita tu decisión', tone: 'warn' }, completed: { label: 'terminado', tone: 'ok' }, cancelled: { label: 'cancelado', tone: '' }, revoked: { label: 'autorización revocada', tone: 'err' }
 };
+/** Lo que «Reanudar» puede retomar: pendientes, esperando decisión, fallidas o bloqueadas. */
+const RESUMABLE: BatchItemState[] = ['queued', 'waiting_dependency', 'needs_owner', 'awaiting_integration', 'failed', 'blocked'];
 const TONE: Record<BatchItemState, '' | 'ok' | 'warn' | 'err' | 'accent'> = {
   queued: '', waiting_dependency: '', running: 'accent', integrating: 'accent', needs_owner: 'warn', awaiting_integration: 'warn', awaiting_acceptance: 'warn', accepted: 'ok', rejected: 'err', failed: 'err', blocked: 'err', cancelled: '', external: 'accent',
   ready: 'warn', revalidating: 'accent', postponed: '', prepared: 'accent'
@@ -54,7 +56,8 @@ export function Batches() {
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.slug, projectId]);
   useLive(c => c.ws === ws.slug && (c.entity === 'batch' || (c.entity === 'process' && c.kind !== 'progress')) && (!c.projectId || c.projectId === projectId), () => load(), { minMs: 1500 });
-  const active = list?.find(b => b.status === 'running' || b.status === 'paused');
+  // Lote abierto: lo decide el servidor con la misma regla que el 409 (blocksNewBatch), sin listas locales.
+  const active = list?.find(b => !!b.blocksNewBatch);
   return (
     <Shell crumb="Lotes">
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -351,7 +354,7 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}><Chip tone={st.tone}>{st.label}</Chip><Chip xs>Gauntlet {GAUNTLET_MODE[b.auth.gauntlet.mode].label.toLowerCase()}</Chip><Chip xs>{b.auth.concurrency} a la vez</Chip><Chip xs>integrar {b.auth.git.merge ? (b.auth.git.integration === 'on_acceptance' ? 'al aceptar' : 'al terminar') : 'no'}</Chip>{b.auth.git.activate && <Chip xs>activar sí</Chip>}<Chip xs>publicar {b.auth.git.publish ? 'sí' : 'no'}</Chip></div></div>
           {!closed && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             {b.status === 'running' && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => act(() => api.batchControl(ws.slug, b.id, 'pause'), 'Lote en pausa')}>Pausar</button>}
-            {b.status === 'paused' && !closing && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setClosing(true); setCloseReason(''); }} title="Sin costo de IA">Cerrar lote…</button>}
+            {(b.status === 'paused' || b.status === 'needs_decision') && !closing && <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setClosing(true); setCloseReason(''); }} title="Sin costo de IA">Cerrar lote…</button>}
             <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setCancelling(c => !c); setRevoking(false); }} aria-expanded={cancelling}>Cancelar lote…</button>
             <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => { setRevoking(r => !r); setCancelling(false); }} aria-expanded={revoking}>Revocar autorización…</button>
           </div>}
@@ -361,7 +364,7 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
           <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => { setCancelling(false); void act(() => api.batchControl(ws.slug, b.id, 'cancel'), 'Lote cancelado'); }}>Confirmar cancelación</button>
           <button className="btn btn-ghost btn-sm" onClick={() => setCancelling(false)}>No cancelar</button>
         </section>}
-        {closing && b.status === 'paused' && <section className="card card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }} data-testid="batch-close">
+        {closing && (b.status === 'paused' || b.status === 'needs_decision') && <section className="card card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }} data-testid="batch-close">
           <div className="sm13"><strong>Cerrar lote</strong> · Sin costo de IA. Queda completado si todas sus historias ya están integradas; si no, cancelado. El motivo y la fecha se registran en el lote.</div>
           <textarea className="input" placeholder="Motivo del cierre (obligatorio)" maxLength={500} value={closeReason} onChange={e => setCloseReason(e.target.value)} aria-label="Motivo del cierre" />
           <div style={{ display: 'flex', gap: 8 }}>
@@ -383,10 +386,12 @@ function BatchDetailOf({ batchId }: { batchId: string }) {
           <ol className="bw-list" style={{ marginTop: 6 }}>{b.integrationPlan.order.map(iid => { const x = b.items.find(i => i.itemId === iid); const notes = b.integrationPlan!.notes.filter(n => n.itemId === iid); return x ? <li key={iid}><span className="mono">{x.storyId}</span> {x.title} <Chip xs tone={TONE[x.state]}>{x.label}</Chip>{notes.map((n, k) => <div key={k} className="small muted">{n.text}</div>)}</li> : null; })}</ol>
           {b.integrationPlan.overlaps.length > 0 && <div className="small muted">Comparten archivos: {b.integrationPlan.overlaps.slice(0, 8).map(o => `${b.items.find(i => i.itemId === o.a)?.storyId}↔${b.items.find(i => i.itemId === o.b)?.storyId} (${o.files.slice(0, 2).join(', ')}${o.files.length > 2 ? '…' : ''})`).join(' · ')}</div>}
         </Disclosure></section>}
-        {b.reason && b.reason !== b.lifecycle.headline && <Notice kind={b.status === 'paused' || idle ? 'warn' : b.status === 'revoked' ? 'err' : 'info'}><span>{b.reason}{b.reasonFix ? <> <Link className="lnk" to={b.reasonFix.href}>{b.reasonFix.label}</Link></> : null}</span></Notice>}
+        {b.status === 'needs_decision' && <div aria-live="polite" className="small" data-testid="batch-needs-decision"><Chip tone="warn">necesita tu decisión</Chip> Ninguna historia avanza sola y alguna aún no está aceptada, cerrada ni cancelada en el Backlog.</div>}
+            {b.reason && b.reason !== b.lifecycle.headline && <Notice kind={b.status === 'paused' || b.status === 'needs_decision' || idle ? 'warn' : b.status === 'revoked' ? 'err' : 'info'}><span>{b.reason}{b.reasonFix ? <> <Link className="lnk" to={b.reasonFix.href}>{b.reasonFix.label}</Link></> : null}</span></Notice>}
         {!closed && <PolicyCard b={b} onChange={setB} />}
-        {(b.status === 'paused' || b.status === 'completed' || idle) && !closed && b.items.some(i => ['queued', 'waiting_dependency', 'needs_owner', 'awaiting_integration'].includes(i.state)) && <ResumeEffects b={b} />}
-        {(b.status === 'paused' || b.status === 'completed' || idle) && !closed && b.items.some(i => ['queued', 'waiting_dependency', 'needs_owner', 'awaiting_integration'].includes(i.state)) && <section className="card card-b" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        {(b.status === 'paused' || b.status === 'needs_decision' || idle) && !closed && (batchHasWork(b.items) || b.items.some(i => RESUMABLE.includes(i.state))) && <ResumeEffects b={b} />}
+        {(b.status === 'paused' || b.status === 'needs_decision' || idle) && !closed && (batchHasWork(b.items) || b.items.some(i => RESUMABLE.includes(i.state))) && <section className="card card-b" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+              <span className="small muted" data-testid="resume-spend-note" style={{ flexBasis: '100%' }}>«Reanudar» vuelve a poner en cola las historias pendientes, fallidas o bloqueadas que se puedan retomar. Solo gasta dentro de la autorización vigente del lote (sus límites y su presupuesto restante). Si el presupuesto se agota, el lote se pausa y te explica el motivo.</span>
           <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>Añadir presupuesto (USD)<input className="input mono" type="number" min={0} step={0.5} value={addBudget} onChange={e => setAddBudget(e.target.value)} style={{ width: 120, height: 32 }} /></label>
           <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>Añadir llamadas a la suscripción<input className="input mono" type="number" min={0} value={addCalls} onChange={e => setAddCalls(e.target.value)} style={{ width: 120, height: 32 }} /></label>
           <label className="ck" style={{ flex: '1 1 260px' }}><input className="cb" type="checkbox" checked={resumeOk} onChange={e => setResumeOk(e.target.checked)} /><span>Autorizo reanudar con estos límites (la duración autorizada cuenta desde ahora).</span></label>
