@@ -19,6 +19,7 @@ import { createStoryProcess, estimateStory } from './storyExecution.ts';
 import { createDelegation, estimateDelegation } from './delegation.ts';
 import { describeProcess } from './guidance.ts';
 import { lessonsRepo } from './lessons.ts';
+import { sealForOwner } from './portalSeal.ts';
 import { systemStatus } from './system.ts';
 import { repoStatus } from './repoStatus.ts';
 import { phaseContext } from './operationalPhase.ts';
@@ -540,7 +541,11 @@ ${await platformSnapshot({ workspaceSlug: conv.workspaceSlug, projectId: conv.pr
   const startedAt = new Date().toISOString();
   try {
     requirePolicy('ai_call', { slug: INTERNAL_WORKSPACE.slug, agentId: a.id, authorized: true }); // enviar el mensaje es la autorización (límite mensual ya comprobado)
-    const req = { model: chatModel, system, user: prompt, maxTokens: 3000, effort: a.config.effort, supportsEffort: !!models.find(m => m.id === chatModel)?.supportsEffort, images };
+    // EN-021: el sello va como bloque aparte, después del texto propio del Asistente y antes de readsWhat.
+  // Lo reciben así la rama del arnés y la de la API. Es la primera respuesta solo si la conversación no tiene ninguna respuesta
+  // previa del Asistente. Se mira `recent` y además la base, porque `recent` es una ventana recortada; un hilo reutilizado con respuesta cuenta como conversación existente.
+  const answeredBefore = recent.some(m => m.role !== 'user') || !!platform.prepare(`SELECT 1 FROM assistant_messages WHERE conversation_id = ? AND role <> 'user' LIMIT 1`).get(conv.id);
+  const req = { model: chatModel, system: sealForOwner(system, !answeredBefore), user: prompt, maxTokens: 3000, effort: a.config.effort, supportsEffort: !!models.find(m => m.id === chatModel)?.supportsEffort, images };
     // Backend del Asistente: con Claude Code, la suscripción (sin cargo a la API); si no está disponible, se dice y NO se usa la API.
     // Con un proyecto fijado (y autorizado para Claude Code), el Asistente lee su repositorio con el puente de SOLO lectura
     // (las mismas rutas protegidas que los agentes: nunca .env, data/, credenciales): investiga antes de proponer. Carril

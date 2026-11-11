@@ -15,6 +15,7 @@ import { monotonicNow } from '../clock.ts';
 import { attachmentsOfMessages, harnessSendsImages, linkToMessage, listAttachments, MAX_IMAGE_BYTES_PER_MESSAGE, modelContext, resolveForMessage, type ChatAttachment } from './agentAttachments.ts';
 import { actionsOfMessages, actionsPrompt, extractAction, registerAction, workContext, type AgentAction } from './agentActions.ts';
 import { buildLessonContext } from './lessons.ts';
+import { sealForOwner } from './portalSeal.ts';
 import { ROLE_TEMPLATE, templateKeyFor } from './agentTemplates.ts';
 import type { TeamRole } from '@portal-ia/domain';
 
@@ -147,7 +148,11 @@ export async function sendChat(slug: string, agentId: string, input: { text: str
   // EN-020: lecciones del papel (y las que no tienen papel) junto con las prácticas de su plantilla, cada texto una sola vez.
   let lessonCtx: { block: string; used: string[] } = { block: '', used: [] };
   try { lessonCtx = buildLessonContext(slug, { projectId, role: roleOfAgent(a), agent: a }); } catch { /* sin lecciones: el chat sigue */ }
-  const system = systemFor(slug, a, projectId) + lessonCtx.block;
+  // EN-021: el chat de un agente es una única conversación con el propietario (agent_messages no tiene marca de reinicio).
+  // Es la primera respuesta si el agente aún no ha respondido ninguna vez con éxito. Se consulta la base y no `hist`,
+  // porque `hist` está recortado por tope y por turnos. El sello se aplica una sola vez, después de las lecciones, que no se repiten.
+  const firstReply = !db.prepare(`SELECT 1 FROM agent_messages WHERE agent_id = ? AND role = 'agent' AND status = 'done' LIMIT 1`).get(agentId);
+  const system = sealForOwner(systemFor(slug, a, projectId) + lessonCtx.block, firstReply);
   const lessonsUsed = lessonCtx.used;
   const ts = now(); const ownerId = crypto.randomUUID(); const replyId = crypto.randomUUID();
   db.prepare(`INSERT INTO agent_messages (id, agent_id, role, content, status, harness, model, project_id, created_at, finished_at, meta_json) VALUES (?, ?, 'owner', ?, 'done', NULL, NULL, ?, ?, ?, ?)`).run(ownerId, agentId, text, projectId, ts, ts, JSON.stringify({ sent: ctx.sent, delivered: null, lessonsUsed }));
