@@ -19,8 +19,6 @@ import { officeHome } from '../lib/routes.ts';
 const STATUS: Record<BatchView['status'], { label: string; tone: '' | 'ok' | 'warn' | 'err' | 'accent' }> = {
   running: { label: 'en marcha', tone: 'accent' }, paused: { label: 'en pausa', tone: 'warn' }, needs_decision: { label: 'necesita tu decisión', tone: 'warn' }, completed: { label: 'terminado', tone: 'ok' }, cancelled: { label: 'cancelado', tone: '' }, revoked: { label: 'autorización revocada', tone: 'err' }
 };
-/** Estados con los que un lote en 'needs_decision' aún lanza trabajo solo (orientativo; el servidor decide con 409). */
-const AUTONOMOUS: BatchItemState[] = ['queued', 'waiting_dependency', 'running', 'integrating', 'revalidating'];
 /** Lo que «Reanudar» puede retomar: pendientes, esperando decisión, fallidas o bloqueadas. */
 const RESUMABLE: BatchItemState[] = ['queued', 'waiting_dependency', 'needs_owner', 'awaiting_integration', 'failed', 'blocked'];
 const TONE: Record<BatchItemState, '' | 'ok' | 'warn' | 'err' | 'accent'> = {
@@ -58,7 +56,8 @@ export function Batches() {
   useEffect(() => { void load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ws.slug, projectId]);
   useLive(c => c.ws === ws.slug && (c.entity === 'batch' || (c.entity === 'process' && c.kind !== 'progress')) && (!c.projectId || c.projectId === projectId), () => load(), { minMs: 1500 });
-  const active = list?.find(b => b.status === 'running' || b.status === 'paused' || (b.status === 'needs_decision' && b.items.some(i => AUTONOMOUS.includes(i.state))));
+  // Lote abierto: lo decide el servidor con la misma regla que el 409 (blocksNewBatch), sin listas locales.
+  const active = list?.find(b => !!b.blocksNewBatch);
   return (
     <Shell crumb="Lotes">
       <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>

@@ -660,6 +660,11 @@ export interface BatchItemView extends BatchItem {
   } | null;
 }
 export interface BatchView extends Omit<Batch, 'items'> {
+  /**
+   * Calculado por el servidor con la misma regla que el 409 batch_active: el lote impide autorizar otro (en marcha,
+   * en pausa, o esperando tu decisión pero aún capaz de lanzar trabajo solo). La interfaz no lo recalcula.
+   */
+  blocksNewBatch?: boolean;
   items: BatchItemView[];
   summary: Record<BatchItemState, number>;
   lifecycle: BatchLifecycle;
