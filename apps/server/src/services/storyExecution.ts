@@ -2,6 +2,7 @@ import { agentCaller, completeWith, RECOVERED_NOTE } from './claudeCode/backend.
 import type { Agent, AssessmentEstimate, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, Process, ProcessStep, ProviderId, ReviewVerdict, RuntimeCheck, StoryPlan, TeamOverride, TeamRole } from '@portal-ia/domain';
 import { composeTeam, orderedMembers, type StoryText } from './teamComposer.ts';
 import { injectLessons, recordDetections, recordLessonOutcomes } from './lessons.ts';
+import { curateAfterTask } from './lessonCurator.ts';
 import { practicesFor } from './agentTemplates.ts';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -463,6 +464,9 @@ Responde SOLO con JSON: {"approve": boolean, "summary": string, "issues": string
     // M4: detección determinista de errores objetivos (sin IA) → lecciones «detectadas» con evidencia.
     try { const ls = recordDetections(slug, processId, repo.path); if (ls.length) log({ processId, lessons: ls.map(l => l.detector) }, 'lecciones detectadas'); } catch (e: any) { log({ err: e.message }, 'detección de lecciones fallida'); }
     try { const o = recordLessonOutcomes(slug, processId, repo.path); if (o.held.length || o.recurred.length) log({ processId, held: o.held.length, recurred: o.recurred.length, refuted: o.refuted.length }, 'lecciones medidas en una tarea posterior'); } catch (e: any) { log({ err: e.message }, 'medición de lecciones fallida'); }
+    // HU-202 · El Curador de Aprendizaje cura sin IA (0 USD) todas las detecciones pendientes del proyecto, también si
+    // el proceso falló, se pausó o se canceló: no queda ninguna lección «detectada».
+    try { const c = curateAfterTask(slug, processId); if (c && c.groups) log({ processId, applied: c.applied, merged: c.merged, discarded: c.discarded }, 'lecciones curadas'); } catch (e: any) { log({ err: e.message }, 'curado de lecciones fallido'); }
   }
 }
 
