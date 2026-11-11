@@ -17,6 +17,7 @@ import { StoryResult } from '../components/StoryResult.tsx';
 import { IterationComposer } from '../components/IterationComposer.tsx';
 import { StoryFlowPanel } from '../components/StoryFlowPanel.tsx';
 import { KIND_LABEL, PendingDecisionCard } from '../components/PendingDecisionCard.tsx';
+import { Disclosure } from '../components/Disclosure.tsx';
 
 const ROLE: Record<string, string> = { planner: 'planifica', implementer: 'implementa', reviewer: 'revisa', consultant: 'consulta' };
 type Tab = 'estado' | 'chat' | 'tareas' | 'iteraciones';
@@ -71,9 +72,19 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
   }, [slug, storyId, active]);
   // La pestaña vive en el hash (#estado, #iteraciones…): así navegar a /historias/:id#iteraciones desde cualquier pestaña
   // (p. ej. tras enviar el feedback de la prueba) siempre la abre y recarga el contexto.
-  const openTab = (t: Tab) => { setTab(t); if (tabFromHash(hash) !== t) navigate({ hash: t }, { replace: true }); };
-  useEffect(() => { const t = tabFromHash(hash); if (t) { setTab(t); void load(); } // eslint-disable-next-line react-hooks/exhaustive-deps
+  // HU-195 · Cada sección es un Disclosure (plegable nativo, id sec-<t>): se abre y se lleva la vista hasta ella, aunque el hash no cambie.
+  const revealSection = (t: Tab) => requestAnimationFrame(() => {
+    const el = document.getElementById(`sec-${t}`);
+    if (el instanceof HTMLDetailsElement) el.open = true;
+    el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  const openTab = (t: Tab) => { setTab(t); revealSection(t); if (tabFromHash(hash) !== t) navigate({ hash: t }, { replace: true }); };
+  useEffect(() => { const t = tabFromHash(hash); if (t) { setTab(t); if (loaded.current) revealSection(t); void load(); } // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hash]);
+  // Hash de entrada: defaultOpen abre la sección; al llegar los datos se lleva la vista hasta ella (una sola vez).
+  const initReveal = useRef(false);
+  useEffect(() => { if (ctx && !initReveal.current) { initReveal.current = true; const t = tabFromHash(hash); if (t && t !== 'estado') revealSection(t); } // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ctx]);
 
   // Chat (también llega una pregunta preparada desde el recorrido: «Preguntar al equipo sobre este problema»)
   // Borradores de esta historia (chat, tarea nueva, nota de iteración y edición del contexto): sobreviven a recargar.
@@ -83,8 +94,12 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
   useEffect(() => { const q = (navState as any)?.ask; if (typeof q === 'string' && q) { setText(q); setAsk(true); navigate(`${pathname}${search}${hash}`, { replace: true, state: null }); } // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navState]);
   useEffect(() => { if (ctx) api.storyAskEstimate(slug, ctx.item.id, agentId || null).then(setEst).catch(() => setEst(null)); }, [slug, ctx?.item.id, agentId]);
-  const endRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [ctx?.messages.length, tab]);
+  // El chat se desplaza dentro de su propia lista (nunca mueve la página) al llegar mensajes o al abrir la sección.
+  const listRef = useRef<HTMLDivElement>(null);
+  const toEnd = () => { const l = listRef.current; if (l) l.scrollTop = l.scrollHeight; };
+  useEffect(() => { toEnd(); }, [ctx?.messages.length]);
+  const hasCtx = !!ctx;
+  useEffect(() => { const d = document.getElementById('sec-chat'); if (!d) return; d.addEventListener('toggle', toEnd); return () => d.removeEventListener('toggle', toEnd); }, [hasCtx]);
   const send = async () => {
     if (!ctx || text.trim().length < 1 || (ask && !auth)) return; setSending(true);
     try { await api.storyMessage(slug, ctx.item.id, text.trim(), ask ? { maxUsd: Math.max(0.1, (est?.estimatedUsd ?? 0.1) * 3), agentId: agentId || null } : undefined); chatDraft.clear(); setAuth(false); await load(); }
@@ -194,8 +209,7 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
             {it.archivedAt && <Link className="btn btn-primary btn-sm" to="/archivo">{Icon.arrow()}Restaurar desde el archivo</Link>}
             {it.status !== 'in_progress' && it.status !== 'done' && it.status !== 'discarded' && !it.archivedAt && <button className="btn btn-ghost btn-sm" title="No se hará: la historia queda en Descartadas (pide confirmación y motivo)" onClick={cancelStory} disabled={cancelBusy}>{cancelBusy ? <span className="spin" /> : Icon.x(14)}Cancelar historia</button>}
           </div>
-        </header>
-        {currentDecision && !it.archivedAt && <Notice kind="warn"><div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', flex: 1 }}>
+        {currentDecision && !it.archivedAt && <div id="story-decision" aria-label="Decisión pendiente" style={{ flexBasis: '100%', minWidth: 0 }}><Notice kind="warn"><div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', flex: 1 }}>
           <strong>Pendiente de tu decisión</strong>
           <Chip tone="accent" xs>Iteración {currentDecision.iteration ?? '—'}</Chip>
           <span>{KIND_LABEL[currentDecision.kind]} · {currentDecision.impact}</span>
@@ -204,9 +218,9 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
             {currentDecision.kind === 'process_authorization'
               ? <button className="btn btn-secondary btn-sm" onClick={openAuthorize}>Abrir la autorización</button>
               : <Link className="btn btn-secondary btn-sm" to={`/procesos/${currentDecision.processId}`}>Decidir en el proceso</Link>}
-            <Link className="btn btn-ghost btn-sm" to="/autorizaciones">Autorizaciones</Link>
           </span>
-        </div></Notice>}
+        </div></Notice></div>}
+        </header>
         {it.archivedAt && <Notice kind="info"><strong>Historia archivada</strong> con la etapa anterior ({new Date(it.archivedAt).toLocaleDateString('es-MX')}). Es histórica: puedes consultarla, pero no admite acciones. Para retomarla, restáurala desde el <Link className="lnk" to="/archivo">archivo histórico</Link>.</Notice>}
         <fieldset disabled={!!it.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
         {last?.guidance?.flow ? <StoryFlowPanel proc={last} story={{ id: it.id, storyId: it.storyId, title: it.title }} variant="story" onChange={onProcChange}
@@ -217,16 +231,20 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 320px)', gap: 16, alignItems: 'start', marginTop: 14 }}>
           <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {(['estado', 'chat', 'tareas', 'iteraciones'] as const).map(t => <button key={t} className={`btn btn-sm ${tab === t ? 'btn-primary' : 'btn-ghost'}`} onClick={() => openTab(t)}>{t === 'estado' ? 'Estado y prueba' : t === 'chat' ? `Chat con el equipo${ctx.messages.length ? ` (${ctx.messages.length})` : ''}` : t === 'tareas' ? `Tareas${openTasks ? ` (${openTasks})` : ''}` : `Iteraciones (${ctx.iterations})`}</button>)}
-            </div>
             <fieldset disabled={!!it.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {tab === 'estado' && (last ? (last.status === 'done' || (last.result?.changes.length ?? 0) > 0 ? <StoryResult proc={last} onChange={onProcChange} /> : <section className="card card-b"><p className="sm13">La iteración actual está <strong>{last.status === 'running' ? 'en ejecución' : last.status === 'pending_authorization' ? 'pendiente de autorización' : last.status}</strong>. {last.status === 'pending_authorization' ? (supOf(last) ? `Está superada por la iteración ${supOf(last)!.byIteration ?? 'más reciente'}: decide sobre la vigente o restáurala desde el historial.` : 'Autorízala con el botón de la cabecera.') : ''}<Link className="lnk" to={`/procesos/${last.id}`}> Ver el proceso</Link>.</p></section>) : <section className="card card-b"><p className="sm13 muted">Esta historia aún no se ha ejecutado. Hazlo desde Backlog («Ejecutar») para que el equipo proponga el diff; después todo el seguimiento ocurre aquí.</p></section>)}
+            {(() => {
+              const estado = last ? (last.status === 'done' || (last.result?.changes.length ?? 0) > 0 ? <StoryResult proc={last} onChange={onProcChange} /> : <section className="card card-b"><p className="sm13">La iteración actual está <strong>{last.status === 'running' ? 'en ejecución' : last.status === 'pending_authorization' ? 'pendiente de autorización' : last.status}</strong>. {last.status === 'pending_authorization' ? (supOf(last) ? `Está superada por la iteración ${supOf(last)!.byIteration ?? 'más reciente'}: decide sobre la vigente o restáurala desde el historial.` : 'Autorízala con el botón de la cabecera.') : ''}<Link className="lnk" to={`/procesos/${last.id}`}> Ver el proceso</Link>.</p></section>) : <section className="card card-b"><p className="sm13 muted">Esta historia aún no se ha ejecutado. Hazlo desde Backlog («Ejecutar») para que el equipo proponga el diff; después todo el seguimiento ocurre aquí.</p></section>;
+              // HU-195 · Con la autorización pendiente, la decisión manda (en la cabecera) y el estado queda plegado.
+              return last?.status === 'pending_authorization'
+                ? <section className="card card-b"><Disclosure id="sec-estado" testId="story-estado" title="Estado y prueba" hint="Plegado mientras decides la autorización de la cabecera." defaultOpen={tabFromHash(hash) === 'estado'}>{estado}</Disclosure></section>
+                : <div id="sec-estado" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>{estado}</div>;
+            })()}
 
-            {tab === 'chat' && <section className="card">
-              <div className="card-h"><div><div className="h3">Chat con los agentes de la historia</div><div className="small muted">El agente elegido responde con todo el contexto (criterio, diff, QA, prueba, tareas). Cada pregunta es una llamada autorizada; las notas sin IA son gratis.</div></div></div>
-              <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 460, overflow: 'auto', padding: 2 }}>
+            <section className="card card-b" aria-label="Chat, tareas e historial" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+
+            <Disclosure id="sec-chat" testId="story-chat" title={`Chat con el equipo${ctx.messages.length ? ` (${ctx.messages.length})` : ''}`} hint="El agente elegido responde con todo el contexto (criterio, diff, QA, prueba, tareas). Cada pregunta es una llamada autorizada; las notas sin IA son gratis." defaultOpen={tab === 'chat'}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div ref={listRef} style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 460, overflow: 'auto', padding: 2 }}>
                   {ctx.messages.length === 0 && <p className="sm13 muted" style={{ margin: 0 }}>Sin mensajes. Pregunta por qué falló un paso, pide que replanteen el alcance o deja una nota para la próxima iteración.</p>}
                   {ctx.messages.map(m => <div key={m.id} style={{ alignSelf: m.role === 'owner' ? 'flex-end' : 'flex-start', maxWidth: '92%', background: m.role === 'owner' ? 'var(--color-ink)' : m.role === 'system' ? 'var(--color-warn-bg-soft)' : 'var(--color-surface-alt)', color: m.role === 'owner' ? 'var(--color-surface)' : 'var(--color-ink)', borderRadius: 10, padding: '8px 12px' }}>
                     <div className="small" style={{ opacity: 0.75, marginBottom: 2 }}>{m.role === 'owner' ? 'Tú' : m.role === 'system' ? 'Portal' : m.agentName} · {new Date(m.createdAt).toLocaleString()}{m.costUsd ? ` · ${m.costUsd.toFixed(4)} USD real` : ''}</div>
@@ -238,7 +256,6 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
                     </div>}
                     {m.proposals?.applied && <div className="small muted" style={{ marginTop: 4 }}>propuesta aplicada</div>}
                   </div>)}
-                  <div ref={endRef} />
                 </div>
                 <textarea className="input" style={{ minHeight: 70 }} value={text} onChange={e => setText(e.target.value)} placeholder="Escribe al equipo…" onKeyDown={e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) void send(); }} />
                 <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -248,11 +265,11 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
                   <button className="btn btn-primary btn-sm" onClick={send} disabled={sending || text.trim().length < 1 || (ask && !auth)}>{sending ? <span className="spin spin-light" /> : Icon.arrow()}{ask ? 'Preguntar' : 'Guardar nota'}</button>
                 </div>
               </div>
-            </section>}
+            </Disclosure>
 
-            {tab === 'tareas' && <section className="card">
-              <div className="card-h"><div><div className="h3">Tareas de la historia</div><div className="small muted">Lo que falta para cerrarla. Las abiertas se incluyen en la siguiente iteración.</div></div><button className="btn btn-secondary btn-sm" onClick={fromFeedback}>Crear desde los pasos con falla</button></div>
-              <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <Disclosure id="sec-tareas" testId="story-tareas" title={`Tareas${openTasks ? ` (${openTasks} abiertas)` : ''}`} hint="Lo que falta para cerrarla. Las abiertas se incluyen en la siguiente iteración." defaultOpen={tab === 'tareas'}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div><button className="btn btn-secondary btn-sm" onClick={fromFeedback}>Crear desde los pasos con falla</button></div>
                 {ctx.tasks.length === 0 && <p className="sm13 muted" style={{ margin: 0 }}>Sin tareas.</p>}
                 {ctx.tasks.map(t => <div key={t.id} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
                   <input className="cb" type="checkbox" checked={t.status === 'done'} onChange={async e => { await api.storySetTask(slug, it.id, t.id, e.target.checked ? 'done' : 'open'); await load(); }} />
@@ -261,16 +278,15 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
                 </div>)}
                 <div style={{ display: 'flex', gap: 8 }}><input className="input" style={{ flex: 1, height: 34 }} value={newTask} onChange={e => setNewTask(e.target.value)} placeholder="Nueva tarea…" onKeyDown={e => { if (e.key === 'Enter') void addTask(); }} /><button className="btn btn-secondary btn-sm" onClick={addTask} disabled={newTask.trim().length < 2}>Añadir</button></div>
               </div>
-            </section>}
+            </Disclosure>
 
-            {tab === 'iteraciones' && <section className="card">
-              <div className="card-h"><div><div className="h3">Iteraciones</div><div className="small muted">Cada iteración es un proceso del equipo con el contexto de la anterior: feedback de la prueba, tareas abiertas, conversación y tu nota.</div></div></div>
-              <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <Disclosure id="sec-iteraciones" testId="story-iteraciones" title={`Iteraciones e historial de autorizaciones (${ctx.iterations})`} hint="Cada iteración es un proceso del equipo con el contexto de la anterior: feedback de la prueba, tareas abiertas, conversación y tu nota." defaultOpen={tab === 'iteraciones'}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 {ctx.processes.some(supOf) && <span className="small muted">Las iteraciones con la autorización superada solo aparecen en el historial de abajo.</span>}
                 {ctx.processes.map((p, i) => ({ p, n: iterOf(p) ?? ctx.processes.length - i })).filter(x => !supOf(x.p)).map(({ p, n }) => <div key={p.id} className="rrow" style={{ alignItems: 'flex-start' }}><span className="mono small muted">Iteración {n}</span><span style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 2 }}><span style={{ fontWeight: 500 }}>{p.guidance?.phase ?? p.status}{p.id === ctx.processes.find(x => !supOf(x))?.id && <> <Chip tone="accent" xs>vigente</Chip></>}</span><span className="small muted">{new Date(p.createdAt).toLocaleString()} · {p.steps.length} pasos · gastado {fmtUsd(p.spentUsd)} de {fmtUsd(p.budgetUsd)}{p.result?.iterationContext ? ' · con contexto de iteración' : ''}</span></span><Link className="btn btn-ghost btn-sm" to={`/procesos/${p.id}`}>Abrir</Link></div>)}
                 {pending ? <Notice kind="warn"><div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <div><strong>Iteración {iterOf(pending) ?? '—'} pendiente de autorización</strong> · se autoriza en la cabecera · estimación ≈ {fmtUsd(pending.estimatedUsd)} · {pending.steps.length} pasos ({pending.steps.map(s => s.agentName).join(', ')})</div>
-                  {pending.result?.iterationContext && <details><summary className="small muted" style={{ cursor: 'pointer' }}>Contexto que recibirá el equipo</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap', fontSize: 12, background: 'var(--color-surface-alt)', padding: 8, borderRadius: 8 }}>{pending.result.iterationContext}</pre></details>}
+                  {pending.result?.iterationContext && <Disclosure title="Contexto que recibirá el equipo"><pre className="mono" style={{ whiteSpace: 'pre-wrap', fontSize: 12, background: 'var(--color-surface-alt)', padding: 8, borderRadius: 8 }}>{pending.result.iterationContext}</pre></Disclosure>}
                   <div><button className="btn btn-secondary btn-sm" onClick={openAuthorize}>{Icon.arrow()}Abrir la autorización en la cabecera</button></div>
                 </div></Notice> : ctx.iteration.state !== 'in_progress' && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <div className="eyebrow">{ctx.iteration.needsReopen ? 'Reabrir la historia y crear una nueva iteración' : 'Nueva iteración'}</div>
@@ -288,7 +304,8 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
                   </ul>}
                 </div>
               </div>
-            </section>}
+            </Disclosure>
+            </section>
             </fieldset>
           </div>
 
@@ -302,7 +319,7 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
                 <textarea id="ctx-criterion" className="input" style={{ minHeight: 80 }} value={edit.criterion} maxLength={600} onChange={e => setEdit({ ...edit, criterion: e.target.value })} />
                 <label className="label" htmlFor="ctx-description" style={{ margin: 0 }}>Descripción e historial</label>
                 <textarea id="ctx-description" className="input" style={{ minHeight: 120 }} value={edit.description} maxLength={4000} onChange={e => setEdit({ ...edit, description: e.target.value })} />
-                {(it.lastProcessId || it.status !== 'pending') && <span className="small muted">El cambio queda registrado en el historial de la historia (pestaña Chat) y la próxima iteración usa este contexto.</span>}
+                {(it.lastProcessId || it.status !== 'pending') && <span className="small muted">El cambio queda registrado en el historial de la historia (sección Chat) y la próxima iteración usa este contexto.</span>}
                 {editErr && <Notice kind="err">{editErr}</Notice>}
                 <div style={{ display: 'flex', gap: 8 }}><button className="btn btn-primary btn-sm" onClick={saveEdit} disabled={editBusy || edit.title.trim().length < 3}>{editBusy ? <span className="spin spin-light" /> : Icon.check()}Guardar</button><button className="btn btn-ghost btn-sm" onClick={() => { setEdit(null); setEditErr(null); }} disabled={editBusy}>Cancelar</button></div>
               </div> : <>

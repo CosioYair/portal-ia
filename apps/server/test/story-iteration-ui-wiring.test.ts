@@ -55,9 +55,10 @@ test('HU-166: la autorización se hace desde la cabecera, sin cambiar de pestañ
   const ws = read('screens/StoryWorkspace.tsx');
   assert.match(ws, /<StoryFlowPanel proc=\{last\}[^\n]*\n?[^\n]*onAuthorize=\{openAuthorize\} authorizeSlot=\{authForm\}/, 'la historia pasa onAuthorize y authorizeSlot a la cabecera');
   assert.ok(ws.includes('id="sec-authorize-story"'), 'el formulario de autorización vive en la cabecera');
-  const iterIdx = ws.indexOf("{tab === 'iteraciones' &&"); assert.ok(iterIdx > 0, 'existe la pestaña Iteraciones');
+  // HU-195 · Iteraciones ya no es una pestaña: es la sección plegable sec-iteraciones (Disclosure).
+  const iterIdx = ws.indexOf('id="sec-iteraciones"'); assert.ok(iterIdx > 0, 'existe la sección plegable de Iteraciones');
   const authIdx = ws.indexOf('api.authorizeProcess(slug, pending.id, Number(budget), pipeline)');
-  assert.ok(authIdx > 0 && authIdx < iterIdx, 'la llamada de autorización no está en la pestaña Iteraciones');
+  assert.ok(authIdx > 0 && authIdx < iterIdx, 'la llamada de autorización no está en la sección Iteraciones');
   assert.ok(!ws.slice(iterIdx).includes('onClick={authorize}'), 'en Iteraciones ya no hay un segundo formulario de autorización');
   assert.ok(!ws.includes("btn btn-primary btn-sm\" onClick={() => openTab('iteraciones')}"), 'el aviso de decisión ya no lleva a Iteraciones para autorizar');
   assert.ok(!ws.includes('Autorízala en la pestaña Iteraciones.'));
