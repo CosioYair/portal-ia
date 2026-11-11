@@ -1651,6 +1651,8 @@ const canResume = (slug: string, it: BatchItem) => requeueMode(slug, it) !== nul
 
 /** Reintentar UNA historia dentro del lote (mismos límites): vuelve a la cola y se comprueban otra vez su equipo y orígenes. */
 export function retryItem(slug: string, id: string, itemId: string): Batch {
+  // Regla 409 (HU-203): si otro lote del proyecto puede lanzar trabajo, reintentar no cambia estados ni crea procesos.
+  assertNoOtherBlocking(slug, id);
   ownerReopen(slug, id);
   const b = getBatch(slug, id); controllable(b);
   const it = b.items.find(i => i.itemId === itemId); if (!it) throw fail(404, 'La historia no está en el lote.', 'not_found');
@@ -1804,6 +1806,8 @@ export function reopenItem(slug: string, id: string, itemId: string): Batch {
  * iteración con tu nota y los pasos que fallaron, y el lote la ejecuta en su turno. Las demás no se repiten.
  */
 export async function iterateItem(slug: string, id: string, itemId: string, note: string, revision?: string | null): Promise<Batch> {
+  // Regla 409 (HU-203): si otro lote del proyecto puede lanzar trabajo, iterar no cambia estados ni crea procesos.
+  assertNoOtherBlocking(slug, id);
   ownerReopen(slug, id);
   const b = getBatch(slug, id); controllable(b);
   const it = b.items.find(i => i.itemId === itemId);
