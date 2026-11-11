@@ -24,19 +24,21 @@ a.btn, a.navi, a.section-tab, a.side-link, a.tile-link, a.cmdk-item, a.desk-link
 .card-b { padding: 20px; }
 .card-f { padding: 12px 20px; border-top: 1px solid var(--color-divider); background: var(--color-surface-alt); border-radius: 0 0 var(--radius-card) var(--radius-card); }
 
-.btn { appearance: none; border: 1px solid transparent; border-radius: var(--radius-sm); height: 40px; padding: 0 16px; font: inherit; font-weight: 500; font-size: 14px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer; white-space: nowrap; text-decoration: none; transition: background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast), box-shadow var(--dur-fast); }
+/* HU-208 · Los botones pueden partir línea: nunca pasan del ancho de su contenedor (también en 375 px). */
+.btn { appearance: none; border: 1px solid transparent; border-radius: var(--radius-sm); min-height: 40px; height: auto; max-width: 100%; padding: 8px 16px; font: inherit; font-weight: 500; font-size: 14px; line-height: 1.25; display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; cursor: pointer; white-space: normal; overflow-wrap: anywhere; text-align: center; text-decoration: none; transition: background var(--dur-fast), border-color var(--dur-fast), color var(--dur-fast), box-shadow var(--dur-fast); }
 .btn:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
 .btn-primary { background: var(--color-primary); color: var(--color-on-dark); box-shadow: var(--shadow-btn); }
 .btn-primary:hover { background: var(--color-primary-hover); color: var(--color-on-dark); }
 .btn-secondary { background: var(--color-surface); color: var(--color-text); border-color: var(--color-control-border); }
 .btn-secondary:hover { background: var(--color-surface-hover); border-color: var(--color-border-hover-strong); color: var(--color-text); }
-.btn-ghost { background: transparent; color: var(--color-text-med); }
-.btn-ghost:hover { background: var(--color-surface-pressed); color: var(--color-text); }
+/* Terciario: transparente con borde visible (≥ 3:1 sobre los fondos claros); para «Ahora no», «Descartar» o «Quitar». */
+.btn-ghost { background: transparent; color: var(--color-text-med); border-color: var(--color-tertiary-border); }
+.btn-ghost:hover { background: var(--color-surface-pressed); color: var(--color-text); border-color: var(--color-border-hover-strong); }
 .btn-danger { background: var(--color-surface); color: var(--color-err-text); border-color: var(--color-err-border); }
 .btn-danger:hover { background: var(--color-err-bg); }
-.btn-sm { height: 32px; padding: 0 12px; font-size: 13px; border-radius: var(--radius-sm); }
+.btn-sm { min-height: 32px; height: auto; max-width: 100%; padding: 5px 12px; font-size: 13px; border-radius: var(--radius-sm); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
-.btn-primary:disabled:hover { background: var(--color-primary); } .btn-secondary:disabled:hover { background: var(--color-surface); } .btn-ghost:disabled:hover { background: transparent; }
+.btn-primary:disabled:hover { background: var(--color-primary); } .btn-secondary:disabled:hover { background: var(--color-surface); } .btn-ghost:disabled:hover { background: transparent; border-color: var(--color-tertiary-border); }
 
 .lnk { appearance: none; background: none; border: 0; padding: 0; font: inherit; font-weight: 500; color: var(--color-accent); cursor: pointer; text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--color-accent) 40%, transparent); text-underline-offset: 3px; }
 .lnk:hover { color: var(--color-accent-hover); }
@@ -255,6 +257,23 @@ button.stat:focus-visible, a.stat:focus-visible { outline: var(--focus-ring); ou
 .settings-card { display: flex; flex-direction: column; gap: 10px; padding: 18px; text-decoration: none; color: inherit; }
 a.settings-card:hover { border-color: var(--color-border-hover); box-shadow: var(--shadow-raise); }
 a.settings-card:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+
+/* HU-208 · Fila de ajuste (components/kit.tsx SettingsRow): etiqueta y descripción a la izquierda, control a la
+   derecha; si no cabe (panel estrecho, móvil), el control pasa debajo. */
+.settings-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3) var(--space-4); padding: var(--space-3) 0; border-top: 1px solid var(--color-divider); min-width: 0; }
+.settings-row:first-child { border-top: 0; }
+.settings-row__text { flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.settings-row__label { font-size: var(--fs-body); font-weight: 500; color: var(--color-text); overflow-wrap: anywhere; }
+.settings-row__desc { margin: 0; font-size: var(--fs-small); line-height: 1.45; color: var(--color-text-muted); overflow-wrap: anywhere; }
+.settings-row__control { flex: 0 1 auto; max-width: 100%; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+@media (max-width: 480px) { .settings-row__control { flex-basis: 100%; } }
+
+/* HU-208 · Panel informativo (components/kit.tsx InfoPanel): icono, título opcional y cuerpo, sobre el fondo info. */
+.info-panel { display: flex; gap: var(--space-3); align-items: flex-start; padding: var(--space-3) var(--space-4); background: var(--color-info-bg); border: 1px solid var(--color-info-border); border-radius: var(--radius); color: var(--color-text-med); font-size: 13px; line-height: 1.45; min-width: 0; }
+.info-panel__icon { flex: none; margin-top: 1px; color: var(--color-info-text); display: inline-flex; }
+.info-panel__content { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.info-panel__title { margin: 0; font-size: var(--fs-body); font-weight: 600; color: var(--color-info-text); }
+.info-panel__body { min-width: 0; overflow-wrap: anywhere; }
 
 @media (prefers-reduced-motion: reduce) { .side { transition: none; } }
 

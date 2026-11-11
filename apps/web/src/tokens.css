@@ -32,6 +32,8 @@
   --color-border-hover: #A9AABE;
   --color-border-hover-strong: #6E7089;
   --color-control-border: #8B8CA3;
+  /* HU-208 · Borde del botón terciario (.btn-ghost): ≥ 3:1 sobre surface, bg, surface-alt y surface-pressed */
+  --color-tertiary-border: #7A7B93;
   --color-track: #E9E9F1;
   --color-dot: #9799AE;
   --color-step-divider: rgba(128, 128, 140, 0.25);
@@ -117,6 +119,8 @@
   /* Avisos: informativo y pregunta del equipo */
   --color-info-bg: #F3F6FD;
   --color-info-border: #D5E0F7;
+  /* HU-208 · Título e icono del panel informativo: ≥ 4,5:1 sobre --color-info-bg */
+  --color-info-text: #2B3F73;
   --color-ask-bg: #FFFAEC;
   --color-ask-border: #EDC165;
 
