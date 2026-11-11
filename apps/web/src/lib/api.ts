@@ -14,6 +14,7 @@ export interface AssignmentPendingItem { id: string; kind: 'awaiting_iteration_a
 export type DecisionHistoryVerdict = 'approve' | 'deny' | 'superseded';
 export interface DecisionHistoryItem { id: string; kind: PendingDecisionKind; title: string; workspaceSlug: string; projectId: string; storyId: string | null; processId: string; conversationId: string | null; verdict: DecisionHistoryVerdict; reason: string | null; decidedAt: string }
 import type { DocumentBatch, DocumentJob, RemovalPreview, RemovalRecord } from '@portal-ia/domain';
+import type { LessonAutoImproveAuthorization } from '@portal-ia/domain';
 import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
 import { ownerNeeded, ownerToken, setOwnerToken } from './owner.ts';
 
@@ -160,6 +161,9 @@ export interface AgentLearningEntry { id: string; title: string; text: string; d
 export interface AgentLearningView { verified: { title: string; text: string; [k: string]: unknown }[]; pending: AgentLearningEntry[]; related: AgentLearningEntry[]; note: string }
 /** HU-202 · Resumen de una depuración del Curador de Aprendizaje (sin IA, 0 USD). */
 export interface LessonCurateSummary { applied: number; merged: number; discarded: number; groups: number; appliedIds: string[] }
+/** EN-022 · Mejora de una lección pendiente de tu decisión (lista aparte en Decisiones; tal como la sirve /inbox/lessons). */
+export interface LessonImprovementInboxItem { lessonId: string; title: string; projectId: string | null; detector: string; version: number; lessonText: string | null; reason: 'recurred' | 'refuted'; tasks: number; at: string; estimatedUsd: number | null }
+export type { LessonAutoImproveAuthorization };
 /** EN-011 · Resumen «Qué trae y qué aprendió» de una importación de ZIP (sin IA). */
 export interface ImportLearnedSkill { slug: string; name: string; description: string; base: boolean; note: string | null }
 export interface ImportLearned {
@@ -375,6 +379,15 @@ export const api = {
   detectLessons: (slug: string, processId: string) => request<Lesson[]>(`/api/workspaces/${slug}/processes/${processId}/detect-lessons`, { method: 'POST' }),
   /** HU-202 · El Curador agrupa y aplica (o descarta) todas las detecciones pendientes con una sola confirmación. Sin IA, 0 USD. */
   lessonsCurate: (slug: string, projectId: string | null) => request<LessonCurateSummary>(`/api/workspaces/${slug}/lessons/curate`, { method: 'POST', body: JSON.stringify({ authorized: true, projectId }) }),
+  /** EN-022 · Autorización permanente de la mejora automática (desactivada por defecto; con topes mensuales). */
+  lessonAutoImprove: (slug: string) => request<LessonAutoImproveAuthorization>(`/api/workspaces/${slug}/lessons/auto-improve`),
+  setLessonAutoImprove: (slug: string, input: { enabled: boolean; monthlyCallCap: number; monthlyUsdCap: number }) => request<LessonAutoImproveAuthorization>(`/api/workspaces/${slug}/lessons/auto-improve`, { method: 'PUT', body: JSON.stringify({ ...input, authorized: true }) }),
+  /** EN-022 · Mejoras de lecciones pendientes de tu decisión (sin IA). */
+  inboxLessons: (slug: string) => request<LessonImprovementInboxItem[]>(`/api/workspaces/${slug}/inbox/lessons`),
+  /** EN-022 · Aceptar la mejora: autoriza UNA llamada al modelo y aplica la versión nueva. */
+  acceptLessonImprovement: (slug: string, id: string) => request<Lesson>(`/api/workspaces/${slug}/lessons/${encodeURIComponent(id)}/improvement/accept`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
+  /** EN-022 · Volver a la versión anterior de una lección mejorada (sin IA, 0 USD). */
+  revertLessonImprovement: (slug: string, id: string) => request<Lesson>(`/api/workspaces/${slug}/lessons/${encodeURIComponent(id)}/improvement/revert`, { method: 'POST', body: JSON.stringify({ confirm: true }) }),
   // M5 · plantillas versionadas
   agentTemplate: (slug: string, id: string, to?: string) => request<{ current: AgentTemplateVersion | null; latest: AgentTemplateVersion | null; versions: AgentTemplateVersion[]; history: { fromVersion: string | null; toVersion: string; at: string; by: string }[]; diff: { from: string | null; to: string; added: string[]; removed: string[]; diffMd: string } | null; templateVersion: string | null }>(`/api/workspaces/${slug}/agents/${id}/template${to ? `?to=${encodeURIComponent(to)}` : ''}`),
   setAgentTemplateVersion: (slug: string, id: string, version: string) => request<Agent>(`/api/workspaces/${slug}/agents/${id}/template-version`, { method: 'POST', body: JSON.stringify({ authorized: true, version }) }),
