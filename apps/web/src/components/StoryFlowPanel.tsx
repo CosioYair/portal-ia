@@ -245,7 +245,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   // HU-166 · Siempre hay un botón principal en la cabecera: si el servidor no trae ninguno, solo se navega al proceso (no se ejecuta nada).
   const fallback = variant === 'story' && !primary && !readOnly;
   // HU-193 · El avance se dice una sola vez: barra de etapas en el resumen y esta línea de «Siguiente paso».
-  const iterationNo = (proc as Process & { iteration?: number | null }).iteration ?? null;
+  // HU-193 · La iteración sale de una sola fuente: flow.iteration (chip «It. N/M»).
   const runningNow = proc.status === 'running';
   const unitNow = runningNow ? flow.delivery?.currentUnit ?? null : null;
   const nextText = primary ? primary.label
@@ -264,9 +264,9 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   return (
     <section className="sf" aria-label="Estado de la historia">
       <div className="sf-summary" aria-label="Resumen de la historia"><div className="sf-top">
-        <div className="sf-title">{iterationNo !== null && <Chip xs className="sf-it">It. {iterationNo}</Chip>}
-          <div className="eyebrow">{story ? <>{variant === 'process' ? <Link className="lnk" to={`/historias/${story.id}`}>{story.storyId}</Link> : story.storyId}</> : 'Historia'}{flow.iteration ? ` · iteración ${flow.iteration.number} de ${flow.iteration.total}` : ''} · etapa {curIdx + 1} de {flow.stages.length}</div>
-          <div className="h3">{story ? story.title : proc.title}</div>
+        <div className="sf-title">{flow.iteration && <Chip xs className="sf-it">It. {flow.iteration.number}/{flow.iteration.total}</Chip>}
+          <div className="eyebrow">{story ? <>{variant === 'process' ? <Link className="lnk" to={`/historias/${story.id}`}>{story.storyId}</Link> : story.storyId}</> : 'Historia'}</div>
+          {variant === 'process' && <div className="h3">{story ? story.title : proc.title}</div>}
         </div>
         <div className="sf-meta">
           <Chip xs className="mono">{fmtUsd(proc.spentUsd)} de {fmtUsd(proc.budgetUsd)} autorizados</Chip>
@@ -287,8 +287,8 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
 
       <div className="sf-next" aria-label="Siguiente paso">
         <p className="sf-next-line">{runningNow && <span className="spin" />}<strong>Siguiente paso:</strong> <span>{nextText}</span></p>
-        {cur.detail && <span className="small muted">{cur.detail}</span>}
-        {flow.responsible.length > 0 && <span className="small">{flow.responsible.map(r => `${r.agentName} (${r.role})`).join(' · ')} — {flow.responsible[0].status}</span>}
+        {(cur.detail || flow.responsible.length > 0) && <span className="small muted sf-next-sub">{[cur.detail || null, flow.responsible.length > 0 ? `${flow.responsible.map(r => r.agentName).join(' · ')} — ${flow.responsible[0].status}` : null].filter(Boolean).join(' · ')}</span>}
+        
         {flow.stages.filter(s => s.status === 'warning' || s.status === 'rejected').filter(s => s.key !== flow.current).map(s => <span key={s.key} className="small" style={{ color: 'var(--color-warn-text)' }}>⚠ {s.label}: {s.detail}</span>)}
       </div>
 
@@ -512,7 +512,7 @@ function DeliveryPanel({ d }: { d: DeliveryProgress }) {
 }
 
 /** HU-193 · Contenido del plegable «Detalle de la entrega»: solo archivos, partes, niveles y gasto de la entrega. */
-function DeliveryDetail({ d, next = null }: { d: DeliveryProgress; next?: string | null }) {
+function DeliveryDetail({ d }: { d: DeliveryProgress }) {
   const level = (ok: boolean | null, yes: string, no: string, unknown: string) => <li data-ok={ok === null ? 'unknown' : String(ok)}><span aria-hidden="true">{ok ? '✓' : ok === false ? '✕' : '…'}</span><span>{ok ? yes : ok === false ? no : unknown}</span></li>;
   const pct = d.total ? Math.round(d.delivered / d.total * 100) : 0;
   return <div className="sf-del" aria-label="Entregables">
@@ -537,7 +537,7 @@ function DeliveryDetail({ d, next = null }: { d: DeliveryProgress; next?: string
       <span className="mono">{fmtUsd(d.spentUsd)} confirmados · ≈ {fmtUsd(d.remainingEstimateUsd)} de API estimados para terminar{d.subscriptionEquivalentUsd ? ` · por tu suscripción ≈ ${fmtUsd(d.subscriptionEquivalentUsd)} equivalente API (orientativo, no se cobra)` : ''}</span>
     </div>
     {d.blocker && !next && <div className="small sf-del-blocker"><strong>Bloqueo actual:</strong> {d.blocker}</div>}
-    <div className="small"><strong>Siguiente:</strong> {next ? <>{next} <span className="muted">(ver «Problema actual»)</span></> : d.next}</div>
+    {/* HU-193 · El siguiente paso solo se muestra en «Siguiente paso» de la cabecera. */}
   </div>;
 }
 
