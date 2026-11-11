@@ -386,7 +386,14 @@ export function scheduleTick(slug: string, id: string): Promise<void> {
 async function tick(slug: string, id: string) {
   const repo = batchesRepo(slug);
   syncItems(slug, id);
-  let b = repo.get(id); if (!b || b.status !== 'running') return;
+  let b = repo.get(id); if (!b) return;
+  // HU-203: un lote que espera tu decisión se da por terminado en cuanto todas sus historias están aceptadas, canceladas,
+  // aplazadas o cerradas en el Backlog (también si se cerraron fuera del lote). Se lee el Backlog directamente.
+  if (b.status === 'needs_decision' && isBatchSettled(b.items.map(i => ({ state: i.state, backlogStatus: backlogRepo(slug).get(i.itemId)?.status ?? null })))) {
+    setStatus(slug, id, 'completed', 'Lote terminado: todas sus historias están aceptadas, cerradas o canceladas en el Backlog.', 'completed');
+    return;
+  }
+  if (b.status !== 'running') return;
   // La duración autorizada limita el trabajo del equipo, no el tiempo que tardas en revisar: con nada técnico en marcha
   // (integración al aceptar, esperando tu revisión) no se pausa por duración.
   if (batchDeps.now() - Date.parse(b.createdAt) > b.auth.maxDurationMin * 60_000 && (!onAcceptance(b) || batchMoving(b.items))) { setStatus(slug, id, 'paused', `Se alcanzó la duración máxima autorizada del lote (${b.auth.maxDurationMin} min). Lo hecho se conserva; «Reanudar» concede el mismo margen otra vez.`, 'pause'); return; }
@@ -1242,7 +1249,9 @@ export function canLaunchWork(slug: string, b: Batch): boolean {
 /** Regla única de lote abierto: en marcha o en pausa, o esperando tu decisión pero con trabajo que puede lanzar solo. */
 export function blocksNewBatch(slug: string, b: Batch): boolean {
   if (b.status === 'running' || b.status === 'paused') return true;
-  return b.status === 'needs_decision' && canLaunchWork(slug, b);
+  return b.status === 'needs_decision' && (canLaunchWork(slug, b)
+    // Bloqueada por una dependencia FUERA del lote: cuando se complete, el lote la ejecutará solo.
+    || b.items.some(i => i.state === 'blocked' && !!i.dependsOn && !i.dependsInBatch));
 }
 
 /** 409 si OTRO lote del mismo proyecto bloquea (reanudar, reintentar, iterar). */
@@ -1946,7 +1955,7 @@ export function startBatchScheduler(log: (o: any, m: string) => void, everyMs = 
   logger = log;
   if (timer) clearInterval(timer);
   timer = setInterval(() => {
-    for (const ws of workspacesRepo.list()) { try { for (const b of batchesRepo(ws.slug).followed()) void syncFromBacklog(ws.slug, b.id).then(() => { if (batchesRepo(ws.slug).get(b.id)?.status === 'running') return scheduleTick(ws.slug, b.id); }).catch(e => logger({ batchId: b.id, err: e?.message }, 'lote: no se pudo sincronizar con el Backlog')); } catch { /* espacio sin base */ } }
+    for (const ws of workspacesRepo.list()) { try { for (const b of batchesRepo(ws.slug).followed()) void syncFromBacklog(ws.slug, b.id).then(() => { const st = batchesRepo(ws.slug).get(b.id)?.status; if (st === 'running' || st === 'needs_decision') return scheduleTick(ws.slug, b.id); }).catch(e => logger({ batchId: b.id, err: e?.message }, 'lote: no se pudo sincronizar con el Backlog')); } catch { /* espacio sin base */ } }
   }, everyMs);
   timer.unref();
 }
