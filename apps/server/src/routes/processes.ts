@@ -41,6 +41,7 @@ import { authorizeProcess } from '../services/processAuthorization.ts';
 import { workItemOf } from '../services/workItems.ts';
 import { closingBlocker } from '../services/closing.ts';
 import { markPublishedIncluded } from '../services/publishedSync.ts';
+import { getPublishInfo, markPublishSkipped } from '../services/publishState.ts';
 
 /** Rutas con efecto (IA o git) que nunca deben actuar sobre una iteración superada de su historia (HU-161). */
 /** Nombre de cada operación con arriendo, para explicar un choque («HU-175 tiene otra operación en curso (integrar en main)»). */
@@ -106,7 +107,9 @@ export async function processRoutes(app: FastifyInstance) {
     }
     const item = q.kind === 'story_execution' && q.backlogItemId ? backlogRepo(slug).get(q.backlogItemId) : undefined;
     const fo = await flowOptions(slug, q, item);
-    return { ...q, version: processVersion(q), closure: storyClosureFor(slug, q), guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, ...fo, backends: q.kind === 'story_execution' ? teamReadiness(slug, q.id) : null }) };
+    // HU-185 · Etapa «Publicar» (no bloqueante): solo para historias integradas; estado de main sin red.
+    const publish = q.kind === 'story_execution' && q.result?.merged ? await getPublishInfo(projectsRepo(slug).repository(q.projectId)?.path ?? null).catch(() => null) : null;
+    return { ...q, version: processVersion(q), closure: storyClosureFor(slug, q), guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, ...fo, publish, backends: q.kind === 'story_execution' ? teamReadiness(slug, q.id) : null }) };
   };
   const guard = (slug: string, reply: any) => { if (!workspacesRepo.get(slug)) { reply.code(404).send({ error: 'Espacio no encontrado' }); return false; } return true; };
 
@@ -584,6 +587,19 @@ Proceso: ${proc.id}`, { processId: proc.id });
         catch (e: any) { app.log.warn({ processId: id, err: e?.message }, 'no se pudieron marcar los procesos incluidos como publicados'); }
       }
       return procs.get(id);
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
+  });
+
+  // HU-185 · «Omitir publicar»: decisión del propietario, sin IA ni git. Solo la registra en result.publishSkipped;
+  // no cambia el cierre (closingBlocker) ni la acción «Cerrar».
+  app.post('/api/workspaces/:slug/processes/:id/skip-publish', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ confirm: z.literal(true) }).safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'Omitir publicar exige tu confirmación explícita.', code: 'confirmation_required' });
+    try {
+      const r = markPublishSkipped(slug, id);
+      app.log.info({ processId: id, at: r.at }, 'publicar omitido por el propietario');
+      return await withGuidance(slug, processesRepo(slug).get(id)!);
     } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
 
