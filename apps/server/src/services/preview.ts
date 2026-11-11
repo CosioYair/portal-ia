@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { PreviewRecord } from '@portal-ia/domain';
-import { REPO_ROOT, config } from '../config.ts';
+import { REPO_ROOT, SELF_IMPROVEMENT_ENABLED, config, editionError } from '../config.ts';
 import { processesRepo, projectsRepo } from '../db/workspace.ts';
 import { withRwLock } from './capacity.ts';
 import { changed } from './live.ts';
@@ -97,6 +97,9 @@ const removeDir = (dir: string) => { if (path.resolve(dir).startsWith(path.resol
  * motivo y las últimas líneas). Una sola a la vez por proceso; como mucho PORTAL_PREVIEW_MAX en total.
  */
 export async function startPreview(slug: string, processId: string): Promise<PreviewRecord> {
+  // HU-206: la edición distribuible no incluye scripts/preview-runner.mjs (ver packageTree.ts). Se rechaza antes de
+  // cualquier efecto: sin reservas, sin consultar la base y sin copiar el runner.
+  if (!SELF_IMPROVEMENT_ENABLED) throw editionError();
   const procs = processesRepo(slug); const p = procs.get(processId);
   if (!p || p.kind !== 'story_execution' || !p.result) throw fail(404, 'Proceso de historia no encontrado.', 'not_found');
   if (p.status === 'running' || p.status === 'pending_authorization') throw fail(409, 'La historia está trabajando: su código aún cambia. Abre la vista previa cuando termine.', 'active');
