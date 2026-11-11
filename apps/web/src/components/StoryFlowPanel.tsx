@@ -521,7 +521,7 @@ function DeliveryDetail({ d }: { d: DeliveryProgress }) {
       <span className="sf-del-bar" role="progressbar" aria-valuemin={0} aria-valuemax={d.total} aria-valuenow={d.delivered} aria-label="Entregables entregados"><span style={{ width: `${pct}%` }} /></span>
       <span className="small muted">unidades {d.units.done} de {d.units.total}</span>
     </div>
-    {/* HU-193 · La unidad en curso se muestra en «Siguiente paso», no aquí. */}
+    {/* HU-193 · La unidad en curso se muestra en la cabecera, no aquí. */}
     <ul className="sf-del-levels" aria-label="Niveles de verificación">
       {level(d.levels.compiles, 'El código compila (typecheck y build en el sandbox)', 'El código no compila', 'Compilación aún sin verificar')}
       {level(d.levels.complete, 'Toda la funcionalidad planificada está entregada', 'Falta funcionalidad por entregar', '')}
@@ -536,8 +536,8 @@ function DeliveryDetail({ d }: { d: DeliveryProgress }) {
       {d.continuations > 0 && <span>{d.continuations} continuación(es) de respuestas cortadas (no cuentan como correcciones)</span>}
       <span className="mono">{fmtUsd(d.spentUsd)} confirmados · ≈ {fmtUsd(d.remainingEstimateUsd)} de API estimados para terminar{d.subscriptionEquivalentUsd ? ` · por tu suscripción ≈ ${fmtUsd(d.subscriptionEquivalentUsd)} equivalente API (orientativo, no se cobra)` : ''}</span>
     </div>
-    {d.blocker && !next && <div className="small sf-del-blocker"><strong>Bloqueo actual:</strong> {d.blocker}</div>}
-    {/* HU-193 · El siguiente paso solo se muestra en «Siguiente paso» de la cabecera. */}
+    {d.blocker && <div className="small sf-del-blocker"><strong>Bloqueo actual:</strong> {d.blocker}</div>}
+    {/* HU-193 · El avance solo se muestra en la cabecera. */}
   </div>;
 }
 

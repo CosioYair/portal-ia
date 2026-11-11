@@ -52,11 +52,14 @@ test('HU-193 · DeliveryPanel solo muestra el detalle de la entrega', () => {
   assert.ok(!/<DeliveryPanel[^>]*(running=|next=)/.test(src), 'el uso ya no pasa running ni next');
   const start = src.indexOf('function DeliveryPanel(');
   assert.ok(start >= 0);
-  const end = src.indexOf('\nfunction ', start);
-  const body = src.slice(start, end > start ? end : undefined);
+  // El tramo llega hasta PipelineActivity para incluir las funciones auxiliares de DeliveryPanel (DeliveryDetail).
+  const end = src.indexOf('\nfunction PipelineActivity(', start);
+  assert.ok(end > start, 'PipelineActivity va después de DeliveryPanel');
+  const body = src.slice(start, end);
+  assert.ok(body.includes('function DeliveryDetail('), 'el tramo analizado incluye DeliveryDetail');
   const sig = body.slice(0, body.indexOf('{', body.indexOf(')')));
   assert.ok(!/running|next/.test(sig), 'la firma no declara running ni next');
-  for (const s of ['running', 'next', 'sf-stages', 'sf-now', 'Ahora']) assert.ok(!body.includes(s), `DeliveryPanel no contiene «${s}»`);
+  for (const s of ['running', 'next', 'Siguiente', 'sf-stages', 'sf-now', 'Ahora']) assert.ok(!body.includes(s), `DeliveryPanel/DeliveryDetail no contiene «${s}»`);
   assert.ok(body.includes('Detalle de la entrega'));
 });
 
