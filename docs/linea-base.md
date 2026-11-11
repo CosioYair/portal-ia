@@ -45,9 +45,8 @@ Documento versionado en git: describe qué ES hoy Portal IA para que cualquier a
 
 ## 5 · Aprendizaje organizacional
 
-- Lecciones (`services/lessons.ts`): detectores sin IA crean lecciones «detectadas» con evidencia; «Proponer con IA» solo con autorización; **solo el propietario valida**. Solo las validadas se inyectan en los prompts por proyecto y papel, y cada paso registra cuáles usó. La reincidencia se cuenta.
+- Lecciones (`services/lessons.ts`, `lessonCurator.ts`): sin IA y a 0 USD, se detectan los errores y, al terminar cada tarea, el Curador los agrupa por causa, aplica la del catálogo y descarta ruido y duplicados. Solo las aplicadas se inyectan (proyecto y papel); se retiran solas si fallan 2 veces. El propietario puede editarlas o retirarlas.
 - Plantillas versionadas (`services/agentTemplates.ts`): una lección validada puede promoverse a práctica de una plantilla (`clave@N+1`); los agentes existentes la adoptan con «Actualizar» y pueden volver atrás.
-- Las lecciones detectadas o propuestas NO son conocimiento validado.
 
 ## 6 · Herramientas de los agentes
 
