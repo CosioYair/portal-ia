@@ -732,6 +732,30 @@ function setItem(slug: string, id: string, itemId: string, patch: Partial<BatchI
   });
 }
 function setStatus(slug: string, id: string, status: Batch['status'], reason: string | null, kind: 'pause' | 'resume' | 'cancel' | 'revoke' | 'completed' | 'budget' | 'close', fix: { label: string; href: string } | null = null) {
+  // HU-203: al darse por terminado (por cualquier camino: temporizador, sincronización con el Backlog o aceptación), el
+  // estado de cada historia en el lote coincide con el Backlog. Lo resuelto fuera del lote se anota aquí, sin crear ni
+  // enlazar procesos: aceptada en el Backlog → aceptada; cerrada o cancelada allí → cancelada.
+  if (status === 'completed') reconcileWithBacklog(slug, id);
+  setStatusRaw(slug, id, status, reason, kind, fix);
+}
+
+function reconcileWithBacklog(slug: string, id: string) {
+  const cur = batchesRepo(slug).get(id); if (!cur) return;
+  const pending = cur.items.some(it => !(it.state === 'accepted' || it.state === 'cancelled' || it.state === 'postponed'));
+  if (!pending) return;
+  batchesRepo(slug).update(id, x => {
+    for (const it of x.items) {
+      if (it.state === 'accepted' || it.state === 'cancelled' || it.state === 'postponed') continue;
+      const bs = backlogRepo(slug).get(it.itemId)?.status ?? null;
+      if (!bs || !isBatchSettled([{ state: it.state, backlogStatus: bs }])) continue;
+      if (bs === 'done') { it.state = 'accepted'; it.reason = 'Aceptada en el Backlog (fuera del lote).'; }
+      else { it.state = 'cancelled'; it.reason = `Cerrada en el Backlog (${bs}) fuera del lote.`; }
+      it.finishedAt = it.finishedAt ?? now();
+    }
+  });
+}
+
+function setStatusRaw(slug: string, id: string, status: Batch['status'], reason: string | null, kind: 'pause' | 'resume' | 'cancel' | 'revoke' | 'completed' | 'budget' | 'close', fix: { label: string; href: string } | null = null) {
   batchesRepo(slug).update(id, b => {
     b.status = status; b.reason = reason; b.reasonFix = fix;
     if (status === 'completed' || status === 'cancelled' || status === 'revoked') b.finishedAt = now();
