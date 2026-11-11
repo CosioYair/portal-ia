@@ -2,17 +2,18 @@ import type { Agent, AgentTemplateVersion, Capability, TeamRole } from '@portal-
 import { AGENT_TEMPLATES, PROPOSED_TEMPLATES } from '@portal-ia/domain';
 import { agentsRepo, workspaceDb } from '../db/workspace.ts';
 import { lessonsRepo } from './lessons.ts';
+import { syncLessonPractices } from './lessonPractices.ts';
 import { monotonicNow } from '../clock.ts';
 
 /**
  * Plantillas de agente versionadas (M5). Cada espacio guarda sus versiones: la v1 es la plantilla aprobada del código;
- * promover una lección validada a práctica crea la vN+1 con la práctica añadida y un diff legible. Los agentes nuevos
- * nacen con la última versión; los existentes la adoptan solo cuando el propietario lo decide (con diff y vuelta atrás).
+ * EN-020: cada lección aplicada con papel entra sola como práctica en una vN+1 (lessonPractices.ts) y los agentes
+ * existentes pasan a ella con by 'portal'; si el propietario vuelve atrás un agente, queda fijado y no se mueve solo.
  * Las prácticas se inyectan en el prompt como «Prácticas de la organización» y se registran en `lessons_used`
  * como `practice:<key>@<v>:<lessonId>`.
  */
 const now = monotonicNow;
-const ROLE_TEMPLATE: Record<TeamRole, string> = { planner: 'pj-coordinador', implementer: 'pj-dev', reviewer: 'pj-qa', consultant: 'pj-arquitecto', evaluator: 'pj-gauntlet' };
+export const ROLE_TEMPLATE: Record<TeamRole, string> = { planner: 'pj-coordinador', implementer: 'pj-dev', reviewer: 'pj-qa', consultant: 'pj-arquitecto', evaluator: 'pj-gauntlet' };
 const CAP_TEMPLATE: Partial<Record<Capability, string>> = { planificar: 'pj-coordinador', implementar: 'pj-dev', revisar_calidad: 'pj-qa', generar_pruebas: 'pj-qa', consultar_arquitectura: 'pj-arquitecto', consultar_ux: 'pj-ux', revisar_seguridad: 'pj-arquitecto', consultar: 'pj-arquitecto', documentar: 'pj-arquitecto', evaluar_gauntlet: 'pj-gauntlet' };
 
 function ensure(slug: string) {
@@ -55,6 +56,14 @@ export function templatesRepo(slug: string) {
 
 export function parseVersion(v: string | null | undefined): { key: string; version: number } | null { const m = (v ?? '').match(/^(.+)@(\d+)$/); return m ? { key: m[1], version: Number(m[2]) } : null; }
 
+/** Agente fijado: su último cambio de versión fue una vuelta atrás del propietario (a una versión menor). */
+export function isPinned(slug: string, agentId: string): boolean {
+  const h = templatesRepo(slug).history(agentId).at(-1);
+  if (!h || h.by !== 'owner') return false;
+  const f = parseVersion(h.fromVersion); const t = parseVersion(h.toVersion);
+  return !!f && !!t && t.version < f.version;
+}
+
 /** Plantilla que sigue un agente: la suya (plantilla aprobada) o, si es personalizado, la del papel de su primera capacidad. */
 export function templateKeyFor(agent: Agent): string | null {
   if ([...AGENT_TEMPLATES, ...PROPOSED_TEMPLATES].some(t => t.key === agent.key)) return agent.key;
@@ -90,7 +99,10 @@ export function inheritLatestTemplate(slug: string, agent: Agent): Agent {
   return agentsRepo(slug).get(agent.id)!;
 }
 
-/** Promueve una lección validada a práctica de una plantilla → nueva versión con diff legible. No toca a ningún agente existente. */
+/**
+ * Compatibilidad: la promoción ya es automática (EN-020). Delega en la sincronización; si la lección ya está como
+ * práctica devuelve esa versión (sin 409). Solo con una plantilla destino distinta de la de su papel se añade a mano.
+ */
 export function promoteLesson(slug: string, lessonId: string, targetKey?: string | null): AgentTemplateVersion {
   const lessons = lessonsRepo(slug); const l = lessons.get(lessonId);
   if (!l) throw Object.assign(new Error('Lección no encontrada'), { statusCode: 404 });
@@ -98,14 +110,17 @@ export function promoteLesson(slug: string, lessonId: string, targetKey?: string
   if (!l.lessonText) throw Object.assign(new Error('La lección no tiene texto.'), { statusCode: 409 });
   const key = targetKey ?? (l.role ? ROLE_TEMPLATE[l.role as TeamRole] : null);
   if (!key) throw Object.assign(new Error('Indica la plantilla destino (la lección no tiene papel).'), { statusCode: 400 });
-  const repo = templatesRepo(slug); const prev = repo.latest(key);
-  if (!prev) throw Object.assign(new Error(`Plantilla desconocida: ${key}`), { statusCode: 404 });
-  if (prev.practices.some(p => p.lessonId === lessonId)) throw Object.assign(new Error(`La práctica ya está en ${prev.id}.`), { statusCode: 409 });
+  const repo = templatesRepo(slug);
+  if (!repo.latest(key)) throw Object.assign(new Error(`Plantilla desconocida: ${key}`), { statusCode: 404 });
+  syncLessonPractices(slug);
+  const prev = repo.latest(key)!;
+  if (prev.practices.some(p => p.lessonId === lessonId || p.text === l.lessonText)) return prev;
   const practice = { lessonId, text: l.lessonText, title: l.title, addedAt: now() };
   const diffMd = `--- ${prev.id}\n+++ ${key}@${prev.version + 1}\n@@ Prácticas de la organización @@\n${prev.practices.map(p => `  ${p.text}`).join('\n')}${prev.practices.length ? '\n' : ''}+ ${l.lessonText}`;
   const v = repo.insert({ key, version: prev.version + 1, name: prev.name, role: prev.role, responsibilities: prev.responsibilities, practices: [...prev.practices, practice], diffMd, source: 'promotion', lessonId, createdBy: 'owner' });
   lessons.update(lessonId, { promotedTo: v.id });
-  return v;
+  syncLessonPractices(slug); // los agentes de esa plantilla la adoptan solos
+  return repo.latest(key) ?? v;
 }
 
 /** Diff legible entre la versión efectiva del agente y otra versión (para opt-in / vuelta atrás). */

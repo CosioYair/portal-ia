@@ -130,13 +130,14 @@ test('B2 · ciclo de validación: proponer solo con autorización (1 llamada), v
 test('B3/B4 · inyección y mejora medible: con L1 inyectada el parche encaja (el simulado responde bien SOLO si el prompt contiene L1); lessons_used registra; reincidencia marca candidata a obsoleta', async () => {
   const dir = repoF(); projectsRepo('portal-ia').setRepository(internal.id, dir, 'main');
   // El implementador acierta solo si recibe L1 (versión 2: contiene el texto de L1 como prefijo)
-  script([{ match: 'plan técnico', text: PLAN }, { match: 'Implementa la historia', requires: 'Copia el fragmento BUSCAR literalmente', text: GOOD_PATCH, otherwise: BAD_PATCH }, { match: 'Revisa los cambios propuestos', text: QA_OK }], ['Lecciones de esta organización (obligatorias)', 'Copia el fragmento BUSCAR literalmente']);
+  script([{ match: 'plan técnico', text: PLAN }, { match: 'Implementa la historia', requires: 'Copia el fragmento BUSCAR literalmente', text: GOOD_PATCH, otherwise: BAD_PATCH }, { match: 'Revisa los cambios propuestos', text: QA_OK }], ['Lecciones de esta organización (obligatorias)', 'Prácticas de la organización (plantilla)', 'Copia el fragmento BUSCAR literalmente']);
   const p2 = await runF('Añadir campo nota al formulario de nueva solicitud (2)');
   assert.equal(p2.status, 'done', p2.error ?? '');
   const impl = p2.steps.find(s => s.role === 'implementer')!;
   const active = lessonsFor('portal-ia', { projectId: internal.id, role: 'implementer' }).find(x => (x.lessonText ?? '').startsWith(L1))!;
-  assert.deepEqual(impl.lessonsUsed, [active.id], 'lessons_used registra la lección inyectada');
-  assert.ok(mockLog().find(l => l.rule === 'Implementa la historia')!.markers.includes('Lecciones de esta organización (obligatorias)'));
+  // EN-020: la lección validada ya es práctica de pj-dev y el Desarrollador la adoptó solo: llega una vez, como práctica
+  assert.equal(impl.lessonsUsed!.length, 1); assert.match(impl.lessonsUsed![0], new RegExp(`^practice:pj-dev@\\d+:${active.id}$`), 'lessons_used registra la lección inyectada');
+  assert.ok(mockLog().find(l => l.rule === 'Implementa la historia')!.markers.includes('Prácticas de la organización (plantilla)'));
   assert.equal(p2.result!.changes.filter(c => c.error).length, 0, 'patch_fail_rate = 0 con la lección (sin ella fue 1 en B1)');
   assert.equal(lessonsRepo('portal-ia').get(active.id)!.usedCount, 1);
   assert.equal(p2.steps.find(s => s.role === 'planner')!.lessonsUsed!.length, 0, 'la lección de implementador no llega al planificador');
@@ -147,47 +148,54 @@ test('B3/B4 · inyección y mejora medible: con L1 inyectada el parche encaja (e
   assert.equal(lessonsRepo('portal-ia').get(active.id)!.recurrenceCount, 1, 'reincidencia contada: candidata a obsoleta');
 });
 
-test('C1/C2 · plantillas versionadas: promover L1 crea pj-dev@2 con diff; los agentes nuevos heredan; los existentes siguen en v1 hasta opt-in (con diff y vuelta atrás); el prompt incluye la práctica', async () => {
+test('C1/C2 · plantillas versionadas (EN-020): la lección aplicada ya está en la última pj-dev sin promover; promover no da 409; los existentes pasan solos (by portal); la vuelta atrás funciona; el prompt la lleva una vez; retirarla la saca', async () => {
   const app = await buildApp();
   const active = lessonsFor('portal-ia', { projectId: internal.id, role: 'implementer' }).find(x => (x.lessonText ?? '').startsWith(L1))!;
   const dev = agentsRepo('portal-ia').list().find(a => a.key === 'pj-dev' && a.projectId === internal.id)!;
-  assert.equal(templatesRepo('portal-ia').latest('pj-dev')!.version, 1);
+  const latest = templatesRepo('portal-ia').latest('pj-dev')!;
+  assert.ok(latest.version > 1, 'validar ya creó versiones nuevas, sin promover');
+  assert.equal(latest.practices.filter(p => p.lessonId === active.id && p.text === active.lessonText).length, 1);
+  assert.equal(lessonsRepo('portal-ia').get(active.id)!.promotedTo, latest.id);
   const pr = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/lessons/${active.id}/promote`, payload: { authorized: true } });
-  assert.equal(pr.statusCode, 201, pr.body); assert.equal(pr.json().id, 'pj-dev@2'); assert.match(pr.json().diffMd, /\+ Copia el fragmento BUSCAR/); assert.equal(pr.json().practices.length, 1);
-  assert.equal(lessonsRepo('portal-ia').get(active.id)!.promotedTo, 'pj-dev@2');
-  // El Desarrollador existente NO cambia
-  assert.equal(agentsRepo('portal-ia').get(dev.id)!.templateVersion ?? null, null); assert.equal(effectiveVersion('portal-ia', dev)!.id, 'pj-dev@1'); assert.equal(practicesFor('portal-ia', agentsRepo('portal-ia').get(dev.id)!).length, 0);
-  // Un proyecto nuevo → Desarrollador nuevo con pj-dev@2
+  assert.ok(pr.statusCode < 300, pr.body); assert.equal(pr.json().id, latest.id, 'ya estaba: sin 409 y sin duplicar'); assert.equal(pr.json().practices.filter((p: any) => p.lessonId === active.id).length, 1);
+  assert.equal(templatesRepo('portal-ia').latest('pj-dev')!.version, latest.version);
+  // El Desarrollador existente ya pasó solo a la última versión (by portal)
+  assert.equal(agentsRepo('portal-ia').get(dev.id)!.templateVersion, latest.id); assert.equal(effectiveVersion('portal-ia', agentsRepo('portal-ia').get(dev.id)!)!.id, latest.id);
+  assert.ok(practicesFor('portal-ia', agentsRepo('portal-ia').get(dev.id)!).some(p => p.text === active.lessonText));
+  const h0 = templatesRepo('portal-ia').history(dev.id); assert.ok(h0.length >= 1); assert.equal(h0.at(-1)!.by, 'portal');
+  // Un proyecto nuevo → Desarrollador nuevo con la última versión
   const { createProject } = await import('../src/services/companies.ts');
   const np = createProject('portal-ia', 'Proyecto C', 'x', []);
   const newDev = agentsRepo('portal-ia').list().find(a => a.key === 'pj-dev' && a.projectId === np.id)!;
-  assert.equal(newDev.templateVersion, 'pj-dev@2'); assert.equal(practicesFor('portal-ia', newDev)[0].text, active.lessonText);
+  assert.equal(newDev.templateVersion, latest.id); assert.ok(practicesFor('portal-ia', newDev).some(p => p.text === active.lessonText));
   // Un agente personalizado con capacidad implementar hereda las prácticas del papel
   const custom = createAgent('portal-ia', { scope: 'project', projectId: np.id, name: 'Dev Móvil', role: 'Desarrollo móvil', reportsTo: 'pj-coordinador', collaborates: [], evaluation: ['x'], config: { name: 'Dev Móvil', specialization: 'x', responsibilities: ['y'], provider: 'anthropic', model: 'claude-sonnet-4-5', fallbacks: [], effort: 'low', tools: { read_repo: true, write_repo: true }, knowledge: {}, monthlyLimitUsd: 1, perTaskAuthUsd: 1, capabilities: ['implementar'] } });
-  assert.equal(custom.templateVersion, 'pj-dev@2'); assert.equal(practicesFor('portal-ia', custom).length, 1);
-  // Opt-in del existente: diff, actualizar, historial, volver atrás
+  assert.equal(custom.templateVersion, latest.id); assert.equal(practicesFor('portal-ia', custom).length, latest.practices.length);
+  // Ya está al día: sin diferencias pendientes; la vuelta atrás y el «Actualizar» del propietario siguen funcionando
   const info = await app.inject({ method: 'GET', url: `/api/workspaces/portal-ia/agents/${dev.id}/template` });
-  assert.equal(info.json().current.id, 'pj-dev@1'); assert.equal(info.json().latest.id, 'pj-dev@2'); assert.deepEqual(info.json().diff.added, [active.lessonText]);
-  const up = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/agents/${dev.id}/template-version`, payload: { authorized: true, version: 'pj-dev@2' } });
-  assert.equal(up.statusCode, 200, up.body); assert.equal(up.json().templateVersion, 'pj-dev@2');
-  assert.equal(practicesFor('portal-ia', agentsRepo('portal-ia').get(dev.id)!).length, 1);
-  const hist = templatesRepo('portal-ia').history(dev.id); assert.equal(hist.length, 1); assert.equal(hist[0].toVersion, 'pj-dev@2'); assert.equal(hist[0].by, 'owner');
+  assert.equal(info.json().current.id, latest.id); assert.equal(info.json().latest.id, latest.id); assert.equal(info.json().diff?.added?.length ?? 0, 0, 'al día: sin diferencias pendientes (la ruta devuelve diff null)');
   const back = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/agents/${dev.id}/template-version`, payload: { authorized: true, version: 'pj-dev@1' } });
-  assert.equal(back.json().templateVersion, 'pj-dev@1'); assert.equal(practicesFor('portal-ia', agentsRepo('portal-ia').get(dev.id)!).length, 0);
-  assert.equal(templatesRepo('portal-ia').history(dev.id).length, 2);
+  assert.equal(back.statusCode, 200, back.body); assert.equal(back.json().templateVersion, 'pj-dev@1'); assert.equal(practicesFor('portal-ia', agentsRepo('portal-ia').get(dev.id)!).length, 0);
+  assert.equal(templatesRepo('portal-ia').history(dev.id).length, h0.length + 1); assert.equal(templatesRepo('portal-ia').history(dev.id).at(-1)!.by, 'owner');
+  const up = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/agents/${dev.id}/template-version`, payload: { authorized: true, version: latest.id } });
+  assert.equal(up.statusCode, 200, up.body); assert.equal(up.json().templateVersion, latest.id);
+  assert.equal(templatesRepo('portal-ia').history(dev.id).length, h0.length + 2);
   // Versión de otra plantilla → rechazada
   const bad = await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/agents/${dev.id}/template-version`, payload: { authorized: true, version: 'pj-qa@1' } }); assert.equal(bad.statusCode, 409);
-  // C2 · ejecución con pj-dev@2: el prompt lleva la práctica aunque la lección no se inyecte por recuperación (la obsoletamos)
-  await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/agents/${dev.id}/template-version`, payload: { authorized: true, version: 'pj-dev@2' } });
-  await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/lessons/${active.id}/obsolete` });
-  assert.ok(!lessonsFor('portal-ia', { projectId: internal.id, role: 'implementer' }).some(x => x.id === active.id), 'la lección retirada no se inyecta');
+  // C2 · ejecución con la última versión: la lección llega una sola vez, como práctica de plantilla
   const dir = repoF(); projectsRepo('portal-ia').setRepository(internal.id, dir, 'main');
   script([{ match: 'plan técnico', text: PLAN }, { match: 'Implementa la historia', requires: 'Copia el fragmento BUSCAR literalmente', text: GOOD_PATCH, otherwise: BAD_PATCH }, { match: 'Revisa los cambios propuestos', text: QA_OK }], ['Prácticas de la organización (plantilla)']);
   const p4 = await runF('Añadir campo nota (4, con práctica de plantilla)');
   assert.equal(p4.status, 'done', p4.error ?? '');
   const impl = p4.steps.find(s => s.role === 'implementer')!;
-  assert.ok(impl.lessonsUsed!.includes(`practice:pj-dev@2:${active.id}`), 'la práctica de plantilla llega al prompt'); assert.ok(!impl.lessonsUsed!.includes(active.id));
+  assert.ok(impl.lessonsUsed!.some(id => id.startsWith('practice:pj-dev@') && id.endsWith(`:${active.id}`)), 'la práctica de plantilla llega al prompt'); assert.ok(!impl.lessonsUsed!.includes(active.id), 'sin duplicado como lección');
   assert.ok(mockLog().find(l => l.rule === 'Implementa la historia')!.markers.includes('Prácticas de la organización (plantilla)'));
   assert.equal(p4.result!.changes.filter(c => c.error).length, 0, 'la práctica heredada evita el fallo');
+  // Retirarla la saca de la plantilla en una versión nueva que el Desarrollador adopta solo
+  await app.inject({ method: 'POST', url: `/api/workspaces/portal-ia/lessons/${active.id}/obsolete` });
+  assert.ok(!lessonsFor('portal-ia', { projectId: internal.id, role: 'implementer' }).some(x => x.id === active.id), 'la lección retirada no se inyecta');
+  const after = templatesRepo('portal-ia').latest('pj-dev')!;
+  assert.ok(!after.practices.some(p => p.lessonId === active.id)); assert.equal(agentsRepo('portal-ia').get(dev.id)!.templateVersion, after.id);
+  assert.ok(!practicesFor('portal-ia', agentsRepo('portal-ia').get(dev.id)!).some(p => p.text === active.lessonText));
   await app.close();
 });

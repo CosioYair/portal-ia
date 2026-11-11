@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { findingKey, verificationPassed } from '@portal-ia/domain';
-import type { Lesson, LessonEvidence, LessonProof, LessonStatus, ModelInfo, Process, ProviderId, TeamRole } from '@portal-ia/domain';
+import type { Agent, Lesson, LessonEvidence, LessonProof, LessonStatus, ModelInfo, Process, ProviderId, TeamRole } from '@portal-ia/domain';
+import { syncLessonPracticesSafe } from './lessonPractices.ts';
+import { practicesFor } from './agentTemplates.ts';
 import { costUsd, estimatePricing, getAdapter } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, workspaceDb } from '../db/workspace.ts';
@@ -182,6 +184,10 @@ function grepRepo(repoPath: string, needle: string, exceptPath: string): boolean
   } catch (e: any) { return e?.status === 1 ? false : true; } // 1 = sin coincidencias; otro código = no se pudo comprobar
 }
 
+/** EN-020: id de la lección detrás de una entrada de lessons_used (las prácticas van como practice:<key>@<v>:<lessonId>). */
+export const lessonIdOf = (id: string): string => id.startsWith('practice:') ? id.split(':').slice(2).join(':') : id;
+const realLessonIds = (ids: string[]): string[] => Array.from(new Set(ids.map(lessonIdOf).filter(x => !!x && x !== 'null' && x !== 'undefined')));
+
 /** Detecta y guarda (sin IA). Devuelve las lecciones nuevas. Contabiliza reincidencias de lecciones ya inyectadas en el paso. */
 export function recordDetections(slug: string, processId: string, repoPath: string | null, extra: Parameters<typeof detectInProcess>[3] = {}): Lesson[] {
   const proc = processesRepo(slug).get(processId); if (!proc) return [];
@@ -189,7 +195,7 @@ export function recordDetections(slug: string, processId: string, repoPath: stri
   for (const d of detectInProcess(slug, proc, repoPath, extra)) {
     const step = proc.steps.find(s => s.id === d.evidence.stepId);
     // Reincidencia: una lección validada con la misma etiqueta de detector ya iba inyectada en ese paso.
-    for (const id of step?.lessonsUsed ?? []) { const l = repo.get(id); if (l && l.status === 'validated' && (l.detector === d.detector || l.tags.includes(d.detector))) repo.bumpRecurrence(id); }
+    for (const id of realLessonIds(step?.lessonsUsed ?? [])) { const l = repo.get(id); if (l && l.status === 'validated' && (l.detector === d.detector || l.tags.includes(d.detector))) repo.bumpRecurrence(id); }
     const l = repo.insert({ projectId: proc.projectId, role: d.role, tags: d.tags, status: 'detected', version: 1, parentId: null, title: d.title, detector: d.detector, evidence: d.evidence, rootCause: null, correctiveAction: null, lessonText: null, source: 'detector', promotedTo: null, dedupeKey: d.dedupeKey });
     if (l) created.push(l);
   }
@@ -209,7 +215,7 @@ export function recordLessonOutcomes(slug: string, processId: string, repoPath: 
   const out = { held: [] as string[], recurred: [] as string[], refuted: [] as string[] };
   const proc = processesRepo(slug).get(processId);
   if (!proc || proc.kind !== 'story_execution') return out;
-  const used = new Set(proc.steps.flatMap(s => s.lessonsUsed ?? []));
+  const used = new Set(realLessonIds(proc.steps.flatMap(s => s.lessonsUsed ?? [])));
   if (!used.size) return out;
   const repo = lessonsRepo(slug);
   const fired = new Set(detectInProcess(slug, proc, repoPath).map(d => d.detector));
@@ -226,6 +232,7 @@ export function recordLessonOutcomes(slug: string, processId: string, repoPath: 
     const tail: LessonProof[] = []; for (const x of [...(after.proof ?? [])].reverse()) { if (x.result === 'held') break; tail.push(x); }
     if (recurred && tail.length >= REFUTE_AFTER) { repo.update(id, { status: 'refuted' }); out.refuted.push(id); }
   }
+  if (out.refuted.length) syncLessonPracticesSafe(slug); // la refutada sale de la plantilla
   return out;
 }
 
@@ -272,35 +279,61 @@ export function validateLesson(slug: string, id: string, patch: { lessonText?: s
   const text = (patch.lessonText ?? l.lessonText ?? '').trim();
   if (text.length < 10) throw Object.assign(new Error('La lección necesita un texto (≥ 10 caracteres) que se inyectará en los prompts.'), { statusCode: 400 });
   // Una retirada (refutada) que corriges es una versión NUEVA: empieza sin pruebas (la anterior conserva su historial).
-  if (l.status === 'validated' || l.status === 'refuted') return repo.newVersion(id, { lessonText: text, rootCause: patch.rootCause ?? l.rootCause, correctiveAction: patch.correctiveAction ?? l.correctiveAction, role: patch.role === undefined ? l.role : patch.role, tags: patch.tags ?? l.tags });
-  return repo.update(id, { status: 'validated', lessonText: text, rootCause: patch.rootCause ?? l.rootCause, correctiveAction: patch.correctiveAction ?? l.correctiveAction, role: patch.role === undefined ? l.role : patch.role, tags: patch.tags ?? l.tags, validatedAt: now(), source: l.source === 'detector' ? 'owner' : l.source })!;
+  const res = (l.status === 'validated' || l.status === 'refuted')
+    ? repo.newVersion(id, { lessonText: text, rootCause: patch.rootCause ?? l.rootCause, correctiveAction: patch.correctiveAction ?? l.correctiveAction, role: patch.role === undefined ? l.role : patch.role, tags: patch.tags ?? l.tags })
+    : repo.update(id, { status: 'validated', lessonText: text, rootCause: patch.rootCause ?? l.rootCause, correctiveAction: patch.correctiveAction ?? l.correctiveAction, role: patch.role === undefined ? l.role : patch.role, tags: patch.tags ?? l.tags, validatedAt: now(), source: l.source === 'detector' ? 'owner' : l.source })!;
+  syncLessonPracticesSafe(slug); // EN-020: llega sola a la plantilla y a los agentes
+  return repo.get(res.id) ?? res;
 }
 export function setLessonStatus(slug: string, id: string, status: 'rejected' | 'obsolete'): Lesson {
   const repo = lessonsRepo(slug); if (!repo.get(id)) throw Object.assign(new Error('Lección no encontrada'), { statusCode: 404 });
-  return repo.update(id, { status })!;
+  const res = repo.update(id, { status })!;
+  syncLessonPracticesSafe(slug); // sale de la práctica de la plantilla
+  return repo.get(id) ?? res;
 }
 /** Lección escrita a mano por el propietario (queda validada directamente: la escribió él). */
 export function createManualLesson(slug: string, input: { projectId: string | null; title: string; lessonText: string; role?: string | null; tags?: string[]; correctiveAction?: string | null }): Lesson {
   const repo = lessonsRepo(slug);
   const l = repo.insert({ projectId: input.projectId, role: input.role ?? null, tags: input.tags ?? [], status: 'validated', version: 1, parentId: null, title: input.title, detector: 'manual', evidence: { processId: null, processTitle: null, stepId: null, agentId: null, agentName: null, file: null, detail: 'Escrita por el propietario.', at: now() }, rootCause: null, correctiveAction: input.correctiveAction ?? null, lessonText: input.lessonText, source: 'owner', promotedTo: null, dedupeKey: null })!;
-  return repo.update(l.id, { validatedAt: now() })!;
+  const res = repo.update(l.id, { validatedAt: now() })!;
+  syncLessonPracticesSafe(slug);
+  return repo.get(l.id) ?? res;
 }
 
 // ---------- 4 · Recuperación e inyección ----------
 export function lessonsFor(slug: string, q: { projectId: string | null; role: TeamRole | null; tags?: string[]; limit?: number }): Lesson[] {
   const all = lessonsRepo(slug).list(q.projectId ?? null, 'validated').filter(l => !l.role || l.role === q.role);
   const tagScore = (l: Lesson) => (q.tags ?? []).filter(t => l.tags.includes(t)).length;
-  return all.sort((a, b) => tagScore(b) - tagScore(a) || b.version - a.version || b.usedCount - a.usedCount).slice(0, q.limit ?? 8);
+  const sorted = all.sort((a, b) => tagScore(b) - tagScore(a) || b.version - a.version || b.usedCount - a.usedCount);
+  return q.limit ? sorted.slice(0, q.limit) : sorted; // EN-020: sin tope por defecto
 }
+/** Lecciones que no van ya como práctica (por id o por texto idéntico): cada texto llega una sola vez al prompt. */
+function withoutPractices(ls: Lesson[], practices: { id: string; text: string }[]): Lesson[] {
+  const ids = new Set(practices.map(p => p.id.split(':').slice(2).join(':')).filter(Boolean));
+  const texts = new Set(practices.map(p => p.text.trim()));
+  const seen = new Set<string>();
+  return ls.filter(l => { const t = (l.lessonText ?? '').trim(); if (ids.has(l.id) || texts.has(t) || seen.has(t)) return false; seen.add(t); return true; });
+}
+const practicesBlock = (practices: { id: string; text: string }[]) => practices.length ? `\n\n# Prácticas de la organización (plantilla)\n${practices.map((p, i) => `${i + 1}. ${p.text}`).join('\n')}\n` : '';
 export function lessonsBlock(lessons: Lesson[]): string {
   if (!lessons.length) return '';
   return `\n\n# Lecciones de esta organización (obligatorias)\n${lessons.map((l, i) => `${i + 1}. ${l.lessonText}`).join('\n')}\n`;
 }
 /** Inyecta en el prompt de sistema y deja constancia en el paso. Devuelve el sistema aumentado. */
 export function injectLessons(slug: string, stepId: string, system: string, q: { projectId: string | null; role: TeamRole | null; tags?: string[] }, practices: { id: string; text: string }[] = []): { system: string; used: string[] } {
-  const ls = lessonsFor(slug, q);
+  const ls = withoutPractices(lessonsFor(slug, q), practices);
   const used = [...ls.map(l => l.id), ...practices.map(p => p.id)];
-  if (used.length) { processesRepo(slug).setStepLessons(stepId, used); lessonsRepo(slug).bumpUsed(ls.map(l => l.id)); }
-  const practiceBlock = practices.length ? `\n\n# Prácticas de la organización (plantilla)\n${practices.map((p, i) => `${i + 1}. ${p.text}`).join('\n')}\n` : '';
-  return { system: system + lessonsBlock(ls) + practiceBlock, used };
+  if (used.length) { processesRepo(slug).setStepLessons(stepId, used); lessonsRepo(slug).bumpUsed(realLessonIds(used)); }
+  return { system: system + lessonsBlock(ls) + practicesBlock(practices), used };
+}
+/**
+ * Lecciones y prácticas del papel para el chat de un agente o un análisis delegado (no toca pasos): devuelve el bloque
+ * para el prompt de sistema y los ids usados (lecciones y `practice:<key>@<v>:<lessonId>`) para registrarlos.
+ */
+export function buildLessonContext(slug: string, q: { projectId: string | null; role: TeamRole | null; agent?: Agent | null; tags?: string[] }): { block: string; used: string[] } {
+  const practices = q.agent ? practicesFor(slug, q.agent) : [];
+  const ls = withoutPractices(lessonsFor(slug, { projectId: q.projectId, role: q.role, tags: q.tags }), practices);
+  const used = [...ls.map(l => l.id), ...practices.map(p => p.id)];
+  if (used.length) lessonsRepo(slug).bumpUsed(realLessonIds(used));
+  return { block: lessonsBlock(ls) + practicesBlock(practices), used };
 }

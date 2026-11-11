@@ -443,14 +443,16 @@ test('R · una brecha con evidencia la cura el Curador (por causa, nunca pendien
   setScript([PASS]);
   let { p } = await authorize('R sin validar', { gauntlet: { mode: 'standard' } });
   const gapIds = new Set(gaps().map(g => g.id));
-  assert.ok(!(p.steps.find(s => s.role === 'implementer')!.lessonsUsed ?? []).some(id => gapIds.has(id)));
+  // EN-020: una lección aplicada con papel llega como práctica de plantilla (`practice:<key>@<v>:<lessonId>`), una sola vez.
+  const usesLesson = (ids: string[] | undefined, lid: string) => (ids ?? []).some(x => x === lid || x.endsWith(`:${lid}`));
+  assert.ok(![...gapIds].some(gid => usesLesson(p.steps.find(s => s.role === 'implementer')!.lessonsUsed, gid)));
   assert.ok(!byRule(R.dev)[0].markers.includes('LECCION-R'));
   // Editada por el propietario: se inyecta al implementador (no al Evaluador, que conserva su contexto nuevo).
   const id = validateLesson(S, fixed.id, { lessonText }).id;
   const base = lessonsRepo(S).get(id)!;
   setScript([PASS]);
   ({ p } = await authorize('R validada sin reincidir', { gauntlet: { mode: 'standard' } }));
-  assert.ok(p.steps.find(s => s.role === 'implementer')!.lessonsUsed!.includes(id), 'el paso deja constancia de la lección usada');
+  assert.ok(usesLesson(p.steps.find(s => s.role === 'implementer')!.lessonsUsed, id), 'el paso deja constancia de la lección usada');
   assert.ok(byRule(R.dev)[0].markers.includes('LECCION-R')); assert.ok(!byRule(R.ev)[0].markers.includes('LECCION-R'));
   let l = lessonsRepo(S).get(id)!;
   assert.equal(l.usedCount, base.usedCount + 1); assert.equal(l.recurrenceCount, base.recurrenceCount, 'el Evaluador no volvió a encontrar la brecha: la lección cambió el comportamiento');
@@ -460,7 +462,7 @@ test('R · una brecha con evidencia la cura el Curador (por causa, nunca pendien
   assert.equal(p.result?.pipeline?.state, 'verified', `${p.status} · ${p.result?.pipeline?.pauseKind} · ${p.result?.pipeline?.reason ?? p.error}`);
   assert.equal(p.result!.gauntlet!.status, 'passed');
   l = lessonsRepo(S).get(id)!;
-  const usedHere = p.steps.filter(s => s.lessonsUsed?.includes(id));
+  const usedHere = p.steps.filter(s => usesLesson(s.lessonsUsed, id));
   assert.ok(usedHere.length >= 2 && usedHere.every(s => s.role === 'implementer'), 'también la corrección dirigida la recibe (la hace el constructor)');
   assert.equal(l.usedCount, base.usedCount + 1 + usedHere.length, 'se cuenta por paso'); assert.ok(l.recurrenceCount >= base.recurrenceCount + 1);
   assert.equal(l.status, 'validated', 'una sola reincidencia no la retira (REFUTE_AFTER = 2)');

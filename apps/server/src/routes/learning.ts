@@ -6,6 +6,8 @@ import { createManualLesson, estimatePropose, lessonsRepo, proposeLesson, record
 import { effectiveVersion, promoteLesson, setAgentTemplateVersion, templatesRepo, versionDiff } from '../services/agentTemplates.ts';
 import { PolicyError } from '../services/executionPolicy.ts';
 import { curatePending } from '../services/lessonCurator.ts';
+import { lessonTemplateReach } from '../services/lessonPractices.ts';
+import { activeAgents } from '../services/activeAgents.ts';
 
 /** M4 · Lecciones validadas y M5 · plantillas versionadas. Ninguna ruta llama a la IA salvo /propose (autorizada). */
 /** La memoria de un agente (lessons.agent_id) se gestiona en su panel; estas rutas son de la organización. */
@@ -18,7 +20,18 @@ export async function learningRoutes(app: FastifyInstance) {
   app.get('/api/workspaces/:slug/lessons', async (req, reply) => {
     const { slug } = req.params as any; if (!guard(slug, reply)) return;
     const q = (req.query as any) ?? {};
-    return lessonsRepo(slug).list(q.projectId ?? null, q.status ?? null);
+    const list = lessonsRepo(slug).list(q.projectId ?? null, q.status ?? null);
+    // EN-020: en cada lección aplicada, la versión de plantilla en la que está y a cuántos agentes llega.
+    let reach: Record<string, { templateVersion: string; agents: number }> = {};
+    try { reach = lessonTemplateReach(slug); } catch { /* sin datos de alcance: la lista sigue */ }
+    const active = activeAgents(slug);
+    return list.map(l => {
+      if (l.status !== 'validated') return l;
+      if (l.role) { const r = reach[l.id]; return { ...l, templateVersion: r?.templateVersion ?? null, agents: r?.agents ?? 0 }; }
+      // Sin papel: no va a una plantilla; llega por el prompt a los agentes del proyecto (y a los de la empresa).
+      const n = active.filter(a => a.scope === 'workspace' || !l.projectId || a.projectId === l.projectId).length;
+      return { ...l, templateVersion: null, agents: n };
+    });
   });
   app.post('/api/workspaces/:slug/lessons', async (req, reply) => {
     const { slug } = req.params as any; if (!guard(slug, reply)) return;
