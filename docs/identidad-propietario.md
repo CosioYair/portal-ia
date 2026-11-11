@@ -29,7 +29,7 @@ páginas y la sesión de este navegador (`services/ownerSession.ts`; ver `docs/m
 
 ## 2. Inventario y clasificación
 
-273 rutas de la API: 90 lecturas y 183 cambios; **171 exigen la sesión** y 12 son abiertas. Generado a partir de las rutas
+275 rutas de la API: 91 lecturas y 184 cambios; **172 exigen la sesión** y 12 son abiertas. Generado a partir de las rutas
 registradas (`app.routeList`): `test/politica-propietario.test.ts` recorre TODAS las que cambian algo (también las que se
 añadan después) y comprueba la lista exacta de abiertas, así que ninguna ruta nueva queda abierta sin decidirlo.
 
@@ -40,8 +40,8 @@ añadan después) y comprueba la lista exacta de abiertas, así que ninguna ruta
 | **B** · Credenciales, motores y permisos (quién y con qué se ejecuta) | 18 | 18 |
 | **C** · Gasta IA o cuota, o pone agentes a trabajar | 51 | 51 |
 | **D** · Cierra, cancela, descarta o borra | 32 | 32 |
-| **E** · Organización, configuración y contenido | 45 | 45 |
-| Lecturas (GET) | 90 | 0 (no cambian nada) |
+| **E** · Organización, configuración y contenido | 46 | 46 |
+| Lecturas (GET) | 91 | 0 (no cambian nada) |
 
 <details><summary><strong>0</strong> · Abiertas: identificación propia (vincular este navegador; el puente de los agentes con su token) y dos lecturas por POST (12)</summary>
 
@@ -206,7 +206,7 @@ añadan después) y comprueba la lista exacta de abiertas, así que ninguna ruta
 
 </details>
 
-<details><summary><strong>E</strong> · Organización, configuración y contenido (45)</summary>
+<details><summary><strong>E</strong> · Organización, configuración y contenido (46)</summary>
 
 - `POST /api/assistant/conversations`
 - `PATCH /api/assistant/conversations/:id`
@@ -216,6 +216,7 @@ añadan después) y comprueba la lista exacta de abiertas, así que ninguna ruta
 - `POST /api/claude-code/detect`
 - `POST /api/claude-code/usage/acknowledge`
 - `POST /api/harnesses/codex/detect`
+- `PUT /api/settings/owner-name` (EN-021: «Tu nombre», entra en el sello de todos los agentes)
 - `POST /api/workspaces`
 - `POST /api/workspaces/:slug/agent-folders`
 - `POST /api/workspaces/:slug/agents`
@@ -286,7 +287,7 @@ añadan después) y comprueba la lista exacta de abiertas, así que ninguna ruta
 
 ## 5. Pruebas
 
-- `test/politica-propietario.test.ts`: recorre las 171 rutas protegidas con 7 variantes cada una (sin sesión, inventada,
+- `test/politica-propietario.test.ts`: recorre las 172 rutas protegidas con 7 variantes cada una (sin sesión, inventada,
   en cookie, otra página local, otro puerto, texto, formulario) y comprueba que **ni la base de datos ni git cambian**;
   rutas alternativas; otra empresa; publicar main, el remoto y reconstruir atados; pestaña desactualizada; Decisiones con
   las credenciales reenviadas; el puente con su token; la vista previa; sin CORS. Salir del proceso durante la prueba es
