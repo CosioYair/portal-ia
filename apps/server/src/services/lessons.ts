@@ -329,7 +329,10 @@ export function recordLessonOutcomes(slug: string, processId: string, repoPath: 
   for (const id of repo.withRecurrence(processId)) repo.clearRecurrence(id, processId);
   const used = new Set(realLessonIds(proc.steps.flatMap(s => s.lessonsUsed ?? [])));
   if (!used.size) return out;
-  const fired = detectInProcess(slug, proc, repoPath);
+  // EN-022: una brecha que el propio proceso corrigió (el Evaluador la dio por corregida en una ronda posterior) es un
+  // fallo intermedio, no una reincidencia: la tarea verificada cuenta como cumplida.
+  const correctedHere = (d: Detection) => d.detector === 'gauntlet_gap' && /^Resultado: corregida en la ronda \d+/.test(d.evidence.detail);
+  const fired = detectInProcess(slug, proc, repoPath).filter(d => !correctedHere(d));
   for (const id of used) {
     const l = repo.get(id); if (!l || l.status !== 'validated' || l.evidence.processId === processId) continue;
     const recurred = fired.some(d => sameCause(l, d));
