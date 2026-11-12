@@ -64,8 +64,8 @@ async function imagePausedStory(title: string) {
     pipeline: { ...newPipeline(normalizePipeline({ ...DEFAULT_PIPELINE, autoApply: true, gauntlet: { mode: 'off', maxRounds: 0 } } as any)), state: 'paused', phase: 'qa', pauseKind: 'environment',
       reason: 'Falta Chromium en la imagen del sandbox', imageRelated: true, qaVerdictSnapshot: snapshot,
       envSnapshot: makeEnvSnapshot({ engine: 'docker', available: true, image: SANDBOX_IMAGE, stale: true }) } as any });
-  // La pausa vive en result.pipeline (state 'paused'); el proceso termina como una pausa real del pipeline ('completed').
-  processesRepo(S).authorize(p.id, 1); processesRepo(S).finish(p.id, 'completed');
+  // La pausa vive en result.pipeline (state 'paused'); el proceso termina como una pausa real del pipeline ('done', ProcessStatus válido).
+  processesRepo(S).authorize(p.id, 1); processesRepo(S).finish(p.id, 'done', null);
   return processesRepo(S).get(p.id)!;
 }
 
