@@ -98,9 +98,25 @@ test('resolveEditionSandboxPaths: por defecto <instalación>-edicion y rechaza c
 
 // ---------- port_busy ----------
 
+/** Ocupa 127.0.0.1:4320 de verdad; reintenta si otro programa lo usa un instante. Devuelve el servidor escuchando o null. */
+async function occupy4320(ms = 10_000): Promise<net.Server | null> {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    const s = net.createServer();
+    const ok = await new Promise<boolean>(res => {
+      s.once('error', () => res(false));
+      s.listen({ host: '127.0.0.1', port: 4320, exclusive: true }, () => res(true));
+    });
+    if (ok && s.listening) return s;
+    s.close(); await sleep(200);
+  }
+  return null;
+}
+
 test('port_busy: con el 4320 ocupado falla en español sin spawn ni carpetas', async () => {
-  const blocker = net.createServer();
-  await new Promise<void>(res => { blocker.once('error', () => res()); blocker.listen({ host: '127.0.0.1', port: 4320 }, () => res()); });
+  const blocker = await occupy4320();
+  assert.ok(blocker, 'la prueba debe poder ocupar 127.0.0.1:4320 para comprobar port_busy');
+  assert.equal(blocker.listening, true, 'el bloqueador escucha en 4320 antes de arrancar');
   const override = path.join(TMP, 'sb-busy'); let calls = 0;
   const spy: SpawnFn = () => { calls++; throw new Error('no debe llamarse'); };
   try {
