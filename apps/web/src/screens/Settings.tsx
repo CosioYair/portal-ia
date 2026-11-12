@@ -40,6 +40,14 @@ export function Settings() {
   const [nameState, setNameState] = useState<'loading' | 'idle' | 'saving' | 'saved' | 'error'>('loading');
   const [nameError, setNameError] = useState<string | null>(null);
   useEffect(() => { void loadOwnerName().then(n => { setOwnerName(n); setSavedName(n); setNameState('idle'); }).catch((e: Error) => { setNameError(e.message); setNameState('error'); }); }, []);
+  // HU-209 · «Sistema» tiene su propia acción: copiar sus datos al portapapeles (sin IA ni costo), con estado explícito.
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
+  const copySystem = async () => {
+    if (!sys) return;
+    const line = `Portal IA ${sys.version} · en marcha ${sys.startCommit ?? '—'} · interfaz ${sys.buildCommit ?? '—'}${sys.sandbox ? ` · sandbox: ${sys.sandbox.detail}` : ''}`;
+    try { await navigator.clipboard.writeText(line); setCopyState('copied'); }
+    catch { setCopyState('error'); }
+  };
   const submitName = () => {
     setNameState('saving'); setNameError(null);
     saveOwnerName(ownerName.trim()).then(n => { setOwnerName(n); setSavedName(n); setNameState('saved'); }).catch((e: Error) => { setNameError(e.message); setNameState('error'); });
@@ -47,7 +55,7 @@ export function Settings() {
   const card = (icon: ReactNode, title: string, scope: string, body: ReactNode, action: ReactNode) => <section className="card settings-card">
     <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}><Tile icon={icon} tone="settings" /><div style={{ flex: 1, minWidth: 0 }}><h2 className="h3" style={{ margin: 0 }}>{title}</h2><Chip xs>{scope}</Chip></div></div>
     <div className="small med">{body}</div>
-    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 'auto' }}>{action}</div>
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', minWidth: 0, maxWidth: '100%' }}>{action}</div>
   </section>;
   return <Shell crumb="Ajustes">
     <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -73,9 +81,8 @@ export function Settings() {
             <label htmlFor="owner-name" style={{ display: 'block', marginBottom: 4 }}>Cómo te llaman los agentes al presentarse. Si lo dejas vacío, te lo preguntan una vez. Nunca se toma de tu correo.</label>
             <input id="owner-name" className="input" type="text" value={ownerName} maxLength={OWNER_NAME_MAX} disabled={nameState === 'loading' || nameState === 'saving'} placeholder="Vacío: el agente te lo pregunta" onChange={e => { setOwnerName(e.target.value); if (nameState === 'saved' || nameState === 'error') setNameState('idle'); }} />
             <p role="status" aria-live="polite" style={{ margin: '4px 0 8px' }}>{nameState === 'loading' ? 'Cargando…' : nameState === 'saving' ? 'Guardando…' : nameState === 'saved' ? 'Guardado.' : nameState === 'error' ? `Error: ${nameError ?? 'no se pudo guardar.'}` : null}</p>
-            <PortalSealPanel ownerName={savedName} />
           </>,
-          <button type="button" className="btn btn-secondary btn-sm" disabled={nameState === 'loading' || nameState === 'saving' || ownerName.trim() === savedName} onClick={submitName}>{nameState === 'saving' ? 'Guardando…' : 'Guardar nombre'}</button>)}
+          <button type="button" className="btn btn-secondary btn-sm" disabled={nameState === 'loading' || nameState === 'saving' || ownerName.trim() === savedName} onClick={submitName}>{nameState === 'saving' ? 'Guardando…' : ownerName.trim() === savedName ? 'Sin cambios' : 'Guardar nombre'}</button>)}
         {card(Icon.sparkles(), 'Mejora automática de lecciones', `Empresa «${ws.name}» · con costo · desactivada por defecto`,
           <LessonAutoImproveSettings slug={ws.slug} />,
           <Link className="btn btn-ghost btn-sm" to="/autorizaciones">Ver mejoras pendientes en Decisiones</Link>)}
@@ -84,8 +91,14 @@ export function Settings() {
           owner ? <OwnerStatus /> : <button type="button" className="btn btn-secondary btn-sm" onClick={() => ownerNeeded()}>Vincular este navegador</button>)}
         {card(Icon.gear(), 'Sistema', 'Este equipo',
           sys ? <>Portal IA {sys.version} · en marcha <span className="mono">{sys.startCommit ?? '—'}</span> · interfaz <span className="mono">{sys.buildCommit ?? '—'}</span>{sys.sandbox ? <> · sandbox: {sys.sandbox.detail}</> : null}. Cuando hay una actualización, la barra de sistema aparece arriba en todas las pantallas.</> : 'Cargando el estado del Portal…',
-          <Link className="btn btn-ghost btn-sm" to="/panel">Repositorio (en el Resumen del proyecto)</Link>)}
+          <>
+            <button type="button" className="btn btn-secondary btn-sm" disabled={!sys} onClick={() => void copySystem()}>Copiar datos del sistema</button>
+            <span role="status" aria-live="polite" className="small">{copyState === 'copied' ? 'Copiado' : copyState === 'error' ? 'No se pudo copiar' : null}</span>
+          </>)}
       </div>
+      <section className="settings-panel" aria-label="Sello Portal IA">
+        <PortalSealPanel ownerName={savedName} />
+      </section>
     </main>
     {dialog === 'harness' && <HarnessDialog onClose={() => { setDialog(null); if (params.get('ver')) setParams({}, { replace: true }); }} />}
     {(dialog === 'company' || dialog === 'project') && <CreateDialog kind={dialog} onClose={() => setDialog(null)} />}

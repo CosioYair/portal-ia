@@ -255,8 +255,15 @@ button.stat:focus-visible, a.stat:focus-visible { outline: var(--focus-ring); ou
 .dec-item-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 
 /* ---------- Ajustes */
-.settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
-.settings-card { display: flex; flex-direction: column; gap: 10px; padding: 18px; text-decoration: none; color: inherit; }
+/* HU-209 · Columnas fluidas (a 375 px una columna nunca pasa del ancho disponible) y tarjetas alineadas arriba: ninguna se
+   estira hasta la altura de la más alta de su fila. */
+.settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr)); align-items: start; gap: 16px; }
+.settings-card { display: flex; flex-direction: column; gap: 10px; padding: 18px; text-decoration: none; color: inherit; min-width: 0; }
+.settings-card .mono { overflow-wrap: anywhere; }
+.settings-card .btn { max-width: 100%; white-space: normal; text-align: center; }
+/* HU-209 · Sección propia del Sello Portal IA, a todo el ancho y debajo de la rejilla (el panel ya trae su tarjeta). */
+.settings-panel { display: block; width: 100%; min-width: 0; max-width: 100%; }
+@media (max-width: 480px) { .settings-card .btn { flex: 1 1 100%; width: 100%; } }
 a.settings-card:hover { border-color: var(--color-border-hover); box-shadow: var(--shadow-raise); }
 a.settings-card:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
 
