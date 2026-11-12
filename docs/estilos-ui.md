@@ -31,6 +31,18 @@ Reglas para que las pantallas del Portal queden alineadas, se adapten al ancho d
 - Las rejillas usan `repeat(auto-fill, minmax(…, 1fr))` en vez de anchos fijos. Lo que no cabe pasa de línea (`flex-wrap: wrap`) en vez de provocar desplazamiento horizontal.
 - Los textos largos (rutas, carpetas, nombres) usan `overflow-wrap: anywhere` o se recortan con puntos suspensivos y llevan `title`.
 
+## Botones (HU-208)
+
+- **Niveles:** hay tres. El primario (`.btn-primary`) es violeta relleno con sombra, y cada pantalla tiene uno solo. El secundario (`.btn-secondary`) va sobre `--color-surface`, con borde `--color-control-border` y texto `--color-text`. El terciario (`.btn-ghost`) es transparente, con borde `--color-tertiary-border` y texto `--color-text-med`; se usa para «Ahora no», «Descartar» y «Quitar». Al pasar el ratón por encima del terciario, el fondo cambia a `--color-surface-pressed` y el borde a `--color-border-hover-strong`.
+- **Borde del terciario:** `--color-tertiary-border` tiene un contraste de 3:1 o más sobre `--color-surface`, `--color-bg`, `--color-surface-alt` y `--color-surface-pressed`. Lo comprueba `hu208-sistema-diseno.test.ts`. No uses `--color-control-border` para este borde, porque sobre `--color-bg` queda en el límite.
+- **Partir línea:** `.btn` y `.btn-sm` llevan `max-width: 100%`, `white-space: normal`, `overflow-wrap: anywhere` y `min-height` (40 px y 32 px), nunca `height` fija. Un texto largo pasa a la línea siguiente en vez de desbordar, también en 375 px. No vuelvas a poner `white-space: nowrap` en un botón.
+
+## Componentes de `kit.tsx`: `SettingsRow` e `InfoPanel` (HU-208)
+
+- **`<SettingsRow label description? htmlFor?>{control}</SettingsRow>`:** muestra la etiqueta y una descripción opcional a la izquierda, y el control a la derecha. En pantallas estrechas el control pasa debajo. Si se pasa `htmlFor`, la etiqueta es un `<label>` enlazado al control. El componente no modifica el control que recibe. Para enlazar la descripción con `aria-describedby`, pasa una función como hijo: recibe el id de la descripción, por ejemplo `{(d) => <input aria-describedby={d} … />}`.
+- **`<InfoPanel title? icon?>{cuerpo}</InfoPanel>`:** es un aviso informativo sobre `--color-info-bg` con borde `--color-info-border`. El título y el icono usan `--color-info-text`, con 4,5:1 o más. Lleva `role="note"` por defecto, así que no interrumpe al lector de pantalla. Usa `role="status"` solo si el contenido cambia mientras se está viendo. El icono es decorativo y el mensaje siempre va en texto.
+- Los dos son solo de presentación: no importan el router ni la API. Sus estilos están en `system.css` (`.settings-row`, `.settings-row__text`, `__label`, `__desc`, `__control`, `.info-panel`, `__icon`, `__title`, `__body`) y usan únicamente tokens.
+
 ## Lista de comprobación antes de entregar una pantalla
 
 1. No hay `style={{` nuevos salvo para valores que se calculan en tiempo de ejecución; los colores y espacios salen de tokens.
@@ -40,6 +52,8 @@ Reglas para que las pantallas del Portal queden alineadas, se adapten al ancho d
 5. En 375 px nada se desborda y las tablas se ven como tarjetas con su `data-label`.
 6. Los estados se comunican con icono y texto, nunca solo con color, y el foco se ve.
 7. El caso vacío o sin datos (p. ej. «Sin ámbito») también está alineado.
+8. Los botones con texto largo parten línea dentro de su contenedor en 375 px, y en cada pantalla hay una sola acción primaria.
+9. Las filas de ajuste usan `SettingsRow` y los avisos informativos usan `InfoPanel`, en lugar de estructuras hechas a mano.
 
 ## Pendiente (otras historias)
 

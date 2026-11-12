@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useId, type ReactNode } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { ILLUSTRATIONS, type IllustrationName } from './illustrations.tsx';
 import { WORK_TABS } from '../lib/routes.ts';
@@ -63,6 +63,42 @@ export function EmptyState({ art = 'desk', title, children, action }: { art?: Il
     <div className="h3">{title}</div>
     {children && <p className="small med" style={{ maxWidth: '52ch' }}>{children}</p>}
     {action}
+  </div>;
+}
+
+/**
+ * HU-208 · Fila de ajuste: etiqueta, descripción opcional y control (a la derecha; debajo si no cabe).
+ * Si se pasa `htmlFor`, la etiqueta es un <label> enlazado al control. El componente no clona a sus hijos:
+ * para enlazar la descripción, pasa una función como `children`; recibe el id de la descripción y el control
+ * lo usa en su `aria-describedby`.
+ */
+export function SettingsRow({ label, description, htmlFor, children }: {
+  label: ReactNode; description?: ReactNode; htmlFor?: string;
+  children: ReactNode | ((describedBy: string | undefined) => ReactNode);
+}) {
+  const descId = useId();
+  const describedBy = description ? descId : undefined;
+  return <div className="settings-row">
+    <div className="settings-row__text">
+      {htmlFor
+        ? <label className="settings-row__label" htmlFor={htmlFor}>{label}</label>
+        : <span className="settings-row__label">{label}</span>}
+      {description && <p className="settings-row__desc" id={descId}>{description}</p>}
+    </div>
+    <div className="settings-row__control">{typeof children === 'function' ? children(describedBy) : children}</div>
+  </div>;
+}
+
+/** HU-208 · Panel informativo: icono y título opcionales, y cuerpo. Usa role="note" por defecto; no interrumpe al lector de pantalla. */
+export function InfoPanel({ title, icon, children, role = 'note' }: {
+  title?: ReactNode; icon?: ReactNode; children: ReactNode; role?: 'note' | 'status' | 'region';
+}) {
+  return <div className="info-panel" role={role}>
+    {icon && <span className="info-panel__icon" aria-hidden="true">{icon}</span>}
+    <div className="info-panel__content">
+      {title && <p className="info-panel__title">{title}</p>}
+      <div className="info-panel__body">{children}</div>
+    </div>
   </div>;
 }
 
