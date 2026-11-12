@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { DeliveryProgress, FlowAction, FlowActionId, FlowIssue, LiveCall, PipelineEvent, Process, ProcessStep, StoryContext } from '@portal-ia/domain';
 import { mergeAcknowledgementsOf, verificationPassed } from '@portal-ia/domain';
-import { api, ApiError, type ProcessBackends } from '../lib/api.ts';
+import { api, ApiError, type ProcessBackends, type SandboxCheckReport, type SandboxImageBuild } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { fmtUsd } from '../lib/labels.ts';
 import { callTiming, connection, serverNow, stepDurationMs } from '../lib/liveStatus.ts';
@@ -23,7 +23,7 @@ const LIVE_TXT: Record<LiveCall['state'], string> = { preparing: 'Preparando la 
 const LIVE_NEXT: Record<LiveCall['state'], string> = { preparing: 'enviar la solicitud al proveedor', queued: 'que termine otra ejecución de Claude Code y se libere un hueco', sending: 'que el proveedor confirme la recepción', waiting: 'que el proveedor empiece a responder (o abortar al llegar al plazo)', receiving: 'terminar de recibir la respuesta', processing: 'validar la entrega y pasar a la siguiente etapa', retrying: 'reenviar la solicitud', cancelling: 'detener el proceso' };
 const go = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 /** Acciones que esta versión de la interfaz sabe ejecutar. Una desconocida (servidor más nuevo) se dice, no se ignora. */
-const HANDLED = new Set<FlowActionId>(['authorize', 'cancel', 'review_diff', 'apply', 'reject', 'install_and_retry', 'verify', 'retry_verification', 'sandbox_help', 'refresh_sandbox', 'request_fix', 'ask_team', 'tasks_from_issue', 'merge', 'rebuild', 'runtime_check', 'manual_test', 'close', 'close_resolved', 'accept_plan', 'retry_process', 'recover', 'new_iteration', 'pipeline_resume', 'repair_output', 'claude_code_fix', 'register_external', 'open_settings', 'integration_prepare', 'integration_resolve', 'convert_to_analysis', 'publish', 'skip_publish']);
+const HANDLED = new Set<FlowActionId>(['authorize', 'cancel', 'review_diff', 'apply', 'reject', 'install_and_retry', 'verify', 'retry_verification', 'sandbox_help', 'refresh_sandbox', 'rebuild_sandbox_image', 'request_fix', 'ask_team', 'tasks_from_issue', 'merge', 'rebuild', 'runtime_check', 'manual_test', 'close', 'close_resolved', 'accept_plan', 'retry_process', 'recover', 'new_iteration', 'pipeline_resume', 'repair_output', 'claude_code_fix', 'register_external', 'open_settings', 'integration_prepare', 'integration_resolve', 'convert_to_analysis', 'publish', 'skip_publish']);
 const AUTH_TXT: Record<string, string> = { 'claude.ai': 'sesión de tu suscripción', oauth_token: 'token OAuth', api_key: 'clave de API (no válida aquí)', none: 'sin sesión' };
 
 interface Props {
@@ -64,6 +64,11 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const [msg, setMsg] = useState<string | null>(null);
   const [answer, setAnswer] = useState('');
   const [cancelling, setCancelling] = useState(false);
+  // EN-024 · Último informe de «Comprobar el sandbox de nuevo» (su huella se envía como `since`) y última construcción de la imagen.
+  const [sandboxReport, setSandboxReport] = useState<(SandboxCheckReport & { checkedAt: string }) | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [checkErr, setCheckErr] = useState<string | null>(null);
+  const [imageBuild, setImageBuild] = useState<SandboxImageBuild | null>(null);
   // HU-187 · «Cerrar como resuelta» abre el diálogo del Portal (lo omitido, motivo vacío, «Integrar primero»), sin diálogos del navegador.
   const [closingResolved, setClosingResolved] = useState(false);
   // HU-186 · Diálogos del Portal: publicar main (con lo que se autoriza), omitir publicar, rechazar la iteración y cancelar.
@@ -84,9 +89,15 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const ccNeeded = ccRelevant || (!!confirming && ['pipeline_resume', 'repair_output', 'integration_resolve', 'accept_plan'].includes(confirming.id));
   useEffect(() => { if (!ccNeeded) { setCc(null); return; } let alive = true; void api.processBackends(slug, proc.id).then(r => { if (alive) setCc(r); }).catch(() => undefined); return () => { alive = false; }; }, [slug, proc.id, ccNeeded, flow?.issue?.title]);
   useEffect(() => { setVerified(null); }, [proc.id]);
+  useEffect(() => { setSandboxReport(null); setCheckErr(null); setChecking(false); setImageBuild(null); }, [proc.id]);
   const [, tick] = useState(0);
   useEffect(() => { if (proc.status !== 'running') return; const t = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(t); }, [proc.status]);
-  useEffect(() => { setConfirming(null); setComposer(null); setAsgFeedback(null); setErr(null); setMsg(null); setOkAuth(false); setAnswer(''); setPublishing(null); setSkipAsk(null); setRejecting(null); setCancelAsk(null); }, [proc.id, flow?.current, flow?.issue?.kind]);
+  useEffect(() => { setConfirming(null); setComposer(null); setAsgFeedback(null); setErr(null); setMsg(null); setOkAuth(false); setAnswer(''); setPublishing(null); setSkipAsk(null); setRejecting(null); setCancelAsk(null); setMergeBlock(null); setRecoverOk(false); }, [proc.id, flow?.current, flow?.issue?.kind]);
+  // EN-023 · «Integrar» respondió 409 porque main avanzó (integration_candidate_required) o choca (merge_conflict): el aviso ofrece preparar el candidato ahí mismo.
+  const [mergeBlock, setMergeBlock] = useState<{ code: 'integration_candidate_required' | 'merge_conflict'; files: string[] } | null>(null);
+  const [recoverOk, setRecoverOk] = useState(false);
+  const [recoverGo, setRecoverGo] = useState(false);
+  useEffect(() => { if (recoverGo && confirming?.id === 'integration_prepare') { setRecoverGo(false); void run(confirming); } }, [recoverGo, confirming]);
   const ackNow = mergeAcknowledgementsOf(proc);
   useEffect(() => { if (proc.status !== 'running') setCancelling(false); }, [proc.status]);
   if (!flow) return null;
@@ -149,7 +160,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const reload = async () => { try { onChange(await api.process(slug, proc.id)); } catch { /* sin cambios */ } };
   const askText = issue ? `Sobre «${issue.title}»${issue.command ? ` (${issue.command})` : ''}: ¿por qué ocurre y cómo propones corregirlo? Responde con las causas y los cambios concretos.` : '¿Qué falta para cerrar esta historia?';
   const run = async (a: FlowAction) => {
-    setErr(null); setMsg(null); if (a.id !== 'claude_code_fix') setVerified(null);
+    setErr(null); setMsg(null); setMergeBlock(null); if (a.id !== 'claude_code_fix') setVerified(null);
     if (!HANDLED.has(a.id)) { setErr(`Esta página no reconoce la acción «${a.label}»: es de una versión más nueva del Portal. Recarga la página (Ctrl+F5) y vuelve a intentarlo; no se ha hecho nada.`); return; }
     if (a.id === 'open_settings') { if (a.href) navigate(a.href); return; }
     // Acciones que solo llevan a la sección donde se completan (con su propia autorización y opciones)
@@ -176,7 +187,28 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       }
       else if (a.id === 'merge') { try { const ack = mergeAcknowledgementsOf(proc); const p = await api.mergeProcess(slug, proc.id, false, { expectedCommit: proc.result?.applied?.commit ?? null, acknowledge: { preexisting: ack.preexisting.length > 0, testUpdates: ack.testUpdates.length > 0 } }); onChange(p); flash(`Integrada en ${p.result?.merged?.into}`); } catch (e: any) { if (e instanceof ApiError && e.body?.process) onChange(e.body.process); else throw e; } }
       else if (a.id === 'runtime_check') { const p = await api.runtimeCheck(slug, proc.id); onChange(p); }
-      else if (a.id === 'refresh_sandbox') { const s = await api.systemSandbox(true); await reload(); flash(s.available === 'unavailable' ? 'Sigue sin sandbox: arranca Docker Desktop' : `Sandbox disponible: ${s.available}`, s.available === 'unavailable' ? 'err' : 'ok'); }
+      else if (a.id === 'refresh_sandbox') {
+          // EN-024 · Solo lectura: el informe queda en la tarjeta (sin aviso fugaz) y el proceso no cambia.
+          setChecking(true); setCheckErr(null);
+          try { const r = await api.sandboxCheck(slug, proc.id, sandboxReport?.fingerprint ?? null); setSandboxReport({ ...r, checkedAt: new Date().toISOString() }); }
+          catch (e) { setCheckErr(e instanceof ApiError ? e.message : 'No se pudo comprobar el sandbox.'); }
+          finally { setChecking(false); }
+        }
+        else if (a.id === 'rebuild_sandbox_image') {
+          // EN-024 · Llega aquí solo tras el diálogo de autorización. Si falla, la salida queda en la tarjeta y la pausa conserva sus acciones.
+          setImageBuild(null);
+          try {
+            const r = await api.rebuildSandboxImage(slug, proc.id);
+            setImageBuild(r.lastImageBuild);
+            if (r.process) onChange(r.process);
+            if (r.ok) flash(`Imagen ${r.tag ?? ''} construida desde el Dockerfile de la rama. Pulsa «Continuar» para repetir la verificación sin IA.`, 'ok');
+            else setErr('La construcción de la imagen falló: revisa su salida en la tarjeta. La historia sigue en pausa.');
+          } catch (e) {
+            const out = e instanceof ApiError ? (e.body?.lastImageBuild?.output ?? e.body?.output ?? null) : null;
+            setImageBuild({ ok: false, tag: null, output: typeof out === 'string' && out ? out : (e instanceof Error ? e.message : 'Error desconocido') });
+            setErr(e instanceof ApiError ? e.message : 'No se pudo construir la imagen del sandbox.');
+          }
+        }
       else if (a.id === 'tasks_from_issue') { if (!itemId) { needsStory(); return; } const t = await api.storyTasksFromIssue(slug, itemId); setMsg(t.length ? `${t.length} tarea(s) creadas a partir del problema.` : 'Ya existían tareas para estos hallazgos; no se duplican.'); }
       else if (a.id === 'reject') { if (!rejecting) { setConfirming(null); setRejecting({ action: a, reason: '' }); return; } const reason = rejecting.reason.trim(); setRejecting(null); onChange(await api.rejectProcess(slug, proc.id, reason || undefined)); flash('Iteración rechazada: la historia vuelve a pendiente'); }
       else if (a.id === 'close') { if (!itemId) { needsStory(); return; } await api.markStoryDone(slug, itemId); flash('Historia completada'); await reload(); }
@@ -235,7 +267,11 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
     } catch (e: any) {
       setErr(explainError(e));
       // Continuar rechazado porque Claude Code no está listo: se muestra el estado real (nada se registró en el proceso).
-      if (e instanceof ApiError && e.body?.code === 'backend_not_ready') { setConfirming(null); if (e.body.readiness) setCc(e.body.readiness); await reload(); }
+      if (a.id === 'merge' && e instanceof ApiError && e?.status === 409 && (e.body?.code === 'integration_candidate_required' || e.body?.code === 'merge_conflict')) {
+          const files: string[] = (e.body?.integration?.conflicts ?? []).map((c: { path: string }) => c.path).concat(e.body?.conflictFiles ?? []);
+          setMergeBlock({ code: e.body.code, files: Array.from(new Set(files)) }); setRecoverOk(false);
+        }
+        if (e instanceof ApiError && e.body?.code === 'backend_not_ready') { setConfirming(null); if (e.body.readiness) setCc(e.body.readiness); await reload(); }
     } finally { setBusy(null); }
   };
 
@@ -321,6 +357,36 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
 
       {issue && <div className="sf-issue" data-cause={issue.cause} data-level={issue.level} role={issue.level === 'blocker' ? 'alert' : undefined} aria-label="Problema actual">
         <div className="sf-issue-title">{issue.level === 'blocker' ? Icon.alert() : Icon.warn()}<span>{issue.title}</span><Chip xs tone={issue.cause === 'environment' ? 'warn' : issue.cause === 'code' ? 'err' : ''}>{CAUSE[issue.cause]}</Chip></div>
+          {confirming?.id === 'rebuild_sandbox_image' && <ul className="sf-details small" aria-label="Qué hace reconstruir la imagen">
+            <li>Construye la imagen desde <code>docker/sandbox.Dockerfile</code> de esta rama y la etiqueta por su hash (<code>portal-ia-sandbox:df-…</code>).</li>
+            <li>Usa red <strong>solo durante la construcción</strong>; las verificaciones siguen sin red.</li>
+            <li>No sobrescribe <code>portal-ia-sandbox:1</code> ni la imagen que usan main y otros procesos.</li>
+            <li>Con la imagen nueva habrá que reinstalar las dependencias del sandbox de esta historia. No llama a la IA.</li>
+          </ul>}
+          {busy === 'rebuild_sandbox_image' && <p className="small" role="status" aria-live="polite"><span className="spin" /> Construyendo la imagen del sandbox… (puede tardar varios minutos)</p>}
+          {imageBuild && !imageBuild.ok && busy !== 'rebuild_sandbox_image' && <details className="small" data-testid="sf-image-build-output" open>
+            <summary>La construcción de la imagen falló: ver su salida</summary>
+            <pre className="mono" style={{ whiteSpace: 'pre-wrap', maxHeight: '18rem', overflow: 'auto' }}>{imageBuild.output || '(sin salida)'}</pre>
+          </details>}
+          {imageBuild?.ok && <p className="small">Imagen <code>{imageBuild.tag ?? ''}</code> lista. «Continuar» repite la verificación con ella sin llamar a la IA.</p>}
+          {(checking || checkErr || sandboxReport) && <div className="sf-check" data-testid="sf-sandbox-check" role="status" aria-live="polite" aria-busy={checking ? true : undefined}>
+            {checking && <p className="small"><span className="spin" /> Comprobando el sandbox…</p>}
+            {checkErr && !checking && <p className="small"><strong>No se pudo comprobar el sandbox:</strong> {checkErr}</p>}
+            {sandboxReport && !checking && <>
+              <p className="small"><strong>{sandboxReport.changed ? 'Comprobación del sandbox' : 'Nada cambió desde la última comprobación'}</strong> · <span className="mono">{hhmm(sandboxReport.checkedAt)}</span></p>
+              {sandboxReport.message && <p className="small">{sandboxReport.message}</p>}
+              <dl className="sf-live-grid small">
+                <dt>Motor</dt><dd className="mono">{String(sandboxReport.engine ?? '—')}{sandboxReport.available ? '' : ' (no disponible)'}</dd>
+                <dt>Imagen</dt><dd><code>{String(sandboxReport.image ?? '—')}</code></dd>
+                <dt>Estado de la imagen</dt><dd>{sandboxReport.stale ? 'desactualizada: no corresponde al Dockerfile de la rama' : 'vigente'}</dd>
+                <dt>Pausa</dt><dd>{sandboxReport.pauseStillActive ? 'sigue activa' : 'ya no aplica: puedes continuar'}</dd>
+              </dl>
+              {(() => {
+                const resolving = sandboxReport.resolvingAction ? flow.actions.find(x => x.id === sandboxReport.resolvingAction) : undefined;
+                return resolving && !readOnly ? <p className="small">Lo que lo resuelve: <button type="button" className="btn btn-primary btn-sm" data-testid="sf-check-resolve" disabled={busy !== null} onClick={() => void run(resolving)}>{resolving.label}</button></p> : null;
+              })()}
+            </>}
+          </div>}
         <p className="sm13" style={{ margin: 0, lineHeight: 1.5 }}>{issue.explanation}</p>
         {details.length > 0 && <ul className="sf-details" aria-label="Detalle del problema">
           {details.map((d, i) => <li key={i}>{d.severity && <span className={`sf-sev sf-sev-${d.severity}`}>{d.severity}</span>}{d.file && <span className="mono">{d.file}{d.line ? `:${d.line}` : ''} </span>}{d.code && <span className="mono muted">{d.code} </span>}{d.text}</li>)}
@@ -457,7 +523,25 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         onIntegrateFirst={(processId: string) => { setClosingResolved(false); if (processId === proc.id) requestAnimationFrame(() => { if (document.getElementById('sec-git')) go('sec-git'); else go('sec-flow'); }); else navigate(`/procesos/${processId}#sec-git`); }}
         onCancel={() => setClosingResolved(false)} />}
       {msg && <Notice kind="info"><div>{msg}{msg.includes('tarea') && itemId && <> <button className="lnk" onClick={() => navigate(`/historias/${itemId}#tareas`)}>Ver tareas</button></>}</div></Notice>}
-      {err && <Notice kind="err">{err}</Notice>}
+      {err && <Notice kind="err"><div className="sf-merge-block">
+        <div>{err}</div>
+        {mergeBlock && !readOnly && <div className="sf-merge-recover" data-testid="sf-merge-recover" data-code={mergeBlock.code}>
+          {mergeBlock.code === 'merge_conflict' && mergeBlock.files.length > 0 && <ul className="sf-details small mono">{mergeBlock.files.map(f => <li key={f}>{f}</li>)}</ul>}
+          <label className="sf-merge-recover-auth small">
+            <input type="checkbox" checked={recoverOk} onChange={e => setRecoverOk(e.target.checked)} />{' '}
+            <span>Autorizo incorporar <strong>main</strong> en la rama de la historia (merge en su worktree) y verificarlo en el sandbox. <strong>No llama a la IA ni modifica main</strong>; integrar sigue siendo decisión mía.</span>
+          </label>
+          <div className="sf-actions">
+            <button type="button" className="btn btn-primary btn-sm" disabled={!recoverOk || busy !== null} aria-busy={busy === 'integration_prepare' ? true : undefined}
+              onClick={() => {
+                const prep: FlowAction = flow.actions.find(x => x.id === 'integration_prepare') ?? { id: 'integration_prepare', label: 'Preparar el candidato de integración (sin IA)', description: 'Incorpora main en la rama con git (sin IA y sin tocar main) y lo verifica en el sandbox.', requires: ['authorization'], primary: true };
+                setConfirming(prep); setOkAuth(true); setRecoverGo(true);
+              }}>
+              {busy === 'integration_prepare' ? <><span className="spin spin-light" /> Preparando y verificando en el sandbox…</> : 'Preparar el candidato de integración (sin IA)'}
+            </button>
+          </div>
+        </div>}
+      </div></Notice>}
     </section>
   );
 }
@@ -606,7 +690,7 @@ function ClaudeCodeCard({ cc }: { cc: ProcessBackends }) {
 /** Errores de la API en lenguaje claro (permisos, autorización, conflictos). */
 export function explainError(e: any): string {
   const code = e instanceof ApiError ? e.body?.code : undefined;
-  if (code === 'tool_not_granted') return `${e.message} Actívala en la ficha avanzada del agente (su panel › Ajustes › Ajustes avanzados) → Herramientas, o elige otro agente para este papel.`;
+  if (code === 'tool_not_granted') return `${e.message} Actívala en su panel › Ajustes › Configuración › Herramientas y conocimiento, o elige otro agente para este papel.`;
   if (code === 'authorization_required' || code === 'network_confirmation_required') return `${e.message} Marca la autorización y vuelve a intentarlo.`;
   if (code === 'merge_conflict') return 'No se pudo integrar por conflictos con main. Arriba tienes la explicación y la corrección.';
   if (code === 'backend_not_ready') return `${e.message} No se ha registrado nada en el proceso: resuelve lo que falta (arriba) y continúa después.`;

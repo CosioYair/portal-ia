@@ -16,7 +16,7 @@ import { Disclosure } from '../components/Disclosure.tsx';
 /**
  * Oficina › Organización (antes «Equipo de IA»): quién reporta a quién, relaciones y configuración, evaluar la
  * organización y el Evaluador Gauntlet. El estado de cada agente es el REAL de la Oficina (calculado en el servidor);
- * cada agente se abre en su panel, y su ficha avanzada sigue en Configuración › Ajustes avanzados.
+ * cada agente se abre en su panel, y su configuración completa está en su panel › Ajustes › Configuración.
  */
 export function OrganizationView({ office, onOpen }: { office: OfficeAgent[]; onOpen: (agentId: string, tab?: string) => void }) {
   const { status, providers } = useApp();
@@ -69,7 +69,7 @@ export function OrganizationView({ office, onOpen }: { office: OfficeAgent[]; on
           <p className="small muted" style={{ margin: '4px 0 0' }}>{agents.length} agentes · {agents.filter(a => a.scope === 'workspace').length} trabajan en toda la empresa · {agents.filter(a => a.scope === 'project').length} en el proyecto{agents.some(isRetired) ? ` · ${agents.filter(isRetired).length} retirados` : ''}</p></div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
           <button className="btn btn-secondary btn-sm" onClick={() => setEvalOpen(o => !o)} aria-expanded={evalOpen}>{Icon.org()}Evaluar organización</button>
-          <Link className="btn btn-ghost btn-sm" to="/equipo/nuevo" title="Formulario con todos los campos (requiere proveedor de API)">Formulario completo de agente</Link>
+          {/* HU-210 · Un único asistente de creación (/oficina/nuevo-agente): se retira el «Formulario completo de agente». */}
         </div>
       </div>
       {evalOpen && <OrgEvaluationPanel slug={ws.slug} defaultProjectId={status.project?.id ?? null} onClose={() => setEvalOpen(false)} />}

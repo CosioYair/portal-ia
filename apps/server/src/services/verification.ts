@@ -6,6 +6,7 @@ import { requirePolicy } from './executionPolicy.ts';
 import { recordDetections } from './lessons.ts';
 import { worktreePathFor } from './repoWrite.ts';
 import { DEPS_MISSING_EXIT, detectSandbox, runInSandbox, type SandboxStatus } from './sandbox.ts';
+import { resolveProcessImage } from './sandboxImage.ts';
 
 export type VerifyCommand = 'install' | 'typecheck' | 'test' | 'build';
 
@@ -15,15 +16,17 @@ export type VerifyCommand = 'install' | 'typecheck' | 'test' | 'build';
  */
 export const sandboxDeps: {
   detect: (force?: boolean) => Promise<SandboxStatus>;
-  run: (worktree: string, repoRoot: string, command: string, opts: { allowNetwork?: boolean }) => Promise<VerificationRun>;
-} = { detect: detectSandbox, run: runInSandbox };
+  run: (worktree: string, repoRoot: string, command: string, opts: { allowNetwork?: boolean; image?: string | null }) => Promise<VerificationRun>;
+  /** EN-024: imagen del proceso según el Dockerfile de su worktree (la de rama df-<hash12> si existe; si no, la por defecto). */
+  resolveImage: (worktree: string, repoRoot: string) => Promise<string | null>;
+} = { detect: detectSandbox, run: runInSandbox, resolveImage: async (wt, root) => (await resolveProcessImage(wt, { repoRoot: root })).image };
 
 /**
  * Ejecuta un comando permitido en el sandbox sobre el worktree del proceso y guarda la ejecución (historial completo).
  * La usan la ruta «Verificar» (autorización por uso) y el pipeline autorizado del proceso (autorización del proceso).
  * Lanza errores con statusCode/code.
  */
-export async function runVerification(slug: string, id: string, command: VerifyCommand, allowNetwork: boolean): Promise<VerificationRun> {
+export async function runVerification(slug: string, id: string, command: VerifyCommand, allowNetwork: boolean, image?: string | null): Promise<VerificationRun> {
   const fail = (statusCode: number, error: string, code?: string) => Object.assign(new Error(error), { statusCode, code });
   const procs = processesRepo(slug); const proc = procs.get(id);
   if (!proc || !proc.result) throw fail(404, 'Proceso no encontrado');
@@ -40,7 +43,12 @@ export async function runVerification(slug: string, id: string, command: VerifyC
   // Instalar dependencias exige red: solo con autorización explícita.
   if (command === 'install' && !allowNetwork) throw fail(409, 'Instalar dependencias necesita red dentro del sandbox. Revisa el diff de package.json y confirma «Permitir red solo para install».', 'network_confirmation_required');
   // Se registra QUÉ commit se verificó: la frescura de la evidencia se decide por el commit, no por la hora.
-  const run = { ...await sandboxDeps.run(wt, path.resolve(repo.path), command, { allowNetwork }), commit: proc.result.applied.commit ?? null };
+  // EN-024: cada orden (también install) corre con la imagen DEL PROCESO, no con la compartida: tras reconstruir desde el
+  // Dockerfile de la rama, la verificación usa portal-ia-sandbox:df-<hash12>. Si no se puede resolver, runInSandbox usa la por defecto.
+  const root = path.resolve(repo.path);
+  let procImage: string | null = image ?? null;
+  if (!procImage) { try { procImage = await sandboxDeps.resolveImage(wt, root); } catch { procImage = null; } }
+  const run = { ...await sandboxDeps.run(wt, root, command, { allowNetwork, image: procImage }), commit: proc.result.applied.commit ?? null };
   const cur = procs.get(id)!;
   procs.setResult(id, { ...cur.result!, verifications: [...cur.result!.verifications, run] });
   procs.logExecution({ projectId: proc.projectId, agentId: qa?.agentId ?? '', kind: `verify:${command}:${run.isolation}`, status: run.exitCode === 0 ? 'done' : 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: run.startedAt });

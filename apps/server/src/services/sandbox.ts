@@ -6,8 +6,9 @@ import { config } from '../config.ts';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
-import type { Isolation, VerificationRun } from '@portal-ia/domain';
+import type { Isolation, SandboxImageInfo, VerificationRun } from '@portal-ia/domain';
 import { scanSecrets } from './repoWrite.ts';
+import { resolveProcessImage } from './sandboxImage.ts';
 import { testDigest } from './testTriage.ts';
 
 const execFileP = promisify(execFile);
@@ -34,7 +35,9 @@ export const WSL_DISTRO = process.env.PORTAL_WSL_DISTRO ?? 'PortalIA-sandbox';
 const LO_UP = `{ if command -v ip >/dev/null 2>&1; then ip link set lo up; elif command -v python3 >/dev/null 2>&1; then python3 -c 'import socket,fcntl,struct;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);f=struct.unpack("16sH14s",fcntl.ioctl(s,0x8913,struct.pack("16sH14s",b"lo",0,b"")))[1];fcntl.ioctl(s,0x8914,struct.pack("16sH14s",b"lo",f|0x41,b""))' ; fi; true; }`;
 const COMMANDS: Record<string, string> = { install: 'npm ci --ignore-scripts --no-audit --no-fund', typecheck: 'npm run typecheck', test: 'npm test', build: 'npm run build' };
 
-export interface SandboxStatus { available: Isolation; docker: boolean; dockerImage?: string; dockerImageReady?: boolean; wsl: boolean; linuxNs?: boolean; detail: string; checkedAt: string }
+export interface SandboxStatus { available: Isolation; docker: boolean; dockerImage?: string; dockerImageReady?: boolean; wsl: boolean; linuxNs?: boolean; detail: string; checkedAt: string;
+  /** EN-024 · Con worktree: la imagen que corresponde a su Dockerfile y si la que hay está desactualizada. */
+  imageInfo?: SandboxImageInfo; stale?: boolean }
 let cached: SandboxStatus | null = null; let cachedAt = 0;
 
 async function has(cmd: string, args: string[], timeout = 6000, env?: NodeJS.ProcessEnv): Promise<string | null> {
@@ -133,8 +136,21 @@ export function splitExitMark(output: string): { output: string; code: number | 
   return m ? { output: output.replace(m[0], '\n').replace(/\n+$/, '\n'), code: Number(m[1]) } : { output, code: null };
 }
 
-/** Detecta el sandbox disponible (caché de 60 s). */
-export async function detectSandbox(force = false): Promise<SandboxStatus> {
+/**
+ * Detecta el sandbox disponible (caché de 60 s). Con `worktree` (EN-024) comprueba además si la imagen corresponde al
+ * docker/sandbox.Dockerfile de ese worktree: si no, lo informa como «imagen desactualizada», no como «Docker disponible».
+ */
+export async function detectSandbox(force = false, opts: { worktree?: string; repoRoot?: string } = {}): Promise<SandboxStatus> {
+  const base = await detectBase(force);
+  if (!opts.worktree || process.env.PORTAL_SANDBOX === 'none') return base;
+  const engine = base.docker || base.dockerImageReady !== undefined && base.available !== 'wsl' && base.available !== 'linux-ns' && /Docker responde/.test(base.detail);
+  if (!engine) return base;
+  const imageInfo = await resolveProcessImage(opts.worktree, { repoRoot: opts.repoRoot });
+  if (!imageInfo.stale) return { ...base, imageInfo, stale: false, dockerImage: imageInfo.image, detail: base.docker ? `Docker disponible (${imageInfo.image}).` : base.detail };
+  return { ...base, imageInfo, stale: true, dockerImage: imageInfo.image, detail: `Imagen desactualizada: ${imageInfo.reason} Reconstrúyela desde la historia («Reconstruir la imagen del sandbox desde la rama»); ${DEFAULT_SANDBOX_IMAGE} no se modifica.` };
+}
+
+async function detectBase(force: boolean): Promise<SandboxStatus> {
   if (cached && !force && Date.now() - cachedAt < 60_000) return cached;
   if (process.env.PORTAL_SANDBOX === 'none') { cached = { available: 'unavailable', docker: false, wsl: false, detail: 'Sandbox desactivado por PORTAL_SANDBOX=none (solo para pruebas).', checkedAt: new Date().toISOString() }; cachedAt = Date.now(); return cached; }
   const dockerOs = await has('docker', ['version', '--format', '{{.Server.Os}}'], 6000, dockerCliEnv());
@@ -240,7 +256,7 @@ function restoreGitPointer(worktree: string, before: string): void {
  * `install` necesita red; se permite solo si `allowNetwork` (autorización aparte con el diff de package.json a la vista).
  * Si lo ejecutado cambió el `.git` del worktree, se restaura antes de volver y la ejecución falla como incidente de seguridad.
  */
-export async function runInSandbox(worktree: string, repoRoot: string, command: string, opts: { allowNetwork?: boolean; timeoutMs?: number } = {}): Promise<VerificationRun> {
+export async function runInSandbox(worktree: string, repoRoot: string, command: string, opts: { allowNetwork?: boolean; timeoutMs?: number; image?: string | null } = {}): Promise<VerificationRun> {
   const before = gitPointer(worktree);
   const run = await runUnguarded(worktree, repoRoot, command, opts);
   if (gitPointer(worktree) === before) return run;
@@ -248,7 +264,7 @@ export async function runInSandbox(worktree: string, repoRoot: string, command: 
   return { ...run, exitCode: 1, tampered: true, output: `${run.output}\n[seguridad] Lo ejecutado en el sandbox modificó el .git del worktree (podría hacer que el Portal ejecutara órdenes fuera del aislamiento). Se restauró el original y la ejecución se da por fallida: revisa el código de este proceso antes de continuar.` };
 }
 
-async function runUnguarded(worktree: string, repoRoot: string, command: string, opts: { allowNetwork?: boolean; timeoutMs?: number }): Promise<VerificationRun> {
+async function runUnguarded(worktree: string, repoRoot: string, command: string, opts: { allowNetwork?: boolean; timeoutMs?: number; image?: string | null }): Promise<VerificationRun> {
   const script = COMMANDS[command];
   if (!script) throw Object.assign(new Error(`Comando no permitido: ${command}`), { statusCode: 400 });
   const startedAt = new Date().toISOString(); const t0 = Date.now(); const timeoutMs = opts.timeoutMs ?? 10 * 60_000;
@@ -259,10 +275,12 @@ async function runUnguarded(worktree: string, repoRoot: string, command: string,
   if (st.available === 'docker') {
     // Dependencias Linux en un volumen propio: los node_modules del equipo (binarios de Windows, enlaces con rutas C:\…) no sirven dentro.
     const allowNetwork = command === 'install' && !!opts.allowNetwork;
-    const volume = depsVolumeName(worktree);
+    // EN-024 · Imagen del proceso (de su rama) solo para este proceso; por defecto, la compartida.
+    const image = opts.image || SANDBOX_IMAGE;
+    const volume = depsVolumeName(worktree, image);
     const name = `portal-ia-sbx-${randomBytes(6).toString('hex')}`;
     const env = dockerCliEnv();
-    const args = buildDockerRunArgs({ worktree, command, script, image: SANDBOX_IMAGE, volume, allowNetwork, name });
+    const args = buildDockerRunArgs({ worktree, command, script, image, volume, allowNetwork, name });
     // Varias historias verifican a la vez: un máximo de contenedores (cada uno con 2 CPU y 2 GB) y el volumen de
     // dependencias con cerrojo lector/escritor («install» lo vacía y lo llena; los demás lo leen). La espera no consume
     // el tiempo máximo del comando, que empieza al lanzar el contenedor.
@@ -281,7 +299,7 @@ async function runUnguarded(worktree: string, repoRoot: string, command: string,
     // El código lo da el CLI; si el motor se quedó colgado tras terminar el comando, el que imprimió el propio contenedor.
     const code = r.stuck ? marked.code : r.code;
     const note = r.stuck ? `\n[el motor de Docker no informó del final del contenedor; se usó el código que imprimió el propio comando (${marked.code}) y se retiró el contenedor]` : '';
-    return finish(code, `[docker ${SANDBOX_IMAGE} · red ${allowNetwork ? 'activada solo para install' : 'desactivada'} · dependencias ${volume}${command === 'install' ? '' : ' (solo lectura)'}]\n` + marked.output + note, 'docker');
+    return finish(code, `[docker ${image} · red ${allowNetwork ? 'activada solo para install' : 'desactivada'} · dependencias ${volume}${command === 'install' ? '' : ' (solo lectura)'}]\n` + marked.output + note, 'docker');
   }
   if (st.available === 'wsl') {
     const wslPath = (await has('wsl.exe', ['-d', WSL_DISTRO, '--', 'wslpath', '-a', worktree])) ?? worktree;

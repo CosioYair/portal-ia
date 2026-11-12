@@ -12,7 +12,6 @@ import { TeamReady } from '../components/TeamReady.tsx';
 import { Avatar, Chip, Empty, Icon, KV, StatusIcon, type PortalState } from '../components/ui.tsx';
 import { STATE_TEXT } from '../components/AgentFigure.tsx';
 import { PageHeader, Stat } from '../components/kit.tsx';
-import { FolderPicker } from '../components/FolderPicker.tsx';
 import { RepoCard } from '../components/RepoCard.tsx';
 import { AssessmentCard } from '../components/AssessmentCard.tsx';
 import { Markdown } from '../components/Markdown.tsx';
@@ -56,7 +55,6 @@ export function Dashboard() {
   const [project, setProject] = useState<ProjectFull | null>(null);
   const [team, setTeam] = useState<OfficeAgent[] | null>(null);
   const [usage, setUsage] = useState<UsageToday | null>(null);
-  const [picker, setPicker] = useState(false);
   const [procs, setProcs] = useState<Process[]>([]);
   const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
   const [backlog, setBacklog] = useState<BacklogItem[]>([]);
@@ -206,7 +204,7 @@ export function Dashboard() {
               </ul>
             </section>}
 
-            {project && <RepoCard project={project} onPick={() => setPicker(true)} onChanged={load} />}
+            {project && <RepoCard project={project} onChanged={load} />}
           </div>
 
           <aside style={{ flex: '1 1 320px', maxWidth: 400, display: 'flex', flexDirection: 'column', gap: 20 }} aria-label="Equipo, procesos y proveedores">
@@ -243,9 +241,6 @@ export function Dashboard() {
           </aside>
         </div>
       </main>
-      {picker && project && <FolderPicker title="Seleccionar carpeta del repositorio" hint="Elige la carpeta local que contiene el código de Portal IA. Al seleccionarla, autorizas su registro con acceso de solo lectura." requireGit
-        onSelect={async (p) => { setPicker(false); try { await api.registerRepository(ws.slug, project.id, p); await load(); flash('Repositorio registrado con acceso de solo lectura'); } catch (e: any) { flash(e.message, 'err'); } }}
-        onClose={() => setPicker(false)} />}
     </Shell>
   );
 }

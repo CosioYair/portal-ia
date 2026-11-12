@@ -24,6 +24,24 @@ import { applyChanges, checkStaleChanges, discardBranch, pushBranches, worktreeP
 import { requirePolicy, PolicyError } from '../services/executionPolicy.ts';
 import { mergeStory } from '../services/storyMerge.ts';
 import { detectSandbox } from '../services/sandbox.ts';
+import fsEn024 from 'node:fs';
+import { z as zEn024 } from 'zod';
+import { processesRepo as en024Procs } from '../db/workspace.ts';
+import { buildSandboxCheckReport, makeEnvSnapshot, rebuildSandboxImageOnce, resolveProcessImage } from '../services/sandboxImage.ts';
+
+/** EN-024 · Autorización explícita para reconstruir la imagen (fail-closed: sin las dos, no se lanza docker). */
+const REBUILD_IMAGE_BODY = zEn024.object({ authorized: zEn024.literal(true), allowNetwork: zEn024.literal(true) });
+/** EN-024 · since: huella de la lectura anterior del cliente (solo se compara). */
+const SANDBOX_CHECK_QUERY = zEn024.object({ since: zEn024.string().regex(/^[0-9a-f]{8,64}$/).optional() });
+/** Worktree del proceso (si existe en disco). */
+function worktreeOfEn024(p: unknown): string | null {
+  const o = (p ?? {}) as { worktreePath?: unknown; worktree?: unknown; result?: { worktreePath?: unknown; worktree?: unknown; applied?: { worktree?: unknown; worktreePath?: unknown } | null } | null };
+  for (const c of [o.worktreePath, o.worktree, o.result?.worktreePath, o.result?.worktree, o.result?.applied?.worktreePath, o.result?.applied?.worktree]) {
+    const s = typeof c === 'string' ? c : c && typeof c === 'object' && typeof (c as { path?: unknown }).path === 'string' ? (c as { path: string }).path : null;
+    if (s && fsEn024.existsSync(s)) return s;
+  }
+  return null;
+}
 import { runVerification } from '../services/verification.ts';
 import { newPipeline, resumeStory } from '../services/storyPipeline.ts';
 import { normalizeGauntlet, normalizePipeline } from '@portal-ia/domain';
@@ -47,10 +65,10 @@ import { getPublishInfo, markPublishSkipped } from '../services/publishState.ts'
 /** Nombre de cada operación con arriendo, para explicar un choque («HU-175 tiene otra operación en curso (integrar en main)»). */
 const OPERATION: Record<string, string> = { authorize: 'autorizar', continue: 'continuar', 'accept-plan': 'seguir con el plan', apply: 'aplicar el diff', merge: 'integrar en main', publish: 'publicar', reject: 'rechazar el diff', recover: 'recuperar', retry: 'volver a ejecutar', verify: 'verificar en el sandbox', 'verify/install-and-retry': 'instalar y verificar', 'runtime-check': 'comprobar en ejecución', 'integration/prepare': 'preparar el candidato de integración', 'integration/resolve': 'resolver conflictos', 'external-correction': 'registrar una corrección externa', 'manual-test/generate': 'generar la prueba manual', 'convert-to-analysis': 'convertir en encargo de análisis' };
 /** Operaciones que ponen a trabajar a la IA o al sandbox: no empiezan mientras el Portal se reconstruye para reiniciarse. */
-const STARTS_WORK = /^(authorize|continue|accept-plan|integration\/prepare|integration\/resolve|external-correction|manual-test\/generate|verify|verify\/install-and-retry|recover|runtime-check)$/;
+const STARTS_WORK = /^(authorize|continue|accept-plan|integration\/prepare|integration\/resolve|external-correction|manual-test\/generate|verify|verify\/install-and-retry|recover|runtime-check|sandbox\/rebuild-image)$/;
 const SUPERSEDED_GUARDED = /\/processes\/:id\/(authorize|apply|merge|publish|continue|accept-plan)$/;
 /** EN-005 · Rutas que reactivarían un proceso antiguo de una historia integrada, completada o descartada: 409 sin efectos. */
-const CLOSURE_GUARDED = /\/processes\/:id\/(authorize|continue|accept-plan|recover|retry|apply|verify|verify\/install-and-retry)$/;
+const CLOSURE_GUARDED = /\/processes\/:id\/(authorize|continue|accept-plan|recover|retry|apply|verify|verify\/install-and-retry|sandbox\/rebuild-image)$/;
 
 /**
  * HU-184 · Comprobaciones de la regla de cierre (services/closing.ts) que un cierre forzado se salta. Sin IA.
@@ -106,7 +124,11 @@ export async function processRoutes(app: FastifyInstance) {
       q = { ...p, result: { ...p.result, activation } };
     }
     const item = q.kind === 'story_execution' && q.backlogItemId ? backlogRepo(slug).get(q.backlogItemId) : undefined;
-    const fo = await flowOptions(slug, q, item);
+    const en024Pl = q.result?.pipeline;
+    const en024Wt = en024Pl && en024Pl.state === 'paused' && en024Pl.pauseKind === 'environment' && (en024Pl as { imageRelated?: boolean }).imageRelated ? q.result?.applied?.worktree ?? null : null;
+    // EN-024 · Solo lectura: si la imagen sigue desactualizada, el recorrido no ofrece «Continuar con la imagen nueva».
+    const en024Img = en024Wt ? await resolveProcessImage(en024Wt).then(i => ({ stale: i.stale, image: i.image, reason: i.reason }), () => null) : undefined;
+    const fo = { ...(await flowOptions(slug, q, item)), ...(en024Img !== undefined ? { sandboxImage: en024Img } : {}) };
     // HU-185 · Etapa «Publicar» (no bloqueante): solo para historias integradas; estado de main sin red.
     const publish = q.kind === 'story_execution' && q.result?.merged ? await getPublishInfo(projectsRepo(slug).repository(q.projectId)?.path ?? null).catch(() => null) : null;
     return { ...q, version: processVersion(q), closure: storyClosureFor(slug, q), guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, ...fo, publish, backends: q.kind === 'story_execution' ? teamReadiness(slug, q.id) : null }) };
@@ -648,6 +670,41 @@ Proceso: ${proc.id}`, { processId: proc.id });
     } catch (e: any) { return sendError(reply, e); }
   });
   app.get('/api/system/sandbox', async (req) => detectSandbox(String((req.query as any)?.force ?? '') === '1'));
+
+  // ---- EN-024 · Reconstruir la imagen del sandbox desde la rama (autorizado; red solo durante el build; nunca toca :1) ----
+  app.post('/api/workspaces/:slug/processes/:id/sandbox/rebuild-image', async (req, reply) => {
+    const { slug, id } = req.params as { slug: string; id: string };
+    const body = REBUILD_IMAGE_BODY.safeParse(req.body ?? {});
+    if (!body.success) return reply.code(403).send({ error: 'Reconstruir la imagen del sandbox requiere tu autorización explícita y permitir la red solo durante la construcción. No se ha construido nada.', code: 'authorization_required' });
+    const p = en024Procs(slug).get(id);
+    if (!p) return reply.code(404).send({ error: 'Proceso no encontrado.' });
+    const wt = worktreeOfEn024(p);
+    if (!wt) return reply.code(409).send({ error: 'El proceso no tiene un worktree en disco: no hay Dockerfile de la rama que construir.', code: 'no_worktree' });
+    req.log.info({ processId: id, operation: 'reconstruir la imagen del sandbox' }, 'EN-024: reconstrucción autorizada de la imagen del sandbox');
+    const build = await rebuildSandboxImageOnce(wt, { authorized: body.data.authorized });
+    // Si falla, el proceso no cambia: la pausa sigue con sus acciones y la salida se devuelve para la tarjeta.
+    return { ok: build.ok, tag: build.tag, lastImageBuild: build, process: en024Procs(slug).get(id) };
+  });
+
+  // ---- EN-024 · «Comprobar el sandbox de nuevo»: informe de solo lectura (no escribe el proceso) ----
+  app.get('/api/workspaces/:slug/processes/:id/sandbox-check', async (req, reply) => {
+    const { slug, id } = req.params as { slug: string; id: string };
+    const q = SANDBOX_CHECK_QUERY.safeParse(req.query ?? {});
+    if (!q.success) return reply.code(400).send({ error: '«since» no es una huella válida de una comprobación anterior.' });
+    const p = en024Procs(slug).get(id);
+    if (!p) return reply.code(404).send({ error: 'Proceso no encontrado.' });
+    const wt = worktreeOfEn024(p);
+    const sb = wt ? await detectSandbox(true, { worktree: wt }) : await detectSandbox(true);
+    const img = wt && sb.available !== 'unavailable' ? await resolveProcessImage(wt) : null;
+    const current = makeEnvSnapshot({ engine: sb.available, available: sb.available !== 'unavailable', image: img?.image ?? null, stale: img?.stale ?? false });
+    const pl = p.result?.pipeline ?? null;
+    const snap = pl?.envSnapshot ?? null;
+    const since = q.data.since ?? null;
+    return buildSandboxCheckReport({
+      current, previous: since ? { fingerprint: since } : snap, comparedWith: since ? 'client' : snap ? 'pause_snapshot' : 'none',
+      pauseActive: !!pl?.pauseKind, pauseImageRelated: !!pl?.imageRelated, detail: img ? `${sb.detail} · ${img.reason}` : sb.detail
+    });
+  });
   // ---- Verificación en ejecución (M2): el Portal se comprueba a sí mismo tras activar el cambio ----
   app.post('/api/workspaces/:slug/processes/:id/runtime-check', async (req, reply) => {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;

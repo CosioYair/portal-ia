@@ -15,6 +15,11 @@ export type DecisionHistoryVerdict = 'approve' | 'deny' | 'superseded';
 export interface DecisionHistoryItem { id: string; kind: PendingDecisionKind; title: string; workspaceSlug: string; projectId: string; storyId: string | null; processId: string; conversationId: string | null; verdict: DecisionHistoryVerdict; reason: string | null; decidedAt: string }
 import type { DocumentBatch, DocumentJob, RemovalPreview, RemovalRecord } from '@portal-ia/domain';
 import type { LessonAutoImproveAuthorization } from '@portal-ia/domain';
+import type { SandboxCheckReport } from '@portal-ia/domain';
+/** EN-024 · Resultado de construir la imagen del sandbox desde el Dockerfile de la rama (si falla, `output` trae su salida). */
+export interface SandboxImageBuild { ok: boolean; tag: string | null; output: string }
+export interface SandboxImageBuildResult { ok: boolean; tag: string | null; lastImageBuild: SandboxImageBuild; process: Process }
+export type { SandboxCheckReport };
 import { noteBundle, noteFailure, noteResponse } from './liveStatus.ts';
 import { ownerNeeded, ownerToken, setOwnerToken } from './owner.ts';
 
@@ -37,7 +42,7 @@ function noteVersions(body: any) {
   if (Array.isArray(body)) body.forEach(one);
   else if (body && typeof body === 'object') { one(body); if (Array.isArray(body.processes)) body.processes.forEach(one); one(body.lastProcess); one(body.process); }
 }
-const VERSIONED = /\/processes\/([^/?]+)\/(authorize|continue|accept-plan|apply|merge|publish|reject|recover|retry|verify|verify\/install-and-retry|runtime-check|integration\/prepare|integration\/resolve|external-correction|manual-test\/generate|convert-to-analysis)$/;
+const VERSIONED = /\/processes\/([^/?]+)\/(authorize|continue|accept-plan|apply|merge|publish|reject|recover|retry|verify|verify\/install-and-retry|runtime-check|integration\/prepare|integration\/resolve|external-correction|manual-test\/generate|convert-to-analysis|sandbox\/rebuild-image)$/;
 function withSeenVersion(url: string, init?: RequestInit): RequestInit | undefined {
   const m = init?.method === 'POST' ? url.match(VERSIONED) : null; const v = m ? seenVersions.get(m[1]) : undefined;
   if (!m || !v) return init;
@@ -346,6 +351,10 @@ export const api = {
   /** M2 · el Portal se comprueba a sí mismo (HTTP y navegador) una vez activado el cambio. */
   runtimeCheck: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/runtime-check`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   systemSandbox: (force = false) => request<{ available: 'docker' | 'wsl' | 'host-min' | 'unavailable'; docker: boolean; wsl: boolean; detail: string; checkedAt: string }>(`/api/system/sandbox${force ? '?force=1' : ''}`),
+  /** EN-024 · Construye la imagen del sandbox desde el Dockerfile de la rama (autorizado, red solo durante la construcción, etiqueta por hash; no toca portal-ia-sandbox:1). */
+  rebuildSandboxImage: (slug: string, processId: string) => request<SandboxImageBuildResult>(`/api/workspaces/${slug}/processes/${processId}/sandbox/rebuild-image`, { method: 'POST', body: JSON.stringify({ authorized: true, allowNetwork: true }) }),
+  /** EN-024 · Comprobación de solo lectura del sandbox del proceso. `since`: huella de la lectura anterior de esta tarjeta (no modifica el proceso). */
+  sandboxCheck: (slug: string, processId: string, since?: string | null) => request<SandboxCheckReport>(`/api/workspaces/${slug}/processes/${processId}/sandbox-check${since ? `?since=${encodeURIComponent(since)}` : ''}`),
   systemPolicy: () => request<{ op: string; level: 'local' | 'auth' | 'external'; tool: string | null; label: string }[]>('/api/system/policy'),
   markStoryDone: (slug: string, id: string, opts?: { force: boolean; reason?: string }) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/done`, { method: 'POST', body: opts ? JSON.stringify(opts) : undefined }),
   /** HU-187 · Qué comprobaciones se omitirían al cerrar como resuelta (sin efectos). */
