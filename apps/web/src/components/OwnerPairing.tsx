@@ -85,7 +85,7 @@ export function OwnerPairing({ id: given, onPaired }: { id?: string; onPaired?: 
     {asked?.problem && <Notice kind="warn">{asked.problem}</Notice>}
     <form style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }} onSubmit={e => { e.preventDefault(); void pair(); }}>
       <label className="small" htmlFor={`${id}-code`}>Código</label>
-      <input id={`${id}-code`} className="input mono" style={{ width: 290, maxWidth: '100%', textTransform: 'uppercase' }} value={code} maxLength={200} autoComplete="one-time-code" spellCheck={false} placeholder="XXXX-XXXX-XXXX-XXXX-XXXX" aria-invalid={!!error || undefined} aria-describedby={error ? `${id}-err` : undefined} onChange={e => setCode(cleanCode(e.target.value))} />
+      <input id={`${id}-code`} className="input mono" style={{ width: 290, maxWidth: '100%', minWidth: 0, textTransform: 'uppercase' }} value={code} maxLength={200} autoComplete="one-time-code" spellCheck={false} placeholder="XXXX-XXXX-XXXX-XXXX-XXXX" aria-invalid={!!error || undefined} aria-describedby={error ? `${id}-err` : undefined} onChange={e => setCode(cleanCode(e.target.value))} />
       <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !asked}>{busy && asked ? <span className="spin spin-light" /> : null}Vincular</button>
     </form>
     {error && <div id={`${id}-err`} role="alert"><Notice kind="warn">{error}</Notice></div>}
@@ -139,9 +139,9 @@ export function OwnerStatus() {
       setOwnerToken(null); requestAnimationFrame(() => document.getElementById('owner-bar')?.querySelector<HTMLElement>('button')?.focus());
     } catch (e: any) { setError(e.message); } finally { setBusy(false); }
   };
-  return <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-    <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void out(false)}>Desvincular este navegador</button>
-    <button type="button" className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void out(true)}>Desvincular todos los navegadores (también este)</button>
+  return <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', minWidth: 0, maxWidth: '100%', flex: '1 1 100%' }}>
+    <button type="button" className="btn btn-ghost btn-sm" style={{ maxWidth: '100%' }} disabled={busy} onClick={() => void out(false)}>Desvincular este navegador</button>
+    <button type="button" className="btn btn-ghost btn-sm" style={{ maxWidth: '100%' }} title="Desvincular todos los navegadores (también este)" aria-label="Desvincular todos los navegadores (también este)" disabled={busy} onClick={() => void out(true)}>Desvincular todos</button>
     {error && <div role="alert" style={{ width: '100%' }}><Notice kind="err">{error}</Notice></div>}
   </div>;
 }
