@@ -606,7 +606,7 @@ function ClaudeCodeCard({ cc }: { cc: ProcessBackends }) {
 /** Errores de la API en lenguaje claro (permisos, autorización, conflictos). */
 export function explainError(e: any): string {
   const code = e instanceof ApiError ? e.body?.code : undefined;
-  if (code === 'tool_not_granted') return `${e.message} Actívala en la ficha avanzada del agente (su panel › Ajustes › Ajustes avanzados) → Herramientas, o elige otro agente para este papel.`;
+  if (code === 'tool_not_granted') return `${e.message} Actívala en su panel › Ajustes › Configuración › Herramientas y conocimiento, o elige otro agente para este papel.`;
   if (code === 'authorization_required' || code === 'network_confirmation_required') return `${e.message} Marca la autorización y vuelve a intentarlo.`;
   if (code === 'merge_conflict') return 'No se pudo integrar por conflictos con main. Arriba tienes la explicación y la corrección.';
   if (code === 'backend_not_ready') return `${e.message} No se ha registrado nada en el proceso: resuelve lo que falta (arriba) y continúa después.`;

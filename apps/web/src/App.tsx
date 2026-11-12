@@ -26,8 +26,7 @@ const Settings = lazy(() => import('./screens/Settings.tsx').then(m => ({ defaul
 const CommandPalette = lazy(() => import('./components/CommandPalette.tsx').then(m => ({ default: m.CommandPalette })));
 // Y las pantallas de detalle y las menos frecuentes: el primer pintado solo carga el marco, la Oficina y el Resumen.
 const Initialization = lazy(() => import('./screens/Initialization.tsx').then(m => ({ default: m.Initialization })));
-const AgentDetail = lazy(() => import('./screens/AgentDetail.tsx').then(m => ({ default: m.AgentDetail })));
-const AgentCreate = lazy(() => import('./screens/AgentCreate.tsx').then(m => ({ default: m.AgentCreate })));
+
 const ProcessList = lazy(() => import('./screens/ProcessView.tsx').then(m => ({ default: m.ProcessList })));
 const ProcessView = lazy(() => import('./screens/ProcessView.tsx').then(m => ({ default: m.ProcessView })));
 const StoryWorkspace = lazy(() => import('./screens/StoryWorkspace.tsx').then(m => ({ default: m.StoryWorkspace })));
@@ -207,10 +206,11 @@ export default function App() {
           <Route path="/oficina/lista" element={company(<Office view="lista" />)} />
           <Route path="/oficina/nuevo-agente" element={guard(<AgentWizard />)} />
           <Route path="/oficina/agente/:agentId/:tab?" element={company(<Office />)} />
-          {/* «Equipo de IA» es ahora Oficina › Organización (se conservan ?… y #…); su ficha avanzada sigue en /equipo/:id. */}
+          {/* HU-210 · «Equipo de IA» es Oficina › Organización; crear un agente solo con el asistente y configurarlo solo en su
+              panel (Ajustes › Configuración). Las rutas antiguas redirigen conservando ?… y #… (también /empresa/:slug/equipo/…). */}
           <Route path="/equipo" element={<Redirect to="/oficina/organizacion" />} />
-          <Route path="/equipo/nuevo" element={guard(<AgentCreate />)} />
-          <Route path="/equipo/:agentId" element={guard(<AgentDetail />)} />
+          <Route path="/equipo/nuevo" element={<Redirect to="/oficina/nuevo-agente" />} />
+          <Route path="/equipo/:agentId" element={<AgentRedirect />} />
           <Route path="/actividad" element={guard(<ProcessList />)} />
           <Route path="/procesos/:processId" element={guard(<ProcessView />)} />
           <Route path="/historias/:storyId" element={guard(<StoryWorkspace />)} />
@@ -238,6 +238,12 @@ export default function App() {
 function Redirect({ to }: { to: string }) {
   const { search, hash } = useLocation();
   return <Navigate to={to + search + hash} replace />;
+}
+
+/** HU-210 · La antigua ficha /equipo/:id lleva a la única configuración del agente, con sus ?… y #…; replace evita bucles con Atrás. */
+function AgentRedirect() {
+  const { agentId } = useParams();
+  return <Redirect to={`/oficina/agente/${encodeURIComponent(agentId ?? '')}/configuracion`} />;
 }
 
 /** Búsqueda (Ctrl+K o el botón de la barra): un solo atajo para toda la aplicación; se carga al abrirla por primera vez. */

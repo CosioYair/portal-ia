@@ -5,22 +5,17 @@ import { api, type ProjectFull } from '../lib/api.ts';
 import { useApp } from '../lib/store.ts';
 import { INIT_STEP_LABELS, INIT_STEP_ORDER } from '../lib/labels.ts';
 import { Chip, Icon, Notice, Stepper, Wordmark } from '../components/ui.tsx';
-import { FolderPicker } from '../components/FolderPicker.tsx';
+import { RepoCard } from '../components/RepoCard.tsx';
 import { AssessmentCard } from '../components/AssessmentCard.tsx';
 import { OwnerBar } from '../components/OwnerPairing.tsx';
 import { onOwnerChange, ownerToken } from '../lib/owner.ts';
 
 export function Initialization() {
-  const { status, refresh, flash, navigate } = useApp();
+  const { status, refresh, navigate } = useApp();
   const [result, setResult] = useState<BootstrapResult | null>(null);
   const [shown, setShown] = useState(status.initialized ? 5 : 0); // pasos revelados progresivamente en la UI
   const [error, setError] = useState<string | null>(null);
   const [project, setProject] = useState<ProjectFull | null>(null);
-  const [repoPath, setRepoPath] = useState<string | null>(null);
-  const [repoGit, setRepoGit] = useState<{ isGit: boolean; branch: string | null } | null>(null);
-  const [repoAuth, setRepoAuth] = useState(false);
-  const [picker, setPicker] = useState(false);
-  const [registering, setRegistering] = useState(false);
   const [treeNode, setTreeNode] = useState('ws');
   const started = useRef(false);
   const [usage, setUsage] = useState<UsageToday | null>(null);
@@ -56,14 +51,8 @@ export function Initialization() {
   const done = shown >= 5 && !!result;
   const registered = project?.repository ?? null;
 
-  const register = async () => {
-    if (!project || !repoPath || !repoAuth) return;
-    setRegistering(true);
-    try {
-      await api.registerRepository(project.workspaceSlug, project.id, repoPath);
-      await loadProject(); setTreeNode('repo'); flash('Repositorio registrado con acceso de solo lectura');
-    } catch (e: any) { flash(e.message, 'err'); } finally { setRegistering(false); }
-  };
+  // HU-210 · El registro vive solo en RepoCard (la misma tarjeta del Resumen); aquí solo se recarga el proyecto.
+  const onRepoChanged = async () => { const had = !!project?.repository; await loadProject(); if (!had) setTreeNode('repo'); };
 
   const tree = [
     { id: 'ws', d: 0, sq: 'tsq-ws', label: 'Empresa interna · Portal IA', meta: 'aislado', title: 'Empresa interna · Portal IA', body: `Empresa reservada para la plataforma. Su base de datos, conocimiento y agentes están separados de cualquier empresa o cliente que crees después.\nAlmacenamiento: ${result?.steps.find(s => s.id === 'workspace')?.detail ?? 'data/workspaces/portal-ia/portal-ia.sqlite'}` },
@@ -91,7 +80,7 @@ export function Initialization() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div className="eyebrow">Pasos 2 y 3 de 3</div>
             <h1 className="h1" style={{ fontSize: 28 }}>{error ? 'No se pudo inicializar' : done ? 'Empresa interna preparada' : 'Preparando la empresa interna…'}</h1>
-            <p className="med">{done ? 'Las estructuras ya existen. Ahora, si registras el repositorio y autorizas la evaluación inicial, el equipo analizará de verdad la idea, el código y el diseño del proyecto.' : 'Se crean las estructuras internas que la plataforma usará para gestionarse a sí misma. Todo ocurre localmente, sin llamadas a modelos de IA.'}</p>
+            <p className="med">{done ? 'Las estructuras ya existen. Registra el repositorio en la tarjeta de abajo; es la misma que verás en el Resumen. Después, si autorizas la evaluación inicial, el equipo analizará de verdad la idea, el código y el diseño del proyecto.' : 'Se crean las estructuras internas que la plataforma usará para gestionarse a sí misma. Todo ocurre localmente, sin llamadas a modelos de IA.'}</p>
           </div>
           {error && <Notice kind="err"><strong>Error.</strong> {error}</Notice>}
 
@@ -112,32 +101,7 @@ export function Initialization() {
             <div className="card-f sm13" style={{ display: 'flex', gap: 16, justifyContent: 'space-between', flexWrap: 'wrap' }}><span className="muted">Esta inicialización no llama a modelos de IA; el consumo real del día se muestra arriba y en cada proceso.</span><span className="mono">local</span></div>
           </section>
 
-          <section className="card">
-            <div className="card-h">
-              <div><div className="h3">Repositorio del código fuente</div><div className="small muted">Acción opcional que requiere tu autorización explícita.</div></div>
-              <Chip tone={registered ? 'ok' : 'warn'}>{registered ? 'Registrado · solo lectura' : 'Pendiente de autorización'}</Chip>
-            </div>
-            <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {registered ? (
-                <Notice kind="ok"><strong>Repositorio registrado</strong> en <span className="mono">{registered.path}</span>{registered.branch && <> (rama <span className="mono">{registered.branch}</span>)</>} con acceso de solo lectura. Escritura y ejecución requieren autorización por agente.</Notice>
-              ) : (<>
-                <p className="sm13 med" style={{ lineHeight: 1.5 }}>Registrar el repositorio permite que los agentes del proyecto lean el código de Portal IA cuando se active el equipo. El registro no concede permisos de escritura ni de ejecución: esos se autorizan por separado en cada agente.</p>
-                <div>
-                  <label className="label" htmlFor="repo-path">Carpeta local del repositorio</label>
-                  <div className="pathfield">
-                    <input id="repo-path" className="input mono" value={repoPath ?? ''} placeholder="Ninguna carpeta seleccionada" readOnly aria-describedby="repo-path-help" />
-                    <button className="btn btn-secondary" onClick={() => setPicker(true)} disabled={!done}>{Icon.folder()}{repoPath ? 'Cambiar…' : 'Examinar…'}</button>
-                  </div>
-                  <div className="help" id="repo-path-help">{repoPath ? (repoGit?.isGit ? `Repositorio git detectado${repoGit.branch ? ` · rama ${repoGit.branch}` : ''}.` : 'La carpeta seleccionada no contiene un repositorio git.') : 'Las rutas locales se eligen con el selector de carpetas; no se escriben a mano.'}</div>
-                </div>
-                <label className="ck"><input className="cb" type="checkbox" checked={repoAuth} disabled={!repoPath} onChange={e => setRepoAuth(e.target.checked)} /><span>Autorizo que el proyecto <strong>Desarrollo del Portal</strong> registre este repositorio con acceso de <strong>solo lectura</strong>. Ningún agente modificará archivos sin una autorización posterior.</span></label>
-                <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-                  <button className="btn btn-secondary" onClick={register} disabled={!repoAuth || !repoPath || registering || !project}>{Icon.git()}{registering ? 'Registrando…' : 'Registrar repositorio'}</button>
-                  <span className="small muted">También puedes hacerlo más tarde desde el Resumen del proyecto.</span>
-                </div>
-              </>)}
-            </div>
-          </section>
+          {done && project && <RepoCard project={project} onChanged={onRepoChanged} />}
 
           {done && project && <AssessmentCard projectId={project.id} hasRepo={!!registered} />}
 
@@ -159,10 +123,6 @@ export function Initialization() {
         </aside>
       </main>
 
-      {picker && <FolderPicker title="Seleccionar carpeta del repositorio" hint="Elige la carpeta local que contiene el código de Portal IA. Solo se puede registrar una carpeta con repositorio git."
-        initialPath={repoPath} requireGit
-        onSelect={(p, info) => { setRepoPath(p); setRepoGit(info); setRepoAuth(false); setPicker(false); }}
-        onClose={() => setPicker(false)} />}
     </div>
   );
 }
