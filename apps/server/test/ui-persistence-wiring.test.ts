@@ -28,7 +28,8 @@ test('guardado ≠ autorización: ninguna casilla «Autorizo…» ni de descarte
   const card = panel.slice(panel.indexOf("useDraft(draftKey('encargo',"), panel.indexOf('\n', panel.indexOf("useDraft(draftKey('encargo',")));
   assert.ok(card && !/\bok\b|discard/.test(card), card);
   assert.match(panel, /const \[ok, setOk\] = useState\(false\); const \[discard, setDiscard\] = useState\(false\)/);
-  for (const f of ['screens/Batches.tsx', 'components/ConversationPanel.tsx', 'screens/StoryWorkspace.tsx', 'screens/AgentCreate.tsx', 'components/IterationComposer.tsx']) {
+  // HU-210 · AgentCreate.tsx desapareció: el único asistente de creación de agentes es AgentWizard (/oficina/nuevo-agente).
+  for (const f of ['screens/Batches.tsx', 'components/ConversationPanel.tsx', 'screens/StoryWorkspace.tsx', 'screens/AgentWizard.tsx', 'components/IterationComposer.tsx']) {
     assert.doesNotMatch(read(f), /useDraft\([^)]*(auth|Auth|confirm)/, `${f}: ninguna confirmación en un borrador`);
   }
   // Tras autorizar, el borrador se borra: el siguiente lote empieza con los valores seguros.
