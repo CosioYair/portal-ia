@@ -208,6 +208,10 @@ El contexto de arriba ya trae lo que el equipo conoce (plan y archivos): úsalo 
 consulta la carpeta de trabajo del proceso con portal_list_files, portal_read_file, portal_search (texto literal; acota con
 «dir») y portal_diff (cambios sin confirmar o de la rama), el conocimiento aprobado del proyecto con portal_knowledge e
 informa de tu avance con portal_report_progress.
+portal_read_file admite un rango de líneas opcional (startLine y endLine, desde 1 y ambos incluidos; como mucho 400 líneas
+por llamada, con nextStartLine si recorta). Úsalo para leer fragmentos exactos de archivos grandes, también más allá de los
+primeros 200 KB. portal_search devuelve cada línea con su sangría original (espacios y tabuladores). Copia los fragmentos
+BUSCAR tal cual.
 Límites de esta ejecución: ${maxTurns} turnos en total y como máximo ${toolBudget(maxTurns)} llamadas a herramientas. Pide varias
 lecturas o búsquedas independientes a la vez, en el mismo turno. Responde antes de agotar los turnos (a más tardar en el
 turno ${Math.max(1, maxTurns - 1)}) con lo que tengas, marcando lo que no pudiste comprobar; si el Portal te dice «presupuesto
@@ -226,9 +230,12 @@ const addUsage = (a: CliFailedUsage | undefined, b: CliFailedUsage | undefined):
 function recoveryPrompt(readRoot: string | null, user: string, uses: BridgeUse[], maxTurns: number): string {
   const searched = uses.filter(u => u.tool === 'portal_search' && u.ok).map(u => `- «${u.arg}»${u.hits ? `: ${u.hits}` : ''}`);
   let left = 40_000;
+  // Rangos de líneas leídos de cada archivo (EN-026): se anotan en el encabezado; el contenido se relee por la ruta (`u.arg`).
+  const rangesOf = (f: string) => uses.filter(u => u.tool === 'portal_read_file' && u.ok && u.arg === f && u.range).map(u => u.range as string);
   const files = readRoot ? Array.from(new Set(uses.filter(u => u.tool === 'portal_read_file' && u.ok).map(u => u.arg))).map(f => {
     const c = readRepoFile(readRoot, f, 30_000); if (c === null || left <= 0) return null;
-    const part = c.slice(0, Math.min(12_000, left)); left -= part.length; return `## ${f}\n\`\`\`\n${part}${part.length < c.length ? '\n… (recortado)' : ''}\n\`\`\``;
+    const rs = rangesOf(f);
+    const part = c.slice(0, Math.min(12_000, left)); left -= part.length; return `## ${f}${rs.length ? ` (líneas leídas: ${rs.join(', ')})` : ''}\n\`\`\`\n${part}${part.length < c.length ? '\n… (recortado)' : ''}\n\`\`\``;
   }).filter(Boolean) : [];
   return `${user}
 

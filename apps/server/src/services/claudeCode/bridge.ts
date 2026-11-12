@@ -29,7 +29,8 @@ export interface BridgeTask {
    *  recuperación sin herramientas parte de lo que ya leyó. */
   toolBudget?: number | null; uses?: BridgeUse[];
 }
-export interface BridgeUse { tool: string; arg: string; ok: boolean; hits?: string }
+/** `arg` es siempre solo la ruta (la recuperación de backend.ts vuelve a leer `u.arg`); el rango leído va aparte, en `range` («inicio-fin»). */
+export interface BridgeUse { tool: string; arg: string; ok: boolean; hits?: string; range?: string }
 interface Pending { task: BridgeTask; resolve: (text: string) => void; reject: (e: Error) => void }
 
 export type BridgeScope = { kind: 'job'; slug: string; taskId: string } | { kind: 'worker'; slug: string; workerId: string; agentIds: string[] };
@@ -214,6 +215,15 @@ export function reportBlocker(scope: BridgeScope, id: string, reason: string): {
 export function protectedReason(rel: string): string | null { return readProtectedReason(rel); }
 
 const MAX_FILE = 200_000;
+/** Lectura por rango de líneas: como mucho 400 líneas por llamada, sobre archivos de hasta 8 MB (leídos enteros). */
+export const MAX_RANGE_LINES = 400;
+const MAX_RANGE_FILE = 8 * 1024 * 1024;
+export type LineRange = { startLine?: number | undefined; endLine?: number | undefined };
+export interface FileContent { path: string; content: string; truncated: boolean }
+export interface FileLines {
+  path: string; startLine: number; endLine: number; totalLines: number; content: string; limited: boolean;
+  eol: 'lf' | 'crlf'; nextStartLine?: number; note?: string;
+}
 /** Lee un archivo de la carpeta de trabajo con TODAS las comprobaciones (ruta protegida, ruta real, binario, secretos). */
 function readInside(readRoot: string, rel: string): { path: string; content: string; truncated: boolean } | Denied {
   const r = resolveReadable(readRoot, rel);
@@ -227,6 +237,42 @@ function readInside(readRoot: string, rel: string): { path: string; content: str
   return { path: norm, content, truncated: st.size > MAX_FILE };
 }
 /**
+ * Lee un RANGO de líneas con las MISMAS comprobaciones que `readInside` (ruta protegida, ruta real dentro de la carpeta,
+ * archivo regular, binario). El archivo se lee ENTERO (hasta 8 MB): así funciona más allá de los primeros 200.000 bytes, y
+ * los secretos se buscan en todo lo leído, no solo en las líneas devueltas. Las líneas se devuelven literales (sin trim).
+ */
+function readLinesInside(readRoot: string, rel: string, range: LineRange): FileLines | Denied {
+  const r = resolveReadable(readRoot, rel);
+  if (!('abs' in r)) return deny(r.status, r.error);
+  const st = fs.statSync(r.abs); if (!st.isFile()) return deny(400, `No es un archivo: ${rel}`);
+  if (st.size > MAX_RANGE_FILE) return deny(413, `Archivo demasiado grande para leerlo por rango (${st.size} bytes; máximo ${MAX_RANGE_FILE}): ${rel}`);
+  const buf = fs.readFileSync(r.abs);
+  if (buf.subarray(0, 8000).includes(0)) return deny(415, `Archivo binario: ${rel}`);
+  let content = buf.toString('utf8');
+  const secret = scanSecrets(content); if (secret) return deny(403, `${secret} No se entrega por el puente.`);
+  if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
+  const eol: 'lf' | 'crlf' = /\r\n/.test(content) ? 'crlf' : 'lf';
+  const lines = content === '' ? [] : content.split(/\r?\n/);
+  // Un salto de línea final no es una línea más.
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  const total = lines.length;
+  const bad = (why: string) => deny(416, `Rango no válido (${why}). El archivo tiene ${total} líneas (totalLines ${total}); startLine y endLine van desde 1 y ambos se incluyen.`);
+  const { startLine, endLine } = range;
+  if (startLine !== undefined && (!Number.isInteger(startLine) || startLine < 1)) return bad(`startLine ${startLine} debe ser un entero desde 1`);
+  if (endLine !== undefined && (!Number.isInteger(endLine) || endLine < 1)) return bad(`endLine ${endLine} debe ser un entero desde 1`);
+  const start = startLine ?? 1;
+  if (start > total) return bad(`startLine ${start} > totalLines ${total}`);
+  if (endLine !== undefined && endLine < start) return bad(`startLine ${start} > endLine ${endLine}`);
+  if (endLine !== undefined && endLine > total) return bad(`endLine ${endLine} > totalLines ${total}`);
+  const wanted = endLine ?? total;
+  const end = Math.min(wanted, start + MAX_RANGE_LINES - 1);
+  const limited = end < wanted;
+  return {
+    path: r.norm, startLine: start, endLine: end, totalLines: total, content: lines.slice(start - 1, end).join('\n'), limited, eol,
+    ...(limited ? { nextStartLine: end + 1, note: `Como mucho ${MAX_RANGE_LINES} líneas por llamada: sigue con startLine ${end + 1}.` } : {})
+  };
+}
+/**
  * Gasta una llamada del presupuesto de herramientas de la tarea (ejecución gestionada) y la anota: lo leído es el punto de
  * partida de la recuperación sin herramientas si agota los turnos. Agotado el presupuesto, el puente pide responder ya.
  */
@@ -235,10 +281,18 @@ function spend(task: BridgeTask, tool: string, arg: string): BridgeUse | Denied 
   if (task.toolBudget && uses.length >= task.toolBudget) return deny(429, `Presupuesto de herramientas agotado (${task.toolBudget} llamadas en esta ejecución): responde ya con lo que tienes y marca lo que no pudiste comprobar.`);
   const u: BridgeUse = { tool, arg: arg.slice(0, 300), ok: false }; uses.push(u); return u;
 }
-export function readTaskFile(task: BridgeTask, rel: string): { path: string; content: string; truncated: boolean } | Denied {
+/** Sin rango: exactamente como siempre (hasta MAX_FILE y `truncated`). Con rango: solo esas líneas, y se anota el rango en `uses`. */
+export function readTaskFile(task: BridgeTask, rel: string): FileContent | Denied;
+export function readTaskFile(task: BridgeTask, rel: string, range: LineRange | undefined): FileContent | FileLines | Denied;
+export function readTaskFile(task: BridgeTask, rel: string, range?: LineRange): FileContent | FileLines | Denied {
   if (!task.readRoot) return deny(404, 'Esta tarea no tiene carpeta de trabajo que leer.');
   const u = spend(task, 'portal_read_file', rel); if (isDenied(u)) return u;
-  const r = readInside(task.readRoot, rel); if (!isDenied(r)) { u.ok = true; u.arg = r.path; }
+  if (!range || (range.startLine === undefined && range.endLine === undefined)) {
+    const r = readInside(task.readRoot, rel); if (!isDenied(r)) { u.ok = true; u.arg = r.path; }
+    return r;
+  }
+  const r = readLinesInside(task.readRoot, rel, range);
+  if (!isDenied(r)) { u.ok = true; u.arg = r.path; u.range = `${r.startLine}-${r.endLine}`; }
   return r;
 }
 
@@ -306,7 +360,7 @@ export function searchTaskFiles(task: BridgeTask, query: string, opts: { dir?: s
     const lines = r.content.split(/\r?\n/); let n = 0;
     for (let i = 0; i < lines.length; i++) {
       if (!(opts.caseSensitive ? lines[i] : lines[i].toLowerCase()).includes(needle)) continue;
-      if (++n <= SEARCH.perFile && matches.length < SEARCH.maxMatches) matches.push({ path: f, line: i + 1, text: lines[i].trim().slice(0, SEARCH.lineChars) });
+      if (++n <= SEARCH.perFile && matches.length < SEARCH.maxMatches) matches.push({ path: f, line: i + 1, text: lines[i].slice(0, SEARCH.lineChars) });
     }
     counts.push({ path: f, matches: n }); if (n > SEARCH.perFile) truncated = true;
     if (r.truncated) skipped.push({ path: f, reason: `Solo se buscó en los primeros ${MAX_FILE} bytes.` });

@@ -346,7 +346,10 @@ export async function claudeCodeRoutes(app: FastifyInstance) {
     if (s.kind === 'worker' && t.claimedBy !== s.workerId) return reply.code(409).send({ error: 'Toma la tarea antes de leer su carpeta de trabajo.' });
     const p = String((req.query as any)?.path ?? '');
     if (!p) return reply.code(400).send({ error: 'Falta la ruta.' });
-    return send(reply, readTaskFile(t, p));
+    const q = z.object({ startLine: z.coerce.number().int().min(1).optional(), endLine: z.coerce.number().int().min(1).optional() }).safeParse({ startLine: (req.query as any)?.startLine, endLine: (req.query as any)?.endLine });
+    if (!q.success) return reply.code(400).send({ error: 'Rango de líneas no válido: startLine y endLine deben ser enteros desde 1 (ambos incluidos).' });
+    const { startLine, endLine } = q.data;
+    return send(reply, readTaskFile(t, p, startLine !== undefined || endLine !== undefined ? { startLine, endLine } : undefined));
   });
   // Búsqueda literal y cambios de la carpeta de trabajo: solo lectura, mismas reglas que leer un archivo.
   app.get('/api/bridge/v1/tasks/:id/search', async (req, reply) => {
