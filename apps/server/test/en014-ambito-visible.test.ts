@@ -69,8 +69,10 @@ test('Oficina: tras la migración todos (también pj-*) muestran Empresa + Gener
 test('interfaz: «Dónde trabaja» para Template.scope, chips del ámbito real y un único bloque «Ámbito» en Nuevo agente', () => {
   const web = (f: string) => fs.readFileSync(new URL(`../../web/src/${f}`, import.meta.url), 'utf8');
   const team = web('screens/Team.tsx'); const detail = web('screens/AgentDetail.tsx'); const panel = web('components/AgentPanel.tsx');
-  const create = web('screens/AgentCreate.tsx'); const office = web('screens/Office.tsx'); const wizard = web('screens/AgentWizard.tsx');
-  for (const [n, src] of [['Team', team], ['AgentDetail', detail], ['AgentPanel', panel], ['AgentCreate', create]] as const) {
+  // HU-210 · AgentCreate.tsx desapareció: el único asistente de creación es AgentWizard (/oficina/nuevo-agente).
+  assert.equal(fs.existsSync(new URL('../../web/src/screens/AgentCreate.tsx', import.meta.url)), false, 'AgentCreate.tsx ya no existe');
+  const office = web('screens/Office.tsx'); const wizard = web('screens/AgentWizard.tsx');
+  for (const [n, src] of [['Team', team], ['AgentDetail', detail], ['AgentPanel', panel], ['AgentWizard', wizard]] as const) {
     assert.ok(!/Ámbito: (proyecto|empresa|toda la empresa|su proyecto)/i.test(src), `${n}: no llama «Ámbito» a dónde trabaja`);
     assert.ok(!/Ámbito asignado/.test(src), `${n}: sin «Ámbito asignado»`);
     assert.ok(!/data-label="Ámbito"[^\n]*a\.scope/.test(src), `${n}: la columna «Ámbito» no usa a.scope`);
@@ -78,10 +80,10 @@ test('interfaz: «Dónde trabaja» para Template.scope, chips del ámbito real y
   for (const [n, src] of [['Team', team], ['AgentDetail', detail], ['AgentPanel', panel], ['Office', office]] as const)
     assert.match(src, /<ContextScopeChips /, `${n}: muestra los chips del ámbito real`);
   assert.match(team, /Dónde trabaja/); assert.match(team, /workplaceLabel/);
-  assert.match(detail, /Dónde trabaja en el Portal/); assert.match(create, /Dónde trabaja en el Portal/);
+  assert.match(detail, /Dónde trabaja en el Portal/);
   assert.match(wizard, /Dónde trabaja en el Portal/);
   assert.equal((wizard.match(/<legend className="label">Ámbito<\/legend>/g) ?? []).length, 1, 'un único bloque «Ámbito»');
   assert.match(wizard, /export function ContextScopeChips/);
   assert.match(wizard, /d\.contextScope \?\? DEFAULT_CONTEXT_SCOPE/, 'por defecto Empresa + General');
-  assert.match(create, /ContextScopeFields/); assert.match(create, /setAgentContextScope/);
+  assert.match(detail, /ContextScopeFields/); assert.match(detail, /setAgentContextScope/);
 });
