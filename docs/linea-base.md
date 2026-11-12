@@ -64,6 +64,28 @@ Ninguna edición lleva credenciales. El árbol que se empaqueta para la edición
   - Comprueba el 403 de la vista previa.
   - Si se añade al árbol un archivo con un literal que parezca una clave, `npm test` falla.
 
+### Probar la Edición en la misma máquina (HU-212)
+
+Para probar la edición distribuible en la misma PC sin tocar el Estudio, ejecuta `npm run edition:try` desde la raíz de la instalación. Puede hacerse con el Estudio en marcha en 4310. La orden ejecuta `apps/server/scripts/edition-sandbox.ts`, que llama a `startEditionSandbox` (`apps/server/src/services/editionSandbox.ts`, sin IA). La Edición queda en `http://127.0.0.1:4320` y se detiene con Ctrl+C. Para ver la interfaz hace falta `apps/web/dist` (`npm run build`); sin él, solo responde la API.
+
+- **Qué queda aislado:**
+  - **Datos:** la Edición usa su propia carpeta. Por defecto es `<instalación>-edicion/data`, una carpeta hermana de la instalación; se puede cambiar con `PORTAL_EDITION_SANDBOX_DIR`. Ahí crea su propia `.master.key` y su propia base de datos.
+  - **Worktrees:** usa su propia carpeta, `<instalación>-edicion/worktrees`.
+  - **Variables del hijo:** el entorno fija de forma explícita `PORTAL_EDITION=distributable`, `PORTAL_PORT=4320`, `PORTAL_HOST=127.0.0.1`, `PORTAL_DATA_DIR` y `PORTAL_WORKTREES_DIR`. Deja vacías las claves de proveedor (`*_API_KEY`) y quita `PORTAL_PREVIEW_*` y `PORTAL_MAIN_BRANCH`. Como `config.ts` solo rellena desde `.env` las variables no definidas, el `.env` del Estudio no se cuela.
+- **Qué no queda aislado:** la sesión de Claude Code del usuario (carpeta personal) es compartida.
+- **El data/ del Estudio no se toca:** el servicio no importa `config.ts` (al cargarse crea carpetas y hace copias en `data/`) ni `repoWrite.ts`, y no usa `REPO_ROOT`. Solo importa módulos `node:*`. La raíz de la instalación y el data/ del Estudio le llegan como parámetros, y solo se leen para comparar rutas y el hash de la clave.
+- **Carpetas rechazadas** (`unsafe_dir`): la carpeta de datos del Estudio, una que esté dentro de ella o que la contenga, una dentro de la instalación o que la contenga, la carpeta de worktrees del Estudio, la raíz de una unidad y la carpeta personal.
+- **Fallos, en español y sin efectos:**
+  - `already_running`: la Edición ya está en marcha.
+  - `port_busy`: el 4320 está ocupado.
+
+  En los dos casos no se lanza ningún proceso ni se crea ninguna carpeta. Hay otros dos fallos:
+  - `start_failed`: el hijo termina o no responde a `/api/health` dentro del plazo.
+  - `shared_key`: la clave de la Edición coincide con la del Estudio; la Edición se detiene.
+- **Sin secretos:** nunca se registra ni se devuelve una clave, su hex ni su hash; solo «clave propia: sí/no». La salida del hijo se guarda en un búfer acotado de unas 200 líneas, y una línea que parezca un secreto o un hex de 64 caracteres se sustituye por «[salida omitida: contenía un posible secreto]».
+- **Detención:** `stopEditionSandbox` mata al hijo, espera a que termine y a que el 4320 quede libre. Si el proceso padre sale, `process.once('exit')` mata también al hijo.
+- **Prueba:** `apps/server/test/hu212-edicion-sandbox.test.ts` cubre el entorno, las rutas, `port_busy`, `already_running` y los guardianes. Uno de ellos importa el servicio en otro proceso y comprueba que la carpeta de datos sigue vacía. Las pruebas de integración se omiten, indicando el motivo, si el 4320 ya estaba ocupado o si falta `apps/web/dist`. Comprueban que `/api/health` responde, que la clave es propia y distinta de la sembrada, y que no aparece ninguna clave en logs, salida ni errores. También comprueban que el data/ del Estudio queda idéntico (archivos, contenido y mtimes) y que el pid muere y el puerto queda libre, tanto tras detener la Edición como tras la salida del padre.
+
 ## 5 · Aprendizaje organizacional
 
 - Lecciones (`services/lessons.ts`, `lessonCurator.ts`): sin IA y a 0 USD, se detectan los errores y, al terminar cada tarea, el Curador los agrupa por causa, aplica la del catálogo y descarta ruido y duplicados. Solo las aplicadas se inyectan (proyecto y papel); se retiran solas si fallan 2 veces. El propietario puede editarlas o retirarlas.
@@ -91,3 +113,4 @@ Ninguna edición lleva credenciales. El árbol que se empaqueta para la edición
 - E2E de automejora: una copia del Portal arrancada con el supervisor recorre solicitud → ejecución → aplicar → verificar en sandbox → integrar → reconstruir y reiniciar → comprobar en ejecución (HTTP y navegador) → prueba manual → cerrar, más los escenarios de fallo (verificación, activación, parche, ejecución).
 - Interfaz: recorridos con Playwright sobre instancias aisladas (recorrido guiado A–F, iteraciones, etapa y archivo, fallos de agentes).
 - Paquete distribuible sin secretos: `hu206-paquete-sin-secretos.test.ts` comprueba el contenido y las exclusiones del árbol, que `findSecret` no marca nada y el 403 de la vista previa en la edición distribuible (ver «Paquete distribuible (HU-206)» en el apartado 4).
+- Edición en la misma máquina: `hu212-edicion-sandbox.test.ts` comprueba el arranque en 4320 con carpeta y clave propias, que no se filtra ninguna clave y que el data/ del Estudio queda intacto. Comprueba también los fallos `port_busy` y `already_running`, y que el proceso muere y el puerto queda libre al detenerla y cuando sale el padre (ver «Probar la Edición en la misma máquina (HU-212)» en el apartado 4).

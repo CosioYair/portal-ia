@@ -20,6 +20,7 @@
     "start:server": "npm run start --workspace apps/server",
     "start:edition": "node scripts/portal-edition-start.mjs",
     "edition:build": "tsx apps/server/scripts/build-edition.ts",
+    "edition:try": "npm run edition:try --workspace apps/server",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present"
   },
