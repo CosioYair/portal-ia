@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "edition:try": "tsx scripts/edition-sandbox.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node scripts/run-tests.mjs"
   },
