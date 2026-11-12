@@ -68,7 +68,7 @@ export function ContextScopeFields({ value, onChange, projects, companyName, idP
   </fieldset>;
 }
 
-/** Tono de cada chip del ámbito: Empresa y General se distinguen de Proyecto. */
+/** Tono de cada chip del ámbito real (los chips de Empresa y General se distinguen del de Proyecto). */
 const SCOPE_TONE: Record<ContextScopeOption, '' | 'accent' | 'ok'> = { project: '', company: 'accent', general: 'ok' };
 
 /**
