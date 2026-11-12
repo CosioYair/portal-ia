@@ -50,6 +50,18 @@ test('rejilla de Ajustes: columnas fluidas y tarjetas alineadas arriba (sin esti
   assert.match(read('screens/Settings.tsx'), /<div className="settings-card__actions">\{action\}<\/div>/);
 });
 
+test('evidencia visual: el script de capturas cubre 375/768/1440 px, vinculado y sin vincular, y mide el scroll horizontal', () => {
+  const e = fs.readFileSync(fileURLToPath(new URL('./e2e/hu209-ajustes-capturas.e2e.mjs', import.meta.url)), 'utf8');
+  assert.match(e, /const WIDTHS = \[375, 768, 1440\];/);
+  assert.match(e, /const STATES = \['vinculado', 'sin-vincular'\];/);
+  assert.match(e, /doc\.scrollWidth <= doc\.clientWidth/);
+  assert.match(e, /`hu209-\$\{width\}-\$\{state\}\.png`/);
+  assert.match(e, /'hu209-medidas\.json'/);
+  assert.match(e, /sealBelowGrid/); assert.match(e, /stretched/); assert.match(e, /overflowing/);
+  // Solo lectura: no pulsa nada ni simula respuestas fuera de la sesión del propietario.
+  assert.ok(!/\.click\(/.test(e), 'el script no pulsa ningún botón');
+});
+
 test('OwnerStatus: textos cortos que caben en la tarjeta; el detalle va en title y aria-label', () => {
   const o = read('components/OwnerPairing.tsx');
   const status = o.slice(o.indexOf('export function OwnerStatus'));
