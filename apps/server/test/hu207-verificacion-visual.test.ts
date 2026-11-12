@@ -46,6 +46,36 @@ test('HU-207 · routesForChanges deduce las rutas con el mapa real de apps/web/v
   assert.deepEqual(routesForChanges(['apps/web/src/screens/Backlog.tsx'], null), [], 'sin mapa no se inventan rutas');
 });
 
+test('HU-207 · cobertura del mapa: todo archivo de apps/web/src (screens/*.tsx, components/*.tsx, lib, css) deduce rutas', () => {
+  const map = loadRouteMap(REPO);
+  assert.ok(map && map.entries.length > 0);
+  const webSrc = path.join(REPO, 'apps', 'web', 'src');
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, d.name);
+      if (d.isDirectory()) walk(full);
+      else files.push(path.relative(REPO, full).split(path.sep).join('/'));
+    }
+  };
+  walk(webSrc);
+  const screens = files.filter(f => /^apps\/web\/src\/screens\/[^/]+\.tsx$/.test(f));
+  const components = files.filter(f => /^apps\/web\/src\/components\/[^/]+\.tsx$/.test(f));
+  assert.ok(screens.length > 0 && components.length > 0, 'se recorrieron screens/ y components/');
+  const sinRuta = files.filter(f => routesForChanges([f], map).length === 0);
+  assert.deepEqual(sinRuta, [], `archivos de apps/web/src sin ruta en visual-routes.json: ${sinRuta.join(', ')}`);
+  // Archivos nuevos (aún no existen): la puerta no puede bloquear con «no se dedujo ninguna ruta».
+  for (const nuevo of ['apps/web/src/screens/PantallaNueva.tsx', 'apps/web/src/components/AlgoNuevo.tsx', 'apps/web/src/hooks/useAlgo.ts', 'apps/web/src/nuevo.css']) {
+    assert.ok(routesForChanges([nuevo], map).length > 0, `${nuevo} tiene rutas por comodín`);
+  }
+  // Ninguna entrada muerta: cada patrón coincide con al menos un archivo real (p. ej. {a,b} no está admitido).
+  const muertas = map.entries.filter(e => routesForChanges(files, { entries: [e] }).length === 0).map(e => e.match);
+  assert.deepEqual(muertas, [], `entradas de visual-routes.json que no coinciden con ningún archivo: ${muertas.join(', ')}`);
+  for (const f of ['apps/web/src/components/TeamReady.tsx', 'apps/web/src/components/OrgEvaluationPanel.tsx']) {
+    assert.ok(routesForChanges([f], map).includes('/oficina/organizacion'), `${f} → /oficina/organizacion`);
+  }
+});
+
 test('HU-207 · sin siembra ni --vars, el mapa solo tiene rutas sin {marcadores} (las pantallas de detalle no bloquean siempre)', () => {
   const map = loadRouteMap(REPO)!;
   const withVars = map.entries.flatMap(e => (e.routes ?? []).filter(r => r.includes('{')).map(r => `${e.match} → ${r}`));

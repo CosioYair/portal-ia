@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "_doc": "HU-207 · Mapa de UX: archivo de apps/web/src → rutas del Portal a capturar a 375, 768 y 1440 px. Rutas planas (sin /empresa/:slug/proyecto/:pid, que SelectRoute redirige y el script marcaría como «ruta redirigida»). Solo rutas SIN parámetros: todavía no hay siembra de datos en la vista previa ni se pasa --vars, así que una ruta con {marcador} fallaría siempre («faltan datos sembrados»); las pantallas de detalle se cubren con su lista (/backlog, /actividad, /lotes, /oficina/organizacion) y la limitación consta en docs/estilos-ui.md. Lo comprueba hu207-verificacion-visual.test.ts. Los comodines de estilos globales, lib/ y components/ garantizan que ningún archivo de apps/web/src se quede sin ruta.",
+  "_doc": "HU-207 · Mapa de UX: archivo de apps/web/src → rutas del Portal a capturar a 375, 768 y 1440 px. Rutas planas (sin /empresa/:slug/proyecto/:pid, que SelectRoute redirige y el script marcaría como «ruta redirigida»). Solo rutas SIN parámetros: todavía no hay siembra de datos en la vista previa ni se pasa --vars, así que una ruta con {marcador} fallaría siempre («faltan datos sembrados»); las pantallas de detalle se cubren con su lista (/backlog, /actividad, /lotes, /oficina/organizacion) y la limitación consta en docs/estilos-ui.md. Lo comprueba hu207-verificacion-visual.test.ts. Los comodines de estilos globales, lib/, components/, screens/ y el final apps/web/src/ garantizan que ningún archivo de apps/web/src se quede sin ruta. Los patrones solo admiten * y ** (no {a,b}): una entrada por archivo. La cobertura y que cada entrada coincida con algún archivo real las comprueba hu207-verificacion-visual.test.ts.",
   "entries": [
     { "match": "apps/web/src/screens/Office.tsx", "routes": ["/oficina", "/oficina/organizacion"] },
     { "match": "apps/web/src/screens/CompanyHome.tsx", "routes": ["/oficina"] },
@@ -9,7 +9,8 @@
     { "match": "apps/web/src/screens/AgentDetail.tsx", "routes": ["/oficina/organizacion"] },
     { "match": "apps/web/src/components/AgentConfigPanel.tsx", "routes": ["/oficina/organizacion"] },
     { "match": "apps/web/src/components/Agent*.tsx", "routes": ["/oficina", "/oficina/organizacion"] },
-    { "match": "apps/web/src/components/{TeamReady,OrgEvaluationPanel}.tsx", "routes": ["/oficina/organizacion"] },
+    { "match": "apps/web/src/components/TeamReady.tsx", "routes": ["/oficina/organizacion"] },
+    { "match": "apps/web/src/components/OrgEvaluationPanel.tsx", "routes": ["/oficina/organizacion"] },
     { "match": "apps/web/src/screens/AgentWizard.tsx", "routes": ["/oficina/nuevo-agente"] },
     { "match": "apps/web/src/components/ModelPicker.tsx", "routes": ["/oficina/nuevo-agente"] },
     { "match": "apps/web/src/screens/Dashboard.tsx", "routes": ["/panel"] },
@@ -55,6 +56,8 @@
     { "match": "apps/web/src/App.tsx", "routes": ["/oficina", "/panel", "/backlog"] },
     { "match": "apps/web/src/main.tsx", "routes": ["/oficina", "/panel"] },
     { "match": "apps/web/src/lib/", "routes": ["/oficina", "/panel"] },
-    { "match": "apps/web/src/components/", "routes": ["/oficina", "/panel", "/backlog"] }
+    { "match": "apps/web/src/components/", "routes": ["/oficina", "/panel", "/backlog"] },
+    { "match": "apps/web/src/screens/", "routes": ["/oficina", "/panel", "/backlog"] },
+    { "match": "apps/web/src/", "routes": ["/oficina", "/panel", "/backlog"] }
   ]
 }
