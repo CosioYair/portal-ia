@@ -8,7 +8,8 @@
     "start": "tsx src/index.ts",
     "edition:try": "tsx scripts/edition-sandbox.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "node scripts/run-tests.mjs"
+    "test": "node scripts/run-tests.mjs",
+    "test:hu207": "node scripts/run-tests.mjs test/hu207-verificacion-visual.test.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.1",
