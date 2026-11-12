@@ -96,12 +96,27 @@ const live = new Map<string, Live>();
 let starting = false;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-function portFree(): Promise<boolean> {
+/** true si algún programa acepta conexiones en 127.0.0.1:4320 (no depende de las opciones de reutilización del bind). */
+function someoneListening(ms = 1500): Promise<boolean> {
+  return new Promise(res => {
+    let done = false;
+    const finish = (v: boolean) => { if (done) return; done = true; sock.destroy(); res(v); };
+    const sock = net.connect({ host: EDITION_SANDBOX_HOST, port: EDITION_SANDBOX_PORT });
+    sock.setTimeout(ms, () => finish(false));
+    sock.once('connect', () => finish(true));
+    sock.once('error', () => finish(false));
+  });
+}
+function canBind(): Promise<boolean> {
   return new Promise(res => {
     const s = net.createServer();
     s.once('error', () => res(false));
     s.listen({ host: EDITION_SANDBOX_HOST, port: EDITION_SANDBOX_PORT, exclusive: true }, () => s.close(() => res(true)));
   });
+}
+async function portFree(): Promise<boolean> {
+  if (await someoneListening()) return false;
+  return canBind();
 }
 async function defaultHealth(url: string): Promise<boolean> {
   try { const r = await fetch(`${url}/api/health`, { signal: AbortSignal.timeout(3000) }); await r.body?.cancel().catch(() => undefined); return r.ok; } catch { return false; }
