@@ -46,14 +46,22 @@ function patternRe(p: string): RegExp {
   return new RegExp(`^${n.split('**').map(part => part.split('*').map(esc).join('[^/]*')).join('.*')}$`);
 }
 
-/** Rutas esperadas (sin duplicados, en el orden del mapa) para los archivos tocados. */
+/**
+ * Rutas esperadas (sin duplicados) para los archivos tocados. Cada archivo usa la PRIMERA entrada del mapa que coincide:
+ * el mapa de UX lista primero las entradas concretas y al final los comodines de respaldo (components/, screens/,
+ * apps/web/src/), que solo se aplican cuando ninguna entrada concreta cubre el archivo.
+ */
 export function routesForChanges(paths: string[], map: VisualRouteMap | null): string[] {
   if (!map?.entries?.length) return [];
-  const files = paths.map(norm);
-  const out: string[] = [];
+  const compiled: { re: RegExp; routes: string[] }[] = [];
   for (const e of map.entries) {
-    let re: RegExp; try { re = patternRe(e.match); } catch { continue; }
-    if (files.some(f => re.test(f))) for (const r of e.routes ?? []) if (typeof r === 'string' && r && !out.includes(r)) out.push(r);
+    try { compiled.push({ re: patternRe(e.match), routes: e.routes ?? [] }); } catch { /* patrón inválido: se ignora */ }
+  }
+  const out: string[] = [];
+  for (const f of paths.map(norm)) {
+    const hit = compiled.find(c => c.re.test(f));
+    if (!hit) continue;
+    for (const r of hit.routes) if (typeof r === 'string' && r && !out.includes(r)) out.push(r);
   }
   return out;
 }
