@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { SystemStatus } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
@@ -42,12 +42,26 @@ export function Settings() {
   useEffect(() => { void loadOwnerName().then(n => { setOwnerName(n); setSavedName(n); setNameState('idle'); }).catch((e: Error) => { setNameError(e.message); setNameState('error'); }); }, []);
   // HU-209 · «Sistema» tiene su propia acción: copiar sus datos al portapapeles (sin IA ni costo), con estado explícito.
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'error'>('idle');
+  // El aviso «Copiado» / error vuelve a idle a los 2 s; el temporizador se limpia al desmontar.
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; if (copyTimer.current) clearTimeout(copyTimer.current); };
+  }, []);
   const copySystem = async () => {
     if (!sys) return;
     const line = `Portal IA ${sys.version} · en marcha ${sys.startCommit ?? '—'} · interfaz ${sys.buildCommit ?? '—'}${sys.sandbox ? ` · sandbox: ${sys.sandbox.detail}` : ''}`;
-    try { await navigator.clipboard.writeText(line); setCopyState('copied'); }
-    catch { setCopyState('error'); }
+    let next: 'copied' | 'error' = 'error';
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) { await navigator.clipboard.writeText(line); next = 'copied'; }
+    } catch { next = 'error'; }
+    if (!alive.current) return;
+    setCopyState(next);
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+    copyTimer.current = setTimeout(() => { copyTimer.current = null; setCopyState('idle'); }, 2000);
   };
+  const unchanged = ownerName.trim() === savedName;
   const submitName = () => {
     setNameState('saving'); setNameError(null);
     saveOwnerName(ownerName.trim()).then(n => { setOwnerName(n); setSavedName(n); setNameState('saved'); }).catch((e: Error) => { setNameError(e.message); setNameState('error'); });
@@ -82,7 +96,7 @@ export function Settings() {
             <input id="owner-name" className="input" type="text" value={ownerName} maxLength={OWNER_NAME_MAX} disabled={nameState === 'loading' || nameState === 'saving'} placeholder="Vacío: el agente te lo pregunta" onChange={e => { setOwnerName(e.target.value); if (nameState === 'saved' || nameState === 'error') setNameState('idle'); }} />
             <p role="status" aria-live="polite" style={{ margin: '4px 0 8px' }}>{nameState === 'loading' ? 'Cargando…' : nameState === 'saving' ? 'Guardando…' : nameState === 'saved' ? 'Guardado.' : nameState === 'error' ? `Error: ${nameError ?? 'no se pudo guardar.'}` : null}</p>
           </>,
-          <button type="button" className="btn btn-secondary btn-sm" disabled={nameState === 'loading' || nameState === 'saving' || ownerName.trim() === savedName} onClick={submitName}>{nameState === 'saving' ? 'Guardando…' : ownerName.trim() === savedName ? 'Sin cambios' : 'Guardar nombre'}</button>)}
+          <button type="button" className="btn btn-secondary btn-sm" disabled={nameState === 'loading' || nameState === 'saving' || nameState === 'error' || unchanged} onClick={submitName}>{nameState === 'saving' ? 'Guardando…' : (nameState === 'idle' || nameState === 'saved') && unchanged ? 'Sin cambios' : 'Guardar nombre'}</button>)}
         {card(Icon.sparkles(), 'Mejora automática de lecciones', `Empresa «${ws.name}» · con costo · desactivada por defecto`,
           <LessonAutoImproveSettings slug={ws.slug} />,
           <Link className="btn btn-ghost btn-sm" to="/autorizaciones">Ver mejoras pendientes en Decisiones</Link>)}
@@ -93,7 +107,7 @@ export function Settings() {
           sys ? <>Portal IA {sys.version} · en marcha <span className="mono">{sys.startCommit ?? '—'}</span> · interfaz <span className="mono">{sys.buildCommit ?? '—'}</span>{sys.sandbox ? <> · sandbox: {sys.sandbox.detail}</> : null}. Cuando hay una actualización, la barra de sistema aparece arriba en todas las pantallas.</> : 'Cargando el estado del Portal…',
           <>
             <button type="button" className="btn btn-secondary btn-sm" disabled={!sys} onClick={() => void copySystem()}>Copiar datos del sistema</button>
-            <span role="status" aria-live="polite" className="small">{copyState === 'copied' ? 'Copiado' : copyState === 'error' ? 'No se pudo copiar' : null}</span>
+            <span role="status" aria-live="polite" className="small">{copyState === 'copied' ? 'Copiado' : copyState === 'error' ? 'No se pudo copiar: selecciona el texto de arriba' : null}</span>
           </>)}
       </div>
       <section className="settings-panel" aria-label="Sello Portal IA">

@@ -10,8 +10,10 @@ const read = (rel: string) => fs.readFileSync(path.join(webSrc, rel), 'utf8');
 
 test('«Tu nombre»: sin cambios el botón está desactivado y dice «Sin cambios»', () => {
   const s = read('screens/Settings.tsx');
-  assert.match(s, /nameState === 'saving' \? 'Guardando…' : ownerName\.trim\(\) === savedName \? 'Sin cambios' : 'Guardar nombre'/);
-  assert.match(s, /disabled=\{nameState === 'loading' \|\| nameState === 'saving' \|\| ownerName\.trim\(\) === savedName\}/);
+  assert.match(s, /const unchanged = ownerName\.trim\(\) === savedName;/);
+  // «Sin cambios» solo en idle/saved: durante la carga o tras un error dice «Guardar nombre» (desactivado).
+  assert.match(s, /nameState === 'saving' \? 'Guardando…' : \(nameState === 'idle' \|\| nameState === 'saved'\) && unchanged \? 'Sin cambios' : 'Guardar nombre'/);
+  assert.match(s, /disabled=\{nameState === 'loading' \|\| nameState === 'saving' \|\| nameState === 'error' \|\| unchanged\}/);
 });
 
 test('el Sello Portal IA va en una sección propia, debajo de la rejilla y fuera de «Tu nombre»', () => {
@@ -28,8 +30,10 @@ test('«Sistema» tiene su propia acción (copiar, sin costo) y no enlaza a /pan
   const sys = s.slice(s.indexOf("'Sistema'"), s.indexOf('className="settings-panel"'));
   assert.ok(!sys.includes('to="/panel"'), 'sin enlace al Resumen del proyecto');
   assert.match(sys, /disabled=\{!sys\} onClick=\{\(\) => void copySystem\(\)\}>Copiar datos del sistema</);
-  assert.match(sys, /role="status"/); assert.match(sys, /'Copiado'/); assert.match(sys, /'No se pudo copiar'/);
-  assert.match(s, /navigator\.clipboard\.writeText\(line\)/); assert.match(s, /catch \{ setCopyState\('error'\); \}/);
+  assert.match(sys, /role="status"/); assert.match(sys, /'Copiado'/); assert.match(sys, /'No se pudo copiar: selecciona el texto de arriba'/);
+  assert.match(s, /navigator\.clipboard\?\.writeText\) \{ await navigator\.clipboard\.writeText\(line\)/, 'comprueba que existe el portapapeles antes de usarlo');
+  assert.match(s, /setTimeout\(\(\) => \{ copyTimer\.current = null; setCopyState\('idle'\); \}, 2000\)/, 'el aviso vuelve a idle a los 2 s');
+  assert.match(s, /return \(\) => \{ alive\.current = false; if \(copyTimer\.current\) clearTimeout\(copyTimer\.current\); \};/, 'el temporizador se limpia al desmontar');
 });
 
 test('rejilla de Ajustes: columnas fluidas y tarjetas alineadas arriba (sin estirarse)', () => {
