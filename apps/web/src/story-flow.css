@@ -48,7 +48,6 @@
 .sf-merge-recover-auth { display: flex; align-items: flex-start; gap: 6px; overflow-wrap: anywhere; }
 .sf-merge-recover-auth input { flex: none; margin-top: 3px; }
 .sf-merge-recover .sf-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-@media (max-width: 480px) { .sf-merge-recover .sf-actions .btn { flex: 1 1 100%; } }
 .sf-fold { min-width: 0; }
 /* HU-194 · Modo proceso: cabecera compacta con «Ver historia»; el resumen y el siguiente paso no se muestran (hidden gana a display:flex). */
 .sf-process-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; min-width: 0; }
@@ -130,4 +129,5 @@
   .sf-stages-compact .sf-stage.is-current .sf-bar { height: 8px; }
   .sf-stages-compact .sf-stage.is-current .sf-stage-label, .sf-stages-compact .sf-stage.is-current:nth-last-child(-n+2) .sf-stage-label { display: block; width: auto; max-width: 100%; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; align-self: stretch; }
   .sf-summary .sf-title { max-width: 100%; }
+  .sf-merge-recover .sf-actions .btn { flex: 1 1 100%; }
 }
