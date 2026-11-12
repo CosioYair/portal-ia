@@ -64,7 +64,7 @@ export function Settings() {
           <Link className="btn btn-secondary btn-sm" to="/presupuestos">Abrir Presupuestos</Link>)}
         {card(Icon.sparkles(), 'Asistente de Empresa', 'Todo el Portal · vive en «Portal IA»',
           <>{assistant ? <>Trabaja con <strong>{assistant.harnessLabel}</strong>. Su modelo, su límite mensual y sus permisos están en su configuración.</> : 'Su modelo, su límite mensual y sus permisos están en su configuración.'}</>,
-          assistant ? <><Link className="btn btn-secondary btn-sm" to={`/empresa/${INTERNAL_SLUG}/oficina/agente/${encodeURIComponent(assistant.id)}/configuracion`}>Configurar</Link><Link className="btn btn-ghost btn-sm" to={`/empresa/${INTERNAL_SLUG}/equipo/${encodeURIComponent(assistant.id)}`}>Ajustes avanzados</Link></> : <Link className="btn btn-ghost btn-sm" to="/asistente">Abrir el Asistente</Link>)}
+          assistant ? <Link className="btn btn-secondary btn-sm" to={`/empresa/${INTERNAL_SLUG}/oficina/agente/${encodeURIComponent(assistant.id)}/configuracion`}>Configurar</Link> : <Link className="btn btn-ghost btn-sm" to="/asistente">Abrir el Asistente</Link>)}
         {card(Icon.building(), 'Empresas y proyectos', 'Todo el Portal',
           <>{workspaces.length} empresa{workspaces.length === 1 ? '' : 's'} (cada una aislada, con su propia base de datos) · {projects.length} proyecto{projects.length === 1 ? '' : 's'} en «{ws.name}». Crear no consume IA.</>,
           <><button type="button" className="btn btn-secondary btn-sm" onClick={() => setDialog('project')}>{Icon.plus()} Proyecto</button><button type="button" className="btn btn-ghost btn-sm" onClick={() => setDialog('company')}>{Icon.plus()} Empresa</button></>)}
