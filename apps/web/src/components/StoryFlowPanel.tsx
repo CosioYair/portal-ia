@@ -86,7 +86,12 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   useEffect(() => { setVerified(null); }, [proc.id]);
   const [, tick] = useState(0);
   useEffect(() => { if (proc.status !== 'running') return; const t = setInterval(() => tick(x => x + 1), 1000); return () => clearInterval(t); }, [proc.status]);
-  useEffect(() => { setConfirming(null); setComposer(null); setAsgFeedback(null); setErr(null); setMsg(null); setOkAuth(false); setAnswer(''); setPublishing(null); setSkipAsk(null); setRejecting(null); setCancelAsk(null); }, [proc.id, flow?.current, flow?.issue?.kind]);
+  useEffect(() => { setConfirming(null); setComposer(null); setAsgFeedback(null); setErr(null); setMsg(null); setOkAuth(false); setAnswer(''); setPublishing(null); setSkipAsk(null); setRejecting(null); setCancelAsk(null); setMergeBlock(null); setRecoverOk(false); }, [proc.id, flow?.current, flow?.issue?.kind]);
+  // EN-023 · «Integrar» respondió 409 porque main avanzó (integration_candidate_required) o choca (merge_conflict): el aviso ofrece preparar el candidato ahí mismo.
+  const [mergeBlock, setMergeBlock] = useState<{ code: 'integration_candidate_required' | 'merge_conflict'; files: string[] } | null>(null);
+  const [recoverOk, setRecoverOk] = useState(false);
+  const [recoverGo, setRecoverGo] = useState(false);
+  useEffect(() => { if (recoverGo && confirming?.id === 'integration_prepare') { setRecoverGo(false); void run(confirming); } }, [recoverGo, confirming]);
   const ackNow = mergeAcknowledgementsOf(proc);
   useEffect(() => { if (proc.status !== 'running') setCancelling(false); }, [proc.status]);
   if (!flow) return null;
@@ -149,7 +154,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
   const reload = async () => { try { onChange(await api.process(slug, proc.id)); } catch { /* sin cambios */ } };
   const askText = issue ? `Sobre «${issue.title}»${issue.command ? ` (${issue.command})` : ''}: ¿por qué ocurre y cómo propones corregirlo? Responde con las causas y los cambios concretos.` : '¿Qué falta para cerrar esta historia?';
   const run = async (a: FlowAction) => {
-    setErr(null); setMsg(null); if (a.id !== 'claude_code_fix') setVerified(null);
+    setErr(null); setMsg(null); setMergeBlock(null); if (a.id !== 'claude_code_fix') setVerified(null);
     if (!HANDLED.has(a.id)) { setErr(`Esta página no reconoce la acción «${a.label}»: es de una versión más nueva del Portal. Recarga la página (Ctrl+F5) y vuelve a intentarlo; no se ha hecho nada.`); return; }
     if (a.id === 'open_settings') { if (a.href) navigate(a.href); return; }
     // Acciones que solo llevan a la sección donde se completan (con su propia autorización y opciones)
@@ -235,7 +240,11 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
     } catch (e: any) {
       setErr(explainError(e));
       // Continuar rechazado porque Claude Code no está listo: se muestra el estado real (nada se registró en el proceso).
-      if (e instanceof ApiError && e.body?.code === 'backend_not_ready') { setConfirming(null); if (e.body.readiness) setCc(e.body.readiness); await reload(); }
+      if (a.id === 'merge' && e instanceof ApiError && e?.status === 409 && (e.body?.code === 'integration_candidate_required' || e.body?.code === 'merge_conflict')) {
+          const files: string[] = (e.body?.integration?.conflicts ?? []).map((c: { path: string }) => c.path).concat(e.body?.conflictFiles ?? []);
+          setMergeBlock({ code: e.body.code, files: Array.from(new Set(files)) }); setRecoverOk(false);
+        }
+        if (e instanceof ApiError && e.body?.code === 'backend_not_ready') { setConfirming(null); if (e.body.readiness) setCc(e.body.readiness); await reload(); }
     } finally { setBusy(null); }
   };
 
@@ -457,7 +466,25 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         onIntegrateFirst={(processId: string) => { setClosingResolved(false); if (processId === proc.id) requestAnimationFrame(() => { if (document.getElementById('sec-git')) go('sec-git'); else go('sec-flow'); }); else navigate(`/procesos/${processId}#sec-git`); }}
         onCancel={() => setClosingResolved(false)} />}
       {msg && <Notice kind="info"><div>{msg}{msg.includes('tarea') && itemId && <> <button className="lnk" onClick={() => navigate(`/historias/${itemId}#tareas`)}>Ver tareas</button></>}</div></Notice>}
-      {err && <Notice kind="err">{err}</Notice>}
+      {err && <Notice kind="err"><div className="sf-merge-block">
+        <div>{err}</div>
+        {mergeBlock && !readOnly && <div className="sf-merge-recover" data-testid="sf-merge-recover" data-code={mergeBlock.code}>
+          {mergeBlock.code === 'merge_conflict' && mergeBlock.files.length > 0 && <ul className="sf-details small mono">{mergeBlock.files.map(f => <li key={f}>{f}</li>)}</ul>}
+          <label className="sf-merge-recover-auth small">
+            <input type="checkbox" checked={recoverOk} onChange={e => setRecoverOk(e.target.checked)} />{' '}
+            <span>Autorizo incorporar <strong>main</strong> en la rama de la historia (merge en su worktree) y verificarlo en el sandbox. <strong>No llama a la IA ni modifica main</strong>; integrar sigue siendo decisión mía.</span>
+          </label>
+          <div className="sf-actions">
+            <button type="button" className="btn btn-primary btn-sm" disabled={!recoverOk || busy !== null} aria-busy={busy === 'integration_prepare' ? true : undefined}
+              onClick={() => {
+                const prep: FlowAction = flow.actions.find(x => x.id === 'integration_prepare') ?? { id: 'integration_prepare', label: 'Preparar el candidato de integración (sin IA)', description: 'Incorpora main en la rama con git (sin IA y sin tocar main) y lo verifica en el sandbox.', requires: ['authorization'], primary: true };
+                setConfirming(prep); setOkAuth(true); setRecoverGo(true);
+              }}>
+              {busy === 'integration_prepare' ? <><span className="spin spin-light" /> Preparando y verificando en el sandbox…</> : 'Preparar el candidato de integración (sin IA)'}
+            </button>
+          </div>
+        </div>}
+      </div></Notice>}
     </section>
   );
 }
