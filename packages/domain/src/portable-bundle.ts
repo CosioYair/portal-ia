@@ -35,6 +35,14 @@ export interface BundleOptions { agentName: string; exportedAt: string; changelo
 export interface BundleLimits { fileBytes: number; totalBytes: number; files: number }
 /** Topes para el paquete de un agente externo: los de su carpeta real más margen para los archivos que genera el paquete. */
 export const EXTERNAL_BUNDLE_LIMITS: BundleLimits = { fileBytes: EXTERNAL_TEXT_LIMIT, totalBytes: EXTERNAL_TOTAL_LIMIT + 512 * 1024, files: 2000 };
+/** HU-211 · Topes de la Edición distribuible (código del Portal y build compilado): 2 MB por archivo, 200 MB en total, 5000 archivos. */
+export const EDITION_BUNDLE_LIMITS: BundleLimits = { fileBytes: 2 * 1024 * 1024, totalBytes: 200 * 1024 * 1024, files: 5000 };
+/**
+ * Perfil de validación. «agent» (por defecto) es el paquete de un agente. «edition» (HU-211) es el árbol de código de la
+ * Edición: no exige los archivos de agente, no aplica la lista blanca de rutas ni la regla de rutas /api/ y tablas (el código
+ * del servidor las contiene a propósito). Mantiene secretos, UUID, rutas locales del perfil y privadas, `forbidden` y límites.
+ */
+export type BundleProfile = 'agent' | 'edition';
 /** Plan que ya funcionó para un PDF (PLANES.json): sin ids de trabajos, UUID ni rutas. */
 export interface BundlePlan { sha256: string; skill: string; script: string; args: string[]; reason: string }
 export interface ExternalBundleOptions extends BundleOptions { role?: string | null; summary?: string | null; provenPlans: BundlePlan[] }
@@ -514,15 +522,23 @@ function lineOf(c: string, src: string): number {
   return m ? c.slice(0, m.index).split('\n').length : 0;
 }
 
-export function validatePortableBundle(files: PortableFiles, opts: { forbidden?: string[]; limits?: BundleLimits; privatePaths?: PrivatePath[] } = {}): BundleProblem[] {
+/** ¿La ruta encontrada es (o está dentro de) una de las rutas privadas indicadas? */
+function isPrivateMatch(m: string, privs: PrivNorm[]): boolean {
+  const n = normPath(m);
+  return privs.some(pv => n === pv.norm || n.startsWith(`${pv.norm}/`));
+}
+
+export function validatePortableBundle(files: PortableFiles, opts: { forbidden?: string[]; limits?: BundleLimits; privatePaths?: PrivatePath[]; profile?: BundleProfile } = {}): BundleProblem[] {
   const lim = opts.limits ?? PORTABLE_LIMITS;
+  const edition = opts.profile === 'edition';
+  const privs = edition ? privateList(opts.privatePaths) : [];
   const out: BundleProblem[] = [];
-  for (const r of REQUIRED) if (files[r] === undefined) out.push({ path: r, message: 'Falta en el paquete.' });
+  if (!edition) for (const r of REQUIRED) if (files[r] === undefined) out.push({ path: r, message: 'Falta en el paquete.' });
   const forbidden = (opts.forbidden ?? []).filter(f => f && f.length >= 4).map(f => f.toLowerCase());
   let total = 0;
   for (const [p, c] of Object.entries(files)) {
     const size = utf8Bytes(c); total += size;
-    if (!allowedBundlePath(p)) { out.push({ path: p, message: 'Ruta no permitida en el paquete.' }); continue; }
+    if (!edition && !allowedBundlePath(p)) { out.push({ path: p, message: 'Ruta no permitida en el paquete.' }); continue; }
     if (size > lim.fileBytes) out.push({ path: p, message: `Archivo demasiado grande (${Math.ceil(size / 1024)} KB; máx. ${lim.fileBytes / 1024} KB).` });
     const secret = findSecret(c); if (secret) out.push({ path: p, message: `Contiene lo que parece una ${secret}: las credenciales nunca salen del Portal.` });
     const uuidLine = lineOf(c, UUID); if (uuidLine) out.push({ path: p, line: uuidLine, message: 'Contiene un identificador interno (UUID).' });
@@ -531,17 +547,22 @@ export function validatePortableBundle(files: PortableFiles, opts: { forbidden?:
     const allowSystem = RAW.test(p) || p === 'GUIA.md';
     const byLine = new Map<number, LocalPathHit>();
     for (const h of findLocalPaths(c, { privatePaths: opts.privatePaths })) {
-      const blocks = h.kind !== 'system' || (!allowSystem && /^[A-Za-z]:/.test(h.match));
+      // Edición: el código cita rutas genéricas a propósito (/tmp, data/workspaces/<slug>); solo bloquean el perfil del
+      // usuario y las rutas privadas reales (carpeta de origen y de datos) indicadas en privatePaths.
+      const blocks = edition
+        ? h.kind === 'profile' || isPrivateMatch(h.match, privs)
+        : h.kind !== 'system' || (!allowSystem && /^[A-Za-z]:/.test(h.match));
       if (blocks && !byLine.has(h.line)) byLine.set(h.line, h);
     }
     const hits = [...byLine.values()];
     for (const h of hits.slice(0, 5)) out.push(localProblem(p, h));
     if (hits.length > 5) out.push({ path: p, message: `Y ${hits.length - 5} línea(s) más con rutas locales o de datos del Portal en este archivo.` });
-    const apiLines = [lineOf(c, API), lineOf(c, TABLES)].filter(n => n > 0);
+    const apiLines = edition ? [] : [lineOf(c, API), lineOf(c, TABLES)].filter(n => n > 0);
     if (apiLines.length) out.push({ path: p, line: Math.min(...apiLines), message: 'Contiene rutas o tablas internas del Portal.' });
     const low = c.toLowerCase(); if (forbidden.some(f => low.includes(f))) out.push({ path: p, message: 'Contiene un dato interno del agente (su id en el Portal).' });
   }
-  if (Object.keys(files).length > lim.files + BUNDLE_EXTRA.length + 1) out.push({ path: '', message: `Demasiados archivos en el paquete (máx. ${lim.files + BUNDLE_EXTRA.length + 1}).` });
+  const maxFiles = edition ? lim.files : lim.files + BUNDLE_EXTRA.length + 1;
+  if (Object.keys(files).length > maxFiles) out.push({ path: '', message: `Demasiados archivos en el paquete (máx. ${maxFiles}).` });
   if (total > lim.totalBytes) out.push({ path: '', message: `El paquete es demasiado grande (${Math.ceil(total / 1024)} KB; máx. ${lim.totalBytes / 1024} KB).` });
   return out;
 }
