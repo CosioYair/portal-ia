@@ -121,6 +121,12 @@ test('(e) compatibilidad: sin profile, validatePortableBundle se comporta como a
   const code = { 'apps/server/src/rutas.ts': "export const url = '/api/workspaces/x/agents';\n" };
   assert.ok(D.validatePortableBundle(code).some(p => p.path === 'apps/server/src/rutas.ts'), 'el perfil de agente rechaza código y rutas /api/');
   assert.deepEqual(D.validatePortableBundle(code, { profile: 'edition', limits: D.EDITION_BUNDLE_LIMITS }), []);
+  // Raíz de un solo nivel (la del sandbox, «/work/»): el código cita «/work/node_modules» como destino de montaje y no es una fuga.
+  const mount = { 'apps/server/src/services/sandbox.ts': "const deps = { type: 'volume', target: '/work/node_modules' };\n" };
+  assert.deepEqual(D.validatePortableBundle(mount, { profile: 'edition', limits: D.EDITION_BUNDLE_LIMITS, privatePaths: [{ path: '/work/', kind: 'source' }] }), []);
+  // Control: una raíz real de dos o más niveles sigue bloqueando.
+  const leak = { 'apps/server/src/fuga.ts': "export const p = '/srv/portal-estudio/apps/x.ts';\n" };
+  assert.ok(D.validatePortableBundle(leak, { profile: 'edition', limits: D.EDITION_BUNDLE_LIMITS, privatePaths: [{ path: '/srv/portal-estudio', kind: 'source' }] }).some(p => p.path === 'apps/server/src/fuga.ts'));
   const bundle = D.buildPortableBundle({ 'agent.yaml': 'name: Agente\nrole: Pruebas\n', 'AGENTS.md': '# Agente\n\nHago pruebas.\n' }, { agentName: 'Agente', exportedAt: '2026-01-01T00:00:00Z' });
   assert.deepEqual(D.validatePortableBundle(bundle, { profile: 'agent' }), D.validatePortableBundle(bundle));
 });

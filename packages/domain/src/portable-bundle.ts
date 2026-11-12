@@ -536,6 +536,14 @@ function lineOf(c: string, src: string): number {
   return m ? c.slice(0, m.index).split('\n').length : 0;
 }
 
+/**
+ * HU-211 · En la Edición, una ruta privada de un solo nivel («/work», «/app», «C:/x») no identifica al usuario y coincide con
+ * rutas que el código cita a propósito (destinos de montaje del contenedor del sandbox): solo cuentan las de 2+ niveles.
+ */
+function editionPrivate(list: PrivNorm[]): PrivNorm[] {
+  return list.filter(pv => pv.norm.split('/').filter(Boolean).length >= 2);
+}
+
 /** ¿La ruta encontrada es (o está dentro de) una de las rutas privadas indicadas? */
 function isPrivateMatch(m: string, privs: PrivNorm[]): boolean {
   const n = normPath(m);
@@ -545,7 +553,7 @@ function isPrivateMatch(m: string, privs: PrivNorm[]): boolean {
 export function validatePortableBundle(files: PortableFiles, opts: { forbidden?: string[]; limits?: BundleLimits; privatePaths?: PrivatePath[]; profile?: BundleProfile } = {}): BundleProblem[] {
   const lim = opts.limits ?? PORTABLE_LIMITS;
   const edition = opts.profile === 'edition';
-  const privs = edition ? privateList(opts.privatePaths) : [];
+  const privs = edition ? editionPrivate(privateList(opts.privatePaths)) : [];
   const out: BundleProblem[] = [];
   if (!edition) for (const r of REQUIRED) if (files[r] === undefined) out.push({ path: r, message: 'Falta en el paquete.' });
   const forbidden = (opts.forbidden ?? []).filter(f => f && f.length >= 4).map(f => f.toLowerCase());
