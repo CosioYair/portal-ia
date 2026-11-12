@@ -313,7 +313,8 @@ añadan después) y comprueba la lista exacta de abiertas, así que ninguna ruta
   con ella (ventana de segundos; el lote no empieza trabajo nuevo mientras se reconstruye).
 - Publicar una historia usa el remoto actual (cambiarlo exige la sesión y el remoto que viste).
 - Si el Portal está apagado y otra aplicación ocupa su puerto (4310) y abres esa dirección, podría leer la sesión de este
-  navegador: si ocurre, Ajustes › Propietario › «Desvincular todos los navegadores».
+  navegador: si ocurre, Ajustes › Propietario › «Desvincular todos» (su nombre accesible, en `aria-label` y `title`, es
+  «Desvincular todos los navegadores (también este)»: cierra las sesiones de todos los navegadores, también la de este).
 - La interfaz de desarrollo (Vite, 5173) es de solo lectura: los cambios se hacen en http://127.0.0.1:4310.
 - Reiniciar o reconstruir el Portal lo hace el propietario («Reconstruir y reiniciar» con el navegador vinculado): ningún
   proceso sin sesión puede.
