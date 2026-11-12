@@ -102,7 +102,7 @@ const dockerInspect: ImageInspector = async (ref, format) => {
  * (o el Dockerfile de la rama es igual al de main); en otro caso, desactualizada.
  */
 export async function resolveProcessImage(worktree: string, opts: { repoRoot?: string; inspect?: ImageInspector } = {}): Promise<SandboxImageInfo> {
-  const inspect = opts.inspect ?? (process.env.PORTAL_SANDBOX === 'none' ? (async () => null) : dockerInspect);
+  const inspect = opts.inspect ?? sandboxImageDeps.inspect ?? (process.env.PORTAL_SANDBOX === 'none' ? (async () => null) : dockerInspect);
   const hash = dockerfileHash(worktree);
   const defaultId = await inspect(SANDBOX_IMAGE, '{{.Id}}');
   if (!hash) return { image: SANDBOX_IMAGE, dockerfileHash: null, expectedTag: null, ready: defaultId !== null, stale: false, reason: 'El worktree no tiene docker/sandbox.Dockerfile: se usa la imagen por defecto.' };
@@ -123,7 +123,7 @@ export async function resolveProcessImage(worktree: string, opts: { repoRoot?: s
 export interface SandboxImageBuild { ok: boolean; tag: string | null; hash: string | null; output: string; at: string }
 
 /** Ejecutor de `docker build` (sustituible en las pruebas para contar llamadas sin lanzar docker). */
-export const sandboxImageDeps: { run: typeof runProcess } = { run: runProcess };
+export const sandboxImageDeps: { run: typeof runProcess; inspect: ImageInspector | null } = { run: runProcess, inspect: null };
 
 /**
  * Construye la imagen de la rama. Solo con `authorized: true` (si no, error 403 sin lanzar docker). Red solo durante el
@@ -142,4 +142,30 @@ export async function buildSandboxImage(worktree: string, opts: { authorized: bo
   const ok = r.code === 0;
   const header = `[docker build ${tag} · red solo durante la construcción · ${SANDBOX_IMAGE} no se modifica]\n`;
   return { ok, tag: ok ? tag : null, hash, output: clipSandboxOutput(header + r.output), at };
+}
+
+/** Construcciones en curso por etiqueta portal-ia-sandbox:df-<hash12> (cerrojo: doble clic, dos pestañas o dos procesos). */
+const inFlightBuilds = new Map<string, Promise<SandboxImageBuild>>();
+
+/**
+ * Reconstrucción idempotente para la ruta: sin autorización, 403 sin lanzar docker. Con ella, una sola construcción por
+ * etiqueta a la vez (las peticiones simultáneas comparten el resultado) y, si df-<hash> ya existe y está vigente según
+ * resolveProcessImage, devuelve ok sin construir.
+ */
+export async function rebuildSandboxImageOnce(worktree: string, opts: { authorized: boolean; inspect?: ImageInspector }): Promise<SandboxImageBuild> {
+  if (opts.authorized !== true) return buildSandboxImage(worktree, { authorized: false });
+  const hash = dockerfileHash(worktree);
+  if (!hash) return buildSandboxImage(worktree, { authorized: true });
+  const tag = branchImageTag(hash);
+  const running = inFlightBuilds.get(tag);
+  if (running) return running;
+  const job = (async (): Promise<SandboxImageBuild> => {
+    const info = await resolveProcessImage(worktree, { inspect: opts.inspect }).catch(() => null);
+    if (info && info.ready && !info.stale && info.image === tag) {
+      return { ok: true, tag, hash, output: `La imagen ${tag} ya existe y corresponde al docker/sandbox.Dockerfile de la rama: no se vuelve a construir (${SANDBOX_IMAGE} no se modifica).`, at: new Date().toISOString() };
+    }
+    return buildSandboxImage(worktree, { authorized: true });
+  })().finally(() => { inFlightBuilds.delete(tag); });
+  inFlightBuilds.set(tag, job);
+  return job;
 }

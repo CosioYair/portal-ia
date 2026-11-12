@@ -27,7 +27,7 @@ import { detectSandbox } from '../services/sandbox.ts';
 import fsEn024 from 'node:fs';
 import { z as zEn024 } from 'zod';
 import { processesRepo as en024Procs } from '../db/workspace.ts';
-import { buildSandboxCheckReport, buildSandboxImage, makeEnvSnapshot, resolveProcessImage } from '../services/sandboxImage.ts';
+import { buildSandboxCheckReport, makeEnvSnapshot, rebuildSandboxImageOnce, resolveProcessImage } from '../services/sandboxImage.ts';
 
 /** EN-024 · Autorización explícita para reconstruir la imagen (fail-closed: sin las dos, no se lanza docker). */
 const REBUILD_IMAGE_BODY = zEn024.object({ authorized: zEn024.literal(true), allowNetwork: zEn024.literal(true) });
@@ -677,7 +677,7 @@ Proceso: ${proc.id}`, { processId: proc.id });
     const wt = worktreeOfEn024(p);
     if (!wt) return reply.code(409).send({ error: 'El proceso no tiene un worktree en disco: no hay Dockerfile de la rama que construir.', code: 'no_worktree' });
     req.log.info({ processId: id, operation: 'reconstruir la imagen del sandbox' }, 'EN-024: reconstrucción autorizada de la imagen del sandbox');
-    const build = await buildSandboxImage(wt, { authorized: body.data.authorized });
+    const build = await rebuildSandboxImageOnce(wt, { authorized: body.data.authorized });
     // Si falla, el proceso no cambia: la pausa sigue con sus acciones y la salida se devuelve para la tarjeta.
     return { ok: build.ok, tag: build.tag, lastImageBuild: build, process: en024Procs(slug).get(id) };
   });

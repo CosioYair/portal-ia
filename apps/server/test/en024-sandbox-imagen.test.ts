@@ -14,7 +14,7 @@ process.env.PORTAL_ALLOW_FOREIGN_REPO = '1';
 process.env.PORTAL_SANDBOX = 'none';
 process.env.PORTAL_MOCK_PROVIDER = '1';
 
-const { branchImageTag, buildImageArgs, buildSandboxCheckReport, buildSandboxImage, dockerfileHash, isBranchTag, makeEnvSnapshot, resolveProcessImage, sandboxImageDeps } = await import('../src/services/sandboxImage.ts');
+const { branchImageTag, buildImageArgs, buildSandboxCheckReport, buildSandboxImage, dockerfileHash, isBranchTag, makeEnvSnapshot, rebuildSandboxImageOnce, resolveProcessImage, sandboxImageDeps } = await import('../src/services/sandboxImage.ts');
 const { DEFAULT_SANDBOX_IMAGE, SANDBOX_IMAGE } = await import('../src/services/sandbox.ts');
 const { replayQaVerdict, newPipeline } = await import('../src/services/storyPipeline.ts');
 const { encryptSecret } = await import('../src/security/crypto.ts');
@@ -175,6 +175,28 @@ test('reanudación: «Continuar» repite la verificación y recalcula QA desde e
   assert.deepEqual(runs.filter(c => c !== 'install'), ['typecheck', 'test', 'build'], 'repite la verificación en el sandbox');
   assert.deepEqual(aiCounter(p.id), before, 'contador de IA: ningún paso de agente ni evento con llamada a la IA');
   assert.notEqual((done.result?.review as { verdict?: string } | null)?.verdict, 'blocked_environment', 'veredicto recalculado con la imagen nueva');
+});
+
+test('rebuildSandboxImageOnce: cerrojo por etiqueta (dos peticiones, una construcción) y no reconstruye si df-<hash> ya existe', async () => {
+  const wt = worktreeWith('FROM node:22\nRUN echo en024-cerrojo\n'); const tag = branchImageTag(dockerfileHash(wt)!);
+  let calls = 0; const prevRun = sandboxImageDeps.run; const prevInspect = sandboxImageDeps.inspect;
+  sandboxImageDeps.run = (async (_cmd: string, args: string[]) => {
+    calls++; assert.ok(!args.includes(DEFAULT_SANDBOX_IMAGE) && !args.includes(SANDBOX_IMAGE));
+    await new Promise(r => setTimeout(r, 30)); return { code: 0, output: 'built' };
+  }) as unknown as typeof prevRun;
+  sandboxImageDeps.inspect = async () => null;
+  try {
+    await assert.rejects(rebuildSandboxImageOnce(wt, { authorized: false }), (e: any) => e.statusCode === 403);
+    assert.equal(calls, 0, 'sin autorización no se lanza docker');
+    const [a, b] = await Promise.all([rebuildSandboxImageOnce(wt, { authorized: true }), rebuildSandboxImageOnce(wt, { authorized: true })]);
+    assert.equal(calls, 1, 'dos peticiones simultáneas comparten una sola construcción');
+    assert.equal(a.ok, true); assert.equal(a.tag, tag); assert.deepEqual(b, a);
+    // La imagen de rama ya existe y está vigente: ok sin construir.
+    sandboxImageDeps.inspect = async (ref) => ref === tag || ref === SANDBOX_IMAGE ? 'sha256:x' : null;
+    const again = await rebuildSandboxImageOnce(wt, { authorized: true });
+    assert.equal(calls, 1, 'no se vuelve a construir una imagen vigente');
+    assert.equal(again.ok, true); assert.equal(again.tag, tag); assert.match(again.output, /ya existe/);
+  } finally { sandboxImageDeps.run = prevRun; sandboxImageDeps.inspect = prevInspect; }
 });
 
 test('buildSandboxCheckReport: «Nada cambió» con la misma lectura y señala la acción que lo resuelve', () => {
