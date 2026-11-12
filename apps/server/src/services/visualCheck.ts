@@ -134,6 +134,53 @@ export function visualSummary(g: VisualGate): string {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+/**
+ * Proveedor que se conecta en la vista previa. Allí corre el adaptador simulado (PORTAL_MOCK_PROVIDER=1): sin red,
+ * sin coste y sin credenciales reales. El id tiene que ser uno de los que admite /api/providers/:id (anthropic|openai).
+ */
+export const PREVIEW_SIM_PROVIDER = 'anthropic';
+const PREVIEW_SIM_KEY = 'preview-visual-check-simulada';
+export interface PreviewResponse { ok: boolean; status: number; json: () => Promise<unknown> }
+export type PreviewFetch = (url: string, init: { method: string; body?: string; headers?: Record<string, string> }) => Promise<PreviewResponse>;
+
+const defaultPreviewFetch: PreviewFetch = async (url, init) => {
+  const r = await fetch(url, { method: init.method, body: init.body, headers: init.headers, signal: AbortSignal.timeout(30_000) });
+  return { ok: r.ok, status: r.status, json: () => r.json() as Promise<unknown> };
+};
+
+/**
+ * Prepara una vista previa vacía antes de capturar: conecta el proveedor simulado y crea el espacio interno.
+ * Así las pantallas no redirigen al asistente de inicio. Es idempotente: si ya está listo, no escribe nada.
+ * Sin IA (verificar el proveedor simulado no sale a la red).
+ */
+export async function initPreviewData(baseUrl: string, f: PreviewFetch = defaultPreviewFetch): Promise<{ steps: string[]; status: { providerConnected: boolean; initialized: boolean } }> {
+  const base = baseUrl.replace(/\/+$/, '');
+  const json = { 'content-type': 'application/json' };
+  const readStatus = async () => {
+    const r = await f(`${base}/api/bootstrap/status`, { method: 'GET' });
+    if (!r.ok) throw new Error(`la vista previa no respondió al estado de inicialización (HTTP ${r.status})`);
+    const s = (await r.json().catch(() => ({}))) as { providerConnected?: unknown; initialized?: unknown };
+    return { providerConnected: !!s?.providerConnected, initialized: !!s?.initialized };
+  };
+  const steps: string[] = [];
+  const st = await readStatus();
+  if (!st.providerConnected) {
+    const put = await f(`${base}/api/providers/${PREVIEW_SIM_PROVIDER}/credential`, { method: 'PUT', headers: json, body: JSON.stringify({ apiKey: PREVIEW_SIM_KEY }) });
+    if (!put.ok) throw new Error(`no se pudo guardar la credencial del proveedor simulado en la vista previa (HTTP ${put.status})`);
+    const ver = await f(`${base}/api/providers/${PREVIEW_SIM_PROVIDER}/verify`, { method: 'POST', headers: json, body: '{}' });
+    if (!ver.ok) throw new Error(`el proveedor simulado no se verificó en la vista previa (HTTP ${ver.status}); ¿arrancó con PORTAL_MOCK_PROVIDER=1?`);
+    steps.push('provider');
+  }
+  if (!st.initialized) {
+    const b = await f(`${base}/api/bootstrap/internal`, { method: 'POST', headers: json, body: '{}' });
+    if (!b.ok) throw new Error(`no se pudo inicializar el espacio interno de la vista previa (HTTP ${b.status})`);
+    steps.push('bootstrap');
+  }
+  const after = await readStatus();
+  if (!after.providerConnected || !after.initialized) throw new Error('la vista previa sigue sin inicializar: las pantallas redirigirían al asistente');
+  return { steps, status: after };
+}
+
 async function readyPreview(slug: string, processId: string, commit: string, signal?: AbortSignal): Promise<string> {
   const mine = () => previewsOf(slug, processId).filter(p => p.live && sameCommit(p.commit, commit));
   const ready = () => mine().find(p => p.status === 'ready' && !!p.url)?.url ?? null;
@@ -203,6 +250,7 @@ async function doRun(slug: string, processId: string, opts: { timeoutMs?: number
   let status: VisualRun['status']; let detail: string; let exitCode: number | null = null;
   try {
     const url = await readyPreview(slug, processId, pre.commit, opts.signal);
+    await initPreviewData(url);
     fs.rmSync(dir, { recursive: true, force: true }); fs.mkdirSync(dir, { recursive: true });
     const vars = Object.entries(opts.vars ?? {}).map(([k, v]) => `${k}=${v}`).join(',');
     const args = ['--base-url', url, '--routes', pre.routes.join(','), '--out', dir, '--commit', pre.commit, ...(vars ? ['--vars', vars] : [])];
