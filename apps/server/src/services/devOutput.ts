@@ -244,16 +244,60 @@ function sentenceWith(text: string, re: RegExp): string {
   const endDot = flat.slice(m.index).search(/[.?!](\s|$)/);
   return flat.slice(start, endDot >= 0 ? m.index + endDot + 1 : m.index + 280).trim().slice(0, 300);
 }
-/** Sección BLOQUEO del contrato: «tipo:», «necesito:», «pregunta:», «consultar:». */
+/** Cabecera de un campo del BLOQUEO: sangría, nombre del campo y resto de la línea (puede estar vacío o acabar en «:»). */
+const BLOCKER_FIELD = /^([ \t]*)[-*]?\s*(tipo|necesito|pregunta|consultar)\s*:\s*(.*)$/i;
+/** Declaración explícita de que faltan capacidades o herramientas (solo se mira la primera línea de necesito/pregunta). */
+const CAPABILITY_GAP = /(me falta(?:n)?|faltan?|no tengo|no dispongo de|sin)\s+(?:las?\s+|los?\s+)?(?:capacidad(?:es)?|herramientas?)/i;
+const BLOCKER_TEXT_MAX = 2000;
+/** Recorta avisando: el propietario debe saber si la pregunta no llegó entera. */
+const capText = (s: string, max: number) => s.length <= max ? s : `${s.slice(0, max)}…(recortado)`;
+
+/**
+ * Campos del BLOQUEO con sus líneas de continuación (EN-025). Antes cada campo se quedaba solo con su primera línea, así que
+ * «pregunta: X:» seguida de una lista llegaba cortada tras «:». Ahora se recorre la sección por líneas: una cabecera
+ * (tipo|necesito|pregunta|consultar) abre un campo y todo lo que sigue se acumula en él, con saltos de línea y viñetas,
+ * hasta la siguiente cabecera. Decisión: una línea solo cuenta como cabecera si su sangría no es mayor que la de la primera
+ * cabecera, para que una viñeta sangrada de la lista («  - consultar: …») no corte el campo. Si un campo se repite, vale el primero.
+ */
+function blockerFields(section: string): Record<'tipo' | 'necesito' | 'pregunta' | 'consultar', string> {
+  const out = { tipo: '', necesito: '', pregunta: '', consultar: '' };
+  const seen = new Set<string>();
+  let current: { key: keyof typeof out; lines: string[] } | null = null;
+  let baseIndent: number | null = null;
+  const close = () => {
+    if (current && !seen.has(current.key)) { seen.add(current.key); out[current.key] = current.lines.map(l => l.trimEnd()).join('\n').trim(); }
+    current = null;
+  };
+  for (const line of section.replace(/\r\n/g, '\n').split('\n')) {
+    const m = line.match(BLOCKER_FIELD);
+    const indent = m ? m[1].replace(/\t/g, '  ').length : 0;
+    if (m && (baseIndent === null || indent <= baseIndent)) {
+      if (baseIndent === null) baseIndent = indent;
+      close();
+      current = { key: m[2].toLowerCase() as keyof typeof out, lines: [m[3]] };
+      continue;
+    }
+    if (current) current.lines.push(line);
+  }
+  close();
+  return out;
+}
+
+/** Sección BLOQUEO del contrato: «tipo:», «necesito:», «pregunta:», «consultar:» (cada uno con sus líneas de continuación). */
 function parseBlocker(section: string): AgentBlocker | null {
   if (!section.trim()) return null;
-  const field = (k: string) => section.match(new RegExp(`^\\s*[-*]?\\s*${k}\\s*:\\s*(.+)$`, 'im'))?.[1]?.trim() ?? '';
-  const t = field('tipo').toLowerCase();
-  const type: AgentBlocker['type'] = /permis/.test(t) ? 'permission' : /capacid|herramient/.test(t) ? 'capability' : 'information';
-  const need = field('necesito') || section.trim().split('\n')[0].slice(0, 300);
-  const question = field('pregunta') || need;
-  const consult = field('consultar') || null;
-  return { type, need: need.slice(0, 400), question: question.slice(0, 400), consult: consult && !/^(ninguno|nadie|-|no)$/i.test(consult) ? consult.slice(0, 120) : null, declared: true };
+  const f = blockerFields(section);
+  const t = f.tipo.toLowerCase();
+  const need = f.necesito || section.trim().split('\n')[0].slice(0, 300);
+  const question = f.pregunta || need;
+  const consult = f.consultar.split('\n')[0].trim() || null;
+  // Prioridad: permiso > capacidad > información. La falta de capacidades se mira en la primera línea de necesito y
+  // pregunta (no en las viñetas, que pueden mencionar «sin herramientas» de pasada).
+  const heads = [need.split('\n')[0], question.split('\n')[0]];
+  const capRx = BLOCKER_RX.find(b => b.type === 'capability')!.re;
+  const capabilityGap = heads.some(h => CAPABILITY_GAP.test(h) || capRx.test(h));
+  const type: AgentBlocker['type'] = /permis/.test(t) ? 'permission' : (/capacid|herramient/.test(t) || capabilityGap) ? 'capability' : 'information';
+  return { type, need: capText(need, BLOCKER_TEXT_MAX), question: capText(question, BLOCKER_TEXT_MAX), consult: consult && !/^(ninguno|nadie|-|no)$/i.test(consult) ? consult.slice(0, 120) : null, declared: true };
 }
 
 /** Clase explícita de fallo para una entrega del Desarrollador (null si es una implementación válida o «sin cambios»). */
