@@ -542,7 +542,7 @@ export interface FlowIssue {
 }
 export type FlowActionId =
   | 'authorize' | 'cancel' | 'review_diff' | 'apply' | 'reject' | 'install_and_retry' | 'verify' | 'retry_verification'
-  | 'sandbox_help' | 'refresh_sandbox' | 'request_fix' | 'ask_team' | 'tasks_from_issue' | 'merge' | 'rebuild'
+  | 'sandbox_help' | 'refresh_sandbox' | 'request_fix' | 'ask_team' | 'tasks_from_issue' | 'merge' | 'rebuild' | 'rebuild_sandbox_image'
   | 'runtime_check' | 'manual_test' | 'close' | 'close_resolved' | 'publish' | 'skip_publish' | 'accept_plan' | 'retry_process' | 'recover' | 'new_iteration'
   | 'pipeline_resume' | 'repair_output'
   /** La historia no cambia código (lo concluyó el Coordinador): encargo de análisis pendiente de tu autorización, sin IA hasta entonces. */
@@ -936,8 +936,61 @@ export interface PipelineStatus {
   baseline?: BaselineRun | null;
   /** Commits en los que «test» se repitió sin IA porque la evidencia guardada estaba recortada (versión anterior). */
   evidenceReruns?: string[];
+  /** EN-024 · La pausa de entorno se debe a la imagen del sandbox (desactualizada o sin lo que exige el cambio). */
+  imageRelated?: boolean;
+  /** EN-024 · Hallazgos de código de QA (gravedad media o baja) guardados al pausar: se ofrecen en «Pedir corrección». */
+  findings?: { severity: IssueSeverity; text: string; file: string | null; evidence: string | null }[];
+  /** EN-024 · Veredicto completo de QA guardado al pausar: al reanudar se recalcula sin IA (replayQaVerdict). */
+  qaVerdictSnapshot?: unknown;
+  /** EN-024 · Estado del sandbox en el momento de la pausa (referencia de «Comprobar el sandbox de nuevo»). */
+  envSnapshot?: SandboxEnvSnapshot | null;
   startedAt: string;
   finishedAt: string | null;
+}
+
+// ---- EN-024 · Imagen del sandbox por rama ----
+/** Imagen que usa (o debería usar) un proceso según el docker/sandbox.Dockerfile de su worktree. */
+export interface SandboxImageInfo {
+  /** Imagen con la que se ejecuta la verificación del proceso. */
+  image: string;
+  /** sha256 del Dockerfile de la rama (finales de línea normalizados); null si el worktree no lo tiene. */
+  dockerfileHash: string | null;
+  /** Etiqueta de la imagen de rama (portal-ia-sandbox:df-<hash12>); null sin Dockerfile. */
+  expectedTag: string | null;
+  /** La imagen existe en el motor. */
+  ready: boolean;
+  /** La imagen en uso no corresponde al Dockerfile de la rama. */
+  stale: boolean;
+  reason: string;
+}
+/** Lectura del entorno del sandbox (lo que compara «Comprobar el sandbox de nuevo»). */
+export interface SandboxEnvSnapshot {
+  engine: string;
+  available: boolean;
+  image: string | null;
+  stale: boolean;
+  /** Hash estable de engine|available|image|stale. */
+  fingerprint: string;
+  at?: string;
+}
+/** Informe de «Comprobar el sandbox de nuevo»: se pinta en la tarjeta y no modifica el proceso. */
+export interface SandboxCheckReport {
+  engine: string;
+  available: boolean;
+  image: string | null;
+  stale: boolean;
+  pauseStillActive: boolean;
+  changed: boolean;
+  fingerprint: string;
+  /** Con qué se comparó: la lectura anterior del cliente, la instantánea de la pausa o nada (primera comprobación). */
+  comparedWith: 'client' | 'pause_snapshot' | 'none';
+  /** Qué cambió (motor, imagen, desactualizada…), en español. */
+  changes: string[];
+  message: string;
+  /** Acción que resuelve la pausa (p. ej. rebuild_sandbox_image); null si no hay nada que resolver. */
+  resolvingAction: string | null;
+  detail: string;
+  checkedAt: string;
 }
 
 // ---- Entrega incremental: manifiesto de entregables y unidades de trabajo ----
@@ -1244,6 +1297,8 @@ export interface ExecutionResult {
   rejected?: { at: string; reason: string } | null;
   /** Pipeline autónomo autorizado (aplicar, verificar, QA con evidencia, correcciones acotadas). */
   pipeline?: PipelineStatus | null;
+  /** EN-024 · Imagen del sandbox de este proceso (construida desde el Dockerfile de su rama). Sin valor: la imagen por defecto. */
+  sandboxImage?: string | null;
   /** Clasificación del fallo del proceso (si falló). */
   failure?: ProcessFailure | null;
   /** Entrega incremental: entregables del plan, unidades de trabajo y comprobación previa a QA (puntos de control duraderos). */

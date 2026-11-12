@@ -42,6 +42,35 @@ Variables opcionales: `PORTAL_SANDBOX_IMAGE` (imagen alternativa; necesita `git`
 
 Comprobación automática: `apps/server/test/sandbox-docker.test.ts` (construcción de la orden, sin Docker; y, si Docker está disponible, un script que intenta encontrar la carpeta del Portal y los datos, escribir fuera del worktree y en las dependencias, leer variables del equipo y salir a Internet: todo debe fallar y solo el worktree debe aceptar escrituras).
 
+### Imagen por rama (EN-024)
+
+Cada proceso se verifica con la imagen que corresponde al `docker/sandbox.Dockerfile` de **su** worktree, no con la que haya en el equipo.
+
+- **Etiqueta por hash.** Se calcula el sha256 del Dockerfile de la rama, sin distinguir CRLF de LF. La imagen de rama se llama `portal-ia-sandbox:df-<hash12>` y lleva la etiqueta `portal-ia.dockerfile-sha=<hash>`.
+- **Qué imagen se usa.** Si existe `df-<hash12>`, se usa esa. Si no existe, se usa la imagen por defecto (`portal-ia-sandbox:1` o `PORTAL_SANDBOX_IMAGE`) en dos casos: si su etiqueta `portal-ia.dockerfile-sha` coincide con el hash, o si el Dockerfile de la rama es igual al de main. En cualquier otro caso la imagen está **desactualizada**: el estado del sandbox lo dice así («imagen desactualizada») y nunca como «Docker disponible». Un worktree sin Dockerfile usa la imagen por defecto.
+- **La imagen queda guardada en el proceso.** Las verificaciones de ese proceso la usan y aparece en la cabecera de la salida. El volumen de dependencias `portal-ia-nm-<hash>` depende de la imagen, así que con una imagen nueva hay que volver a ejecutar `install`.
+- **Pausa por la imagen.** La verificación o QA puede pausarse por el entorno porque a la imagen le falta algo (por ejemplo, Chromium o Playwright) o porque está desactualizada. Esa pausa queda marcada como relacionada con la imagen. La tarjeta de la historia ofrece, por este orden:
+  1. «Reconstruir la imagen del sandbox desde la rama» (acción principal);
+  2. «Comprobar el sandbox de nuevo»;
+  3. «Continuar»;
+  4. «Pedir corrección», solo si QA dejó hallazgos de código.
+- **Reconstrucción autorizada** (`POST /api/workspaces/:slug/processes/:id/sandbox/rebuild-image` con `{ "authorized": true, "allowNetwork": true }`):
+  - Sin autorización no se lanza Docker y la ruta responde con un error (fail-closed).
+  - Ejecuta `docker build --pull --network default --label portal-ia.dockerfile-sha=<hash> -t portal-ia-sandbox:df-<hash12> -f <worktree>/docker/sandbox.Dockerfile <worktree>/docker`. La red solo se usa durante la construcción; las verificaciones siguen con `--network none`.
+  - La operación queda auditada en el historial de ejecución y tiene un límite de 20 minutos.
+  - **Nunca** reetiqueta ni sobrescribe `portal-ia-sandbox:1` ni `PORTAL_SANDBOX_IMAGE`, que son las imágenes de main y de los demás procesos. `buildImageArgs` rechaza cualquier etiqueta que no sea `df-<hash>`.
+  - Si la construcción falla, la tarjeta muestra la salida recortada, la pausa se mantiene y sus acciones siguen disponibles.
+- **Reanudación sin IA.** Después de reconstruir, «Continuar» no gasta presupuesto de IA:
+  - repite con la imagen nueva la verificación determinista (typecheck, test, build y los scripts de verificación ya definidos);
+  - recalcula el veredicto de QA con `replayQaVerdict` a partir del veredicto guardado en la pausa. Quita los bloqueos de entorno si la verificación pasa y conserva los hallazgos de código. No se llama a `complete()`.
+  - Si la verificación vuelve a fallar por el entorno, la historia se pausa otra vez por la imagen.
+- **«Comprobar el sandbox de nuevo»** (`GET /api/workspaces/:slug/processes/:id/sandbox-check?since=<fingerprint>`) es de solo lectura: no modifica el proceso.
+  - Muestra **en la tarjeta** el motor, la imagen, si está desactualizada y si la pausa sigue.
+  - Compara con la lectura anterior del cliente (`since`). Si no la hay, compara con la instantánea del entorno guardada al pausar.
+  - Si nada cambió, lo dice («Nada cambió desde la última comprobación») y señala la acción que lo resuelve.
+
+Para borrar imágenes de rama antiguas, lístalas con `docker image ls portal-ia-sandbox` y elimínalas con `docker image rm portal-ia-sandbox:df-<hash12>`. Esto no afecta a `:1`.
+
 ## Opción B · Distribución WSL2 dedicada (sin Docker)
 
 1. `wsl --install -d Ubuntu` (si aún no tienes WSL2).

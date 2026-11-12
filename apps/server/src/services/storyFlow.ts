@@ -35,6 +35,8 @@ export interface FlowOptions {
   integration?: BranchIntegration | null;
   /** HU-185 · Estado de publicación de main (sin red). Sin valor: la etapa «Publicar» solo usa lo que guarda el proceso. */
   publish?: PublishInfo | null;
+  /** EN-024 · Imagen del sandbox del proceso según resolveProcessImage (solo en la pausa de entorno por la imagen). Sin valor: desconocida. */
+  sandboxImage?: { stale: boolean; image: string; reason?: string } | null;
 }
 
 const LABELS: Record<FlowStageKey, string> = {
@@ -52,6 +54,18 @@ const act = (id: FlowActionId, label: string, description: string, requires: Flo
 const ASK = act('ask_team', 'Preguntar al equipo sobre este problema', 'Abre el chat de la historia con el problema ya citado. Cada pregunta es una llamada a la IA que autorizas con un tope.', ['ai_budget']);
 const TASKS = act('tasks_from_issue', 'Convertir en tareas', 'Crea una tarea por cada hallazgo (sin IA). Las tareas abiertas entran en la siguiente iteración.');
 const fix = (label = 'Pedir al equipo que lo corrija') => act('request_fix', label, 'Prepara una iteración correctiva con el error, la evidencia, los archivos y los intentos anteriores. Queda pendiente de tu autorización y presupuesto: no gasta nada hasta entonces.', ['confirmation']);
+
+/** EN-024 · Hallazgos de código (media/baja) guardados en una pausa de entorno, como texto. */
+export function envFindings(pl: unknown): string[] {
+  const f = ((pl ?? {}) as { findings?: unknown }).findings;
+  if (!Array.isArray(f)) return [];
+  return f.map(x => {
+    if (typeof x === 'string') return x;
+    const o = (x ?? {}) as { severity?: unknown; title?: unknown; text?: unknown; detail?: unknown; description?: unknown; file?: unknown };
+    const body = [o.title, o.text, o.detail, o.description].filter(s => typeof s === 'string').join(' · ');
+    return `${typeof o.severity === 'string' ? `[${o.severity}] ` : ''}${body}${typeof o.file === 'string' ? ` (${o.file})` : ''}`.trim();
+  }).filter(Boolean);
+}
 
 /** Verificaciones relevantes desde que se aplicó (las anteriores son de otra versión del código). */
 function sinceApplied(p: Process): VerificationRun[] {
@@ -371,6 +385,25 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
     else if (pl.pauseKind === 'call_cap' || (pl.pauseKind === 'budget' && /llamada\(s\) a la suscripción autorizadas/.test(pl.reason ?? ''))) { const n = pl.config.maxSubscriptionCalls ?? 60; actions.push(resume(`Conceder ${n} llamadas más a la suscripción y continuar`, `El equipo retoma donde lo dejó con ${n} llamadas más a tu suscripción (no es USD de API). Lo hecho no se repite.`, ['authorization'], { addSubscriptionCalls: n })); }
     else if (pl.pauseKind === 'budget') actions.push(resume('Continuar con más presupuesto', 'El equipo retoma donde lo dejó (no repite lo hecho). Fijas el presupuesto adicional máximo; solo se gasta lo necesario.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.5 }));
     else if (pl.pauseKind === 'network') actions.push(resume('Permitir instalar dependencias y continuar', 'Instala las dependencias en el sandbox con red temporal (solo durante la instalación) y sigue verificando. No llama a la IA.', ['authorization', 'network'], { pipeline: { allowInstall: true } }));
+    else if (pl.pauseKind === 'environment' && (pl as { imageRelated?: boolean }).imageRelated) {
+      // EN-024 · Pausa por la imagen del sandbox: la acción principal es reconstruirla desde la rama (autorizada, red solo en el build).
+      const found = envFindings(pl);
+      const img = opts.sandboxImage;
+      const ready = !!img && !img.stale;
+      actions.push(
+        act('rebuild_sandbox_image', 'Reconstruir la imagen del sandbox desde la rama', 'Construye la imagen desde el docker/sandbox.Dockerfile de esta rama, con red solo durante la construcción, y la etiqueta por hash (portal-ia-sandbox:df-…). No toca portal-ia-sandbox:1 ni la imagen que usan main y otros procesos. No llama a la IA.', ['authorization', 'network'], { primary: !ready }),
+        act('refresh_sandbox', 'Comprobar el sandbox de nuevo', 'Detecta el motor y la imagen sin ejecutar nada y te dice en la tarjeta qué encontró y si la pausa sigue.'));
+      if (img?.stale) {
+        // Imagen aún desactualizada: «Continuar» volvería a pausar igual; no se ofrece y se explica qué lo resuelve.
+        issue = { ...issue!, explanation: `${issue!.explanation} La imagen sigue desactualizada${img.reason ? ` (${img.reason})` : ''}: «Continuar con la imagen nueva» no está disponible hasta que la reconstruyas con «Reconstruir la imagen del sandbox desde la rama».` };
+      }
+      else if (ready) actions.push(resume('Continuar con la imagen nueva', `La imagen ${img!.image} ya corresponde al Dockerfile de la rama. Repite la verificación con ella y recalcula el veredicto de QA desde el guardado, sin llamar a la IA.`, ['authorization'], { primary: true }));
+      else actions.push(resume('Continuar con la imagen nueva', 'No se pudo leer la imagen ahora: repite la verificación y, si la imagen sigue desactualizada, la pausa vuelve sin llamar a la IA. Con la imagen reconstruida recalcula el veredicto de QA desde el guardado, sin IA.', ['authorization']));
+      if (found.length) {
+        issue = { ...issue!, details: [...(issue!.details ?? []), ...found.map(text => ({ text: `Hallazgo de código: ${text}` }))] };
+        actions.push(act('request_fix', `Pedir corrección de ${found.length} hallazgo(s) de código`, 'Prepara una iteración correctiva con esos hallazgos de código, la evidencia, los archivos y los intentos anteriores. Queda pendiente de tu autorización y presupuesto: no gasta nada hasta entonces.', ['confirmation']));
+      }
+    }
     else if (pl.pauseKind === 'environment') actions.push(act('refresh_sandbox', 'Comprobar el sandbox de nuevo', 'Vuelve a detectar Docker sin ejecutar nada.'), resume('Continuar cuando el entorno esté listo', 'Retoma la verificación; no llama a la IA salvo que haga falta corregir código.', ['authorization']));
     else if (pl.pauseKind === 'plan' && r.gauntlet?.planReview?.status === 'paused') actions.push(act('accept_plan', 'Seguir con este plan (decides tú)', 'Se implementa el plan tal como está; no se repiten ni el plan ni su revisión. Las brechas señaladas quedan en el informe.', ['authorization', 'ai_budget'], { primary: true, suggestedBudgetUsd: 0 }), act('new_iteration', 'Reformular o dividir la historia (nueva iteración)', 'Prepara la iteración con el motivo; el plan nuevo se revisa antes de gastar en la implementación.', ['confirmation']));
     // Sin código a propósito: un encargo de análisis hace el trabajo; repetir la historia igual pagaría la misma respuesta.
