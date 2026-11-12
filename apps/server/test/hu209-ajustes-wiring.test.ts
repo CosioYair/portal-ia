@@ -43,6 +43,11 @@ test('rejilla de Ajustes: columnas fluidas y tarjetas alineadas arriba (sin esti
   assert.match(grid, /align-items:\s*start/);
   assert.match(css.match(/\.settings-card\s*\{[^}]*\}/)?.[0] ?? '', /min-width:\s*0/);
   assert.match(css, /\.settings-card \.mono\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  // Sin reglas que repitan .btn (HU-208) ni botones al 100 % en las tarjetas; la fila de acciones tiene su clase.
+  assert.ok(!/\.settings-card \.btn\b/.test(css), 'no se redefine .btn dentro de .settings-card');
+  assert.match(css, /\.settings-card__actions\s*\{[^}]*flex-wrap:\s*wrap/);
+  assert.ok(!/\.settings-card__actions[^{]*\.btn-ghost/.test(css), 'los ghost no se estiran');
+  assert.match(read('screens/Settings.tsx'), /<div className="settings-card__actions">\{action\}<\/div>/);
 });
 
 test('OwnerStatus: textos cortos que caben en la tarjeta; el detalle va en title y aria-label', () => {

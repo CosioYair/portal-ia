@@ -69,7 +69,7 @@ export function Settings() {
   const card = (icon: ReactNode, title: string, scope: string, body: ReactNode, action: ReactNode) => <section className="card settings-card">
     <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}><Tile icon={icon} tone="settings" /><div style={{ flex: 1, minWidth: 0 }}><h2 className="h3" style={{ margin: 0 }}>{title}</h2><Chip xs>{scope}</Chip></div></div>
     <div className="small med">{body}</div>
-    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', minWidth: 0, maxWidth: '100%' }}>{action}</div>
+    <div className="settings-card__actions">{action}</div>
   </section>;
   return <Shell crumb="Ajustes">
     <main className="page" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
