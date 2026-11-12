@@ -122,6 +122,9 @@ export async function resolveProcessImage(worktree: string, opts: { repoRoot?: s
 
 export interface SandboxImageBuild { ok: boolean; tag: string | null; hash: string | null; output: string; at: string }
 
+/** Ejecutor de `docker build` (sustituible en las pruebas para contar llamadas sin lanzar docker). */
+export const sandboxImageDeps: { run: typeof runProcess } = { run: runProcess };
+
 /**
  * Construye la imagen de la rama. Solo con `authorized: true` (si no, error 403 sin lanzar docker). Red solo durante el
  * build; etiqueta por hash; nunca escribe la imagen por defecto. Si falla, devuelve la salida recortada.
@@ -131,10 +134,11 @@ export async function buildSandboxImage(worktree: string, opts: { authorized: bo
   const at = new Date().toISOString();
   const hash = dockerfileHash(worktree);
   if (!hash) return { ok: false, tag: null, hash: null, output: 'El worktree no tiene docker/sandbox.Dockerfile: no hay nada que construir.', at };
-  if (process.env.PORTAL_SANDBOX === 'none' && !opts.run) return { ok: false, tag: null, hash, output: 'Sandbox desactivado por PORTAL_SANDBOX=none: no se construye ninguna imagen.', at };
+  const runner = opts.run ?? sandboxImageDeps.run;
+  if (process.env.PORTAL_SANDBOX === 'none' && runner === runProcess) return { ok: false, tag: null, hash, output: 'Sandbox desactivado por PORTAL_SANDBOX=none: no se construye ninguna imagen.', at };
   const tag = branchImageTag(hash);
   const args = buildImageArgs({ worktree, tag, hash });
-  const r = await (opts.run ?? runProcess)('docker', args, { env: dockerCliEnv(), timeoutMs: opts.timeoutMs ?? BUILD_TIMEOUT_MS });
+  const r = await runner('docker', args, { env: dockerCliEnv(), timeoutMs: opts.timeoutMs ?? BUILD_TIMEOUT_MS });
   const ok = r.code === 0;
   const header = `[docker build ${tag} · red solo durante la construcción · ${SANDBOX_IMAGE} no se modifica]\n`;
   return { ok, tag: ok ? tag : null, hash, output: clipSandboxOutput(header + r.output), at };

@@ -4,10 +4,69 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execSync } from 'node:child_process';
 import type { VerificationRun } from '@portal-ia/domain';
-import { branchImageTag, buildImageArgs, buildSandboxCheckReport, buildSandboxImage, dockerfileHash, isBranchTag, makeEnvSnapshot, resolveProcessImage, type ImageInspector } from '../src/services/sandboxImage.ts';
-import { DEFAULT_SANDBOX_IMAGE, SANDBOX_IMAGE } from '../src/services/sandbox.ts';
-import { replayQaVerdict } from '../src/services/storyPipeline.ts';
+import type { ImageInspector } from '../src/services/sandboxImage.ts';
+
+// Servidor aislado: datos temporales, sandbox y proveedor simulados (0 USD, sin docker real).
+process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-en024-'));
+process.env.PORTAL_ALLOW_FOREIGN_REPO = '1';
+process.env.PORTAL_SANDBOX = 'none';
+process.env.PORTAL_MOCK_PROVIDER = '1';
+
+const { branchImageTag, buildImageArgs, buildSandboxCheckReport, buildSandboxImage, dockerfileHash, isBranchTag, makeEnvSnapshot, resolveProcessImage, sandboxImageDeps } = await import('../src/services/sandboxImage.ts');
+const { DEFAULT_SANDBOX_IMAGE, SANDBOX_IMAGE } = await import('../src/services/sandbox.ts');
+const { replayQaVerdict, newPipeline } = await import('../src/services/storyPipeline.ts');
+const { encryptSecret } = await import('../src/security/crypto.ts');
+const { classifyModel, DEFAULT_PIPELINE, normalizePipeline } = await import('@portal-ia/domain');
+const { providersRepo } = await import('../src/db/platform.ts');
+const { runBootstrap } = await import('../src/routes/bootstrap.ts');
+const { processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
+const { buildApp } = await import('./fixtures/owner-app.ts');
+const { addManualItem } = await import('../src/services/backlog.ts');
+const { createStoryProcess } = await import('../src/services/storyExecution.ts');
+const { applyChanges } = await import('../src/services/repoWrite.ts');
+const { sandboxDeps } = await import('../src/services/verification.ts');
+
+providersRepo.setCredential('anthropic', encryptSecret('sk-ant-test'), 'sk-ant-…test');
+providersRepo.setConnected('anthropic', ['claude-opus-4-1', 'claude-sonnet-4-5', 'claude-haiku-4-5'].map(id => classifyModel('anthropic', id)));
+runBootstrap();
+const S = 'portal-ia'; const W = `/api/workspaces/${S}`;
+const project = projectsRepo(S).list()[0];
+const app = await buildApp();
+let runs: string[] = [];
+sandboxDeps.detect = async () => ({ available: 'docker', docker: true, wsl: false, detail: 'simulado', checkedAt: new Date().toISOString() });
+sandboxDeps.run = async (_wt, _root, command) => {
+  runs.push(command);
+  const t = new Date().toISOString();
+  return { command, exitCode: 0, output: `${command} ok`, startedAt: t, finishedAt: new Date().toISOString(), durationMs: 1, isolation: 'docker' };
+};
+const gitIn = (cwd: string, cmd: string) => execSync(`git -c user.email=t@t -c user.name=t ${cmd}`, { cwd, encoding: 'utf8' }).trim();
+const put = (dir: string, p: string, c: string) => { fs.mkdirSync(path.dirname(path.join(dir, p)), { recursive: true }); fs.writeFileSync(path.join(dir, p), c); };
+const waitIdle = async (id: string) => { for (let i = 0; i < 400; i++) { const p = processesRepo(S).get(id)!; if (p.status !== 'running') return p; await new Promise(r => setTimeout(r, 25)); } throw new Error('sigue en ejecución'); };
+
+/** Historia aplicada en su rama y en pausa de entorno por la imagen (falta Chromium), con el veredicto de QA guardado. */
+async function imagePausedStory(title: string) {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-en024-repo-'));
+  put(repo, 'src/a.ts', 'export const a = 1;\n');
+  put(repo, 'package.json', '{ "name": "demo", "version": "1.0.0", "private": true }\n');
+  gitIn(repo, 'init -q -b main'); gitIn(repo, 'add -A'); gitIn(repo, 'commit -qm Base');
+  projectsRepo(S).setRepository(project.id, repo, 'main');
+  const it = addManualItem(S, project.id, { title, criterion: 'se verifica con la imagen nueva' });
+  const p = createStoryProcess(S, project.id, it.id);
+  const changes = [{ path: 'src/a.ts', action: 'modify' as const, content: 'export const a = 2;\n', diff: '', before: 1, after: 1, error: null }];
+  const ap = await applyChanges(repo, `portal-ia/hu-${it.storyId?.replace(/\D/g, '') || '1'}`, changes as any, `${title}: cambios`, { processId: p.id });
+  const at = new Date(Date.now() - 60_000).toISOString();
+  const findings = [{ severity: 'high', text: 'Falta Chromium en la imagen del sandbox para la verificación visual', file: null, evidence: null, category: 'environment' }];
+  const snapshot = { verdict: 'blocked_environment', summary: 'Falta Chromium en la imagen del sandbox', findings };
+  processesRepo(S).setResult(p.id, { ...p.result!, changes: changes as any, applied: { branch: ap.branch, commit: ap.commit, files: ap.files, appliedAt: at, worktree: ap.worktree },
+    verifications: [], review: { approve: false, verdict: 'blocked_environment', issues: [], findings, suggestedTests: [], summary: snapshot.summary } as any,
+    pipeline: { ...newPipeline(normalizePipeline({ ...DEFAULT_PIPELINE, autoApply: true, gauntlet: { mode: 'off', maxRounds: 0 } } as any)), state: 'paused', phase: 'qa', pauseKind: 'environment',
+      reason: 'Falta Chromium en la imagen del sandbox', imageRelated: true, qaVerdictSnapshot: snapshot,
+      envSnapshot: makeEnvSnapshot({ engine: 'docker', available: true, image: SANDBOX_IMAGE, stale: true }) } as any });
+  processesRepo(S).authorize(p.id, 1); processesRepo(S).finish(p.id, 'paused' as any);
+  return processesRepo(S).get(p.id)!;
+}
 
 // EN-024 · Imagen del sandbox por rama, reconstrucción autorizada y «Comprobar el sandbox de nuevo» que informa.
 const serverSrc = fileURLToPath(new URL('../src/', import.meta.url));
@@ -63,9 +122,59 @@ test('buildSandboxImage: sin autorización no lanza docker; si falla devuelve su
   assert.equal(calls, 0, 'fail-closed: sin autorización no se ejecuta nada');
   const r = await buildSandboxImage(wt, { authorized: true, run: fake });
   assert.equal(calls, 1); assert.equal(r.ok, false); assert.equal(r.tag, null); assert.match(r.output, /no se pudo descargar chromium/);
-  // La ruta exige authorized:true (zod) y delega en el servicio.
-  const routes = readSrc('routes/processes.ts');
-  assert.ok(routes.includes('sandbox/rebuild-image')); assert.ok(routes.includes('z.literal(true)')); assert.ok(routes.includes('sandbox-check'));
+});
+
+test('POST sandbox/rebuild-image sin authorized:true responde 403 y no lanza docker (ejecutor simulado: 0 llamadas)', async () => {
+  const p = await imagePausedStory('EN-024 · reconstruir sin autorización');
+  let calls = 0; const prev = sandboxImageDeps.run;
+  sandboxImageDeps.run = (async () => { calls++; return { code: 0, output: '' }; }) as unknown as typeof prev;
+  try {
+    const before = JSON.stringify(processesRepo(S).get(p.id));
+    for (const payload of [{}, { authorized: false }]) {
+      const r = await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/sandbox/rebuild-image`, payload });
+      assert.equal(r.statusCode, 403, r.body);
+    }
+    assert.equal(calls, 0, 'fail-closed: sin autorización no se ejecuta docker');
+    assert.equal(JSON.stringify(processesRepo(S).get(p.id)), before, 'la historia sigue igual, en pausa con sus acciones');
+  } finally { sandboxImageDeps.run = prev; }
+});
+
+test('GET sandbox-check informa en la tarjeta (motor, imagen, desactualizada, pausa) y no modifica el proceso', async () => {
+  const p = await imagePausedStory('EN-024 · comprobar el sandbox');
+  const before = processesRepo(S).get(p.id)!; const beforeJson = JSON.stringify(before);
+  const r1 = await app.inject({ method: 'GET', url: `${W}/processes/${p.id}/sandbox-check` });
+  assert.equal(r1.statusCode, 200, r1.body);
+  const rep = r1.json().report ?? r1.json();
+  assert.equal(typeof rep.engine, 'string'); assert.ok('image' in rep && typeof rep.stale === 'boolean', r1.body);
+  assert.equal(rep.pauseStillActive, true); assert.ok(typeof rep.message === 'string' && rep.message.length > 0);
+  const r2 = await app.inject({ method: 'GET', url: `${W}/processes/${p.id}/sandbox-check?since=${rep.fingerprint}` });
+  assert.equal(r2.statusCode, 200, r2.body);
+  const rep2 = r2.json().report ?? r2.json();
+  assert.equal(rep2.changed, false); assert.match(rep2.message, /Nada cambió/);
+  assert.equal(rep2.resolvingAction, 'rebuild_sandbox_image', 'señala la acción que lo resuelve');
+  const after = processesRepo(S).get(p.id)!;
+  assert.equal(after.status, before.status);
+  assert.deepEqual(after.result?.pipeline, before.result?.pipeline);
+  assert.equal((after as { updatedAt?: string }).updatedAt, (before as { updatedAt?: string }).updatedAt);
+  assert.equal(JSON.stringify(after), beforeJson, 'la comprobación es de solo lectura');
+});
+
+test('reanudación: «Continuar» repite la verificación y recalcula QA desde el guardado con 0 llamadas a la IA', async () => {
+  const p = await imagePausedStory('EN-024 · continuar con la imagen nueva');
+  const aiCounter = (id: string) => { const q = processesRepo(S).get(id)!;
+    return { steps: q.steps.length, aiEvents: (q.result?.pipeline?.events ?? []).filter(e => (e as { aiCall?: boolean }).aiCall).length }; };
+  const before = aiCounter(p.id);
+  const flow = (await app.inject({ method: 'GET', url: `${W}/processes/${p.id}` })).json().guidance.flow;
+  assert.equal(flow.actions[0].id, 'rebuild_sandbox_image', JSON.stringify(flow.actions.map((a: any) => a.id)));
+  const resume = flow.actions.find((a: any) => a.id === 'pipeline_resume');
+  assert.ok(resume, 'se ofrece «Continuar»'); assert.ok(!resume.requires.includes('ai_budget'), 'continuar no pide presupuesto de IA');
+  runs = [];
+  const cont = await app.inject({ method: 'POST', url: `${W}/processes/${p.id}/continue`, payload: { authorized: true } });
+  assert.equal(cont.statusCode, 200, cont.body);
+  const done = await waitIdle(p.id);
+  assert.deepEqual(runs.filter(c => c !== 'install'), ['typecheck', 'test', 'build'], 'repite la verificación en el sandbox');
+  assert.deepEqual(aiCounter(p.id), before, 'contador de IA: ningún paso de agente ni evento con llamada a la IA');
+  assert.notEqual((done.result?.review as { verdict?: string } | null)?.verdict, 'blocked_environment', 'veredicto recalculado con la imagen nueva');
 });
 
 test('buildSandboxCheckReport: «Nada cambió» con la misma lectura y señala la acción que lo resuelve', () => {
@@ -94,11 +203,6 @@ test('replayQaVerdict recalcula sin IA: quita el bloqueo de entorno y conserva l
   assert.ok(!texts.some(t => t.includes('Chromium')), 'quita el bloqueo de entorno');
   const again = replayQaVerdict(snapshot, []);
   assert.equal(again.verdict, 'blocked_environment', 'sin verificación válida sigue en pausa');
-  // Contador de llamadas a la IA: el recálculo no pasa por complete() ni por la puerta de QA.
-  const src = readSrc('services/storyPipeline.ts');
-  const body = src.slice(src.indexOf('export function replayQaVerdict'), src.indexOf('export function replayQaFromPause'));
-  const aiCalls = (body.match(/complete\(|qaGate|getAdapter|claudeCodeComplete|callAgent/g) ?? []).length;
-  assert.equal(aiCalls, 0);
 });
 
 test('la pausa de entorno por la imagen ofrece primero la reconstrucción, sin ai_budget, y «Pedir corrección» con hallazgos', () => {
