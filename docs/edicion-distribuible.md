@@ -37,7 +37,9 @@ La generación se detiene sin dejar ningún ZIP en estos casos:
 
 1. Descomprime el ZIP en una carpeta nueva.
 2. Ejecuta `npm ci` para instalar las dependencias. Necesitas Node 22.13 o superior.
-3. Ejecuta `npm run start:edition`.
+3. Ejecuta `npm run start:edition`. Es la **única** forma de arrancar la Edición.
+
+> **`npm start` no está disponible en la Edición.** El `package.json` es el mismo que el del Estudio y su script `start` apunta a `scripts/portal-start.mjs`. Ese archivo es el supervisor de automejora del Estudio y no se incluye en el ZIP. Si ejecutas `npm start`, Node termina con un error de módulo no encontrado (`Cannot find module …scripts/portal-start.mjs`). No es una instalación dañada: usa `npm run start:edition`. Tampoco funcionan `npm run dev` ni `npm run edition:build`, que son solo del Estudio.
 
 El lanzador fija siempre `PORTAL_EDITION=distributable`, aunque el entorno traiga otro valor, y usa `./data` como carpeta de datos salvo que se indique `PORTAL_DATA_DIR`. No instala nada: si faltan el build o las dependencias, se detiene y pide `npm ci`. Tampoco tiene supervisor de reinicio.
 
