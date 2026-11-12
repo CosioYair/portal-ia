@@ -118,7 +118,7 @@ export function replayQaVerdict(snapshot: unknown, verification: VerificationRun
 
 /**
  * Reanudación «replayQa» de una pausa por la imagen: con el veredicto guardado y la verificación repetida devuelve el
- * veredicto recalculado (sin llamar a complete()); null si la pausa no la admite (se sigue el camino de siempre).
+ * veredicto recalculado (sin llamar al modelo); null si la pausa no la admite (se sigue el camino de siempre).
  */
 export function replayQaFromPause(slug: string, processId: string, verification: VerificationRun[]): ReplayedQa | null {
   const pl = pipelineOf(slug, processId) as unknown as { imageRelated?: boolean; qaVerdictSnapshot?: unknown } | null;

@@ -392,7 +392,7 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
         resume('Continuar con la imagen nueva', 'Repite la verificación con la imagen reconstruida y recalcula el veredicto de QA desde el guardado, sin llamar a la IA.', ['authorization']));
       if (found.length) {
         issue = { ...issue!, details: [...(issue!.details ?? []), ...found.map(text => ({ text: `Hallazgo de código: ${text}` }))] };
-        actions.push(fix(`Pedir corrección de ${found.length} hallazgo(s) de código`));
+        actions.push(act('request_fix', `Pedir corrección de ${found.length} hallazgo(s) de código`, 'Prepara una iteración correctiva con esos hallazgos de código, la evidencia, los archivos y los intentos anteriores. Queda pendiente de tu autorización y presupuesto: no gasta nada hasta entonces.', ['confirmation']));
       }
     }
     else if (pl.pauseKind === 'environment') actions.push(act('refresh_sandbox', 'Comprobar el sandbox de nuevo', 'Vuelve a detectar Docker sin ejecutar nada.'), resume('Continuar cuando el entorno esté listo', 'Retoma la verificación; no llama a la IA salvo que haga falta corregir código.', ['authorization']));
