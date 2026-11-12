@@ -165,6 +165,8 @@ test('reanudación: «Continuar» repite la verificación y recalcula QA desde e
     return { steps: q.steps.length, aiEvents: (q.result?.pipeline?.events ?? []).filter(e => (e as { aiCall?: boolean }).aiCall).length }; };
   const before = aiCounter(p.id);
   const flow = (await app.inject({ method: 'GET', url: `${W}/processes/${p.id}` })).json().guidance.flow;
+  const cur = processesRepo(S).get(p.id)!;
+  assert.ok(Array.isArray(flow.actions) && flow.actions.length > 0, `la pausa por la imagen debe ofrecer acciones; flujo: ${JSON.stringify({ stage: flow.stage ?? null, issue: flow.issue ?? null, status: cur.status, pipeline: { state: cur.result?.pipeline?.state, pauseKind: cur.result?.pipeline?.pauseKind, imageRelated: (cur.result?.pipeline as { imageRelated?: boolean } | undefined)?.imageRelated } })}`);
   assert.equal(flow.actions[0].id, 'rebuild_sandbox_image', JSON.stringify(flow.actions.map((a: any) => a.id)));
   const resume = flow.actions.find((a: any) => a.id === 'pipeline_resume');
   assert.ok(resume, 'se ofrece «Continuar»'); assert.ok(!resume.requires.includes('ai_budget'), 'continuar no pide presupuesto de IA');
