@@ -123,6 +123,13 @@ function alignYaml(files: PortableFiles, ours: PortableFiles): PortableFiles {
   const yaml = definitionToFiles({ ...d, manifest })['agent.yaml'];
   return yaml === undefined ? files : { ...files, 'agent.yaml': yaml };
 }
+/**
+ * HU-213 · Fusión a tres bandas por archivo, compartida con la actualización de la Edición (editionUpdate.ts).
+ * base = la última versión común, ours = la local, theirs = la que llega. Los choques quedan en `conflicts`, sin pisar nada.
+ */
+export function mergeThreeWay(base: PortableFiles, ours: PortableFiles, theirs: PortableFiles): PortableMergeResult {
+  return mergePortableFiles(base, ours, theirs);
+}
 const withoutMem = (f: PortableFiles): PortableFiles => { const { [MEM]: _m, ...rest } = f; return rest; };
 const memKey = (t: string) => normalizeText(t).trim().toLowerCase();
 
@@ -151,7 +158,7 @@ function planMerge(slug: string, a: Agent, theirs: PortableFiles, marker: ZipMar
   const repo = agentFoldersRepo(slug); const adopted = repo.adopted(a.id);
   const ours0 = adopted?.files ?? definitionToFiles(definitionFor(slug, a, adoptedExtras(slug, a)));
   const base = baseFor(slug, a.id, theirs, marker);
-  const result = mergePortableFiles(withoutMem(alignYaml(base.files, ours0)), withoutMem(alignYaml(ours0, ours0)), withoutMem(alignYaml(theirs, ours0)));
+  const result = mergeThreeWay(withoutMem(alignYaml(base.files, ours0)), withoutMem(alignYaml(ours0, ours0)), withoutMem(alignYaml(theirs, ours0)));
   // Memoria: entradas del ZIP que no estaban al exportar ni existen ya en el Portal.
   const baseMem = new Set((filesToDefinition(base.files).definition?.memory ?? []).map(m => memKey(`${m.title}\n${m.text}`)));
   // Cualquier entrada que ya tenga el agente (verificada, pendiente o retirada): reimportar el mismo ZIP no duplica nada.

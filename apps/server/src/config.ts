@@ -68,17 +68,55 @@ export const config = {
   webDist: path.join(REPO_ROOT, 'apps/web/dist')
 };
 
-fs.mkdirSync(path.join(config.dataDir, 'workspaces'), { recursive: true });
-
-/** Versión del esquema de datos: cada cambio de versión hace una copia de `data/` antes de abrir las bases (migraciones solo aditivas). */
+/** Versión del esquema de datos: cada subida de versión hace una copia de `data/` antes de abrir las bases (migraciones solo aditivas). */
 export const DATA_SCHEMA_VERSION = '0.19';
-export function backupDataBeforeMigration(): string | null {
+
+/** Limpia un marcador de versión: quita el BOM, los espacios y los saltos de línea. */
+export function normalizeSchemaVersion(v: string | null | undefined): string {
+  return (v ?? '').replace(/^\uFEFF/, '').trim();
+}
+
+/** HU-213 · Compara versiones de esquema por números, segmento a segmento ('0.19' > '0.9'). Un segmento no numérico cuenta como 0. */
+export function compareSchemaVersion(a: string, b: string): -1 | 0 | 1 {
+  const parts = (v: string) => normalizeSchemaVersion(v).split('.').map(s => (/^\d+$/.test(s.trim()) ? Number(s.trim()) : 0));
+  const pa = parts(a); const pb = parts(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? 0; const y = pb[i] ?? 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/** Versión registrada en `<dataDir>/.schema-version` ('' si no existe o no se puede leer). */
+export function readSchemaMarker(dataDir: string): string {
+  const marker = path.join(dataDir, '.schema-version');
+  try { return fs.existsSync(marker) ? normalizeSchemaVersion(fs.readFileSync(marker, 'utf8')) : ''; } catch { return ''; }
+}
+
+export type SchemaState = 'igual' | 'migrar' | 'mas-nuevo';
+export interface SchemaGuard { state: SchemaState; data: string; program: string; reason: string | null }
+
+/** HU-213 · Comprobación pura del esquema (no escribe nada). «mas-nuevo» = los datos son de un programa más reciente: se bloquea. */
+export function schemaGuard(dataDir: string, program: string = DATA_SCHEMA_VERSION): SchemaGuard {
+  const data = readSchemaMarker(dataDir);
+  if (!data) return { state: 'migrar', data: '', program, reason: null };
+  const c = compareSchemaVersion(data, program);
+  if (c === 0) return { state: 'igual', data, program, reason: null };
+  if (c < 0) return { state: 'migrar', data, program, reason: null };
+  return {
+    state: 'mas-nuevo', data, program,
+    reason: `Los datos tienen el esquema ${data}, más nuevo que este programa (${program}). Instala una Edición igual o más reciente o restaura una copia de ${path.join(dataDir, 'backups')}.`
+  };
+}
+
+/**
+ * Copia las bases de `dataDir` en `backups/<fecha>_antes-de-<versión>` y, solo si la copia termina bien, escribe el marcador
+ * de forma atómica (archivo temporal + rename). Si la copia falla, borra la copia a medias, no toca el marcador y lanza el error.
+ */
+export function backupDataDir(dataDir: string, version: string, writeMarker = true): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const dest = path.join(dataDir, 'backups', `${stamp}_antes-de-${version}`);
   try {
-    const marker = path.join(config.dataDir, '.schema-version');
-    const current = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').trim() : '';
-    if (current === DATA_SCHEMA_VERSION) return null;
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const dest = path.join(config.dataDir, 'backups', `${stamp}_antes-de-${DATA_SCHEMA_VERSION}`);
     fs.mkdirSync(dest, { recursive: true });
     const copy = (src: string, rel = '') => {
       for (const e of fs.readdirSync(src, { withFileTypes: true })) {
@@ -88,9 +126,30 @@ export function backupDataBeforeMigration(): string | null {
         else if (/\.(sqlite|sqlite-wal|sqlite-shm)$|^\.master\.key$/.test(e.name)) fs.copyFileSync(from, to);
       }
     };
-    copy(config.dataDir);
-    fs.writeFileSync(marker, DATA_SCHEMA_VERSION);
-    return dest;
-  } catch { return null; }
+    copy(dataDir);
+  } catch (e: any) {
+    try { fs.rmSync(dest, { recursive: true, force: true }); } catch { /* copia a medias */ }
+    throw Object.assign(new Error(`No se pudo copiar ${dataDir} antes de pasar al esquema ${version}: ${e?.message ?? e}. No se ha cambiado nada.`), { code: 'backup_failed' });
+  }
+  if (writeMarker) {
+    const marker = path.join(dataDir, '.schema-version'); const tmp = `${marker}.tmp`;
+    fs.writeFileSync(tmp, version);
+    fs.renameSync(tmp, marker);
+  }
+  return dest;
 }
-backupDataBeforeMigration();
+
+/** Copia previa solo al SUBIR de versión. Si los datos son más nuevos lanza el motivo sin escribir nada (code «schema_newer»). */
+export function backupDataBeforeMigration(dataDir: string = config.dataDir, program: string = DATA_SCHEMA_VERSION): string | null {
+  const g = schemaGuard(dataDir, program);
+  if (g.state === 'mas-nuevo') throw Object.assign(new Error(g.reason ?? 'Los datos son de un esquema más nuevo que este programa.'), { code: 'schema_newer' });
+  if (g.state === 'igual') return null;
+  return backupDataDir(dataDir, program);
+}
+
+try { backupDataBeforeMigration(); }
+catch (e: any) {
+  console.error(`[portal-ia] No se puede arrancar: ${e?.message ?? e}`);
+  process.exit(1);
+}
+fs.mkdirSync(path.join(config.dataDir, 'workspaces'), { recursive: true });
