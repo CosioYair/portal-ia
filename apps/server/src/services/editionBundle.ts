@@ -5,7 +5,7 @@ import { listPackageFiles } from './packageTree.ts';
 import { sha256FileAsync, writeZip } from './zipFile.ts';
 
 /**
- * HU-211 · Edición distribuible generada desde el Estudio con un árbol limpio. Sin REPO_ROOT: quien llama pasa la raíz,
+ * HU-211 · Edición distribuible generada desde el Estudio con un árbol limpio. Sin la raíz global del servidor: quien llama pasa la raíz,
  * el build y la carpeta de datos. Todo se comprueba ANTES de escribir; si algo falla no queda ningún ZIP.
  */
 

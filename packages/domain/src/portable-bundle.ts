@@ -96,6 +96,20 @@ function classify(m: string, privs: PrivNorm[]): LocalPathKind {
   for (const pv of privs) if (pv.base && (n.includes(`/${pv.base}/`) || n.endsWith(`/${pv.base}`))) return pv.kind;
   return 'other';
 }
+/**
+ * ¿Aparece la ruta privada `norm` como ruta completa dentro de `low` (ya normalizado)? No cuenta como prefijo de otro
+ * nombre: «/work» no está en «./routes/workspaces.ts» ni en «data/workspaces/», pero sí en «/work/apps/x».
+ */
+function hasPathAt(low: string, norm: string): boolean {
+  for (let i = low.indexOf(norm); i >= 0; i = low.indexOf(norm, i + 1)) {
+    const before = i > 0 ? low.charAt(i - 1) : '';
+    const after = low.charAt(i + norm.length);
+    if (before && /[\w.-]/.test(before)) continue;
+    if (after && after !== '/' && /[\w.-]/.test(after)) continue;
+    return true;
+  }
+  return false;
+}
 function snippetOf(m: string): string {
   const s = m.length > 80 ? `${m.slice(0, 79)}…` : m;
   return findSecret(s) ? '[oculto]' : s;
@@ -122,7 +136,7 @@ export function findLocalPaths(text: string, opts: { privatePaths?: PrivatePath[
     }
     if (privs.length) {
       const low = normPath(ln);
-      for (const pv of privs) if (low.includes(pv.norm) && !found.some(f => classify(f.m, privs) === pv.kind)) found.push({ at: Number.MAX_SAFE_INTEGER, m: pv.raw });
+      for (const pv of privs) if (hasPathAt(low, pv.norm) && !found.some(f => classify(f.m, privs) === pv.kind)) found.push({ at: Number.MAX_SAFE_INTEGER, m: pv.raw });
     }
     found.sort((x, y) => x.at - y.at);
     for (const f of found) {
