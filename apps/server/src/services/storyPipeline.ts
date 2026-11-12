@@ -996,6 +996,22 @@ function ineffectiveCorrection(ctx: StoryRunCtx) {
 }
 
 export async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
+  // EN-024 · Reanudación de una pausa por la imagen del sandbox: el veredicto se recalcula SIN IA desde el guardado.
+  const replayed = replayQaFromPause(ctx.slug, ctx.processId, sinceApplied(processesRepo(ctx.slug).get(ctx.processId)!.result!) as VerificationRun[]);
+  if (replayed) {
+    if (replayed.verdict === 'blocked_environment') {
+      try {
+        const sbNow = await sandboxDeps.detect();
+        const img = await resolveProcessImage(readRootOf(ctx));
+        markEnvPause(ctx.slug, ctx.processId, { engine: sbNow.available, available: sbNow.available !== 'unavailable', image: img.image, stale: img.stale }, true);
+      } catch { /* la instantánea nunca impide la pausa */ }
+      emit(ctx, 'qa', 'QA no pudo validar por el entorno (recalculado sin IA con la imagen nueva).', { costUsd: 0, detail: replayed.summary });
+      throw new PipelinePause('environment', replayed.summary);
+    }
+    updateResult(ctx.slug, ctx.processId, x => ({ ...x, review: { ...((x.review ?? {}) as object), verdict: replayed.verdict, summary: replayed.summary, findings: replayed.findings } as unknown as typeof x.review }));
+    emit(ctx, 'qa', replayed.verdict === 'approved' ? 'QA aprobó la implementación (veredicto recalculado sin IA con la imagen nueva).' : `QA rechazó: ${replayed.blocking.length} hallazgo(s) (veredicto recalculado sin IA con la imagen nueva).`, { costUsd: 0, detail: replayed.summary });
+    return;
+  }
   const qa = ctx.qa!; const proc = processesRepo(ctx.slug).get(ctx.processId)!; const r = proc.result!; const p = r.pipeline!;
   emit(ctx, 'qa', 'QA está evaluando la evidencia: diff, typecheck, pruebas y compilación.', { phase: 'qa', aiCall: true });
   const pendingQa = proc.steps.find(s => s.role === 'reviewer' && s.status === 'pending');
@@ -1100,7 +1116,11 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
       // EN-024 · Si lo que falta está en la imagen, la pausa lo dice y guarda el veredicto (para reanudar sin IA) y los hallazgos de código.
       if (verdictImageRelated(v)) {
         updatePipeline(ctx.slug, ctx.processId, { imageRelated: true, qaVerdictSnapshot: v, findings: codeFindingsOf(v) } as unknown as Parameters<typeof updatePipeline>[2]);
-        void resolveProcessImage(readRootOf(ctx)).then(img => markEnvPause(ctx.slug, ctx.processId, { engine: 'docker', available: true, image: img.image, stale: img.stale }, true)).catch(() => { /* sin instantánea */ });
+        try {
+        const sbNow = await sandboxDeps.detect();
+        const img = await resolveProcessImage(readRootOf(ctx));
+        markEnvPause(ctx.slug, ctx.processId, { engine: sbNow.available, available: sbNow.available !== 'unavailable', image: img.image, stale: img.stale }, true);
+      } catch { /* sin instantánea: la pausa sigue igualmente */ }
         throw new PipelinePause('environment', `QA no pudo validar por el entorno: a la imagen del sandbox le falta lo que exige el cambio. ${v.overridden ?? v.summary} Reconstruye la imagen desde la rama y pulsa «Continuar»: se repite la verificación y QA se recalcula sin IA.`);
       }
       throw new PipelinePause('environment', `QA no pudo validar por el entorno: ${v.overridden ?? v.summary}`);
