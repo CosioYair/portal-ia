@@ -119,8 +119,15 @@ export async function evaluatePage(page, { baseUrl, route, width, outDir, vars =
   result.overflow = m.scrollWidth > m.clientWidth || m.bodyScrollWidth > m.bodyClientWidth;
   if (result.overflow) result.reasons.push(`desbordamiento horizontal: scrollWidth ${Math.max(m.scrollWidth, m.bodyScrollWidth)} > clientWidth ${m.clientWidth}`);
   if (!axeSource) { result.status = 'unavailable'; result.reasons.push('axe-core no disponible'); return result; }
-  await page.addScriptTag({ content: axeSource });
-  result.violations = await page.evaluate(AXE_RUN);
+  try {
+    // La vista previa impone CSP script-src 'self': el contexto se crea con bypassCSP; si aun así falla, nunca es ok.
+    await page.addScriptTag({ content: axeSource });
+    result.violations = await page.evaluate(AXE_RUN);
+  } catch (e) {
+    result.status = 'unavailable';
+    result.reasons.push(`no se pudo ejecutar axe-core en la página (¿CSP?): ${e?.message ?? e}`);
+    return result;
+  }
   result.blocking = result.violations.filter(v => BLOCKING_IMPACTS.includes(v.impact));
   for (const v of result.blocking) result.reasons.push(`axe ${v.impact}: ${v.id} (${v.nodes} nodos)`);
   result.status = result.reasons.length ? 'fail' : 'ok';
@@ -155,17 +162,22 @@ export async function main(argv, deps = {}) {
   try { browser = await pw.chromium.launch(); }
   catch (e) { return write(summarize({ ...base, unavailable: `Chromium no disponible (npx playwright install chromium): ${e?.message ?? e}` })); }
   const results = [];
+  let unavailable = null;
   try {
-    const context = await browser.newContext();
+    // bypassCSP solo en este Playwright: la CSP del proxy de la vista previa (script-src 'self') no cambia.
+    const context = await browser.newContext({ bypassCSP: true });
     for (const route of a.routes) {
       for (const width of WIDTHS) {
         const page = await context.newPage();
         try { results.push(await evaluatePage(page, { baseUrl: a.baseUrl, route, width, outDir: a.out, vars: a.vars, axeSource: axe.source, timeoutMs: a.timeoutMs })); }
+        catch (e) { results.push({ route, width, url: null, finalUrl: null, screenshot: null, overflow: false, violations: [], blocking: [], status: 'fail', reasons: [`error al evaluar la ruta: ${e?.message ?? e}`] }); }
         finally { await page.close().catch(() => undefined); }
       }
     }
+  } catch (e) {
+    unavailable = `no se pudo preparar el navegador: ${e?.message ?? e}`;
   } finally { await browser.close().catch(() => undefined); }
-  return write(summarize({ ...base, results }));
+  return write(summarize({ ...base, results, unavailable }));
 }
 
 const invoked = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
