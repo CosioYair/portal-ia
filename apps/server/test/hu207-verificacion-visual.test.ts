@@ -35,7 +35,7 @@ const allExist = () => true;
 test('HU-207 · routesForChanges deduce las rutas con el mapa real de apps/web/visual-routes.json', () => {
   const map = loadRouteMap(REPO);
   assert.ok(map && map.entries.length > 0, 'el mapa de UX existe y tiene entradas');
-  assert.deepEqual(routesForChanges(['apps/web/src/screens/Batches.tsx'], map), ['/lotes', '/lotes/{batch}']);
+  assert.deepEqual(routesForChanges(['apps/web/src/screens/Batches.tsx'], map), ['/lotes']);
   assert.deepEqual(routesForChanges(['apps/web/src/screens/Backlog.tsx'], map), ['/backlog']);
   const global = routesForChanges(['apps/web/src/tokens.css'], map);
   for (const r of ['/oficina', '/panel', '/backlog']) assert.ok(global.includes(r), `tokens.css cubre ${r}`);
@@ -44,6 +44,21 @@ test('HU-207 · routesForChanges deduce las rutas con el mapa real de apps/web/v
   assert.ok(routesForChanges(['apps/web/src/components/AlgoNuevo.tsx'], map).length > 0, 'el comodín de components/ no deja archivos sin ruta');
   assert.deepEqual(routesForChanges(['apps/server/src/services/gauntlet.ts'], map), [], 'el servidor no exige capturas');
   assert.deepEqual(routesForChanges(['apps/web/src/screens/Backlog.tsx'], null), [], 'sin mapa no se inventan rutas');
+});
+
+test('HU-207 · sin siembra ni --vars, el mapa solo tiene rutas sin {marcadores} (las pantallas de detalle no bloquean siempre)', () => {
+  const map = loadRouteMap(REPO)!;
+  const withVars = map.entries.flatMap(e => (e.routes ?? []).filter(r => r.includes('{')).map(r => `${e.match} → ${r}`));
+  assert.deepEqual(withVars, [], 'visualStage llama a runVisualCheck sin vars: una ruta con {marcador} daría «faltan datos sembrados» siempre');
+  for (const f of ['apps/web/src/screens/StoryWorkspace.tsx', 'apps/web/src/story-flow.css', 'apps/web/src/screens/ProcessView.tsx', 'apps/web/src/components/Gauntlet.tsx', 'apps/web/src/screens/Batches.tsx', 'apps/web/src/screens/AgentDetail.tsx']) {
+    const routes = routesForChanges([f], map);
+    assert.ok(routes.length > 0, `${f} tiene rutas`);
+    assert.ok(routes.every(r => !r.includes('{')), `${f}: ${routes.join(', ')}`);
+  }
+  assert.deepEqual(routesForChanges(['apps/web/src/screens/StoryWorkspace.tsx'], map), ['/backlog']);
+  assert.deepEqual(routesForChanges(['apps/web/src/screens/ProcessView.tsx'], map), ['/actividad']);
+  const src = fs.readFileSync(path.join(REPO, 'apps', 'server', 'src', 'services', 'gauntlet.ts'), 'utf8');
+  assert.ok(src.includes('await runVisualCheck(ctx.slug, ctx.processId)'), 'visualStage no pasa vars: por eso el mapa no puede llevar marcadores');
 });
 
 test('HU-207 · touchesWeb y sameCommit', () => {

@@ -274,6 +274,8 @@ export async function visualStage(ctx: StoryRunCtx, proc: Process): Promise<Visu
   if (!gate.required || gate.ok) return gate;
   emit(ctx, 'gauntlet', `La historia toca apps/web/src y falta la evidencia visual del commit ${gate.commit ?? '?'}: se lanza la verificación visual en el host (375, 768 y 1440 px, sin IA).`);
   let detail = '';
+  // Sin `vars` a propósito: aún no hay siembra en la vista previa, así que apps/web/visual-routes.json solo usa rutas sin
+  // {marcadores} (lo fija hu207-verificacion-visual.test.ts; la limitación consta en docs/estilos-ui.md).
   try { const run = await runVisualCheck(ctx.slug, ctx.processId); detail = run.status === 'ok' ? '' : run.detail; }
   catch (e) { detail = (e as Error).message; }
   gate = visualGate(ctx.slug, processesRepo(ctx.slug).get(ctx.processId) ?? proc);
