@@ -6,7 +6,8 @@ import { inheritLatestTemplate } from './agentTemplates.ts';
 import { clip } from './devOutput.ts';
 import { testsEvidence, verificationEvidence } from './qaGate.ts';
 import { sys } from './storyPrompts.ts';
-import { emit, PipelinePause, pipelineOf, sinceApplied, stepCall, updateResult, type StoryRunCtx } from './storyPipeline.ts';
+import { emit, IMAGE_MISSING, PipelinePause, pipelineOf, sinceApplied, stepCall, updateResult, type StoryRunCtx } from './storyPipeline.ts';
+import { runVisualCheck, visualGate, visualSummary, type VisualGate } from './visualCheck.ts';
 import { monotonicNow } from '../clock.ts';
 import { workItemOf } from './workItems.ts';
 
@@ -115,7 +116,7 @@ export function createEvaluator(slug: string, projectId: string, opts: { model?:
  * recibe el resumen del constructor, sus consultas ni el razonamiento del plan: las afirmaciones del equipo van aparte,
  * marcadas como algo a comprobar, no como prueba.
  */
-export function gauntletPrompt(ctx: StoryRunCtx, proc: Process, cfg: PipelineConfig, previous: GauntletRound[]): string {
+export function gauntletPrompt(ctx: StoryRunCtx, proc: Process, cfg: PipelineConfig, previous: GauntletRound[], visual = ''): string {
   const r = proc.result!; const item = ctx.item;
   const criteria = Array.from(new Set([...(ctx.plan?.acceptance ?? []), ...(item.criterion ? [item.criterion] : [])].map(c => c.trim()).filter(Boolean)));
   const verifs = sinceApplied(r);
@@ -137,7 +138,7 @@ ${criteria.map((c, i) => `${i + 1}. ${c}`).join('\n') || '(la historia no tiene 
 ${deliverables || '- (sin plan de archivos)'}
 # Evidencia objetiva (sandbox, sin IA)
 ${evidence}
-${testsEvidence(verifs) ? `${clip(testsEvidence(verifs), 2500)}\n` : ''}${claims || disputes ? `# Afirmaciones del equipo (NO son evidencia: compruébalas contra el diff y la evidencia)\n${[claims, disputes ? `El equipo discute brechas anteriores:\n${disputes}` : ''].filter(Boolean).join('\n')}\n` : ''}${prev ? `# Rondas anteriores (comprueba si la brecha señalada sigue)\n${prev}\n` : ''}# El resultado: diff de la historia
+${testsEvidence(verifs) ? `${clip(testsEvidence(verifs), 2500)}\n` : ''}${visual ? `# Evidencia visual (host, sin IA: capturas a 375, 768 y 1440 px, desbordamiento y axe)\n${clip(visual, 4000)}\n` : ''}${claims || disputes ? `# Afirmaciones del equipo (NO son evidencia: compruébalas contra el diff y la evidencia)\n${[claims, disputes ? `El equipo discute brechas anteriores:\n${disputes}` : ''].filter(Boolean).join('\n')}\n` : ''}${prev ? `# Rondas anteriores (comprueba si la brecha señalada sigue)\n${prev}\n` : ''}# El resultado: diff de la historia
 ${clip(diff, 45_000) || '(sin cambios)'}
 
 # Reglas
@@ -146,6 +147,7 @@ ${clip(diff, 45_000) || '(sin cambios)'}
 - criteria: un elemento por criterio con status met | partial | unmet | unverifiable y la evidencia que lo respalda.
 - largestGap: la brecha más importante que queda, en una frase (o null si no queda ninguna).
 - anotherRoundWorthIt: true solo si corregir lo pendiente cambia de verdad el resultado.
+- Si hay «Evidencia visual», úsala para los criterios visuales (rutas, anchos, desbordes, violaciones y capturas).
 - Lo que no puedas comprobar con esta evidencia (p. ej. el aspecto visual sin capturas): márcalo unverifiable y dilo en limitations; no inventes certeza.
 - No reescribas ni rediseñes: señala lo que falla y lo esperado, para una corrección dirigida.`;
 }
@@ -259,6 +261,26 @@ export const toCorrection = (f: GauntletFinding): { severity: IssueSeverity; tex
 
 // ---------------------------------------------------------------- Etapa
 
+/** Quita del texto de la pausa lo que la clasificaría como «falta en la imagen del sandbox» (es evidencia del host). */
+export const scrubImageWords = (t: string) => t.replace(new RegExp(IMAGE_MISSING.source, 'gi'), 'herramienta del host');
+
+/**
+ * Puerta visual obligatoria (HU-207), en TODOS los modos: si la historia toca apps/web/src exige el report.json y los PNG
+ * del commit aplicado. Si faltan, lanza la verificación en el host UNA vez (sin IA). Si tampoco pasa, pausa con la causa
+ * «evidencia visual pendiente en el host» y «Continuar» la repite.
+ */
+export async function visualStage(ctx: StoryRunCtx, proc: Process): Promise<VisualGate> {
+  let gate = visualGate(ctx.slug, proc);
+  if (!gate.required || gate.ok) return gate;
+  emit(ctx, 'gauntlet', `La historia toca apps/web/src y falta la evidencia visual del commit ${gate.commit ?? '?'}: se lanza la verificación visual en el host (375, 768 y 1440 px, sin IA).`);
+  let detail = '';
+  try { const run = await runVisualCheck(ctx.slug, ctx.processId); detail = run.status === 'ok' ? '' : run.detail; }
+  catch (e) { detail = (e as Error).message; }
+  gate = visualGate(ctx.slug, processesRepo(ctx.slug).get(ctx.processId) ?? proc);
+  if (gate.ok) { emit(ctx, 'gauntlet', `Verificación visual superada en el host (commit ${gate.commit ?? '?'}): ${gate.routes.join(', ')}.`); return gate; }
+  throw new PipelinePause('gauntlet', scrubImageWords(`Evidencia visual pendiente en el host (commit ${gate.commit ?? '?'}): ${gate.reasons.join(' · ') || 'sin informe válido'}${detail ? ` · última ejecución: ${clip(detail, 400)}` : ''}. Acción: pulsa «Continuar» para repetir la verificación visual en el host (sin IA) o lánzala con POST /api/workspaces/${ctx.slug}/processes/${ctx.processId}/visual-check. Lo hecho se conserva.`));
+}
+
 /**
  * Tras la aprobación de QA (o tras una corrección del Evaluador): una ronda del Evaluador sobre el commit actual y la
  * decisión determinista. Devuelve 'verified' (sin nada que corregir o con lo pendiente documentado), 'correct' (se
@@ -268,6 +290,8 @@ export async function gauntletStage(ctx: StoryRunCtx, cfg: PipelineConfig): Prom
   const g = normalizeGauntlet(cfg.gauntlet);
   const procs = processesRepo(ctx.slug); const proc = procs.get(ctx.processId)!; const r = proc.result!;
   const save = (s: GauntletState) => updateResult(ctx.slug, ctx.processId, x => ({ ...x, gauntlet: s }));
+  // HU-207: antes de cualquier salida (off, commit ya evaluado o sin Evaluador), la puerta visual.
+  const visual = await visualStage(ctx, proc);
   if (g.mode === 'off') {
     // El propietario siguió sin más evaluación tras una detención: queda registrado (las brechas siguen en el informe).
     if (r.gauntlet?.status === 'stopped') { const s = { ...r.gauntlet, status: 'waived' as const, pendingReeval: false, reason: `El propietario continuó sin más evaluación. Pendiente documentado: ${r.gauntlet.reason ?? ''}` }; save(s); emit(ctx, 'gauntlet', s.reason); return { outcome: 'verified', toFix: [], state: s }; }
@@ -300,7 +324,7 @@ export async function gauntletStage(ctx: StoryRunCtx, cfg: PipelineConfig): Prom
   const round = state.rounds.length + 1;
   emit(ctx, 'gauntlet', `${ev.config.name} evalúa de forma independiente (Gauntlet ${g.mode}, ronda ${round}): criterios de aceptación contra el resultado real y su evidencia.`, { phase: 'qa', aiCall: true });
   const pending = proc.steps.find(s => s.role === 'evaluator' && s.status === 'pending');
-  const res = await stepCall(ctx, ev, 'evaluator', pending ? `Evaluación Gauntlet (ronda ${round})` : `Evaluación Gauntlet (ronda ${round}, tras corrección)`, `Gauntlet ${g.mode}: evaluación independiente del commit ${commit ?? '?'}`, gauntletSystem(ev, ctx), gauntletPrompt(ctx, proc, cfg, state.rounds), 6000, pending?.id, GAUNTLET_SCHEMA as any, `Evaluación Gauntlet ronda ${round}`);
+  const res = await stepCall(ctx, ev, 'evaluator', pending ? `Evaluación Gauntlet (ronda ${round})` : `Evaluación Gauntlet (ronda ${round}, tras corrección)`, `Gauntlet ${g.mode}: evaluación independiente del commit ${commit ?? '?'}`, gauntletSystem(ev, ctx), gauntletPrompt(ctx, proc, cfg, state.rounds, visual.required ? visualSummary(visual) : ''), 6000, pending?.id, GAUNTLET_SCHEMA as any, `Evaluación Gauntlet ronda ${round}`);
   const parsed = parseGauntlet(res.text);
   const p = pipelineOf(ctx.slug, ctx.processId);
   const rr: GauntletRound = { round, commit, at: now(), evaluatorId: ev.id, evaluatorName: ev.config.name, stepId: res.stepId, ...parsed, decision: 'pass', reason: '', costUsd: res.costUsd, tokensIn: res.inputTokens };
