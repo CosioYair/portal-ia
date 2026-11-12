@@ -91,8 +91,27 @@ const redact = (line: string) => (SECRET_RES.some(re => re.test(line)) ? OMITTED
 
 // ---------- Estado ----------
 
-interface Live { owner: string; child: ChildProcess; pid: number | null; dataDir: string; exited: boolean; exit: Promise<void>; output: string[] }
+interface Live { owner: string; child: ChildProcess; pid: number | null; dataDir: string; pidFile: string; exited: boolean; exit: Promise<void>; output: string[] }
 const live = new Map<string, Live>();
+
+// ---------- Archivo de pid (impide dos CLI a la vez) ----------
+
+const pidFileOf = (p: EditionSandboxPaths) => path.join(p.root, 'edition.pid');
+function pidAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+/** Pid vivo registrado en <sandbox>/edition.pid, o null. Un archivo con un pid que ya no existe se descarta (obsoleto). */
+function livePidFromFile(file: string): number | null {
+  let raw: string;
+  try { raw = fs.readFileSync(file, 'utf8').trim(); } catch { return null; }
+  const pid = Number(raw);
+  if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && pidAlive(pid)) return pid;
+  try { fs.rmSync(file, { force: true }); } catch { /* sin permiso: se ignora */ }
+  return null;
+}
+function clearPidFile(l: Live): void {
+  try { if (fs.readFileSync(l.pidFile, 'utf8').trim() === String(l.pid)) fs.rmSync(l.pidFile, { force: true }); } catch { /* ya no existe */ }
+}
 let starting = false;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -118,8 +137,22 @@ async function portFree(): Promise<boolean> {
   if (await someoneListening()) return false;
   return canBind();
 }
-async function defaultHealth(url: string): Promise<boolean> {
-  try { const r = await fetch(`${url}/api/health`, { signal: AbortSignal.timeout(3000) }); await r.body?.cancel().catch(() => undefined); return r.ok; } catch { return false; }
+/**
+ * Salud de NUESTRA Edición: no basta un 200. El cuerpo debe ser la Edición distribuible con la carpeta de datos que le
+ * dimos; si responde otra instancia (carrera entre portFree() y el spawn) se lanza start_failed.
+ */
+async function defaultHealth(url: string, expectedDataDir: string): Promise<boolean> {
+  let body: { edition?: unknown; dataDir?: unknown } | null = null;
+  try {
+    const r = await fetch(`${url}/api/health`, { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) { await r.body?.cancel().catch(() => undefined); return false; }
+    body = await r.json().catch(() => null) as { edition?: unknown; dataDir?: unknown } | null;
+  } catch { return false; }
+  const sameDir = typeof body?.dataDir === 'string' && realLower(body.dataDir) === realLower(expectedDataDir);
+  if (!sameDir || body?.edition !== 'distributable') {
+    throw fail('start_failed', `En ${url} responde otra instancia del Portal (no es la Edición recién lanzada con datos en ${expectedDataDir}): ciérrala y vuelve a intentarlo.`);
+  }
+  return true;
 }
 const keyHash = (file: string): string | null => { try { return createHash('sha256').update(fs.readFileSync(file, 'utf8').trim()).digest('hex'); } catch { return null; } };
 
@@ -127,12 +160,13 @@ async function killAndWait(l: Live, ms = 10_000): Promise<void> {
   if (!l.exited) { try { l.child.kill(); } catch { /* ya terminó */ } }
   await Promise.race([l.exit, sleep(ms)]);
   live.delete(l.owner);
+  clearPidFile(l);
 }
 
 export interface StartEditionOptions {
   installRoot: string; studioDataDir: string; override?: string | undefined;
   spawnFn?: SpawnFn; log?: LogFn; baseEnv?: NodeJS.ProcessEnv;
-  health?: (url: string) => Promise<boolean>; startTimeoutMs?: number; keyWaitMs?: number;
+  health?: (url: string, expectedDataDir: string) => Promise<boolean>; startTimeoutMs?: number; keyWaitMs?: number;
   onExit?: (code: number | null) => void;
 }
 export interface EditionSandboxInfo { url: string; pid: number | null; dataDir: string; worktreesDir: string; ownKey: boolean }
@@ -146,6 +180,9 @@ export async function startEditionSandbox(opts: StartEditionOptions): Promise<Ed
   starting = true;
   try {
     const paths = resolveEditionSandboxPaths(opts);
+    const pidFile = pidFileOf(paths);
+    const otherPid = livePidFromFile(pidFile);
+    if (otherPid) throw fail('already_running', `La Edición ya está en marcha desde otra ventana en ${EDITION_SANDBOX_URL} (pid ${otherPid}): detenla antes de lanzarla otra vez. Si ese proceso no es la Edición, borra ${pidFile}.`);
     if (!(await portFree())) throw fail('port_busy', `El puerto ${EDITION_SANDBOX_PORT} de ${EDITION_SANDBOX_HOST} está ocupado por otro programa: ciérralo o libera el puerto y vuelve a intentarlo.`);
     fs.mkdirSync(paths.dataDir, { recursive: true });
     fs.mkdirSync(paths.worktreesDir, { recursive: true });
@@ -153,11 +190,12 @@ export async function startEditionSandbox(opts: StartEditionOptions): Promise<Ed
     const spawnFn: SpawnFn = opts.spawnFn ?? nodeSpawn;
     const child = spawnFn(process.execPath, ['--import', 'tsx', 'src/index.ts'], { cwd: path.join(opts.installRoot, 'apps', 'server'), env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const owner = createHash('sha256').update(realLower(paths.dataDir)).digest('hex').slice(0, 12);
-    const l: Live = { owner, child, pid: child.pid ?? null, dataDir: paths.dataDir, exited: false, exit: Promise.resolve(), output: [] };
+    const l: Live = { owner, child, pid: child.pid ?? null, dataDir: paths.dataDir, pidFile, exited: false, exit: Promise.resolve(), output: [] };
     l.exit = new Promise<void>(res => {
-      child.once('exit', code => { l.exited = true; if (live.get(owner) === l) live.delete(owner); opts.onExit?.(code); res(); });
-      child.once('error', e => { l.exited = true; l.output.push(redact(`no se pudo lanzar: ${e.message}`)); if (live.get(owner) === l) live.delete(owner); res(); });
+      child.once('exit', code => { l.exited = true; if (live.get(owner) === l) live.delete(owner); clearPidFile(l); opts.onExit?.(code); res(); });
+      child.once('error', e => { l.exited = true; l.output.push(redact(`no se pudo lanzar: ${e.message}`)); if (live.get(owner) === l) live.delete(owner); clearPidFile(l); res(); });
     });
+    if (l.pid) { try { fs.writeFileSync(pidFile, String(l.pid)); } catch { /* sin archivo de pid: queda el control en memoria */ } }
     const pipe = (s: NodeJS.ReadableStream | null | undefined) => {
       let pending = '';
       s?.on('data', (b: Buffer) => {
@@ -171,7 +209,7 @@ export async function startEditionSandbox(opts: StartEditionOptions): Promise<Ed
       const health = opts.health ?? defaultHealth; const limit = opts.startTimeoutMs ?? 120_000; const t0 = Date.now();
       for (;;) {
         if (l.exited) throw fail('start_failed', `La Edición terminó al arrancar. Últimas líneas:\n${l.output.slice(-15).join('\n').slice(-1500)}`);
-        if (await health(EDITION_SANDBOX_URL)) break;
+        if ((await health(EDITION_SANDBOX_URL, paths.dataDir)) && !l.exited) break;
         if (Date.now() - t0 > limit) throw fail('start_failed', `La Edición no respondió en ${EDITION_SANDBOX_URL}/api/health en ${Math.round(limit / 1000)} s. Últimas líneas:\n${l.output.slice(-15).join('\n').slice(-1500)}`);
         await sleep(500);
       }
@@ -210,4 +248,4 @@ export function editionSandboxOutput(): string[] {
   return [...live.values()].flatMap(l => l.output);
 }
 
-process.once('exit', () => { for (const l of live.values()) { try { l.child.kill(); } catch { /* ya terminó */ } } });
+process.once('exit', () => { for (const l of live.values()) { try { l.child.kill(); } catch { /* ya terminó */ } clearPidFile(l); } });

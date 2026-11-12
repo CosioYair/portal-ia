@@ -143,7 +143,14 @@ test('already_running: la segunda llamada falla en español y no vuelve a lanzar
     return child as unknown as ChildProcess;
   };
   const common = { installRoot: path.join(TMP, 'inst'), studioDataDir: path.join(TMP, 'inst', 'data'), override: path.join(TMP, 'sb-fake'), spawnFn: fake, log: () => undefined, health: async () => true };
+  // edition.pid obsoleto (pid de un proceso ya terminado): se descarta y no impide arrancar.
+  const deadPid = await new Promise<number>(res => { const p = spawn(process.execPath, ['-e', ''], { stdio: 'ignore', windowsHide: true }); p.once('exit', () => res(p.pid!)); });
+  assert.ok(await waitFor(() => isDead(deadPid), 5000));
+  const pidFile = path.join(TMP, 'sb-fake', 'edition.pid');
+  fs.mkdirSync(path.dirname(pidFile), { recursive: true });
+  fs.writeFileSync(pidFile, String(deadPid));
   const info = await startEditionSandbox(common);
+  assert.equal(fs.readFileSync(pidFile, 'utf8').trim(), '999999', 'escribe <sandbox>/edition.pid con el pid del hijo');
   assert.equal(info.url, EDITION_SANDBOX_URL);
   assert.equal(info.ownKey, true);
   assert.equal(editionSandboxStatus().running, true);
@@ -151,6 +158,21 @@ test('already_running: la segunda llamada falla en español y no vuelve a lanzar
     (e: unknown) => codeOf(e) === 'already_running' && /ya está en marcha/.test((e as Error).message));
   assert.equal(calls, 1);
   assert.equal(await stopEditionSandbox(), true);
+  assert.equal(editionSandboxStatus().running, false);
+  assert.equal(fs.existsSync(pidFile), false, 'al parar se borra edition.pid');
+});
+
+test('already_running: un edition.pid con un pid vivo (otra CLI) falla en español sin spawn ni mirar el puerto', async () => {
+  const root = path.join(TMP, 'sb-otra-cli'); fs.mkdirSync(root, { recursive: true });
+  const pidFile = path.join(root, 'edition.pid');
+  fs.writeFileSync(pidFile, String(process.ppid > 0 ? process.ppid : 1));
+  let calls = 0;
+  const spy: SpawnFn = () => { calls++; throw new Error('no debe llamarse'); };
+  await assert.rejects(startEditionSandbox({ installRoot: path.join(TMP, 'inst'), studioDataDir: path.join(TMP, 'inst', 'data'), override: root, spawnFn: spy, log: () => undefined }),
+    (e: unknown) => codeOf(e) === 'already_running' && /ya está en marcha/.test((e as Error).message));
+  assert.equal(calls, 0);
+  assert.equal(fs.existsSync(path.join(root, 'data')), false, 'no crea carpetas');
+  assert.equal(fs.existsSync(pidFile), true, 'no borra el pid de otra CLI viva');
   assert.equal(editionSandboxStatus().running, false);
 });
 
@@ -197,8 +219,10 @@ test('integración: arranca en 4320 con clave propia, sin filtrar claves y sin t
   try {
     const r = await fetch(`${EDITION_SANDBOX_URL}/api/health`);
     assert.equal(r.ok, true);
-    const body = await r.json().catch(() => null) as { edition?: unknown } | null;
+    const body = await r.json().catch(() => null) as { edition?: unknown; dataDir?: unknown } | null;
     assert.equal(body?.edition, 'distributable', 'la instancia en 4320 es la Edición distribuible');
+    assert.equal(typeof body?.dataDir, 'string');
+    assert.equal(path.resolve(body!.dataDir as string), path.resolve(info.dataDir), 'responde el hijo lanzado (su dataDir), no otra instancia');
     const keyFile = path.join(info.dataDir, '.master.key');
     assert.ok(fs.existsSync(keyFile), 'la Edición crea su propia .master.key');
     const raw = fs.readFileSync(keyFile); const text = raw.toString('utf8').trim();
