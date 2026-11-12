@@ -11,12 +11,16 @@ import { DatabaseSync } from 'node:sqlite';
 process.env.PORTAL_EDITION = 'distributable';
 const DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-hu211-data-'));
 process.env.PORTAL_DATA_DIR = DATA_DIR;
+process.env.LOG_LEVEL = 'warn';
+delete process.env.PORTAL_SANDBOX; delete process.env.PORTAL_OWNER_CODE_FILE; delete process.env.PORTAL_PREVIEW;
 
 const D = await import('@portal-ia/domain');
 const cfg = await import('../src/config.ts');
 const { assertCleanTree, buildEditionZip, EDITION_LAUNCHER } = await import('../src/services/editionBundle.ts');
 const { listZip, readZipEntry } = await import('../src/services/zipFile.ts');
 const { createBudgetHierarchy, BudgetHierarchyError, currentPeriod } = await import('../src/services/budget-hierarchy.ts');
+const { buildApp } = await import('../src/app.ts');
+const { stopBatchScheduler } = await import('../src/services/batchRunner.ts');
 
 /** Raíz del repositorio: tres niveles por encima de apps/server/test. */
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -131,11 +135,28 @@ test('(e) compatibilidad: sin profile, validatePortableBundle se comporta como a
   assert.deepEqual(D.validatePortableBundle(bundle, { profile: 'agent' }), D.validatePortableBundle(bundle));
 });
 
-test('(f) la Edición arranca vacía y con presupuesto 0 (sin presupuesto definido)', () => {
+test('(f) la Edición arranca vacía y con presupuesto 0 (sin presupuesto definido)', async () => {
+  assert.equal(cfg.PORTAL_EDITION, 'distributable');
   assert.equal(cfg.SELF_IMPROVEMENT_ENABLED, false);
+  assert.equal(path.resolve(cfg.config.dataDir), path.resolve(DATA_DIR), 'usa la carpeta de datos temporal');
   const wsDir = path.join(DATA_DIR, 'workspaces');
   const spaces = fs.existsSync(wsDir) ? fs.readdirSync(wsDir) : [];
   assert.deepEqual(spaces, [], 'no hay espacios ni empresas en una carpeta de datos nueva');
+  // La app real arranca con la edición distribuible y la carpeta de datos vacía: la API no expone espacios ni agentes.
+  const app = await buildApp();
+  try {
+    const host = `127.0.0.1:${cfg.config.port}`;
+    const st = await app.inject({ method: 'GET', url: '/api/bootstrap/status', headers: { host } });
+    assert.equal(st.statusCode, 200, st.body);
+    const s = st.json();
+    assert.equal(s.initialized, false);
+    assert.equal(s.workspace, null);
+    assert.equal(s.project, null);
+    assert.equal(s.agentCount, 0);
+    const ws = await app.inject({ method: 'GET', url: '/api/workspaces', headers: { host } });
+    assert.equal(ws.statusCode, 200, ws.body);
+    assert.deepEqual(ws.json(), [], 'la lista de espacios está vacía');
+  } finally { stopBatchScheduler(); await app.close(); }
   const dbDir = fs.mkdtempSync(path.join(TMP, 'espacio-'));
   const db = new DatabaseSync(path.join(dbDir, 'presupuesto.sqlite'));
   try {
