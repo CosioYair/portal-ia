@@ -106,8 +106,39 @@ function withPublishStage(flow: StoryFlow, p: Process, opts: FlowOptions): Story
   return { ...flow, stages, actions };
 }
 
+/**
+ * EN-023 · Una sola regla para integrar, idéntica a storyMerge.ts: con conflictos reales → 'conflict' (409 merge_conflict);
+ * main avanzó sin conflictos → 'behind' (409 integration_candidate_required); sin datos de git o al día → 'ok'.
+ */
+export type IntegrationGate = 'ok' | 'behind' | 'conflict';
+export function integrationGate(ig: BranchIntegration | null | undefined): IntegrationGate {
+  if (!ig) return 'ok';
+  if (ig.state === 'conflicts') return 'conflict';
+  return ig.behindCount > 0 ? 'behind' : 'ok';
+}
+
+/**
+ * EN-023 · Ningún estado ofrece 'merge' si storyMerge lo rechazaría: en cualquier pausa (desacuerdo, QA no pudo verificar),
+ * con QA aprobada o con el candidato, si la rama va por detrás de main (o choca con ella) se quita 'merge' y la acción
+ * principal pasa a ser preparar el candidato de integración (sin IA). Con la rama al día, 'merge' vuelve tal cual.
+ */
+function gateMerge(flow: StoryFlow, p: Process, opts: FlowOptions): StoryFlow {
+  const r = p.result;
+  if (!r?.applied || r.merged) return flow;
+  const gate = integrationGate(opts.integration);
+  if (gate === 'ok' || !flow.actions.some(a => a.id === 'merge')) return flow;
+  const ig = opts.integration!;
+  const rest = flow.actions.filter(a => a.id !== 'merge');
+  if (rest.some(a => a.id === 'integration_prepare' || a.id === 'integration_resolve')) return { ...flow, actions: rest };
+  const description = gate === 'behind'
+    ? `${ig.target} avanzó ${ig.behindCount} commit(s) desde que nació la rama: integrar ahora fallaría. Se incorpora ${ig.target} en la rama con git (sin IA y sin tocar ${ig.target}) y se vuelve a verificar en el sandbox; después vuelve «Integrar».`
+    : `${ig.target} cambió ${ig.conflicts.map(c => c.path).join(', ')}: integrar así fallaría. Se combina con git sin IA; si hay conflictos reales, se dicen y decides cómo resolverlos.`;
+  const prep = act('integration_prepare', 'Preparar el candidato de integración (sin IA)', description, ['authorization'], { primary: true });
+  return { ...flow, actions: [prep, ...rest.map(a => a.primary ? { ...a, primary: false } : a)] };
+}
+
 export function buildStoryFlow(p0: Process, opts: FlowOptions = {}): StoryFlow {
-  const flow = withPublishStage(buildStoryFlowCore(p0, opts), p0, opts);
+  const flow = withPublishStage(gateMerge(buildStoryFlowCore(p0, opts), p0, opts), p0, opts);
   if (!isAssignmentProcess(p0)) return flow;
   // Encargo: solo se ofrece lo que tiene un camino real (su petición de cambios); las historias no cambian.
   const actions = flow.actions.filter(a => !STORY_ONLY.has(a.id)).map(a => a.id === 'request_fix' ? { ...a, description: ASSIGNMENT_FIX_TXT } : a);

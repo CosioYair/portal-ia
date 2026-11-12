@@ -38,6 +38,17 @@
 .sf-next-sub { display: block; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sf-more { flex: 1 1 100%; }
 .sf-more .sf-actions { padding-top: 6px; }
+/* EN-023 · El contador de «Más acciones» queda en la línea del título a 375, 768 y 1440 px. */
+.sf-more .disclosure-text { display: inline-flex; flex-direction: row; flex-wrap: nowrap; align-items: baseline; gap: 6px; min-width: 0; }
+.sf-more .disclosure-title { min-width: 0; white-space: nowrap; }
+.sf-more .disclosure-hint { flex: none; white-space: nowrap; }
+/* EN-023 · Recuperación dentro del aviso: «Preparar el candidato de integración (sin IA)» con su autorización. */
+.sf-merge-block { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.sf-merge-recover { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sf-merge-recover-auth { display: flex; align-items: flex-start; gap: 6px; overflow-wrap: anywhere; }
+.sf-merge-recover-auth input { flex: none; margin-top: 3px; }
+.sf-merge-recover .sf-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+@media (max-width: 480px) { .sf-merge-recover .sf-actions .btn { flex: 1 1 100%; } }
 .sf-fold { min-width: 0; }
 /* HU-194 · Modo proceso: cabecera compacta con «Ver historia»; el resumen y el siguiente paso no se muestran (hidden gana a display:flex). */
 .sf-process-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; min-width: 0; }
