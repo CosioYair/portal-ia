@@ -61,6 +61,32 @@ test('HU-207 · sin siembra ni --vars, el mapa solo tiene rutas sin {marcadores}
   assert.ok(src.includes('await runVisualCheck(ctx.slug, ctx.processId)'), 'visualStage no pasa vars: por eso el mapa no puede llevar marcadores');
 });
 
+test('HU-207 · cada ruta de visual-routes.json existe en apps/web/src/App.tsx (sin redirección ni comodín)', () => {
+  const app = fs.readFileSync(path.join(REPO, 'apps', 'web', 'src', 'App.tsx'), 'utf8');
+  const declared: string[] = [];
+  for (const m of app.matchAll(/<Route\s+path="([^"]+)"\s+element=\{([^\n]*)/g)) {
+    const [, p, element] = m;
+    if (p.includes('*')) continue; // comodines (SelectRoute, catch-all): aceptarían cualquier ruta
+    if (/^\s*<(Redirect|Navigate|AgentRedirect)\b/.test(element)) continue; // solo redirige: el script la marcaría como «ruta redirigida»
+    declared.push(p);
+  }
+  assert.ok(declared.includes('/backlog') && declared.includes('/panel'), `se leyeron los path de App.tsx: ${declared.join(', ')}`);
+  const toRe = (p: string) => new RegExp(`^${p.split('/').map(seg => {
+    if (seg.startsWith(':')) return seg.endsWith('?') ? '(?:[^/]+)?' : '[^/]+';
+    return seg.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+  }).join('/').replace(/\/\(\?:\[\^\/\]\+\)\?/g, '(?:/[^/]+)?')}/?$`);
+  const res = declared.map(toRe);
+  const map = loadRouteMap(REPO)!;
+  const routes = Array.from(new Set(map.entries.flatMap(e => e.routes ?? [])));
+  assert.ok(routes.length > 0);
+  const missing = routes.filter(r => {
+    const asParam = r.replace(/\{([A-Za-z0-9_]+)\}/g, ':$1');
+    const sample = asParam.replace(/:[A-Za-z0-9_]+/g, 'x');
+    return !declared.includes(asParam) && !res.some(re => re.test(sample));
+  });
+  assert.deepEqual(missing, [], `rutas del mapa que no existen en App.tsx: ${missing.join(', ')}`);
+});
+
 test('HU-207 · touchesWeb y sameCommit', () => {
   assert.equal(touchesWeb(['apps/web/src/styles.css']), true);
   assert.equal(touchesWeb(['.\\apps\\web\\src\\App.tsx']), true, 'rutas de Windows normalizadas');
