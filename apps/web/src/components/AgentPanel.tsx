@@ -11,6 +11,7 @@ import { api, type AgentCapabilitiesView, type AgentLearningEntry, type AgentLea
 import { TOOL_LABELS, fmtUsd } from '../lib/labels.ts';
 import { HARNESSES, agentDisplayName, workplaceLabel } from '@portal-ia/domain';
 import { ContextScopeChips } from '../screens/AgentWizard.tsx';
+import { AgentAdvancedSettings } from '../screens/AgentDetail.tsx';
 import { FolderPicker } from './FolderPicker.tsx';
 import { DocumentsTab, OriginTab } from './ExternalAgent.tsx';
 import { AgentZipImport } from './AgentZipImport.tsx';
@@ -518,7 +519,6 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
         <select id="cfg-dep" className="input" style={{ maxWidth: 240, height: 32 }} value={dep} onChange={e => setDep(e.target.value)}>{departments.map(d => <option key={d.slug} value={d.name}>{d.name}</option>)}</select>
         <button className="btn btn-secondary btn-sm" disabled={busy || dep === p.department?.name} onClick={() => void move()}>Mover</button>
       </div>
-      <Link className="lnk small" to={`/equipo/${encodeURIComponent(p.agent.id)}`}>Ajustes avanzados (modelo, herramientas, límites, capacidades)</Link>
     </section>
     {/* EN-021 · Sello Portal IA en solo lectura: igual para agentes propios y externos (EXTERNAL_TABS también abre ConfigTab). */}
     <PortalSealPanel />
@@ -562,6 +562,11 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
       <div className="small">Permisos concedidos: {tools.length ? tools.map(t => TOOL_LABELS[t]?.name ?? t).join(', ') : 'ninguno'}</div>
       <div className="small">Trabaja en: {workplaceLabel(p.agent.scope).toLowerCase()} · las acciones externas, publicar o gastar siempre te piden aprobación.</div>
       <div className="small muted">Las instrucciones o habilidades de su carpeta nunca amplían estos permisos.</div>
+    </section>
+    {/* HU-210 · Única pantalla de configuración del agente: lo que antes estaba en /equipo/:id se edita aquí. */}
+    <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }} aria-labelledby="adv-h">
+      <div className="h3" id="adv-h">Modelo, herramientas, límites y capacidades</div>
+      <AgentAdvancedSettings key={p.agent.id} slug={slug} agentId={p.agent.id} onChanged={onChanged} />
     </section>
     <section style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <div className="h3">Registro</div>
