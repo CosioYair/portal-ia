@@ -13,7 +13,7 @@ const fail = (msg: string, statusCode = 409) => Object.assign(new Error(msg), { 
 
 /** Lo necesario para ejecutar la Edición (además del build compilado y del lanzador). */
 export const EDITION_INCLUDE: readonly RegExp[] = [
-  /^apps\/server\/src\//, /^apps\/web\/src\//, /^apps\/web\/index\.html$/, /^packages\/[^/]+\/src\//,
+  /^apps\/server\/src\//, /^apps\/server\/tools\//, /^apps\/web\/src\//, /^apps\/web\/index\.html$/, /^packages\/[^/]+\/src\//,
   /^package\.json$/, /^package-lock\.json$/, /^(?:apps|packages)\/[^/]+\/package\.json$/,
   /^(?:(?:apps|packages)\/[^/]+\/)?tsconfig[^/]*\.json$/, /^README\.md$/, /^\.env\.example$/,
   /^docs\/edicion-distribuible\.md$/, /^scripts\/portal-edition-start\.mjs$/

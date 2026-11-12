@@ -21,6 +21,7 @@ La generación se detiene sin dejar ningún ZIP en estos casos:
 ## Qué contiene
 
 - El código necesario para ejecutar: `apps/server/src`, `apps/web/src`, `apps/web/index.html`, `packages/*/src`, los `package.json`, `package-lock.json` y los `tsconfig*.json`.
+- Las herramientas de documentos de `apps/server/tools` (scripts de Python y `kits/`), que el servidor usa al ejecutar las habilidades de PDF. Para usarlas hace falta Python 3 en el equipo de la empresa.
 - El build compilado de la interfaz, en `apps/web/dist/`.
 - El lanzador `scripts/portal-edition-start.mjs`.
 - `README.md`, `.env.example` y este documento.
