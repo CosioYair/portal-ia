@@ -180,11 +180,12 @@ test('guardián: importar editionSandbox.ts en otro proceso no toca la carpeta d
 
 // ---------- Integración: la Edición real ----------
 
-const distMissing = !fs.existsSync(path.join(INSTALL_ROOT, 'apps', 'web', 'dist'));
+// /api/health responde aunque falte apps/web/dist (app.ts solo sirve dist si existe): solo se omite con el 4320 ocupado.
 const busyBefore = !(await canListen());
-const skipReason = busyBefore ? 'el puerto 4320 ya estaba ocupado' : distMissing ? 'falta apps/web/dist (npm run build)' : false;
+const skipReason = busyBefore ? 'el puerto 4320 ya estaba ocupado' : false;
 
-test('integración: arranca en 4320 con clave propia, sin filtrar claves y sin tocar el data/ del Estudio; stop libera pid y puerto', { skip: skipReason, timeout: 240_000 }, async () => {
+test('integración: arranca en 4320 con clave propia, sin filtrar claves y sin tocar el data/ del Estudio; stop libera pid y puerto', { skip: skipReason, timeout: 240_000 }, async t => {
+  t.diagnostic('HU212-INTEGRACION-EJECUTADA: arranque real en 4320');
   const studio = path.join(TMP, 'estudio-data'); fs.mkdirSync(studio, { recursive: true });
   const seeded = Buffer.alloc(32, 7).toString('hex');
   fs.writeFileSync(path.join(studio, '.master.key'), seeded);
@@ -196,9 +197,8 @@ test('integración: arranca en 4320 con clave propia, sin filtrar claves y sin t
   try {
     const r = await fetch(`${EDITION_SANDBOX_URL}/api/health`);
     assert.equal(r.ok, true);
-    const body = await r.json().catch(() => null) as { edition?: unknown; config?: { edition?: unknown } } | null;
-    const edition = body?.edition ?? body?.config?.edition;
-    if (typeof edition === 'string') assert.equal(edition, 'distributable');
+    const body = await r.json().catch(() => null) as { edition?: unknown } | null;
+    assert.equal(body?.edition, 'distributable', 'la instancia en 4320 es la Edición distribuible');
     const keyFile = path.join(info.dataDir, '.master.key');
     assert.ok(fs.existsSync(keyFile), 'la Edición crea su propia .master.key');
     const raw = fs.readFileSync(keyFile); const text = raw.toString('utf8').trim();
@@ -222,7 +222,8 @@ test('integración: arranca en 4320 con clave propia, sin filtrar claves y sin t
   pid = null;
 });
 
-test('integración: si el proceso padre sale, el hijo muere y el 4320 queda libre', { skip: skipReason, timeout: 240_000 }, async () => {
+test('integración: si el proceso padre sale, el hijo muere y el 4320 queda libre', { skip: skipReason, timeout: 240_000 }, async t => {
+  t.diagnostic('HU212-INTEGRACION-EJECUTADA: salida del proceso padre');
   const studio = path.join(TMP, 'estudio-data-2'); fs.mkdirSync(studio, { recursive: true });
   const helper = path.join(os.tmpdir(), `hu212-padre-${process.pid}.mjs`);
   fs.writeFileSync(helper, [

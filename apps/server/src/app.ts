@@ -92,7 +92,7 @@ export async function buildApp() {
   // Nunca dentro de un marco de otra página (una vista previa no puede mostrar el Portal y hacerte pulsar en él).
   app.addHook('onSend', async (req, reply, payload) => { const csp = reply.getHeader('content-security-policy'); reply.header('x-frame-options', 'DENY').header('content-security-policy', csp ? `${csp}; frame-ancestors 'none'` : "frame-ancestors 'none'"); if (req.url.startsWith('/api/')) { reply.header('x-server-time', String(Date.now())).header('cache-control', 'no-store'); const web = currentWebBundle(); if (web) reply.header('x-portal-web', web); } return payload; });
 
-  app.get('/api/health', async () => ({ ok: true, name: 'portal-ia', version: VERSION, dataDir: config.dataDir, repoRoot: REPO_ROOT }));
+  app.get('/api/health', async () => ({ ok: true, name: 'portal-ia', version: VERSION, edition: config.edition, dataDir: config.dataDir, repoRoot: REPO_ROOT }));
 
   // Inventario de las rutas registradas: la política del propietario se audita sobre él (test/politica-propietario.test.ts
   // recorre TODAS las que cambian algo, también las que se añadan después).
