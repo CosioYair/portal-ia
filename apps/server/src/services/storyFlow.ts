@@ -35,6 +35,8 @@ export interface FlowOptions {
   integration?: BranchIntegration | null;
   /** HU-185 · Estado de publicación de main (sin red). Sin valor: la etapa «Publicar» solo usa lo que guarda el proceso. */
   publish?: PublishInfo | null;
+  /** EN-024 · Imagen del sandbox del proceso según resolveProcessImage (solo en la pausa de entorno por la imagen). Sin valor: desconocida. */
+  sandboxImage?: { stale: boolean; image: string; reason?: string } | null;
 }
 
 const LABELS: Record<FlowStageKey, string> = {
@@ -386,10 +388,17 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
     else if (pl.pauseKind === 'environment' && (pl as { imageRelated?: boolean }).imageRelated) {
       // EN-024 · Pausa por la imagen del sandbox: la acción principal es reconstruirla desde la rama (autorizada, red solo en el build).
       const found = envFindings(pl);
+      const img = opts.sandboxImage;
+      const ready = !!img && !img.stale;
       actions.push(
-        act('rebuild_sandbox_image', 'Reconstruir la imagen del sandbox desde la rama', 'Construye la imagen desde el docker/sandbox.Dockerfile de esta rama, con red solo durante la construcción, y la etiqueta por hash (portal-ia-sandbox:df-…). No toca portal-ia-sandbox:1 ni la imagen que usan main y otros procesos. No llama a la IA.', ['authorization', 'network'], { primary: true }),
-        act('refresh_sandbox', 'Comprobar el sandbox de nuevo', 'Detecta el motor y la imagen sin ejecutar nada y te dice en la tarjeta qué encontró y si la pausa sigue.'),
-        resume('Continuar con la imagen nueva', 'Repite la verificación con la imagen reconstruida y recalcula el veredicto de QA desde el guardado, sin llamar a la IA.', ['authorization']));
+        act('rebuild_sandbox_image', 'Reconstruir la imagen del sandbox desde la rama', 'Construye la imagen desde el docker/sandbox.Dockerfile de esta rama, con red solo durante la construcción, y la etiqueta por hash (portal-ia-sandbox:df-…). No toca portal-ia-sandbox:1 ni la imagen que usan main y otros procesos. No llama a la IA.', ['authorization', 'network'], { primary: !ready }),
+        act('refresh_sandbox', 'Comprobar el sandbox de nuevo', 'Detecta el motor y la imagen sin ejecutar nada y te dice en la tarjeta qué encontró y si la pausa sigue.'));
+      if (img?.stale) {
+        // Imagen aún desactualizada: «Continuar» volvería a pausar igual; no se ofrece y se explica qué lo resuelve.
+        issue = { ...issue!, explanation: `${issue!.explanation} La imagen sigue desactualizada${img.reason ? ` (${img.reason})` : ''}: «Continuar con la imagen nueva» no está disponible hasta que la reconstruyas con «Reconstruir la imagen del sandbox desde la rama».` };
+      }
+      else if (ready) actions.push(resume('Continuar con la imagen nueva', `La imagen ${img!.image} ya corresponde al Dockerfile de la rama. Repite la verificación con ella y recalcula el veredicto de QA desde el guardado, sin llamar a la IA.`, ['authorization'], { primary: true }));
+      else actions.push(resume('Continuar con la imagen nueva', 'No se pudo leer la imagen ahora: repite la verificación y, si la imagen sigue desactualizada, la pausa vuelve sin llamar a la IA. Con la imagen reconstruida recalcula el veredicto de QA desde el guardado, sin IA.', ['authorization']));
       if (found.length) {
         issue = { ...issue!, details: [...(issue!.details ?? []), ...found.map(text => ({ text: `Hallazgo de código: ${text}` }))] };
         actions.push(act('request_fix', `Pedir corrección de ${found.length} hallazgo(s) de código`, 'Prepara una iteración correctiva con esos hallazgos de código, la evidencia, los archivos y los intentos anteriores. Queda pendiente de tu autorización y presupuesto: no gasta nada hasta entonces.', ['confirmation']));

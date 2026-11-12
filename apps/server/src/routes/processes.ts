@@ -124,7 +124,11 @@ export async function processRoutes(app: FastifyInstance) {
       q = { ...p, result: { ...p.result, activation } };
     }
     const item = q.kind === 'story_execution' && q.backlogItemId ? backlogRepo(slug).get(q.backlogItemId) : undefined;
-    const fo = await flowOptions(slug, q, item);
+    const en024Pl = q.result?.pipeline;
+    const en024Wt = en024Pl && en024Pl.state === 'paused' && en024Pl.pauseKind === 'environment' && (en024Pl as { imageRelated?: boolean }).imageRelated ? q.result?.applied?.worktree ?? null : null;
+    // EN-024 · Solo lectura: si la imagen sigue desactualizada, el recorrido no ofrece «Continuar con la imagen nueva».
+    const en024Img = en024Wt ? await resolveProcessImage(en024Wt).then(i => ({ stale: i.stale, image: i.image, reason: i.reason }), () => null) : undefined;
+    const fo = { ...(await flowOptions(slug, q, item)), ...(en024Img !== undefined ? { sandboxImage: en024Img } : {}) };
     // HU-185 · Etapa «Publicar» (no bloqueante): solo para historias integradas; estado de main sin red.
     const publish = q.kind === 'story_execution' && q.result?.merged ? await getPublishInfo(projectsRepo(slug).repository(q.projectId)?.path ?? null).catch(() => null) : null;
     return { ...q, version: processVersion(q), closure: storyClosureFor(slug, q), guidance: describeProcess(q, { isPortalRepo, storyStatus: item && (item.lastProcessId === q.id || !item.lastProcessId) ? item.status : null, ...fo, publish, backends: q.kind === 'story_execution' ? teamReadiness(slug, q.id) : null }) };
