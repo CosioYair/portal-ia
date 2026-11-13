@@ -439,8 +439,21 @@ function mergeMeta(ctx: StoryRunCtx, unit: WorkUnit, meta: ParsedDevOutput) {
  * hacerla pasar cambiándola debilitaría la verificación (HU-155). Lo demás (otros entregables pendientes, archivos fuera
  * del plan) se acepta y se anota.
  */
+/**
+ * ¿La prueba comprueba algo que la historia cambia? (sin IA): su texto nombra la ruta o el nombre de archivo de un
+ * archivo (no de prueba) cambiado por la historia — lo importa o lo lee. Es el vínculo objetivo que permite adaptarla.
+ */
+export function coversStoryChange(testSource: string, storyPaths: string[]): boolean {
+  if (!testSource) return false;
+  return storyPaths.some(p => {
+    const file = p.split('/').pop() ?? p;
+    const stem = file.replace(/\.[^.]+$/, '');
+    return testSource.includes(p) || testSource.includes(file) || (stem.length >= 4 && new RegExp(`[/'"\`]${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.[cm]?[jt]sx?)?['"\`]`).test(testSource));
+  });
+}
 function scopeCheck(man: StoryManifest, unit: WorkUnit, s: Settled, base: ProposedChange[], wt: string | null = null): ProposedChange[] {
   const full = new Set(s.raw.filter(c => c.action === 'create' || c.action === 'modify').map(c => clean(c.path)));
+  const storyPaths = Array.from(new Set([...base, ...s.changes].filter(c => !c.error && !isTestEntry(c.path)).map(c => c.path)));
   return s.changes.map(c => {
     if (c.error) return c;
     const d = man.deliverables.find(x => x.path === c.path);
@@ -449,7 +462,12 @@ function scopeCheck(man: StoryManifest, unit: WorkUnit, s: Settled, base: Propos
     const restores = !!prior?.baseHash && c.content !== null && hashText(c.content.replace(/\r\n/g, '\n')) === prior.baseHash;
     // Excepción con evidencia: la línea base demostró que esta prueba pasa sin la historia y falla con ella (comprueba un
     // comportamiento que la historia cambia); se permite actualizarla y queda registrada para QA y el propietario.
-    const behavior = (unit.testUpdatable ?? []).includes(c.path) && c.action !== 'delete' && !SENSITIVE_TEST.test(c.path);
+    // Portal IA 3 · la misma regla vale en TODAS las rondas (QA, Gauntlet, propietario…), no solo tras una verificación en
+    // rojo: una prueba existente que comprueba un archivo que esta historia cambia puede adaptarse al comportamiento nuevo
+    // en la misma entrega que lo cambia. Antes el código se aplicaba, su prueba se rechazaba y el árbol quedaba en rojo
+    // por construcción (HU-214: siete iteraciones). Sigue sin permitirse debilitarla ni tocar las pruebas sensibles.
+    const linked = existingTest && !restores && !!wt && coversStoryChange(readRepoFile(wt, c.path, 400_000) ?? '', storyPaths);
+    const behavior = ((unit.testUpdatable ?? []).includes(c.path) || linked) && c.action !== 'delete' && !SENSITIVE_TEST.test(c.path);
     // Aun así, nunca para debilitarla (sin IA): ni skip/todo/only, ni menos casos, ni menos aserciones.
     const weak = existingTest && behavior && !restores && c.content !== null && wt ? weakensTest(readRepoFile(wt, c.path, 400_000) ?? '', c.content) : null;
     if (weak) return { ...c, error: `«${c.path}»: la actualización ${weak}; eso debilitaría la verificación. Adapta la prueba al comportamiento nuevo sin quitar comprobaciones, o corrige el código.` };
@@ -490,7 +508,8 @@ async function applyUnit(ctx: StoryRunCtx, unitId: string, s: Settled): Promise<
     const flagged = changes.filter(c => c.error || c.warning).map(c => ({ path: c.path, error: c.error ?? null, warning: c.warning ?? null, unitId, at: now() }));
     if (flagged.length) m.rejected = [...(m.rejected ?? []), ...flagged].slice(-60);
     // Pruebas existentes actualizadas por cambio de comportamiento (con la evidencia de la línea base): visibles para QA y para ti.
-    const updated = files.filter(f => (u.testUpdatable ?? []).includes(f));
+    const preexisting = new Set(valid.filter(c => isTestEntry(c.path) && c.before > 0 && !m.deliverables.find(x => x.path === c.path)?.planned).map(c => c.path));
+    const updated = files.filter(f => (u.testUpdatable ?? []).includes(f) || preexisting.has(f));
     if (updated.length) m.testUpdates = [...(m.testUpdates ?? []), ...updated.map(f => ({ path: f, unitId, commit, reason: `Pasa en la base y falla con la historia: ${(u.findings ?? []).map(x => clip(x.text, 200)).join(' · ')}. Resumen del equipo: ${clip(s.meta?.summary ?? '', 400) || '—'}`, at: now() }))].slice(-30);
   });
   mergeMeta(ctx, unit, s.meta);

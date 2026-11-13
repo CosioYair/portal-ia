@@ -793,6 +793,8 @@ export const settleUnit = (ctx: StoryRunCtx, outputs: DevOutput[], config: Pipel
 
 // ---------------------------------------------------------------- 2-6 · Aplicar, verificar, QA y correcciones
 
+/** Rondas extra, como mucho, que se conceden por encima de maxCorrections cuando cada fallo es distinto del anterior (hay progreso). */
+export const PROGRESS_EXTRA = 2;
 export function bumpFailure(list: PipelineStatus['failures'], signature: string, label: string) {
   const f = list.find(x => x.signature === signature);
   return f ? list.map(x => x === f ? { ...x, count: x.count + 1 } : x) : [...list, { signature, count: 1, label }];
@@ -1076,7 +1078,12 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
         updatePipeline(ctx.slug, ctx.processId, { failures });
         const count = failures.find(f => f.signature === sig)!.count;
         if (count > cfg.maxIdenticalFailures) throw new PipelinePause('repeated_failure', `El mismo fallo de ${failed.command} se repitió ${count} veces tras corregirlo: el equipo se detiene para no gastar más. Revisa el diagnóstico.`);
-        if (p.corrections >= cfg.maxCorrections) throw new PipelinePause('limit', `${failed.command} sigue fallando y se alcanzó el máximo de correcciones autorizadas (${cfg.maxCorrections}). Lo hecho se conserva.`);
+        // Portal IA 3 · el tope mide falta de progreso, no un número fijo: si el fallo de ahora es DISTINTO de los
+        // anteriores (la corrección previa arregló lo suyo y apareció otra cosa), se concede una ronda más, acotada
+        // (PROGRESS_EXTRA) y siempre dentro de las llamadas y la duración autorizadas. El mismo fallo nunca la obtiene.
+        const progressed = !p.failures.some(f => f.signature === sig) && p.failures.length > 0 && p.corrections < cfg.maxCorrections + PROGRESS_EXTRA;
+        if (p.corrections >= cfg.maxCorrections && progressed) emit(ctx, 'verify', `El fallo de ${failed.command} es distinto del anterior: la corrección previa avanzó. Se concede una ronda más (${p.corrections + 1} de ${cfg.maxCorrections + PROGRESS_EXTRA} como máximo) en lugar de detenerse.`);
+        if (p.corrections >= cfg.maxCorrections && !progressed) throw new PipelinePause('limit', `${failed.command} sigue fallando y se alcanzó el máximo de correcciones autorizadas (${cfg.maxCorrections}). Lo hecho se conserva.`);
         emit(ctx, 'verify', FAIL_MSG[failed.command] ?? `${failed.command} falla. El equipo está preparando una corrección.`, { phase: 'correcting', detail: verificationEvidence(failed).split('\n').slice(0, 6).join(' ') });
         if (units) { units.startRound(ctx, cfg, 'verification', units.verificationFindings(failed), { testUpdatable: units.behaviorTests(ctx, failed) }); continue; }
         const d = diagnosticsFor(failed);
