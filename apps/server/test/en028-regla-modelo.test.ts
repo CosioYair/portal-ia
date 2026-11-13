@@ -44,6 +44,7 @@ const { lessonsRepo } = await import('../src/services/lessons.ts');
 const { EDITION_INCLUDE, EDITION_FORBIDDEN } = await import('../src/services/editionBundle.ts');
 const { listPackageFiles } = await import('../src/services/packageTree.ts');
 const creation: any = await import('../src/services/agentCreation.ts');
+const { draftLesson, estimatePropose } = await import('../src/services/lessons.ts');
 
 // Id de la regla: solo existe como dato (catálogo simulado y platform.sqlite), nunca en el código de src/.
 const RULE = ['claude', 'fable', '5', '2', 'en028'].join('-');
@@ -205,4 +206,30 @@ test('6 · Edición: solo código, sin data/ ni .sqlite ni el id de la regla', (
     assert.ok(!/\.sqlite/i.test(rel), `${rel} es una base de datos`);
     if (/\.(ts|tsx|mjs|js|json|md|html|css)$/i.test(rel)) assert.ok(!fs.readFileSync(path.join(root, rel), 'utf8').includes(RULE), `${rel} contiene el id de la regla`);
   }
+});
+
+test('2 · extremo a extremo con un llamante real (draftLesson → completeWith) y un agente de la API de Anthropic', async () => {
+  const ts = new Date().toISOString();
+  const lesson: any = lessonsRepo(S).insert({ projectId: null, role: null, tags: ['en028-e2e'], status: 'validated', version: 1, parentId: null, title: 'Lección EN-028 e2e', detector: 'manual', evidence: { processId: null, processTitle: null, stepId: null, agentId: null, agentName: null, file: null, detail: 'prueba de extremo a extremo', at: ts }, rootCause: null, correctiveAction: null, lessonText: 'Texto de prueba', source: 'manual', promotedTo: null, dedupeKey: null, agentId: null } as any);
+  const lessonId: string = typeof lesson === 'string' ? lesson : lesson.id;
+  const { agentId } = estimatePropose(S, lessonId);
+  // El agente que redacta la lección pasa a la API de Anthropic (no Claude Code): la regla debe entrar por completeWith.
+  const put = await inject('PUT', `${W}/agents/${agentId}/backend`, { backend: 'api', authorized: true });
+  assert.equal(put.statusCode, 200, put.body);
+  const agent = agentsRepo(S).get(agentId)!;
+  assert.equal(agent.config.backend ?? 'api', 'api'); assert.equal(agent.config.provider, 'anthropic');
+  assert.notEqual(agent.config.model, RULE, 'el agente se creó antes de la regla: su modelo guardado no es el de la regla');
+  const calls = () => fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8').trim().split('\n').filter(Boolean).map(l => JSON.parse(l)) : [];
+  fs.writeFileSync(logPath, '');
+  await draftLesson(S, lessonId, { authorized: true });
+  const sent = calls();
+  assert.equal(sent.length, 1, 'una sola llamada al proveedor');
+  assert.equal(sent[0].model, RULE, 'el llamante real envía el modelo de la regla a la API de Anthropic');
+  // Id fuera del catálogo: error claro y ninguna llamada con otro modelo.
+  fs.writeFileSync(logPath, '');
+  connect(BASE);
+  try {
+    await assert.rejects(draftLesson(S, lessonId, { authorized: true }), /no está en la lista de modelos de Anthropic/);
+    assert.equal(calls().length, 0, 'no se llama al proveedor con ningún otro modelo');
+  } finally { connect([...BASE, RULE]); }
 });
