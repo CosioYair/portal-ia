@@ -8,6 +8,13 @@ import { runtimeVerified } from './runtimeChecks.ts';
 import { driftMessage } from './worktreeDrift.ts';
 import { staleCorrectionUnits, testRunSummary } from './failureDiagnosis.ts';
 import type { teamReadiness } from './claudeCode/backend.ts';
+import { isVisualPause } from './gauntlet.ts';
+import { visualGate } from './visualCheck.ts';
+
+/** EN-027 · ¿La puerta visual (HU-207) exige evidencia que no hay? Sin IA; si no se puede leer, no se presume. */
+function visualPending(p: Process): boolean {
+  try { const g = visualGate('', p); return g.required && !g.ok; } catch { return false; }
+}
 
 /**
  * Recorrido guiado de una historia (una sola fuente de verdad, sin IA): en qué etapa está, qué la bloquea, de qué tipo
@@ -317,12 +324,15 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
     forced = k; set(k, pl.state === 'paused' || pl.pauseKind === 'qa' ? 'blocked' : 'failed', (k === 'review' && rev ? `${reviewStageText(rev)} · ` : '') + (pl.reason ?? '').slice(0, 140));
     const cause = ['environment', 'network', 'provider_timeout', 'provider_error', 'interrupted', 'subscription_limit'].includes(pl.pauseKind ?? '') ? 'environment' : ['limit', 'repeated_failure', 'too_large', 'incomplete'].includes(pl.pauseKind ?? '') ? 'code' : 'decision';
     const req = pl.ownerRequest ?? null;
+    // EN-027 · La reanudación volvió a la misma pausa con el mismo motivo sin gastar: se dice explícitamente.
+    const reps = pl.repeatCount ?? 0;
+    const repeatNote = reps > 0 ? ` La reanudación volvió a la misma pausa con el mismo motivo sin gastar (${reps} ${reps === 1 ? 'vez' : 'veces'}).` : '';
     const fromVerify = verifyFailed ? verificationIssue(verifyFailed, devs) : null;
     const qaDetails = pl.pauseKind === 'gauntlet'
       ? (r.gauntlet?.rounds.at(-1)?.findings ?? []).filter(x => !x.unsupported && x.severity !== 'minor').map(x => ({ text: `[Evaluador · ${x.severity === 'blocking' ? 'bloqueante' : 'mayor'}] ${x.text}${x.evidence ? ` — evidencia: ${x.evidence.split('\n')[0].slice(0, 200)}` : ''}`, file: x.file, severity: (x.severity === 'blocking' ? 'alta' : 'media') as IssueSeverity }))
       : (r.review?.findings ?? []).map(x => ({ text: x.text, file: x.file, severity: x.severity }));
     const title = ({ budget: 'Pausado: el presupuesto autorizado no alcanza para el siguiente paso', subscription_limit: 'Pausado: la suscripción de Claude alcanzó su límite de uso', call_cap: 'Pausado: se usaron las llamadas a la suscripción autorizadas (no es USD)', network: 'Pausado: falta autorizar la instalación de dependencias', environment: 'Pausado por el entorno (sandbox)', duration: 'Pausado: se alcanzó la duración máxima', limit: 'Detenido: se alcanzó el máximo de correcciones', repeated_failure: 'Detenido: el mismo fallo se repite', qa: 'QA no pudo verificar: decides tú', no_changes: 'El Desarrollador concluye que no hacen falta cambios', refusal: 'El Desarrollador no completó la tarea', cancelled: 'Cancelado', missing_information: 'El equipo necesita información para seguir', permission: 'Pausado: hace falta un permiso', unsupported: 'Detenido: falta una capacidad que el equipo no tiene', provider_refusal: 'El proveedor rechazó la petición', provider_timeout: 'Pausado: el proveedor no respondió a tiempo', max_turns: 'Pausado: Claude Code agotó sus turnos sin terminar (no es un error de conexión)', provider_error: 'Pausado: no se pudo contactar con el proveedor', interrupted: 'Interrumpido por un reinicio del Portal', unknown: 'Detenido por un fallo no identificado', too_large: 'Detenido: un entregable no cabe en la salida del modelo', incomplete: 'Pausado: la entrega está incompleta (no se pagó a QA)', plan: r.gauntlet?.planReview?.status === 'paused' ? 'La revisión independiente del plan dejó una brecha bloqueante: decides tú' : r.planNoCode ? 'La historia no pide cambios de código: decide cómo hacerla' : 'Detenido: el plan no se puede ejecutar por partes', disagreement: 'QA y el Desarrollador no están de acuerdo: decides tú', gauntlet: 'El Evaluador Gauntlet dejó brechas bloqueantes: decides tú', external: verifyOk ? 'Corrección externa verificada: falta QA' : 'Corrección externa: decides el siguiente paso' } as Record<string, string>)[pl.pauseKind ?? ''] ?? 'El pipeline se detuvo';
-    issue = { kind: pl.pauseKind === 'provider_refusal' ? 'agent_refused' : req ? 'agent_blocked' : pl.state === 'paused' ? 'pipeline_paused' : pl.pauseKind === 'qa' ? 'qa_blocked' : 'pipeline_stopped', level: 'blocker', cause, command: fromVerify?.command, title, explanation: req ? `${req.why}` : `${pl.reason ?? ''} Todo lo hecho se conserva (cambios, verificaciones y registro).`, request: req, details: req ? [{ text: req.question }, ...req.options.map(o => ({ text: `Opción: ${o}` }))] : fromVerify?.details.length ? fromVerify.details : qaDetails.length ? qaDetails : pl.failures.map(x => ({ text: `${x.label} · ${x.count} vez/veces` })), files: fromVerify?.files ?? Array.from(new Set(qaDetails.map(x => x.file).filter(Boolean) as string[])), evidence: fromVerify?.evidence ?? null, responsible: cause === 'code' ? devs : [] };
+    issue = { kind: pl.pauseKind === 'provider_refusal' ? 'agent_refused' : req ? 'agent_blocked' : pl.state === 'paused' ? 'pipeline_paused' : pl.pauseKind === 'qa' ? 'qa_blocked' : 'pipeline_stopped', level: 'blocker', cause, command: fromVerify?.command, title, explanation: req ? `${req.why}` : `${pl.reason ?? ''} Todo lo hecho se conserva (cambios, verificaciones y registro).${repeatNote}`, request: req, details: req ? [{ text: req.question }, ...req.options.map(o => ({ text: `Opción: ${o}` }))] : fromVerify?.details.length ? fromVerify.details : qaDetails.length ? qaDetails : pl.failures.map(x => ({ text: `${x.label} · ${x.count} vez/veces` })), files: fromVerify?.files ?? Array.from(new Set(qaDetails.map(x => x.file).filter(Boolean) as string[])), evidence: fromVerify?.evidence ?? null, responsible: cause === 'code' ? devs : [] };
     const resume = (label: string, description: string, requires: FlowAction['requires'], extra: Partial<FlowAction> = {}) => act('pipeline_resume', label, description, requires, { pipeline: {}, ...extra });
     const answer = req ? { question: req.question, why: req.why, options: req.options } : null;
     if (req && (pl.pauseKind === 'missing_information' || pl.pauseKind === 'permission' || pl.pauseKind === 'unsupported')) {
@@ -424,6 +434,20 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
       if (conflictWithMain) actions.push(act('integration_prepare', 'Preparar el candidato de integración (main tiene cambios que chocan)', `main cambió ${(opts.integration?.state === 'conflicts' ? opts.integration.conflicts.map(c => c.path) : r.mergeError?.files ?? []).join(', ')}: integrar así fallaría. Se combina con git sin IA; si hay conflictos reales, se dicen y decides cómo resolverlos.`, ['authorization']));
       else if (verifyOk) actions.push(act('merge', 'Integrar en main bajo tu criterio', 'La verificación automática está en verde; QA no pudo concluir. Requiere tu autorización.', ['authorization']));
       actions.push(resume('Pedir a QA que vuelva a evaluar', 'Una nueva evaluación de QA con la evidencia actual (incluidas las comprobaciones sin IA, como la equivalencia de estilos).', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.3 }), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama.'));
+    }
+    else if (pl.pauseKind === 'gauntlet' && (isVisualPause(pl.reason) || visualPending(p))) {
+      // EN-027 · Falta la evidencia visual (HU-207): no es una brecha del Evaluador. La acción principal repite la
+      // verificación en el host sin IA. No se ofrece «Continuar sin más evaluación» (saltaría la verificación obligatoria).
+      const gs = r.gauntlet; const done = gs?.rounds.filter(x => x.decision === 'correct').length ?? 0;
+      const withEvidence = (gs?.rounds.at(-1)?.findings ?? []).filter(x => !x.unsupported && !!x.evidence && x.severity !== 'minor');
+      const commit = /\(commit ([^)\s]+)\)/.exec(pl.reason ?? '')?.[1] ?? r.applied?.commit ?? '?';
+      const busy = /La historia está trabajando/.test(pl.reason ?? '');
+      const reasonText = (pl.reason ?? '').replace(/Acción: pulsa «Continuar»[^.]*\./, 'Acción: pulsa «Repetir la verificación visual (sin IA)».');
+      issue = { ...issue!, cause: 'environment', title: `Falta la evidencia visual del commit ${commit}: repite la verificación en el host (sin IA)`, explanation: `${reasonText}${busy ? ' La vista previa no llegó a arrancar porque el propio proceso seguía en marcha (corregido en EN-027): repetirla ahora debería funcionar.' : ''} Todo lo hecho se conserva (cambios, verificaciones y registro).${repeatNote}`, responsible: [] };
+      actions.push(resume('Repetir la verificación visual (sin IA)', 'Arranca la vista previa del commit aplicado y repite la verificación visual en el host (375, 768 y 1440 px, desbordamiento y axe). No llama a la IA ni concede correcciones; si vuelve a faltar la evidencia, la pausa vuelve con el motivo nuevo.', ['authorization'], { primary: true, pipeline: { maxCorrections: 0 } }));
+      actions.push(act('review_diff', 'Revisar el diff', 'El código y la evidencia guardada, sin cambiar nada.'));
+      if (withEvidence.length && done < GAUNTLET_LIMITS.deep) actions.push(resume('Conceder otra corrección dirigida', `El Desarrollador corrige SOLO la brecha señalada y el Evaluador re-evalúa (ronda ${done + 2} como máximo; QA no repite lo ya aprobado).`, ['authorization', 'ai_budget'], { pipeline: { maxCorrections: 1, gauntlet: { mode: 'deep', maxRounds: done + 1 } }, suggestedBudgetUsd: 0.5 }));
+      actions.push(fix('Preparar una iteración con la evidencia visual'), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
     }
     else if (pl.pauseKind === 'gauntlet') {
       // El Evaluador se detuvo (límite de rondas o sin progreso) con brechas bloqueantes y evidencia: lo hecho se conserva.
