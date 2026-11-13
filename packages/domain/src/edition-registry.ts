@@ -18,7 +18,8 @@ export interface EditionRecord {
   version: string;
   commit: string;
   sha256: string;
-  zipPath: string;
+  /** Solo el nombre del zip (nunca la ruta absoluta del host). */
+  zipName: string;
   entries: number;
   bytes: number;
   createdAt: string;

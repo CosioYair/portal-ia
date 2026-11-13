@@ -61,7 +61,7 @@ interface Row {
   created_at: string; license_id: string; license_status: string; issued_at: string; expires_at: string; renewals: number; updated_at: string;
 }
 const toView = (r: Row): EditionView => ({
-  id: r.id, version: r.version, commit: r.commit_sha, sha256: r.sha256, zipPath: r.zip_path, entries: Number(r.entries), bytes: Number(r.bytes),
+  id: r.id, version: r.version, commit: r.commit_sha, sha256: r.sha256, zipName: path.basename(r.zip_path), entries: Number(r.entries), bytes: Number(r.bytes),
   createdAt: r.created_at, updatedAt: r.updated_at,
   license: { id: r.license_id, status: r.license_status as EditionLicenseStatus, issuedAt: r.issued_at, expiresAt: r.expires_at, renewals: Number(r.renewals) }
 });
@@ -106,11 +106,21 @@ function readVersion(root: string): string {
   } catch { return '0.0.0'; }
 }
 
+/** Generaciones en curso por espacio: no se lanzan dos a la vez. */
+const generating = new Set<string>();
+
 export async function generateEdition(slug: string, authorized: boolean, env: EditionEnv): Promise<EditionView> {
   assertCore(slug);
   assertStudio(env);
   authorize(slug, 'generate', authorized);
   if (!canTransition(null, 'generate')) throw fail(editionTransitionError(null, 'generate'), 409);
+  if (generating.has(slug)) throw fail('Ya se está generando una edición: espera a que termine.', 409, 'generation_in_progress');
+  generating.add(slug);
+  try { return await runGeneration(slug, env); }
+  finally { generating.delete(slug); }
+}
+
+async function runGeneration(slug: string, env: EditionEnv): Promise<EditionView> {
   const git = env.git ?? ((args: string[]) => execFileSync('git', args, { cwd: env.root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
   let porcelain: string; let head: string;
   try { porcelain = git(['status', '--porcelain']); head = git(['rev-parse', 'HEAD']).trim(); }
@@ -143,7 +153,9 @@ function transition(slug: string, id: string, action: Exclude<EditionAction, 'ge
   const status = nextLicenseStatus(cur.license.status, action);
   const expires = action === 'renew' ? renewedExpiry(cur.license.expiresAt, now) : cur.license.expiresAt;
   const renewals = cur.license.renewals + (action === 'renew' ? 1 : 0);
-  db(slug).prepare('UPDATE editions SET license_status = ?, expires_at = ?, renewals = ?, updated_at = ? WHERE id = ?').run(status, expires, renewals, now.toISOString(), id);
+  const info = db(slug).prepare('UPDATE editions SET license_status = ?, expires_at = ?, renewals = ?, updated_at = ? WHERE id = ? AND license_status = ?')
+    .run(status, expires, renewals, now.toISOString(), id, cur.license.status);
+  if (Number(info.changes) === 0) throw fail('La edición cambió desde que la viste: no se ha aplicado la acción. Revisa y vuelve a intentarlo.', 409, 'stale_state');
   return getEdition(slug, id)!;
 }
 
