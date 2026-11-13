@@ -34,6 +34,7 @@ import { getClaudeCodeSettings } from './claudeCode/settings.ts';
 import { monotonicNow } from '../clock.ts';
 import { setWorkStatus, workItemOf, type WorkItem } from './workItems.ts';
 import { assertStoryOpen, storyClosureFor } from './storyClosure.ts';
+import { effectiveModel } from './modelRule.ts';
 
 /**
  * EN-005 · Defensa en profundidad: ¿este proceso es antiguo y su historia ya está integrada, completada o descartada?
@@ -309,8 +310,14 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
         const cc = await withWatchdog(claudeCodeComplete({ slug, projectId: proc.projectId, processId, stepId, agent, role: step.role ?? null, title: step.title }, request, ctrl.signal, onCcLive).finally(() => { if (queuedAt !== null) { addQueuedMs(processId, Date.now() - queuedAt); queuedAt = null; } started(); }), ctrl, timeoutMs, { startAfter: out });
         res = cc; cost = 0; backend = cc.backendLabel;
       } else {
+        // EN-028 · La regla de modelo de Portal IA también se aplica por la API de Anthropic. Si el id no es válido, se lanza
+        // ModelRuleError antes de llamar: no se usa otro modelo en silencio.
+        const apiModel = effectiveModel(slug, agent, agent.config.model);
+        if (apiModel !== agent.config.model) setLive({ model: apiModel });
         res = await withWatchdog(getAdapter(providerId)!.complete(decryptSecret(cred!.ciphertext), { workspaceId: prow.workspace_id }, {
           ...request,
+          model: apiModel,
+          supportsEffort: !!models.find(m => m.id === apiModel)?.supportsEffort,
           onProgress: e => {
             setLive(e === 'sent' ? { state: 'waiting', lastEvent: 'Solicitud enviada; esperando la respuesta del proveedor', lastEventAt: new Date().toISOString() }
               : e === 'headers' ? { state: 'receiving', lastEvent: 'El proveedor empezó a responder', lastEventAt: new Date().toISOString() }
@@ -318,7 +325,7 @@ export async function callAgentStep(slug: string, processId: string, stepId: str
             if (e !== 'sent') opts.log({ ...who, attempt, ms: ms() }, e === 'headers' ? 'llamada al proveedor: cabeceras recibidas' : 'llamada al proveedor: respuesta completa');
           }
         }, ctrl.signal), ctrl, timeoutMs);
-        cost = costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
+        cost = costUsd(providerId, apiModel, res.inputTokens, res.outputTokens);
         if (fallbackReason) backend = `${backendLabel('api', null, providerId)} (alternativa autorizada a Claude Code)`;
       }
       const prev = procs.get(processId)!.steps.find(s => s.id === stepId)!;
