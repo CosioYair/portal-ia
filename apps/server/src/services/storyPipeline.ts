@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { addQueuedMs, queuedMsOf } from './capacity.ts';
 import path from 'node:path';
-import { backendLabel, batchSourceOf, promptSections, verificationPassed, verificationsForApplied } from '@portal-ia/domain';
+import { backendLabel, batchSourceOf, nextRepeatCount, promptSections, verificationPassed, verificationsForApplied } from '@portal-ia/domain';
 import type { Agent, AgentBlocker, AgentFailureKind, BaselineTriage, LiveCall, OwnerRequest, BacklogItem, DevOutputAssessment, ExecutionResult, ModelInfo, PipelineConfig, PipelineEvent, PipelineEventKind, PipelinePauseKind, PipelinePhase, PipelineStatus, Process, ProcessFailure, ProposedChange, ProviderId, StoryPlan, TeamRole, VerificationRun } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError, reasoningHeadroom } from '@portal-ia/ai-adapters';
 import { providersRepo } from '../db/platform.ts';
@@ -1168,7 +1168,16 @@ export function pausePipeline(ctx: StoryRunCtx, pause: PipelinePause) {
   const stopped = ['repeated_failure', 'limit', 'qa', 'no_changes', 'refusal', 'provider_refusal', 'unsupported', 'unknown', 'plan', 'disagreement', 'gauntlet'].includes(pause.kind);
   const CLASS: Partial<Record<PipelinePauseKind, AgentFailureKind>> = { budget: 'BUDGET_EXHAUSTED', network: 'PERMISSION_REQUIRED', environment: 'ENVIRONMENT_FAILURE', limit: 'RECOVERABLE_IMPLEMENTATION_ERROR', repeated_failure: 'RECOVERABLE_IMPLEMENTATION_ERROR', missing_information: 'MISSING_INFORMATION', permission: 'PERMISSION_REQUIRED', unsupported: 'UNSUPPORTED_CAPABILITY', provider_refusal: 'PROVIDER_REFUSAL', provider_timeout: 'PROVIDER_TIMEOUT', provider_error: 'PROVIDER_CONNECTION_ERROR', max_turns: 'CLAUDE_CODE_MAX_TURNS_EXHAUSTED', interrupted: 'UNKNOWN_FAILURE', unknown: 'UNKNOWN_FAILURE', too_large: 'INCOMPLETE_OUTPUT', incomplete: 'RECOVERABLE_IMPLEMENTATION_ERROR', call_cap: 'PERMISSION_REQUIRED' };
   const cur = pipelineOf(ctx.slug, ctx.processId);
-  updatePipeline(ctx.slug, ctx.processId, { state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, providerCode: pause.providerCode, reason: pause.message, phase: 'finished', finishedAt: now(), failureClass: cur.failureClass && ['missing_information', 'permission', 'unsupported', 'provider_refusal'].includes(pause.kind) ? cur.failureClass : CLASS[pause.kind] ?? cur.failureClass ?? null }, { kind: 'pause', message: pause.message });
+  // EN-027 · ¿La reanudación volvió a la MISMA pausa (mismo tipo y motivo normalizado) sin gastar nada entre ambas?
+  // Gasto = algún evento con costo o con llamada a la IA (también por suscripción) después de la pausa anterior.
+  const prevPause = cur.lastPause ?? { pauseKind: cur.pauseKind, reason: cur.reason };
+  const evs = cur.events ?? [];
+  let lastPauseAt = -1;
+  for (let i = evs.length - 1; i >= 0; i--) if (evs[i].kind === 'pause') { lastPauseAt = i; break; }
+  const spentBetween = lastPauseAt < 0 || evs.slice(lastPauseAt + 1).some(e => (e.costUsd ?? 0) > 0 || !!e.aiCall);
+  const repeatCount = nextRepeatCount({ ...prevPause, repeatCount: cur.repeatCount }, { pauseKind: pause.kind, reason: pause.message }, spentBetween);
+  const lastPause: NonNullable<PipelineStatus['lastPause']> = { pauseKind: pause.kind, reason: pause.message };
+  updatePipeline(ctx.slug, ctx.processId, { repeatCount, lastPause, state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, providerCode: pause.providerCode, reason: pause.message, phase: 'finished', finishedAt: now(), failureClass: cur.failureClass && ['missing_information', 'permission', 'unsupported', 'provider_refusal'].includes(pause.kind) ? cur.failureClass : CLASS[pause.kind] ?? cur.failureClass ?? null }, { kind: 'pause', message: pause.message });
 }
 
 // ---------------------------------------------------------------- Reanudar (sin repetir lo hecho)

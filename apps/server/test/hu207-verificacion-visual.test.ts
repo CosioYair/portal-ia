@@ -88,7 +88,7 @@ test('HU-207 · sin siembra ni --vars, el mapa solo tiene rutas sin {marcadores}
   assert.deepEqual(routesForChanges(['apps/web/src/screens/StoryWorkspace.tsx'], map), ['/backlog']);
   assert.deepEqual(routesForChanges(['apps/web/src/screens/ProcessView.tsx'], map), ['/actividad']);
   const src = fs.readFileSync(path.join(REPO, 'apps', 'server', 'src', 'services', 'gauntlet.ts'), 'utf8');
-  assert.ok(src.includes('await runVisualCheck(ctx.slug, ctx.processId)'), 'visualStage no pasa vars: por eso el mapa no puede llevar marcadores');
+  assert.ok(src.includes('await runVisualCheck(ctx.slug, ctx.processId, { pipeline: true })'), 'visualStage no pasa vars: por eso el mapa no puede llevar marcadores');
 });
 
 test('HU-207 · cada ruta de visual-routes.json existe en apps/web/src/App.tsx (sin redirección ni comodín)', () => {
@@ -197,17 +197,19 @@ test('HU-207 · gauntletStage llama a la puerta visual ANTES del modo off, del c
   const stage = src.slice(src.indexOf('export async function visualStage('), src.indexOf('export async function gauntletStage('));
   assert.equal((stage.match(/runVisualCheck\(/g) ?? []).length, 1, 'una sola ejecución en el host por paso, sin bucles');
   assert.ok(!/for \(|while \(/.test(stage), 'sin reintentos en bucle');
-  assert.ok(stage.includes("throw new PipelinePause('gauntlet', scrubImageWords(`Evidencia visual pendiente en el host"), 'pausa con la causa visual y su acción');
+  assert.ok(stage.includes("throw new PipelinePause('gauntlet', scrubImageWords(`${VISUAL_PAUSE_PREFIX}"), 'pausa con la causa visual y su acción');
+  assert.ok(src.includes("export const VISUAL_PAUSE_PREFIX = 'Evidencia visual pendiente en el host'"), 'el prefijo de la pausa no cambia (detecta también las guardadas)');
+  assert.ok(stage.includes('pulsa «Repetir la verificación visual (sin IA)»'), 'la pausa nombra el botón que existe');
   assert.ok(body.includes('visual.required ? visualSummary(visual)'), 'el Evaluador recibe el resumen visual');
 });
 
 test('HU-207 · la pausa visual no se clasifica como «falta en la imagen del sandbox» (IMAGE_MISSING real)', () => {
   const detail = 'Chromium no disponible (npx playwright install chromium): falta en la imagen; imagen del sandbox no lo tiene';
   assert.ok(IMAGE_MISSING.test(detail), 'el detalle crudo sí coincidiría');
-  const msg = scrubImageWords(`Evidencia visual pendiente en el host (commit ${COMMIT}): verificación no disponible · última ejecución: ${detail}. Acción: pulsa «Continuar» para repetir la verificación visual en el host (sin IA).`);
+  const msg = scrubImageWords(`Evidencia visual pendiente en el host (commit ${COMMIT}): verificación no disponible · última ejecución: ${detail}. Acción: pulsa «Repetir la verificación visual (sin IA)» o lánzala con POST /api/workspaces/s/processes/p/visual-check. Lo hecho se conserva.`);
   assert.equal(IMAGE_MISSING.test(msg), false, msg);
   assert.match(msg, /Evidencia visual pendiente en el host/);
-  assert.match(msg, /pulsa «Continuar»/);
+  assert.match(msg, /pulsa «Repetir la verificación visual \(sin IA\)»/);
 });
 
 // ---------------------------------------------------------------- Script con navegador falso

@@ -264,10 +264,21 @@ export const toCorrection = (f: GauntletFinding): { severity: IssueSeverity; tex
 /** Quita del texto de la pausa lo que la clasificaría como «falta en la imagen del sandbox» (es evidencia del host). */
 export const scrubImageWords = (t: string) => t.replace(new RegExp(IMAGE_MISSING.source, 'gi'), 'herramienta del host');
 
+/** EN-027 · Prefijo del motivo de la pausa visual (también el de las pausas ya guardadas, como la de HU-214). */
+export const VISUAL_PAUSE_PREFIX = 'Evidencia visual pendiente en el host';
+/** EN-027 · ¿Este motivo de pausa 'gauntlet' es el de la puerta visual (falta la evidencia en el host)? */
+export const isVisualPause = (reason: string | null | undefined): boolean =>
+  String(reason ?? '').trimStart().toLowerCase().startsWith(VISUAL_PAUSE_PREFIX.toLowerCase());
+/** EN-027 · Pausa tras «Repetir la verificación visual (sin IA)»: la evidencia pasó y falta la ronda del Evaluador (con IA). */
+export const VISUAL_PASSED_PREFIX = 'Evidencia visual superada en el host';
+export const isVisualPassedPause = (reason: string | null | undefined): boolean =>
+  String(reason ?? '').trimStart().toLowerCase().startsWith(VISUAL_PASSED_PREFIX.toLowerCase());
+
 /**
  * Puerta visual obligatoria (HU-207), en TODOS los modos: si la historia toca apps/web/src exige el report.json y los PNG
  * del commit aplicado. Si faltan, lanza la verificación en el host UNA vez (sin IA). Si tampoco pasa, pausa con la causa
- * «evidencia visual pendiente en el host» y «Continuar» la repite.
+ * «evidencia visual pendiente en el host» y «Repetir la verificación visual (sin IA)» la repite.
+ * EN-027: la vista previa la abre el propio pipeline (`pipeline: true`), así que el proceso en «running» no la bloquea.
  */
 export async function visualStage(ctx: StoryRunCtx, proc: Process): Promise<VisualGate> {
   let gate = visualGate(ctx.slug, proc);
@@ -276,11 +287,11 @@ export async function visualStage(ctx: StoryRunCtx, proc: Process): Promise<Visu
   let detail = '';
   // Sin `vars` a propósito: aún no hay siembra en la vista previa, así que apps/web/visual-routes.json solo usa rutas sin
   // {marcadores} (lo fija hu207-verificacion-visual.test.ts; la limitación consta en docs/estilos-ui.md).
-  try { const run = await runVisualCheck(ctx.slug, ctx.processId); detail = run.status === 'ok' ? '' : run.detail; }
+  try { const run = await runVisualCheck(ctx.slug, ctx.processId, { pipeline: true }); detail = run.status === 'ok' ? '' : run.detail; }
   catch (e) { detail = (e as Error).message; }
   gate = visualGate(ctx.slug, processesRepo(ctx.slug).get(ctx.processId) ?? proc);
   if (gate.ok) { emit(ctx, 'gauntlet', `Verificación visual superada en el host (commit ${gate.commit ?? '?'}): ${gate.routes.join(', ')}.`); return gate; }
-  throw new PipelinePause('gauntlet', scrubImageWords(`Evidencia visual pendiente en el host (commit ${gate.commit ?? '?'}): ${gate.reasons.join(' · ') || 'sin informe válido'}${detail ? ` · última ejecución: ${clip(detail, 400)}` : ''}. Acción: pulsa «Continuar» para repetir la verificación visual en el host (sin IA) o lánzala con POST /api/workspaces/${ctx.slug}/processes/${ctx.processId}/visual-check. Lo hecho se conserva.`));
+  throw new PipelinePause('gauntlet', scrubImageWords(`${VISUAL_PAUSE_PREFIX} (commit ${gate.commit ?? '?'}): ${gate.reasons.join(' · ') || 'sin informe válido'}${detail ? ` · última ejecución: ${clip(detail, 400)}` : ''}. Acción: pulsa «Repetir la verificación visual (sin IA)» o lánzala con POST /api/workspaces/${ctx.slug}/processes/${ctx.processId}/visual-check. Lo hecho se conserva.`));
 }
 
 /**
@@ -323,6 +334,8 @@ export async function gauntletStage(ctx: StoryRunCtx, cfg: PipelineConfig): Prom
     save(s); emit(ctx, 'gauntlet', `Gauntlet (${g.mode}) no aplicado: ${s.reason}`);
     return { outcome: 'verified', toFix: [], state: s };
   }
+  // EN-027 · Reanudación «sin IA» (solo la puerta visual): no se llama al Evaluador sin presupuesto autorizado para ello.
+  if (cfg.visualOnly) throw new PipelinePause('gauntlet', `${VISUAL_PASSED_PREFIX} (commit ${commit ?? '?'}). Falta la ronda del Evaluador Gauntlet sobre este commit, que llama a la IA: no se lanzó porque «Repetir la verificación visual (sin IA)» no autoriza gasto. Acción: pulsa «Pasar al Evaluador Gauntlet (con IA)» con el presupuesto que fijes. Lo hecho se conserva.`);
   const round = state.rounds.length + 1;
   emit(ctx, 'gauntlet', `${ev.config.name} evalúa de forma independiente (Gauntlet ${g.mode}, ronda ${round}): criterios de aceptación contra el resultado real y su evidencia.`, { phase: 'qa', aiCall: true });
   const pending = proc.steps.find(s => s.role === 'evaluator' && s.status === 'pending');

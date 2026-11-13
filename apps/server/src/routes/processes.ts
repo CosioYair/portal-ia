@@ -110,7 +110,7 @@ function findBacklogItem(slug: string, idOrCode: string) {
  * IA cuando el usuario lo autoriza con un presupuesto (POST /authorize). Puede cancelarse; se detiene entre pasos.
  */
 /** Configuración del pipeline autorizado (se normaliza y acota en el servidor). */
-const PIPELINE_INPUT = z.object({ autoApply: z.boolean().optional(), autoVerify: z.boolean().optional(), commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(), allowInstall: z.boolean().optional(), maxOutputRepairs: z.number().int().min(0).max(10).optional(), maxCorrections: z.number().int().min(0).max(10).optional(), maxIdenticalFailures: z.number().int().min(1).max(10).optional(), maxDurationMin: z.number().int().min(1).max(600).optional(), maxConsultations: z.number().int().min(0).max(3).optional(), maxProviderRetries: z.number().int().min(0).max(3).optional(), providerTimeoutSec: z.number().int().min(5).max(900).nullable().optional(), maxContinuations: z.number().int().min(0).max(12).optional(), gauntlet: z.object({ mode: z.enum(['off', 'standard', 'deep', 'auto']), maxRounds: z.number().int().min(0).max(6).optional() }).optional(), maxSubscriptionCalls: z.number().int().min(1).max(2000).optional() });
+const PIPELINE_INPUT = z.object({ autoApply: z.boolean().optional(), autoVerify: z.boolean().optional(), commands: z.array(z.enum(['typecheck', 'test', 'build'])).max(3).optional(), allowInstall: z.boolean().optional(), maxOutputRepairs: z.number().int().min(0).max(10).optional(), maxCorrections: z.number().int().min(0).max(10).optional(), maxIdenticalFailures: z.number().int().min(1).max(10).optional(), maxDurationMin: z.number().int().min(1).max(600).optional(), maxConsultations: z.number().int().min(0).max(3).optional(), maxProviderRetries: z.number().int().min(0).max(3).optional(), providerTimeoutSec: z.number().int().min(5).max(900).nullable().optional(), maxContinuations: z.number().int().min(0).max(12).optional(), gauntlet: z.object({ mode: z.enum(['off', 'standard', 'deep', 'auto']), maxRounds: z.number().int().min(0).max(6).optional() }).optional(), maxSubscriptionCalls: z.number().int().min(1).max(2000).optional(), visualOnly: z.boolean().optional() });
 
 export async function processRoutes(app: FastifyInstance) {
   // Al servir un proceso se calcula (no se persiste) su estado de activación en el Portal en marcha y la orientación.
@@ -300,7 +300,8 @@ export async function processRoutes(app: FastifyInstance) {
     if (request && !body.data.answer) return reply.code(400).send({ error: `El equipo necesita tu respuesta para seguir: «${request.question}»`, code: 'answer_required', request });
     // Gauntlet «automático» al continuar: se resuelve aquí, con la misma regla que al autorizar (nunca llega «auto» a la ejecución).
     const gIn = body.data.pipeline?.gauntlet ? resolveGauntletFor(slug, proc, normalizeGauntlet(body.data.pipeline.gauntlet)) : null;
-    const cfg0 = normalizePipeline({ ...(prev?.config ?? {}), ...(body.data.pipeline ?? {}), ...(gIn ? { gauntlet: gIn } : {}) });
+    // EN-027 · «visualOnly» vale solo para esta reanudación: nunca se hereda de la configuración guardada.
+    const cfg0 = normalizePipeline({ ...(prev?.config ?? {}), ...(body.data.pipeline ?? {}), visualOnly: body.data.pipeline?.visualOnly === true, ...(gIn ? { gauntlet: gIn } : {}) });
     // Más llamadas a la suscripción solo con tu autorización explícita al continuar (se suman al tope que había).
     const cfg = body.data.addSubscriptionCalls && cfg0.maxSubscriptionCalls ? { ...cfg0, maxSubscriptionCalls: Math.min(2000, cfg0.maxSubscriptionCalls + body.data.addSubscriptionCalls) } : cfg0;
     // Los límites nuevos se suman a lo ya consumido: continuar tras un tope concede ese margen otra vez, no más.

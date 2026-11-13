@@ -11,6 +11,7 @@ import { withRwLock } from './capacity.ts';
 import { changed } from './live.ts';
 import { mainBranch, readProtectedReason, repoRoot, scanSecrets } from './repoWrite.ts';
 import { clipSandboxOutput, depsVolumeName, detectSandbox, dockerCliEnv, dockerMountArg, NM_CACHES, SANDBOX_IMAGE } from './sandbox.ts';
+import { visualCheckInFlight } from './visualCheck.ts';
 
 /**
  * Vista previa temporal de un candidato de integración, para que el propietario PRUEBE la historia antes de aceptarla. Sin IA.
@@ -49,7 +50,8 @@ const GIT_SAFE = ['--attr-source', EMPTY_TREE, '-c', 'core.autocrlf=false', '-c'
 const gitOut = async (cwd: string, args: string[], env?: NodeJS.ProcessEnv) => (await execFileP('git', [...GIT_SAFE, ...args], { cwd, windowsHide: true, maxBuffer: 50 * 1024 * 1024, env: env ?? process.env })).stdout;
 const docker = async (args: string[], timeout = 60_000) => { const r = await execFileP('docker', args, { env: dockerCliEnv(), windowsHide: true, timeout, maxBuffer: 10 * 1024 * 1024 }); return `${r.stdout}`.trim(); };
 
-type Live = { slug: string; processId: string; id: string; app: string; proxy: string; vol: string; net: string; dir: string; timer: NodeJS.Timeout | null; stopping: boolean };
+/** `pipeline`: la abrió la verificación visual del propio proceso (EN-027), no el propietario. */
+type Live = { slug: string; processId: string; id: string; app: string; proxy: string; vol: string; net: string; dir: string; timer: NodeJS.Timeout | null; stopping: boolean; pipeline: boolean };
 const live = new Map<string, Live>();
 /** Procesos con una vista previa preparándose (antes de registrarla): el límite cuenta también estas (dos pestañas a la vez). */
 const reserving = new Set<string>();
@@ -96,13 +98,15 @@ const removeDir = (dir: string) => { if (path.resolve(dir).startsWith(path.resol
  * compilación y el arranque siguen en segundo plano y el registro pasa a «lista» (con su dirección) o a «falló» (con el
  * motivo y las últimas líneas). Una sola a la vez por proceso; como mucho PORTAL_PREVIEW_MAX en total.
  */
-export async function startPreview(slug: string, processId: string): Promise<PreviewRecord> {
+export async function startPreview(slug: string, processId: string, opts: { pipeline?: boolean } = {}): Promise<PreviewRecord> {
   // HU-206: la edición distribuible no incluye scripts/preview-runner.mjs (ver packageTree.ts). Se rechaza antes de
   // cualquier efecto: sin reservas, sin consultar la base y sin copiar el runner.
   if (!SELF_IMPROVEMENT_ENABLED) throw editionError();
   const procs = processesRepo(slug); const p = procs.get(processId);
   if (!p || p.kind !== 'story_execution' || !p.result) throw fail(404, 'Proceso de historia no encontrado.', 'not_found');
-  if (p.status === 'running' || p.status === 'pending_authorization') throw fail(409, 'La historia está trabajando: su código aún cambia. Abre la vista previa cuando termine.', 'active');
+  // EN-027: la verificación visual del propio pipeline (opts.pipeline) corre con el proceso en «running» y su commit ya
+  // está aplicado; el propietario (ruta sin opción) sigue sin poder abrirla mientras la historia trabaja.
+  if (p.status === 'pending_authorization' || (p.status === 'running' && !opts.pipeline)) throw fail(409, 'La historia está trabajando: su código aún cambia. Abre la vista previa cuando termine.', 'active');
   const r = p.result;
   if (!r.applied?.branch) throw fail(409, 'La historia aún no tiene una rama aplicada que previsualizar.', 'not_applied');
   if (r.merged) throw fail(409, `Ya está integrada en ${r.merged.into} (${r.merged.commit}): pruébala en el Portal en marcha.`, 'merged');
@@ -111,10 +115,10 @@ export async function startPreview(slug: string, processId: string): Promise<Pre
   if (reserving.has(processId)) throw fail(409, 'Ya se está preparando su vista previa.', 'preview_starting');
   if (live.size + reserving.size >= MAX_LIVE) { const o = [...live.values()][0]; throw fail(409, `Ya hay una vista previa en marcha o preparándose${o ? ` (${processesRepo(o.slug).get(o.processId)?.title ?? o.processId})` : ''}: detenla antes de abrir otra.`, 'preview_limit'); }
   reserving.add(processId);
-  try { return await startReserved(slug, processId); } finally { reserving.delete(processId); }
+  try { return await startReserved(slug, processId, !!opts.pipeline); } finally { reserving.delete(processId); }
 }
 
-async function startReserved(slug: string, processId: string): Promise<PreviewRecord> {
+async function startReserved(slug: string, processId: string, pipeline: boolean): Promise<PreviewRecord> {
   const procs = processesRepo(slug); const p = procs.get(processId)!; const r = p.result!;
   if (!r.applied?.branch) throw fail(409, 'La historia aún no tiene una rama aplicada que previsualizar.', 'not_applied');
   const sb = await detectSandbox();
@@ -154,7 +158,7 @@ async function startReserved(slug: string, processId: string): Promise<PreviewRe
   const rec: PreviewRecord = { id, commit: head.slice(0, 7), mainHead: mainHead.slice(0, 7), tree, combined, includesProvisional: provisional, profile, status: 'starting', url: null, startedAt: at.toISOString(), expiresAt: new Date(at.getTime() + TTL_MIN * 60_000).toISOString(), reason: combined ? null : `Choca con ${target}: se previsualiza la rama sola, sin el ${target} actual.`, readyAt: null, stoppedAt: null, logTail: null };
   const cur = procs.get(processId)!;
   procs.setResult(processId, { ...cur.result!, previews: [...(cur.result!.previews ?? []).slice(-9), rec] });
-  const l: Live = { slug, processId, id, app: `portal-ia-pv-${id}-app`, proxy: `portal-ia-pv-${id}-proxy`, vol: `portal-ia-pv-${id}-sock`, net: `portal-ia-pv-${id}-net`, dir, timer: null, stopping: false };
+  const l: Live = { slug, processId, id, app: `portal-ia-pv-${id}-app`, proxy: `portal-ia-pv-${id}-proxy`, vol: `portal-ia-pv-${id}-sock`, net: `portal-ia-pv-${id}-net`, dir, timer: null, stopping: false, pipeline };
   live.set(id, l);
   changed({ ws: slug, entity: 'process', id: processId });
   logger({ processId, previewId: id, commit: rec.commit, mainHead: rec.mainHead, combined, profile }, 'vista previa: arrancando (aislada, sin IA)');
@@ -261,7 +265,8 @@ export async function sweepPreviews(): Promise<void> {
   for (const l of [...live.values()]) {
     const p = processesRepo(l.slug).get(l.processId);
     if (!p || p.result?.merged) await stopPreview(l.slug, l.processId, l.id, p?.result?.merged ? 'la historia se integró' : 'el proceso ya no existe');
-    else if (p.status === 'running') await stopPreview(l.slug, l.processId, l.id, 'el candidato vuelve a cambiar (la historia está trabajando)');
+    // EN-027: la vista previa que abrió la verificación visual del propio pipeline no se corta mientras esa verificación sigue.
+    else if (p.status === 'running' && !(l.pipeline && visualCheckInFlight(l.slug, l.processId))) await stopPreview(l.slug, l.processId, l.id, 'el candidato vuelve a cambiar (la historia está trabajando)');
     else if (p.supersededBy || (p.backlogItemId && processesRepo(l.slug).listByBacklogItem(p.backlogItemId).filter(x => x.kind === 'story_execution').at(-1)?.id !== p.id)) await stopPreview(l.slug, l.processId, l.id, 'hay una iteración más reciente de la historia');
   }
   const out = await docker(['ps', '-a', '--filter', `label=portal-ia.preview.owner=${OWNER}`, '--format', '{{.Label "portal-ia.preview"}}']).catch(() => '');
