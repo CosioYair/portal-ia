@@ -135,7 +135,10 @@ test('HU-214 · interfaz: ruta /ediciones en App.tsx, diálogo de autorización 
   assert.match(appSrc, /import\('\.\/screens\/Editions\.tsx'\)/);
   assert.match(appSrc, /<Route path="\/ediciones" element=\{company\(<Editions \/>\)\} \/>/);
   const screen = fs.readFileSync(path.join(webSrc, 'screens', 'Editions.tsx'), 'utf8');
-  assert.match(screen, /role="dialog"/);
+  assert.match(screen, /import \{ Modal \} from '\.\.\/components\/Modal\.tsx';/, 'usa el Modal compartido (foco atrapado y devuelto)');
+  assert.match(screen, /<Modal\b/);
+  assert.doesNotMatch(screen, /modal-backdrop|row-actions/, 'sin clases que no existen en el CSS');
+  assert.match(screen, /Autorizar y /);
   assert.match(screen, /authorized: true/);
   assert.match(screen, /Autorización del propietario/);
   assert.match(screen, /irreversible/);

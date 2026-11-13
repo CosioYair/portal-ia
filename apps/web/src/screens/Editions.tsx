@@ -3,7 +3,8 @@ import {
   canTransition, isLicenseExpired, EDITION_ACTION_EFFECT, EDITION_ACTION_LABEL, EDITION_STATUS_LABEL, INTERNAL_WORKSPACE,
   type EditionAction, type EditionLicenseStatus, type EditionView
 } from '@portal-ia/domain';
-import { Chip, Empty, Notice, Spinner } from '../components/ui.tsx';
+import { Chip, Empty, Icon, Notice, Spinner } from '../components/ui.tsx';
+import { Modal } from '../components/Modal.tsx';
 import { ownerNeeded, ownerToken, setOwnerToken } from '../lib/owner.ts';
 
 /**
@@ -53,11 +54,6 @@ export function Editions() {
   }, []);
   useEffect(() => { void load(); }, [load]);
 
-  useEffect(() => {
-    if (!pending) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !busy) setPending(null); };
-    window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
-  }, [pending, busy]);
 
   const open = (action: EditionAction, edition: EditionView | null) => { setDialogError(null); setDone(null); setPending({ action, edition }); };
 
@@ -82,9 +78,11 @@ export function Editions() {
         <h1 id="ed-title">Ediciones</h1>
         <p className="muted">Copias distribuibles del Portal generadas desde este Estudio, con su versión, su commit y su licencia local.</p>
         {!distributable && phase === 'ready' && (
-          <button type="button" className="btn" disabled={busy} onClick={() => open('generate', null)}>
-            {busy && pending?.action === 'generate' ? 'Generando…' : EDITION_ACTION_LABEL.generate}
-          </button>
+          <div className="page-head-actions">
+            <button type="button" className="btn btn-primary" disabled={busy} onClick={() => open('generate', null)}>
+              {busy && pending?.action === 'generate' ? 'Generando…' : EDITION_ACTION_LABEL.generate}
+            </button>
+          </div>
         )}
       </header>
 
@@ -110,10 +108,10 @@ export function Editions() {
                 <article aria-label={`Edición ${ed.version}, commit ${ed.commit.slice(0, 7)}`}>
                   <h2>Versión {ed.version}</h2>
                   <dl>
-                    <dt>Commit</dt><dd><code>{ed.commit.slice(0, 7)}</code></dd>
+                    <dt>Commit</dt><dd><code style={{ overflowWrap: 'anywhere' }}>{ed.commit.slice(0, 7)}</code></dd>
                     <dt>Licencia</dt>
                     <dd>
-                      <code>{ed.license.id}</code>{' '}
+                      <code style={{ overflowWrap: 'anywhere' }}>{ed.license.id}</code>{' '}
                       <Chip tone={STATUS_TONE[ed.license.status]}>{EDITION_STATUS_LABEL[ed.license.status]}</Chip>
                       {expired && ed.license.status !== 'revoked' && <> <Chip tone="warn">Caducada</Chip></>}
                     </dd>
@@ -121,9 +119,11 @@ export function Editions() {
                     <dt>Generada</dt><dd>{fmtDate(ed.createdAt)}</dd>
                   </dl>
                   {!distributable && (
-                    <div className="row-actions" role="group" aria-label={`Acciones de la edición ${ed.version}`}>
+                    <div className="page-head-actions" style={{ justifyContent: 'flex-start' }} role="group" aria-label={`Acciones de la edición ${ed.version}`}>
                       {ROW_ACTIONS.filter(a => canTransition(ed.license.status, a)).map(a => (
-                        <button key={a} type="button" className="btn btn-sm" disabled={busy} onClick={() => open(a, ed)}>{EDITION_ACTION_LABEL[a]}</button>
+                        <button key={a} type="button" className={a === 'revoke' ? 'btn btn-danger btn-sm' : 'btn btn-secondary btn-sm'} disabled={busy} onClick={() => open(a, ed)}>
+                          {a === 'revoke' && <span aria-hidden="true">{Icon.warn()}</span>}{EDITION_ACTION_LABEL[a]}
+                        </button>
                       ))}
                       {ed.license.status === 'revoked' && <span className="muted">Revocada: no admite más acciones.</span>}
                     </div>
@@ -136,22 +136,22 @@ export function Editions() {
       )}
 
       {pending && !distributable && (
-        <div className="modal-backdrop">
-          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="ed-dialog-title" aria-describedby="ed-dialog-desc">
-            <h2 id="ed-dialog-title">{EDITION_ACTION_LABEL[pending.action]}{pending.edition ? ` · versión ${pending.edition.version}` : ''}</h2>
-            <p id="ed-dialog-desc">{EDITION_ACTION_EFFECT[pending.action]}</p>
+        <Modal
+          title={`${EDITION_ACTION_LABEL[pending.action]}${pending.edition ? ` · versión ${pending.edition.version}` : ''}`}
+          onClose={() => { if (!busy) setPending(null); }}
+          footer={<>
+            <button type="button" className="btn btn-secondary" disabled={busy} onClick={() => setPending(null)}>Cancelar</button>
+            <button type="button" className={pending.action === 'revoke' ? 'btn btn-danger' : 'btn btn-primary'} disabled={busy} onClick={() => void confirm()}>
+              {busy ? (pending.action === 'generate' ? 'Generando…' : 'Aplicando…') : `Autorizar y ${EDITION_ACTION_LABEL[pending.action].toLowerCase()}`}
+            </button>
+          </>}
+        >
+            <p>{EDITION_ACTION_EFFECT[pending.action]}</p>
             {pending.action === 'generate' && <Notice kind="info">Requisitos: árbol de trabajo sin cambios por confirmar y build de la interfaz del mismo commit. No llama a ningún modelo de IA.</Notice>}
             {pending.action === 'revoke' && <Notice kind="warn">Esta acción es irreversible: la edición no se podrá reactivar ni renovar.</Notice>}
             <p><strong>Autorización del propietario:</strong> al confirmar, autorizas esta acción y queda registrada en el historial.</p>
             {dialogError && <div role="alert"><Notice kind="err">{dialogError}</Notice></div>}
-            <div className="row-actions">
-              <button type="button" className="btn" disabled={busy} onClick={() => setPending(null)} autoFocus>Cancelar</button>
-              <button type="button" className="btn" disabled={busy} onClick={() => void confirm()}>
-                {busy ? (pending.action === 'generate' ? 'Generando…' : 'Aplicando…') : `Autorizar y ${EDITION_ACTION_LABEL[pending.action].toLowerCase()}`}
-              </button>
-            </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </main>
   );
