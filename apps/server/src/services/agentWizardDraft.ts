@@ -4,6 +4,7 @@ import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, workspaceDb } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { agentBackend, agentCaller } from './claudeCode/backend.ts';
+import { effectiveModel } from './modelRule.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { harnessLabelFor } from './harness/index.ts';
 import { changed } from './live.ts';
@@ -64,7 +65,9 @@ export async function draftWizardProposal(slug: string, need: string, opts: { au
   catch (e: any) { throw fail(e?.message ?? 'Llamada no autorizada.', e?.statusCode ?? 403); }
 
   const prompt = promptFor(slug, text);
-  const req = { model: a.config.model, system: prompt.system, user: prompt.user, maxTokens: MAX_TOKENS, effort: 'low' as const, supportsEffort: false };
+  // EN-028: el modelo de la regla de Portal IA (si se aplica); id inválido → error claro, sin usar otro modelo.
+  const model = effectiveModel(slug, a, a.config.model);
+  const req = { model, system: prompt.system, user: prompt.user, maxTokens: MAX_TOKENS, effort: 'low' as const, supportsEffort: false };
   const startedAt = new Date().toISOString();
   const log = (status: 'done' | 'failed', tIn: number, tOut: number, cost: number) => {
     try { processesRepo(slug).logExecution({ projectId: '', agentId: a.id, kind: KIND, status, tokensIn: tIn, tokensOut: tOut, cost, startedAt } as any); } catch { /* auditoría */ }
@@ -86,8 +89,8 @@ export async function draftWizardProposal(slug: string, need: string, opts: { au
     if (spent + est.estimatedUsd > a.config.monthlyLimitUsd) throw fail(`La redacción superaría el límite mensual de «${a.config.name}» (${spent.toFixed(2)} + ≈${est.estimatedUsd.toFixed(3)} de ${a.config.monthlyLimitUsd.toFixed(2)} USD).`, 409);
     const models: ModelInfo[] = JSON.parse(prow.models_json);
     try {
-      const r = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { ...req, supportsEffort: !!models.find(m => m.id === a.config.model)?.supportsEffort } as any);
-      const cost = costUsd(providerId, a.config.model, r.inputTokens, r.outputTokens);
+      const r = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { ...req, supportsEffort: !!models.find(m => m.id === model)?.supportsEffort } as any);
+      const cost = costUsd(providerId, model, r.inputTokens, r.outputTokens);
       log('done', r.inputTokens, r.outputTokens, cost);
       out = { text: r.text, tokensIn: r.inputTokens, tokensOut: r.outputTokens, cost };
     } catch (e: any) {
@@ -98,5 +101,5 @@ export async function draftWizardProposal(slug: string, need: string, opts: { au
 
   const parsed = parseWizardDraft(out.text);
   if (!parsed) throw fail('El Agente de Onboarding no devolvió una propuesta legible. Puedes seguir sin IA o volver a intentarlo.', 422);
-  return { draft: parsed.draft, discarded: parsed.discarded, byAgent: a.config.name, harness, model: a.config.model, tokensIn: out.tokensIn, tokensOut: out.tokensOut, costUsd: out.cost };
+  return { draft: parsed.draft, discarded: parsed.discarded, byAgent: a.config.name, harness, model, tokensIn: out.tokensIn, tokensOut: out.tokensOut, costUsd: out.cost };
 }

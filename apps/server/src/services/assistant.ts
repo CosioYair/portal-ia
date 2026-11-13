@@ -13,6 +13,7 @@ import { backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } 
 import { activeAgents } from './activeAgents.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
+import { effectiveModel } from './modelRule.ts';
 import { addManualItem, resetStory } from './backlog.ts';
 import { createCompany, createProject } from './companies.ts';
 import { createStoryProcess, estimateStory } from './storyExecution.ts';
@@ -512,7 +513,8 @@ export async function chat(userText: string, images: { mediaType: string; data: 
   if (info.backend === 'api' && (!cred || prow.status !== 'connected')) throw Object.assign(new Error('El proveedor del Asistente no está conectado.'), { statusCode: 409 });
   const models: ModelInfo[] = (() => { try { return JSON.parse(prow.models_json); } catch { return []; } })();
   // HU-197: el modelo se resuelve antes de guardar nada o de llamar a la IA. El límite mensual ya se comprobó antes.
-  const chatModel = resolveChatModel(models, opts.model, a.config.model, providerId);
+  // EN-028: el Asistente es un agente de portal-ia; con la regla activa (y Anthropic) usa su modelo en el arnés y en la API.
+  const chatModel = effectiveModel(INTERNAL_WORKSPACE.slug, a, resolveChatModel(models, opts.model, a.config.model, providerId));
   const attachments: AssistantAttachment[] = [...images.map((im, i) => ({ name: im.name ?? `imagen-${i + 1}`, mediaType: im.mediaType, bytes: Math.round(im.data.length * 0.75) })), ...files];
   const conv = conversationId ? getConversation(conversationId) : (conversationsRepo.list().find(c => c.status === 'active') ?? createConversation(userText.slice(0, 60), null, null));
   if (conv.title === 'Nueva conversación' && !assistantRepo.list(1, conv.id).length) conversationsRepo.update(conv.id, { title: userText.replace(/\s+/g, ' ').trim().slice(0, 60) || conv.title });
