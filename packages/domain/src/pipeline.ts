@@ -1,5 +1,36 @@
-import type { PipelineConfig } from './types.ts';
+import type { PipelineConfig, PipelinePauseKind } from './types.ts';
 import { normalizeGauntlet, type GauntletConfig } from './gauntlet.ts';
+
+declare module './types.ts' {
+  interface PipelineStatus {
+    /**
+     * EN-027 · Reanudaciones seguidas que volvieron a la MISMA pausa (mismo tipo y mismo motivo normalizado) sin gastar
+     * nada entre ambas. Opcional: los resultados guardados antes no lo tienen (equivale a 0).
+     */
+    repeatCount?: number;
+  }
+}
+
+/** EN-027 · Motivo de pausa comparable: sin la parte «última ejecución …», sin horas ni espacios repetidos. */
+export function normalizePauseReason(reason: string | null | undefined): string {
+  return String(reason ?? '')
+    .replace(/\s*[(·,;-]?\s*última ejecución[^)·\n]*\)?/gi, '')
+    .replace(/\d{4}-\d{2}-\d{2}T[\d:.]+Z?/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/** EN-027 · ¿Es la misma pausa? Mismo tipo y mismo motivo normalizado (no vacío). */
+export function samePause(a: { pauseKind: PipelinePauseKind | null; reason: string | null } | null | undefined, b: { pauseKind: PipelinePauseKind | null; reason: string | null } | null | undefined): boolean {
+  if (!a || !b || !a.pauseKind || a.pauseKind !== b.pauseKind) return false;
+  const x = normalizePauseReason(a.reason); return !!x && x === normalizePauseReason(b.reason);
+}
+
+/** EN-027 · Nuevo valor de repeatCount: +1 si se repite la misma pausa sin gasto entre ambas; si no, 0. */
+export function nextRepeatCount(prev: { pauseKind: PipelinePauseKind | null; reason: string | null; repeatCount?: number } | null | undefined, next: { pauseKind: PipelinePauseKind | null; reason: string | null }, spentBetween: boolean): number {
+  return !spentBetween && samePause(prev, next) ? Math.max(0, Math.floor(Number(prev?.repeatCount) || 0)) + 1 : 0;
+}
 
 /**
  * Pipeline autorizado por defecto al ejecutar una historia desde la interfaz: aplicar en el worktree aislado, verificar

@@ -189,11 +189,12 @@ export async function initPreviewData(baseUrl: string, f: PreviewFetch = default
   return { steps, status: after };
 }
 
-async function readyPreview(slug: string, processId: string, commit: string, signal?: AbortSignal): Promise<string> {
+async function readyPreview(slug: string, processId: string, commit: string, signal?: AbortSignal, pipeline = false): Promise<string> {
   const mine = () => previewsOf(slug, processId).filter(p => p.live && sameCommit(p.commit, commit));
   const ready = () => mine().find(p => p.status === 'ready' && !!p.url)?.url ?? null;
   const now = ready(); if (now) return now;
-  if (!mine().length) await startPreview(slug, processId);
+  // EN-027: desde el pipeline (proceso en «running») se pide con la opción interna; la ruta del propietario no la usa.
+  if (!mine().length) await startPreview(slug, processId, pipeline ? { pipeline: true } : {});
   const t0 = Date.now();
   for (;;) {
     if (signal?.aborted) throw new Error('verificación cancelada');
@@ -232,8 +233,14 @@ function runScript(args: string[], timeoutMs: number, signal?: AbortSignal): Pro
 
 const inflight = new Map<string, Promise<VisualRun>>();
 
-/** Ejecuta la verificación visual en el host (una a la vez por proceso). Nunca da por buena una ejecución incompleta. */
-export function runVisualCheck(slug: string, processId: string, opts: { timeoutMs?: number; vars?: Record<string, string>; signal?: AbortSignal; authorized?: boolean } = {}): Promise<VisualRun> {
+/** EN-027 · ¿Hay una verificación visual en curso para este proceso? (el barrido de vistas previas no la corta). */
+export function visualCheckInFlight(slug: string, processId: string): boolean { return inflight.has(`${slug}:${processId}`); }
+
+/**
+ * Ejecuta la verificación visual en el host (una a la vez por proceso). Nunca da por buena una ejecución incompleta.
+ * `pipeline: true` (solo visualStage): la vista previa del propio proceso se puede abrir con el proceso en «running».
+ */
+export function runVisualCheck(slug: string, processId: string, opts: { timeoutMs?: number; vars?: Record<string, string>; signal?: AbortSignal; authorized?: boolean; pipeline?: boolean } = {}): Promise<VisualRun> {
   const key = `${slug}:${processId}`;
   const running = inflight.get(key); if (running) return running;
   const p = doRun(slug, processId, opts).finally(() => inflight.delete(key));
@@ -241,7 +248,7 @@ export function runVisualCheck(slug: string, processId: string, opts: { timeoutM
   return p;
 }
 
-async function doRun(slug: string, processId: string, opts: { timeoutMs?: number; vars?: Record<string, string>; signal?: AbortSignal; authorized?: boolean }): Promise<VisualRun> {
+async function doRun(slug: string, processId: string, opts: { timeoutMs?: number; vars?: Record<string, string>; signal?: AbortSignal; authorized?: boolean; pipeline?: boolean }): Promise<VisualRun> {
   const procs = processesRepo(slug);
   const proc = procs.get(processId);
   if (!proc) throw Object.assign(new Error('Proceso no encontrado'), { statusCode: 404, code: 'process_not_found' });
@@ -257,7 +264,7 @@ async function doRun(slug: string, processId: string, opts: { timeoutMs?: number
   const dir = visualDir(processId, pre.commit);
   let status: VisualRun['status']; let detail: string; let exitCode: number | null = null;
   try {
-    const url = await readyPreview(slug, processId, pre.commit, opts.signal);
+    const url = await readyPreview(slug, processId, pre.commit, opts.signal, !!opts.pipeline);
     await initPreviewData(url);
     fs.rmSync(dir, { recursive: true, force: true }); fs.mkdirSync(dir, { recursive: true });
     const vars = Object.entries(opts.vars ?? {}).map(([k, v]) => `${k}=${v}`).join(',');
