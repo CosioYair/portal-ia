@@ -8,7 +8,7 @@ import { generateEdition, listEditions, renewEdition, revokeEdition, setEditionA
  * HU-214 · Módulo «Ediciones» (solo en el núcleo). Rutas delgadas: validan con zod y delegan en services/editionRegistry.ts.
  * Toda acción exige `authorized: true` en el cuerpo (autorización explícita del propietario). Sin ella, el servicio audita
  * la denegación (`policy:edition-<acción>:denied`) y la ruta responde 403 sin cambiar nada.
- * La raíz del repositorio llega como opción del plugin (registrada en app.ts), sin importar REPO_ROOT aquí.
+ * La raíz del repositorio llega como opción del plugin (registrada en app.ts); este archivo no importa la constante de config.ts.
  */
 export interface EditionRoutesOptions { root: string }
 

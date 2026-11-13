@@ -13,7 +13,7 @@ import { assertCleanTree, buildEditionZip, type EditionZipResult } from './editi
 
 /**
  * HU-214 · Registro de ediciones (solo en el núcleo: base de INTERNAL_WORKSPACE). La raíz del repositorio la pasa quien
- * llama (sin REPO_ROOT aquí, HU-205). Toda acción exige la autorización explícita del propietario y queda auditada en
+ * llama (este archivo no importa la constante de la raíz de config.ts, HU-205). Toda acción exige la autorización explícita del propietario y queda auditada en
  * execution_history como `policy:edition-<acción>:granted|denied`.
  */
 
