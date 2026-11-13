@@ -56,6 +56,7 @@
     { "match": "apps/web/src/system.css", "routes": ["/oficina", "/panel", "/backlog", "/actividad", "/lotes", "/ajustes"] },
     { "match": "apps/web/src/App.tsx", "routes": ["/oficina", "/panel", "/backlog", "/ediciones", "/ajustes"] },
     { "match": "apps/web/src/main.tsx", "routes": ["/oficina", "/panel"] },
+    { "match": "apps/web/src/lib/routes.ts", "routes": ["/oficina", "/panel", "/ediciones", "/ajustes"] },
     { "match": "apps/web/src/lib/", "routes": ["/oficina", "/panel"] },
     { "match": "apps/web/src/components/", "routes": ["/oficina", "/panel", "/backlog"] },
     { "match": "apps/web/src/screens/", "routes": ["/oficina", "/panel", "/backlog"] },

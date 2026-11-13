@@ -5,7 +5,7 @@ import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
  * pantalla «madre» del «Atrás» y adónde ir al cambiar de empresa o proyecto. Una sección nueva se añade aquí y aparece
  * en todos esos sitios a la vez.
  */
-export type SectionId = 'oficina' | 'decisiones' | 'asistente' | 'resumen' | 'trabajo' | 'conocimiento' | 'ajustes';
+export type SectionId = 'oficina' | 'decisiones' | 'asistente' | 'resumen' | 'trabajo' | 'conocimiento' | 'ajustes' | 'ediciones';
 export type IconName = 'building' | 'bell' | 'sparkles' | 'gauge' | 'kanban' | 'book' | 'sliders';
 export interface Section {
   id: SectionId; label: string; path: string; icon: IconName;
@@ -26,7 +26,9 @@ export const SECTIONS: Section[] = [
   { id: 'resumen', label: 'Resumen', path: '/panel', icon: 'gauge', group: 'project', needsProject: true, match: /^\/(panel|etapa|mantenimiento)(\/|$)/, hint: 'Estado del proyecto, atención, equipo y repositorio' },
   { id: 'trabajo', label: 'Trabajo', path: '/backlog', icon: 'kanban', group: 'project', needsProject: true, match: /^\/(backlog|historias|lotes|actividad|procesos|archivo)(\/|$)/, hint: 'Backlog, lotes, actividad y archivo' },
   { id: 'conocimiento', label: 'Conocimiento', path: '/conocimiento', icon: 'book', group: 'project', needsProject: true, match: /^\/conocimiento(\/|$)/, hint: 'Documentos y lecciones del proyecto' },
-  { id: 'ajustes', label: 'Ajustes', path: '/ajustes', icon: 'sliders', group: 'company', needsProject: false, match: /^\/(ajustes|presupuestos|configuracion)(\/|$)/, hint: 'Motores de IA, presupuestos, empresas y sistema' }
+  { id: 'ajustes', label: 'Ajustes', path: '/ajustes', icon: 'sliders', group: 'company', needsProject: false, match: /^\/(ajustes|presupuestos|configuracion)(\/|$)/, hint: 'Motores de IA, presupuestos, empresas y sistema' },
+  // HU-214 · Ediciones: versiones y licencias de las copias del Portal (cada acción pide la autorización del propietario).
+  { id: 'ediciones', label: 'Ediciones', path: '/ediciones', icon: 'book', group: 'company', needsProject: false, match: /^\/ediciones(\/|$)/, hint: 'Versiones y licencias de tus copias' }
 ];
 /** Empresa interna: allí viven el Asistente de Empresa y el propio Portal. */
 export const INTERNAL_SLUG = INTERNAL_WORKSPACE.slug;
