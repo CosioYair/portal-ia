@@ -75,7 +75,9 @@ test('Decisiones aprueba o deniega SOLO con la tarjeta de siempre (cifra, riesgo
 test('cada sección del menú tiene su ruta y las rutas antiguas siguen llevando a su sitio', () => {
   const app = read('App.tsx'); const routes = read('lib/routes.ts');
   const paths = [...routes.matchAll(/\{ id: '[a-z]+', label: '[^']+', path: '([^']+)'/g)].map(m => m[1]);
-  assert.deepEqual(paths, ['/oficina', '/autorizaciones', '/asistente', '/panel', '/backlog', '/conocimiento', '/ajustes']);
+  // Portal IA 3: la sección Trabajo abre en /trabajo (historias y encargos juntos); /backlog sigue existiendo como pestaña.
+  assert.deepEqual(paths, ['/oficina', '/autorizaciones', '/asistente', '/panel', '/trabajo', '/conocimiento', '/ajustes']);
+  assert.ok(app.includes('<Route path="/backlog" '), 'la ruta antigua /backlog sigue existiendo');
   for (const p of paths) assert.ok(app.includes(`<Route path="${p}" `), `falta la ruta ${p}`);
   assert.match(app, /<Route path="\/equipo" element=\{<Redirect to="\/oficina\/organizacion" \/>\} \/>/);
   assert.match(app, /<Route path="\/decisiones" element=\{<Redirect to="\/autorizaciones" \/>\} \/>/);

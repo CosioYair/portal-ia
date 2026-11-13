@@ -136,7 +136,7 @@ test('B · progreso: si la corrección arregla un fallo y aparece OTRO distinto,
   assert.equal(pl.state, 'verified', why(p));
   assert.equal(pl.corrections, 2, 'la segunda ronda se concedió porque el fallo había cambiado');
   assert.ok(pl.corrections <= 1 + PROGRESS_EXTRA);
-  assert.ok(pl.events.some(e => /es distinto del anterior: la corrección previa avanzó/.test(e.message)), 'el registro explica por qué siguió');
+  assert.ok(pl.events.some(e => /ya pasa: la corrección previa avanzó/.test(e.message)), 'el registro explica por qué siguió');
 });
 
 test('B · sin progreso: el MISMO fallo tras corregir se detiene en el tope (no gasta rondas extra)', async () => {
@@ -168,4 +168,105 @@ test('C · la protección sigue: una prueba que no comprueba nada de lo que la h
   const wt = p.result!.applied!.worktree!;
   assert.match(fs.readFileSync(path.join(wt, 'test/ajena.test.mjs'), 'utf8'), /equal\(other, true\)/, 'la prueba ajena queda intacta');
   assert.match(fs.readFileSync(path.join(wt, 'test/menu-wiring.test.mjs'), 'utf8'), /deepEqual\(ROUTES/, 'la vinculada conserva su aserción');
+});
+
+test('D · iterar CONTINÚA sobre la misma rama: no se borra ni se rehace lo hecho; «Aplicar los cambios pedidos» termina el trabajo', async () => {
+  reset();
+  setRules(plan(['src/limits.mjs'], ['El limite pasa a 40']), [
+    { match: R.fix, text: resp('Comentario sin efecto.', P('src/limits.mjs', 'export const FLOOR = 1;', 'export const FLOOR = 1; // nada')) },
+    { match: R.dev, text: resp('Sube el limite.', P('src/limits.mjs', 'export const LIMIT = 10;', 'export const LIMIT = 40;')) }
+  ]);
+  const id = newRun('Limite 40', 'El limite pasa a 40.', { maxCorrections: 1 });
+  const p0 = await run(id);
+  assert.equal(p0.result!.pipeline!.state, 'stopped', why(p0));
+  const branch = p0.result!.applied!.branch; const wt = p0.result!.applied!.worktree!;
+  const before = execSync(`git rev-list --count ${branch}`, { cwd: repo, encoding: 'utf8' }).trim();
+  const W = `/api/workspaces/${S}`;
+  const it = await app.inject({ method: 'POST', url: `${W}/stories/${p0.backlogItemId}/iterate`, payload: { note: 'La prueba del limite debe esperar 40.' } });
+  assert.equal(it.statusCode, 201, it.body);
+  const body = it.json();
+  assert.equal(body.continued, true, 'no crea un proceso nuevo desde main');
+  assert.equal(body.process.id, id, 'es el MISMO proceso');
+  assert.ok(fs.existsSync(wt), 'el worktree sigue vivo');
+  assert.ok(execSync('git branch --list ' + branch, { cwd: repo, encoding: 'utf8' }).includes(branch), 'la rama no se borró');
+  const view = (await app.inject({ method: 'GET', url: `${W}/processes/${id}` })).json();
+  const labels = JSON.stringify(view).match(/Aplicar los cambios pedidos/);
+  assert.ok(labels, 'la pantalla ofrece «Aplicar los cambios pedidos»');
+  setRules(plan(['src/limits.mjs'], ['El limite pasa a 40']), [
+    { match: R.fix, text: resp('Adapto la prueba del limite al valor nuevo.', P('test/limits.test.mjs', 'assert.equal(LIMIT, 10);', 'assert.equal(LIMIT, 40);')) },
+    { match: R.dev, text: resp('No debería llamarse: no se rehace la implementación.', F('src/rehecho.mjs', 'export const rehecho = true;\n')) }
+  ]);
+  const c = await app.inject({ method: 'POST', url: `${W}/processes/${id}/continue`, payload: { authorized: true, budgetUsd: 5 } });
+  assert.equal(c.statusCode, 200, c.body);
+  const end = Date.now() + 60_000; let p = processesRepo(S).get(id)!;
+  while (p.status === 'running' || p.result!.pipeline!.state === 'running') { if (Date.now() > end) throw new Error('tiempo agotado'); await new Promise(r => setTimeout(r, 30)); p = processesRepo(S).get(id)!; }
+  assert.equal(p.result!.pipeline!.state, 'verified', why(p));
+  assert.ok(!fs.existsSync(path.join(wt, 'src/rehecho.mjs')), 'la implementación no se rehízo');
+  assert.match(fs.readFileSync(path.join(wt, 'src/limits.mjs'), 'utf8'), /LIMIT = 40/, 'lo ya hecho se conservó');
+  assert.ok(Number(execSync(`git rev-list --count ${branch}`, { cwd: repo, encoding: 'utf8' }).trim()) > Number(before), 'se añadieron commits sobre la misma rama');
+});
+
+test('E · falta una herramienta del Portal (axe-core): se reconoce como entorno, no como fallo del trabajo', async () => {
+  const { isVisualToolMissing } = await import('../src/services/gauntlet.ts');
+  assert.equal(isVisualToolMissing('Evidencia visual pendiente en el host (commit 91de370): verificación no disponible: axe-core no está instalado (npm i -D axe-core o PORTAL_AXE) · faltan capturas: /oficina@375'), true);
+  assert.equal(isVisualToolMissing('Evidencia visual pendiente en el host (commit abc1234): desbordamiento horizontal en /oficina@375 (12 px)'), false);
+  // (Gauntlet M1) «No disponible» porque la vista previa no arrancó o el proceso seguía en marcha NO es una herramienta que falte.
+  const BUSY = 'Evidencia visual pendiente en el host (commit 1a2b3c4): verificación no disponible · última ejecución: no se pudo ejecutar en el host: La historia está trabajando: su código aún cambia.';
+  assert.equal(isVisualToolMissing(BUSY), false);
+  const { buildStoryFlow } = await import('../src/services/storyFlow.ts');
+  const mk = (reason: string): any => ({ id: 'p-visual', kind: 'story_execution', status: 'done', projectId: 'p1', backlogItemId: 'b1', estimatedUsd: 0, steps: [], createdAt: new Date().toISOString(), result: {
+    changes: [{ path: 'apps/web/src/screens/Backlog.tsx', content: 'x' }], applied: { branch: 'story/x', commit: '1a2b3c4', worktree: repo }, verifications: [],
+    gauntlet: { mode: 'auto', maxRounds: 1, status: 'stopped', reason: null, rounds: [] },
+    pipeline: { state: 'paused', pauseKind: 'gauntlet', reason, config: { ...DEFAULT_PIPELINE }, failures: [], events: [], corrections: 0 } } });
+  const missing: any = buildStoryFlow(mk('Evidencia visual pendiente en el host (commit 1a2b3c4): verificación no disponible: axe-core no está instalado (npm i -D axe-core o PORTAL_AXE) · faltan capturas: /oficina@375.'));
+  assert.match(missing.issue.title, /Falta una herramienta de comprobación visual del Portal/);
+  assert.match(missing.issue.explanation, /axe-core no está instalado/, 'la causa real sigue a la vista');
+  assert.ok(!missing.actions.some((a: any) => /Preparar una iteración/.test(a.label)), 'rehacer la historia no instala la herramienta');
+  assert.ok(missing.actions.some((a: any) => a.primary && /Repetir la verificación visual/.test(a.label)));
+  const busy: any = buildStoryFlow(mk(BUSY));
+  assert.doesNotMatch(busy.issue.title, /Falta una herramienta/, 'la pausa por proceso en marcha conserva su título propio');
+  assert.ok(busy.actions.some((a: any) => /Preparar una iteración/.test(a.label)), 'y sus acciones de siempre');
+  const root = JSON.parse(fs.readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'));
+  assert.match(root.devDependencies['axe-core'] ?? '', /^\d+\.\d+\.\d+$/, 'axe-core está declarado y fijado: una instalación limpia puede pasar la puerta visual');
+});
+
+test('F · (Gauntlet B1) una prueba vinculada sin evidencia de base solo puede adaptar valores: ni cambiar el tipo de comprobacion, ni aserciones triviales, ni renombrar casos', async () => {
+  const { weakensUnprovenUpdate } = await import('../src/services/testUpdateRules.ts');
+  const before = "test('devuelve 409', () => { assert.equal(res.status, 409); assert.match(body, /conflicto/); });\n";
+  assert.equal(weakensUnprovenUpdate(before, before.replace('409);', '410);')), null, 'adaptar el valor esperado se permite');
+  assert.match(weakensUnprovenUpdate(before, before.replace('assert.equal(res.status, 409)', 'assert.ok(true)')) ?? '', /tipo|siempre pasa/);
+  assert.match(weakensUnprovenUpdate(before, before.replace('assert.match(', 'assert.doesNotMatch(')) ?? '', /tipo/);
+  assert.match(weakensUnprovenUpdate(before, before.replace("'devuelve 409'", "'otra cosa'")) ?? '', /renombra o quita/);
+  assert.match(weakensUnprovenUpdate(before, before + "test('extra', () => { assert.ok(true); });\n") ?? '', /siempre pasa/);
+  assert.match(weakensUnprovenUpdate(before, before.replace("test('devuelve", "test.skip('devuelve")) ?? '', /skip/);
+  // El vinculo exige una ruta o un import entre comillas: un nombre suelto en un comentario no vale.
+  assert.equal(coversStoryChange('// ver routes.mjs para el detalle\n', ['src/routes.mjs']), false);
+  assert.equal(coversStoryChange("import x from './api.ts';", ['src/a.ts']), false);
+});
+
+test('F · (Gauntlet B1) en el pipeline: reescribir la asercion de una prueba vinculada para que pase se RECHAZA y la prueba queda intacta', async () => {
+  reset();
+  setRules(plan(['src/routes.mjs'], ['Hay una ruta /archivo']), [
+    { match: R.fix, text: resp('Sin cambios.') },
+    { match: R.dev, text: resp('Anade la ruta y neutraliza la prueba.',
+      P('src/routes.mjs', "['/oficina', '/ajustes']", "['/oficina', '/ajustes', '/archivo']"),
+      P('test/menu-wiring.test.mjs', "assert.deepEqual(ROUTES, ['/oficina', '/ajustes']);", 'assert.ok(true);')) }
+  ]);
+  const p = await run(newRun('Ruta de archivo', 'Hay una ruta /archivo.', { maxCorrections: 0 }));
+  const rej = (p.result!.manifest!.rejected ?? []).filter(r => r.error);
+  assert.ok(rej.some(r => r.path === 'test/menu-wiring.test.mjs' && /debilitar/.test(r.error!)), JSON.stringify(rej));
+  assert.match(fs.readFileSync(path.join(p.result!.applied!.worktree!, 'test/menu-wiring.test.mjs'), 'utf8'), /deepEqual\(ROUTES, \['\/oficina', '\/ajustes'\]\)/);
+  assert.notEqual(p.result!.pipeline!.state, 'verified', 'con la prueba intacta y en rojo, no se da por verificada');
+});
+
+test('G · (Gauntlet M5) progreso = algo de lo que fallaba ya no falla; A -> A+B es una regresion y no concede rondas', async () => {
+  const { verificationProgress } = await import('../src/services/storyPipeline.ts');
+  const f = (...s: string[]) => s.map(signature => ({ signature }));
+  assert.equal(verificationProgress(f('test|a:uno,a:dos'), 'test', 'test|a:dos'), true, 'uno se arreglo');
+  assert.equal(verificationProgress(f('test|a:uno'), 'test', 'test|b:otro'), true, 'el anterior desaparecio');
+  assert.equal(verificationProgress(f('test|a:uno'), 'test', 'test|a:uno,b:otro'), false, 'regresion: sigue lo anterior y hay mas');
+  assert.equal(verificationProgress(f('test|a:uno'), 'test', 'test|a:uno'), false, 'el mismo fallo');
+  assert.equal(verificationProgress(f('qa|x', 'output|y'), 'test', 'test|a:uno'), false, 'las firmas de QA o de formato no cuentan como verificacion previa');
+  assert.equal(verificationProgress(f('typecheck|e1'), 'test', 'test|a:uno'), false, 'otro comando no es referencia');
+  assert.equal(verificationProgress([], 'test', 'test|a:uno'), false);
 });

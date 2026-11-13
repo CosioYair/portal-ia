@@ -17,6 +17,7 @@ import { createStoryProcess, stepByRole, supersedePreviousIterations } from './s
 import { iterationNumbers } from './inbox.ts';
 import { lessonsRepo } from './lessons.ts';
 import { discardBranch } from './repoWrite.ts';
+import { ownerRoundPossible, prepareOwnerRound } from './storyUnits.ts';
 import { flowOptions } from './processView.ts';
 import { issueForPrompt } from './storyFlow.ts';
 import { activationOf } from './system.ts';
@@ -275,10 +276,24 @@ export async function tasksFromIssue(slug: string, itemId: string): Promise<Stor
  * `discardApplied`); anterior a v0.12 → descartada conservando la rama; integrada → parte de main.
  * Una historia cerrada o descartada solo itera con `reopen` (queda registrado en su historial).
  */
-export async function iterateStory(slug: string, itemId: string, note: string | null, opts: { reopen?: boolean; discardApplied?: boolean } = {}): Promise<{ process: Process; context: string; actions: string[] }> {
+export async function iterateStory(slug: string, itemId: string, note: string | null, opts: { reopen?: boolean; discardApplied?: boolean } = {}): Promise<{ process: Process; context: string; actions: string[]; continued?: boolean }> {
   const ctx = await storyContext(slug, itemId); const item = ctx.item; const st = ctx.iteration;
   if (st.state === 'in_progress') throw conflict('Ya hay una iteración en curso o pendiente de autorización.', 'iteration_in_progress');
   if (st.needsReopen && !opts.reopen) throw conflict(`La historia está ${item.status === 'done' ? 'completada' : 'descartada'}: reábrela para crear una nueva iteración.`, 'story_closed');
+  // Portal IA 3 · por defecto una iteración CONTINÚA sobre la rama que ya existe: lo hecho y verificado se conserva y solo
+  // se corrige lo pedido (antes cada iteración borraba la rama y rehacía la historia desde main: HU-214 lo hizo siete
+  // veces). Descartar y rehacer desde cero solo ocurre si el propietario lo pide de forma explícita (discardApplied).
+  {
+    const last = ctx.lastProcess ? processesRepo(slug).get(ctx.lastProcess.id) : undefined;
+    if (!opts.discardApplied && !st.needsReopen && ownerRoundPossible(last) && !last!.result?.pipeline?.ownerRequest) {
+      const issue = ctx.lastProcess?.guidance?.flow?.issue;
+      const text = (note ?? '').trim() || (issue && issue.kind !== 'manual_failed' ? `Corrige lo que detuvo la historia: ${issue.title}. ${issueForPrompt(issue, ctx.lastProcess!)}` : 'Revisa la entrega frente al criterio de aceptación y corrige lo que falte.');
+      const p = prepareOwnerRound(slug, last!.id, text, failedSteps(ctx).map(f => `${f.text}${f.comment ? ` → ${f.comment}` : ''}`));
+      const cur = backlogRepo(slug).get(item.id)!;
+      if (cur.status === 'blocked') backlogRepo(slug).setStatus(item.id, 'review', last!.id);
+      return { process: p, context: `Se continúa sobre la rama ${last!.result!.applied!.branch}: lo hecho se conserva.`, actions: [`se continúa sobre la misma rama (${last!.result!.applied!.branch}); no se descarta ni se rehace lo ya verificado`], continued: true };
+    }
+  }
   if (st.needsDiscardConfirmation && !opts.discardApplied) throw conflict(`La iteración anterior está aplicada en ${st.branch} sin integrar. Para iterar hay que descartar su worktree y su rama: confírmalo explícitamente.`, 'discard_confirmation_required', { branch: st.branch });
   const fails = failedSteps(ctx); const open = ctx.tasks.filter(t => t.status === 'open');
   const prev = ctx.lastProcess; const actions: string[] = [];

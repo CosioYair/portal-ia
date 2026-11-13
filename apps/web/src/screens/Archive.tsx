@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { procLabel } from '../lib/processView.ts';
 import { Link } from 'react-router-dom';
 import type { BacklogItem, ProjectArchive } from '@portal-ia/domain';
 import { api } from '../lib/api.ts';
@@ -9,7 +10,7 @@ import { Chip, Icon, Notice } from '../components/ui.tsx';
 import { EmptyState, Tile, WorkTabs } from '../components/kit.tsx';
 import { Disclosure } from '../components/Disclosure.tsx';
 
-const PROC_STATUS: Record<string, string> = { running: 'en ejecución', done: 'completado', pending_authorization: 'pendiente de autorización', failed: 'con errores', cancelled: 'cancelado', budget_exceeded: 'presupuesto agotado' };
+/* Portal IA 3: el texto del estado sale de procLabel (un solo criterio en todo el Portal). */
 
 /** Archivo histórico: historias y procesos de etapas anteriores. Solo lectura; una historia puede restaurarse al backlog. */
 export function Archive() {
@@ -72,7 +73,7 @@ export function Archive() {
           <section className="card">
             <div className="card-h"><div className="h3">Procesos archivados <span className="muted" style={{ fontWeight: 400 }}>· {procs.length}</span></div></div>
             <div style={{ display: 'flex', flexDirection: 'column' }}>
-              {procs.map(p => <button key={p.id} className="arow" onClick={() => navigate(`/procesos/${p.id}`)}><span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{p.title}</span><span className="small muted">{PROC_STATUS[p.status] ?? p.status} · {new Date(p.createdAt).toLocaleDateString('es-MX')}</span></span><span className="small mono muted">{fmtUsd(p.spentUsd)}</span></button>)}
+              {procs.map(p => <button key={p.id} className="arow" onClick={() => navigate(`/procesos/${p.id}`)}><span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{p.title}</span><span className="small muted">{procLabel(p).label} · {new Date(p.createdAt).toLocaleDateString('es-MX')}</span></span><span className="small mono muted">{fmtUsd(p.spentUsd)}</span></button>)}
             </div>
           </section>
         </>}

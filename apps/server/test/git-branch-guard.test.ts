@@ -142,11 +142,10 @@ test('API: GET de estado y POST fuera de main responden con motivo claro (409) s
     // Sin repositorio (p. ej. dentro del sandbox Docker, donde el worktree no ve su .git) no hay HEAD que comparar.
     const headBefore = body.reasonCode === 'NOT_A_REPO' ? null : git(REPO_ROOT, 'rev-parse', 'HEAD');
     const post = await app.inject({ method: 'POST', url: '/api/portal/integration', payload: { branch: 'portal-ia/hu-143' } });
-    assert.equal(post.statusCode, 409);
-    assert.equal(post.json().code, body.reasonCode);
-    if (headBefore) assert.equal(git(REPO_ROOT, 'rev-parse', 'HEAD'), headBefore, 'no se hizo ningún commit');
+    assert.equal(post.statusCode, 410, 'la integracion directa (sin verificacion ni QA) esta retirada');
+    if (headBefore) assert.equal(git(REPO_ROOT, 'rev-parse', 'HEAD'), headBefore, 'no se hizo ningun commit');
   }
-  const invalid = await app.inject({ method: 'POST', url: '/api/portal/integration', payload: {} });
-  assert.equal(invalid.statusCode, 400);
+  const gone = await app.inject({ method: 'POST', url: '/api/portal/integration', payload: { branch: 'cualquiera' } });
+  assert.equal(gone.statusCode, 410); assert.equal(gone.json().code, 'removed');
   await app.close();
 });

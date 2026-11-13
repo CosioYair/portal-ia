@@ -269,6 +269,14 @@ export const VISUAL_PAUSE_PREFIX = 'Evidencia visual pendiente en el host';
 /** EN-027 · ¿Este motivo de pausa 'gauntlet' es el de la puerta visual (falta la evidencia en el host)? */
 export const isVisualPause = (reason: string | null | undefined): boolean =>
   String(reason ?? '').trimStart().toLowerCase().startsWith(VISUAL_PAUSE_PREFIX.toLowerCase());
+/**
+ * Portal IA 3 · ¿La pausa visual se debe a que al Portal le falta una herramienta (axe-core, Playwright o Chromium)?
+ * Es un problema del entorno, no del trabajo: no se ofrece corregir ni iterar, y no deja lección al equipo.
+ */
+export const isVisualToolMissing = (reason: string | null | undefined): boolean =>
+  // (Gauntlet M1) Solo los motivos exactos que emite scripts/visual-check.mjs cuando falta una herramienta. «No disponible»
+  // a secas también ocurre cuando la vista previa no arranca o el proceso seguía en marcha: eso NO es una herramienta.
+  /axe-core no (?:est[aá] instalado|disponible)|Playwright no est[aá] instalado|Chromium no disponible/i.test(String(reason ?? ''));
 /** EN-027 · Pausa tras «Repetir la verificación visual (sin IA)»: la evidencia pasó y falta la ronda del Evaluador (con IA). */
 export const VISUAL_PASSED_PREFIX = 'Evidencia visual superada en el host';
 export const isVisualPassedPause = (reason: string | null | undefined): boolean =>

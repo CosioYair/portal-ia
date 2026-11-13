@@ -795,6 +795,19 @@ export const settleUnit = (ctx: StoryRunCtx, outputs: DevOutput[], config: Pipel
 
 /** Rondas extra, como mucho, que se conceden por encima de maxCorrections cuando cada fallo es distinto del anterior (hay progreso). */
 export const PROGRESS_EXTRA = 2;
+/**
+ * ¿La verificación de ahora avanzó respecto a la anterior del mismo comando? Sí solo si algún fallo anterior ya no está.
+ * `failures` es la lista ANTES de anotar el fallo actual. Las firmas son «comando|prueba1,prueba2…» (verificationSignature).
+ */
+export function verificationProgress(failures: { signature: string }[], command: string, sig: string): boolean {
+  const prefix = `${command}|`;
+  const prev = failures.filter(f => f.signature.startsWith(prefix)).at(-1);
+  if (!prev || prev.signature === sig || !sig.startsWith(prefix)) return false;
+  const set = (s: string) => new Set(s.slice(prefix.length).split(',').map(x => x.trim()).filter(Boolean));
+  const before = set(prev.signature); const now = set(sig);
+  if (!before.size) return false;
+  return [...before].some(x => !now.has(x));
+}
 export function bumpFailure(list: PipelineStatus['failures'], signature: string, label: string) {
   const f = list.find(x => x.signature === signature);
   return f ? list.map(x => x === f ? { ...x, count: x.count + 1 } : x) : [...list, { signature, count: 1, label }];
@@ -1081,9 +1094,11 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
         // Portal IA 3 · el tope mide falta de progreso, no un número fijo: si el fallo de ahora es DISTINTO de los
         // anteriores (la corrección previa arregló lo suyo y apareció otra cosa), se concede una ronda más, acotada
         // (PROGRESS_EXTRA) y siempre dentro de las llamadas y la duración autorizadas. El mismo fallo nunca la obtiene.
-        const progressed = !p.failures.some(f => f.signature === sig) && p.failures.length > 0 && p.corrections < cfg.maxCorrections + PROGRESS_EXTRA;
-        if (p.corrections >= cfg.maxCorrections && progressed) emit(ctx, 'verify', `El fallo de ${failed.command} es distinto del anterior: la corrección previa avanzó. Se concede una ronda más (${p.corrections + 1} de ${cfg.maxCorrections + PROGRESS_EXTRA} como máximo) en lugar de detenerse.`);
-        if (p.corrections >= cfg.maxCorrections && !progressed) throw new PipelinePause('limit', `${failed.command} sigue fallando y se alcanzó el máximo de correcciones autorizadas (${cfg.maxCorrections}). Lo hecho se conserva.`);
+        // (Gauntlet M5) «Distinto» no basta: A → A+B es una regresión. Hay progreso solo si algo de lo que fallaba en la
+        // verificación anterior del MISMO comando ya no falla; las firmas de QA o de formato no cuentan.
+        const progressed = p.corrections < cfg.maxCorrections + PROGRESS_EXTRA && verificationProgress(p.failures, failed.command, sig);
+        if (p.corrections >= cfg.maxCorrections && progressed) emit(ctx, 'verify', `Parte de lo que fallaba en ${failed.command} ya pasa: la corrección previa avanzó. Se concede una ronda más (${p.corrections + 1} de ${cfg.maxCorrections + PROGRESS_EXTRA} como máximo, dentro de las llamadas autorizadas) en lugar de detenerse.`);
+        if (p.corrections >= cfg.maxCorrections && !progressed) throw new PipelinePause('limit', `${failed.command} sigue fallando tras ${p.corrections} corrección(es) (autorizadas: ${cfg.maxCorrections}${p.corrections > cfg.maxCorrections ? `, más ${p.corrections - cfg.maxCorrections} por avance` : ''}) y la última no arregló nada de lo que fallaba. Lo hecho se conserva.`);
         emit(ctx, 'verify', FAIL_MSG[failed.command] ?? `${failed.command} falla. El equipo está preparando una corrección.`, { phase: 'correcting', detail: verificationEvidence(failed).split('\n').slice(0, 6).join(' ') });
         if (units) { units.startRound(ctx, cfg, 'verification', units.verificationFindings(failed), { testUpdatable: units.behaviorTests(ctx, failed) }); continue; }
         const d = diagnosticsFor(failed);

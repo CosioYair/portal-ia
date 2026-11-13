@@ -463,7 +463,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
         <strong className="sm13">{issue ? 'Pedir al equipo que lo corrija' : 'Nueva iteración'}</strong>
         <span className="small">{issue ? 'El equipo recibirá automáticamente el problema (comando, errores, archivos, evidencia), los intentos anteriores, las tareas abiertas y el criterio vigente.' : 'El equipo recibirá el contexto acumulado de la historia.'}</span>
         <IterationComposer slug={slug} itemId={itemId} iteration={composer.iteration} nextNumber={composer.iterations + 1} placeholder="Indicaciones adicionales para el equipo (opcional)"
-          onCreated={() => { flash('Iteración correctiva creada: revísala y autorízala'); setComposer(null); if (variant === 'story' && onOpenIterations) onOpenIterations(); else navigate(`/historias/${itemId}#iteraciones`); }} />
+          onCreated={r => { setComposer(null); if (r.continued) { flash('Anotado sobre lo ya hecho: pulsa «Aplicar los cambios pedidos» para que el equipo siga'); void reload(); if (variant !== 'story') navigate(`/historias/${itemId}`); return; } flash('Iteración correctiva creada: revísala y autorízala'); if (variant === 'story' && onOpenIterations) onOpenIterations(); else navigate(`/historias/${itemId}#iteraciones`); }} />
         <button className="btn btn-ghost btn-sm" style={{ alignSelf: 'flex-start' }} onClick={() => setComposer(null)}>Cancelar</button>
       </div>}
 

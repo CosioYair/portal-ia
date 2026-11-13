@@ -25,6 +25,7 @@
     "test": "npm run test --workspaces --if-present"
   },
   "devDependencies": {
+    "axe-core": "4.10.3",
     "playwright": "^1.64.1",
     "typescript": "^5.9.3"
   }

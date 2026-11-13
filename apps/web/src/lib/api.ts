@@ -281,6 +281,8 @@ export const api = {
   phasePreview: (slug: string, projectId: string, name?: string) => request<PhaseTransitionPreview>(`/api/workspaces/${slug}/projects/${projectId}/phase/preview${name ? `?name=${encodeURIComponent(name)}` : ''}`),
   startPhase: (slug: string, projectId: string, name: string) => request<PhaseTransition>(`/api/workspaces/${slug}/projects/${projectId}/phase`, { method: 'POST', body: JSON.stringify({ name, authorized: true }) }),
   revertPhase: (slug: string, projectId: string, id: string, reason?: string) => request<PhaseTransition>(`/api/workspaces/${slug}/projects/${projectId}/phase/${id}/revert`, { method: 'POST', body: JSON.stringify({ authorized: true, reason }) }),
+  /** Portal IA 3: todo el trabajo pedido (historias y encargos) con su estado veraz. */
+  work: (slug: string, projectId: string) => request<WorkView>(`/api/workspaces/${slug}/projects/${projectId}/work`),
   archive: (slug: string, projectId: string) => request<ProjectArchive>(`/api/workspaces/${slug}/projects/${projectId}/archive`),
   restoreStory: (slug: string, id: string) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/restore`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   backlog: (slug: string, projectId: string) => request<BacklogItem[]>(`/api/workspaces/${slug}/projects/${projectId}/backlog`),
@@ -375,7 +377,7 @@ export const api = {
   storySetTask: (slug: string, id: string, taskId: string, status: 'open' | 'done') => request<StoryTask>(`/api/workspaces/${slug}/stories/${id}/tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
   storyDeleteTask: (slug: string, id: string, taskId: string) => request<{ ok: boolean }>(`/api/workspaces/${slug}/stories/${id}/tasks/${taskId}`, { method: 'DELETE' }),
   /** reopen: reabre una historia cerrada · discardApplied: confirma descartar el worktree y la rama de la iteración aplicada sin integrar. */
-  storyIterate: (slug: string, id: string, note?: string | null, opts: { reopen?: boolean; discardApplied?: boolean } = {}) => request<{ process: Process; context: string; actions: string[] }>(`/api/workspaces/${slug}/stories/${id}/iterate`, { method: 'POST', body: JSON.stringify({ note: note ?? null, ...opts }) }),
+  storyIterate: (slug: string, id: string, note?: string | null, opts: { reopen?: boolean; discardApplied?: boolean } = {}) => request<{ process: Process; context: string; actions: string[]; continued?: boolean }>(`/api/workspaces/${slug}/stories/${id}/iterate`, { method: 'POST', body: JSON.stringify({ note: note ?? null, ...opts }) }),
   // M4 · lecciones validadas
   lessons: (slug: string, projectId?: string | null, status?: string) => { const q = new URLSearchParams(); if (projectId) q.set('projectId', projectId); if (status) q.set('status', status); const qs = q.toString(); return request<Lesson[]>(`/api/workspaces/${slug}/lessons${qs ? `?${qs}` : ''}`); },
   createLesson: (slug: string, input: { projectId: string | null; title: string; lessonText: string; role?: string | null; tags?: string[] }) => request<Lesson>(`/api/workspaces/${slug}/lessons`, { method: 'POST', body: JSON.stringify(input) }),
@@ -524,3 +526,7 @@ export const wizardDraft = (slug: string, need: string, maxUsd: number) =>
 /** Crea el agente (sin IA) y envía también la necesidad y las habilidades (las del perfil y las añadidas a mano). */
 export const createAgentWizard = (slug: string, input: WizardCreateInput) =>
   request<import('@portal-ia/domain').Agent>(`${wsUrl(slug)}/agents/wizard`, { method: 'POST', body: JSON.stringify({ ...input, need: input.need?.trim() ? input.need.trim().slice(0, 4000) : null, skills: input.skills ?? [] }) });
+
+export type WorkSegment = 'needs_you' | 'running' | 'todo' | 'done';
+export interface WorkItem { kind: 'story' | 'assignment'; id: string; code: string; title: string; ask: string; state: { key: string; label: string; meaning: string; tone: '' | 'ok' | 'warn' | 'err'; dot: '' | 'ok' | 'pulse' | 'err'; needsOwner: boolean; open: boolean }; segment: WorkSegment; processId: string | null; conversationId: string | null; dependsOn: string | null; updatedAt: string }
+export interface WorkView { items: WorkItem[]; counts: Record<WorkSegment, number> }

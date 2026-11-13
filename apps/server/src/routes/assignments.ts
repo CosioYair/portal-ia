@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { acquireWork } from '../services/executionLocks.ts';
 import { z } from 'zod';
+import { workView } from '../services/work.ts';
 import { workspacesRepo } from '../db/platform.ts';
 import { acceptAssignment, assignmentAuthorizationPreview, assignmentView, authorizeAssignment, cancelAssignment, createAssignment, listAssignments, requestAssignmentChanges, updateAssignment } from '../services/assignments.ts';
 
@@ -21,6 +22,11 @@ export async function assignmentRoutes(app: FastifyInstance) {
   const authorized = (body: unknown) => z.object({ authorized: z.literal(true) }).passthrough().safeParse(body ?? {}).success;
   const DENIED = { error: 'Esta acción exige tu autorización explícita.', code: 'authorization_required' };
 
+  // Portal IA 3: todo el trabajo pedido (historias y encargos) en una sola lista, con su estado veraz. Solo lectura.
+  app.get('/api/workspaces/:slug/projects/:projectId/work', async (req, reply) => {
+    const { slug, projectId } = req.params as any; if (!guard(slug, reply)) return;
+    return workView(slug, projectId);
+  });
   app.get('/api/workspaces/:slug/assignments', async (req, reply) => {
     const { slug } = req.params as any; if (!guard(slug, reply)) return;
     const { projectId } = req.query as any;

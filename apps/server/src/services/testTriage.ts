@@ -45,7 +45,7 @@ export function errorKernel(message: string): string {
 }
 
 /** Pruebas cuyo cambio debilitaría controles del Portal: nunca se «actualizan» por un cambio de comportamiento. */
-export const SENSITIVE_TEST = /propietario|owner|pol[ií]tica|policy|seguridad|security|sandbox|bridge|puente|capabilit|capacidad|git-?safety|permis|secret|credencial|crypto|cifrado/i;
+export const SENSITIVE_TEST = /guard|autoriz|auth|budget|presup|integr|puerta|cierre|lote|propietario|owner|pol[ií]tica|policy|seguridad|security|sandbox|bridge|puente|capabilit|capacidad|git-?safety|permis|secret|credencial|crypto|cifrado/i;
 
 /**
  * Clasifica las pruebas que fallan con la historia frente a la base.

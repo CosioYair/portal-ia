@@ -70,11 +70,13 @@ test('el punto de proceso del Dashboard va con StatusIcon y texto accesible', ()
   const line = dash.split(/\r?\n/).find(l => l.includes('procs.slice(0, 4).map('));
   assert.ok(line, 'no se encontró la lista de procesos del Dashboard');
   // El texto accesible del icono es el mismo que el visible (PROC_LABEL), para que un proceso cancelado no se anuncie como «Pendiente».
-  assert.ok(line.includes('<StatusIcon state={procState(p.status)} label={PROC_LABEL[p.status] ?? p.status} showLabel={false} />'), 'el StatusIcon del proceso debe llevar el texto accesible de PROC_LABEL');
-  assert.ok(line.includes('{PROC_LABEL[p.status] ?? p.status}</span>'), 'la fila del proceso debe mostrar también el texto del estado');
-  assert.match(dash, /cancelled: 'cancelado'/);
+  // Portal IA 3: el texto sale de procLabel (un solo criterio en todo el Portal; un proceso detenido ya no dice «completado»).
+  assert.ok(line.includes('<StatusIcon state={procStateOf(p)} label={procLabel(p).label} showLabel={false} />'), 'el StatusIcon del proceso debe llevar el texto accesible de procLabel');
+  assert.ok(line.includes('{procLabel(p).label}</span>'), 'la fila del proceso debe mostrar también el texto del estado');
+  assert.match(dash, /import \{ procLabel \} from '\.\.\/lib\/processView\.ts'/);
+  assert.doesNotMatch(dash, /done: 'completado'/, 'el Dashboard no tiene un mapa propio que llame «completado» a un proceso detenido');
   assert.ok(!/className=\{?[`'"]dot\b/.test(line), 'la fila del proceso no debe usar un punto solo de color');
-  assert.match(dash, /function procState\(status: string\): PortalState/);
+  assert.match(dash, /function procStateOf\(p: Process\): PortalState/);
 });
 
 test('apps/web no añade dependencias', () => {

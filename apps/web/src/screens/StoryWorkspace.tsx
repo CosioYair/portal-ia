@@ -291,7 +291,7 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
                 </div></Notice> : ctx.iteration.state !== 'in_progress' && <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   <div className="eyebrow">{ctx.iteration.needsReopen ? 'Reabrir la historia y crear una nueva iteración' : 'Nueva iteración'}</div>
                   <IterationComposer key={`${ctx.iterations}:${note}`} slug={slug} itemId={it.id} iteration={ctx.iteration} nextNumber={ctx.iterations + 1} initialNote={note}
-                    onCreated={async () => { setNote(''); flash('Iteración creada: autorízala con un presupuesto'); await load(); }} />
+                    onCreated={async r => { setNote(''); flash(r.continued ? 'Anotado sobre lo ya hecho: pulsa «Aplicar los cambios pedidos» para que el equipo siga' : 'Iteración creada: autorízala con un presupuesto'); await load(); if (r.continued) window.scrollTo({ top: 0 }); }} />
                 </div>}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid var(--color-divider)', paddingTop: 10 }}>
                   <div className="eyebrow">Historial de autorizaciones superadas</div>

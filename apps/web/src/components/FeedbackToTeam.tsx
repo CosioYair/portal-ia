@@ -44,7 +44,7 @@ export function FeedbackToTeam({ slug, itemId, failed, flush }: { slug: string; 
         <div className="small" style={{ marginBottom: 6 }}><strong>El equipo recibirá</strong> {failed.length} paso(s) con falla y sus comentarios, {ctx.tasks.filter(t => t.status === 'open').length} tarea(s) abiertas, el criterio de aceptación vigente y tu nota.</div>
         <IterationComposer slug={slug} itemId={itemId} iteration={ctx.iteration} nextNumber={ctx.iterations + 1} beforeSubmit={flush}
           placeholder="Nota adicional para el equipo (opcional): qué esperabas ver, prioridades, qué no tocar…"
-          onCreated={() => { flash('Iteración creada con tu feedback: revísala y autorízala'); navigate(`/historias/${itemId}#iteraciones`); }} />
+          onCreated={r => { flash(r.continued ? 'Anotado sobre lo ya hecho: pulsa «Aplicar los cambios pedidos» para que el equipo siga' : 'Iteración creada con tu feedback: revísala y autorízala'); if (r.continued) navigate(`/historias/${itemId}`); else navigate(`/historias/${itemId}#iteraciones`); }} />
       </div>}
       {err && <Notice kind="err">{err}</Notice>}
     </div>

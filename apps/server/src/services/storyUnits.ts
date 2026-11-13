@@ -13,6 +13,7 @@ import { requirePolicy } from './executionPolicy.ts';
 import { applyChanges, changesSinceBase, commitInWorktree, hashText, mainBranch, readRepoFile, safeRelPath } from './repoWrite.ts';
 import { diagnoseFailure, diagnosisPrompt, failingTests, staleCorrectionUnits } from './failureDiagnosis.ts';
 import { isPreexisting, SENSITIVE_TEST, triageText, weakensTest } from './testTriage.ts';
+import { weakensUnprovenUpdate } from './testUpdateRules.ts';
 import { verificationEvidence, zeroTests } from './qaGate.ts';
 import { DEV_MAX_TOKENS, DROP_FORMAT, FILE_FORMAT, manualTestFormatFor, PATCH_ONLY_FORMAT, UNIT_FORMAT, sys } from './storyPrompts.ts';
 import { isPortalRuntime } from './storyExecution.ts';
@@ -448,7 +449,8 @@ export function coversStoryChange(testSource: string, storyPaths: string[]): boo
   return storyPaths.some(p => {
     const file = p.split('/').pop() ?? p;
     const stem = file.replace(/\.[^.]+$/, '');
-    return testSource.includes(p) || testSource.includes(file) || (stem.length >= 4 && new RegExp(`[/'"\`]${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.[cm]?[jt]sx?)?['"\`]`).test(testSource));
+    // Gauntlet B1: solo cuenta la ruta completa o un import/ruta entre comillas; un nombre suelto en un comentario, no.
+    return testSource.includes(p) || (file.length >= 6 && stem.length >= 4 && new RegExp(`[/'"\`]${stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.[cm]?[jt]sx?)?['"\`]`).test(testSource));
   });
 }
 function scopeCheck(man: StoryManifest, unit: WorkUnit, s: Settled, base: ProposedChange[], wt: string | null = null): ProposedChange[] {
@@ -469,7 +471,7 @@ function scopeCheck(man: StoryManifest, unit: WorkUnit, s: Settled, base: Propos
     const linked = existingTest && !restores && !!wt && coversStoryChange(readRepoFile(wt, c.path, 400_000) ?? '', storyPaths);
     const behavior = ((unit.testUpdatable ?? []).includes(c.path) || linked) && c.action !== 'delete' && !SENSITIVE_TEST.test(c.path);
     // Aun así, nunca para debilitarla (sin IA): ni skip/todo/only, ni menos casos, ni menos aserciones.
-    const weak = existingTest && behavior && !restores && c.content !== null && wt ? weakensTest(readRepoFile(wt, c.path, 400_000) ?? '', c.content) : null;
+    const weak = existingTest && behavior && !restores && c.content !== null && wt ? ((unit.testUpdatable ?? []).includes(c.path) ? weakensTest : weakensUnprovenUpdate)(readRepoFile(wt, c.path, 400_000) ?? '', c.content) : null;
     if (weak) return { ...c, error: `«${c.path}»: la actualización ${weak}; eso debilitaría la verificación. Adapta la prueba al comportamiento nuevo sin quitar comprobaciones, o corrige el código.` };
     if (existingTest && !restores && !behavior) return { ...c, error: `«${c.path}» es una prueba que ya existía y no está en el plan: no se modifica para que pase (debilitaría la verificación). Corrige el código que la rompe; si esta historia debe cambiar esa prueba, el propietario la añade al plan. Restaurar su contenido original sí se permite.` };
     if (full.has(c.path) && c.before > 0 && d?.status === 'delivered' && d.unitId !== unit.id) return { ...c, error: `Ya se entregó en otra unidad (${d.unitId}): no se regenera un archivo terminado. Para cambiarlo, usa patch sobre su contenido actual.` };
@@ -508,9 +510,10 @@ async function applyUnit(ctx: StoryRunCtx, unitId: string, s: Settled): Promise<
     const flagged = changes.filter(c => c.error || c.warning).map(c => ({ path: c.path, error: c.error ?? null, warning: c.warning ?? null, unitId, at: now() }));
     if (flagged.length) m.rejected = [...(m.rejected ?? []), ...flagged].slice(-60);
     // Pruebas existentes actualizadas por cambio de comportamiento (con la evidencia de la línea base): visibles para QA y para ti.
-    const preexisting = new Set(valid.filter(c => isTestEntry(c.path) && c.before > 0 && !m.deliverables.find(x => x.path === c.path)?.planned).map(c => c.path));
+    const ownTests = new Set((resultOf(ctx).changes ?? []).filter(c => !c.error && c.action === 'create').map(c => c.path));
+    const preexisting = new Set(valid.filter(c => isTestEntry(c.path) && c.before > 0 && !ownTests.has(c.path) && !m.deliverables.find(x => x.path === c.path)?.planned).map(c => c.path));
     const updated = files.filter(f => (u.testUpdatable ?? []).includes(f) || preexisting.has(f));
-    if (updated.length) m.testUpdates = [...(m.testUpdates ?? []), ...updated.map(f => ({ path: f, unitId, commit, reason: `Pasa en la base y falla con la historia: ${(u.findings ?? []).map(x => clip(x.text, 200)).join(' · ')}. Resumen del equipo: ${clip(s.meta?.summary ?? '', 400) || '—'}`, at: now() }))].slice(-30);
+    if (updated.length) m.testUpdates = [...(m.testUpdates ?? []), ...updated.map(f => ({ path: f, unitId, commit, reason: !(u.testUpdatable ?? []).includes(f) ? `Vinculada a un archivo que la historia cambia; SIN evidencia de linea base: revisa su diff antes de aceptar. Resumen del equipo: ${clip(s.meta?.summary ?? '', 400) || '-'}` : `Pasa en la base y falla con la historia: ${(u.findings ?? []).map(x => clip(x.text, 200)).join(' · ')}. Resumen del equipo: ${clip(s.meta?.summary ?? '', 400) || '—'}`, at: now() }))].slice(-30);
   });
   mergeMeta(ctx, unit, s.meta);
   // Lo rechazado por las reglas de ámbito queda registrado (evidencia para el propietario y para las lecciones).

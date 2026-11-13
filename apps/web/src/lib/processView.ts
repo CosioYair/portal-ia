@@ -1,4 +1,4 @@
-import type { Process } from '@portal-ia/domain';
+import { ownerProcessState, type Process } from '@portal-ia/domain';
 
 /**
  * HU-167 · Funciones puras de la vista de procesos (sin IO, sin React ni DOM): se pueden importar desde las pruebas de Node.
@@ -19,14 +19,9 @@ export const P_LABEL: Record<Process['status'], ProcStatusLabel> = {
  * (HU-159 figuraba «Completado» mientras esperaba una autorización). Pausado = espera tu decisión; detenido = se paró.
  */
 export function procLabel(p: Process): ProcStatusLabel {
-  const pl = p.result?.pipeline;
-  // En marcha pero esperando turno (máximo de ejecuciones de Claude Code a la vez): en cola, no bloqueado ni trabajando.
-  if (p.status === 'running' && p.steps.some(s => s.status === 'running' && s.live?.state === 'queued')) return { label: 'En cola · espera un hueco', tone: '', dot: 'pulse' };
-  // Integrada en main: una pausa anterior (p. ej. el candidato antes de integrar) ya no es su estado.
-  if (p.status === 'done' && p.result?.merged) return { label: 'Integrada en main', tone: 'ok', dot: '' };
-  if (p.status === 'done' && pl?.state === 'paused') return { label: 'Pausado · espera tu decisión', tone: 'warn', dot: '' };
-  if (p.status === 'done' && pl?.state === 'stopped' && pl.pauseKind && pl.pauseKind !== 'no_changes') return { label: 'Detenido · decides tú', tone: 'warn', dot: '' };
-  return P_LABEL[p.status];
+  // Portal IA 3: un solo criterio para todas las pantallas (packages/domain/src/owner-state.ts).
+  const st = ownerProcessState(p);
+  return { label: st.label, tone: st.tone, dot: st.dot };
 }
 
 export type ProcessFilterKey = 'running' | 'waiting' | 'done' | 'failed' | 'cancelled';
@@ -42,15 +37,11 @@ export const PROCESS_FILTERS: { key: 'all' | ProcessFilterKey; label: string }[]
 
 /** Grupo del filtro de Actividad. «waiting» agrupa lo pendiente de autorización y los pipelines pausados o detenidos (igual que procLabel). */
 export function processFilterKey(p: Process): ProcessFilterKey {
-  if (p.status === 'running') return 'running';
-  if (p.status === 'pending_authorization') return 'waiting';
-  if (p.status === 'failed' || p.status === 'budget_exceeded') return 'failed';
-  if (p.status === 'cancelled') return 'cancelled';
-  const pl = p.result?.pipeline;
-  if (p.result?.merged) return 'done';
-  if (pl?.state === 'paused') return 'waiting';
-  if (pl?.state === 'stopped' && pl.pauseKind && pl.pauseKind !== 'no_changes') return 'waiting';
-  return 'done';
+  const st = ownerProcessState(p);
+  if (st.key === 'working' || st.key === 'queued') return 'running';
+  if (st.key === 'failed') return 'failed';
+  if (st.key === 'cancelled') return 'cancelled';
+  return st.needsOwner ? 'waiting' : 'done';
 }
 
 export type NextStepTarget = { kind: 'anchor'; id: string } | { kind: 'link'; to: string };

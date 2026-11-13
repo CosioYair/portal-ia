@@ -24,7 +24,8 @@ test('las llamadas que cambian algo sin pasar por request() envían la sesión d
     raw++;
     if (!s.includes('ownerHeaders(') || !s.includes('noteOwnerResponse(')) offenders.push(path.relative(web, f));
   }
-  assert.ok(raw >= 3, `se esperaban las llamadas directas conocidas (subidas, retroalimentación de pruebas manuales, integración): ${raw}`);
+  // Portal IA 3: la integración directa (lib/integration.ts) se retiró; quedan las subidas y las pruebas manuales.
+  assert.ok(raw >= 2, `se esperaban las llamadas directas conocidas (subidas y retroalimentación de pruebas manuales): ${raw}`);
   assert.deepEqual(offenders, [], 'estas llamadas no envían la sesión del propietario');
 });
 
