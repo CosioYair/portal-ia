@@ -16,6 +16,7 @@ import { cliCommandFor, findCli, lastDetection, verifiedDetection } from './dete
 import { getClaudeCodeSettings, projectAuthorized } from './settings.ts';
 import { overageAccepted, saveUsageReport, subscriptionGate } from './usage.ts';
 import { codexComplete, codexGate, lastCodexDetection } from '../harness/codex.ts';
+import { effectiveModel, explainModelRejection, ruleApplies } from '../modelRule.ts';
 
 /**
  * Backend de ejecución «Claude Code» para los pasos de un proceso autorizado. El agente del Portal conserva su identidad,
@@ -114,9 +115,13 @@ export function teamReadiness(slug: string, processId: string) {
 }
 
 /** La llamada con el backend resuelto: Claude Code (suscripción) o, si el agente usa la API, su proveedor de siempre. */
-export function completeWith(cc: ReturnType<typeof agentCaller>, providerId: ProviderId, cred: { ciphertext: string } | undefined, prow: { workspace_id: string | null }, req: CompletionRequest, signal?: AbortSignal): Promise<CompletionResult> {
+export function completeWith(cc: ReturnType<typeof agentCaller>, providerId: ProviderId, cred: { ciphertext: string } | undefined, prow: { workspace_id: string | null }, req: CompletionRequest, signal?: AbortSignal, rule?: { slug: string; agent: Agent }): Promise<CompletionResult> {
+  // Claude Code aplica la regla de modelo en claudeCodeComplete; la API de Anthropic, aquí (EN-028). Un id no válido lanza un error claro.
   if (cc) return cc.complete(req, signal);
-  return getAdapter(providerId)!.complete(decryptSecret(cred!.ciphertext), { workspaceId: prow.workspace_id }, req, signal);
+  let r = req;
+  try { if (rule) r = { ...req, model: effectiveModel(rule.slug, rule.agent, req.model) }; }
+  catch (e) { return Promise.reject(e); }
+  return getAdapter(providerId)!.complete(decryptSecret(cred!.ciphertext), { workspaceId: prow.workspace_id }, r, signal);
 }
 
 /**
@@ -254,6 +259,16 @@ Ya NO tienes herramientas: responde YA, en el formato pedido, con el contexto de
  * responde, el error sigue siendo «turnos agotados» (con el uso de las dos) y no se insiste.
  */
 export async function claudeCodeComplete(t: ExecutionTarget, req: CompletionRequest, signal: AbortSignal, onLive: (patch: Partial<LiveCall>) => void): Promise<ClaudeCodeCompletion> {
+  // EN-028: la regla de modelo de Portal IA entra AQUÍ, una sola vez, antes de runs.start y del --model de la CLI (también
+  // para la recuperación). Si el id no es válido, lanza ModelRuleError y no se hace la llamada; si Claude Code lo rechaza,
+  // se dice claramente y no se reintenta con otro modelo.
+  const ruled = ruleApplies(t.slug, t.agent).applies;
+  const resolved: CompletionRequest = { ...req, model: effectiveModel(t.slug, t.agent, req.model) };
+  try { return await claudeCodeCompleteResolved(t, resolved, signal, onLive); }
+  catch (e: any) { throw ruled ? explainModelRejection(e, resolved.model) : e; }
+}
+
+async function claudeCodeCompleteResolved(t: ExecutionTarget, req: CompletionRequest, signal: AbortSignal, onLive: (patch: Partial<LiveCall>) => void): Promise<ClaudeCodeCompletion> {
   try { return await claudeCodeRun(t, req, signal, onLive, true); }
   catch (e: any) {
     if (e?.error?.code !== 'max_turns' || !recoverable(t)) throw e;

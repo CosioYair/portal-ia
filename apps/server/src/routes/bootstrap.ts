@@ -3,16 +3,20 @@ import { AGENT_TEMPLATES, INTERNAL_PROJECT, INTERNAL_WORKSPACE, pickByTier, type
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, projectsRepo, workspaceDbPath } from '../db/workspace.ts';
 import { inheritLatestTemplate } from '../services/agentTemplates.ts';
+import { ruleModelFor } from '../services/modelRule.ts';
 
 /**
  * HU-002 + HU-003: inicialización del espacio interno y del equipo inicial.
  * Idempotente: puede llamarse varias veces; solo crea lo que falta. Cero llamadas a modelos de IA.
  */
-export function buildAgentConfig(t: AgentTemplate, provider: ProviderId, models: ModelInfo[], defaultModel: string | null): AgentConfig {
+export function buildAgentConfig(t: AgentTemplate, provider: ProviderId, models: ModelInfo[], defaultModel: string | null, ruleModel: string | null = null): AgentConfig {
+  // EN-028: con la regla de modelo (solo portal-ia, agentes Anthropic), el agente nuevo queda con ese modelo y sin
+  // alternativas: nunca otro modelo en silencio.
+  const ruled = !!ruleModel && provider === 'anthropic';
   const preferred = pickByTier(models, t.tier);
   const fallback = pickByTier(models, t.fallbackTier);
-  const model = preferred?.id ?? defaultModel ?? '';
-  const fallbacks = fallback && fallback.id !== model ? [fallback.id] : [];
+  const model = ruled ? ruleModel! : preferred?.id ?? defaultModel ?? '';
+  const fallbacks = !ruled && fallback && fallback.id !== model ? [fallback.id] : [];
   return {
     name: t.name, specialization: t.specialization, responsibilities: [...t.responsibilities],
     provider, model, fallbacks, effort: t.effort,
@@ -54,7 +58,7 @@ export function runBootstrap(): BootstrapResult {
   for (const t of AGENT_TEMPLATES) {
     const projectId = t.scope === 'project' ? project.id : null;
     if (agents.byKey(t.key, projectId)) continue;
-    inheritLatestTemplate(ws.slug, agents.createFromTemplate(t, projectId, buildAgentConfig(t, providerId, models, prov.default_model)));
+    inheritLatestTemplate(ws.slug, agents.createFromTemplate(t, projectId, buildAgentConfig(t, providerId, models, prov.default_model, ruleModelFor(ws.slug, providerId))));
     created++;
   }
   if (created) already = false;
