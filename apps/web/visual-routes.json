@@ -45,6 +45,8 @@
     { "match": "apps/web/src/components/PendingDecisionCard.tsx", "routes": ["/autorizaciones"] },
     { "match": "apps/web/src/screens/Settings.tsx", "routes": ["/ajustes"] },
     { "match": "apps/web/src/components/ClaudeCodePanel.tsx", "routes": ["/ajustes"] },
+    { "match": "apps/web/src/components/ModelRuleSettings.tsx", "routes": ["/ajustes"] },
+    { "match": "apps/web/src/components/HarnessDialog.tsx", "routes": ["/ajustes", "/oficina"] },
     { "match": "apps/web/src/screens/Assistant.tsx", "routes": ["/asistente"] },
     { "match": "apps/web/src/components/Assistant*.tsx", "routes": ["/asistente", "/panel"] },
     { "match": "apps/web/src/screens/ProviderSetup.tsx", "routes": ["/configuracion/proveedor"] },
