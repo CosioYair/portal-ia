@@ -12,6 +12,7 @@ import { lessonsFor, lessonsRepo } from './lessons.ts';
 import { expandHome, isAllowed } from '../routes/fs.ts';
 import { monotonicNow } from '../clock.ts';
 import { zipBuffers } from './zipFile.ts';
+import { ruleModelFor } from './modelRule.ts';
 
 /**
  * Creación de agentes sin código (asistente de la oficina), importación de carpetas portables y exportación.
@@ -82,7 +83,20 @@ function validate(slug: string, i: WizardInput): { provider: ProviderId } {
   return { provider };
 }
 
-export async function createAgentFromWizard(slug: string, i: WizardInput, source: 'created' | 'import' = 'created', importNote = 'Importado desde una carpeta (revisado por el propietario)', prepare?: (agent: Agent) => void): Promise<Agent> {
+/**
+ * EN-028 · En portal-ia, con la regla activa, un agente Anthropic (Claude Code, consola o API de Anthropic) nace con el
+ * modelo de la regla. Esto vale para Nuevo agente y para lo importado: el modelo que pida el paquete o el elegido no
+ * cuentan. Codex, otros proveedores y otras empresas conservan su modelo. Después, validate() comprueba que el modelo
+ * está en el catálogo: si no está, se avisa con claridad y no se usa otro modelo en su lugar.
+ */
+export function withRuleModel(slug: string, i: WizardInput): WizardInput {
+  const provider: ProviderId = i.harness === 'codex' ? 'openai' : i.harness === 'api' ? (i.provider ?? 'anthropic') : 'anthropic';
+  const rule = ruleModelFor(slug, provider);
+  return rule ? { ...i, model: rule } : i;
+}
+
+export async function createAgentFromWizard(slug: string, input: WizardInput, source: 'created' | 'import' = 'created', importNote = 'Importado desde una carpeta (revisado por el propietario)', prepare?: (agent: Agent) => void): Promise<Agent> {
+  const i = withRuleModel(slug, input);
   const { provider } = validate(slug, i);
   const contextScope = resolveContextScope(slug, i.contextScope);
   const agents = agentsRepo(slug); const deps = departmentsRepo(slug);
