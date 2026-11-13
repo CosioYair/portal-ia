@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url';
  * sintéticos como el guardado de HU-214 y el arranque de la vista previa desde el pipeline con su contrato de código.
  */
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-en027-'));
-delete process.env.PORTAL_SANDBOX;
+// Sin Docker: la vista previa del pipeline supera la comprobación de estado y falla después (docker_required…).
+process.env.PORTAL_SANDBOX = 'none';
+process.env.PORTAL_ALLOW_FOREIGN_REPO = '1';
 process.env.PORTAL_MOCK_PROVIDER = '1';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -20,6 +22,33 @@ const { buildStoryFlow } = await import('../src/services/storyFlow.ts');
 const { isVisualPause, VISUAL_PAUSE_PREFIX } = await import('../src/services/gauntlet.ts');
 const { visualGate } = await import('../src/services/visualCheck.ts');
 const { DEFAULT_PIPELINE, nextRepeatCount, normalizePauseReason, samePause } = await import('../../../packages/domain/src/pipeline.ts');
+const { startPreview } = await import('../src/services/preview.ts');
+const { runVisualCheck } = await import('../src/services/visualCheck.ts');
+const { encryptSecret } = await import('../src/security/crypto.ts');
+const { classifyModel } = await import('@portal-ia/domain');
+const { providersRepo } = await import('../src/db/platform.ts');
+const { runBootstrap } = await import('../src/routes/bootstrap.ts');
+const { processesRepo, projectsRepo } = await import('../src/db/workspace.ts');
+const { createCompany, createProject } = await import('../src/services/companies.ts');
+const { REPO_ROOT } = await import('../src/config.ts');
+
+providersRepo.setCredential('anthropic', encryptSecret('credencial-simulada'), 'simulada');
+providersRepo.setConnected('anthropic', ['claude-sonnet-4-5'].map(id => classifyModel('anthropic', id)));
+runBootstrap();
+const WS = createCompany('Acme EN027').slug;
+
+/** Proceso de historia REAL en «running» (autorizado) con su commit aplicado y cambios en apps/web/src, como HU-207. */
+function runningStory(): string {
+  const project = createProject(WS, `Producto ${Math.random().toString(36).slice(2, 7)}`, 'x', []);
+  projectsRepo(WS).setRepository(project.id, REPO_ROOT, 'main');
+  const procs = processesRepo(WS);
+  const p = procs.create({ projectId: project.id, kind: 'story_execution', title: 'HU-EN027', estimatedUsd: 0, steps: [] } as any);
+  procs.authorize(p.id, 1);
+  procs.setResult(p.id, { plan: null, implementationSummary: 'x', changes: [{ path: 'apps/web/src/screens/Backlog.tsx', content: 'x' }], verifyCommands: [], review: null, applied: { branch: 'story/hu-en027', commit: COMMIT, worktree: REPO_ROOT }, verifications: [] } as any);
+  assert.equal(procs.get(p.id)?.status, 'running', 'precondición: el proceso sigue en «running»');
+  return p.id;
+}
+const errOf = async (p: Promise<unknown>) => { try { await p; return null; } catch (e: any) { return e; } };
 
 const HU214_ID = 'a8dab576-2d48-4b33-955e-1f88875288ff';
 const COMMIT = '1a2b3c4d5e6f7a8b';
@@ -44,19 +73,35 @@ const labels = (flow: any) => flow.actions.map((a: any) => a.label as string);
 
 // ---------------------------------------------------------------- Vista previa desde el propio pipeline
 
-test('EN-027 · visualStage abre la vista previa del propio proceso con { pipeline: true }; la ruta del propietario no', () => {
+test('EN-027 · startPreview con el proceso en «running»: sin opción 409 «active»; con { pipeline: true } supera esa comprobación', async () => {
+  const id = runningStory();
+  const owner = await errOf(startPreview(WS, id));
+  assert.ok(owner, 'la ruta del propietario no abre la vista previa mientras la historia trabaja');
+  assert.equal(owner.statusCode, 409);
+  assert.equal(owner.code, 'active');
+  const pipe = await errOf(startPreview(WS, id, { pipeline: true }));
+  // Sin Docker falla más adelante (docker_required, deps_missing…), pero NUNCA por el estado «running».
+  assert.notEqual(pipe?.code, 'active', `con la opción del pipeline no se rechaza por «running» (obtenido: ${pipe?.code} ${pipe?.message ?? ''})`);
+  assert.doesNotMatch(String(pipe?.message ?? ''), /La historia está trabajando/);
+});
+
+test('EN-027 · reproduce el bucle: runVisualCheck sin la opción vuelve a «La historia está trabajando»; como pipeline (visualStage) ya no', async () => {
+  const id = runningStory();
+  const gate = visualGate(WS, processesRepo(WS).get(id)!);
+  assert.ok(gate.required && !!gate.commit && gate.routes.length > 0, `precondición: la puerta visual exige rutas (${gate.reasons.join(' · ')})`);
+  // Antes de EN-027 visualStage llegaba aquí sin la opción: misma pausa en cada reanudación, sin gastar.
+  const loop = await runVisualCheck(WS, id);
+  assert.equal(loop.status, 'unavailable');
+  assert.match(loop.detail, /La historia está trabajando/, 'sin la opción se reproduce la causa del bucle de HU-214');
+  const fixed = await runVisualCheck(WS, id, { pipeline: true });
+  assert.doesNotMatch(fixed.detail, /La historia está trabajando/, `como pipeline la vista previa del propio proceso no se rechaza por «running»: ${fixed.detail}`);
+  assert.equal(processesRepo(WS).get(id)?.status, 'running', 'el proceso sigue en marcha: la verificación no lo detiene');
+});
+
+test('EN-027 · visualStage usa la opción interna y la ruta del propietario nunca', () => {
   const g = SRC('gauntlet.ts');
   const stage = g.slice(g.indexOf('export async function visualStage('), g.indexOf('export async function gauntletStage('));
   assert.ok(stage.includes('runVisualCheck(ctx.slug, ctx.processId, { pipeline: true })'), 'visualStage pide la vista previa como pipeline');
-  const vc = SRC('visualCheck.ts');
-  assert.ok(vc.includes("startPreview(slug, processId, pipeline ? { pipeline: true } : {})"), 'readyPreview pasa la opción a startPreview');
-  assert.ok(vc.includes('readyPreview(slug, processId, pre.commit, opts.signal, !!opts.pipeline)'), 'doRun pasa la opción a readyPreview');
-  const pv = SRC('preview.ts');
-  const start = pv.slice(pv.indexOf('export async function startPreview('));
-  const body = start.slice(0, start.indexOf('\nexport ', 10));
-  assert.ok(body.includes('pipeline'), 'startPreview distingue la vista previa del pipeline');
-  assert.ok(body.includes("'running'"), 'startPreview sigue comprobando el estado «running» (el propietario sigue sin poder abrirla)');
-  assert.ok(pv.includes('!(l.pipeline && visualCheckInFlight(l.slug, l.processId))'), 'el barrido no corta la vista previa del pipeline mientras su verificación sigue');
   const routes = fs.readFileSync(path.join(REPO, 'apps', 'server', 'src', 'routes', 'previews.ts'), 'utf8');
   assert.ok(!/pipeline:\s*true/.test(routes), 'la ruta del propietario nunca usa la opción interna');
 });
