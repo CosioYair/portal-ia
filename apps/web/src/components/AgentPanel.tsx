@@ -526,6 +526,11 @@ function ConfigTab({ slug, p, departments, onChanged }: { slug: string; p: Panel
       <div className="h3" id="harness-h">Motor de IA (cómo trabaja)</div>
       {!opts ? <Spinner /> : <>
         <p className="small">Ahora trabaja con <strong>{opts.currentLabel}</strong>. {opts.continuity}</p>
+        {/* EN-028 · Regla de modelo de la empresa: dice si se aplica a este agente y por qué (Codex u otro proveedor: no se cambia en silencio). */}
+        {opts.modelRule && <Notice kind={opts.modelRule.applies ? 'ok' : 'warn'}>
+          <strong>Regla de modelo de la empresa:</strong> {opts.modelRule.applies ? 'se aplica a este agente.' : 'no se aplica a este agente.'} {opts.modelRule.reason}
+          {opts.modelRule.applies && opts.modelRule.model && <span className="small" style={{ display: 'block', marginTop: 4 }}>Modelo guardado: <span className="mono">{p.agent.config.model || 'predeterminado'}</span> · Modelo que se usa en cada llamada: <span className="mono">{opts.modelRule.model}</span></span>}
+        </Notice>}
         <details className="small muted"><summary style={{ cursor: 'pointer' }}>Detalles técnicos</summary>Modelo: <span className="mono">{opts.model}</span></details>
         <div className="harness-cards">{opts.options.filter(o => o.id !== 'claude-code-terminal' || o.current).map(o => <button key={o.id} type="button" className="harness-card" aria-pressed={(pick ?? opts.current) === o.id} disabled={!o.availability.available && !o.current} onClick={() => setPick(o.current ? null : o.id)}>
           <strong>{o.name}{o.current ? ' · actual' : ''}</strong>
