@@ -143,7 +143,7 @@ export async function extractBacklogWithAI(slug: string, projectId: string, maxU
       model: coord.config.model, maxTokens: 3000, effort: 'low', supportsEffort: false,
       system: `Eres «${coord.config.name}». Conviertes un documento de dirección en un backlog estructurado. Agentes disponibles (key: nombre): ${agents}. Responde SOLO con JSON válido.`,
       user: `Extrae TODAS las historias del siguiente documento. Responde SOLO con un array JSON de objetos {"id":"HU-0xx","titulo":string,"responsable":key de agente o null,"dependeDe":"HU-0xx"|null,"estimacion":"S"|"M"|"L"|null,"criterio":string}. Mantén los ids del documento; si no tiene, numera desde HU-005.\n\n${synthesis.body.slice(0, 40_000)}`
-    });
+    }, undefined, { slug, agent: coord });
     const cost = (cc ? 0 : costUsd(providerId, coord.config.model, res.inputTokens, res.outputTokens));
     processesRepo(slug).logExecution({ projectId, agentId: coord.id, kind: 'backlog_extract', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
     const items = parseBacklogFromMarkdown(res.text);

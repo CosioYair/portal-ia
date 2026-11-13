@@ -133,7 +133,7 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
           model: agent.config.model, system: systemPrompt, user: userPrompt,
           maxTokens: STEP_PLAN[i].maxTokens, effort: agent.config.effort, supportsEffort: !!modelInfo?.supportsEffort,
           timeoutMs
-        }, ctrl.signal), ctrl, timeoutMs);
+        }, ctrl.signal, { slug, agent }), ctrl, timeoutMs);
         const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
         procs.stepFinish(step.id, 'done', { tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, outputMd: res.text });
         procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);

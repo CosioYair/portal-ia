@@ -115,11 +115,12 @@ export function teamReadiness(slug: string, processId: string) {
 }
 
 /** La llamada con el backend resuelto: Claude Code (suscripción) o, si el agente usa la API, su proveedor de siempre. */
-export function completeWith(cc: ReturnType<typeof agentCaller>, providerId: ProviderId, cred: { ciphertext: string } | undefined, prow: { workspace_id: string | null }, req: CompletionRequest, signal?: AbortSignal, rule?: { slug: string; agent: Agent }): Promise<CompletionResult> {
-  // Claude Code aplica la regla de modelo en claudeCodeComplete; la API de Anthropic, aquí (EN-028). Un id no válido lanza un error claro.
+export function completeWith(cc: ReturnType<typeof agentCaller>, providerId: ProviderId, cred: { ciphertext: string } | undefined, prow: { workspace_id: string | null }, req: CompletionRequest, signal: AbortSignal | undefined, rule: { slug: string; agent: Agent }): Promise<CompletionResult> {
+  // Claude Code aplica la regla de modelo en claudeCodeComplete; la API de Anthropic, aquí (EN-028). `rule` es obligatorio:
+  // ningún llamante puede saltarse la regla. Un id no válido lanza un error claro y no se llama con otro modelo.
   if (cc) return cc.complete(req, signal);
   let r = req;
-  try { if (rule) r = { ...req, model: effectiveModel(rule.slug, rule.agent, req.model) }; }
+  try { r = { ...req, model: effectiveModel(rule.slug, rule.agent, req.model) }; }
   catch (e) { return Promise.reject(e); }
   return getAdapter(providerId)!.complete(decryptSecret(cred!.ciphertext), { workspaceId: prow.workspace_id }, r, signal);
 }

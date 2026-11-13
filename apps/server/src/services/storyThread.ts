@@ -193,7 +193,7 @@ export async function askTeam(slug: string, itemId: string, text: string, opts: 
   const startedAt = now();
   try {
     requirePolicy('ai_call', { slug, agentId: agent.id, projectId: ctx.item.projectId, authorized: true });
-    const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user: userPrompt, maxTokens: 2500, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort });
+    const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user: userPrompt, maxTokens: 2500, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort }, undefined, { slug, agent });
     const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
     processesRepo(slug).logExecution({ projectId: ctx.item.projectId, agentId: agent.id, kind: 'story_chat', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
     const m = res.text.match(/```proposals\s*([\s\S]*?)```/i); let proposals: any = null;
