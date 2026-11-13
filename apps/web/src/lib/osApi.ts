@@ -40,7 +40,13 @@ export interface HarnessOption { id: ExecutionBackend; name: string; vendor: str
   compatibility: { needs: HarnessCapability[]; gains: CompatItem[]; losses: CompatItem[]; missing: { capability: HarnessCapability; label: string; note: string | null }[]; reduced: { capability: HarnessCapability; label: string; note: string | null }[] }; current: boolean }
 interface CompatItem { capability: HarnessCapability; label: string; needed: boolean; from: { level: string; note?: string }; to: { level: string; note?: string } }
 export interface HarnessOptions { current: ExecutionBackend; currentLabel: string; model: string; provider: ProviderId; continuity: string; pinned: string; options: HarnessOption[];
-  work: { inFlight: { id: string; title: string }[]; open: { id: string; title: string; status: string }[]; batches: { id: string; title: string; status: string; sources: string[] }[] } }
+  work: { inFlight: { id: string; title: string }[]; open: { id: string; title: string; status: string }[]; batches: { id: string; title: string; status: string; sources: string[] }[] };
+  /** EN-028 · ¿Se le aplica la regla de modelo de Portal IA? Si no, `reason` dice por qué (Codex, otro proveedor, inactiva…). */
+  modelRule?: ModelRuleStatus }
+/** EN-028 · Regla de modelo de Portal IA (dato de platform.sqlite; solo para la empresa interna). */
+export interface ModelRule { model: string; active: boolean; confirmedBy: string | null; confirmedAt: string | null }
+export interface ModelRuleStatus { applies: boolean; reason: string; model: string | null }
+export interface ModelRuleView { slug: string; supported: boolean; rule: ModelRule | null; models: { id: string; name: string }[] }
 export interface CodexDetection { checkedAt: string; installed: boolean; path: string | null; version: string | null; auth: string; billing: string; exposedTools: string[] | null; blockedTools: string[]; userContext: string[]; restricted: boolean; models: { id: string; name: string }[]; credentialVars: string[]; problems: string[] }
 export interface CodexSettings { enabled: boolean; cliPath: string | null; maxDurationSec: number; authorizedAt: string | null }
 export interface AgentMessage { id: string; agentId: string; role: 'owner' | 'agent'; content: string; status: 'done' | 'running' | 'failed' | 'interrupted'; harness: string | null; model: string | null; tokensIn: number; tokensOut: number; costUsd: number; error: string | null; createdAt: string; finishedAt: string | null; replyTo: string | null;
@@ -163,6 +169,10 @@ export const osApi = {
   detectCodex: () => request<{ settings: CodexSettings; detection: CodexDetection }>(`/api/harnesses/codex/detect`, { method: 'POST', body: J({}) }),
   setCodex: (enabled: boolean, cliPath?: string | null) => request<{ settings: CodexSettings; detection: CodexDetection | null }>(`/api/harnesses/codex`, { method: 'PUT', body: J({ enabled, ...(cliPath !== undefined ? { cliPath } : {}), authorized: enabled ? true : undefined }) }),
   harnessOptions: (slug: string, id: string) => request<HarnessOptions>(`${W(slug)}/agents/${id}/harness`),
+  /** EN-028 · Regla de modelo y modelos de Anthropic disponibles (lectura, sin costo). */
+  getModelRule: (slug: string) => request<ModelRuleView>(`${W(slug)}/model-rule`),
+  /** EN-028 · Guarda la regla. Solo tras la confirmación explícita del propietario (confirm: true); sin IA ni costo. */
+  setModelRule: (slug: string, model: string, active: boolean) => request<{ slug: string; rule: ModelRule }>(`${W(slug)}/model-rule`, { method: 'PUT', body: J({ model, active, confirm: true }) }),
   switchHarness: (slug: string, id: string, harness: ExecutionBackend, model: string, provider?: ProviderId | null) => request<Agent>(`${W(slug)}/agents/${id}/harness`, { method: 'PUT', body: J({ harness, model, provider: provider ?? null, authorized: true }) }),
   chat: (slug: string, id: string) => request<{ messages: AgentMessage[]; usage: { used: number; cap: number }; estimate: ChatEstimate }>(`${W(slug)}/agents/${id}/chat`),
   sendChat: (slug: string, id: string, text: string, projectId: string | null, authorizeBillable?: boolean, attachmentIds: string[] = []) => request<{ owner: AgentMessage; reply: AgentMessage }>(`${W(slug)}/agents/${id}/chat`, { method: 'POST', body: J({ text, projectId, authorizeBillable, attachmentIds }) }),
