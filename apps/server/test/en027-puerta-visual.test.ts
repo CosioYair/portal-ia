@@ -21,7 +21,7 @@ const SRC = (f: string) => fs.readFileSync(path.join(REPO, 'apps', 'server', 'sr
 const { buildStoryFlow } = await import('../src/services/storyFlow.ts');
 const { isVisualPause, VISUAL_PAUSE_PREFIX } = await import('../src/services/gauntlet.ts');
 const { visualGate } = await import('../src/services/visualCheck.ts');
-const { DEFAULT_PIPELINE, nextRepeatCount, normalizePauseReason, samePause } = await import('../../../packages/domain/src/pipeline.ts');
+const { DEFAULT_PIPELINE, nextRepeatCount, normalizePauseReason, normalizePipeline, samePause } = await import('../../../packages/domain/src/pipeline.ts');
 const { startPreview } = await import('../src/services/preview.ts');
 const { runVisualCheck } = await import('../src/services/visualCheck.ts');
 const { encryptSecret } = await import('../src/security/crypto.ts');
@@ -70,6 +70,38 @@ function mkProc(reason: string, o: { web?: boolean; findings?: any[]; repeatCoun
   };
 }
 const labels = (flow: any) => flow.actions.map((a: any) => a.label as string);
+
+// ---------------------------------------------------------------- «Sin IA» de verdad: el Evaluador no se llama sin presupuesto
+
+test('EN-027 · «Repetir la verificación visual (sin IA)» envía visualOnly (solo la puerta visual) y normalizePipeline lo conserva', () => {
+  const main: any = (buildStoryFlow(mkProc(HU214_REASON)) as any).actions.find((a: any) => a.primary);
+  assert.equal(main?.label, REPEAT);
+  assert.deepEqual(main.requires, ['authorization']);
+  assert.equal(main.pipeline?.visualOnly, true, 'la reanudación solo repite la puerta visual');
+  assert.equal((normalizePipeline({ ...DEFAULT_PIPELINE, visualOnly: true } as any) as any).visualOnly, true);
+  assert.equal((normalizePipeline({ ...DEFAULT_PIPELINE } as any) as any).visualOnly, undefined, 'sin la opción, el pipeline de siempre (regresión)');
+});
+
+test('EN-027 · con visualOnly, gauntletStage se detiene ANTES de llamar al Evaluador (stepCall) y la ruta no la hereda', () => {
+  const g = SRC('gauntlet.ts');
+  const stage = g.slice(g.indexOf('export async function gauntletStage('));
+  const stop = stage.indexOf('if (cfg.visualOnly) throw new PipelinePause(');
+  assert.ok(stop > 0, 'gauntletStage corta con visualOnly');
+  assert.ok(stop < stage.indexOf("stepCall(ctx, ev, 'evaluator'"), 'el corte va antes de la llamada con coste');
+  const route = fs.readFileSync(path.join(REPO, 'apps', 'server', 'src', 'routes', 'processes.ts'), 'utf8');
+  assert.ok(route.includes('visualOnly: body.data.pipeline?.visualOnly === true'), 'visualOnly solo vale para la reanudación que lo pide');
+});
+
+test('EN-027 · evidencia visual superada: la tarjeta pide presupuesto de IA para el Evaluador y no se presenta como brechas', () => {
+  const p = mkProc(`Evidencia visual superada en el host (commit ${COMMIT}). Falta la ronda del Evaluador Gauntlet sobre este commit.`, { web: false });
+  const flow: any = buildStoryFlow(p);
+  assert.doesNotMatch(flow.issue.title, /El Evaluador Gauntlet dejó brechas bloqueantes/);
+  const main = flow.actions.find((a: any) => a.primary);
+  assert.equal(main?.label, 'Pasar al Evaluador Gauntlet (con IA)', `acciones: ${labels(flow).join(' | ')}`);
+  assert.deepEqual(main.requires, ['authorization', 'ai_budget']);
+  assert.ok(main.suggestedBudgetUsd > 0);
+  assert.ok(!labels(flow).includes(REPEAT));
+});
 
 // ---------------------------------------------------------------- Vista previa desde el propio pipeline
 

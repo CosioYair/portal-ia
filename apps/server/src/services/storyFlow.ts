@@ -8,7 +8,7 @@ import { runtimeVerified } from './runtimeChecks.ts';
 import { driftMessage } from './worktreeDrift.ts';
 import { staleCorrectionUnits, testRunSummary } from './failureDiagnosis.ts';
 import type { teamReadiness } from './claudeCode/backend.ts';
-import { isVisualPause } from './gauntlet.ts';
+import { isVisualPassedPause, isVisualPause } from './gauntlet.ts';
 import { visualGate } from './visualCheck.ts';
 
 /** EN-027 · ¿La puerta visual (HU-207) exige evidencia que no hay? Sin IA; si no se puede leer, no se presume. */
@@ -444,10 +444,16 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
       const busy = /La historia está trabajando/.test(pl.reason ?? '');
       const reasonText = (pl.reason ?? '').replace(/Acción: pulsa «Continuar»[^.]*\./, 'Acción: pulsa «Repetir la verificación visual (sin IA)».');
       issue = { ...issue!, cause: 'environment', title: `Falta la evidencia visual del commit ${commit}: repite la verificación en el host (sin IA)`, explanation: `${reasonText}${busy ? ' La vista previa no llegó a arrancar porque el propio proceso seguía en marcha (corregido en EN-027): repetirla ahora debería funcionar.' : ''} Todo lo hecho se conserva (cambios, verificaciones y registro).${repeatNote}`, responsible: [] };
-      actions.push(resume('Repetir la verificación visual (sin IA)', 'Arranca la vista previa del commit aplicado y repite la verificación visual en el host (375, 768 y 1440 px, desbordamiento y axe). No llama a la IA ni concede correcciones; si vuelve a faltar la evidencia, la pausa vuelve con el motivo nuevo.', ['authorization'], { primary: true, pipeline: { maxCorrections: 0 } }));
+      actions.push(resume('Repetir la verificación visual (sin IA)', 'Arranca la vista previa del commit aplicado y repite la verificación visual en el host (375, 768 y 1440 px, desbordamiento y axe). No llama a la IA ni concede correcciones: si la evidencia pasa y falta la ronda del Evaluador, se detiene antes de llamarlo y lo decides tú; si vuelve a faltar la evidencia, la pausa vuelve con el motivo nuevo.', ['authorization'], { primary: true, pipeline: { maxCorrections: 0, visualOnly: true } as FlowAction['pipeline'] }));
       actions.push(act('review_diff', 'Revisar el diff', 'El código y la evidencia guardada, sin cambiar nada.'));
       if (withEvidence.length && done < GAUNTLET_LIMITS.deep) actions.push(resume('Conceder otra corrección dirigida', `El Desarrollador corrige SOLO la brecha señalada y el Evaluador re-evalúa (ronda ${done + 2} como máximo; QA no repite lo ya aprobado).`, ['authorization', 'ai_budget'], { pipeline: { maxCorrections: 1, gauntlet: { mode: 'deep', maxRounds: done + 1 } }, suggestedBudgetUsd: 0.5 }));
       actions.push(fix('Preparar una iteración con la evidencia visual'), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
+    }
+    else if (pl.pauseKind === 'gauntlet' && isVisualPassedPause(pl.reason)) {
+      // EN-027 · La verificación visual (sin IA) pasó; la ronda del Evaluador tiene coste y se autoriza aparte, con presupuesto.
+      issue = { ...issue!, level: 'warning', cause: 'decision', title: 'Evidencia visual superada: falta la evaluación del Evaluador Gauntlet (con IA)', responsible: [] };
+      actions.push(resume('Pasar al Evaluador Gauntlet (con IA)', 'El Evaluador evalúa el commit con la evidencia visual ya guardada. Llama a la IA dentro del presupuesto que fijes y no concede correcciones nuevas: si deja brechas, se detiene y decides tú.', ['authorization', 'ai_budget'], { primary: true, pipeline: { maxCorrections: 0 }, suggestedBudgetUsd: 0.5 }));
+      actions.push(act('review_diff', 'Revisar el diff', 'El código y la evidencia guardada, sin cambiar nada.'), fix(), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
     }
     else if (pl.pauseKind === 'gauntlet') {
       // El Evaluador se detuvo (límite de rondas o sin progreso) con brechas bloqueantes y evidencia: lo hecho se conserva.

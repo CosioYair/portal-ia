@@ -269,6 +269,10 @@ export const VISUAL_PAUSE_PREFIX = 'Evidencia visual pendiente en el host';
 /** EN-027 · ¿Este motivo de pausa 'gauntlet' es el de la puerta visual (falta la evidencia en el host)? */
 export const isVisualPause = (reason: string | null | undefined): boolean =>
   String(reason ?? '').trimStart().toLowerCase().startsWith(VISUAL_PAUSE_PREFIX.toLowerCase());
+/** EN-027 · Pausa tras «Repetir la verificación visual (sin IA)»: la evidencia pasó y falta la ronda del Evaluador (con IA). */
+export const VISUAL_PASSED_PREFIX = 'Evidencia visual superada en el host';
+export const isVisualPassedPause = (reason: string | null | undefined): boolean =>
+  String(reason ?? '').trimStart().toLowerCase().startsWith(VISUAL_PASSED_PREFIX.toLowerCase());
 
 /**
  * Puerta visual obligatoria (HU-207), en TODOS los modos: si la historia toca apps/web/src exige el report.json y los PNG
@@ -330,6 +334,8 @@ export async function gauntletStage(ctx: StoryRunCtx, cfg: PipelineConfig): Prom
     save(s); emit(ctx, 'gauntlet', `Gauntlet (${g.mode}) no aplicado: ${s.reason}`);
     return { outcome: 'verified', toFix: [], state: s };
   }
+  // EN-027 · Reanudación «sin IA» (solo la puerta visual): no se llama al Evaluador sin presupuesto autorizado para ello.
+  if (cfg.visualOnly) throw new PipelinePause('gauntlet', `${VISUAL_PASSED_PREFIX} (commit ${commit ?? '?'}). Falta la ronda del Evaluador Gauntlet sobre este commit, que llama a la IA: no se lanzó porque «Repetir la verificación visual (sin IA)» no autoriza gasto. Acción: pulsa «Pasar al Evaluador Gauntlet (con IA)» con el presupuesto que fijes. Lo hecho se conserva.`);
   const round = state.rounds.length + 1;
   emit(ctx, 'gauntlet', `${ev.config.name} evalúa de forma independiente (Gauntlet ${g.mode}, ronda ${round}): criterios de aceptación contra el resultado real y su evidencia.`, { phase: 'qa', aiCall: true });
   const pending = proc.steps.find(s => s.role === 'evaluator' && s.status === 'pending');

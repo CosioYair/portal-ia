@@ -9,6 +9,13 @@ declare module './types.ts' {
      */
     repeatCount?: number;
   }
+  interface PipelineConfig {
+    /**
+     * EN-027 · Reanudación de un solo uso que SOLO repite la puerta visual (sin IA): si la evidencia pasa y el commit aún
+     * necesita una ronda del Evaluador (con coste de IA), el pipeline se detiene antes de llamarlo y lo decides tú.
+     */
+    visualOnly?: boolean;
+  }
 }
 
 /** EN-027 · Motivo de pausa comparable: sin la parte «última ejecución …», sin horas ni espacios repetidos. */
@@ -78,6 +85,7 @@ export function normalizePipeline(input: (Partial<Omit<PipelineConfig, 'gauntlet
     maxContinuations: int(c.maxContinuations, 0, PIPELINE_LIMITS.maxContinuations, DEFAULT_PIPELINE.maxContinuations!),
     gauntlet: normalizeGauntlet(c.gauntlet),
     ...(c.apiFallback === false ? { apiFallback: false } : {}),
+    ...(c.visualOnly === true ? { visualOnly: true } : {}),
     ...(c.maxSubscriptionCalls != null && Number(c.maxSubscriptionCalls) > 0 ? { maxSubscriptionCalls: int(c.maxSubscriptionCalls, 1, PIPELINE_LIMITS.maxSubscriptionCalls, 60) } : {}),
     ...(Array.isArray(c.backends) && c.backends.length ? { backends: c.backends.filter(b => b === 'api' || b === 'claude_code') } : {})
   };
