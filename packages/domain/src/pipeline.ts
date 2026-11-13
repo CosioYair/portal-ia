@@ -8,6 +8,11 @@ declare module './types.ts' {
      * nada entre ambas. Opcional: los resultados guardados antes no lo tienen (equivale a 0).
      */
     repeatCount?: number;
+    /**
+     * EN-027 · Última pausa registrada por pausePipeline (tipo y motivo), con la que se compara la siguiente para calcular
+     * repeatCount. Opcional: los resultados guardados antes no la tienen (se usa pauseKind/reason).
+     */
+    lastPause?: { pauseKind: PipelinePauseKind | null; reason: string | null };
   }
   interface PipelineConfig {
     /**

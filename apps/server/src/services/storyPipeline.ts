@@ -1170,14 +1170,14 @@ export function pausePipeline(ctx: StoryRunCtx, pause: PipelinePause) {
   const cur = pipelineOf(ctx.slug, ctx.processId);
   // EN-027 · ¿La reanudación volvió a la MISMA pausa (mismo tipo y motivo normalizado) sin gastar nada entre ambas?
   // Gasto = algún evento con costo o con llamada a la IA (también por suscripción) después de la pausa anterior.
-  const prevPause = (cur as unknown as { lastPause?: { pauseKind: PipelinePauseKind | null; reason: string | null } }).lastPause ?? { pauseKind: cur.pauseKind, reason: cur.reason };
+  const prevPause = cur.lastPause ?? { pauseKind: cur.pauseKind, reason: cur.reason };
   const evs = cur.events ?? [];
   let lastPauseAt = -1;
   for (let i = evs.length - 1; i >= 0; i--) if (evs[i].kind === 'pause') { lastPauseAt = i; break; }
-  const spentBetween = lastPauseAt < 0 || evs.slice(lastPauseAt + 1).some(e => { const x = e as unknown as { costUsd?: number | null; aiCall?: boolean }; return (x.costUsd ?? 0) > 0 || !!x.aiCall; });
+  const spentBetween = lastPauseAt < 0 || evs.slice(lastPauseAt + 1).some(e => (e.costUsd ?? 0) > 0 || !!e.aiCall);
   const repeatCount = nextRepeatCount({ ...prevPause, repeatCount: cur.repeatCount }, { pauseKind: pause.kind, reason: pause.message }, spentBetween);
-  const lastPause = { pauseKind: pause.kind, reason: pause.message };
-  updatePipeline(ctx.slug, ctx.processId, { repeatCount, ...({ lastPause } as object), state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, providerCode: pause.providerCode, reason: pause.message, phase: 'finished', finishedAt: now(), failureClass: cur.failureClass && ['missing_information', 'permission', 'unsupported', 'provider_refusal'].includes(pause.kind) ? cur.failureClass : CLASS[pause.kind] ?? cur.failureClass ?? null }, { kind: 'pause', message: pause.message });
+  const lastPause: NonNullable<PipelineStatus['lastPause']> = { pauseKind: pause.kind, reason: pause.message };
+  updatePipeline(ctx.slug, ctx.processId, { repeatCount, lastPause, state: stopped ? 'stopped' : 'paused', pauseKind: pause.kind, providerCode: pause.providerCode, reason: pause.message, phase: 'finished', finishedAt: now(), failureClass: cur.failureClass && ['missing_information', 'permission', 'unsupported', 'provider_refusal'].includes(pause.kind) ? cur.failureClass : CLASS[pause.kind] ?? cur.failureClass ?? null }, { kind: 'pause', message: pause.message });
 }
 
 // ---------------------------------------------------------------- Reanudar (sin repetir lo hecho)

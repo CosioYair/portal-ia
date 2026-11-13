@@ -205,6 +205,31 @@ test('EN-027 · la misma pausa con el mismo motivo y sin gasto incrementa repeat
   assert.equal(nextRepeatCount(null, b, false), 0, 'un resultado antiguo sin pausa previa');
 });
 
+test('EN-027 · pausePipeline sobre un proceso real: la misma pausa seguida sin gasto da repeatCount 1; con aiCall o costUsd entre ambas, 0', async () => {
+  const { newPipeline, pausePipeline, PipelinePause, pipelineOf, updatePipeline, updateResult } = await import('../src/services/storyPipeline.ts');
+  const id = runningStory();
+  updateResult(WS, id, r => ({ ...r, pipeline: newPipeline({ ...DEFAULT_PIPELINE }) }));
+  const ctx = { slug: WS, processId: id, log: () => {} } as any;
+  const pause = () => new PipelinePause('gauntlet', HU214_REASON);
+
+  pausePipeline(ctx, pause());
+  assert.equal(pipelineOf(WS, id).repeatCount, 0, 'la primera pausa no es una repetición');
+  assert.deepEqual(pipelineOf(WS, id).lastPause, { pauseKind: 'gauntlet', reason: HU214_REASON }, 'lastPause queda guardado con su tipo');
+
+  pausePipeline(ctx, pause());
+  assert.equal(pipelineOf(WS, id).repeatCount, 1, 'misma pausa seguida sin ningún evento con coste entre ambas');
+
+  updatePipeline(WS, id, {}, { kind: 'info', message: 'llamada a la IA', aiCall: true });
+  pausePipeline(ctx, pause());
+  assert.equal(pipelineOf(WS, id).repeatCount, 0, 'un evento aiCall entre ambas pausas es gasto');
+
+  pausePipeline(ctx, pause());
+  assert.equal(pipelineOf(WS, id).repeatCount, 1);
+  updatePipeline(WS, id, {}, { kind: 'info', message: 'coste', costUsd: 0.01 });
+  pausePipeline(ctx, pause());
+  assert.equal(pipelineOf(WS, id).repeatCount, 0, 'un evento con costUsd>0 entre ambas pausas es gasto');
+});
+
 test('EN-027 · la tarjeta dice que la reanudación volvió a la misma pausa sin gastar; sin repeatCount (guardado antiguo) no', () => {
   const flow: any = buildStoryFlow(mkProc(HU214_REASON, { repeatCount: 2 }));
   assert.match(flow.issue.explanation, /La reanudación volvió a la misma pausa con el mismo motivo sin gastar \(2 veces\)/);
