@@ -130,6 +130,32 @@ test('HU-214 · renovar, desactivar, activar y revocar; una edición revocada no
   assert.throws(() => reg.renewEdition(S, 'no-existe', true, o), (e: any) => e?.statusCode === 404);
 });
 
+test('HU-214 · auditoría: cada intento queda en execution_history como policy:edition-<acción>:granted|denied', async () => {
+  const { workspaceDb } = await import('../src/db/workspace.ts');
+  const audit = () => (workspaceDb(S).prepare(`SELECT kind, status FROM execution_history WHERE kind LIKE 'policy:edition-%' ORDER BY rowid`).all() as any[]).map(r => ({ kind: String(r.kind), status: String(r.status) }));
+  const before = audit().length;
+  const { env } = fakeEnv();
+  const o = { distributable: false };
+  const ed = await reg.generateEdition(S, true, env);
+  reg.renewEdition(S, ed.id, true, o);
+  assert.throws(() => reg.renewEdition(S, ed.id, false, o), (e: any) => e?.name === 'PolicyError' || /autorizaci/i.test(e?.message));
+  const snapshot = JSON.stringify(reg.getEdition(S, ed.id));
+  reg.revokeEdition(S, ed.id, true, o);
+  const rows = audit().slice(before);
+  const kinds = rows.map(r => r.kind);
+  assert.deepEqual(kinds, [
+    'policy:edition-generate:granted',
+    'policy:edition-renew:granted',
+    'policy:edition-renew:denied:sin_autorizacion',
+    'policy:edition-revoke:granted'
+  ], 'un registro por intento, en orden');
+  assert.equal(rows.find(r => r.kind === 'policy:edition-generate:granted')?.status, 'done');
+  assert.equal(rows.find(r => r.kind === 'policy:edition-revoke:granted')?.status, 'done');
+  assert.equal(rows.find(r => r.kind === 'policy:edition-renew:denied:sin_autorizacion')?.status, 'failed');
+  assert.notEqual(snapshot, JSON.stringify(reg.getEdition(S, ed.id)), 'la revocación autorizada sí se aplicó');
+  assert.equal(reg.getEdition(S, ed.id)!.license.renewals, 1, 'la renovación denegada no cambió nada');
+});
+
 test('HU-214 · interfaz: ruta /ediciones en App.tsx, diálogo de autorización y authorized:true en la pantalla', () => {
   const appSrc = fs.readFileSync(path.join(webSrc, 'App.tsx'), 'utf8');
   assert.match(appSrc, /import\('\.\/screens\/Editions\.tsx'\)/);

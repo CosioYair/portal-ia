@@ -76,11 +76,16 @@ function assertStudio(env?: Pick<EditionEnv, 'distributable'>): void {
 
 /** Puerta de autorización y auditoría (misma semántica que requirePolicy: nivel «auth»). */
 function authorize(slug: string, action: EditionAction, authorized: boolean): void {
-  const log = (status: 'granted' | 'denied', reason?: string) => {
-    try { processesRepo(slug).logExecution({ projectId: '', agentId: '', kind: `policy:edition-${action}:${status}${reason ? `:${reason}` : ''}`, status: status === 'granted' ? 'done' : 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() }); } catch { /* la auditoría no rompe la operación */ }
-  };
-  if (!authorized) { log('denied', 'sin_autorizacion'); throw new PolicyError('authorization_required', 'Esta acción sobre ediciones requiere autorización explícita del propietario.'); }
-  log('granted');
+  const log = (status: 'granted' | 'denied', reason?: string) =>
+    processesRepo(slug).logExecution({ projectId: '', agentId: '', kind: `policy:edition-${action}:${status}${reason ? `:${reason}` : ''}`, status: status === 'granted' ? 'done' : 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt: new Date().toISOString() });
+  if (!authorized) {
+    // La denegación se responde siempre con 403; si su registro falla, se avisa (no se oculta).
+    try { log('denied', 'sin_autorizacion'); } catch (e) { console.warn(`[ediciones] no se pudo auditar la denegación de «${action}»:`, e); }
+    throw new PolicyError('authorization_required', 'Esta acción sobre ediciones requiere autorización explícita del propietario.');
+  }
+  // Sin auditoría no hay acción: si no se puede registrar la autorización, no se cambia nada.
+  try { log('granted'); }
+  catch { throw fail('No se pudo registrar la autorización en el historial: la acción no se ha aplicado.', 500, 'audit_failed'); }
 }
 
 export function listEditions(slug: string): EditionView[] {
