@@ -7,6 +7,7 @@ import { lastDetection } from '../claudeCode/detect.ts';
 import { getClaudeCodeSettings } from '../claudeCode/settings.ts';
 import { getCodexSettings, lastCodexDetection } from './codex.ts';
 import { recordAgentEvent } from '../agentEvents.ts';
+import { ruleApplies } from '../modelRule.ts';
 
 /**
  * Registro de arneses y cambio de arnés de un agente (docs/arneses.md). Un cambio:
@@ -78,6 +79,8 @@ export function harnessOptions(slug: string, agent: Agent) {
   const work = affectedWork(slug, agent.id);
   return {
     current, currentLabel: harnessLabelFor(agent), model: agent.config.model, provider: agent.config.provider,
+    // EN-028: indica si se le aplica la regla de modelo de Portal IA y, si no, por qué (Codex, otro proveedor, regla inactiva u otra empresa).
+    modelRule: ruleApplies(slug, agent),
     work,
     continuity: 'Cada ejecución empieza de cero: el Portal le pasa a cualquier arnés la identidad, las instrucciones, las habilidades y la memoria verificada del agente. No hay una sesión que continuar.',
     pinned: 'Los encargos y lotes ya autorizados conservan el arnés con el que los autorizaste: si este cambia, sus siguientes llamadas con este agente no se hacen (se dice por qué) y nada cambia en silencio.',
