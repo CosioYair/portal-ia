@@ -11,7 +11,6 @@ import { changed } from './live.ts';
 import { monotonicNow } from '../clock.ts';
 import { departmentsRepo } from './departments.ts';
 import { lessonsRepo } from './lessons.ts';
-import { ruleApplies } from './modelRule.ts';
 
 /**
  * Carpeta portable de cada agente (contrato `portal-ia/agent@1`, docs/agentes-portables.md) y sus revisiones.
@@ -284,15 +283,13 @@ export function definitionFor(slug: string, a: Agent, extras: AgentExtras): Port
   const portableScope = scope ? contextScopeToPortable(scope, scope.company ? companyNameOf(slug) : null) : undefined;
   // EN-015: personal_name en agent.yaml (y en el ZIP) solo si lo tiene; `name` sigue siendo el puesto.
   const personal = agentPersonalName(a);
-  // EN-028: la regla de modelo de Portal IA es un dato interno de la plataforma y no se exporta. Si se aplica a este agente,
-  // la carpeta (y el ZIP) llevan harness.model vacío («predeterminado»). AGENTS.md, habilidades y memoria no cambian.
-  let ruled = false;
-  try { ruled = ruleApplies(slug, a).applies; } catch { ruled = false; }
+  // EN-028: la carpeta en disco y sus revisiones reflejan siempre config.model. Solo la exportación (agentCreation.exportFiles,
+  // que usan la ruta de exportación y el ZIP) vacía harness.model cuando se aplica la regla de modelo de Portal IA.
   return {
     manifest: {
       schema: PORTABLE_AGENT_SCHEMA, id: a.id, name: a.config.name, ...(personal ? { personalName: personal } : {}), role: a.template.role, department: dep?.slug ?? null, initials: a.template.initials,
       summary: a.config.specialization, responsibilities: a.config.responsibilities, deliverables: extras.deliverables, capabilities: a.config.capabilities ?? [],
-      harness: { preferred: harnessOf(a), model: ruled ? '' : a.config.model, effort: a.config.effort },
+      harness: { preferred: harnessOf(a), model: a.config.model, effort: a.config.effort },
       permissions: { tools, autonomy: extras.autonomy },
       createdAt: a.createdAt,
       ...(portableScope ? { contextScope: portableScope } : {})

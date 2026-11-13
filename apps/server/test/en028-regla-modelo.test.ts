@@ -195,6 +195,28 @@ test('6 · exportar la carpeta: harness.model vacío; AGENTS.md, habilidades y m
   } finally { assert.equal((await inject('PUT', `${W}/model-rule`, { model: RULE, active: true, confirm: true })).statusCode, 200); }
 });
 
+test('6 · sincronizar la carpeta en disco no vacía el modelo ni config.model; solo la exportación lo vacía', async () => {
+  const folders: any = await import('../src/services/agentFolders.ts');
+  const repo: any = agentsRepo(S);
+  const a = agentsOf(S).find(x => ruleApplies(S, x).applies);
+  assert.ok(a, 'hay un agente de portal-ia al que se aplica la regla');
+  const before: string = repo.get(a.id).config.model;
+  assert.ok(before, 'el agente tiene modelo');
+  await folders.syncAgentFolder(S, repo.get(a.id));
+  const f = folders.agentFoldersRepo(S).folderOf(a.id);
+  assert.ok(f, 'el agente tiene carpeta');
+  const disk = folders.readFolder(folders.folderPath(S, f.folder)).files;
+  assert.equal(filesToDefinition(disk).definition!.manifest.harness.model, before, 'la carpeta en disco conserva el modelo');
+  assert.equal(filesToDefinition(folders.agentFoldersRepo(S).adopted(a.id).files).definition!.manifest.harness.model, before, 'la revisión adoptada conserva el modelo');
+  assert.equal(repo.get(a.id).config.model, before, 'config.model no cambia');
+  // Releer y sincronizar otra vez no cambia nada.
+  await folders.syncAgentFolder(S, repo.get(a.id));
+  assert.equal(repo.get(a.id).config.model, before);
+  const exported = await exportFiles(S, a.id);
+  assert.equal(filesToDefinition(exported.files).definition!.manifest.harness.model, '', 'solo lo exportado sale con modelo predeterminado');
+  assert.ok(exported.files['AGENTS.md'], 'la exportación conserva AGENTS.md');
+});
+
 test('6 · Edición: solo código, sin data/ ni .sqlite ni el id de la regla', () => {
   const root = path.resolve(here, '..', '..', '..');
   const list = listPackageFiles(root)

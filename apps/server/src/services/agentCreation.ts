@@ -12,7 +12,7 @@ import { lessonsFor, lessonsRepo } from './lessons.ts';
 import { expandHome, isAllowed } from '../routes/fs.ts';
 import { monotonicNow } from '../clock.ts';
 import { zipBuffers } from './zipFile.ts';
-import { ruleModelFor } from './modelRule.ts';
+import { ruleApplies, ruleModelFor } from './modelRule.ts';
 
 /**
  * Creación de agentes sin código (asistente de la oficina), importación de carpetas portables y exportación.
@@ -267,8 +267,26 @@ export async function exportFiles(slug: string, agentId: string): Promise<{ fold
   const ad = f ? agentFoldersRepo(slug).adopted(agentId) : null;
   const base = ad?.files ?? definitionToFiles(definitionFor(slug, a, adoptedExtras(slug, a)));
   const lessons = roleLessons(slug, a);
-  const files: PortableFiles = lessons ? { ...base, 'knowledge/lecciones-del-papel.md': lessons } : base;
+  const withLessons: PortableFiles = lessons ? { ...base, 'knowledge/lecciones-del-papel.md': lessons } : base;
+  const files = withoutRuleModel(slug, a, withLessons);
   return { folder: f?.folder ?? slugify(`${a.key}-${a.id.slice(0, 8)}`), files, kind: 'internal' };
+}
+
+/**
+ * EN-028 · Solo al exportar: si la regla de modelo de Portal IA se aplica al agente, el manifiesto sale con harness.model
+ * vacío («predeterminado»). Solo se regenera el manifiesto (.yaml); AGENTS.md, habilidades, memoria y conocimiento se
+ * copian tal cual. La carpeta en disco y config.model no cambian.
+ */
+function withoutRuleModel(slug: string, a: Agent, files: PortableFiles): PortableFiles {
+  let ruled = false;
+  try { ruled = ruleApplies(slug, a).applies; } catch { ruled = false; }
+  if (!ruled) return files;
+  const def = filesToDefinition(files).definition;
+  if (!def || !def.manifest.harness.model) return files;
+  const regenerated = definitionToFiles({ ...def, manifest: { ...def.manifest, harness: { ...def.manifest.harness, model: '' } } });
+  const out: PortableFiles = { ...files };
+  for (const [p, c] of Object.entries(regenerated)) if (p.endsWith('.yaml') && p in files) out[p] = c;
+  return out;
 }
 
 /**
