@@ -2,13 +2,14 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CAPABILITIES, PORTABLE_LIMITS, allowedBundlePath, allowedPortablePath, applyMergeResolutions, baseSkillTool, changelogSinceExport, definitionToFiles, filesToDefinition, findSecret, isBaseSkill, lastExportMark, mergePortableFiles, normalizeText, stripZipRoot } from '@portal-ia/domain';
+import { stripBundleNotices, CAPABILITIES, PORTABLE_LIMITS, allowedBundlePath, allowedPortablePath, applyMergeResolutions, baseSkillTool, changelogSinceExport, definitionToFiles, filesToDefinition, findSecret, isBaseSkill, lastExportMark, mergePortableFiles, normalizeText, stripZipRoot } from '@portal-ia/domain';
 import type { Agent, LessonStatus, PortableFiles, PortableMergeConflict, PortableMergeResult, PortableSkill } from '@portal-ia/domain';
 import { listZip, readZipEntry } from './zipFile.ts';
 import { agentsRepo } from '../db/workspace.ts';
-import { adoptedExtras, agentFoldersRepo, applyImportedPersonalName, definitionFor, grantedTools, hashFiles, importScopePreview, notAdoptedChanges, restoreRevision, syncAgentFolder, writeImportedRevision, type AgentRevision, type RowPatch } from './agentFolders.ts';
+import { DEFAULT_INSTRUCTIONS_MARK, adoptedExtras, agentFoldersRepo, applyImportedPersonalName, definitionFor, grantedTools, hashFiles, importScopePreview, notAdoptedChanges, restoreRevision, syncAgentFolder, writeImportedRevision, type AgentRevision, type RowPatch } from './agentFolders.ts';
 import { importFromFiles, type ImportGrant } from './agentCreation.ts';
 import { lessonsRepo } from './lessons.ts';
+import { externalSource } from './externalAgents.ts';
 import { agentEvents, recordAgentEvent } from './agentEvents.ts';
 import { monotonicNow } from '../clock.ts';
 
@@ -40,7 +41,22 @@ type EventKind = Parameters<typeof recordAgentEvent>[2];
 const event = (slug: string, agentId: string, kind: string, detail: Record<string, unknown>) => recordAgentEvent(slug, agentId, kind as EventKind, detail);
 type LessonPatch = Parameters<ReturnType<typeof lessonsRepo>['update']>[1];
 
-export interface ZipMarker { workspace: string | null; agentId: string | null; n: number | null; hash: string | null; exportedAt: string | null }
+export interface ZipMarker { workspace: string | null; agentId: string | null; n: number | null; hash: string | null; exportedAt: string | null;
+  /** Portal IA 3 · Identificador portable del agente (no es su id interno) y huella de cada archivo tal como se exportó. */
+  bundle: string | null; files: Record<string, string> | null }
+
+/**
+ * Portal IA 3 · Identificador portable de un agente: estable, derivado de su id interno pero sin revelarlo. Permite que
+ * el paquete que se exporta vuelva a SU agente (antes el paquete no llevaba ni id ni marcador y siempre entraba como nuevo).
+ */
+export const bundleIdOf = (agentId: string): string => `pa-${crypto.createHash('sha256').update(`portal-ia/agent/${agentId}`).digest('hex').slice(0, 24)}`;
+const fileHash = (text: string): string => crypto.createHash('sha256').update(normalizeText(text)).digest('hex');
+/** Marcador que acompaña al paquete exportado: sin id interno, sin nombre del espacio, sin rutas. */
+export function exportMarker(agentId: string, base: { n: number | null; hash: string | null }, bundle: PortableFiles, exportedAt: string): string {
+  const files: Record<string, string> = {};
+  for (const p of Object.keys(bundle).sort()) files[p] = fileHash(bundle[p]!);
+  return `${JSON.stringify({ schema: 2, bundle: bundleIdOf(agentId), n: base.n, hash: base.hash, exportedAt, files }, null, 2)}\n`;
+}
 
 // ---------------------------------------------------------------- Lectura defensiva
 
@@ -90,7 +106,8 @@ function parseMarker(text: string): ZipMarker | null {
   try {
     const j = JSON.parse(text) as Record<string, unknown>;
     const s = (v: unknown) => typeof v === 'string' && v.length <= 200 ? v : null;
-    return { workspace: s(j.workspace), agentId: s(j.agentId), n: typeof j.n === 'number' && Number.isInteger(j.n) && j.n > 0 ? j.n : null, hash: s(j.hash), exportedAt: s(j.exportedAt) };
+    const fh = j.files && typeof j.files === 'object' && !Array.isArray(j.files) ? Object.fromEntries(Object.entries(j.files as Record<string, unknown>).filter(([k, v]) => k.length <= 300 && typeof v === 'string' && /^[0-9a-f]{64}$/.test(v)).slice(0, 400)) as Record<string, string> : null;
+    return { workspace: s(j.workspace), agentId: s(j.agentId), n: typeof j.n === 'number' && Number.isInteger(j.n) && j.n > 0 ? j.n : null, hash: s(j.hash), exportedAt: s(j.exportedAt), bundle: s(j.bundle), files: fh };
   } catch { return null; }
 }
 
@@ -154,10 +171,30 @@ function baseFor(slug: string, agentId: string, theirs: PortableFiles, marker: Z
   return best && best.score > 0 ? { n: best.n, files: best.files, how: 'parecido' } : { n: null, files: {}, how: 'sin-base' };
 }
 
-function planMerge(slug: string, a: Agent, theirs: PortableFiles, marker: ZipMarker | null): MergePlan {
+/**
+ * Portal IA 3 · Lo que llega de un paquete exportado, listo para fusionar. El paquete no es la carpeta tal cual: al
+ * exportar se limpia (sin id, sin rutas ni datos internos) y se le añaden avisos. Con la huella de cada archivo se sabe
+ * con exactitud qué NO cambió fuera: eso se trata como «sin cambios» (vale el texto del Portal) y solo lo que de verdad
+ * se editó fuera entra en la fusión. Un archivo generado por el paquete que no cambió no se adopta.
+ */
+export function incomingFromBundle(theirs: PortableFiles, marker: ZipMarker | null, base: PortableFiles): PortableFiles {
+  if (!marker?.files) return theirs;
+  const out: PortableFiles = {};
+  for (const [p, text] of Object.entries(theirs)) {
+    const unchanged = marker.files[p] !== undefined && marker.files[p] === fileHash(text);
+    if (unchanged) { if (base[p] !== undefined) out[p] = base[p]!; continue; }
+    out[p] = p === 'AGENTS.md' ? stripBundleNotices(text) : text;
+  }
+  // Lo que el paquete no trae pero estaba en la base y no forma parte de un paquete (nunca se exportó) se conserva.
+  for (const [p, text] of Object.entries(base)) if (out[p] === undefined && theirs[p] === undefined && marker.files[p] === undefined) out[p] = text;
+  return out;
+}
+
+function planMerge(slug: string, a: Agent, theirs0: PortableFiles, marker: ZipMarker | null): MergePlan {
   const repo = agentFoldersRepo(slug); const adopted = repo.adopted(a.id);
   const ours0 = adopted?.files ?? definitionToFiles(definitionFor(slug, a, adoptedExtras(slug, a)));
-  const base = baseFor(slug, a.id, theirs, marker);
+  const base = baseFor(slug, a.id, theirs0, marker);
+  const theirs = incomingFromBundle(theirs0, marker, base.files);
   const result = mergeThreeWay(withoutMem(alignYaml(base.files, ours0)), withoutMem(alignYaml(ours0, ours0)), withoutMem(alignYaml(theirs, ours0)));
   // Memoria: entradas del ZIP que no estaban al exportar ni existen ya en el Portal.
   const baseMem = new Set((filesToDefinition(base.files).definition?.memory ?? []).map(m => memKey(`${m.title}\n${m.text}`)));
@@ -173,9 +210,12 @@ function planMerge(slug: string, a: Agent, theirs: PortableFiles, marker: ZipMar
 
 /** El agente del ZIP existe en ESTE espacio (un marcador de otro espacio lo trata como nuevo: nunca se adopta uno ajeno). */
 function existingAgent(slug: string, files: PortableFiles, marker: ZipMarker | null): Agent | null {
+  if (marker?.workspace && marker.workspace !== slug) return null;
   const id = filesToDefinition(files).definition?.manifest.id ?? null;
-  if (!id || (marker?.workspace && marker.workspace !== slug)) return null;
-  return agentsRepo(slug).get(id) ?? null;
+  if (id) return agentsRepo(slug).get(id) ?? null;
+  // Paquete exportado (sin id interno): se reconoce por su identificador portable.
+  if (marker?.bundle) return agentsRepo(slug).list().find(a => bundleIdOf(a.id) === marker.bundle) ?? null;
+  return null;
 }
 
 // ---------------------------------------------------------------- Qué trae y qué aprendió (sin IA)
@@ -233,6 +273,9 @@ export function previewZipImport(slug: string, uploaded: string, name: string) {
   const parsed = filesToDefinition(files); const d = parsed.definition;
   const ok = !!d && !parsed.problems.some(p => p.blocking);
   const existing = existingAgent(slug, files, marker);
+  // Portal IA 3: el paquete de un agente con carpeta propia vuelve a SU carpeta (con sus programas), no por aqui: esta
+  // via lo convertiria en un agente nuevo sin sus scripts.
+  if (existing && externalSource(slug, existing.id)) throw fail(`Este paquete es de ${existing.config.name}, un agente con carpeta propia. Importalo desde su ficha: Ajustes > Origen > «Importar paquete mejorado».`, 409, { code: 'external_agent', agentId: existing.id });
   const token = stage(slug, uploaded, name, hash);
   // EN-014 · Ámbito que quedará tras importar (declarado en agent.yaml o, en un ZIP antiguo, el del agente existente o
   // General si es nuevo). Un proyecto que no existe en este Portal solo se avisa: no bloquea.
@@ -293,6 +336,11 @@ export async function applyZipImport(slug: string, input: ZipConfirmInput, onRow
   if (plan.ours[MEM] !== undefined) merged[MEM] = plan.ours[MEM]!;
   const fromZip = plan.result.conflicts.filter(c => input.resolutions[c.path] === 'zip').map(c => c.path);
   const adopted = [...plan.result.adopted, ...fromZip];
+  // Portal IA 3 · Instrucciones editadas FUERA: dejan de ser «las de por defecto». Sin esto, si el texto conservaba la marca
+  // de «instrucciones por defecto», el Portal las regeneraba y lo aprendido fuera se perdía sin avisar.
+  if (adopted.includes('AGENTS.md') && merged['AGENTS.md']?.includes(DEFAULT_INSTRUCTIONS_MARK)) {
+    merged['AGENTS.md'] = normalizeText(merged['AGENTS.md'].split('\n').filter(l => l.trim() !== DEFAULT_INSTRUCTIONS_MARK).join('\n'));
+  }
   const target = existing;
   const zipName = st.name || 'agente.zip';
   const learned = learnedSummary(files, plan.ours, grantedTools(target), plan.newMemory, changelog);

@@ -1,0 +1,27 @@
+/* Portal IA 3 · Exportar e importar un agente. Solo tokens (tokens.css). */
+.pkg { display: flex; flex-direction: column; gap: var(--space-3); }
+.pkg-head { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
+.pkg-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--space-3); }
+.pkg-box { border: 1px solid var(--color-border); border-radius: var(--radius-card); background: var(--color-surface-alt); padding: var(--space-3); min-width: 0; }
+.pkg-h { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--color-text); }
+.pkg-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; line-height: 1.45; color: var(--color-text); overflow-wrap: anywhere; }
+.pkg-note { margin: 8px 0 0; }
+.pkg-ver { font-family: var(--font-mono); font-size: 12px; color: var(--color-text-muted); }
+.pkg-warn { color: var(--color-attention-text); font-weight: 500; }
+.pkg-details > summary { cursor: pointer; font-size: 13px; color: var(--color-text-muted); min-height: 32px; display: flex; align-items: center; }
+.pkg-details > summary:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.pkg-files { margin: 6px 0 0; padding-left: 18px; font-family: var(--font-mono); font-size: 12px; color: var(--color-text-muted); columns: 2 220px; overflow-wrap: anywhere; }
+.pkg-upload { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
+.pkg-review { display: flex; flex-direction: column; gap: var(--space-3); }
+.pkg-changes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.pkg-change { border: 1px solid var(--color-border); border-left-width: 4px; border-radius: var(--radius-card); padding: var(--space-3); display: flex; flex-direction: column; gap: 8px; background: var(--color-surface); min-width: 0; }
+.pkg-change-conflict { border-left-color: var(--color-attention-border); }
+.pkg-change-top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pkg-path { font-family: var(--font-mono); font-size: 12.5px; color: var(--color-text); overflow-wrap: anywhere; }
+.pkg-choice { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.pkg-choice legend { padding: 0; margin-bottom: 4px; color: var(--color-attention-text); }
+.pkg-diff { margin: 6px 0 0; padding: var(--space-2); border-radius: var(--radius-tag); background: var(--color-surface-sunken); font-family: var(--font-mono); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pkg-del { color: var(--color-err-text); }
+.pkg-add { color: var(--color-ok-text); }
+.pkg-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: center; }
+.pkg-actions .btn, .pkg-upload .btn { min-height: 40px; }

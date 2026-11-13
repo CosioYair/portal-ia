@@ -16,6 +16,8 @@
     { "match": "apps/web/src/screens/Dashboard.tsx", "routes": ["/panel"] },
     { "match": "apps/web/src/screens/Backlog.tsx", "routes": ["/backlog"] },
     { "match": "apps/web/src/screens/Work.tsx", "routes": ["/trabajo"] },
+    { "match": "apps/web/src/components/PortablePackage.tsx", "routes": ["/oficina"] },
+    { "match": "apps/web/src/portable.css", "routes": ["/oficina"] },
     { "match": "apps/web/src/work.css", "routes": ["/trabajo"] },
     { "match": "apps/web/src/components/StoryCard.tsx", "routes": ["/backlog"] },
     { "match": "apps/web/src/screens/StoryWorkspace.tsx", "routes": ["/backlog"] },

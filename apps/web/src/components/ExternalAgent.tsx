@@ -1,3 +1,4 @@
+import { PackageReadiness, PackageReturn } from './PortablePackage.tsx';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { BATCH_ITEM_LABEL, FEEDBACK_LABEL, INTEGRATION_LABEL, PRESENCE_LABEL, PROPOSAL_ORIGIN_LABEL, batchCountsAddUp, type RemovalPreview, type RemovalRecord, type DocumentBatch, type DocumentBatchItem, type DocumentBatchItemState, type DocumentJob, type ExecutionBackend, type ExternalGrants, type ImprovementProposal } from '@portal-ia/domain';
 import { Chip, Icon, Notice, Spinner } from './ui.tsx';
@@ -510,7 +511,14 @@ export function OriginTab({ slug, p, onChanged }: { slug: string; p: Panel; onCh
     <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }} aria-labelledby="origin-bundle-h">
       <div className="h3" id="origin-bundle-h">Exportar</div>
       {s.changes.length > 0 && <span className="small muted">El paquete sale de la versión adoptada ({s.revision}). Lo que cambió fuera y aún no se adopta no entra.</span>}
+      <PackageReadiness slug={slug} agentId={p.agent.id} />
       <BundleDownloadButton slug={slug} agentId={p.agent.id} external />
+    </section>
+    <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }} aria-labelledby="origin-return-h">
+      <div className="h3" id="origin-return-h">Traer de vuelta un paquete mejorado</div>
+      {s.changes.length > 0
+        ? <span className="small muted">Antes revisa (más abajo) los cambios hechos en su carpeta fuera del Portal.</span>
+        : <PackageReturn slug={slug} agentId={p.agent.id} canRestore={!restoreBlock} onRestore={async n => { await osApi.restoreSource(slug, p.agent.id, n); await load(); }} onDone={() => void load()} />}
     </section>
     <section className="card" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}><div className="h3">Integración</div><Chip xs tone={s.state === 'integrated' ? 'ok' : s.state === 'evaluating' ? 'accent' : 'warn'}>{INTEGRATION_LABEL[s.state]}</Chip></div>

@@ -30,3 +30,4 @@ export const PROVIDER_META = {
   openai: { id: 'openai', name: 'OpenAI', consoleHost: 'platform.openai.com', keyHint: 'sk-…' }
 } as const;
 export * from './owner-state.ts';
+export * from './portable-manifest.ts';

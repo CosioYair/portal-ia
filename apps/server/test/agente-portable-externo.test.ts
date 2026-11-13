@@ -201,7 +201,13 @@ test('interno: el paquete lleva las lecciones validadas de su papel', async () =
 
 test('reimportar el ZIP exportado (HU-183) funciona y no expone id, modelo, permisos ni secretos', async () => {
   assert.ok(extZip, 'depende de la exportación del externo');
-  const pvz = previewZipImport(S, extZip, 'pdf-word-fiel-paquete-portable.zip');
+  // Portal IA 3: en el Portal donde el agente existe, su paquete vuelve a SU carpeta (Origen), con sus programas; por la
+  // importacion generica se rechaza con el motivo. Donde no existe (otro Portal: sin este marcador) entra como nuevo.
+  assert.throws(() => previewZipImport(S, extZip, 'pdf-word-fiel-paquete-portable.zip'), (e: any) => e.statusCode === 409 && e.payload?.code === 'external_agent' && e.payload?.agentId === extId);
+  const { zipBuffers } = await import('../src/services/zipFile.ts');
+  const elsewhere = path.join(tmp, 'en-otro-portal.zip');
+  fs.writeFileSync(elsewhere, zipBuffers(Object.entries(extBytes).filter(([name]) => name !== 'portal-export.json').map(([name, data]) => ({ name, data }))));
+  const pvz = previewZipImport(S, elsewhere, 'pdf-word-fiel-paquete-portable.zip');
   assert.equal(pvz.ok, true, JSON.stringify(pvz));
   assert.equal(pvz.mode, 'nuevo');
   const r = await applyZipImport(S, { token: pvz.token, hash: pvz.hash, resolutions: {}, grant: GRANT }, () => () => { /* sin fila */ });

@@ -136,7 +136,9 @@ test('en014 · ZIP antiguo sin ámbito ni id (agente nuevo): la vista previa no 
   const NAME = 'Agente Nuevo EN014';
   const y = withoutId(stripScope(exported['agent.yaml']!)).replace(/^name:.*$/m, `name: ${NAME}`);
   assert.ok(!/^context_scope:/m.test(y) && !/^id:/m.test(y), y);
-  const r = await zipPreview(zipOf({ ...exported, 'agent.yaml': y })); assert.equal(r.statusCode, 200, r.body);
+  // Portal IA 3: un ZIP «antiguo» tampoco trae el marcador de exportacion (hoy el paquete lo lleva y volveria a su agente).
+  const { 'portal-export.json': _marker, ...old } = exported;
+  const r = await zipPreview(zipOf({ ...old, 'agent.yaml': y })); assert.equal(r.statusCode, 200, r.body);
   const pv = r.json();
   assert.equal(pv.mode, 'nuevo', 'sin id el ZIP es un agente nuevo');
   assert.equal(pv.contextScope?.declared, false, 'sin context_scope no se declara ámbito');

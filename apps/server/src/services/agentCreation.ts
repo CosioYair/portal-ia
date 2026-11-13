@@ -237,7 +237,7 @@ function roleLessons(slug: string, a: Agent): string | null {
 }
 
 /** Archivos de la revisión adoptada (o la que se generaría) para descargar como paquete. */
-export async function exportFiles(slug: string, agentId: string): Promise<{ folder: string; files: PortableFiles; kind: 'internal' | 'external'; sourceRoot?: string }> {
+export async function exportFiles(slug: string, agentId: string): Promise<{ folder: string; files: PortableFiles; kind: 'internal' | 'external'; sourceRoot?: string; base?: { n: number | null; hash: string | null } }> {
   const a = agentsRepo(slug).get(agentId); if (!a) throw Object.assign(new Error('Agente no encontrado'), { statusCode: 404 });
   // EN-007 · Agente externo: su revisión adoptada (lo que admite isIdentityPath), no definitionFor. Import diferido:
   // externalAgents.ts importa este módulo.
@@ -247,24 +247,28 @@ export async function exportFiles(slug: string, agentId: string): Promise<{ fold
     const snap = ext.sourcesRepo(slug).files(agentId) ?? {};
     const files: PortableFiles = {};
     for (const p of Object.keys(snap).sort()) if (isIdentityPath(p)) files[p] = snap[p]!;
-    return { folder: slugify(path.basename(src.root)).slice(0, 60) || slugify(a.config.name).slice(0, 60) || 'agente', files, kind: 'external', sourceRoot: src.root };
+    return { folder: slugify(path.basename(src.root)).slice(0, 60) || slugify(a.config.name).slice(0, 60) || 'agente', files, kind: 'external', sourceRoot: src.root, base: { n: src.revision, hash: src.adoptedHash } };
   }
   const f = agentFoldersRepo(slug).folderOf(agentId);
   const ad = f ? agentFoldersRepo(slug).adopted(agentId) : null;
   const base = ad?.files ?? definitionToFiles(definitionFor(slug, a, adoptedExtras(slug, a)));
   const lessons = roleLessons(slug, a);
   const files: PortableFiles = lessons ? { ...base, 'knowledge/lecciones-del-papel.md': lessons } : base;
-  return { folder: f?.folder ?? slugify(`${a.key}-${a.id.slice(0, 8)}`), files, kind: 'internal' };
+  return { folder: f?.folder ?? slugify(`${a.key}-${a.id.slice(0, 8)}`), files, kind: 'internal', base: { n: ad?.n ?? null, hash: ad ? hashFiles(ad.files) : null } };
 }
+
+export interface ExportReadiness { ok: boolean; kind: 'internal' | 'external'; problems: unknown[]; files: string[]; bytes: number; manifest: unknown; excluded: string[]; warnings: string[] }
+/** Vista previa de la exportación: qué lleva, qué necesita fuera y qué lo impide (si algo). Sin IA, sin efectos. */
+export async function exportReadiness(slug: string, agentId: string): Promise<ExportReadiness> { return (await exportBundle(slug, agentId, { dryRun: true })).readiness!; }
 
 /**
  * Paquete portable autosuficiente (portal-ia/agent-bundle@2) en un ZIP en memoria: la carpeta adoptada, limpia de datos
  * internos, más AUTOMEJORA.md, CAMBIOS.md, GUIA.md y scripts/anotar-cambio.mjs. Si queda algún secreto o dato interno
  * (id del agente, UUID, rutas locales o de data/, rutas /api/, tablas), se niega con 409 y la lista de problemas.
  */
-export async function exportBundle(slug: string, agentId: string): Promise<{ fileName: string; zip: Buffer; files: string[] }> {
+export async function exportBundle(slug: string, agentId: string, opts: { dryRun?: boolean } = {}): Promise<{ fileName: string; zip: Buffer; files: string[]; readiness?: ExportReadiness }> {
   const a = agentsRepo(slug).get(agentId); if (!a) throw Object.assign(new Error('Agente no encontrado'), { statusCode: 404 });
-  const { files, kind, sourceRoot } = await exportFiles(slug, agentId);
+  const { files, kind, sourceRoot, base } = await exportFiles(slug, agentId);
   // Si la historia «Automejora desde el chat» deja un CAMBIOS.md en la carpeta, se conserva su historial.
   const changelog = typeof files['CAMBIOS.md'] === 'string' ? files['CAMBIOS.md'] : null;
   const exportedAt = new Date().toISOString();
@@ -272,25 +276,51 @@ export async function exportBundle(slug: string, agentId: string): Promise<{ fil
   const contextScope = contextScopeOf(slug, a);
   const companyName = contextScope?.company ? companyNameOf(slug) : null;
   const projectName = contextScope?.project?.name ?? null;
-  let bundle: PortableFiles;
+  let bundle: PortableFiles; let enrichWarnings: string[] = []; let manifestOut: unknown = null;
   if (kind === 'external') {
     // EN-007 · Revisión adoptada con los scripts sin tocar, más los planes que ya funcionaron por SHA-256 del PDF.
     const { provenPlansForExport } = await import('./documentJobs.ts');
     bundle = buildExternalBundle(files, { agentName: a.config.name, role: a.template?.role ?? null, summary: a.config.specialization ?? null, exportedAt, changelog, provenPlans: provenPlansForExport(slug, agentId, files), contextScope, companyName, projectName });
   } else bundle = buildPortableBundle(files, { agentName: a.config.name, exportedAt, changelog, contextScope, companyName, projectName });
+  // Portal IA 3 · El paquete tiene que poder ejecutarse fuera: manifiesto, versiones fijadas, comprobación de entorno y
+  // la herramienta con la que el Portal valida su trabajo. Todo pasa después por la misma validación (sin secretos ni rutas).
+  {
+    const { enrichBundle } = await import('./portablePackage.ts');
+    const { bundleIdOf } = await import('./agentZipImport.ts');
+    const dj = kind === 'external' ? await import('./documentJobs.ts') : null;
+    const src = kind === 'external' ? (await import('./externalAgents.ts')).externalSource(slug, agentId) : null;
+    const enriched = await enrichBundle(bundle, { agentId, name: a.config.name, kind, exportedAt, bundleId: bundleIdOf(agentId), sourceRoot: sourceRoot ?? null, grants: src ? { runScripts: !!src.grants.runScripts, writeDocuments: !!src.grants.writeDocuments } : null }, {
+      probe: names => (dj ? dj.pythonPackageVersions(names) : Promise.resolve({ python: null, versions: {} })),
+      validationTool: () => (dj ? dj.portalValidationTool() : null)
+    });
+    bundle = enriched.files; enrichWarnings = enriched.warnings; manifestOut = enriched.manifest;
+  }
   // Nunca se entrega un ZIP parcial: cualquier problema (secreto, ruta local, dato interno o tamaño) niega TODO con 409.
   // EN-010 · En los externos, su carpeta original y la de datos del Portal son rutas privadas: nunca salen en el paquete.
   const privatePaths = kind === 'external'
     ? [...(sourceRoot ? [{ path: sourceRoot, kind: 'source' as const }] : []), ...(config.dataDir ? [{ path: config.dataDir, kind: 'portal-data' as const }] : [])]
     : undefined;
   const problems = validatePortableBundle(bundle, { forbidden: [a.id], limits: kind === 'external' ? EXTERNAL_BUNDLE_LIMITS : undefined, privatePaths });
+  // Portal IA 3 · «¿Está listo para exportar?»: la MISMA preparación y validación que la descarga, sin generar el ZIP
+  // ni registrar nada. Así lo que se enseña antes de exportar es exactamente lo que se exportará.
+  if (opts.dryRun) {
+    const names0 = Object.keys(bundle).sort();
+    const excluded = kind === 'external'
+      ? ['Tus documentos y entregables', 'La bandeja de entrada', 'Las dependencias instaladas (viajan sus versiones, no los archivos)', 'Copias de seguridad', 'Credenciales y datos internos del Portal']
+      : ['El arnés, el modelo y los permisos (los decide quien lo use)', 'Memoria sin verificar', 'Credenciales y datos internos del Portal'];
+    return { fileName: '', zip: Buffer.alloc(0), files: names0, readiness: { ok: problems.length === 0, kind, problems, files: names0, bytes: names0.reduce((n, k) => n + Buffer.byteLength(bundle[k]!, 'utf8'), 0), manifest: manifestOut, excluded, warnings: enrichWarnings } };
+  }
   if (problems.length) {
     const list = problems.map(p => (p.path ? `${p.path}${p.line ? `:${p.line}` : ''} — ${p.message}` : p.message));
     const hint = problems.find(p => p.hint)?.hint;
     throw Object.assign(new Error(`No se puede exportar el paquete: ${list.slice(0, 5).join(' · ')}${list.length > 5 ? ` (y ${list.length - 5} más)` : ''}${hint ? `. ${hint}` : ''}`), { statusCode: 409, payload: { problems } });
   }
   const names = Object.keys(bundle);
-  const zip = zipBuffers(names.map(name => ({ name, data: Buffer.from(bundle[name]!, 'utf8') })));
+  // Portal IA 3 · Marcador de exportación: permite que este paquete vuelva a SU agente y saber qué cambió fuera. No lleva
+  // el id interno ni el nombre del espacio. Va fuera de la validación: lo escribe el Portal, no el agente.
+  const { exportMarker, ZIP_EXPORT_MARKER } = await import('./agentZipImport.ts');
+  const marker = exportMarker(a.id, base ?? { n: null, hash: null }, bundle, exportedAt);
+  const zip = zipBuffers([...names.map(name => ({ name, data: Buffer.from(bundle[name]!, 'utf8') })), { name: ZIP_EXPORT_MARKER, data: Buffer.from(marker, 'utf8') }]);
   const fileName = `${slugify(a.config.name).slice(0, 60) || 'agente'}-paquete-portable.zip`;
   recordAgentEvent(slug, agentId, 'exported', { format: 'zip', files: names.length, bytes: zip.length });
   return { fileName, zip, files: names };
