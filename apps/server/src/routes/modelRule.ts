@@ -12,7 +12,7 @@ const Params = z.object({ slug: z.string().min(1) });
 const RuleBody = z.object({
   model: z.string().trim().min(1, 'Elige un modelo para la regla.').max(200),
   active: z.boolean(),
-  confirm: z.literal(true, { errorMap: () => ({ message: 'Activar o cambiar la regla de modelo requiere tu confirmación explícita.' }) })
+  confirm: z.literal(true, { error: 'Activar o cambiar la regla de modelo requiere tu confirmación explícita.' })
 });
 
 export async function modelRuleRoutes(app: FastifyInstance) {
