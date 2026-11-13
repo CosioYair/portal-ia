@@ -8,6 +8,7 @@ import type { Agent, Lesson, LessonEvidence, LessonImprovement, LessonProof, Les
 import { syncLessonPracticesSafe } from './lessonPractices.ts';
 import { practicesFor } from './agentTemplates.ts';
 import { costUsd, estimatePricing, getAdapter } from '@portal-ia/ai-adapters';
+import { costModel } from './modelRule.ts';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, workspaceDb } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
@@ -385,7 +386,7 @@ export async function draftLesson(slug: string, lessonId: string, opts: { author
   const startedAt = now();
   requirePolicy('ai_call', { slug, agentId: agent.id, projectId: l.projectId, authorized: opts.authorized });
   const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user, maxTokens: 800, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort }, undefined, { slug, agent });
-  const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
+  const cost = (cc ? 0 : costUsd(providerId, costModel(slug, agent, agent.config.model), res.inputTokens, res.outputTokens));
   processesRepo(slug).logExecution({ projectId: l.projectId ?? '', agentId: agent.id, kind: opts.kind ?? 'lesson_propose', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
   let j: any = {}; try { j = JSON.parse(res.text.match(/\{[\s\S]*\}/)?.[0] ?? '{}'); } catch { j = {}; }
   const role = ['planner', 'implementer', 'reviewer', 'consultant'].includes(j.role) ? j.role : l.role;

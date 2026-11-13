@@ -6,6 +6,7 @@ import { sealForStep } from './portalSeal.ts';
 import { curateAfterTask } from './lessonCurator.ts';
 import { practicesFor } from './agentTemplates.ts';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
+import { costModel } from './modelRule.ts';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
 import { decisionsFromProcess, iterationNumbers } from './inbox.ts';
@@ -686,7 +687,7 @@ Responde SOLO con JSON: {"userFacing": string (3-8 líneas en lenguaje llano: qu
   const startedAt = new Date().toISOString();
   requirePolicy('ai_call', { slug, agentId: agent.id, projectId: proc.projectId, authorized: true });
   const qaUser = buildManualTestQaPrompt({ portal, base: user, devSteps }) + manualTestRegenerateNote(outsideSteps, regenerate); const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user: qaUser, maxTokens: 2000, effort: 'low', supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort }, undefined, { slug, agent });
-  const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
+  const cost = (cc ? 0 : costUsd(providerId, costModel(slug, agent, agent.config.model), res.inputTokens, res.outputTokens));
   procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
   procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'manual_test_gen', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
   const j = extractJson(res.text);

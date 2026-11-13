@@ -9,6 +9,7 @@ import { CONSULT_EVIDENCE_CHARS, filesContext } from './storyPipeline.ts';
 import type { Agent, AssessmentEstimate, BacklogItem, BacklogOp, DelegationResult, ModelInfo, Process, ProviderId } from '@portal-ia/domain';
 import { PORTAL_CAPABILITIES, EFFORT_THINKING_TOKENS, agentPersonalName, normalizeAgentName } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
+import { costModel } from './modelRule.ts';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { activeAgents } from './activeAgents.ts';
@@ -246,7 +247,7 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
       requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true, route: cc ? 'claude-code' : 'api' });
       const timeoutMs = callTimeoutMs(maxTokens, agent.config.effort);
       const res = await withWatchdog(completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history, timeoutMs }, ctrl.signal, { slug, agent }), ctrl, timeoutMs);
-      const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
+      const cost = (cc ? 0 : costUsd(providerId, costModel(slug, agent, agent.config.model), res.inputTokens, res.outputTokens));
       const prev = procs.get(processId)!.steps[stepIdx]; const acc = history?.length ? prev : { inputTokens: 0, outputTokens: 0, costUsd: 0 };
       procs.stepFinish(step.id, 'done', { tokensIn: acc.inputTokens + res.inputTokens, tokensOut: acc.outputTokens + res.outputTokens, cost: acc.costUsd + cost, outputMd: history?.length ? `${history.filter(h => h.role === 'assistant').map(h => h.content).join('')}${res.text}` : res.text });
       procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
@@ -256,7 +257,7 @@ export async function runDelegation(slug: string, processId: string, log: (o: an
     } catch (e) {
       const err = e instanceof ProviderRequestError ? e.error : null; let msg = err ? err.message : (e as Error).message;
       // Lo que pudo facturarse sin confirmación del proveedor se guarda aparte del gasto confirmado (estimación de la entrada).
-      const billed = !cc && maybeBilled(e); const estCost = billed ? costUsd(providerId, agent.config.model, estimateTokens(system + user), 0) : 0;
+      const billed = !cc && maybeBilled(e); const estCost = billed ? costUsd(providerId, costModel(slug, agent, agent.config.model), estimateTokens(system + user), 0) : 0;
       if (billed) msg += ` Posible costo NO confirmado por el proveedor: ≈ ${estCost.toFixed(4)} USD (estimación de la entrada enviada; sin confirmación del proveedor).`;
       // Una ejecución de Claude Code sin respuesta útil (turnos agotados) consumió la suscripción: su uso se registra en el
       // paso y en el proceso (0 USD de la API), como en el pipeline de historias.

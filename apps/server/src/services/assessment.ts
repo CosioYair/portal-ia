@@ -2,6 +2,7 @@ import { EFFORT_THINKING_TOKENS } from '@portal-ia/domain';
 import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import type { Agent, AssessmentEstimate, Process, ProviderId } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
+import { costModel } from './modelRule.ts';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, knowledgeRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { activeAgents } from './activeAgents.ts';
@@ -134,7 +135,7 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
           maxTokens: STEP_PLAN[i].maxTokens, effort: agent.config.effort, supportsEffort: !!modelInfo?.supportsEffort,
           timeoutMs
         }, ctrl.signal, { slug, agent }), ctrl, timeoutMs);
-        const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
+        const cost = (cc ? 0 : costUsd(providerId, costModel(slug, agent, agent.config.model), res.inputTokens, res.outputTokens));
         procs.stepFinish(step.id, 'done', { tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, outputMd: res.text });
         procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
         procs.logExecution({ projectId: project.id, agentId: agent.id, kind: 'assessment_step', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
@@ -148,7 +149,7 @@ export async function runAssessment(slug: string, processId: string, log: (o: an
         // facturarse: su costo ESTIMADO se guarda como no confirmado, aparte del gasto confirmado (nunca un 0 engañoso).
         const billed = !cc && maybeBilled(e);
         const estIn = billed ? estimateTokens(systemPrompt + userPrompt) : 0;
-        const estCost = billed ? costUsd(providerId, agent.config.model, estIn, 0) : 0;
+        const estCost = billed ? costUsd(providerId, costModel(slug, agent, agent.config.model), estIn, 0) : 0;
         if (billed) msg += ` Posible costo NO confirmado: ≈ ${estCost.toFixed(4)} USD (≈${estIn} tokens de entrada; sin confirmación del proveedor).`;
         procs.stepFinish(step.id, 'failed', { error: msg });
         if (billed) procs.addUnconfirmed(processId, step.id, estCost);

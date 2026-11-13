@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import type { BacklogItem, ModelInfo, Process, ProviderId, StoryContext, StoryIterationState, StoryMessage, StoryTask, TeamMember } from '@portal-ia/domain';
 import { INTERNAL_WORKSPACE, EFFORT_THINKING_TOKENS } from '@portal-ia/domain';
 import { costUsd, estimatePricing, getAdapter, ProviderRequestError } from '@portal-ia/ai-adapters';
+import { costModel } from './modelRule.ts';
 import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
 import { activeAgents } from './activeAgents.ts';
@@ -194,7 +195,7 @@ export async function askTeam(slug: string, itemId: string, text: string, opts: 
   try {
     requirePolicy('ai_call', { slug, agentId: agent.id, projectId: ctx.item.projectId, authorized: true });
     const res = await completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user: userPrompt, maxTokens: 2500, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort }, undefined, { slug, agent });
-    const cost = (cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens));
+    const cost = (cc ? 0 : costUsd(providerId, costModel(slug, agent, agent.config.model), res.inputTokens, res.outputTokens));
     processesRepo(slug).logExecution({ projectId: ctx.item.projectId, agentId: agent.id, kind: 'story_chat', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
     const m = res.text.match(/```proposals\s*([\s\S]*?)```/i); let proposals: any = null;
     if (m) { try { proposals = JSON.parse(m[1]); } catch { proposals = null; } }

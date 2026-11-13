@@ -36,7 +36,7 @@ const { buildApp } = await import('./fixtures/owner-app.ts');
 const { resetDetectionCache } = await import('../src/services/claudeCode/detect.ts');
 const { agentCaller, completeWith, setBridgeUrl } = await import('../src/services/claudeCode/backend.ts');
 const { getClaudeCodeSettings, saveClaudeCodeSettings } = await import('../src/services/claudeCode/settings.ts');
-const { ruleApplies, effectiveModel, ruleModelFor, explainModelRejection, ModelRuleError } = await import('../src/services/modelRule.ts');
+const { ruleApplies, effectiveModel, ruleModelFor, explainModelRejection, ModelRuleError, costModel } = await import('../src/services/modelRule.ts');
 const { harnessOptions } = await import('../src/services/harness/index.ts');
 const { createCompany, createProject } = await import('../src/services/companies.ts');
 const { exportFiles } = await import('../src/services/agentFolders.ts');
@@ -172,6 +172,22 @@ test('f · Codex y OpenAI: la regla no se aplica, se dice por qué y su modelo n
   assert.equal(ho.modelRule.applies, false); assert.equal(ho.model, 'gpt-5');
   assert.equal(ruleApplies('otra', ccAgent).applies, false);
   assert.equal(ruleApplies(S, { ...ccAgent, config: { ...ccAgent.config, backend: 'claude-code', provider: 'anthropic' } }).applies, true);
+});
+
+test('f2 · el coste se calcula con el modelo usado (el de la regla) y no cambia para Codex, OpenAI ni otras empresas', () => {
+  const api = { ...ccAgent, config: { ...ccAgent.config, backend: 'api', provider: 'anthropic', model: 'claude-sonnet-4-5' } };
+  const codex = { ...ccAgent, config: { ...ccAgent.config, backend: 'codex', provider: 'openai', model: 'gpt-5-codex' } };
+  const openai = { ...ccAgent, config: { ...ccAgent.config, backend: 'api', provider: 'openai', model: 'gpt-5' } };
+  assert.equal(costModel(S, api, 'claude-sonnet-4-5'), RULE);
+  assert.equal(costModel(S, codex, 'gpt-5-codex'), 'gpt-5-codex');
+  assert.equal(costModel(S, openai, 'gpt-5'), 'gpt-5');
+  assert.equal(costModel('otra', api, 'claude-sonnet-4-5'), 'claude-sonnet-4-5');
+  // Contrato: ningún cálculo de coste de estos servicios usa ya el modelo guardado del agente en lugar del efectivo.
+  for (const f of ['delegation', 'assessment', 'backlog', 'lessons', 'storyExecution', 'orgEvaluation', 'storyThread']) {
+    const src = fs.readFileSync(path.join(here, '..', 'src', 'services', `${f}.ts`), 'utf8');
+    assert.doesNotMatch(src, /costUsd\(providerId, (agent|coord)\.config\.model/, `${f}.ts calcula el coste sin el modelo de la regla`);
+    assert.match(src, /costModel\(slug, /, `${f}.ts usa costModel`);
+  }
 });
 
 test('6 · exportar la carpeta: harness.model vacío; AGENTS.md, habilidades y memoria verificada se conservan', async () => {

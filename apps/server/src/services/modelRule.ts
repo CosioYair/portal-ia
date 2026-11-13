@@ -75,6 +75,15 @@ export function effectiveModel(slug: string, agent: Agent, requested: string): s
   return validateRuleModel(st.model);
 }
 
+/**
+ * Modelo con el que se calcula el COSTE de una llamada: el que se usó de verdad (el de la regla si se aplica) o el pedido.
+ * No valida ni lanza: sirve también en el manejo de errores sin tapar el fallo original.
+ */
+export function costModel(slug: string, agent: Agent, requested: string): string {
+  const st = ruleApplies(slug, agent);
+  return st.applies && st.model && st.model.trim() ? st.model.trim() : requested;
+}
+
 /** Modelo con el que se crean los agentes nuevos de la empresa (null = sin regla: lo de siempre). */
 export function ruleModelFor(slug: string, provider: ProviderId): string | null {
   if (slug !== MODEL_RULE_SLUG || provider !== 'anthropic') return null;
