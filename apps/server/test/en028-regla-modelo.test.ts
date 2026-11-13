@@ -230,6 +230,48 @@ test('6 · Edición: solo código, sin data/ ni .sqlite ni el id de la regla', (
   }
 });
 
+test('2 · contrato: ninguna llamada directa al adaptador en src/ se salta la regla de modelo', () => {
+  const srcRoot = path.resolve(here, '..', 'src');
+  const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap(d => {
+    const p = path.join(dir, d.name);
+    return d.isDirectory() ? walk(p) : /\.(ts|tsx|mts)$/.test(d.name) ? [p] : [];
+  });
+  const DIRECT = /getAdapter\([^)]*\)!?\s*\.complete\(/g;
+  // Único punto de entrada de la regla: completeWith en backend.ts. Los llamantes de esta lista llaman directamente al
+  // adaptador, pero calculan antes el modelo con effectiveModel(...) y lo pasan a la llamada. Si aparece una llamada directa
+  // en un archivo nuevo, hay que usar completeWith o añadir aquí ese archivo junto con su effectiveModel.
+  const ALLOWED: Record<string, string> = {
+    'services/claudeCode/backend.ts': 'completeWith (punto único de la regla)',
+    'services/agentChat.ts': 'conversación con el agente: effectiveModel antes de la API',
+    'services/agentFactory.ts': 'borrador de agente: effectiveModel del agente de incorporación',
+    'services/agentNames.ts': 'nombre propio: effectiveModel en las dos ramas',
+    'services/agentWizardDraft.ts': 'borrador del asistente: effectiveModel',
+    'services/assistant.ts': 'Asistente: effectiveModel sobre el modelo de chat',
+    'services/storyPipeline.ts': 'pipeline por API: effectiveModel antes de la llamada'
+  };
+  const offenders: string[] = []; const unguarded: string[] = []; const seen = new Set<string>();
+  for (const file of walk(srcRoot)) {
+    const rel = path.relative(srcRoot, file).split(path.sep).join('/');
+    const text = fs.readFileSync(file, 'utf8');
+    const direct = [...text.matchAll(DIRECT)];
+    if (!direct.length) continue;
+    seen.add(rel);
+    if (!(rel in ALLOWED)) {
+      for (const m of direct) offenders.push(`${rel}:${text.slice(0, m.index ?? 0).split('\n').length}`);
+      continue;
+    }
+    const guards = (text.match(/effectiveModel\(/g) ?? []).length;
+    if (guards < direct.length) unguarded.push(`${rel} (${direct.length} llamadas directas, ${guards} effectiveModel)`);
+    if (rel !== 'services/claudeCode/backend.ts' && !/import\s*\{[^}]*\beffectiveModel\b[^}]*\}\s*from\s*['"][./]*(?:\.\.\/)*(?:services\/)?modelRule\.ts['"]/.test(text) && !/from\s*['"]\.\/modelRule\.ts['"]/.test(text)) {
+      unguarded.push(`${rel} no importa effectiveModel de modelRule.ts`);
+    }
+  }
+  assert.deepEqual(offenders, [], `llamadas directas al adaptador que se saltan la regla de modelo (usa completeWith): ${offenders.join(', ')}`);
+  assert.deepEqual(unguarded, [], `llamadas directas sin effectiveModel: ${unguarded.join(', ')}`);
+  // La lista no se queda vieja: cada archivo permitido sigue teniendo su llamada directa.
+  for (const rel of Object.keys(ALLOWED)) assert.ok(seen.has(rel), `${rel} ya no llama directamente al adaptador: quítalo de la lista permitida`);
+});
+
 test('2 · extremo a extremo con un llamante real (draftLesson → completeWith) y un agente de la API de Anthropic', async () => {
   const ts = new Date().toISOString();
   const lesson: any = lessonsRepo(S).insert({ projectId: null, role: null, tags: ['en028-e2e'], status: 'validated', version: 1, parentId: null, title: 'Lección EN-028 e2e', detector: 'manual', evidence: { processId: null, processTitle: null, stepId: null, agentId: null, agentName: null, file: null, detail: 'prueba de extremo a extremo', at: ts }, rootCause: null, correctiveAction: null, lessonText: 'Texto de prueba', source: 'manual', promotedTo: null, dedupeKey: null, agentId: null } as any);
