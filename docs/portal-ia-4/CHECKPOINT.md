@@ -38,7 +38,18 @@ documentos de esta carpeta; no los repite. Informe para el propietario: `INFORME
 
 ## Repositorio
 
-Se rellena al cerrar la consolidación (commit final de `main`, ramas remotas borradas y las que no se pudieron).
+Consolidado el 2026-11-14.
+
+- `main` local = `origin/main` = GitHub, en el commit de código `77fa15c` (batería completa: 177/177 archivos,
+  1332 pruebas superadas, 0 fallidas, 3 omitidas de siempre). Publicado sin forzar. Este apunte va en un commit
+  posterior que solo cambia documentación.
+- GitHub: **una sola rama, `main`**. Se borraron las 41 ramas remotas de desarrollo; las 41 estaban contenidas en
+  `main` (comprobado una a una antes de borrar). Ninguna quedó sin poder borrarse.
+- En esta máquina se conservan todas las ramas locales y sus carpetas de trabajo. Con trabajo que NO está en `main`:
+  `portal-ia/hu-177` (3 commits) y `portal-ia/hu-178` (4 commits), posteriores a lo que se integró de esas
+  historias; no se han verificado ni integrado. `candidato/hu-159-integracion` quedó superado por lo que ya está
+  en `main`.
+- No se repitió la pasada en Linux (sandbox) de toda la batería; el propio Portal la hace al verificar cada trabajo.
 
 ## Imágenes de Docker necesarias en la máquina (una vez; ya construidas en este equipo)
 
