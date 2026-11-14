@@ -31,7 +31,15 @@ export function defaultChecks(): RuntimeCheck[] {
 export function matches(text: string, expect: string): boolean {
   const re = expect.match(/^\/(.+)\/([a-z]*)$/);
   if (re) { try { return new RegExp(re[1], re[2].replace('g', '')).test(text); } catch { return text.includes(expect); } }
+  // «/texto» sin la barra de cierre NO es una expresión regular: quien lo escribió quiso decir ese texto. Se busca tal cual
+  // y sin la barra inicial (EN-029: «/<div id="root"» daba por rota una pantalla que estaba bien).
+  if (expect.length > 1 && expect.startsWith('/')) return text.includes(expect) || text.includes(expect.slice(1));
   return text.includes(expect);
+}
+
+/** ¿La respuesta es el armazón de la aplicación web (una pantalla), cuyo contenido solo existe tras pintarla el navegador? */
+export function isAppShell(p: string, body: string): boolean {
+  return !/^\/api(\/|$)/.test(p) && /<div id="root"/.test(body) && /<script[^>]+type="module"/.test(body);
 }
 
 async function httpCheck(c: RuntimeCheck, dir: string, i: number): Promise<RuntimeCheckResult> {
@@ -41,6 +49,12 @@ async function httpCheck(c: RuntimeCheck, dir: string, i: number): Promise<Runti
     const res = await fetch(url, { signal: ctl.signal, headers: { 'cache-control': 'no-cache' } }); clearTimeout(t);
     const body = await res.text();
     const ok = res.ok && matches(body, c.expect);
+    // Una pantalla (no /api/) responde siempre con el armazón de la aplicación: su contenido lo pinta el navegador. Si lo
+    // esperado no está en el armazón, HTTP no puede juzgarlo; se comprueba con un navegador de verdad (o queda pendiente).
+    if (res.ok && !ok && isAppShell(c.path, body)) {
+      const viaUi = await uiCheck({ ...c, kind: 'ui', selector: c.selector || 'body' }, dir, i);
+      return { ...viaUi, check: c, detail: `Es una pantalla: se comprobó con el navegador. ${viaUi.detail}` };
+    }
     const file = path.join(dir, `check-${i + 1}-http.txt`);
     fs.writeFileSync(file, `GET ${url}\nHTTP ${res.status}\n\n${body.slice(0, 200_000)}`);
     return { check: c, status: ok ? 'ok' : 'fail', detail: ok ? `HTTP ${res.status}, la respuesta contiene lo esperado.` : `HTTP ${res.status}; ${res.ok ? 'la respuesta no contiene lo esperado' : 'error del servidor'}. Extracto: ${body.slice(0, 300).replace(/\s+/g, ' ')}`, evidence: file, at };

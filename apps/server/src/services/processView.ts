@@ -8,6 +8,7 @@ import { isActiveJob } from './activeJobs.ts';
 import { worktreeDrift } from './worktreeDrift.ts';
 import { branchIntegration } from './storyIntegration.ts';
 import { projectsRepo } from '../db/workspace.ts';
+import { isNewerThan, latestMerged } from './storyClosure.ts';
 
 /**
  * Datos que necesita el recorrido guiado de un proceso de historia (sin IA, solo lectura): pasos con falla de la prueba,
@@ -36,7 +37,14 @@ export async function flowOptions(slug: string, p: Process, item?: BacklogItem |
   // Integración con la rama principal (git en memoria, sin IA): ¿avanzó main?, ¿se combina limpio o hay conflictos reales?
   const repo = r?.applied && !r.merged && !r.rejected && p.status !== 'running' ? projectsRepo(slug).repository(p.projectId) : null;
   const integration = repo && r?.applied ? await branchIntegration(repo.path, r.applied.branch).catch(() => null) : null;
-  return { failedStepDetails, sandbox, updateFailedLog, iteration: idx >= 0 ? { number: siblings.length - idx, total: siblings.length } : null, orphan, drift, integration };
+  // Solo cuando el plan concluyó «sin código»: ¿una iteración anterior de este mismo trabajo ya está integrada?
+  let delivered: GuidanceOptions['delivered'] = null;
+  if (r?.planNoCode && !r.merged) {
+    const fam = p.backlogItemId ? processesRepo(slug).listByBacklogItem(p.backlogItemId) : p.assignmentId ? processesRepo(slug).listByAssignment(p.assignmentId) : [];
+    const m = latestMerged(fam.filter(x => x.id !== p.id && !x.archivedAt));
+    if (m && isNewerThan(p, m)) delivered = { processId: m.id, commit: m.result!.merged!.commit, mergedAt: m.result!.merged!.mergedAt };
+  }
+  return { delivered, failedStepDetails, sandbox, updateFailedLog, iteration: idx >= 0 ? { number: siblings.length - idx, total: siblings.length } : null, orphan, drift, integration };
 }
 
 /**

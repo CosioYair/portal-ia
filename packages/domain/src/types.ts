@@ -547,6 +547,8 @@ export type FlowActionId =
   | 'pipeline_resume' | 'repair_output'
   /** La historia no cambia código (lo concluyó el Coordinador): encargo de análisis pendiente de tu autorización, sin IA hasta entonces. */
   | 'convert_to_analysis'
+  /** El plan concluye que no hay nada que cambiar porque una iteración anterior YA está integrada: se vuelve a esa entrega (sin IA). */
+  | 'restore_delivered'
   /** Conector Claude Code: autorizar el proyecto o pasar a «gestionado» los agentes sin consola, y continuar (sin repetir lo hecho). */
   | 'claude_code_fix'
   /** Registrar como corrección del propietario un commit hecho fuera del equipo (consola) y verificarlo sin IA. */

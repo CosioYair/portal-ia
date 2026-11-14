@@ -54,6 +54,7 @@ import { defaultChecks, runRuntimeChecks, runtimeVerified } from '../services/ru
 import { recordDetections } from '../services/lessons.ts';
 import { addManualItem, discardStory, estimateExtraction, extractBacklogWithAI, importBacklogFromKnowledge, resetStory } from '../services/backlog.ts';
 import { backlogRepo } from '../db/workspace.ts';
+import { assignmentsRepo } from '../db/assignments.ts';
 import { assertNotSuperseded, InboxError } from '../services/inbox.ts';
 import { monotonicNow } from '../clock.ts';
 import { authorizeProcess } from '../services/processAuthorization.ts';
@@ -721,6 +722,24 @@ Proceso: ${proc.id}`, { processId: proc.id });
       current, previous: since ? { fingerprint: since } : snap, comparedWith: since ? 'client' : snap ? 'pause_snapshot' : 'none',
       pauseActive: !!pl?.pauseKind, pauseImageRelated: !!pl?.imageRelated, detail: img ? `${sb.detail} · ${img.reason}` : sb.detail
     });
+  });
+  // ---- Lo pedido ya está entregado: la iteración «sin código» cede el sitio a la que se integró (sin IA, reversible) ----
+  app.post('/api/workspaces/:slug/processes/:id/restore-delivered', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const body = z.object({ authorized: z.literal(true) }).safeParse(req.body);
+    if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita.' });
+    const procs = processesRepo(slug); const proc = procs.get(id);
+    if (!proc || proc.kind !== 'story_execution') return reply.code(404).send({ error: 'Proceso no encontrado' });
+    const d = (await flowOptions(slug, proc)).delivered;
+    if (!d) return reply.code(409).send({ error: 'Este proceso no tiene una entrega anterior integrada a la que volver.', code: 'no_delivered' });
+    if (proc.status === 'running') return reply.code(409).send({ error: 'El proceso está en ejecución.', code: 'busy' });
+    try {
+      procs.restoreSuperseded(d.processId);
+      procs.markSuperseded(id, d.processId);
+      if (proc.assignmentId) assignmentsRepo(slug).update(proc.assignmentId, a => { a.processId = d.processId; a.events.push({ at: new Date().toISOString(), kind: 'status', processId: d.processId, message: `Se volvió a la entrega integrada (${d.commit}): la revisión posterior concluyó que no queda código que cambiar.` }); });
+      app.log.info({ from: id, to: d.processId }, 'vuelta a la entrega integrada (iteración sin código superada)');
+      return await withGuidance(slug, procs.get(d.processId)!);
+    } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   // ---- Verificación en ejecución (M2): el Portal se comprueba a sí mismo tras activar el cambio ----
   app.post('/api/workspaces/:slug/processes/:id/runtime-check', async (req, reply) => {

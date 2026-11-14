@@ -58,6 +58,7 @@ function describePhase(p: Process, opts: GuidanceOptions): ProcessGuidance {
   if (r.rejected && !r.merged) return { phase: r.applied ? (r.applied.worktree ? 'Diff rechazado (rama descartada)' : 'Iteración anterior a v0.12 descartada (rama conservada)') : 'Diff rechazado', next: `Motivo: ${r.rejected.reason}. La historia volvió a pendiente; ejecútala de nuevo cuando quieras.`, tone: 'warn', settled: true };
   if (!r.applied) {
     // Detenida en el plan: el Desarrollador ni siquiera trabajó (no se le culpa de «no entregar cambios»).
+    if (!applicable && r.planNoCode && opts.delivered) return { phase: 'Ya entregado (no queda código que cambiar)', next: 'Vuelve a la entrega integrada y compruébala: no hace falta otra corrección ni un análisis.', tone: 'info', settled: false };
     if (!applicable && r.planNoCode) return { phase: 'Sin cambios de código (lo concluyó el Coordinador)', next: 'Conviértela en un encargo de análisis, reformúlala para que cambie código (nueva iteración) o ciérrala. Repetirla tal cual daría lo mismo.', tone: 'warn', settled: false };
     if (!applicable && r.pipeline?.pauseKind === 'plan') return { phase: 'Detenida en el plan (nada implementado)', next: 'Revisa «Problema actual»: el plan no se pudo ejecutar por partes.', tone: 'warn', settled: false };
     if (!applicable) return { phase: 'Terminado sin cambios aplicables', next: 'El Desarrollador no entregó cambios válidos. Acota la historia y vuelve a ejecutarla.', tone: 'err', settled: true };

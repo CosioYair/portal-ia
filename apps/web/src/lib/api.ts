@@ -358,6 +358,7 @@ export const api = {
   applyChanges: (slug: string, processId: string, branch?: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/apply`, { method: 'POST', body: JSON.stringify({ authorized: true, branch }) }),
   verifyProcess: (slug: string, processId: string, command: 'install' | 'typecheck' | 'test' | 'build', allowNetwork = false) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/verify`, { method: 'POST', body: JSON.stringify({ authorized: true, command, allowNetwork }) }),
   /** M2 · el Portal se comprueba a sí mismo (HTTP y navegador) una vez activado el cambio. */
+  restoreDelivered: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/restore-delivered`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   runtimeCheck: (slug: string, processId: string) => request<Process>(`/api/workspaces/${slug}/processes/${processId}/runtime-check`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   systemSandbox: (force = false) => request<{ available: 'docker' | 'wsl' | 'host-min' | 'unavailable'; docker: boolean; wsl: boolean; detail: string; checkedAt: string }>(`/api/system/sandbox${force ? '?force=1' : ''}`),
   /** EN-024 · Construye la imagen del sandbox desde el Dockerfile de la rama (autorizado, red solo durante la construcción, etiqueta por hash; no toca portal-ia-sandbox:1). */

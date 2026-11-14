@@ -24,7 +24,7 @@ const LIVE_NEXT: Record<LiveCall['state'], string> = { preparing: 'enviar la sol
 // Portal IA 3: el destino puede estar dentro de un bloque plegado (el detalle técnico): se abre antes de ir.
 const go = (id: string) => { const el = document.getElementById(id); for (let d = el?.closest('details'); d; d = d.parentElement?.closest('details') ?? null) d.open = true; el?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' }); };
 /** Acciones que esta versión de la interfaz sabe ejecutar. Una desconocida (servidor más nuevo) se dice, no se ignora. */
-const HANDLED = new Set<FlowActionId>(['authorize', 'cancel', 'review_diff', 'apply', 'reject', 'install_and_retry', 'verify', 'retry_verification', 'sandbox_help', 'refresh_sandbox', 'rebuild_sandbox_image', 'request_fix', 'ask_team', 'tasks_from_issue', 'merge', 'rebuild', 'runtime_check', 'manual_test', 'close', 'close_resolved', 'accept_plan', 'retry_process', 'recover', 'new_iteration', 'pipeline_resume', 'repair_output', 'claude_code_fix', 'register_external', 'open_settings', 'integration_prepare', 'integration_resolve', 'convert_to_analysis', 'publish', 'skip_publish']);
+const HANDLED = new Set<FlowActionId>(['authorize', 'cancel', 'review_diff', 'apply', 'reject', 'install_and_retry', 'verify', 'retry_verification', 'sandbox_help', 'refresh_sandbox', 'rebuild_sandbox_image', 'request_fix', 'ask_team', 'tasks_from_issue', 'merge', 'rebuild', 'runtime_check', 'manual_test', 'close', 'close_resolved', 'accept_plan', 'retry_process', 'recover', 'new_iteration', 'pipeline_resume', 'repair_output', 'claude_code_fix', 'register_external', 'open_settings', 'integration_prepare', 'integration_resolve', 'convert_to_analysis', 'restore_delivered', 'publish', 'skip_publish']);
 const AUTH_TXT: Record<string, string> = { 'claude.ai': 'sesión de tu suscripción', oauth_token: 'token OAuth', api_key: 'clave de API (no válida aquí)', none: 'sin sesión' };
 
 interface Props {
@@ -215,6 +215,7 @@ export function StoryFlowPanel({ proc, story, variant, onChange, onAsk, onOpenIt
       else if (a.id === 'close') { if (!itemId) { needsStory(); return; } await api.markStoryDone(slug, itemId); flash('Historia completada'); await reload(); }
       else if (a.id === 'close_resolved') { if (!itemId) { needsStory(); return; } setConfirming(null); setComposer(null); setClosingResolved(true); return; }
       else if (a.id === 'accept_plan') { onChange(await api.acceptPlan(slug, proc.id, Math.max(0, Number(addBudget) || 0))); flash('Se implementa el plan aceptado; lo pendiente queda documentado'); }
+      else if (a.id === 'restore_delivered') { const p = await api.restoreDelivered(slug, proc.id); flash('Has vuelto a la entrega integrada: comprueba el Portal en marcha'); navigate(`/procesos/${p.id}`); }
       else if (a.id === 'convert_to_analysis') { const p = await api.convertToAnalysis(slug, proc.id); flash('Encargo de análisis preparado: revísalo y autorízalo'); navigate(`/procesos/${p.id}`); }
       else if (a.id === 'retry_process') { const p = await api.retryProcess(slug, proc.id); flash('Proceso nuevo creado: elige el presupuesto y autorízalo'); navigate(`/procesos/${p.id}`); }
       else if (a.id === 'pipeline_resume' || a.id === 'repair_output') {
