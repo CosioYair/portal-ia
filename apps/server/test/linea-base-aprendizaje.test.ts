@@ -169,7 +169,8 @@ test('línea base: una sola ejecución por commit (también simultáneas), en un
 // ---------- Pipeline real (proveedor simulado) ----------
 test('HU-177 · lo que ya fallaba en main no se le cobra a la historia: sin correcciones, QA lo ve «frente a la base», se puede integrar; no deja lección', async () => {
   // Una lección validada que el implementador llevará inyectada: esta tarea posterior la DEMUESTRA si termina verificada.
-  const lesson = createManualLesson(S, { projectId: project.id, title: 'Entregar cada archivo con su prueba', lessonText: 'MARCA_LECCION_PROBADA: entrega cada archivo nuevo con su prueba.', role: 'implementer' });
+  // Portal IA 4: la lección dice a qué zona se refiere (src/); la tarea posterior entrega src/nuevo.mjs, así que la pone a prueba.
+  const lesson = createManualLesson(S, { projectId: project.id, title: 'Entregar cada archivo con su prueba', lessonText: 'MARCA_LECCION_PROBADA: entrega cada archivo nuevo con su prueba.', role: 'implementer', file: 'src/index.mjs' });
   setRules(plan([{ path: 'src/nuevo.mjs', kind: 'code' }], ['Existe src/nuevo.mjs']), [{ match: R.dev, text: resp('Entrega src/nuevo.mjs.', F('src/nuevo.mjs', 'export const nuevo = true;\n')) }]);
   const id = newRun('Nuevo módulo', 'Existe src/nuevo.mjs que exporta nuevo.');
   const p = await run(id); const pl = p.result!.pipeline!;
@@ -185,7 +186,7 @@ test('HU-177 · lo que ya fallaba en main no se le cobra a la historia: sin corr
   // Lección demostrada por esta tarea posterior (llevaba la lección y terminó verificada sin repetir su error).
   assert.ok(byRule(R.dev).some(c => c.markers.includes('MARCA_LECCION_PROBADA')), 'el implementador recibió la lección');
   const l = lessonsRepo(S).get(lesson.id)!;
-  assert.equal(l.proof?.at(-1)?.result, 'held'); assert.equal(l.proof?.at(-1)?.processId, id); assert.ok(l.provenAt, 'aprendida: la demostró una tarea posterior');
+  assert.equal(l.proof?.at(-1)?.result, 'held'); assert.equal(l.proof?.at(-1)?.processId, id); assert.equal(l.proof?.at(-1)?.exposed, true, 'la tarea tocó la zona de la lección'); assert.ok(l.provenAt, 'aprendida: la demostró una tarea posterior que tocaba esa zona');
   // Integrar en main con la verificación del Portal (test cuenta como superada frente a la base).
   const m0 = await app.inject({ method: 'POST', url: `${W}/processes/${id}/merge`, payload: { authorized: true } });
   assert.equal(m0.statusCode, 409, 'sin confirmar lo heredado no se integra'); assert.equal(m0.json().code, 'ack_required');

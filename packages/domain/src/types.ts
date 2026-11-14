@@ -1797,7 +1797,14 @@ export interface LessonImprovementPendingItem {
   at: string;
 }
 
-export interface LessonProof { processId: string; processTitle: string | null; result: 'held' | 'recurred'; detail: string; at: string }
+export interface LessonProof {
+  processId: string; processTitle: string | null; result: 'held' | 'recurred'; detail: string; at: string;
+  /**
+   * Portal IA 4 · ¿La tarea estuvo de verdad EXPUESTA al error de la lección (cambió el archivo, o su carpeta, donde
+   * ocurrió)? Solo una tarea expuesta que termina bien demuestra algo. Ausente (pruebas anteriores) = no se sabe.
+   */
+  exposed?: boolean;
+}
 export interface LessonEvidence { processId: string | null; processTitle: string | null; stepId: string | null; agentId: string | null; agentName: string | null; file: string | null; detail: string; at: string }
 export interface Lesson {
   id: string; projectId: string | null; role: string | null; tags: string[]; status: LessonStatus; version: number; parentId: string | null;

@@ -153,7 +153,8 @@ export function lessonsRepo(slug: string) {
     addProof(id: string, p: LessonProof) {
       const cur = this.get(id); if (!cur || (cur.proof ?? []).some(x => x.processId === p.processId)) return cur;
       const proof = [...(cur.proof ?? []), p].slice(-20);
-      db.prepare(`UPDATE lessons SET proof_json = ?, proven_at = COALESCE(proven_at, ?), updated_at = ? WHERE id = ?`).run(JSON.stringify(proof), p.result === 'held' ? p.at : null, now(), id);
+      // Portal IA 4: solo una tarea EXPUESTA al error y terminada bien la demuestra.
+      db.prepare(`UPDATE lessons SET proof_json = ?, proven_at = COALESCE(proven_at, ?), updated_at = ? WHERE id = ?`).run(JSON.stringify(proof), p.result === 'held' && p.exposed === true ? p.at : null, now(), id);
       return this.get(id);
     },
     /** Nueva versión de una lección validada (la anterior queda «obsoleta» con enlace). */
@@ -165,6 +166,17 @@ export function lessonsRepo(slug: string) {
       return this.get(v.id)!;
     }
   };
+}
+
+/**
+ * Portal IA 4 · ¿Una tarea que cambió `touched` estuvo expuesta al error de la lección? Sí, si cambió el archivo donde
+ * ocurrió o algo de su misma carpeta. Una lección sin archivo (genérica: «QA no aprobó el diff») no tiene dónde
+ * repetirse de forma comprobable, así que ninguna tarea la demuestra.
+ */
+export function lessonExposure(l: Pick<Lesson, 'evidence'>, touched: string[]): boolean {
+  const file = (l.evidence?.file ?? '').replace(/\\/g, '/').trim(); if (!file) return false;
+  const dir = file.includes('/') ? file.slice(0, file.lastIndexOf('/')) : '';
+  return touched.some(p => p === file || (!!dir && p.startsWith(dir + '/') && !p.slice(dir.length + 1).includes('/')));
 }
 
 // ---------- 1 · Detección determinista ----------
@@ -333,10 +345,12 @@ export function recordLessonOutcomes(slug: string, processId: string, repoPath: 
   // fallo intermedio, no una reincidencia: la tarea verificada cuenta como cumplida.
   const correctedHere = (d: Detection) => d.detector === 'gauntlet_gap' && /^Resultado: corregida en la ronda \d+/.test(d.evidence.detail);
   const fired = detectInProcess(slug, proc, repoPath).filter(d => !correctedHere(d));
+  const touched = (proc.result?.changes ?? []).filter(c => !c.error).map(c => String(c.path).replace(/\\/g, '/'));
   for (const id of used) {
     const l = repo.get(id); if (!l || l.status !== 'validated' || l.evidence.processId === processId) continue;
     const recurred = fired.some(d => sameCause(l, d));
-    const after = repo.addProof(id, { processId, processTitle: proc.title, result: recurred ? 'recurred' : 'held', detail: recurred ? `El mismo error («${l.detector}») volvió a ocurrir con la lección inyectada.` : 'Terminó verificada sin repetir el error de la lección.', at: now() });
+    const exposed = recurred || lessonExposure(l, touched);
+    const after = repo.addProof(id, { processId, processTitle: proc.title, result: recurred ? 'recurred' : 'held', exposed, detail: recurred ? `El mismo error («${l.detector}») volvió a ocurrir con la lección inyectada.` : exposed ? 'Tocó la misma zona donde ocurrió el error y terminó verificada sin repetirlo.' : 'Terminó verificada, pero no tocó la zona donde ocurrió el error: no demuestra que la lección funcione.', at: now() });
     if (!after) continue;
     (recurred ? out.recurred : out.held).push(id);
     const tail: LessonProof[] = []; for (const x of [...(after.proof ?? [])].reverse()) { if (x.result === 'held') break; tail.push(x); }
@@ -418,9 +432,9 @@ export function setLessonStatus(slug: string, id: string, status: 'rejected' | '
   return repo.get(id) ?? res;
 }
 /** Lección escrita a mano por el propietario (queda validada directamente: la escribió él). */
-export function createManualLesson(slug: string, input: { projectId: string | null; title: string; lessonText: string; role?: string | null; tags?: string[]; correctiveAction?: string | null }): Lesson {
+export function createManualLesson(slug: string, input: { projectId: string | null; title: string; lessonText: string; role?: string | null; tags?: string[]; correctiveAction?: string | null; /** Archivo o zona a la que se refiere (sin ella no se puede demostrar). */ file?: string | null }): Lesson {
   const repo = lessonsRepo(slug);
-  const l = repo.insert({ projectId: input.projectId, role: input.role ?? null, tags: input.tags ?? [], status: 'validated', version: 1, parentId: null, title: input.title, detector: 'manual', evidence: { processId: null, processTitle: null, stepId: null, agentId: null, agentName: null, file: null, detail: 'Escrita por el propietario.', at: now() }, rootCause: null, correctiveAction: input.correctiveAction ?? null, lessonText: input.lessonText, source: 'owner', promotedTo: null, dedupeKey: null })!;
+  const l = repo.insert({ projectId: input.projectId, role: input.role ?? null, tags: input.tags ?? [], status: 'validated', version: 1, parentId: null, title: input.title, detector: 'manual', evidence: { processId: null, processTitle: null, stepId: null, agentId: null, agentName: null, file: input.file?.trim() || null, detail: 'Escrita por el propietario.', at: now() }, rootCause: null, correctiveAction: input.correctiveAction ?? null, lessonText: input.lessonText, source: 'owner', promotedTo: null, dedupeKey: null })!;
   const res = repo.update(l.id, { validatedAt: now() })!;
   syncLessonPracticesSafe(slug);
   return repo.get(l.id) ?? res;

@@ -51,9 +51,9 @@ function mkProc(projectId: string, result: Record<string, unknown>, lessonsUsed:
   processesRepo(slug).setResult(p.id, { changes: [], verifications: [], review: null, runtimeChecks: null, applied: false, ...result } as any);
   return processesRepo(slug).get(p.id)!;
 }
-function mkLesson(projectId: string, o: { tags?: string[]; status?: string; detector?: string; text?: string } = {}) {
+function mkLesson(projectId: string, o: { tags?: string[]; status?: string; detector?: string; text?: string; file?: string } = {}) {
   const repo = lessonsRepo(slug);
-  const l = repo.insert({ projectId, role: 'implementer', tags: o.tags ?? ['verify', 'implementar'], status: o.status ?? 'validated', version: 1, parentId: null, title: 'Lección de prueba', detector: o.detector ?? 'verification_failed', evidence: { processId: 'proc-origen', processTitle: 'Origen', stepId: null, agentId: null, agentName: null, file: null, detail: 'Evidencia de origen', at: new Date().toISOString() }, rootCause: null, correctiveAction: null, lessonText: o.text ?? 'Ejecuta npm test antes de entregar y corrige cada prueba que falle.', source: 'curator', promotedTo: null, dedupeKey: null } as any)!;
+  const l = repo.insert({ projectId, role: 'implementer', tags: o.tags ?? ['verify', 'implementar'], status: o.status ?? 'validated', version: 1, parentId: null, title: 'Lección de prueba', detector: o.detector ?? 'verification_failed', evidence: { processId: 'proc-origen', processTitle: 'Origen', stepId: null, agentId: null, agentName: null, file: o.file ?? null, detail: 'Evidencia de origen', at: new Date().toISOString() }, rootCause: null, correctiveAction: null, lessonText: o.text ?? 'Ejecuta npm test antes de entregar y corrige cada prueba que falle.', source: 'curator', promotedTo: null, dedupeKey: null } as any)!;
   return repo.update(l.id, { validatedAt: new Date().toISOString() })!;
 }
 const policyGrants = () => (workspaceDb(slug).prepare(`SELECT COUNT(*) AS n FROM execution_history WHERE kind = 'policy:ai_call:granted'`).get() as any).n as number;
@@ -74,11 +74,12 @@ test('a · recordDetections suma como máximo UNA reincidencia por lección y pr
 
 test('b · un fallo intermedio que el mismo proceso corrige y termina verificado no cuenta; la ficha muestra «Aprendida» sin reincidencia', () => {
   const pj = proj();
-  const L = mkLesson(pj.id, { tags: ['verify', 'test', 'implementar', 'causa:test:resta devuelve 1'] });
+  // Portal IA 4: la lección señala DÓNDE ocurrió el error; solo una tarea que toque esa zona puede demostrarla.
+  const L = mkLesson(pj.id, { tags: ['verify', 'test', 'implementar', 'causa:test:resta devuelve 1'], file: 'src/resta.ts' });
   const p = mkProc(pj.id, { verifications: [V('test', 1, TAP('resta devuelve 1'))], pipeline: { state: 'paused', events: [] } }, [L.id]);
   recordDetections(slug, p.id, null);
   assert.equal(lessonsRepo(slug).get(L.id)!.recurrenceCount, 1, 'pausado: cuenta mientras no se corrige');
-  processesRepo(slug).setResult(p.id, { changes: [], verifications: [V('test', 0, '# pass 12')], review: null, runtimeChecks: null, applied: true, pipeline: { state: 'verified', events: [] } } as any);
+  processesRepo(slug).setResult(p.id, { changes: [{ path: 'src/resta.ts', content: 'x' }], verifications: [V('test', 0, '# pass 12')], review: null, runtimeChecks: null, applied: true, pipeline: { state: 'verified', events: [] } } as any);
   recordDetections(slug, p.id, null);
   const out = recordLessonOutcomes(slug, p.id, null);
   const l = lessonsRepo(slug).get(L.id)!;
