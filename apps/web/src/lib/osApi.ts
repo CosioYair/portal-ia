@@ -197,6 +197,13 @@ export const osApi = {
     request<ZipImportResult>(`${W(slug)}/agents/import-zip/confirm`, { method: 'POST', body: J({ ...body, resolutions: body.resolutions ?? {} }) }),
   zipImportUndo: (slug: string, id: string, importN: number) => request<{ revision: Revision; retired: number }>(`${W(slug)}/agents/${id}/import-zip/${importN}/undo`, { method: 'POST', body: J({}) }),
   exportFiles: (slug: string, id: string) => request<{ folder: string; files: PortableFiles }>(`${W(slug)}/agents/${id}/export`),
+  /** Portal IA 3: qué llevará el paquete, qué necesita fuera y si algo impide exportarlo. Sin costo. */
+  exportReadiness: (slug: string, id: string) => request<ExportReadiness>(`${W(slug)}/agents/${encodeURIComponent(id)}/export/readiness`),
+  /** Portal IA 3: vuelta de un agente con carpeta propia. Vista previa (no escribe nada) y aplicación (con copia previa). */
+  packagePreview: (slug: string, id: string, file: File, onProgress?: (fraction: number) => void, signal?: AbortSignal) =>
+    streamUpload<PackagePreview>(`${W(slug)}/agents/${encodeURIComponent(id)}/source/package/preview?name=${encodeURIComponent(file.name)}`, file, onProgress, signal),
+  packageApply: (slug: string, id: string, token: string, resolutions: Record<string, 'portal' | 'paquete'>) =>
+    request<PackageResult>(`${W(slug)}/agents/${encodeURIComponent(id)}/source/package/apply`, { method: 'POST', body: J({ token, resolutions, authorized: true }) }),
   /** URL del paquete portable (ZIP) del agente. */
   exportZipUrl: (slug: string, id: string) => `${W(slug)}/agents/${encodeURIComponent(id)}/export.zip`,
   /** Descarga el paquete portable (ZIP). Sin costo de IA. Lanza ApiError con el motivo (y `body.problems` en un 409). */
@@ -250,3 +257,20 @@ export interface SourceStatus {
   revisions: { n: number; hash: string; source: string; note: string; by: string; at: string }[];
   toolchain: { python: string | null; pythonVersion: string | null; soffice: string | null; problems: string[] };
 }
+
+export interface PortableRequirementView { name: string; import: string; version: string | null; source: 'agente' | 'portal' | 'sin-fijar' }
+export interface PortableManifestView {
+  name: string; kind: 'internal' | 'external';
+  contents: { instructions: string[]; skills: string[]; scripts: string[]; memory: string[]; context: string[]; generated: string[] };
+  entrypoints: { skill: string; script: string; summary: string; usage: string | null; proven: boolean }[];
+  runtime: { python: { minimum: string; tested: string | null } | null; requirements: PortableRequirementView[]; lock: string | null; binaries: { name: string; label: string; env: string; required: boolean; why: string }[] };
+  permissions: { runScripts: boolean; writeDocuments: boolean } | null;
+  validation: { tool: string; command: string; gates: string[] } | null;
+  harnesses: { id: string; label: string; runsScripts: boolean; note: string }[];
+  limitations: string[];
+}
+export interface ExportReadiness { ok: boolean; kind: 'internal' | 'external'; problems: ExportProblemView[]; files: string[]; bytes: number; manifest: PortableManifestView | null; excluded: string[]; warnings: string[] }
+export interface ExportProblemView { path: string; message: string; line?: number; snippet?: string; reason?: string; hint?: string }
+export interface PackageChange { path: string; kind: 'adopt' | 'added' | 'conflict'; script: boolean; before: string | null; after: string; portal: string | null }
+export interface PackagePreview { token: string; agentId: string; agentName: string; exportedAt: string | null; baseRevision: number | null; currentRevision: number; changes: PackageChange[]; unchanged: number; ignored: string[]; notRemoved: string[]; warnings: string[]; canWrite: boolean; upToDate: boolean }
+export interface PackageResult { revision: number; previousRevision: number; backup: string | null; written: string[]; kept: string[]; upToDate: boolean }

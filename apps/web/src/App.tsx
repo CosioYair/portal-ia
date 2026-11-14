@@ -8,6 +8,8 @@ import { Welcome } from './screens/Welcome.tsx';
 import { ProviderSetup } from './screens/ProviderSetup.tsx';
 import { Dashboard } from './screens/Dashboard.tsx';
 import { Backlog } from './screens/Backlog.tsx';
+import { Work } from './screens/Work.tsx';
+import { Acceptance } from './screens/Acceptance.tsx';
 import { Assistant } from './screens/Assistant.tsx';
 import { Budgets } from './screens/Budgets.tsx';
 import { CompanyHome } from './screens/CompanyHome.tsx';
@@ -218,6 +220,7 @@ export default function App() {
           <Route path="/historias/:storyId" element={guard(<StoryWorkspace />)} />
           <Route path="/conocimiento" element={guard(<Knowledge />)} />
           <Route path="/presupuestos" element={company(<Budgets />)} />
+          <Route path="/trabajo" element={guard(<Work />)} />
           <Route path="/backlog" element={guard(<Backlog />)} />
           <Route path="/lotes" element={guard(<Batches />)} />
           <Route path="/lotes/:batchId" element={guard(<BatchDetail />)} />
@@ -230,6 +233,7 @@ export default function App() {
           <Route path="/ajustes" element={company(<Settings />)} />
           {/* HU-214 · Ediciones: lista, genera, renueva, activa, desactiva y revoca; cada acción exige la autorización del propietario. */}
           <Route path="/ediciones" element={company(<Editions />)} />
+          <Route path="/aceptacion" element={company(<Acceptance />)} />
           <Route path="*" element={<Navigate to={home} replace />} />
         </Routes>
         </Suspense>

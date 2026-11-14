@@ -183,7 +183,11 @@ test('A · «Atrás» sin pantalla anterior del Portal va a la pantalla madre (n
   assert.deepEqual(parentOf('/historias/abc'), { path: '/backlog', label: 'Backlog' });
   assert.deepEqual(parentOf('/procesos/p1'), { path: '/actividad', label: 'Actividad' });
   assert.deepEqual(parentOf('/lotes/b1'), { path: '/lotes', label: 'Lotes' });
-  assert.equal(parentOf('/panel'), null);
+  // Portal IA 3: la portada del proyecto es Trabajo (Resumen ya no esta en el menu y cuelga de ella).
+  assert.equal(parentOf('/trabajo'), null);
+  assert.deepEqual(parentOf('/panel'), { path: '/trabajo', label: 'Trabajo' });
+  assert.deepEqual(parentOf('/backlog'), { path: '/trabajo', label: 'Trabajo' });
+  assert.deepEqual(parentOf('/aceptacion'), { path: '/oficina', label: 'Oficina' });
   assert.equal(screenName('/backlog?x=1#y'), 'Backlog'); assert.equal(screenName('/historias/1'), 'la historia');
 });
 

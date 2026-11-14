@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { IntegrationError, getIntegrationStatus, integrateIntoMain } from '../services/integration.ts';
+import { getIntegrationStatus } from '../services/integration.ts';
 
 const statusSchema = z.object({
   currentBranch: z.string().nullable(),
@@ -10,21 +10,14 @@ const statusSchema = z.object({
   reason: z.string().optional()
 });
 
-const bodySchema = z.object({ branch: z.string().min(1).max(200) });
 
 export async function integrationRoutes(app: FastifyInstance) {
   app.get('/api/portal/integration/status', async () => {
     return statusSchema.parse(await getIntegrationStatus());
   });
 
-  app.post('/api/portal/integration', async (req, reply) => {
-    const parsed = bodySchema.safeParse(req.body);
-    if (!parsed.success) return reply.code(400).send({ error: 'Indica la rama que se va a integrar.' });
-    try {
-      return await integrateIntoMain({ sourceBranch: parsed.data.branch });
-    } catch (e) {
-      if (e instanceof IntegrationError) return reply.code(409).send(e.body);
-      throw e;
-    }
-  });
+  // Portal IA 3: esta ruta integraba CUALQUIER rama local en main y hacia push sin verificacion, QA ni registro del
+  // proceso (su pantalla no estaba enlazada en ningun sitio). Se retira: integrar solo existe desde la historia o el
+  // encargo, con sus comprobaciones. Responde 410 para que un cliente antiguo reciba el motivo.
+  app.post('/api/portal/integration', async (_req, reply) => reply.code(410).send({ code: 'removed', error: 'Esta forma de integrar se ha retirado. Integra desde la historia o el encargo: asi se verifica y se revisa antes de llegar a main.' }));
 }

@@ -12,7 +12,7 @@ import { detectCodex, getCodexSettings, lastCodexDetection, saveCodexSettings } 
 import { chatEstimate, chatMessages, chatUsageToday, sendChat } from '../services/agentChat.ts';
 import { adoptExternal, agentCapabilities, agentFoldersRepo, agentLearning, discardExternal, ensureAgentFolders, folderStatus, restoreRevision, setAgentContextScope, syncAgentFolder, updateExtras } from '../services/agentFolders.ts';
 import { detectSandbox } from '../services/sandbox.ts';
-import { createAgentFromWizard, exportBundle, exportFiles, exportTo, importConfirm, importPreview } from '../services/agentCreation.ts';
+import { createAgentFromWizard, exportBundle, exportReadiness, exportFiles, exportTo, importConfirm, importPreview } from '../services/agentCreation.ts';
 import { draftWizardProposal, estimateWizardDraft } from '../services/agentWizardDraft.ts';
 import { applyZipImport, previewZipImport, undoZipImport, ZIP_UPLOAD_MAX } from '../services/agentZipImport.ts';
 import { acceptOctetStream, streamToTemp, uploadName } from './uploads.ts';
@@ -403,6 +403,11 @@ export async function agentsOsRoutes(app: FastifyInstance) {
     try { return await exportFiles(slug, id); } catch (e) { return err(reply, e); }
   });
   // Paquete portable autosuficiente (ZIP): sin costo de IA; se niega con 409 y el motivo si encuentra secretos o datos internos.
+  // Portal IA 3: qué llevará el paquete y si está listo (la misma validación que la descarga, sin generar nada).
+  app.get('/api/workspaces/:slug/agents/:id/export/readiness', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return; if (!agentOr404(slug, id, reply)) return;
+    try { return await exportReadiness(slug, id); } catch (e) { return err(reply, e); }
+  });
   app.get('/api/workspaces/:slug/agents/:id/export.zip', async (req, reply) => {
     const p = z.object({ slug: z.string().min(1).max(120), id: z.string().min(1).max(120) }).safeParse(req.params);
     if (!p.success) return reply.code(400).send({ error: 'Parámetros no válidos.' });

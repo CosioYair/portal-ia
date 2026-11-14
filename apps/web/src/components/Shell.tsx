@@ -16,6 +16,9 @@ import { officeHome, SECTIONS, sectionOf, sectionRoot, type IconName, type Secti
 import { attentionTotal, openUi, useAttention } from '../lib/uiBus.ts';
 import { OwnerBar } from './OwnerPairing.tsx';
 
+/** Último recuento de «te necesitan» por empresa y proyecto: al cambiar de pantalla no vuelve a 0 mientras se recarga. */
+const needsCache = new Map<string, number>();
+
 /** Diálogo mínimo para crear empresa o proyecto (operación local, sin IA). */
 export function CreateDialog({ kind, onClose }: { kind: 'company' | 'project'; onClose: () => void }) {
   const { status, select, refreshStructure, flash } = useApp();
@@ -65,6 +68,11 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
   const back = useBack();
   const liveConn = useLiveConnection();
   const att = useAttention(ws.slug); const pending = attentionTotal(att);
+  // Portal IA 3: cuántos trabajos te necesitan (historias y encargos), a la vista en el menú: es por donde se continúa.
+  const [needsYou, setNeedsYou] = useState(() => needsCache.get(`${ws.slug}:${project?.id ?? ''}`) ?? 0);
+  const loadNeeds = () => { if (!project) { setNeedsYou(0); return; } const key = `${ws.slug}:${project.id}`; api.work(ws.slug, project.id).then(v => { needsCache.set(key, v.counts.needs_you); setNeedsYou(v.counts.needs_you); }).catch(() => undefined); };
+  useEffect(loadNeeds, [ws.slug, project?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  useLive(c => c.ws === ws.slug && c.kind !== 'progress' && (!c.projectId || c.projectId === project?.id) && ['process', 'backlog', 'assignment'].includes(c.entity), loadNeeds, { minMs: 8000 });
   const path = useLocation().pathname;
   const section = sectionOf(path);
   // Móvil: el menú es un cajón (Esc lo cierra, el foco queda dentro y vuelve al botón al cerrar); se cierra al navegar.
@@ -115,6 +123,7 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
   const navItem = (s: Section) => <Link key={s.id} to={s.id === 'oficina' ? officeHome() : s.path} className={`navi${section?.id === s.id ? ' is-active' : ''}`} aria-current={section?.id === s.id ? 'page' : undefined}
     title={s.hint}>
     {sectionIcon(s)}<span className="navi-text">{s.label}</span>
+    {s.id === 'trabajo' && needsYou > 0 && <span className="navi-needs" title={`${needsYou} te ${needsYou === 1 ? 'necesita' : 'necesitan'}`}><span aria-hidden="true">{needsYou > 99 ? '99+' : needsYou}</span><span className="sr-only"> {needsYou === 1 ? 'te necesita' : 'te necesitan'}</span></span>}
     {s.id === 'trabajo' && usage && usage.running > 0 && <span className="navi-live" title={`${usage.running} en ejecución`}><span className="live-dot" aria-hidden="true" /><span>{usage.running}</span><span className="sr-only"> en ejecución</span></span>}
   </Link>;
 

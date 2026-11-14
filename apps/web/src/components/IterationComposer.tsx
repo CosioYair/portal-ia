@@ -15,7 +15,7 @@ interface Props {
   placeholder?: string;
   /** Antes de crear (p. ej. guardar los comentarios de la prueba aún no guardados). */
   beforeSubmit?: () => Promise<void>;
-  onCreated: (r: { processId: string; actions: string[] }) => void;
+  onCreated: (r: { processId: string; actions: string[]; continued: boolean }) => void;
 }
 
 /**
@@ -32,27 +32,29 @@ export function IterationComposer({ slug, itemId, iteration, nextNumber, initial
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   if (iteration.state === 'in_progress') return <Notice kind="info">{iteration.summary}</Notice>;
-  const blocked = iteration.needsDiscardConfirmation && !confirmDiscard;
+  // Portal IA 3: por defecto se CONTINUA sobre la rama ya hecha; descartarla es una eleccion explicita, nunca un requisito.
+  const keeps = iteration.needsDiscardConfirmation && !confirmDiscard;
+  const blocked = false;
   const submit = async () => {
     setBusy(true); setErr(null);
     try {
       await beforeSubmit?.();
       const r = await api.storyIterate(slug, itemId, note.trim() || null, { reopen: iteration.needsReopen, discardApplied: iteration.needsDiscardConfirmation && confirmDiscard });
       noteDraft.clear(); setConfirmDiscard(false);
-      onCreated({ processId: r.process.id, actions: r.actions });
+      onCreated({ processId: r.process.id, actions: r.actions, continued: !!r.continued });
     } catch (e: any) { setErr(e.message); } finally { setBusy(false); }
   };
   return (
     <div className="iter-composer" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <p className="small muted" style={{ margin: 0 }}>{iteration.summary}</p>
+      <p className="small muted" style={{ margin: 0 }}>{keeps ? 'Di qué hay que corregir o completar. Lo que ya está hecho y verificado se conserva.' : iteration.summary}</p>
       {noteDraft.status === 'restored' && <DraftNote status="restored" onDiscard={noteDraft.clear} />}
       <textarea className="input" style={{ minHeight: 60 }} value={note} onChange={e => setNote(e.target.value)} aria-label="Nota para el equipo"
         placeholder={placeholder ?? 'Nota para el equipo (qué corregir o completar). Se añaden solos los pasos con falla y sus comentarios, las tareas abiertas, el criterio vigente y la conversación reciente.'} />
       {iteration.needsDiscardConfirmation && <label className="ck"><input className="cb" type="checkbox" checked={confirmDiscard} onChange={e => setConfirmDiscard(e.target.checked)} />
-        <span>Autorizo descartar la iteración aplicada sin integrar: se retira su worktree y se borra la rama <span className="mono">{iteration.branch}</span>. Tu carpeta del Portal y <span className="mono">main</span> no cambian.</span></label>}
+        <span>Empezar de cero: descartar lo ya hecho en esta historia y rehacerla entera. Sin marcar, el equipo corrige sobre lo que ya hay (recomendado).</span></label>}
       <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-        <button className="btn btn-primary btn-sm" onClick={submit} disabled={busy || blocked}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}{iteration.needsReopen ? `Reabrir y crear iteración ${nextNumber}` : `Crear iteración ${nextNumber}`}</button>
-        <span className="small muted">Queda pendiente de tu autorización; no gasta nada hasta entonces.</span>
+        <button className="btn btn-primary btn-sm" onClick={submit} disabled={busy || blocked}>{busy ? <span className="spin spin-light" /> : Icon.arrow()}{iteration.needsReopen ? `Reabrir y crear iteración ${nextNumber}` : keeps ? 'Pedir estos cambios' : `Crear iteración ${nextNumber}`}</button>
+        <span className="small muted">{keeps ? 'El equipo corrige sobre lo que ya hay. No gasta nada hasta que pulses «Aplicar los cambios pedidos».' : 'Queda pendiente de tu autorización; no gasta nada hasta entonces.'}</span>
       </div>
       {err && <Notice kind="err">{err}</Notice>}
     </div>

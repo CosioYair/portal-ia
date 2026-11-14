@@ -19,8 +19,10 @@ const mk = (over: Record<string, unknown> = {}) => ({
 const paused = { pipeline: { state: 'paused' }, changes: [] };
 
 test('procLabel y processFilterKey: pausado espera tu decisión; budget_exceeded cuenta como error', () => {
-  assert.equal(procLabel(mk({ status: 'done', result: paused })).label, 'Pausado · espera tu decisión');
-  assert.equal(procLabel(mk({ status: 'done', result: { pipeline: { state: 'stopped', pauseKind: 'no_changes' }, changes: [] } })).label, 'Completado');
+  // Portal IA 3: un solo criterio (ownerProcessState); «Completado» deja de existir como estado.
+  assert.equal(procLabel(mk({ status: 'done', result: paused })).label, 'Necesita tu decisión');
+  assert.equal(procLabel(mk({ status: 'done', result: { pipeline: { state: 'stopped', pauseKind: 'no_changes' }, changes: [] } })).label, 'Sin cambios necesarios');
+  assert.equal(procLabel(mk({ status: 'done', result: { pipeline: { state: 'stopped', pauseKind: 'limit' }, applied: { branch: 'b', commit: 'c', worktree: 'w' } } })).label, 'Detenido sin terminar');
   assert.equal(processFilterKey(mk({ status: 'running' })), 'running');
   assert.equal(processFilterKey(mk({ status: 'pending_authorization' })), 'waiting');
   assert.equal(processFilterKey(mk({ status: 'done', result: paused })), 'waiting');

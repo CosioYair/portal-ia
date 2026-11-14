@@ -1,3 +1,4 @@
+import { PackageReadiness } from './PortablePackage.tsx';
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent as RKeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
@@ -378,6 +379,7 @@ function ExportBox({ slug, agentId }: { slug: string; agentId: string }) {
       <button className="btn btn-secondary btn-sm" disabled={busy || !path.trim()} onClick={() => void toFolder()}>Copiar carpeta</button>
     </div>
     <span className="small muted">Sin credenciales: la carpeta solo lleva identidad, instrucciones, habilidades, memoria verificada y referencias.</span>
+    <PackageReadiness slug={slug} agentId={agentId} />
     <BundleDownloadButton slug={slug} agentId={agentId} />
   </section>;
 }

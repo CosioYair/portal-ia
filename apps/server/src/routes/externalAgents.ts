@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { workspacesRepo } from '../db/platform.ts';
 import { agentsRepo } from '../db/workspace.ts';
 import { adoptSourceChange, externalPreview, importExternal, restoreSourceRevision, sourceStatus, updateGrants } from '../services/externalAgents.ts';
+import { applyExternalPackage, previewExternalPackage } from '../services/externalPackage.ts';
 import os from 'node:os';
 import path from 'node:path';
 import { applyProposal, BATCH_LIMITS, classifyFeedback, detectToolchain, documentJobsRunning, jobFile, jobsDb, listJobs, listProposals, rejectProposal, serialForAgent, startProcessing, undoProposal, versionEvidence } from '../services/documentJobs.ts';
@@ -62,6 +63,22 @@ export async function externalAgentsRoutes(app: FastifyInstance) {
     const { slug, id } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
     const b = z.object({ n: z.number().int().min(1), authorized: z.literal(true) }).safeParse(req.body); if (!b.success) return reply.code(400).send({ error: 'Indica la revisión y confírmalo.' });
     try { return restoreSourceRevision(slug, id, b.data.n); } catch (e) { return err(reply, e); }
+  });
+
+  // ---------- Portal IA 3: vuelta del paquete mejorado fuera (vista previa sin escribir; aplicar con copia previa)
+  app.route({
+    method: ['POST', 'PUT'], url: `${W}/agents/:id/source/package/preview`,
+    handler: async (req, reply) => {
+      const { slug, id } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
+      let up: Awaited<ReturnType<typeof streamToTemp>> | null = null;
+      try { up = await streamToTemp(req, 8 * 1024 * 1024); return previewExternalPackage(slug, id, up.file); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, ...(e.payload ?? {}) }); } finally { up?.cleanup(); }
+    }
+  });
+  app.post(`${W}/agents/:id/source/package/apply`, async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply) || !agentOk(slug, id, reply)) return;
+    const b = z.object({ token: z.string().min(8).max(80), resolutions: z.record(z.string().max(300), z.enum(['portal', 'paquete'])).default({}), authorized: z.literal(true) }).safeParse(req.body);
+    if (!b.success) return reply.code(400).send({ error: 'Indica la vista previa y confirma que autorizas escribir en la carpeta del agente.' });
+    try { return reply.code(201).send(applyExternalPackage(slug, id, { token: b.data.token, resolutions: b.data.resolutions })); } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message, ...(e.payload ?? {}) }); }
   });
 
   // ---------- Documentos

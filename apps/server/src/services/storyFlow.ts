@@ -8,7 +8,7 @@ import { runtimeVerified } from './runtimeChecks.ts';
 import { driftMessage } from './worktreeDrift.ts';
 import { staleCorrectionUnits, testRunSummary } from './failureDiagnosis.ts';
 import type { teamReadiness } from './claudeCode/backend.ts';
-import { isVisualPassedPause, isVisualPause } from './gauntlet.ts';
+import { isVisualPassedPause, isVisualPause, isVisualToolMissing } from './gauntlet.ts';
 import { visualGate } from './visualCheck.ts';
 
 /** EN-027 · ¿La puerta visual (HU-207) exige evidencia que no hay? Sin IA; si no se puede leer, no se presume. */
@@ -421,7 +421,13 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
     else if (pl.pauseKind === 'plan') actions.push(act('new_iteration', 'Reformular o dividir la historia (nueva iteración)', 'Prepara la iteración con el motivo; el plan nuevo se valida antes de gastar en consultas o implementación.', ['confirmation']), act('retry_process', 'Volver a ejecutar la historia', 'Crea un proceso nuevo pendiente de autorización.', ['authorization', 'ai_budget']), act('close_resolved', 'Cerrar como resuelta', 'Indica el motivo.'));
     else if (pl.pauseKind === 'disagreement') { actions.push(act('review_diff', 'Revisar el diff, el hallazgo y la respuesta del equipo', 'Decide tú con la evidencia de ambos.')); if (verifyOk) actions.push(act('merge', 'Integrar en main bajo tu criterio', 'La verificación automática está en verde; QA y el equipo discrepan. Requiere tu autorización.', ['authorization'])); actions.push(fix('Preparar una iteración con tu decisión'), ASK, act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama.')); }
     else if (pl.pauseKind === 'too_large' || pl.pauseKind === 'incomplete') actions.push(resume('Reintentar solo lo que falta', 'Vuelve a intentar SOLO los entregables pendientes, con el motivo del fallo como instrucción (lo entregado no se repite ni se vuelve a cobrar), dentro del presupuesto que autorices.', ['authorization', 'ai_budget'], { pipeline: { maxCorrections: 1 }, suggestedBudgetUsd: 0.5 }), fix('Acotar o dividir la historia (nueva iteración)'), ASK, act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
-    else if (pl.pauseKind === 'limit' || pl.pauseKind === 'repeated_failure') actions.push(resume('Conceder otra corrección', 'Autoriza una corrección más con la evidencia actual (un intento, dentro del presupuesto que fijes).', ['authorization', 'ai_budget'], { pipeline: { maxCorrections: 1 }, suggestedBudgetUsd: 0.5 }), fix('Preparar una iteración con el diagnóstico'), ASK, act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
+    // Portal IA 3 · la corrección concedida trabaja hasta dejarlo en verde o hasta que deje de avanzar (el mismo fallo dos
+    // veces), no un único intento: antes un fallo DISTINTO tras corregir volvía a detenerla y parecía «no hacer nada».
+    else if (pl.pauseKind === 'limit' || pl.pauseKind === 'repeated_failure') actions.push(resume('Seguir corrigiendo', 'El equipo sigue corrigiendo sobre lo ya hecho, con la evidencia exacta del fallo. Continúa mientras cada intento avance y se detiene solo si el mismo fallo se repite. Dentro del presupuesto que fijes.', ['authorization', 'ai_budget'], { primary: true, pipeline: { maxCorrections: 2 }, suggestedBudgetUsd: 0.5 }), fix('Pedir un cambio de enfoque (sobre la misma rama)'), ASK, act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
+    else if (pl.pauseKind === 'owner_changes') {
+      issue = { ...issue!, level: 'warning', title: 'Tus cambios están listos para aplicarse sobre lo ya hecho', explanation: `${pl.reason ?? ''} No se descarta ni se rehace nada de lo verificado.` };
+      actions.push(resume('Aplicar los cambios pedidos', 'El equipo aplica lo que pediste sobre la misma rama y repite la verificación y la revisión. No rehace lo que ya estaba bien.', ['authorization', 'ai_budget'], { primary: true, suggestedBudgetUsd: 0.5 }), act('review_diff', 'Revisar el diff', 'El código tal como está ahora.'));
+    }
     else if (pl.pauseKind === 'duration' || pl.pauseKind === 'cancelled') actions.push(resume('Continuar', 'Retoma donde lo dejó, sin repetir lo hecho.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0 }));
     else if (pl.pauseKind === 'qa') {
       // Historia solo de CSS con la equivalencia de estilos comprobada sin IA: la decisión que falta es concreta (las
@@ -446,8 +452,13 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
       issue = { ...issue!, cause: 'environment', title: `Falta la evidencia visual del commit ${commit}: repite la verificación en el host (sin IA)`, explanation: `${reasonText}${busy ? ' La vista previa no llegó a arrancar porque el propio proceso seguía en marcha (corregido en EN-027): repetirla ahora debería funcionar.' : ''} Todo lo hecho se conserva (cambios, verificaciones y registro).${repeatNote}`, responsible: [] };
       actions.push(resume('Repetir la verificación visual (sin IA)', 'Arranca la vista previa del commit aplicado y repite la verificación visual en el host (375, 768 y 1440 px, desbordamiento y axe). No llama a la IA ni concede correcciones: si la evidencia pasa y falta la ronda del Evaluador, se detiene antes de llamarlo y lo decides tú; si vuelve a faltar la evidencia, la pausa vuelve con el motivo nuevo.', ['authorization'], { primary: true, pipeline: { maxCorrections: 0, visualOnly: true } as FlowAction['pipeline'] }));
       actions.push(act('review_diff', 'Revisar el diff', 'El código y la evidencia guardada, sin cambiar nada.'));
+      // Portal IA 3 · falta una herramienta del Portal (navegador de pruebas o axe-core): no es un fallo del trabajo.
+      // No se ofrece corregir ni iterar (el equipo no puede instalar nada y rehacer la historia no lo arregla).
+      const toolMissing = isVisualToolMissing(pl.reason);
+      if (toolMissing) issue = { ...issue!, title: 'Falta una herramienta de comprobación visual del Portal (no es un fallo del trabajo)', explanation: `El trabajo del equipo está hecho y no tiene nada que corregir. El Portal no pudo comprobar las pantallas porque le falta su comprobador de accesibilidad o el navegador de pruebas. Pulsa «Actualizar» en la barra superior y «Reconstruir y reiniciar el Portal»: instala sus herramientas. Después pulsa aquí «Repetir la verificación visual (sin IA)». Todo lo hecho se conserva. Detalle: ${reasonText}${repeatNote}` };
       if (withEvidence.length && done < GAUNTLET_LIMITS.deep) actions.push(resume('Conceder otra corrección dirigida', `El Desarrollador corrige SOLO la brecha señalada y el Evaluador re-evalúa (ronda ${done + 2} como máximo; QA no repite lo ya aprobado).`, ['authorization', 'ai_budget'], { pipeline: { maxCorrections: 1, gauntlet: { mode: 'deep', maxRounds: done + 1 } }, suggestedBudgetUsd: 0.5 }));
-      actions.push(fix('Preparar una iteración con la evidencia visual'), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
+      if (!toolMissing) actions.push(fix('Preparar una iteración con la evidencia visual'));
+      actions.push(act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
     }
     else if (pl.pauseKind === 'gauntlet' && isVisualPassedPause(pl.reason)) {
       // EN-027 · La verificación visual (sin IA) pasó; la ronda del Evaluador tiene coste y se autoriza aparte, con presupuesto.

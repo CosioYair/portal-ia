@@ -1,3 +1,4 @@
+import { isPortableToolPath } from './portable-manifest.ts';
 import { PORTABLE_AGENT_SCHEMA, PORTABLE_LIMITS, allowedPortablePath, findSecret, memoryToMarkdown, normalizeText, parseMemory, parseYaml, toYaml, type PortableFiles } from './portable-agent.ts';
 import { EXTERNAL_TEXT_LIMIT, EXTERNAL_TOTAL_LIMIT, isIdentityPath, parseSkillHeader } from './external-agent.ts';
 import { environmentGuide } from './agent-skills.ts';
@@ -47,10 +48,12 @@ export type BundleProfile = 'agent' | 'edition';
 export interface BundlePlan { sha256: string; skill: string; script: string; args: string[]; reason: string }
 export interface ExternalBundleOptions extends BundleOptions { role?: string | null; summary?: string | null; provenPlans: BundlePlan[] }
 
+/** Portal IA 3: marcador de exportacion (identificador portable, revision base y huella de cada archivo). Lo escribe el Portal. */
+export const BUNDLE_EXPORT_MARKER = 'portal-export.json';
 const BUNDLE_EXTRA = ['AUTOMEJORA.md', 'CAMBIOS.md', 'GUIA.md', 'scripts/anotar-cambio.mjs'];
 const REQUIRED = ['agent.yaml', 'AGENTS.md', 'memory/MEMORY.md', ...BUNDLE_EXTRA];
 /** ¿Ruta admitida en el paquete? (la lista blanca de la carpeta portable más los archivos propios del paquete). */
-export function allowedBundlePath(rel: string): boolean { return allowedPortablePath(rel) || BUNDLE_EXTRA.includes(rel) || rel === 'PLANES.json' || isIdentityPath(rel); }
+export function allowedBundlePath(rel: string): boolean { return allowedPortablePath(rel) || BUNDLE_EXTRA.includes(rel) || rel === 'PLANES.json' || rel === BUNDLE_EXPORT_MARKER || isPortableToolPath(rel) || isIdentityPath(rel); }
 
 /** Bytes UTF-8 de un texto (sin depender de Buffer ni TextEncoder: dominio puro). */
 function utf8Bytes(s: string): number {
@@ -149,6 +152,7 @@ export function findLocalPaths(text: string, opts: { privatePaths?: PrivatePath[
 }
 
 /** Quita datos internos de un texto: rutas locales → «[ruta local]», UUID y tablas → «[interno]», rutas /api/ → «[ruta interna]». */
+export const scrubPortableText = (s: string): string => scrub(s);
 function scrub(s: string): string {
   let t = s;
   for (const [src, fl] of SCRUB) t = t.replace(new RegExp(src, fl), '[ruta local]');
@@ -193,6 +197,14 @@ function cleanMemory(agentName: string, text: string | undefined): string {
 }
 
 const POINTER = '> Reglas de automejora: lee y cumple AUTOMEJORA.md antes de trabajar y anota cada cambio en CAMBIOS.md.';
+const GUIA_POINTER = '> Para procesar un PDF o un ZIP con PDFs fuera del Portal, sigue GUIA.md (plan probado en PLANES.json, script de la habilidad, comprobaciones, reintento y automejora).';
+
+/** Portal IA 3 · Quita los avisos que el paquete antepone a AGENTS.md (no son parte de las instrucciones del agente). */
+export function stripBundleNotices(text: string): string {
+  const lines = normalizeText(text).split('\n');
+  while (lines.length && (lines[0] === POINTER || lines[0] === GUIA_POINTER || (lines[0] === '' && lines.length > 1))) lines.shift();
+  return normalizeText(lines.join('\n'));
+}
 
 function automejora(name: string, o: { editable?: string; memory?: string; plans?: boolean } = {}): string {
   return normalizeText(`# Reglas de automejora de ${name}
@@ -382,7 +394,6 @@ export function buildPortableBundle(files: PortableFiles, opts: BundleOptions): 
 
 // ---------------------------------------------------------------- EN-007: paquete de un agente externo
 
-const GUIA_POINTER = '> Para procesar un PDF o un ZIP con PDFs fuera del Portal, sigue GUIA.md (plan probado en PLANES.json, script de la habilidad, comprobaciones, reintento y automejora).';
 const RAW = /\.(py|txt)$/;
 const PROGRAMS: [RegExp, string][] = [
   [/soffice|libreoffice/i, 'LibreOffice (orden soffice)'], [/tesseract/i, 'Tesseract OCR'], [/pdftoppm|pdftotext|poppler/i, 'Poppler (pdftoppm o pdftotext)'],

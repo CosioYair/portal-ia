@@ -238,6 +238,21 @@ export async function detectToolchain(force = false): Promise<Toolchain> {
   return toolchain;
 }
 
+/** Portal IA 3 · Versiones instaladas (en el Python que usa el Portal) de los paquetes indicados. Nunca instala nada. */
+export async function pythonPackageVersions(names: string[]): Promise<{ python: string | null; versions: Record<string, string | null> }> {
+  const tc = await detectToolchain();
+  if (!tc.python) return { python: null, versions: {} };
+  const safe = names.filter(n => /^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$/.test(n)).slice(0, 60);
+  if (!safe.length) return { python: tc.pythonVersion, versions: {} };
+  const code = 'import json, sys\nfrom importlib import metadata\nout = {}\nfor n in sys.argv[1:]:\n    try:\n        out[n] = metadata.version(n)\n    except Exception:\n        out[n] = None\nprint(json.dumps(out))';
+  const r = await run(tc.python, [...pyFlags(), '-c', code, ...safe], { cwd: os.tmpdir(), timeoutMs: 30_000, env: baseEnv(tc, null) });
+  try { return { python: tc.pythonVersion, versions: JSON.parse(r.stdout.trim().split('\n').pop() ?? '{}') }; } catch { return { python: tc.pythonVersion, versions: {} }; }
+}
+/** Portal IA 3 · Herramienta con la que el Portal valida las conversiones: viaja en el paquete para validar igual fuera. */
+export function portalValidationTool(): { name: string; source: string } | null {
+  try { return { name: 'doc_qa.py', source: fs.readFileSync(path.join(TOOLS_DIR, 'doc_qa.py'), 'utf8') }; } catch { return null; }
+}
+
 /** Entorno mínimo: sin variables del Portal ni credenciales; temporales y perfil dentro de la carpeta del trabajo. */
 function baseEnv(tc: Toolchain | null, tmp: string | null): NodeJS.ProcessEnv {
   const sys = process.env.SYSTEMROOT ?? process.env.SystemRoot ?? 'C:\\Windows';

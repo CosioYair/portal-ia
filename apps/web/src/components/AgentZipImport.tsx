@@ -63,7 +63,7 @@ export function AgentZipImport({ slug, projectId, harnesses, departments, agentI
       const pv = await osApi.zipImportPreview(slug, file, f => setSt(s => s.kind === 'uploading' ? { ...s, progress: f } : s), ctl.signal);
       const blocking = pv.problems.filter(p => p.blocking);
       if (!pv.ok || blocking.length) { setSt({ kind: 'error', message: 'El ZIP no se puede importar.', problems: blocking.map(p => `${p.path}: ${p.message}`) }); return; }
-      if (agentId && pv.agentId !== agentId) { setSt({ kind: 'error', message: 'Este ZIP es de otro agente (su id no coincide).', problems: [] }); return; }
+      if (agentId && pv.agentId !== agentId) { setSt({ kind: 'error', message: pv.agentId ? 'Este paquete es de otro agente de tu empresa. Impórtalo desde la ficha de ese agente.' : 'Este paquete no es de este agente: no trae su marca de exportación. Si quieres crear un agente nuevo con él, usa «Nuevo agente › Importar».', problems: [] }); return; }
       if (pv.mode === 'nuevo') { setDep(pv.agent?.department ?? departments[0] ?? 'Dirección'); setTools([]); setHarness(null); setAuth(false); setSt({ kind: 'new', pv }); return; }
       if (pv.upToDate) { setSt({ kind: 'uptodate', pv }); return; }
       // EN-014 · Ámbito actual del agente (lectura sin costo) para mostrar el cambio y no adoptarlo sin que el propietario lo vea.
