@@ -96,7 +96,7 @@ export const ACCEPTANCE_STEPS: AcceptanceStep[] = [
 
 /** Huella del texto de un paso: si el paso cambia, una marca anterior deja de valer (hay que probarlo de nuevo). */
 export function acceptanceStepSignature(s: AcceptanceStep): string {
-  const text = [s.title, ...s.how, s.expect].join('\n');
+  const text = [s.title, s.to, s.go, ...s.how, s.expect].join('\n');
   let h = 5381;
   for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) >>> 0;
   return h.toString(36);
@@ -115,7 +115,7 @@ export function acceptanceView(marks: Record<string, AcceptanceMark | undefined>
   const steps = ACCEPTANCE_STEPS.map(s => {
     const m = marks[s.id];
     if (!m) return { ...s, mark: { result: null, comment: '', at: null } };
-    if (m.sig && m.sig !== acceptanceStepSignature(s)) return { ...s, mark: { result: null, comment: m.comment, at: null } };
+    if (m.sig !== acceptanceStepSignature(s)) return { ...s, mark: { result: null, comment: m.comment, at: null } };
     return { ...s, mark: { result: m.result, comment: m.comment, at: m.result ? m.at : null } };
   });
   const ok = steps.filter(s => s.mark.result === 'ok').length; const fail = steps.filter(s => s.mark.result === 'fail').length;
