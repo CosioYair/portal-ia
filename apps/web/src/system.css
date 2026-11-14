@@ -91,7 +91,7 @@ a.btn, a.navi, a.section-tab, a.side-link, a.tile-link, a.cmdk-item, a.desk-link
 .seg { display: inline-flex; border: 1px solid var(--color-control-border); border-radius: var(--radius-sm); padding: 2px; background: var(--color-surface); gap: 2px; flex-wrap: wrap; }
 .seg button { appearance: none; border: 0; background: transparent; font: inherit; font-size: 13px; font-weight: 500; color: var(--color-text-med); height: 30px; padding: 0 12px; border-radius: var(--radius-badge); cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
 .seg button:hover { background: var(--color-surface-hover); color: var(--color-text); }
-.seg button[aria-pressed="true"] { background: var(--color-primary); color: var(--color-on-dark); }
+.seg button[aria-pressed="true"], .seg button[role="tab"][aria-selected="true"] { background: var(--color-primary); color: var(--color-on-dark); }
 .seg button:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .seg button:disabled { opacity: .4; cursor: not-allowed; }
 .seg-lg button { height: 36px; padding: 0 16px; font-size: 14px; }
@@ -463,3 +463,6 @@ html { scroll-padding-top: 76px; }
 .toast { white-space: normal; width: max-content; max-width: calc(100vw - 32px); }
 .owner-bar-short { display: none; }
 @media (max-width: 600px) { .owner-bar-long { display: none; } .owner-bar-short { display: inline; } }
+
+/* Portal IA 3 · Una etiqueta larga dentro de una tarjeta de Ajustes se parte en varias lineas en vez de desbordar la pantalla (a 375 px sobresalia 9 px). */
+.settings-card .chip-xs { white-space: normal; height: auto; min-height: 20px; padding-top: 2px; padding-bottom: 2px; max-width: 100%; overflow-wrap: anywhere; }

@@ -547,7 +547,7 @@ export interface ReviewView {
   checks: { key: string; label: string; status: 'ok' | 'ok_baseline' | 'fail' | 'not_run' | 'unavailable'; detail: string }[];
   tests: { total: number; passed: number; failed: number } | null;
   findings: { source: 'qa' | 'gauntlet'; severity: 'alta' | 'media' | 'baja'; text: string; where: string | null; blocking: boolean }[];
-  qa: { verdict: 'approved' | 'outdated' | 'rejected' | 'inconclusive' | 'none'; note: string };
+  qa: { verdict: 'approved' | 'outdated' | 'rejected' | 'inconclusive' | 'omitted' | 'none'; note: string };
   gauntlet: { verdict: 'passed' | 'pending' | 'gaps' | 'skipped' | 'waived' | 'off'; note: string };
   testUpdates: { path: string; reason: string; proven: boolean }[];
   visual: { required: boolean; ok: boolean; note: string; shots: { route: string; width: number; file: string; overflow: boolean; violations: number }[] };

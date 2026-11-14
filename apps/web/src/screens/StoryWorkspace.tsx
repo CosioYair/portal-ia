@@ -231,7 +231,7 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
           onAsk={q => { setText(q); setAsk(true); openTab('chat'); }} onOpenIterations={() => openTab('iteraciones')} />
           : last && <><Notice kind={last.guidance?.tone === 'err' ? 'err' : last.guidance?.tone === 'ok' ? 'ok' : last.guidance?.tone === 'warn' ? 'warn' : 'info'}><div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', flex: 1 }}><span><strong>Siguiente paso:</strong> {last.guidance?.next ?? 'abre el proceso para ver en qué punto está.'}</span><Link className={`btn ${it.archivedAt ? 'btn-secondary' : 'btn-primary'} btn-sm`} style={{ marginLeft: 'auto' }} to={`/procesos/${last.id}`}>Ver el proceso</Link></div></Notice>{authForm}</>}
         </fieldset>
-        {last && <ReviewSummary slug={slug} processId={last.id} stamp={`${last.version ?? ''}:${last.status}:${last.finishedAt ?? ''}:${last.result?.pipeline?.state ?? ''}:${last.result?.applied?.commit ?? ''}:${last.result?.merged?.commit ?? ''}:${last.result?.verifications?.length ?? 0}:${last.result?.review?.verdict ?? ''}:${last.result?.gauntlet?.status ?? ''}`} />}
+        {last && <ReviewSummary slug={slug} processId={last.id} stamp={`${it.status}:${last.version ?? ''}:${last.status}:${last.finishedAt ?? ''}:${last.result?.pipeline?.state ?? ''}:${last.result?.applied?.commit ?? ''}:${last.result?.merged?.commit ?? ''}:${last.result?.verifications?.length ?? 0}:${last.result?.review?.verdict ?? ''}:${last.result?.gauntlet?.status ?? ''}`} />}
 
         <div className="story-cols">
           <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>

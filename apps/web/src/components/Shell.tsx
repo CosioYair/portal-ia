@@ -70,7 +70,7 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
   const att = useAttention(ws.slug); const pending = attentionTotal(att);
   // Portal IA 3: cuántos trabajos te necesitan (historias y encargos), a la vista en el menú: es por donde se continúa.
   const [needsYou, setNeedsYou] = useState(() => needsCache.get(`${ws.slug}:${project?.id ?? ''}`) ?? 0);
-  const loadNeeds = () => { if (!project) { setNeedsYou(0); return; } const key = `${ws.slug}:${project.id}`; api.work(ws.slug, project.id).then(v => { needsCache.set(key, v.counts.needs_you); setNeedsYou(v.counts.needs_you); }).catch(() => undefined); };
+  const loadNeeds = () => { if (!project) { setNeedsYou(0); return; } const key = `${ws.slug}:${project.id}`; setNeedsYou(needsCache.get(key) ?? 0); api.work(ws.slug, project.id).then(v => { needsCache.set(key, v.counts.needs_you); setNeedsYou(v.counts.needs_you); }).catch(() => undefined); };
   useEffect(loadNeeds, [ws.slug, project?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useLive(c => c.ws === ws.slug && c.kind !== 'progress' && (!c.projectId || c.projectId === project?.id) && ['process', 'backlog', 'assignment'].includes(c.entity), loadNeeds, { minMs: 8000 });
   const path = useLocation().pathname;
