@@ -63,7 +63,8 @@ export function Work() {
     <Shell crumb="Todo">
       <main className="page work-page">
         <PageHeader icon={Icon.kanban(22)} tone="work" eyebrow="Trabajo" title="Todo lo que has pedido"
-          description="Historias y encargos en un solo lugar, con su estado real. Empieza por lo que te necesita.">
+          description="Historias y encargos en un solo lugar, con su estado real. Empieza por lo que te necesita."
+          actions={<Link className="btn btn-ghost btn-sm" to="/panel">Proyecto y repositorio</Link>}>
           <WorkTabs />
         </PageHeader>
 

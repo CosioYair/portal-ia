@@ -5,7 +5,7 @@ import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
  * pantalla «madre» del «Atrás» y adónde ir al cambiar de empresa o proyecto. Una sección nueva se añade aquí y aparece
  * en todos esos sitios a la vez.
  */
-export type SectionId = 'oficina' | 'decisiones' | 'asistente' | 'resumen' | 'trabajo' | 'conocimiento' | 'ajustes';
+export type SectionId = 'oficina' | 'decisiones' | 'asistente' | 'resumen' | 'trabajo' | 'conocimiento' | 'ajustes' | 'aceptacion';
 export type IconName = 'building' | 'bell' | 'sparkles' | 'gauge' | 'kanban' | 'book' | 'sliders';
 export interface Section {
   id: SectionId; label: string; path: string; icon: IconName;
@@ -23,10 +23,16 @@ export const SECTIONS: Section[] = [
   { id: 'oficina', label: 'Oficina', path: '/oficina', icon: 'building', group: 'main', needsProject: false, match: /^\/(oficina|equipo)(\/|$)/, hint: 'Tu empresa: departamentos, agentes y organización' },
   { id: 'decisiones', label: 'Decisiones', path: '/autorizaciones', icon: 'bell', group: 'main', needsProject: false, match: /^\/(autorizaciones|decisiones)(\/|$)/, hint: 'Pendientes e historial de tus decisiones (campana)', inMenu: false },
   { id: 'asistente', label: 'Asistente', path: '/asistente', icon: 'sparkles', group: 'main', needsProject: false, match: /^\/asistente(\/|$)/, hint: 'Pide en lenguaje natural; el Portal decide a quién le toca' },
-  { id: 'resumen', label: 'Resumen', path: '/panel', icon: 'gauge', group: 'project', needsProject: true, match: /^\/(panel|etapa|mantenimiento)(\/|$)/, hint: 'Estado del proyecto, atención, equipo y repositorio' },
+  { id: 'resumen', label: 'Resumen', path: '/panel', icon: 'gauge', group: 'project', needsProject: true, match: /^\/(panel|etapa|mantenimiento)(\/|$)/, hint: 'Estado del proyecto, atención, equipo y repositorio',
+    // Portal IA 3: fuera del menú. Se llega desde Trabajo («Proyecto y repositorio») y con Ctrl+K: conserva el repositorio
+    // del proyecto, las etapas y el mantenimiento. Lo demás que mostraba ya está en Trabajo (qué te necesita, qué está en marcha), en la
+    // Oficina (el equipo) y en Ajustes (repositorio y gasto). Sigue existiendo en su ruta y en la búsqueda (Ctrl+K).
+    inMenu: false },
   { id: 'trabajo', label: 'Trabajo', path: '/trabajo', icon: 'kanban', group: 'project', needsProject: true, match: /^\/(trabajo|backlog|historias|lotes|actividad|procesos|archivo)(\/|$)/, hint: 'Todo lo que has pedido: historias, encargos, lotes y archivo' },
   { id: 'conocimiento', label: 'Conocimiento', path: '/conocimiento', icon: 'book', group: 'project', needsProject: true, match: /^\/conocimiento(\/|$)/, hint: 'Documentos y lecciones del proyecto' },
-  { id: 'ajustes', label: 'Ajustes', path: '/ajustes', icon: 'sliders', group: 'company', needsProject: false, match: /^\/(ajustes|presupuestos|configuracion)(\/|$)/, hint: 'Motores de IA, presupuestos, empresas y sistema' }
+  { id: 'ajustes', label: 'Ajustes', path: '/ajustes', icon: 'sliders', group: 'company', needsProject: false, match: /^\/(ajustes|presupuestos|configuracion)(\/|$)/, hint: 'Motores de IA, presupuestos, empresas y sistema' },
+  // Portal IA 3: el recorrido de aceptación del propietario (lo prueba y lo marca él, dentro del Portal).
+  { id: 'aceptacion', label: 'Aceptación', path: '/aceptacion', icon: 'gauge', group: 'company', needsProject: false, match: /^\/aceptacion(\/|$)/, hint: 'Prueba tú lo que pediste y anota si funciona' }
 ];
 /** Empresa interna: allí viven el Asistente de Empresa y el propio Portal. */
 export const INTERNAL_SLUG = INTERNAL_WORKSPACE.slug;

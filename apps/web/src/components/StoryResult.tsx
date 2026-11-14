@@ -8,7 +8,7 @@ import { Markdown } from './Markdown.tsx';
 import { StoryOverview } from './StoryOverview.tsx';
 
 /** Resultado de la ejecución de una historia: plan, cambios propuestos (diff), revisión QA, aplicar en rama y verificar. */
-export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: Process) => void }) {
+export function StoryResult({ proc, onChange, hideOverview = false }: { proc: Process; onChange: (p: Process) => void; hideOverview?: boolean }) {
   const { status, flash } = useApp();
   const slug = status.workspace!.slug;
   const r = proc.result!;
@@ -49,7 +49,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {proc.status === 'done' && <StoryOverview proc={proc} onChange={onChange} onClose={async () => { if (!proc.backlogItemId) return; await api.markStoryDone(slug, proc.backlogItemId); }} />}
+      {proc.status === 'done' && !hideOverview && <StoryOverview proc={proc} onChange={onChange} onClose={async () => { if (!proc.backlogItemId) return; await api.markStoryDone(slug, proc.backlogItemId); }} />}
       {err && busy === null && !canApply && <Notice kind="err">{err}</Notice>}
       {r.plan && <section className="card"><div className="card-h"><div><div className="h3">Plan técnico</div>{byRole('planner') && <div className="small muted">{byRole('planner')} · planifica</div>}</div><Chip xs>{r.plan.tasks.length} tareas</Chip></div>
         <div className="card-b" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -72,7 +72,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
               <span className="small mono muted">{c.before} → {c.after} líneas</span>{Icon.chevR()}
             </button>
             {open === c.path && (c.error || c.warning) && <div className="card-b" style={{ padding: '8px 18px', borderTop: '1px solid var(--color-divider)' }}>{c.error && <Notice kind="err">{c.error} Este cambio no se escribirá; el resto sí.</Notice>}{c.warning && <Notice kind="warn">{c.warning}</Notice>}</div>}
-            {open === c.path && !c.error && <pre className="mono" style={{ margin: 0, padding: '12px 18px', background: 'var(--color-surface-alt)', borderTop: '1px solid var(--color-divider)', borderBottom: '1px solid var(--color-divider)', fontSize: 12, lineHeight: 1.5, overflow: 'auto', maxHeight: 480, whiteSpace: 'pre' }}>
+            {open === c.path && !c.error && <pre className="mono" tabIndex={0} role="region" aria-label={`Cambios en ${c.path}`} style={{ margin: 0, padding: '12px 18px', background: 'var(--color-surface-alt)', borderTop: '1px solid var(--color-divider)', borderBottom: '1px solid var(--color-divider)', fontSize: 12, lineHeight: 1.5, overflow: 'auto', maxHeight: 480, whiteSpace: 'pre' }}>
               {(c.diff ?? '').split('\n').map((l, i) => <div key={i} style={{ color: l.startsWith('+') && !l.startsWith('+++') ? 'var(--color-ok-text)' : l.startsWith('-') && !l.startsWith('---') ? 'var(--color-err-text)' : l.startsWith('@@') ? 'var(--color-text-muted)' : 'var(--color-ink)', background: l.startsWith('+') && !l.startsWith('+++') ? 'var(--color-ok-bg)' : l.startsWith('-') && !l.startsWith('---') ? 'var(--color-err-bg)' : 'transparent' }}>{l || ' '}</div>)}
             </pre>}
           </div>)}
@@ -123,7 +123,7 @@ export function StoryResult({ proc, onChange }: { proc: Process; onChange: (p: P
             <div className="card-h" style={{ padding: '10px 14px' }}><span className="mono sm13">{v.command}{v.isolation ? <span className="muted"> · {isoLabel(v.isolation)}</span> : null}</span><Chip tone={v.exitCode === 0 ? 'ok' : verificationPassed(v) ? 'warn' : v.exitCode === null || (v.exitCode === 86 && v.isolation === 'docker') ? 'warn' : 'err'} xs>{v.exitCode === 0 ? 'correcto' : verificationPassed(v) ? `correcto frente a la base · ${v.triage!.preexisting.length} fallo(s) ya existían sin la historia` : v.exitCode === null ? 'no terminó · tiempo agotado' : v.exitCode === 86 && v.isolation === 'docker' ? 'bloqueado · faltan dependencias' : v.isolation === 'unavailable' ? 'no ejecutado · sin sandbox' : `falló · código ${v.exitCode ?? '?'}`} · {(v.durationMs / 1000).toFixed(1)} s</Chip></div>
             {v.triage && !v.triage.unavailable ? <p className="small" style={{ margin: 0, padding: '6px 14px' }}>Línea base ({v.triage.baseCommit.slice(0, 7)}, sin la historia): {v.triage.preexisting.length} fallo(s) ya existían con el mismo error{v.triage.introduced.length + v.triage.changed.length ? ` · ${v.triage.introduced.length + v.triage.changed.length} los causa la historia` : ''}{v.triage.preexisting.length ? ` — ${v.triage.preexisting.map(t => `«${t.name}»`).join(', ')}` : ''}.</p> : v.triage?.unavailable ? <p className="small muted" style={{ margin: 0, padding: '6px 14px' }}>Sin línea base: {v.triage.unavailable}.</p> : null}
             <details open={i === r.verifications.length - 1 && !verificationPassed(v) && v.exitCode !== 86}><summary className="small muted" style={{ cursor: 'pointer', padding: '6px 14px' }}>{lastLine(v.output).slice(0, 160) || 'Ver la salida'}</summary>
-            <pre className="mono" style={{ margin: 0, padding: '10px 14px', fontSize: 12, maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{v.output || '(sin salida)'}</pre></details>
+            <pre className="mono" tabIndex={0} role="region" aria-label={`Salida de ${v.command}`} style={{ margin: 0, padding: '10px 14px', fontSize: 12, maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{v.output || '(sin salida)'}</pre></details>
           </div>)}
         </div></section>}
 

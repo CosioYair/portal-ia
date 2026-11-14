@@ -1,3 +1,4 @@
+import type { AcceptanceView } from '@portal-ia/domain';
 import type { RestoreSupersededResult, StoryDecisionHistory, MaintenancePlan, MaintenanceSelection } from '@portal-ia/domain';
 import type { PipelineConfig, PhaseTransition, PhaseTransitionPreview, ProjectArchive, StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
@@ -281,6 +282,12 @@ export const api = {
   phasePreview: (slug: string, projectId: string, name?: string) => request<PhaseTransitionPreview>(`/api/workspaces/${slug}/projects/${projectId}/phase/preview${name ? `?name=${encodeURIComponent(name)}` : ''}`),
   startPhase: (slug: string, projectId: string, name: string) => request<PhaseTransition>(`/api/workspaces/${slug}/projects/${projectId}/phase`, { method: 'POST', body: JSON.stringify({ name, authorized: true }) }),
   revertPhase: (slug: string, projectId: string, id: string, reason?: string) => request<PhaseTransition>(`/api/workspaces/${slug}/projects/${projectId}/phase/${id}/revert`, { method: 'POST', body: JSON.stringify({ authorized: true, reason }) }),
+  /** Portal IA 3: recorrido de aceptación del propietario (lo marca él; exige su sesión). */
+  acceptance: () => request<AcceptanceView>('/api/acceptance'),
+  acceptanceMark: (id: string, result: 'ok' | 'fail' | null, comment: string) => request<AcceptanceView>(`/api/acceptance/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ result, comment }) }),
+  /** Portal IA 3: la revisión de un trabajo en lenguaje llano. Solo lectura. */
+  review: (slug: string, processId: string) => request<ReviewView>(`/api/workspaces/${slug}/processes/${processId}/review`),
+  reviewShotUrl: (slug: string, processId: string, file: string) => `/api/workspaces/${slug}/processes/${processId}/review/shots/${encodeURIComponent(file)}`,
   /** Portal IA 3: todo el trabajo pedido (historias y encargos) con su estado veraz. */
   work: (slug: string, projectId: string) => request<WorkView>(`/api/workspaces/${slug}/projects/${projectId}/work`),
   archive: (slug: string, projectId: string) => request<ProjectArchive>(`/api/workspaces/${slug}/projects/${projectId}/archive`),
@@ -530,3 +537,21 @@ export const createAgentWizard = (slug: string, input: WizardCreateInput) =>
 export type WorkSegment = 'needs_you' | 'running' | 'todo' | 'done';
 export interface WorkItem { kind: 'story' | 'assignment'; id: string; code: string; title: string; ask: string; state: { key: string; label: string; meaning: string; tone: '' | 'ok' | 'warn' | 'err'; dot: '' | 'ok' | 'pulse' | 'err'; needsOwner: boolean; open: boolean }; segment: WorkSegment; processId: string | null; conversationId: string | null; dependsOn: string | null; updatedAt: string }
 export interface WorkView { items: WorkItem[]; counts: Record<WorkSegment, number> }
+
+export interface ReviewView {
+  processId: string; code: string | null; title: string; kind: 'story' | 'assignment' | 'other';
+  state: { key: string; label: string; meaning: string; tone: '' | 'ok' | 'warn' | 'err'; needsOwner: boolean; open: boolean };
+  phase: 'ready' | 'not_ready' | 'integrated' | 'closed' | 'discarded'; headline: string;
+  ask: string; criteria: string[]; whatChanged: string | null;
+  files: { path: string; change: 'nuevo' | 'modificado' | 'eliminado'; lines: number }[];
+  checks: { key: string; label: string; status: 'ok' | 'ok_baseline' | 'fail' | 'not_run' | 'unavailable'; detail: string }[];
+  tests: { total: number; passed: number; failed: number } | null;
+  findings: { source: 'qa' | 'gauntlet'; severity: 'alta' | 'media' | 'baja'; text: string; where: string | null; blocking: boolean }[];
+  qa: { verdict: 'approved' | 'outdated' | 'rejected' | 'inconclusive' | 'none'; note: string };
+  gauntlet: { verdict: 'passed' | 'pending' | 'gaps' | 'skipped' | 'waived' | 'off'; note: string };
+  testUpdates: { path: string; reason: string; proven: boolean }[];
+  visual: { required: boolean; ok: boolean; note: string; shots: { route: string; width: number; file: string; overflow: boolean; violations: number }[] };
+  toTest: string[]; limitations: string[];
+  verdict: { ready: boolean; missing: string[] };
+  technical: { branch: string | null; commit: string | null; integratedInto: string | null; integratedCommit: string | null };
+}

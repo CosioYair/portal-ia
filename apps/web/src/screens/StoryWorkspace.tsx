@@ -1,3 +1,6 @@
+import { StoryOverview } from '../components/StoryOverview.tsx';
+import { procLabel } from '../lib/processView.ts';
+import { ReviewSummary } from '../components/ReviewSummary.tsx';
 import { useEffect, useRef, useState } from 'react';
 import { useEntryTitle } from '../lib/nav.ts';
 import { useLatest, useLive } from '../lib/live.ts';
@@ -228,12 +231,13 @@ function StoryWorkspaceOf({ storyId }: { storyId: string }) {
           onAsk={q => { setText(q); setAsk(true); openTab('chat'); }} onOpenIterations={() => openTab('iteraciones')} />
           : last && <><Notice kind={last.guidance?.tone === 'err' ? 'err' : last.guidance?.tone === 'ok' ? 'ok' : last.guidance?.tone === 'warn' ? 'warn' : 'info'}><div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', flex: 1 }}><span><strong>Siguiente paso:</strong> {last.guidance?.next ?? 'abre el proceso para ver en qué punto está.'}</span><Link className={`btn ${it.archivedAt ? 'btn-secondary' : 'btn-primary'} btn-sm`} style={{ marginLeft: 'auto' }} to={`/procesos/${last.id}`}>Ver el proceso</Link></div></Notice>{authForm}</>}
         </fieldset>
+        {last && <ReviewSummary slug={slug} processId={last.id} stamp={`${last.version ?? ''}:${last.status}:${last.finishedAt ?? ''}:${last.result?.pipeline?.state ?? ''}:${last.result?.applied?.commit ?? ''}:${last.result?.merged?.commit ?? ''}:${last.result?.verifications?.length ?? 0}:${last.result?.review?.verdict ?? ''}:${last.result?.gauntlet?.status ?? ''}`} />}
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 320px)', gap: 16, alignItems: 'start', marginTop: 14 }}>
+        <div className="story-cols">
           <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
             <fieldset disabled={!!it.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
             {(() => {
-              const estado = last ? (last.status === 'done' || (last.result?.changes.length ?? 0) > 0 ? <StoryResult proc={last} onChange={onProcChange} /> : <section className="card card-b"><p className="sm13">La iteración actual está <strong>{last.status === 'running' ? 'en ejecución' : last.status === 'pending_authorization' ? 'pendiente de autorización' : last.status}</strong>. {last.status === 'pending_authorization' ? (supOf(last) ? `Está superada por la iteración ${supOf(last)!.byIteration ?? 'más reciente'}: decide sobre la vigente o restáurala desde el historial.` : 'Autorízala con el botón de la cabecera.') : ''}<Link className="lnk" to={`/procesos/${last.id}`}> Ver el proceso</Link>.</p></section>) : <section className="card card-b"><p className="sm13 muted">Esta historia aún no se ha ejecutado. Hazlo desde Backlog («Ejecutar») para que el equipo proponga el diff; después todo el seguimiento ocurre aquí.</p></section>;
+              const estado = last ? (last.status === 'done' || (last.result?.changes.length ?? 0) > 0 ? <>{last.status === 'done' && <StoryOverview proc={last} onChange={onProcChange} onClose={async () => { await api.markStoryDone(slug, it.id); }} />}<Disclosure id="detalle-tecnico" testId="story-detalle-tecnico" className="tech-all" title="Detalle técnico completo" hint="Plan, cambios línea a línea, verificación y repositorio. No hace falta para decidir."><StoryResult proc={last} onChange={onProcChange} hideOverview /></Disclosure></> : <section className="card card-b"><p className="sm13">El trabajo actual: <strong>{procLabel(last).label}</strong>. {last.status === 'pending_authorization' ? (supOf(last) ? `Está superada por la iteración ${supOf(last)!.byIteration ?? 'más reciente'}: decide sobre la vigente o restáurala desde el historial.` : 'Autorízala con el botón de la cabecera.') : ''}<Link className="lnk" to={`/procesos/${last.id}`}> Ver el proceso</Link>.</p></section>) : <section className="card card-b"><p className="sm13 muted">Esta historia aún no se ha ejecutado. Hazlo desde Backlog («Ejecutar») para que el equipo proponga el diff; después todo el seguimiento ocurre aquí.</p></section>;
               // HU-195 · Con la autorización pendiente, la decisión manda (en la cabecera) y el estado queda plegado.
               return last?.status === 'pending_authorization'
                 ? <section className="card card-b"><Disclosure id="sec-estado" testId="story-estado" title="Estado y prueba" hint="Plegado mientras decides la autorización de la cabecera." defaultOpen={tabFromHash(hash) === 'estado'}>{estado}</Disclosure></section>

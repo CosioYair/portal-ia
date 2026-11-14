@@ -31,3 +31,4 @@ export const PROVIDER_META = {
 } as const;
 export * from './owner-state.ts';
 export * from './portable-manifest.ts';
+export * from './acceptance-guide.ts';

@@ -1,3 +1,4 @@
+import { ReviewSummary } from '../components/ReviewSummary.tsx';
 import { useEffect, useRef, useState } from 'react';
 import { useEntryState, useEntryTitle } from '../lib/nav.ts';
 import { useLatest, useLive } from '../lib/live.ts';
@@ -148,6 +149,7 @@ function ProcessViewOf({ processId }: { processId: string }) {
         <fieldset disabled={!!proc.archivedAt} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
         {proc.kind === 'story_execution' && proc.guidance?.flow && <div id="sec-flow" tabIndex={-1}><StoryFlowPanel proc={proc} variant="process" onChange={setProc}
           story={proc.backlogItemId ? { id: proc.backlogItemId, storyId: proc.title.split(' · ')[0], title: proc.title.split(' · ').slice(1).join(' · ') || proc.title } : null} /></div>}
+        {(proc.kind === 'story_execution') && <ReviewSummary slug={slug} processId={proc.id} stamp={`${proc.version ?? ''}:${proc.status}:${proc.finishedAt ?? ''}:${proc.result?.pipeline?.state ?? ''}:${proc.result?.applied?.commit ?? ''}:${proc.result?.merged?.commit ?? ''}:${proc.result?.verifications?.length ?? 0}:${proc.result?.review?.verdict ?? ''}:${proc.result?.gauntlet?.status ?? ''}`} />}
         {proc.guidance && !proc.guidance.flow && !closure && proc.status !== 'pending_authorization' && !proc.archivedAt && <div id="sec-recovery" tabIndex={-1}><Notice kind={proc.guidance.tone}><div style={{ display: 'flex', flexDirection: 'column', gap: 8, flex: 1 }}>
           <div><strong>{proc.guidance.phase}.</strong></div>
           {proc.kind === 'story_execution' && !proc.archivedAt && (proc.status === 'failed' || proc.status === 'cancelled' || proc.status === 'budget_exceeded') && <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>

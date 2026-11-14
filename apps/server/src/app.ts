@@ -1,3 +1,4 @@
+import { acceptanceRoutes } from './routes/acceptance.ts';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
@@ -108,6 +109,7 @@ export async function buildApp() {
   await app.register(processRoutes);
   await app.register(assistantRoutes);
   await app.register(systemRoutes);
+  await app.register(acceptanceRoutes);
   await app.register(integrationRoutes);
   await app.register(inboxRoutes);
   await app.register(budgetRoutes);

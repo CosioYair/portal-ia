@@ -64,16 +64,18 @@ export function useEntryState<T>(name: string, initial: T): [T, (v: T | ((p: T) 
 /** Pantalla «madre» de una ruta (para entrar por un enlace directo y volver sin salir del Portal). */
 export function parentOf(pathname: string): { path: string; label: string } | null {
   if (/^\/historias\//.test(pathname)) return { path: '/backlog', label: 'Backlog' };
-  if (/^\/mantenimiento(\/|$)/.test(pathname)) return { path: '/panel', label: 'Resumen' };
+  if (/^\/(mantenimiento|etapa)(\/|$)/.test(pathname)) return { path: '/panel', label: 'Proyecto' };
   if (/^\/procesos\//.test(pathname)) return { path: '/actividad', label: 'Actividad' };
   if (/^\/lotes\/[^/]+/.test(pathname)) return { path: '/lotes', label: 'Lotes' };
   if (/^\/equipo\/.+/.test(pathname)) return { path: '/oficina/organizacion', label: 'Organización' };
   if (/^\/oficina\/.+/.test(pathname)) return { path: '/oficina', label: 'Oficina' };
   if (/^\/(presupuestos|configuracion)(\/|$)/.test(pathname)) return { path: '/ajustes', label: 'Ajustes' };
-  if (pathname === '/panel' || pathname === '/' || pathname === '/oficina') return null;
+  if (pathname === '/' || pathname === '/oficina' || pathname === '/trabajo') return null;
+  // Portal IA 3: «Resumen» ya no está en el menú; la portada del proyecto es Trabajo.
+  if (pathname === '/panel') return { path: '/trabajo', label: 'Trabajo' };
   // Secciones que no dependen de un proyecto vuelven a la Oficina (la portada); las del proyecto, a su Resumen.
-  if (/^\/(autorizaciones|decisiones|asistente|ajustes)(\/|$)/.test(pathname)) return { path: '/oficina', label: 'Oficina' };
-  return { path: '/panel', label: 'Resumen' };
+  if (/^\/(autorizaciones|decisiones|asistente|ajustes|aceptacion)(\/|$)/.test(pathname)) return { path: '/oficina', label: 'Oficina' };
+  return { path: '/trabajo', label: 'Trabajo' };
 }
 
 /** Nombre genérico de una pantalla por su ruta (si la pantalla no dio uno más concreto). */

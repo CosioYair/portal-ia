@@ -1,3 +1,4 @@
+import { reviewOf, reviewShotPath } from '../services/review.ts';
 import type { FastifyInstance } from 'fastify';
 import { updateRunning } from '../services/system.ts';
 import { processVersion } from '../services/revision.ts';
@@ -238,6 +239,21 @@ export async function processRoutes(app: FastifyInstance) {
     const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
     const p = processesRepo(slug).get(id); if (!p) return reply.code(404).send({ error: 'Proceso no encontrado' });
     return await withGuidance(slug, p.kind === 'delegated_task' && p.status === 'done' ? ensureOpsParsed(slug, p) : p);
+  });
+
+  // Portal IA 3 · La revisión de un trabajo en lenguaje llano (qué cambió, comprobaciones, hallazgos, capturas, qué probar).
+  app.get('/api/workspaces/:slug/processes/:id/review', async (req, reply) => {
+    const { slug, id } = req.params as any; if (!guard(slug, reply)) return;
+    const p = processesRepo(slug).get(id); if (!p) return reply.code(404).send({ error: 'Proceso no encontrado' });
+    return reviewOf(slug, p);
+  });
+  // Capturas de la comprobación visual, servidas desde su carpeta de evidencia (solo PNG de ese proceso).
+  app.get('/api/workspaces/:slug/processes/:id/review/shots/:file', async (req, reply) => {
+    const { slug, id, file } = req.params as any; if (!guard(slug, reply)) return;
+    const p = processesRepo(slug).get(id); if (!p) return reply.code(404).send({ error: 'Proceso no encontrado' });
+    const abs = reviewShotPath(slug, p, String(file));
+    if (!abs) return reply.code(404).send({ error: 'Captura no encontrada' });
+    return reply.header('Content-Type', 'image/png').header('Cache-Control', 'private, max-age=300').send(fs.readFileSync(abs));
   });
 
   // Autorización explícita: aquí y solo aquí empieza el consumo de IA.

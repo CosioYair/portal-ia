@@ -19,7 +19,9 @@ const calls = (src: string) => [...src.matchAll(/\b(api|osApi)\.([a-zA-Z]+)\(/g)
 // aunque el panel del Asistente esté cerrado.
 // HU-196: el historial de Decisiones (pestaña «Historial» de /autorizaciones) lee las decisiones resueltas de la empresa
 // (GET /inbox/history, solo lectura, sin IA ni costo).
-const READ_ONLY = new Set(['api.inbox', 'api.inboxAssignments', 'api.inboxHistory', 'osApi.office', 'api.backlog', 'api.usageToday', 'api.systemStatus', 'api.assistantPendingCount']);
+const READ_ONLY = new Set(['api.inbox', 'api.inboxAssignments', 'api.inboxHistory', 'osApi.office', 'api.backlog', 'api.usageToday', 'api.systemStatus', 'api.assistantPendingCount',
+  // Portal IA 3: api.work lee cuántos trabajos te necesitan (GET, sin efectos) para mostrarlo en el menú.
+  'api.work']);
 
 test('HU-196: api.inboxHistory es una lectura (GET sin cuerpo ni método)', () => {
   const api = read('lib/api.ts');
@@ -76,7 +78,7 @@ test('cada sección del menú tiene su ruta y las rutas antiguas siguen llevando
   const app = read('App.tsx'); const routes = read('lib/routes.ts');
   const paths = [...routes.matchAll(/\{ id: '[a-z]+', label: '[^']+', path: '([^']+)'/g)].map(m => m[1]);
   // Portal IA 3: la sección Trabajo abre en /trabajo (historias y encargos juntos); /backlog sigue existiendo como pestaña.
-  assert.deepEqual(paths, ['/oficina', '/autorizaciones', '/asistente', '/panel', '/trabajo', '/conocimiento', '/ajustes']);
+  assert.deepEqual(paths, ['/oficina', '/autorizaciones', '/asistente', '/panel', '/trabajo', '/conocimiento', '/ajustes', '/aceptacion']);
   assert.ok(app.includes('<Route path="/backlog" '), 'la ruta antigua /backlog sigue existiendo');
   for (const p of paths) assert.ok(app.includes(`<Route path="${p}" `), `falta la ruta ${p}`);
   assert.match(app, /<Route path="\/equipo" element=\{<Redirect to="\/oficina\/organizacion" \/>\} \/>/);
