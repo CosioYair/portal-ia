@@ -4,6 +4,7 @@ import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, workspaceDb } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { agentBackend, agentCaller } from './claudeCode/backend.ts';
+import { effectiveModel } from './modelRule.ts';
 import { requirePolicy } from './executionPolicy.ts';
 import { harnessLabelFor } from './harness/index.ts';
 import { agentFoldersRepo, nameContextFor, storePersonalName, syncAgentFolder } from './agentFolders.ts';
@@ -66,7 +67,9 @@ function authorize(slug: string, a: Agent, authorized: boolean) {
 /** UNA llamada con el arnés del agente (sin sustituto: si su arnés no está disponible, se dice por qué). */
 async function callOnce(slug: string, a: Agent, prompt: string): Promise<{ text: string; tokensIn: number; tokensOut: number; cost: number; harness: string }> {
   const harness = agentBackend(a);
-  const req = { model: a.config.model, system: `Eres «${a.config.name}», un agente de Portal IA. Respondes solo con el JSON que se te pide.`, user: prompt, maxTokens: MAX_TOKENS, effort: a.config.effort, supportsEffort: false };
+  // EN-028: el modelo de la regla de Portal IA (si se aplica) en las dos ramas; id inválido → error claro, sin sustituto.
+  const model = effectiveModel(slug, a, a.config.model);
+  const req = { model, system: `Eres «${a.config.name}», un agente de Portal IA. Respondes solo con el JSON que se te pide.`, user: prompt, maxTokens: MAX_TOKENS, effort: a.config.effort, supportsEffort: false };
   const startedAt = new Date().toISOString();
   const log = (status: 'done' | 'failed', tIn: number, tOut: number, cost: number) => {
     try { processesRepo(slug).logExecution({ projectId: projectOf(a) ?? '', agentId: a.id, kind: 'agent_name', status, tokensIn: tIn, tokensOut: tOut, cost, startedAt }); } catch { /* auditoría */ }
@@ -87,8 +90,8 @@ async function callOnce(slug: string, a: Agent, prompt: string): Promise<{ text:
   if (spent + est > a.config.monthlyLimitUsd) throw fail(`La propuesta superaría el límite mensual de «${a.config.name}» (${spent.toFixed(2)} + ≈${est.toFixed(3)} de ${a.config.monthlyLimitUsd.toFixed(2)} USD).`, 409);
   const models: ModelInfo[] = JSON.parse(prow.models_json);
   try {
-    const r = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { ...req, supportsEffort: !!models.find(m => m.id === a.config.model)?.supportsEffort } as any);
-    const cost = costUsd(providerId, a.config.model, r.inputTokens, r.outputTokens);
+    const r = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { ...req, supportsEffort: !!models.find(m => m.id === model)?.supportsEffort } as any);
+    const cost = costUsd(providerId, model, r.inputTokens, r.outputTokens);
     log('done', r.inputTokens, r.outputTokens, cost);
     return { text: r.text, tokensIn: r.inputTokens, tokensOut: r.outputTokens, cost, harness };
   } catch (e: any) {

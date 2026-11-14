@@ -7,6 +7,7 @@ import { providersRepo } from '../db/platform.ts';
 import { agentsRepo, processesRepo, projectsRepo } from '../db/workspace.ts';
 import { decryptSecret } from '../security/crypto.ts';
 import { requirePolicy } from './executionPolicy.ts';
+import { effectiveModel } from './modelRule.ts';
 import { inheritLatestTemplate } from './agentTemplates.ts';
 import { archiveAgentFolder } from './agentFolders.ts';
 
@@ -90,6 +91,8 @@ export async function draftAgent(slug: string, description: string, scope: Scope
   const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId);
   if (!cred || prow.status !== 'connected') throw Object.assign(new Error('El proveedor del Agente de Onboarding no está conectado.'), { statusCode: 409 });
   const models: ModelInfo[] = JSON.parse(prow.models_json);
+  // EN-028: el Agente de Onboarding de portal-ia llama con el modelo de la regla; id inválido → error claro antes de llamar.
+  const callModel = effectiveModel(slug, onboarding, onboarding.config.model);
   const existing = agents.list().map(a => `- ${a.key}: ${a.config.name} (${a.template.role}, ámbito ${a.scope})`).join('\n');
   const system = `Eres «${onboarding.config.name}» en Portal IA. ${onboarding.config.specialization}
 Tu tarea: proponer la configuración de un nuevo agente especializado, en JSON estricto, para que el propietario la revise y edite antes de crearlo. No creas nada tú; solo propones.
@@ -109,9 +112,9 @@ Responde SOLO con un objeto JSON con esta forma exacta:
   try {
     requirePolicy('ai_call', { slug, agentId: onboarding.id, authorized: true });
     const res = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, {
-      model: onboarding.config.model, system, user, maxTokens: 1500, effort: 'low', supportsEffort: false
+      model: callModel, system, user, maxTokens: 1500, effort: 'low', supportsEffort: false
     });
-    const cost = costUsd(providerId, onboarding.config.model, res.inputTokens, res.outputTokens);
+    const cost = costUsd(providerId, callModel, res.inputTokens, res.outputTokens);
     processesRepo(slug).logExecution({ projectId: agents.list().find(a => a.projectId)?.projectId ?? '', agentId: onboarding.id, kind: 'agent_draft', status: 'done', tokensIn: res.inputTokens, tokensOut: res.outputTokens, cost, startedAt });
     const jsonText = res.text.match(/\{[\s\S]*\}/)?.[0] ?? '{}';
     let j: any = {}; try { j = JSON.parse(jsonText); } catch { j = {}; }

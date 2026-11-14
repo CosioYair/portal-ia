@@ -2,6 +2,7 @@ import { agentCaller, completeWith } from './claudeCode/backend.ts';
 import type { Agent, DelegationResult, ModelInfo, OrgDecision, OrgEvaluation, OrgEvaluationBrief, OrgEvaluationStatus, OrgProposal, Process, ProviderId } from '@portal-ia/domain';
 import { ORG_ACTION_LABEL, ORG_BRIEF_REQUIRED_MESSAGE, ORG_TARGET_LABEL, briefIsEmpty, briefLimitError, briefToMarkdown, departmentOf, isRetired, normalizeOrgBrief, parseOrgProposals, EFFORT_THINKING_TOKENS } from '@portal-ia/domain';
 import { costUsd, estimatePricing, estimateTokens, ProviderRequestError } from '@portal-ia/ai-adapters';
+import { costModel } from './modelRule.ts';
 import { providersRepo, workspacesRepo } from '../db/platform.ts';
 import { agentsRepo, backlogRepo, knowledgeRepo, processesRepo, projectsRepo, workspaceDb } from '../db/workspace.ts';
 import { orgEvaluationsRepo } from '../db/orgEvaluationSchema.ts';
@@ -224,8 +225,8 @@ export async function runOrgEvaluation(slug: string, processId: string, log: (o:
     try {
       requirePolicy('ai_call', { slug, processId, agentId: agent.id, projectId: proc.projectId, authorized: true, route: cc ? 'claude-code' : 'api' });
       const timeoutMs = callTimeoutMs(maxTokens, agent.config.effort);
-      const res = await withWatchdog(completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history, timeoutMs }, ctrl.signal), ctrl, timeoutMs);
-      const cost = cc ? 0 : costUsd(providerId, agent.config.model, res.inputTokens, res.outputTokens);
+      const res = await withWatchdog(completeWith(cc, providerId, cred, prow, { model: agent.config.model, system, user, maxTokens, effort: agent.config.effort, supportsEffort: !!models.find(m => m.id === agent.config.model)?.supportsEffort, history, timeoutMs }, ctrl.signal, { slug, agent }), ctrl, timeoutMs);
+      const cost = cc ? 0 : costUsd(providerId, costModel(slug, agent, agent.config.model), res.inputTokens, res.outputTokens);
       const prev = procs.get(processId)!.steps[stepIdx]; const acc = history?.length ? prev : { inputTokens: 0, outputTokens: 0, costUsd: 0 };
       procs.stepFinish(step.id, 'done', { tokensIn: acc.inputTokens + res.inputTokens, tokensOut: acc.outputTokens + res.outputTokens, cost: acc.costUsd + cost, outputMd: history?.length ? `${history.filter(h => h.role === 'assistant').map(h => h.content).join('')}${res.text}` : res.text });
       procs.addUsage(processId, res.inputTokens, res.outputTokens, cost);
@@ -234,7 +235,7 @@ export async function runOrgEvaluation(slug: string, processId: string, log: (o:
       return res;
     } catch (e) {
       const err = e instanceof ProviderRequestError ? e.error : null; let msg = err ? err.message : (e as Error).message;
-      const billed = !cc && maybeBilled(e); const estCost = billed ? costUsd(providerId, agent.config.model, estimateTokens(system + user), 0) : 0;
+      const billed = !cc && maybeBilled(e); const estCost = billed ? costUsd(providerId, costModel(slug, agent, agent.config.model), estimateTokens(system + user), 0) : 0;
       if (billed) msg += ` Posible costo NO confirmado por el proveedor: ≈ ${estCost.toFixed(4)} USD (estimación de la entrada enviada).`;
       procs.stepFinish(step.id, 'failed', { error: msg }); if (billed) procs.addUnconfirmed(processId, step.id, estCost);
       procs.logExecution({ projectId: proc.projectId, agentId: agent.id, kind: 'org_evaluation_step', status: 'failed', tokensIn: 0, tokensOut: 0, cost: 0, startedAt });

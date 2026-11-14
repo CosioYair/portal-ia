@@ -12,6 +12,7 @@ import { lessonsRepo } from './lessons.ts';
 import { externalSource } from './externalAgents.ts';
 import { agentEvents, recordAgentEvent } from './agentEvents.ts';
 import { monotonicNow } from '../clock.ts';
+import { ruleModelFor } from './modelRule.ts';
 
 /**
  * Importar un agente desde un ZIP (docs/agentes-portables.md).
@@ -285,7 +286,9 @@ export function previewZipImport(slug: string, uploaded: string, name: string) {
     agent: d ? { name: d.manifest.name, role: d.manifest.role, summary: d.manifest.summary, department: d.manifest.department, responsibilities: d.manifest.responsibilities, deliverables: d.manifest.deliverables, capabilities: d.manifest.capabilities.filter(c => CAPABILITIES.some(x => x.id === c)) } : null,
     requests: d ? { harness: d.manifest.harness.preferred, model: d.manifest.harness.model, tools: d.manifest.permissions.tools, autonomy: d.manifest.permissions.autonomy } : null,
     instructions: d?.instructions ?? '', skills: d?.skills.map(s => ({ slug: s.slug, name: s.name, description: s.description, body: s.body })) ?? [],
-    memory: d?.memory.map(m => ({ title: m.title, text: m.text })) ?? [], references: d?.knowledge.map(k => ({ slug: k.slug, title: k.title, body: k.body })) ?? []
+    memory: d?.memory.map(m => ({ title: m.title, text: m.text })) ?? [], references: d?.knowledge.map(k => ({ slug: k.slug, title: k.title, body: k.body })) ?? [],
+    // EN-028 · En portal-ia, con la regla activa, un agente nuevo Anthropic usa el modelo de la regla y no el del paquete.
+    ruleModel: ruleModelFor(slug, 'anthropic')
   };
   if (!existing) {
     const learned = learnedSummary(files, {}, null, (d?.memory ?? []).map(m => ({ title: m.title, text: m.text })), changelog);
@@ -323,7 +326,8 @@ export async function applyZipImport(slug: string, input: ZipConfirmInput, onRow
     if (!input.grant) throw fail('Para un agente nuevo elige arnés, permisos y departamento.', 400);
     const nameWarnings: string[] = [];
     const agent = await importFromFiles(slug, files, `ZIP «${st.name || 'agente.zip'}»`, input.grant, 'Importado desde ZIP (revisado por el propietario)', w => { nameWarnings.push(w); });
-    event(slug, agent.id, 'imported_zip', { mode: 'nuevo', hash: input.hash });
+    // EN-028 · importFromFiles → createAgentFromWizard → withRuleModel: en portal-ia el modelo del paquete se sustituye por el de la regla.
+    event(slug, agent.id, 'imported_zip', { mode: 'nuevo', hash: input.hash, model: agent.config.model, ...(ruleModelFor(slug, agent.config.provider) ? { modelRule: true } : {}) });
     unstage(input.token);
     const learned = learnedSummary(files, {}, null, (filesToDefinition(files).definition?.memory ?? []).map(m => ({ title: m.title, text: m.text })), changelog);
     learned.warnings.push(...nameWarnings);

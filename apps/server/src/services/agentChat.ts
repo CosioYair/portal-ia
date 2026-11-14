@@ -15,6 +15,7 @@ import { monotonicNow } from '../clock.ts';
 import { attachmentsOfMessages, harnessSendsImages, linkToMessage, listAttachments, MAX_IMAGE_BYTES_PER_MESSAGE, modelContext, resolveForMessage, type ChatAttachment } from './agentAttachments.ts';
 import { actionsOfMessages, actionsPrompt, extractAction, registerAction, workContext, type AgentAction } from './agentActions.ts';
 import { buildLessonContext } from './lessons.ts';
+import { effectiveModel } from './modelRule.ts';
 import { sealForOwner } from './portalSeal.ts';
 import { ROLE_TEMPLATE, templateKeyFor } from './agentTemplates.ts';
 import type { TeamRole } from '@portal-ia/domain';
@@ -173,7 +174,10 @@ export async function sendChat(slug: string, agentId: string, input: { text: str
   void (async () => {
     try {
       requirePolicy('ai_call', { slug, agentId, authorized: true, route: harness === 'api' ? 'api' : harness === 'codex' ? 'codex' : 'claude-code' });
-      const req = { model: a.config.model, system, user: `${text}${ctx.text}`, maxTokens: MAX_TOKENS, effort: a.config.effort, supportsEffort: false, history: hist.length ? hist : undefined, ...(ctx.images.length ? { images: ctx.images } : {}) };
+      // EN-028: el modelo real de la llamada (el de la regla de Portal IA si se aplica; si su id no es válido, error claro sin sustituto).
+      const model = effectiveModel(slug, a, a.config.model);
+      if (model !== a.config.model) db.prepare(`UPDATE agent_messages SET model = ? WHERE id = ?`).run(model, replyId);
+      const req = { model, system, user: `${text}${ctx.text}`, maxTokens: MAX_TOKENS, effort: a.config.effort, supportsEffort: false, history: hist.length ? hist : undefined, ...(ctx.images.length ? { images: ctx.images } : {}) };
       // Si la respuesta pide una acción, se quita del texto visible y se dirige al ciclo que corresponde.
       const done = async (raw: string, extra: { tokensIn: number; tokensOut: number; cost?: number }) => {
         const { visible, action } = extractAction(raw.trim());
@@ -186,8 +190,8 @@ export async function sendChat(slug: string, agentId: string, input: { text: str
       } else {
         const providerId = a.config.provider as ProviderId; const prow = providersRepo.get(providerId)!; const cred = providersRepo.credential(providerId)!;
         const models: ModelInfo[] = JSON.parse(prow.models_json);
-        const r = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { ...req, supportsEffort: !!models.find(m => m.id === a.config.model)?.supportsEffort });
-        await done(r.text, { tokensIn: r.inputTokens, tokensOut: r.outputTokens, cost: costUsd(providerId, a.config.model, r.inputTokens, r.outputTokens) });
+        const r = await getAdapter(providerId)!.complete(decryptSecret(cred.ciphertext), { workspaceId: prow.workspace_id }, { ...req, supportsEffort: !!models.find(m => m.id === model)?.supportsEffort });
+        await done(r.text, { tokensIn: r.inputTokens, tokensOut: r.outputTokens, cost: costUsd(providerId, model, r.inputTokens, r.outputTokens) });
       }
     } catch (e: any) {
       const msg = e instanceof ProviderRequestError ? e.error.message : e?.message ?? String(e);

@@ -283,6 +283,8 @@ export function definitionFor(slug: string, a: Agent, extras: AgentExtras): Port
   const portableScope = scope ? contextScopeToPortable(scope, scope.company ? companyNameOf(slug) : null) : undefined;
   // EN-015: personal_name en agent.yaml (y en el ZIP) solo si lo tiene; `name` sigue siendo el puesto.
   const personal = agentPersonalName(a);
+  // EN-028: la carpeta en disco y sus revisiones reflejan siempre config.model. Solo la exportación (agentCreation.exportFiles,
+  // que usan la ruta de exportación y el ZIP) vacía harness.model cuando se aplica la regla de modelo de Portal IA.
   return {
     manifest: {
       schema: PORTABLE_AGENT_SCHEMA, id: a.id, name: a.config.name, ...(personal ? { personalName: personal } : {}), role: a.template.role, department: dep?.slug ?? null, initials: a.template.initials,
@@ -364,6 +366,16 @@ async function withLock<T>(key: string, fn: () => T | Promise<T>): Promise<T> {
 }
 
 export function folderPath(slug: string, folder: string) { return path.join(agentsRoot(slug), folder); }
+
+/**
+ * EN-028 · Archivos de la carpeta exportada de un agente (los mismos que entrega la ruta de exportación).
+ * Pasa la llamada a agentCreation.exportFiles, que carga en el momento de la llamada para no crear una dependencia circular al cargar los módulos.
+ * Con la regla de modelo activa en portal-ia, harness.model sale vacío («predeterminado»).
+ */
+export async function exportFiles(slug: string, agentId: string): Promise<{ folder: string; files: PortableFiles; kind: 'internal' | 'external'; sourceRoot?: string }> {
+  const creation = await import('./agentCreation.ts');
+  return creation.exportFiles(slug, agentId);
+}
 
 const diskCache = new Map<string, { sig: string; hash: string }>();
 /** Firma barata de una carpeta (sin leer contenido): rutas, tamaños y fechas de modificación, sin seguir enlaces. */

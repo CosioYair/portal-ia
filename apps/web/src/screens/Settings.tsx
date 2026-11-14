@@ -14,6 +14,7 @@ import { ownerNeeded } from '../lib/owner.ts';
 import { loadOwnerName, PortalSealPanel, saveOwnerName } from '../components/AgentConfigPanel.tsx';
 import { OWNER_NAME_MAX } from '@portal-ia/domain';
 import { LessonAutoImproveSettings } from '../components/LessonAutoImproveSettings.tsx';
+import { ModelRuleSettings } from '../components/ModelRuleSettings.tsx';
 
 /**
  * Ajustes (Portal IA 2.0): un sitio para lo que antes estaba repartido (proveedores en el pie del menú, motores en un
@@ -100,6 +101,9 @@ export function Settings() {
         {card(Icon.sparkles(), 'Mejora automática de lecciones', `Empresa «${ws.name}» · con costo · desactivada por defecto`,
           <LessonAutoImproveSettings slug={ws.slug} />,
           <Link className="btn btn-ghost btn-sm" to="/autorizaciones">Ver mejoras pendientes en Decisiones</Link>)}
+        {card(Icon.bolt(), 'Regla de modelo de Portal IA', 'Solo la empresa «Portal IA» · agentes Anthropic',
+          <ModelRuleSettings slug={INTERNAL_SLUG} />,
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setDialog('harness')}>Ver motores</button>)}
         {card(Icon.shield(), 'Propietario', 'Este navegador',
           owner ? <>Este navegador está vinculado como propietario: puede hacer cambios (autorizar, integrar, cerrar, configurar). La sesión dura 7 días desde el último uso.</> : <>Sin vincular puedes consultarlo todo; para hacer cambios, vincula este navegador con un código de un solo uso (la vinculación dura 7 días desde el último uso).</>,
           owner ? <OwnerStatus /> : <button type="button" className="btn btn-secondary btn-sm" onClick={() => ownerNeeded()}>Vincular este navegador</button>)}
