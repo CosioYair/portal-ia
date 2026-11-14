@@ -942,6 +942,8 @@ export interface PipelineStatus {
   findings?: { severity: IssueSeverity; text: string; file: string | null; evidence: string | null }[];
   /** EN-024 · Veredicto completo de QA guardado al pausar: al reanudar se recalcula sin IA (replayQaVerdict). */
   qaVerdictSnapshot?: unknown;
+  /** Portal IA 3 · Commit que QA evaluó CON la evidencia visual a la vista (null: la evaluó sin ella). */
+  qaVisualCommit?: string | null;
   /** EN-024 · Estado del sandbox en el momento de la pausa (referencia de «Comprobar el sandbox de nuevo»). */
   envSnapshot?: SandboxEnvSnapshot | null;
   startedAt: string;

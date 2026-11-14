@@ -16,9 +16,10 @@ import { backoffMs, callTimeoutMs, isTransient, maxProviderRetries, maybeBilled,
 import { injectLessons, recordDetections, recordLessonOutcomes } from './lessons.ts';
 import { sealForStep } from './portalSeal.ts';
 import { curateAfterTask } from './lessonCurator.ts';
-import { gauntletStage, toCorrection } from './gauntlet.ts';
+import { gauntletStage, toCorrection, visualBeforeQa, visualEvidencePresent, VISUAL_PASSED_PREFIX, VISUAL_READY_PREFIX } from './gauntlet.ts';
+import { visualGate, visualSummary } from './visualCheck.ts';
 import { callMetricsRepo, promptHash } from '../db/callMetrics.ts';
-import { actionableFindings, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, testsEvidence, verificationEvidence } from './qaGate.ts';
+import { actionableFindings, dropSatisfiedVisualFindings, verdictAboutMissingVisual, enforceQaGate, parseQaVerdict, QA_VERDICT_SCHEMA, qaEvidencePrompt, rejectionSignature, testsEvidence, verificationEvidence } from './qaGate.ts';
 /** Veredicto de QA con salida estructurada nativa del proveedor (si la admite); el motor lo valida igualmente. */
 const QA_SCHEMA = { name: 'veredicto_qa', description: 'Veredicto de la puerta de calidad con hallazgos y evidencia.', schema: QA_VERDICT_SCHEMA as unknown as Record<string, unknown> };
 import { annotateChanges, applyChanges, changesSinceBase, checkStaleChanges, commitInWorktree, git, readRepoFile, safeRelPath, scanSecrets, type RawChange } from './repoWrite.ts';
@@ -1028,7 +1029,8 @@ export async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
     return;
   }
   const qa = ctx.qa!; const proc = processesRepo(ctx.slug).get(ctx.processId)!; const r = proc.result!; const p = r.pipeline!;
-  emit(ctx, 'qa', 'QA está evaluando la evidencia: diff, typecheck, pruebas y compilación.', { phase: 'qa', aiCall: true });
+  const vgate = visualGate(ctx.slug, proc); const vReady = vgate.required && visualEvidencePresent(vgate);
+  emit(ctx, 'qa', `QA está evaluando la evidencia: diff, typecheck, pruebas y compilación${vReady ? ', más las capturas y la accesibilidad comprobadas en el host' : ''}.`, { phase: 'qa', aiCall: true });
   const pendingQa = proc.steps.find(s => s.role === 'reviewer' && s.status === 'pending');
   // QA recibe también el manifiesto (qué estaba planificado, qué está de verdad en el worktree), la comprobación previa sin IA, la evidencia de las pruebas y sus hallazgos anteriores.
   // Entrega incremental: estado de cada comprobación y, si QA ya revisó un commit anterior, el diff completo solo de lo que cambió.
@@ -1043,7 +1045,7 @@ export async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
       catch { unchanged = []; /* commit anterior inalcanzable: revisión completa */ }
     }
   }
-  const user = qaEvidencePrompt({ criterion: ctx.item.criterion, plan: ctx.plan, summary: r.implementationSummary ?? '', changes: r.changes, verifications: sinceApplied(r), required: cfg.commands, attempts: attemptsSummary(p), consultText: ctx.consultText, manifest: r.manifest ?? null, previousFindings: r.review?.verdict === 'rejected' ? r.review.findings ?? [] : [], tests: testsEvidence(sinceApplied(r)), checks, unchangedSinceReview: unchanged, reviewedCommit: reviewed, external: r.externalCorrections ?? [] });
+  const user = qaEvidencePrompt({ criterion: ctx.item.criterion, plan: ctx.plan, summary: r.implementationSummary ?? '', changes: r.changes, verifications: sinceApplied(r), required: cfg.commands, attempts: attemptsSummary(p), consultText: ctx.consultText, manifest: r.manifest ?? null, previousFindings: r.review?.verdict === 'rejected' ? r.review.findings ?? [] : [], tests: testsEvidence(sinceApplied(r)), checks, unchangedSinceReview: unchanged, reviewedCommit: reviewed, external: r.externalCorrections ?? [], visual: vgate.required ? (vgate.dir ? visualSummary(vgate).split(`${vgate.dir}${path.sep}`).join('').split(vgate.dir).join('') : visualSummary(vgate)) : '' });
   const system = sys(qa, ctx.project, ctx.item);
   let res = await stepCall(ctx, qa, 'reviewer', pendingQa ? pendingQa.title : `Revisión de QA con evidencia (tras corrección ${p.corrections})`, 'Puerta de calidad con evidencia del sandbox', system, user, 6000, pendingQa?.id, QA_SCHEMA);
   let verdict = parseQaVerdict(res.text);
@@ -1054,9 +1056,10 @@ export async function qaStage(ctx: StoryRunCtx, cfg: PipelineConfig) {
     verdict = parseQaVerdict(res.text);
   }
   const fresh = processesRepo(ctx.slug).get(ctx.processId)!.result!;
-  const gated = enforceQaGate(verdict, cfg.commands, sinceApplied(fresh));
+  const gated0 = enforceQaGate(verdict, cfg.commands, sinceApplied(fresh));
+  const gated = vReady ? dropSatisfiedVisualFindings(gated0) : gated0;
   updateResult(ctx.slug, ctx.processId, x => ({ ...x, review: gated }));
-  updatePipeline(ctx.slug, ctx.processId, { lastQaCommit: fresh.applied?.commit ?? null });
+  updatePipeline(ctx.slug, ctx.processId, { lastQaCommit: fresh.applied?.commit ?? null, qaVisualCommit: vReady ? fresh.applied?.commit ?? null : null } as unknown as Parameters<typeof updatePipeline>[2]);
   if (fresh.manifest) updateResult(ctx.slug, ctx.processId, x => x.manifest ? { ...x, manifest: { ...x.manifest, reviewedCommit: fresh.applied?.commit ?? null } } : x);
   const label = gated.verdict === 'approved' ? 'QA aprobó la implementación con evidencia.' : gated.verdict === 'rejected' ? `QA rechazó: ${actionableFindings(gated).length} hallazgo(s) con evidencia.` : gated.verdict === 'blocked_environment' ? 'QA no pudo validar por el entorno.' : 'QA no pudo verificar con la evidencia disponible.';
   emit(ctx, 'qa', label, { costUsd: res.costUsd, detail: [gated.overridden, gated.summary].filter(Boolean).join(' ') });
@@ -1115,10 +1118,23 @@ export async function runPipelineStages(ctx: StoryRunCtx): Promise<PipelineStatu
     // lo re-evalúa (o ya lo evaluó) el Evaluador. No se pagan dos revisiones del mismo commit.
     const gauntletReeval = r.review?.verdict === 'approved' && !!r.gauntlet && (!!r.gauntlet.pendingReeval || r.gauntlet.rounds.at(-1)?.commit === r.applied.commit);
     const qaRequested = !!p.qaRequestedFor && p.qaRequestedFor === r.applied.commit;
-    const qaRan = qaRequested || (!gauntletReeval && (p.lastQaCommit !== r.applied.commit || !r.review?.verdict));
+    // Portal IA 3 · La evidencia visual (capturas y accesibilidad) la produce el Portal ANTES de QA. Si QA ya dio un
+    // veredicto NO aprobado sobre este commit sin haberla visto, vuelve a evaluar ahora que existe (una llamada), en vez
+    // de repetir el veredicto guardado o de mandar «faltan capturas» al Desarrollador.
+    const vis = await visualBeforeQa(ctx, processesRepo(ctx.slug).get(ctx.processId)!);
+    const visReady = vis.required && visualEvidencePresent(vis);
+    const visualFresh = visReady && !!r.review?.verdict && r.review.verdict !== 'approved' && p.lastQaCommit === r.applied.commit && (p as { qaVisualCommit?: string | null }).qaVisualCommit !== r.applied.commit && verdictAboutMissingVisual(r.review);
+    const qaRan = qaRequested || visualFresh || (!gauntletReeval && (p.lastQaCommit !== r.applied.commit || !r.review?.verdict));
+    // «Repetir la verificación visual (sin IA)» no autoriza gasto: si lo siguiente es la revisión de calidad, se pide.
+    if (qaRan && cfg.visualOnly) throw new PipelinePause('gauntlet', `${vis.ok ? VISUAL_PASSED_PREFIX : `${VISUAL_READY_PREFIX}, con problemas que debe juzgar la revisión de calidad`} (commit ${r.applied.commit})${vis.ok ? '' : `: ${clip(vis.reasons.join(' · '), 300)}`}. Falta la revisión de calidad de este commit con las capturas, que llama a la IA: no se lanzó porque «Repetir la verificación visual (sin IA)» no autoriza gasto. Acción: pulsa «Continuar con la revisión (con IA)» con el presupuesto que fijes. Lo hecho se conserva.`);
+    if (visualFresh) {
+      updatePipeline(ctx.slug, ctx.processId, { imageRelated: false, qaVerdictSnapshot: null } as unknown as Parameters<typeof updatePipeline>[2]);
+      emit(ctx, 'qa', 'La revisión de calidad vuelve a evaluar este commit: ahora tiene las capturas y el informe de accesibilidad que le faltaban. No se pide ninguna corrección al equipo por este motivo.');
+    }
     if (qaRan) await qaStage(ctx, cfg);
     if (qaRequested) updatePipeline(ctx.slug, ctx.processId, { qaRequestedFor: null });
     const v = processesRepo(ctx.slug).get(ctx.processId)!.result!.review!;
+    if (cfg.visualOnly && v.verdict !== 'approved') throw new PipelinePause('qa', `La comprobación visual está hecha, pero la revisión de calidad no aprobó este commit: ${clip(v.overridden ?? v.summary ?? '', 400)} «Repetir la verificación visual (sin IA)» no autoriza correcciones ni llamadas a la IA: decide tú el siguiente paso.`);
     if (v.verdict === 'approved') {
       const names: Record<string, string> = { typecheck: 'Typecheck', test: 'pruebas', build: 'compilación' };
       const ran = cfg.autoVerify ? `${cfg.commands.map(c => names[c]).join(', ').replace(/, ([^,]*)$/, ' y $1')} aprobad${cfg.commands.length > 1 ? 'os' : 'o'}.` : '';
