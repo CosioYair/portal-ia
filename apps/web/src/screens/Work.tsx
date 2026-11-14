@@ -50,7 +50,8 @@ export function Work() {
   // Solo este proyecto y como mucho una vez cada 5 s: la lista no necesita mas y asi no compite con lo que este trabajando.
   useLive(c => c.ws === ws.slug && (!c.projectId || c.projectId === projectId) && ['process', 'backlog', 'assignment', 'batch'].includes(c.entity), load, { minMs: 5000 });
 
-  const set = (k: 'ver' | 'q', v: string) => { const next = new URLSearchParams(params); if (!v || (k === 'ver' && v === 'abierto')) next.delete(k); else next.set(k, v); setParams(next, { replace: k === 'q' }); };
+  // Siempre a partir de la direccion ACTUAL (forma funcional): escribir en el buscador justo despues de elegir un filtro no lo pierde.
+  const set = (k: 'ver' | 'q', v: string) => setParams(() => { const next = new URLSearchParams(window.location.search); if (!v || (k === 'ver' && v === 'abierto')) next.delete(k); else next.set(k, v); return next; }, { replace: k === 'q' });
   const shown = useMemo(() => {
     const term = q.trim().toLowerCase();
     return (data?.items ?? []).filter(i => (view === 'open' ? i.segment !== 'done' : i.segment === view) && (!term || `${i.code} ${i.title} ${i.ask}`.toLowerCase().includes(term)));
