@@ -26,6 +26,17 @@ try { const { recoverInterruptedPlans } = await import('./services/projectMainte
 try { const { cleanupBaselineWorktrees } = await import('./services/baseline.ts'); const n = await cleanupBaselineWorktrees(); if (n) app.log.warn({ removed: n }, 'worktrees temporales de una ejecución anterior retirados'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'limpieza de worktrees temporales omitida'); }
 // Operaciones del Asistente que se ejecutaban en segundo plano (p. ej. pruebas en el sandbox): no terminaron; se dice así.
 try { const { recoverInterruptedOperations } = await import('./services/assistant.ts'); const n = recoverInterruptedOperations(); if (n) app.log.warn({ interrupted: n }, 'operaciones del Asistente interrumpidas por el reinicio: quedan como no terminadas'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'recuperación de operaciones del Asistente omitida'); }
+// Portal IA 4 · Un trabajo ya integrado no figura como «detenido» por una iteración posterior que no tenía nada que
+// cambiar (EN-029): se corrige al arrancar y cada vez que termina un proceso. Sin IA; no acepta ni cierra nada.
+try {
+  const { reconcileDelivered } = await import('./services/deliveredReconcile.ts');
+  const { workspacesRepo } = await import('./db/platform.ts');
+  const { onProcessFinish } = await import('./db/workspace.ts');
+  for (const ws of workspacesRepo.list()) { try { const r = reconcileDelivered(ws.slug); if (r.length) app.log.warn({ workspace: ws.slug, restored: r }, 'trabajos ya integrados devueltos a su entrega (la iteración posterior no tenía nada que cambiar)'); } catch (e) { app.log.warn({ workspace: ws.slug, err: (e as Error).message }, 'conciliación de entregas integradas omitida en este espacio'); } }
+  onProcessFinish((slug, processId) => { setImmediate(() => { try { const r = reconcileDelivered(slug, { processId }); if (r.length) app.log.info({ workspace: slug, restored: r }, 'iteración sin código tras una integración: vuelve a ser vigente la entrega integrada'); } catch { /* se corregirá al arrancar */ } }); });
+} catch (e) { app.log.warn({ err: (e as Error).message }, 'conciliación de entregas integradas omitida'); }
+// Portal IA 4 · Estudio: exportaciones que un cierre dejó a medias, sus contenedores y sus carpetas temporales.
+void (async () => { try { const { recoverStudioAtStartup } = await import('./services/studio.ts'); const { workspacesRepo } = await import('./db/platform.ts'); const r = await recoverStudioAtStartup(workspacesRepo.list().map(w => w.slug)); if (r.renders || r.containers) app.log.warn(r, 'Estudio: exportaciones interrumpidas por el reinicio marcadas como no terminadas'); const { recoverLabAtStartup } = await import('./services/artifactLab.ts'); const n = await recoverLabAtStartup(workspacesRepo.list().map(w => w.slug)); if (n) app.log.warn({ interrupted: n }, 'análisis de artefactos interrumpidos por el reinicio'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'Estudio: recuperación omitida'); } })();
 // HU-144: Ctrl+C, SIGTERM y SIGHUP hacen el mismo apagado limpio que «Reiniciar» (puerto libre, sin hijos huérfanos).
 installSignalHandlers(app);
 attachApp(app);
@@ -35,6 +46,8 @@ try {
   // Lotes de ejecución continua: retoman tras el reinicio (sin reenviar llamadas con cobro incierto) y se revisan sin IA.
   // Va tras escuchar: la activación de un lote se comprueba contra el Portal ya en marcha.
   try { const { resumeBatches, startBatchScheduler } = await import('./services/batchRunner.ts'); startBatchScheduler((o, m) => app.log.info(o, m)); await resumeBatches((o, m) => app.log.info(o, m)); } catch (e) { app.log.warn({ err: (e as Error).message }, 'lotes: recuperación omitida'); }
+  // Portal IA 4 · Trabajos cuyo commit verificado ya está en la rama principal: se registran como integrados (hechos de git).
+  void (async () => { try { const { reconcileIntegrated } = await import('./services/deliveredReconcile.ts'); const { workspacesRepo } = await import('./db/platform.ts'); for (const ws of workspacesRepo.list()) { const r = await reconcileIntegrated(ws.slug, (o, m) => app.log.info(o, m)); if (r.length) app.log.warn({ workspace: ws.slug, processes: r }, 'trabajos ya contenidos en la rama principal registrados como integrados (falta la aceptación del propietario)'); } } catch (e) { app.log.warn({ err: (e as Error).message }, 'conciliación con git omitida'); } })();
   // Vistas previas que dejó un arranque anterior de esta instancia: se retiran (no siguen sirviendo código sin aceptar).
   void import('./services/preview.ts').then(m => m.cleanupPreviews((o, msg) => app.log.info(o, msg))).catch(e => app.log.warn({ err: (e as Error).message }, 'vistas previas: limpieza omitida'));
 } catch (err) {

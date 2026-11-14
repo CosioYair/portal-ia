@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { StudioFormat } from '@portal-ia/domain';
 import { STUDIO_FORMATS } from '@portal-ia/domain';
-import { fmtTime, studioApi, type StudioProjectSummary, type StudioProviderInfo, type StudioStatus } from '../lib/studioApi.ts';
+import { fmtBytes, fmtTime, studioApi, type StudioProjectSummary, type StudioProviderInfo, type StudioStatus } from '../lib/studioApi.ts';
 import { useApp } from '../lib/store.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Modal } from '../components/Modal.tsx';
@@ -24,16 +24,19 @@ export function Studio() {
   const { status, flash, navigate } = useApp(); const slug = status.workspace!.slug;
   const [list, setList] = useState<StudioProjectSummary[] | null>(null); const [info, setInfo] = useState<StudioStatus | null>(null);
   const [err, setErr] = useState<string | null>(null); const [creating, setCreating] = useState(false); const [removing, setRemoving] = useState<StudioProjectSummary | null>(null);
+  const [renaming, setRenaming] = useState<StudioProjectSummary | null>(null); const [newName, setNewName] = useState(''); const [purging, setPurging] = useState(false);
   const [name, setName] = useState(''); const [format, setFormat] = useState<StudioFormat>('landscape'); const [busy, setBusy] = useState(false);
   const load = () => studioApi.list(slug).then(setList).catch(e => setErr(e.message));
   useEffect(() => { void load(); studioApi.status(slug).then(setInfo).catch(() => undefined); }, [slug]); // eslint-disable-line react-hooks/exhaustive-deps
   const create = async () => { if (!name.trim()) return; setBusy(true); setErr(null); try { const f = await studioApi.create(slug, name.trim(), format); navigate(`/estudio/${f.project.id}`); } catch (e: any) { setErr(e.message); setBusy(false); } };
   const duplicate = async (p: StudioProjectSummary) => { try { await studioApi.duplicate(slug, p.id); flash(`Copia de «${p.name}» creada`); await load(); } catch (e: any) { setErr(e.message); } };
+  const rename = async () => { if (!renaming || !newName.trim()) return; try { const f = await studioApi.get(slug, renaming.id); await studioApi.save(slug, renaming.id, { ...f.project, name: newName.trim() }, f.project.revision, null); setRenaming(null); await load(); } catch (e: any) { setErr(e.message); setRenaming(null); } };
+  const purge = async () => { setPurging(false); try { const r = await studioApi.purgeTrash(slug); flash(`Espacio liberado: ${fmtBytes(r.freed.bytes)}`); setInfo(i => (i ? { ...i, trash: r.trash } : i)); } catch (e: any) { setErr(e.message); } };
   const remove = async () => { if (!removing) return; try { await studioApi.remove(slug, removing.id); flash(`«${removing.name}» se quitó de la lista`); setRemoving(null); await load(); } catch (e: any) { setErr(e.message); setRemoving(null); } };
   const engine = info?.engine;
 
   return <Shell crumb="Estudio">
-    <div className="st-home">
+    <div className="page st-home">
       <PageHeader icon={Icon.layers()} tone="work" title="Estudio" description="Monta vídeos con tus clips, imágenes, música y texto, y expórtalos en MP4. Todo se procesa en esta máquina."
         actions={<button className="btn btn-primary" onClick={() => { setName(''); setCreating(true); }}>{Icon.plus()} Nuevo proyecto</button>} />
       {err && <Notice kind="err">{err}</Notice>}
@@ -47,7 +50,8 @@ export function Studio() {
             <span className="st-project-text"><strong>{p.name}</strong><span className="small muted">{STUDIO_FORMATS[p.format].label} {STUDIO_FORMATS[p.format].ratio} · {p.clips ? `${fmtTime(p.duration)} · ${p.clips} ${p.clips === 1 ? 'fragmento' : 'fragmentos'}` : 'vacío'} · cambiado el {new Date(p.updatedAt).toLocaleDateString()}</span></span>
           </Link>
           <div className="st-project-actions">
-            <button className="btn btn-ghost btn-sm" onClick={() => void duplicate(p)}>Duplicar</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => { setNewName(p.name); setRenaming(p); }} aria-label={`Cambiar el nombre de «${p.name}»`}>Renombrar</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => void duplicate(p)} aria-label={`Duplicar «${p.name}»`}>Duplicar</button>
             <button className="btn btn-ghost btn-sm" onClick={() => setRemoving(p)} aria-label={`Quitar «${p.name}»`}>Quitar</button>
           </div>
         </li>)}</ul>}
@@ -67,6 +71,13 @@ export function Studio() {
         <div className="st-formats">{(Object.keys(STUDIO_FORMATS) as StudioFormat[]).map(f => <label key={f} className={`st-formatopt${format === f ? ' is-on' : ''}`}><input type="radio" name="st-format" className="sr-only" checked={format === f} onChange={() => setFormat(f)} /><span className={`st-project-shape st-shape-${f}`} aria-hidden="true" /><span><strong>{STUDIO_FORMATS[f].label}</strong><br /><span className="small muted">{STUDIO_FORMATS[f].ratio}{f === 'portrait' ? ' · móvil, reels' : f === 'square' ? ' · redes' : ' · pantalla'}</span></span></label>)}</div>
       </fieldset>
       <p className="small muted" style={{ margin: 0 }}>Podrás cambiar el formato después.</p>
+    </Modal>}
+    {info && info.trash.projects > 0 && <p className="small muted st-trash">Hay {info.trash.projects} {info.trash.projects === 1 ? 'proyecto quitado' : 'proyectos quitados'} que {info.trash.projects === 1 ? 'ocupa' : 'ocupan'} {fmtBytes(info.trash.bytes)} en el disco. <button className="lnk" onClick={() => setPurging(true)}>Borrarlos definitivamente y liberar el espacio</button></p>}
+    {renaming && <Modal title="Cambiar el nombre" onClose={() => setRenaming(null)} footer={<><button className="btn btn-ghost" onClick={() => setRenaming(null)}>Cancelar</button><button className="btn btn-primary" onClick={rename} disabled={!newName.trim()}>Guardar</button></>}>
+      <div><label className="label" htmlFor="st-rename">Nombre</label><input id="st-rename" className="input" style={{ width: '100%' }} value={newName} maxLength={120} onChange={e => setNewName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') void rename(); }} /></div>
+    </Modal>}
+    {purging && <Modal title="Borrar definitivamente" onClose={() => setPurging(false)} footer={<><button className="btn btn-ghost" onClick={() => setPurging(false)}>Cancelar</button><button className="btn btn-danger" onClick={purge}>Borrar y liberar espacio</button></>}>
+      <p style={{ margin: 0 }}>Se borrarán del disco los proyectos que quitaste de la lista, con sus medios, sus vídeos exportados y su historial. No se puede deshacer.</p>
     </Modal>}
     {removing && <Modal title="Quitar el proyecto" onClose={() => setRemoving(null)} footer={<><button className="btn btn-ghost" onClick={() => setRemoving(null)}>Cancelar</button><button className="btn btn-danger" onClick={remove}>Quitar de la lista</button></>}>
       <p style={{ margin: 0 }}>«{removing.name}» dejará de aparecer en el Estudio. Sus medios y los vídeos exportados se conservan en el disco.</p>

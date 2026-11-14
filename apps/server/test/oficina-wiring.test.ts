@@ -9,17 +9,20 @@ import { fileURLToPath } from 'node:url';
 const webSrc = fileURLToPath(new URL('../../web/src/', import.meta.url));
 const read = (rel: string) => fs.readFileSync(path.join(webSrc, rel), 'utf8');
 
-test('la oficina es la portada y el Panel sigue existiendo', () => {
+test('la portada es Inicio; la Oficina (ahora «Agentes») y el Panel siguen existiendo', () => {
   const app = read('App.tsx');
-  // La portada es la Oficina, en la última vista usada (Planta por defecto; Lista en móvil sin vista guardada).
-  assert.match(app, /const home = ready \? officeHome\(\)/); assert.match(read('lib/routes.ts'), /return width !== undefined && width < 768 \? '\/oficina\/lista' : '\/oficina';/);
+  // Portal IA 4: se entra por «Inicio» (qué te necesita, qué está en marcha, qué se terminó). La Oficina conserva su
+  // última vista usada (Planta por defecto; Lista en móvil sin vista guardada).
+  assert.match(app, /const home = ready \? HOME/); assert.match(app, /<Route path="\/inicio" element=\{company\(<Home \/>\)\} \/>/);
+  assert.match(read('lib/routes.ts'), /export const HOME = '\/inicio';/);
+  assert.match(read('lib/routes.ts'), /return width !== undefined && width < 768 \? '\/oficina\/lista' : '\/oficina';/);
   assert.match(app, /<Route path="\/oficina" /);
   assert.match(app, /<Route path="\/oficina\/agente\/:agentId\/:tab\?" /);
   assert.match(app, /<Route path="\/oficina\/nuevo-agente" /);
   assert.match(app, /<Route path="\/panel" element=\{guard\(<Dashboard \/>\)\} \/>/);
   // Portal IA 2.0: el menú sale del registro único de secciones (lib/routes.ts).
-  assert.match(read('lib/routes.ts'), /\{ id: 'oficina', label: 'Oficina', path: '\/oficina'/);
-  assert.match(read('lib/routes.ts'), /\{ id: 'resumen', label: 'Resumen', path: '\/panel'/, 'el Panel sigue en /panel, como «Resumen»');
+  assert.match(read('lib/routes.ts'), /\{ id: 'oficina', label: 'Agentes', path: '\/oficina'/, 'la Oficina es el destino «Agentes»');
+  assert.match(read('lib/routes.ts'), /\{ id: 'resumen', label: 'Proyecto y repositorio', path: '\/panel'/, 'el Panel sigue en /panel');
   assert.match(read('components/Shell.tsx'), /SECTIONS\.filter\(/);
 });
 

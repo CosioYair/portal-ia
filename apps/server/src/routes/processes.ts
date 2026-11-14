@@ -55,6 +55,7 @@ import { recordDetections } from '../services/lessons.ts';
 import { addManualItem, discardStory, estimateExtraction, extractBacklogWithAI, importBacklogFromKnowledge, resetStory } from '../services/backlog.ts';
 import { backlogRepo } from '../db/workspace.ts';
 import { assignmentsRepo } from '../db/assignments.ts';
+import { restoreDelivered } from '../services/deliveredReconcile.ts';
 import { assertNotSuperseded, InboxError } from '../services/inbox.ts';
 import { monotonicNow } from '../clock.ts';
 import { authorizeProcess } from '../services/processAuthorization.ts';
@@ -730,15 +731,12 @@ Proceso: ${proc.id}`, { processId: proc.id });
     if (!body.success) return reply.code(400).send({ error: 'Se requiere autorización explícita.' });
     const procs = processesRepo(slug); const proc = procs.get(id);
     if (!proc || proc.kind !== 'story_execution') return reply.code(404).send({ error: 'Proceso no encontrado' });
-    const d = (await flowOptions(slug, proc)).delivered;
-    if (!d) return reply.code(409).send({ error: 'Este proceso no tiene una entrega anterior integrada a la que volver.', code: 'no_delivered' });
-    if (proc.status === 'running') return reply.code(409).send({ error: 'El proceso está en ejecución.', code: 'busy' });
+    if (proc.status === 'running' || proc.status === 'pending_authorization') return reply.code(409).send({ error: 'El proceso está en ejecución o esperando tu autorización.', code: 'busy' });
     try {
-      procs.restoreSuperseded(d.processId);
-      procs.markSuperseded(id, d.processId);
-      if (proc.assignmentId) assignmentsRepo(slug).update(proc.assignmentId, a => { a.processId = d.processId; a.events.push({ at: new Date().toISOString(), kind: 'status', processId: d.processId, message: `Se volvió a la entrega integrada (${d.commit}): la revisión posterior concluyó que no queda código que cambiar.` }); });
-      app.log.info({ from: id, to: d.processId }, 'vuelta a la entrega integrada (iteración sin código superada)');
-      return await withGuidance(slug, procs.get(d.processId)!);
+      const back = restoreDelivered(slug, proc, 'owner');
+      if (!back) return reply.code(409).send({ error: 'Este proceso no tiene una entrega anterior integrada a la que volver.', code: 'no_delivered' });
+      app.log.info({ from: id, to: back.id }, 'vuelta a la entrega integrada (iteración sin código superada)');
+      return await withGuidance(slug, back);
     } catch (e: any) { return reply.code(e.statusCode ?? 500).send({ error: e.message }); }
   });
   // ---- Verificación en ejecución (M2): el Portal se comprueba a sí mismo tras activar el cambio ----

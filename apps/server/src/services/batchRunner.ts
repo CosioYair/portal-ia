@@ -1305,21 +1305,28 @@ function closeFaithfully(slug: string, id: string, detail: string) {
  */
 export function canLaunchWork(slug: string, b: Batch): boolean {
   const by = new Map(b.items.map(i => [i.storyId, i]));
-  const dead: BatchItemState[] = [...DEPENDENCY_BROKEN, 'rejected', 'postponed'];
-  return b.items.some(i => {
+  // Portal IA 4: una historia que espera a otra solo «puede lanzarse sola» si esa otra AVANZA por sí misma. Si la
+  // dependencia está detenida esperando al propietario, el lote no tiene nada que hacer solo y no debe bloquear a otro
+  // (lote 640b06fe: HU-215 y HU-216 esperaban a HU-214, detenida, y eso impedía crear cualquier lote nuevo).
+  const seen = new Set<string>();
+  const advances = (i: BatchItem): boolean => {
+    if (seen.has(i.storyId)) return false; seen.add(i.storyId);
     if (i.state === 'queued' || i.state === 'running' || i.state === 'integrating' || i.state === 'revalidating') return true;
     if (i.state === 'external') { const pid = currentProcessId(i); return !!pid && processesRepo(slug).get(pid)?.status === 'running'; }
     if ((i.state === 'waiting_dependency' || (i.state === 'blocked' && i.failureClass === 'dependency')) && i.dependsOn) {
       const d = by.get(i.dependsOn);
-      return !!d && !dead.includes(d.state);
+      return !!d && advances(d);
     }
     return false;
-  });
+  };
+  return b.items.some(i => { seen.clear(); return advances(i); });
 }
 
 /** Regla única de lote abierto: en marcha o en pausa, o esperando tu decisión pero con trabajo que puede lanzar solo. */
 export function blocksNewBatch(slug: string, b: Batch): boolean {
-  if (b.status === 'running' || b.status === 'paused') return true;
+  if (b.status === 'running') return true;
+  // En pausa: bloquea solo si al reanudarlo tendría trabajo que lanzar por sí mismo (si todo espera al propietario, no).
+  if (b.status === 'paused') return canLaunchWork(slug, b);
   return b.status === 'needs_decision' && (canLaunchWork(slug, b)
     // Bloqueada por una dependencia FUERA del lote: cuando se complete, el lote la ejecutará solo.
     || b.items.some(i => i.state === 'blocked' && !!i.dependsOn && !i.dependsInBatch));

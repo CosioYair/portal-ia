@@ -241,3 +241,25 @@ test('recorrido real: crear, importar, montar, recortar, partir, texto, audio, g
     assert.deepEqual((await json('GET', `${W}/projects`)).body.map((x: any) => x.id), [pid]);
   } finally { await app.close(); }
 });
+
+// ---- Hallazgos de la revisión de seguridad (ronda 1) ----
+test('S-M3 · el texto del usuario es literal: «50% de descuento» y «%{pts}» no se interpretan', () => {
+  const p = newStudioProject('p', 'x', 'landscape', 'now');
+  p.tracks[0].clips.push(newStudioClip('text', 't', { start: 0, duration: 2, text: { content: '50% de descuento %{localtime} \\n', size: 60, color: '#FFFFFF', background: null, position: 'center', bold: true } }));
+  const plan = buildRenderPlan(p, ASSETS, { height: 480, quality: 'draft', outFile: 'o.mp4' });
+  assert.match(plan.filter, /drawtext=[^;]*:expansion=none:/);
+  assert.equal(plan.textFiles[0].content, '50% de descuento %{localtime} \\n');
+});
+
+test('S-L1 · un color que no es un texto #hex no entra en el proyecto (ni rompe la exportación)', () => {
+  const { project } = normalizeStudioProject({ tracks: [{ kind: 'text', clips: [{ start: 0, duration: 1, text: { content: 'x', color: ['#FFFFFF'], background: { a: 1 } } }] }] }, base, ASSETS);
+  const t = project.tracks[0].clips[0].text!;
+  assert.equal(t.color, '#FFFFFF'); assert.equal(typeof t.color, 'string'); assert.equal(t.background, null);
+  assert.doesNotThrow(() => buildRenderPlan(project, ASSETS, { height: 480, quality: 'draft', outFile: 'o.mp4' }));
+});
+
+test('más pistas de las admitidas: se dice, no se pierden en silencio', () => {
+  const tracks = Array.from({ length: 14 }, (_, i) => ({ id: `t${i}`, kind: 'text', clips: [] }));
+  const { project, fixes } = normalizeStudioProject({ tracks }, base, ASSETS);
+  assert.equal(project.tracks.length, 12); assert.ok(fixes.some(f => /como mucho 12 pistas/.test(f)));
+});

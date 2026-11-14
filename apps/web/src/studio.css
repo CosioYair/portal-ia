@@ -25,8 +25,13 @@
 
 /* Editor */
 .st-editor { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.page.st-editor { max-width: none; padding-top: var(--space-4); }
 .st-head { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; }
-.st-name { flex: 1 1 200px; min-width: 0; font-weight: 600; }
+.st-namewrap { flex: 1 1 200px; min-width: 0; display: flex; } .st-name { flex: 1; min-width: 0; width: 100%; font-weight: 600; }
+.st-errline { display: block; }
+.st-editor.is-dropping .st-drop { border-color: var(--color-accent); background: var(--color-accent-wash); }
+.st-nameversion { display: flex; gap: var(--space-2); align-items: flex-end; flex-wrap: wrap; } .st-nameversion .st-field { flex: 1 1 220px; }
+.st-confirm { display: inline-flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; justify-content: flex-end; }
 .st-format .input { min-width: 150px; }
 .st-save { font-size: 13px; color: var(--color-text-muted); white-space: nowrap; }
 .st-save-saved { color: var(--color-ok-text); } .st-save-conflict, .st-save-error { color: var(--color-err-text); font-weight: 600; } .st-save-dirty { color: var(--color-attention-text); }
@@ -49,7 +54,8 @@
 .st-tab { flex: 1; appearance: none; background: transparent; border: 0; border-bottom: 2px solid transparent; padding: 12px 10px; min-height: 44px; font: inherit; font-size: 13px; font-weight: 500; color: var(--color-text-muted); cursor: pointer; }
 .st-tab.is-on { color: var(--color-accent-hover); border-bottom-color: var(--color-accent); }
 .st-tab:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }
-.st-panel { padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-3); max-height: 62vh; overflow-y: auto; }
+.st-panel { padding: var(--space-3); display: flex; flex-direction: column; gap: var(--space-3); }
+@media (min-width: 1024px) { .st-panel { max-height: 62vh; overflow-y: auto; } }
 .st-drop { display: flex; gap: var(--space-3); align-items: center; padding: var(--space-4); border: 1.5px dashed var(--color-control-border); border-radius: var(--radius-sm); cursor: pointer; background: var(--color-surface-alt); min-height: 72px; }
 .st-drop:hover, .st-drop.is-over { border-color: var(--color-accent); background: var(--color-accent-wash); }
 .st-drop:focus-within { outline: var(--focus-ring); outline-offset: 2px; }
@@ -86,7 +92,7 @@
 .st-grid { --st-head: 148px; position: relative; display: flex; flex-direction: column; min-width: 100%; }
 .st-corner { font-size: 12px; color: var(--color-text-muted); }
 .st-ruler { position: relative; flex: none; height: 28px; cursor: pointer; touch-action: none; }
-.st-tick { position: absolute; top: 0; height: 28px; padding-left: 4px; border-left: 1px solid var(--color-border-strong); font-size: 11px; line-height: 28px; color: var(--color-text-muted); font-variant-numeric: tabular-nums; pointer-events: none; }
+.st-tick { position: absolute; top: 0; height: 28px; padding-left: 4px; border-left: 1px solid var(--color-border-strong); font-size: 12px; line-height: 28px; color: var(--color-text-muted); font-variant-numeric: tabular-nums; pointer-events: none; }
 .st-track { display: flex; border-bottom: 1px solid var(--color-divider); }
 .st-rowhead { flex: none; width: var(--st-head); box-sizing: border-box; position: sticky; left: 0; z-index: 2; background: var(--color-surface-alt); border-right: 1px solid var(--color-border); padding: 4px 8px; display: flex; flex-direction: column; gap: 2px; justify-content: center; }
 .st-trackname { appearance: none; border: 1px solid transparent; background: transparent; font: inherit; font-size: 13px; font-weight: 600; color: var(--color-text); padding: 2px 4px; border-radius: var(--radius-tag); width: 100%; min-width: 0; }
@@ -95,8 +101,13 @@
 .st-tg { appearance: none; border: 1px solid var(--color-tertiary-border); background: var(--color-surface); color: var(--color-text-med); border-radius: var(--radius-pill); font: inherit; font-size: 11px; padding: 2px 8px; min-height: 24px; cursor: pointer; }
 .st-tg.is-on { background: var(--color-attention-bg); border-color: var(--color-attention-border); color: var(--color-attention-text); }
 .st-tg:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
+.st-tg:disabled { opacity: .4; cursor: not-allowed; }
+.st-tg-ic { min-width: 24px; padding: 2px 6px; display: inline-flex; align-items: center; justify-content: center; }
+.st-lane.is-over { background: var(--color-accent-wash); box-shadow: inset 0 0 0 2px var(--color-accent-border); }
 .st-lane { position: relative; height: 56px; flex: none; background: var(--color-surface-sunken); }
-.st-clip { position: absolute; top: 6px; height: 44px; box-sizing: border-box; border-radius: var(--radius-badge); border: 1px solid var(--color-accent-border); background: var(--color-accent-soft); color: var(--color-accent-hover); display: flex; align-items: center; overflow: hidden; cursor: grab; touch-action: none; user-select: none; font-size: 12px; font-weight: 500; }
+.st-clip { position: absolute; top: 6px; height: 44px; box-sizing: border-box; border-radius: var(--radius-badge); border: 1px solid var(--color-accent-border); background: var(--color-accent-soft); color: var(--color-accent-hover); display: flex; align-items: center; overflow: hidden; cursor: grab; touch-action: pan-x pan-y; user-select: none; font-size: 12px; font-weight: 500; }
+/* Con el dedo, el primer toque selecciona; solo el fragmento ya seleccionado se arrastra (deslizar sigue desplazando). */
+.st-clip.is-sel { touch-action: none; }
 .st-clip-audio { background: var(--color-ok-bg); border-color: var(--color-ok-border); color: var(--color-ok-text); }
 .st-clip-text { background: var(--color-attention-bg); border-color: var(--color-attention-border); color: var(--color-attention-text); }
 .st-clip-image { background: var(--color-queued-bg); border-color: var(--color-queued-border); color: var(--color-queued-text); }
@@ -104,8 +115,8 @@
 .st-clip.is-drag { opacity: .8; cursor: grabbing; z-index: 2; }
 .st-clip:focus-visible { outline: var(--focus-ring); outline-offset: 1px; }
 .st-clip-label { flex: 1; min-width: 0; padding: 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
-.st-handle { flex: none; width: 10px; align-self: stretch; cursor: ew-resize; background: currentColor; opacity: .28; touch-action: none; }
-.st-clip:hover .st-handle, .st-clip.is-sel .st-handle { opacity: .6; }
+.st-handle { flex: none; width: 12px; align-self: stretch; cursor: ew-resize; background: currentColor; opacity: .28; touch-action: none; }
+.st-clip:hover .st-handle, .st-clip.is-sel .st-handle { opacity: .7; }
 .st-playhead { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--color-err); pointer-events: none; z-index: 1; }
 .st-hint { margin: 0; padding: var(--space-3); }
 
@@ -116,6 +127,8 @@
 .st-result { width: 100%; max-height: 46vh; background: var(--color-ink); border-radius: var(--radius-sm); }
 .st-versions { max-height: 50vh; overflow-y: auto; }
 
+/* En pantallas estrechas: vista previa, línea de tiempo y, debajo, la biblioteca y los ajustes del fragmento elegido. */
+@media (max-width: 1023px) { .st-top { display: contents; } .st-stage { order: 1; } .st-timeline { order: 2; } .st-side { order: 3; } }
 @media (max-width: 640px) {
   .st-head-actions { margin-left: 0; width: 100%; }
   .st-head-actions .btn { flex: 1 1 auto; justify-content: center; }

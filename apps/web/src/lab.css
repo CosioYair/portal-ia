@@ -1,0 +1,35 @@
+/* Portal IA 4 · Análisis de artefactos. Solo tokens (ver tokens.css). */
+.lab { display: flex; flex-direction: column; gap: var(--space-5); }
+.page.lab { max-width: 980px; }
+.lab-card { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-5); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); min-width: 0; }
+.lab-h2 { margin: 0; font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+.lab-h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.lab-fs { border: 0; margin: 0; padding: 0; min-width: 0; }
+.lab-options { display: grid; gap: var(--space-2); grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
+.lab-option { display: flex; flex-direction: column; gap: 4px; padding: var(--space-3); border: 1px solid var(--color-control-border); border-radius: var(--radius-sm); cursor: pointer; min-height: 88px; }
+.lab-option.is-on { border-color: var(--color-accent); background: var(--color-accent-wash); box-shadow: inset 0 0 0 1px var(--color-accent); }
+.lab-option:focus-within { outline: var(--focus-ring); outline-offset: 2px; }
+.lab-file { display: block; width: 100%; max-width: 100%; font: inherit; font-size: 14px; padding: 10px; border: 1.5px dashed var(--color-control-border); border-radius: var(--radius-sm); background: var(--color-surface-alt); }
+.lab-file:focus-visible { outline: var(--focus-ring); outline-offset: 2px; }
+.lab-textarea { width: 100%; height: auto; min-height: 76px; padding: 8px 12px; resize: vertical; }
+.lab-actions { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
+.lab-report-head { display: flex; gap: var(--space-3); align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+.lab-summary { display: grid; gap: var(--space-2); grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+.lab-stat { display: flex; flex-direction: column; gap: 2px; padding: var(--space-3); border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-surface-alt); font-size: 13px; color: var(--color-text-med); }
+.lab-stat strong { font-size: 26px; font-weight: 600; color: var(--color-text); font-variant-numeric: tabular-nums; }
+.lab-stat.is-bad { background: var(--color-err-bg-soft); border-color: var(--color-err-border); } .lab-stat.is-bad strong { color: var(--color-err-text); }
+.lab-stat.is-ok { background: var(--color-ok-bg); border-color: var(--color-ok-border); } .lab-stat.is-ok strong { color: var(--color-ok-text); }
+.lab-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.lab-finding { padding: var(--space-3); border: 1px solid var(--color-border); border-left: 4px solid var(--color-border-strong); border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.lab-exposed { border-left-color: var(--color-err-border); } .lab-not_observed, .lab-ok { border-left-color: var(--color-ok-border); }
+.lab-finding-top { display: flex; gap: var(--space-2); align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.lab-obs, .lab-loc, .lab-fix { margin: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.lab-obs { font-family: var(--font-mono); font-size: 12px; color: var(--color-text-med); white-space: pre-wrap; max-height: 220px; overflow: auto; }
+.lab-compare { display: flex; flex-direction: column; gap: var(--space-2); padding-top: var(--space-3); border-top: 1px solid var(--color-divider); }
+.lab-compare .input { max-width: 100%; }
+.lab-cmp-result { display: flex; flex-direction: column; gap: var(--space-2); }
+.lab-cmp-line { margin: 0; font-size: 14px; display: flex; gap: var(--space-2); align-items: baseline; flex-wrap: wrap; }
+.lab-past { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.lab-past li { border-bottom: 1px solid var(--color-divider); } .lab-past li:last-child { border-bottom: 0; }
+.lab-past-btn { appearance: none; width: 100%; display: flex; gap: var(--space-3); align-items: center; justify-content: space-between; padding: 10px 4px; min-height: 48px; background: transparent; border: 0; font: inherit; color: var(--color-text); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.lab-past-btn:hover { background: var(--color-surface-hover); } .lab-past-btn:focus-visible { outline: var(--focus-ring); outline-offset: -2px; }

@@ -33,3 +33,4 @@ export * from './owner-state.ts';
 export * from './portable-manifest.ts';
 export * from './acceptance-guide.ts';
 export * from './studio.ts';
+export * from './lab.ts';

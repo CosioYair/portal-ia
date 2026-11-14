@@ -149,3 +149,68 @@ test('la ruta «volver a la entrega integrada» deja vigente lo integrado, super
     assert.equal(again.statusCode, 409, 'la entrega integrada no tiene a dónde volver');
   } finally { await app.close(); }
 });
+
+// ---- Sin clic del propietario: el estado se corrige solo (al arrancar y al terminar un proceso) ----
+const { reconcileDelivered } = await import('../src/services/deliveredReconcile.ts');
+const { canLaunchWork, blocksNewBatch } = await import('../src/services/batchRunner.ts');
+
+test('un trabajo integrado que quedó «detenido» por una iteración sin código vuelve solo a su entrega (EN-029 en vivo)', async () => {
+  const S = INTERNAL_WORKSPACE.slug; const project = projectsRepo(S).list()[0];
+  const procs = processesRepo(S); const asg = assignmentsRepo(S);
+  const en = asg.create({ projectId: project.id, owner: 'owner', request: 'cambia los colores', title: 'Paleta', objective: '', criteria: ['c'], outOfScope: [], size: 'S', status: 'changes_requested', reason: null, conversationId: null, messageId: null, processId: null, processIds: [], iterationNote: 'La historia no pide cambios de código: decide cómo hacerla' } as any);
+  const mk = () => procs.create({ projectId: project.id, kind: 'story_execution', title: `${en.code} · Paleta`, estimatedUsd: 0, assignmentId: en.id, steps: [] });
+  // Como en el Portal en marcha: la integrada, y DOS iteraciones sin código detrás (f7618b53 y afaf14d2).
+  const a = mk(); await new Promise(r => setTimeout(r, 15)); const b = mk(); await new Promise(r => setTimeout(r, 15)); const c = mk();
+  procs.setResult(a.id, merged([rcResult('/api/health', 'ok'), rcResult('/api/system/status', 'ok'), rcResult('/oficina', 'fail', EXPECT_EN029)]).result); procs.finish(a.id, 'done');
+  procs.setResult(b.id, noCode().result); procs.finish(b.id, 'done');
+  procs.setResult(c.id, noCode().result); procs.finish(c.id, 'done');
+  procs.markSuperseded(a.id, b.id);
+  asg.update(en.id, x => { x.processId = c.id; x.processIds = [a.id, b.id, c.id]; });
+  const before = workView(S, project.id).items.find(i => i.id === en.id)!;
+  assert.notEqual(before.state.key, 'integrated_unaccepted', `así se veía: «${before.state.label}», aunque estaba integrado`);
+
+  const done = reconcileDelivered(S).filter(r => r.restored === a.id);
+  assert.ok(done.length >= 1, 'la conciliación encuentra el trabajo');
+  assert.equal(procs.get(a.id)!.supersededBy, null);
+  assert.equal(procs.get(b.id)!.supersededBy, a.id); assert.equal(procs.get(c.id)!.supersededBy, a.id);
+  const item = workView(S, project.id).items.find(i => i.id === en.id)!;
+  assert.equal(item.processId, a.id);
+  assert.equal(item.state.key, 'integrated_unaccepted', 'ahora dice la verdad: integrado, falta tu aceptación');
+  assert.equal(asg.get(en.id)!.status, 'ready_for_review', 'no se acepta nada por el propietario: queda para su revisión');
+  assert.deepEqual(reconcileDelivered(S).filter(r => r.restored === a.id), [], 'una segunda pasada no hace nada');
+});
+
+test('una iteración posterior que aún espera la autorización del propietario no se toca', () => {
+  const S = INTERNAL_WORKSPACE.slug; const project = projectsRepo(S).list()[0]; const procs = processesRepo(S); const asg = assignmentsRepo(S);
+  const en = asg.create({ projectId: project.id, owner: 'owner', request: 'x', title: 'Otra', objective: '', criteria: ['c'], outOfScope: [], size: 'S', status: 'running', reason: null, conversationId: null, messageId: null, processId: null, processIds: [] } as any);
+  const a = procs.create({ projectId: project.id, kind: 'story_execution', title: 'a', estimatedUsd: 0, assignmentId: en.id, steps: [] });
+  procs.setResult(a.id, merged([rcResult('/api/health', 'ok')]).result); procs.finish(a.id, 'done');
+  const b = procs.create({ projectId: project.id, kind: 'story_execution', title: 'b', estimatedUsd: 0, assignmentId: en.id, steps: [] });
+  asg.update(en.id, x => { x.processId = b.id; });
+  assert.deepEqual(reconcileDelivered(S).filter(r => r.from === b.id), [], 'pendiente de autorizar: es decisión del propietario');
+  assert.equal(asg.get(en.id)!.processId, b.id);
+});
+
+test('la comprobación tolerante no se pasa de laxa: «/a» no se da por buena con cualquier «a»', () => {
+  assert.equal(matches('una página cualquiera', '/a'), false);
+  assert.equal(matches('ruta api health', '/api'), false, 'una ruta sigue buscándose tal cual');
+  assert.equal(matches('<h1>Hola mundo</h1>', '/Hola mundo'), true, 'varias palabras sí son texto');
+  assert.equal(matches('x'.repeat(10), `/${'a'.repeat(600)}/`), false, 'una expresión desmesurada no se evalúa');
+});
+
+// ---- Lotes: uno atascado esperando al propietario no impide crear otro (lote 640b06fe) ----
+const bi = (storyId: string, state: string, o: any = {}): any => ({ storyId, state, dependsOn: null, dependsInBatch: true, failureClass: null, processIds: [], ...o });
+const batch = (status: string, items: any[]): any => ({ id: 'b1', projectId: 'p', status, items, title: 'Lote 5' });
+
+test('un lote en pausa cuyo único trabajo espera a una historia detenida no bloquea un lote nuevo', () => {
+  const stuck = batch('paused', [bi('HU-214', 'needs_decision'), bi('HU-215', 'waiting_dependency', { dependsOn: 'HU-214' }), bi('HU-216', 'waiting_dependency', { dependsOn: 'HU-215' })]);
+  assert.equal(canLaunchWork('portal-ia', stuck), false, 'nada puede avanzar sin el propietario');
+  assert.equal(blocksNewBatch('portal-ia', stuck), false, 'antes: cualquier lote en pausa bloqueaba');
+});
+
+test('un lote con trabajo que sí avanza solo sigue bloqueando (no se pisan dos lotes activos)', () => {
+  assert.equal(blocksNewBatch('portal-ia', batch('running', [bi('HU-1', 'running')])), true);
+  assert.equal(blocksNewBatch('portal-ia', batch('paused', [bi('HU-1', 'queued')])), true, 'en pausa pero con cola: al reanudarlo trabajaría');
+  assert.equal(blocksNewBatch('portal-ia', batch('paused', [bi('HU-1', 'running'), bi('HU-2', 'waiting_dependency', { dependsOn: 'HU-1' })])), true);
+  assert.equal(canLaunchWork('portal-ia', batch('needs_decision', [bi('HU-1', 'waiting_dependency', { dependsOn: 'HU-2' }), bi('HU-2', 'waiting_dependency', { dependsOn: 'HU-1' })])), false, 'una dependencia circular no se cuenta como avance');
+});

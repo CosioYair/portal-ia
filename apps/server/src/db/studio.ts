@@ -65,6 +65,13 @@ export function studioRepo(slug: string) {
       } catch (e) { try { d.exec('ROLLBACK'); } catch { /* ya cerrada */ } throw e; }
     },
     trash(id: string, at: string): boolean { return Number(d.prepare(`UPDATE studio_projects SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL`).run(at, id).changes) > 0; },
+    trashedIds(): string[] { return (d.prepare(`SELECT id FROM studio_projects WHERE deleted_at IS NOT NULL`).all() as any[]).map(r => r.id as string); },
+    /** Borra del todo un proyecto que ya estaba en la papelera (sus archivos los quita el servicio). */
+    purge(id: string): void {
+      d.exec('BEGIN');
+      try { for (const t of ['studio_versions', 'studio_assets', 'studio_renders']) d.prepare(`DELETE FROM ${t} WHERE project_id = ?`).run(id); d.prepare(`DELETE FROM studio_projects WHERE id = ? AND deleted_at IS NOT NULL`).run(id); d.exec('COMMIT'); }
+      catch (e) { try { d.exec('ROLLBACK'); } catch { /* ya cerrada */ } throw e; }
+    },
     versions(id: string): StudioVersionRow[] { return (d.prepare(`SELECT revision, label, at FROM studio_versions WHERE project_id = ? ORDER BY revision DESC`).all(id) as any[]).map(r => ({ revision: Number(r.revision), label: r.label ?? null, at: r.at })); },
     version(id: string, revision: number): StudioProject | null { const r = d.prepare(`SELECT doc_json FROM studio_versions WHERE project_id = ? AND revision = ?`).get(id, revision) as any; return r ? JSON.parse(r.doc_json) : null; },
 

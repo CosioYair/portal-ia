@@ -28,12 +28,17 @@ export function defaultChecks(): RuntimeCheck[] {
   ];
 }
 
+const MAX_EXPECT = 500; const MAX_BODY = 200_000;
 export function matches(text: string, expect: string): boolean {
+  // La expectativa la escribe un agente: es un dato no fiable. Expresiones y textos acotados para no bloquear el servidor.
+  if (expect.length > MAX_EXPECT) return false;
+  const body = text.length > MAX_BODY ? text.slice(0, MAX_BODY) : text;
   const re = expect.match(/^\/(.+)\/([a-z]*)$/);
-  if (re) { try { return new RegExp(re[1], re[2].replace('g', '')).test(text); } catch { return text.includes(expect); } }
+  if (re) { try { return new RegExp(re[1], re[2].replace('g', '')).test(body); } catch { return text.includes(expect); } }
   // «/texto» sin la barra de cierre NO es una expresión regular: quien lo escribió quiso decir ese texto. Se busca tal cual
   // y sin la barra inicial (EN-029: «/<div id="root"» daba por rota una pantalla que estaba bien).
-  if (expect.length > 1 && expect.startsWith('/')) return text.includes(expect) || text.includes(expect.slice(1));
+  // Solo cuando lo que sigue a la barra es claramente texto (una etiqueta o varias palabras), no una ruta como «/api».
+  if (expect.length > 4 && expect.startsWith('/') && /[<\s]/.test(expect)) return text.includes(expect) || text.includes(expect.slice(1));
   return text.includes(expect);
 }
 

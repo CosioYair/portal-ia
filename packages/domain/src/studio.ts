@@ -88,7 +88,8 @@ export const STUDIO_LIMITS: StudioLimits = { maxAssetBytes: 500 * 1024 * 1024, m
 const num = (v: unknown, d: number, min: number, max: number) => { const n = typeof v === 'number' && Number.isFinite(v) ? v : d; return Math.min(max, Math.max(min, n)); };
 const str = (v: unknown, d: string, max: number) => (typeof v === 'string' ? v : d).slice(0, max);
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
-const COLOR = /^#[0-9a-fA-F]{6}$/;
+const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+const COLOR = { test: (v: unknown): v is string => typeof v === 'string' && COLOR_RE.test(v) };
 const round = (n: number) => Math.round(n * 1000) / 1000;
 
 export function studioCanvas(format: StudioFormat, height: number): { width: number; height: number } {
@@ -132,6 +133,7 @@ export function normalizeStudioProject(input: unknown, base: Pick<StudioProject,
   const seen = new Set<string>(); let clipCount = 0;
   const uid = (v: unknown, prefix: string) => { let id = typeof v === 'string' && ID.test(v) ? v : ''; let i = seen.size; while (!id || seen.has(id)) id = `${prefix}-${++i}`; seen.add(id); return id; };
   const tracks: StudioTrack[] = [];
+  if (Array.isArray(src.tracks) && src.tracks.length > STUDIO_LIMITS.maxTracks) fixes.push(`Un proyecto admite como mucho ${STUDIO_LIMITS.maxTracks} pistas: las últimas no se guardaron.`);
   for (const t of Array.isArray(src.tracks) ? src.tracks.slice(0, STUDIO_LIMITS.maxTracks) : []) {
     if (!t || typeof t !== 'object') continue;
     const kind: StudioTrackKind = t.kind === 'audio' || t.kind === 'text' ? t.kind : 'video';

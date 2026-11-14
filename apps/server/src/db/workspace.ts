@@ -451,6 +451,29 @@ export function processesRepo(slug: string) {
     setCallCap(id: string, n: number | null) { db.prepare(`UPDATE processes SET max_subscription_calls = ? WHERE id = ?`).run(n, id); touch(id); },
     /** Deshace las marcas puestas por un proceso que nunca empezó (se canceló al no poder autorizarse). */
     unsupersedeBy(byId: string): number { const ids = (db.prepare(`SELECT id FROM processes WHERE superseded_by = ?`).all(byId) as any[]).map(r => r.id as string); const n = Number(db.prepare(`UPDATE processes SET superseded_by = NULL, superseded_at = NULL WHERE superseded_by = ?`).run(byId).changes); ids.forEach(x => touch(x)); return n; },
+    /**
+     * Portal IA 4 · La entrega integrada `id` vuelve a ser la vigente de su trabajo: deja de estar superada y las
+     * iteraciones POSTERIORES sin integrar pasan a superadas por ella. Una sola transacción; no borra ni cambia resultados.
+     */
+    makeCurrentDelivered(id: string): string[] {
+      const r = db.prepare(`SELECT id, backlog_item_id, assignment_id, created_at FROM processes WHERE id = ? AND json_type(result_json, '$.merged') = 'object'`).get(id) as any;
+      if (!r) return [];
+      const col = r.backlog_item_id ? 'backlog_item_id' : r.assignment_id ? 'assignment_id' : null; const ts = now(); let later: string[] = [];
+      db.exec('BEGIN');
+      try {
+        db.prepare(`UPDATE processes SET superseded_by = NULL, superseded_at = NULL WHERE id = ?`).run(id);
+        if (col) {
+          later = (db.prepare(`SELECT id FROM processes WHERE ${col} = ? AND kind = 'story_execution' AND archived_at IS NULL AND superseded_by IS NULL AND id <> ?
+            AND (created_at > ? OR (created_at = ? AND id > ?)) AND json_type(result_json, '$.merged') IS NULL AND status NOT IN ('running', 'pending_authorization')`)
+            .all(r.backlog_item_id ?? r.assignment_id, id, r.created_at, r.created_at, id) as any[]).map(x => x.id as string);
+          const mark = db.prepare(`UPDATE processes SET superseded_by = ?, superseded_at = ? WHERE id = ?`);
+          for (const o of later) mark.run(id, ts, o);
+        }
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
+      [id, ...later].forEach(x => touch(x));
+      return later;
+    },
     restoreSuperseded(id: string): { restored: string; superseded: string[] } | null {
       const r = db.prepare(`SELECT id, backlog_item_id, assignment_id, superseded_by FROM processes WHERE id = ?`).get(id) as any;
       if (!r || r.superseded_by == null) return null;

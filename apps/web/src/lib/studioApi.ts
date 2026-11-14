@@ -5,7 +5,7 @@ import { noteOwnerResponse, ownerHeaders } from './owner.ts';
 /** Portal IA 4 · cliente del Estudio. */
 export type MediaEngine = { state: 'ready' } | { state: 'no_docker' | 'missing_image'; detail: string; hint: string };
 export interface StudioProviderInfo { id: string; name: string; capabilities: string[]; state: 'verified' | 'configured_untested' | 'requires_connection' | 'requires_paid_auth' | 'unsupported'; note: string; priceHint: string | null }
-export interface StudioStatus { engine: MediaEngine; limits: StudioLimits; providers: StudioProviderInfo[] }
+export interface StudioStatus { engine: MediaEngine; limits: StudioLimits; providers: StudioProviderInfo[]; trash: { projects: number; bytes: number } }
 export interface StudioProjectSummary { id: string; name: string; format: StudioFormat; revision: number; duration: number; clips: number; createdAt: string; updatedAt: string }
 export interface StudioFull { project: StudioProject; assets: StudioAsset[]; renders: StudioRender[] }
 export interface StudioVersion { revision: number; label: string | null; at: string }
@@ -14,7 +14,8 @@ const W = (slug: string) => `/api/workspaces/${slug}/studio`;
 const json = (method: string, body?: unknown): RequestInit => ({ method, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
 
 export const studioApi = {
-  status: (slug: string, fresh = false) => apiRequest<StudioStatus>(`${W(slug)}/status${fresh ? '?fresh=1' : ''}`),
+  status: (slug: string, fresh = false) => (fresh ? apiRequest<StudioStatus>(`${W(slug)}/status/refresh`, json('POST', {})) : apiRequest<StudioStatus>(`${W(slug)}/status`)),
+  purgeTrash: (slug: string) => apiRequest<{ freed: { projects: number; bytes: number }; trash: { projects: number; bytes: number } }>(`${W(slug)}/trash/purge`, json('POST', { confirm: true })),
   list: (slug: string) => apiRequest<StudioProjectSummary[]>(`${W(slug)}/projects`),
   create: (slug: string, name: string, format: StudioFormat) => apiRequest<StudioFull>(`${W(slug)}/projects`, json('POST', { name, format })),
   get: (slug: string, id: string) => apiRequest<StudioFull>(`${W(slug)}/projects/${id}`),

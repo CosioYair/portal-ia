@@ -34,13 +34,17 @@ export function studioDir(slug: string, projectId: string, sub: 'assets' | 'expo
 
 // ---------- Motor de medios (Docker) ----------
 export type MediaEngine = { state: 'ready' } | { state: 'no_docker' | 'missing_image'; detail: string; hint: string };
-function run(cmd: string, args: string[], timeoutMs: number, onOut?: (chunk: string) => void): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
+function run(cmd: string, args: string[], timeoutMs: number, onOut?: (chunk: string) => void, stallMs = 0): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean; stalled: boolean }> {
   return new Promise(resolve => {
-    let stdout = '', stderr = '', timedOut = false, done = false;
+    let stdout = '', stderr = '', timedOut = false, stalled = false, done = false;
     const child = spawn(cmd, args, { env: dockerCliEnv(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     const timer = setTimeout(() => { timedOut = true; try { child.kill(); } catch { /* ya terminó */ } }, timeoutMs);
-    const end = (code: number | null) => { if (done) return; done = true; clearTimeout(timer); resolve({ code, stdout, stderr, timedOut }); };
-    child.stdout.on('data', b => { const s = String(b); if (stdout.length < 2_000_000) stdout += s; onOut?.(s); });
+    // Sin ninguna salida durante «stallMs»: el proceso está atascado (no se espera al tiempo máximo).
+    let quiet: ReturnType<typeof setTimeout> | null = null;
+    const alive = () => { if (!stallMs) return; if (quiet) clearTimeout(quiet); quiet = setTimeout(() => { stalled = true; timedOut = true; try { child.kill(); } catch { /* ya terminó */ } }, stallMs); };
+    alive();
+    const end = (code: number | null) => { if (done) return; done = true; clearTimeout(timer); if (quiet) clearTimeout(quiet); resolve({ code, stdout, stderr, timedOut, stalled }); };
+    child.stdout.on('data', b => { const s = String(b); if (stdout.length < 2_000_000) stdout += s; alive(); onOut?.(s); });
     child.stderr.on('data', b => { if (stderr.length < 200_000) stderr += String(b); });
     child.on('error', e => { stderr += String(e.message); end(null); });
     child.on('close', code => end(code));
@@ -64,7 +68,7 @@ async function requireEngine(): Promise<void> {
   if (e.state !== 'ready') throw err(503, `${e.detail} ${e.hint}`, `media_${e.state}`);
 }
 const baseArgs = (name: string, memory: string, cpus: string) => ['run', '--rm', '--init', '--pull', 'never', '--name', name, '--label', 'portal-ia.media=1',
-  '--network', 'none', '--memory', memory, '--cpus', cpus, '--pids-limit', '256', '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--user', '1000:1000',
+  '--network', 'none', '--memory', memory, '--memory-swap', memory, '--cpus', cpus, '--pids-limit', '256', '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--user', '1000:1000',
   '--read-only', '--mount', dockerMountArg({ type: 'tmpfs', target: '/tmp', 'tmpfs-mode': '1777', 'tmpfs-size': '268435456' })];
 const bind = (source: string, target: string, readonly: boolean) => ['--mount', dockerMountArg({ type: 'bind', source, target, ...(readonly ? { readonly: true as const } : {}) })];
 
@@ -194,12 +198,15 @@ export async function importStudioAsset(slug: string, projectId: string, tempFil
 export function studioAssetFile(slug: string, assetId: string): { file: string; asset: StudioAsset } {
   const row = studioRepo(slug).asset(safeId(assetId)); if (!row) throw err(404, 'Medio no encontrado.');
   const { file, sha256: _s, ...asset } = row;
-  return { file: path.join(studioDir(slug, row.projectId, 'assets'), path.basename(file)), asset };
+  const full = path.join(studioDir(slug, row.projectId, 'assets'), path.basename(file));
+  if (!fs.existsSync(full)) throw err(410, 'El archivo de este medio ya no está en el disco. Súbelo de nuevo.', 'gone');
+  return { file: full, asset };
 }
 export function removeStudioAsset(slug: string, assetId: string): void {
   const repo = studioRepo(slug); const row = repo.asset(safeId(assetId)); if (!row) throw err(404, 'Medio no encontrado.');
   const p = repo.get(row.projectId);
   if (p?.tracks.some(t => t.clips.some(c => c.assetId === assetId))) throw err(409, 'Este medio se usa en la línea de tiempo. Quita primero sus fragmentos.', 'asset_in_use');
+  if (repo.renders(row.projectId).some(r => r.status === 'queued' || r.status === 'running')) throw err(409, 'Hay una exportación en marcha en este proyecto: espera a que termine para quitar medios.', 'render_busy');
   repo.removeAsset(assetId);
   try { fs.rmSync(path.join(studioDir(slug, row.projectId, 'assets'), path.basename(row.file)), { force: true }); } catch { /* ya no está */ }
   changed({ ws: slug, entity: 'studio', id: row.projectId });
@@ -234,11 +241,12 @@ async function runRender(slug: string, renderId: string, project: StudioProject)
   const update = (patch: Partial<StudioRender>, kind: 'state' | 'progress' = 'state') => { r = repo.putRender({ ...r!, ...patch }); changed({ ws: slug, entity: 'studio', id: r.projectId, kind }); };
   // Carpeta de trabajo CORTA en el temporal del sistema: el motor de Docker en Windows falla (error de E/S) al montar
   // rutas muy largas. Se exporta y se comprueba ahí; solo el MP4 ya comprobado pasa a la carpeta del proyecto.
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'pia-st-')); const jobDir = path.join(work, 'in'); const tmpOut = path.join(work, 'out'); fs.mkdirSync(tmpOut);
-  const outDir = studioDir(slug, project.id, 'exports');
+  let work = '';
   const container = `pia-render-${renderId.slice(0, 12)}`;
   const state = { container, cancelled: false }; active.set(key(slug, renderId), state);
   try {
+    work = fs.mkdtempSync(path.join(os.tmpdir(), 'pia-st-')); const jobDir = path.join(work, 'in'); const tmpOut = path.join(work, 'out'); fs.mkdirSync(tmpOut);
+    const outDir = studioDir(slug, project.id, 'exports');
     const assets = assetMap(slug, project.id);
     const plan = buildRenderPlan(project, assets, { height: r.height, quality: r.quality, outFile: r.fileName });
     fs.mkdirSync(jobDir, { recursive: true });
@@ -258,20 +266,24 @@ async function runRender(slug: string, renderId: string, project: StudioProject)
       const pct = Math.min(0.99, Number(m[1]) / 1_000_000 / plan.duration);
       if (pct - lastSaved >= 0.02) { lastSaved = pct; update({ progress: Math.round(pct * 100) / 100 }, 'progress'); }
     };
-    const timeoutMs = Math.max(180_000, Math.round(plan.duration * 60_000 * (r.quality === 'high' ? 2 : 1)));
-    const res = await run('docker', [...baseArgs(container, '2g', '2'), ...bind(jobDir, '/in', true), ...bind(tmpOut, '/out', false), MEDIA_IMAGE, 'ffmpeg', ...plan.args], timeoutMs, onOut);
+    // Como mucho 8 veces la duración del vídeo (16 en calidad alta), nunca más de 2 horas; y si FFmpeg pasa 3 minutos
+    // sin avanzar nada, está atascado. Dentro del contenedor hay además un tope propio, por si el Portal se cierra.
+    const timeoutMs = Math.min(RENDER_MAX_MS, Math.max(180_000, Math.round(plan.duration * 8_000 * (r.quality === 'high' ? 2 : 1))));
+    const res = await run('docker', [...baseArgs(container, '2g', '2'), ...bind(jobDir, '/in', true), ...bind(tmpOut, '/out', false), MEDIA_IMAGE, 'timeout', '-s', 'KILL', String(Math.ceil(timeoutMs / 1000) + 30), 'ffmpeg', ...plan.args], timeoutMs, onOut, 180_000);
     if (state.cancelled) { update({ status: 'cancelled', finishedAt: new Date().toISOString() }); return; }
-    if (res.timedOut) { await run('docker', ['rm', '-f', container], 15_000); throw new Error('La exportación superó el tiempo máximo y se detuvo. Prueba con calidad «Borrador» o un proyecto más corto.'); }
+    if (res.timedOut) { await run('docker', ['rm', '-f', container], 15_000); throw new Error(res.stalled ? 'La exportación dejó de avanzar y se detuvo. Suele deberse a un medio dañado: prueba a quitar el último que añadiste.' : 'La exportación superó el tiempo máximo y se detuvo. Prueba con calidad «Borrador» o un proyecto más corto.'); }
     if (res.code !== 0) throw new Error(res.code === 137 ? 'La exportación se quedó sin memoria (límite de 2 GB). Prueba con una resolución menor.' : `FFmpeg no pudo exportar el vídeo: ${res.stderr.trim().split('\n').slice(-3).join(' ').slice(0, 400) || `código ${res.code}`}`);
     const check = await verifyExport(path.join(tmpOut, r.fileName), plan);
+    if (state.cancelled) { update({ status: 'cancelled', finishedAt: new Date().toISOString() }); return; }
     if (check.ok) { const dest = path.join(outDir, r.fileName); try { fs.renameSync(path.join(tmpOut, r.fileName), dest); } catch { fs.copyFileSync(path.join(tmpOut, r.fileName), dest); } }
     if (!check.ok) { update({ status: 'failed', check, error: `El archivo exportado no pasó la comprobación: ${check.problems.join(' ')}`, finishedAt: new Date().toISOString() }); return; }
     update({ status: 'done', progress: 1, check, finishedAt: new Date().toISOString() });
+    pruneExports(slug, project.id);
   } catch (e: any) {
     update({ status: state.cancelled ? 'cancelled' : 'failed', error: state.cancelled ? null : String(e?.message ?? e).slice(0, 600), finishedAt: new Date().toISOString() });
   } finally {
     active.delete(key(slug, renderId));
-    try { fs.rmSync(work, { recursive: true, force: true }); } catch { /* temporal */ }
+    if (work) try { fs.rmSync(work, { recursive: true, force: true }); } catch { /* temporal */ }
   }
 }
 
@@ -306,6 +318,46 @@ export function studioRenderFile(slug: string, renderId: string): { file: string
   const p = repo.get(r.projectId);
   const base = (p?.name ?? 'video').normalize('NFKD').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').slice(0, 60) || 'video';
   return { file, render: r, name: `${base}-${studioCanvas(p?.format ?? 'landscape', r.height).height}p.mp4` };
+}
+
+const RENDER_MAX_MS = 2 * 60 * 60 * 1000;
+/** Exportaciones terminadas que se conservan por proyecto (las anteriores se borran del disco; su registro queda). */
+export const STUDIO_KEEP_EXPORTS = 10;
+function pruneExports(slug: string, projectId: string): void {
+  const dir = studioDir(slug, projectId, 'exports');
+  const keep = new Set(studioRepo(slug).renders(projectId).filter(r => r.status === 'done').slice(0, STUDIO_KEEP_EXPORTS).map(r => r.fileName));
+  for (const f of fs.readdirSync(dir)) if (f.endsWith('.mp4') && !keep.has(f)) { try { fs.rmSync(path.join(dir, f), { force: true }); } catch { /* en uso */ } }
+}
+
+/** Papelera: proyectos quitados de la lista, con lo que ocupan sus archivos. */
+function dirBytes(d: string): number { let n = 0; try { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); n += e.isDirectory() ? dirBytes(p) : fs.statSync(p).size; } } catch { /* no existe */ } return n; }
+export function studioTrash(slug: string): { projects: number; bytes: number } {
+  const ids = studioRepo(slug).trashedIds();
+  return { projects: ids.length, bytes: ids.reduce((n, id) => n + dirBytes(path.join(config.dataDir, 'studio', slug, id)), 0) };
+}
+/** Vaciar la papelera: borra del disco los proyectos quitados (medios, exportaciones e historial). No se puede deshacer. */
+export function purgeStudioTrash(slug: string): { projects: number; bytes: number } {
+  const before = studioTrash(slug); const repo = studioRepo(slug);
+  for (const id of repo.trashedIds()) {
+    if (!ID.test(id)) continue;
+    try { fs.rmSync(path.join(config.dataDir, 'studio', slug, id), { recursive: true, force: true }); } catch { /* se intentará la próxima vez */ }
+    repo.purge(id);
+  }
+  return before;
+}
+
+/**
+ * Al arrancar el Portal: nada del Estudio puede estar trabajando de verdad. Se detienen los contenedores de medios que
+ * dejó un cierre brusco, se retiran sus carpetas temporales y las exportaciones «en marcha» pasan a «no terminó».
+ */
+export async function recoverStudioAtStartup(slugs: string[]): Promise<{ renders: number; containers: number; temp: number }> {
+  let renders = 0, containers = 0, temp = 0;
+  for (const s of slugs) { try { renders += recoverStudioRenders(s); } catch { /* espacio sin Estudio */ } }
+  const ps = await run('docker', ['ps', '-aq', '--filter', 'label=portal-ia.media=1'], 8000);
+  const ids = ps.code === 0 ? ps.stdout.split(/\s+/).filter(Boolean) : [];
+  if (ids.length) { await run('docker', ['rm', '-f', ...ids], 20_000); containers = ids.length; }
+  try { for (const e of fs.readdirSync(os.tmpdir(), { withFileTypes: true })) if (e.isDirectory() && /^pia-(st|pr)-/.test(e.name)) { try { fs.rmSync(path.join(os.tmpdir(), e.name), { recursive: true, force: true }); temp++; } catch { /* en uso */ } } } catch { /* sin acceso */ }
+  return { renders, containers, temp };
 }
 
 /** Al arrancar: una exportación «en marcha» de antes del reinicio ya no tiene proceso; se dice y se puede repetir. */

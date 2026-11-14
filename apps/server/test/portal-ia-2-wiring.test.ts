@@ -78,8 +78,11 @@ test('cada sección del menú tiene su ruta y las rutas antiguas siguen llevando
   const app = read('App.tsx'); const routes = read('lib/routes.ts');
   const paths = [...routes.matchAll(/\{ id: '[a-z]+', label: '[^']+', path: '([^']+)'/g)].map(m => m[1]);
   // Portal IA 3: la sección Trabajo abre en /trabajo (historias y encargos juntos); /backlog sigue existiendo como pestaña.
-  // Portal IA 4: se añade el Estudio (vídeo), que es de la empresa.
-  assert.deepEqual(paths, ['/oficina', '/autorizaciones', '/asistente', '/panel', '/trabajo', '/estudio', '/conocimiento', '/ajustes', '/aceptacion']);
+  // Portal IA 4: seis destinos por objetivo, en el orden del menú; después, lo que no es destino (se llega con «Pedir»,
+  // la campana, Inicio, Ajustes o Ctrl+K).
+  assert.deepEqual(paths, ['/inicio', '/trabajo', '/oficina', '/estudio', '/conocimiento', '/ajustes', '/asistente', '/autorizaciones', '/panel', '/aceptacion']);
+  const inMenu = [...routes.matchAll(/\{ id: '[a-z]+', label: '([^']+)', path: '[^']+'[^\n]*/g)].filter(m => !/inMenu: false/.test(m[0])).map(m => m[1]);
+  assert.deepEqual(inMenu, ['Inicio', 'Trabajo', 'Agentes', 'Estudio', 'Conocimiento', 'Ajustes'], 'el menú: seis destinos, ninguno repetido');
   assert.ok(app.includes('<Route path="/backlog" '), 'la ruta antigua /backlog sigue existiendo');
   for (const p of paths) assert.ok(app.includes(`<Route path="${p}" `), `falta la ruta ${p}`);
   assert.match(app, /<Route path="\/equipo" element=\{<Redirect to="\/oficina\/organizacion" \/>\} \/>/);
@@ -97,7 +100,7 @@ test('cambiar de empresa o proyecto va a la raíz de la sección (nunca a un det
   // Selección y destino en la MISMA transición: nunca se monta la ruta anterior con la empresa nueva.
   assert.match(app, /startTransition\(\(\) => \{ setProjects\(ps\); setSel\(next\); if \(go\) navigate\(go\.to\(pid\), \{ replace: go\.replace \}\); \}\);/);
   assert.match(app, /<Routes key=\{`\$\{status\.workspace\?\.slug \?\? ''\}:\$\{status\.project\?\.id \?\? ''\}`\}>/);
-  assert.match(routes, /if \(!s \|\| \(s\.needsProject && !hasProject\)\) return '\/oficina';/);
+  assert.match(routes, /if \(!s \|\| \(s\.needsProject && !hasProject\)\) return HOME;/);
 });
 
 test('panel del agente: cada pestaña antigua pertenece a un grupo (los enlaces /oficina/agente/:id/<pestaña> siguen valiendo)', () => {
@@ -140,7 +143,8 @@ test('raíz de sección al cambiar de empresa o proyecto (comportamiento, no sol
   assert.equal(sectionRoot('/historias/abc', true), '/backlog', 'un detalle de historia → Backlog');
   assert.equal(sectionRoot('/procesos/p1', true), '/actividad');
   assert.equal(sectionRoot('/lotes/b1', true), '/lotes');
-  assert.equal(sectionRoot('/lotes/b1', false), '/oficina', 'sin proyecto, las secciones de proyecto llevan a la Oficina');
+  assert.equal(sectionRoot('/lotes/b1', false), '/inicio', 'sin proyecto, las secciones de proyecto llevan a Inicio');
+  assert.equal(sectionRoot('/estudio/abc', false), '/estudio', 'el Estudio es de la empresa: un proyecto de vídeo de otra empresa no se reabre');
   assert.equal(sectionRoot('/autorizaciones', false), '/autorizaciones', 'Decisiones es de empresa');
   assert.equal(sectionRoot('/presupuestos', false), '/presupuestos');
   assert.equal(sectionRoot('/oficina/organizacion', true), '/oficina/organizacion', 'se queda en la vista de la Oficina');

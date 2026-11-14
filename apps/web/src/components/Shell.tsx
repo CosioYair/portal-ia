@@ -12,7 +12,7 @@ import { PortalMark } from './illustrations.tsx';
 import { SystemBar } from './SystemBar.tsx';
 import { useLive, useLiveConnection } from '../lib/live.ts';
 import { useBack } from '../lib/nav.ts';
-import { officeHome, SECTIONS, sectionOf, sectionRoot, type IconName, type Section } from '../lib/routes.ts';
+import { HOME, officeHome, SECTIONS, sectionOf, sectionRoot, type IconName, type Section } from '../lib/routes.ts';
 import { attentionTotal, openUi, useAttention } from '../lib/uiBus.ts';
 import { OwnerBar } from './OwnerPairing.tsx';
 
@@ -41,7 +41,7 @@ export function CreateDialog({ kind, onClose }: { kind: 'company' | 'project'; o
 }
 
 const usageCache = new Map<string, UsageToday>();
-const ICONS: Record<IconName, () => ReactNode> = { building: () => Icon.building(), bell: () => Icon.bell(), sparkles: () => Icon.sparkles(), gauge: () => Icon.gauge(), kanban: () => Icon.kanban(), book: () => Icon.book(), sliders: () => Icon.sliders(), layers: () => Icon.layers() };
+const ICONS: Record<IconName, () => ReactNode> = { building: () => Icon.building(), bell: () => Icon.bell(), sparkles: () => Icon.sparkles(), gauge: () => Icon.gauge(), kanban: () => Icon.kanban(), book: () => Icon.book(), sliders: () => Icon.sliders(), layers: () => Icon.layers(), grid: () => Icon.grid(), users: () => Icon.users() };
 export const sectionIcon = (s: Section) => ICONS[s.icon]();
 
 /**
@@ -119,6 +119,7 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
     if (e.key === 'Enter') { const v = pick[which]; if (v) { e.preventDefault(); apply(which, v); } }
   };
   // HU-196 · Las secciones con inMenu === false (Decisiones) no se listan en el menú: se llega a ellas con la campana y Ctrl+K.
+  // Portal IA 4 · Un solo menú, por objetivo y en el orden del registro; Ajustes va aparte, al final.
   const group = (g: Section['group']) => SECTIONS.filter(s => s.group === g && s.inMenu !== false && (!s.needsProject || project));
   const navItem = (s: Section) => <Link key={s.id} to={s.id === 'oficina' ? officeHome() : s.path} className={`navi${section?.id === s.id ? ' is-active' : ''}`} aria-current={section?.id === s.id ? 'page' : undefined}
     title={s.hint}>
@@ -133,7 +134,7 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
       {menu && <div className="side-scrim" onClick={() => { setMenu(false); menuBtn.current?.focus(); }} aria-hidden="true" />}
       <aside className={`side${menu ? ' side-open' : ''}`} ref={sideRef} aria-label="Menú principal" {...(menu ? { role: 'dialog', 'aria-modal': true } : {})}>
         <button type="button" className="side-close" onClick={() => { setMenu(false); menuBtn.current?.focus(); }} aria-label="Cerrar menú">{Icon.x(16)}</button>
-        <Link className="side-brand" to={officeHome()} aria-label="Portal IA · ir a la Oficina" style={{ textDecoration: 'none' }}><PortalMark size={30} /><span>Portal IA<small>Estudio de agentes</small></span></Link>
+        <Link className="side-brand" to={HOME} aria-label="Portal IA · ir a Inicio" style={{ textDecoration: 'none' }}><PortalMark size={30} /><span>Portal IA<small>Tu equipo de IA</small></span></Link>
         <div className="ctx" role="group" aria-label="Contexto de trabajo">
           <label className="ctx-label" htmlFor="ws-select">Empresa</label>
           <select id="ws-select" value={pick.ws ?? ws.slug} aria-describedby="ctx-hint" onKeyDown={e => onPickKey(e, 'ws')} onBlur={() => setPick({})} onChange={e => onPick('ws', e.target.value)}>
@@ -152,9 +153,8 @@ export function Shell({ crumb, children }: { crumb: ReactNode; children: ReactNo
         </div>
         <nav aria-label="Secciones" style={{ display: 'flex', flexDirection: 'column', gap: 2, marginTop: 10 }}>
           {group('main').map(navItem)}
-          {project ? <><div className="side-sec">Proyecto</div>{group('project').map(navItem)}</>
-            : <button type="button" className="navi" onClick={() => setDialog('project')}>{Icon.plus()}<span className="navi-text">Crear un proyecto</span></button>}
-          <div className="side-sec">Empresa</div>
+          {!project && <button type="button" className="navi" onClick={() => setDialog('project')}>{Icon.plus()}<span className="navi-text">Crear un proyecto</span></button>}
+          <div className="side-sep" role="presentation" />
           {group('company').map(navItem)}
         </nav>
         <div className="side-foot">

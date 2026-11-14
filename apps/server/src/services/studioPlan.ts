@@ -105,7 +105,7 @@ export function buildRenderPlan(project: StudioProject, assets: Map<string, Stud
         ? `:alpha='min(1,min(${c.fadeIn > 0 ? `(t-${n(c.start)})/${n(c.fadeIn)}` : '1'},${c.fadeOut > 0 ? `(${n(c.start + c.duration)}-t)/${n(c.fadeOut)}` : '1'}))'` : '';
       const box = t.background ? `:box=1:boxcolor=0x${t.background.slice(1)}@0.65:boxborderw=${Math.round(size * 0.3)}` : `:borderw=${Math.max(1, Math.round(size / 24))}:bordercolor=black@0.6`;
       const out = `tx${ti}`;
-      chains.push(`[${last}]drawtext=fontfile=${t.bold ? FONT_BOLD : FONT}:textfile=/in/${file}:fontsize=${size}:fontcolor=0x${t.color.slice(1)}:x=(w-text_w)/2:y=${y}:line_spacing=${Math.round(size * 0.2)}${box}${alpha}:enable='between(t,${n(c.start)},${n(c.start + c.duration)})'[${out}]`);
+      chains.push(`[${last}]drawtext=fontfile=${t.bold ? FONT_BOLD : FONT}:textfile=/in/${file}:expansion=none:fontsize=${size}:fontcolor=0x${t.color.slice(1)}:x=(w-text_w)/2:y=${y}:line_spacing=${Math.round(size * 0.2)}${box}${alpha}:enable='between(t,${n(c.start)},${n(c.start + c.duration)})'[${out}]`);
       last = out; ti++;
     }
   }

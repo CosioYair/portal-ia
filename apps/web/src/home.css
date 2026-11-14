@@ -1,0 +1,40 @@
+/* Portal IA 4 · «Inicio»: tu oficina hoy. Solo tokens (ver tokens.css). */
+.home { display: flex; flex-direction: column; gap: var(--space-5); }
+.page.home { max-width: 1180px; }
+.home-hero { display: flex; gap: var(--space-4); align-items: flex-end; justify-content: space-between; flex-wrap: wrap; }
+.home-hero .h1 { margin: 0; }
+.home-hero .lede { margin: 6px 0 0; }
+.btn.home-ask { min-height: 48px; padding: 0 20px; font-size: 15px; }
+.home-sec { display: flex; flex-direction: column; gap: var(--space-3); }
+.home-sec-h { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); flex-wrap: wrap; }
+.home-h2 { margin: 0; font-size: 16px; font-weight: 600; color: var(--color-text); }
+.home-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.home-item { display: flex; gap: var(--space-4); align-items: center; justify-content: space-between; padding: 14px 16px; background: var(--color-surface); border: 1px solid var(--color-border); border-left: 4px solid var(--color-border-strong); border-radius: var(--radius-card); box-shadow: var(--shadow-card); }
+.home-tone-warn { border-left-color: var(--color-attention-border); } .home-tone-err { border-left-color: var(--color-err-border); } .home-tone-ok { border-left-color: var(--color-ok-border); }
+.home-item-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.home-item-top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.home-code { font-family: var(--font-mono); font-size: 12px; color: var(--color-text-muted); }
+.home-item-title { font-size: 15px; font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.home-item-meaning { font-size: 13px; line-height: 1.45; color: var(--color-text-muted); max-width: 70ch; }
+.btn.home-go { flex: none; min-height: 44px; white-space: nowrap; }
+.home-calm { padding: var(--space-5); background: var(--color-surface); border: 1px dashed var(--color-border-strong); border-radius: var(--radius-card); color: var(--color-text-med); }
+.home-calm p { margin: 0; max-width: 70ch; }
+.home-grid { display: grid; gap: var(--space-4); grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); align-items: start; }
+.home-card { display: flex; flex-direction: column; gap: var(--space-3); align-items: flex-start; padding: var(--space-4); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); min-width: 0; }
+.home-card .home-sec-h { width: 100%; }
+.home-empty { margin: 0; font-size: 14px; line-height: 1.5; color: var(--color-text-muted); }
+.home-mini { list-style: none; margin: 0; padding: 0; width: 100%; display: flex; flex-direction: column; }
+.home-mini li { display: flex; gap: var(--space-3); align-items: baseline; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--color-divider); }
+.home-mini li:last-child { border-bottom: 0; }
+.home-mini a { color: var(--color-text); text-decoration: none; font-size: 14px; min-width: 0; overflow-wrap: anywhere; }
+.home-mini a:hover { text-decoration: underline; } .home-mini a:focus-visible, .home-agent:focus-visible { outline: var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-tag); }
+.home-when { flex: none; font-size: 12px; color: var(--color-text-muted); white-space: nowrap; }
+.home-big { margin: 0; font-size: 15px; } .home-big strong { font-size: 26px; font-weight: 600; margin-right: 4px; }
+.home-chips { list-style: none; margin: 0; padding: 0; display: flex; gap: 6px; flex-wrap: wrap; }
+.home-agent { display: inline-flex; align-items: center; min-height: 28px; padding: 0 10px; border-radius: var(--radius-pill); border: 1px solid var(--color-border); background: var(--color-surface-alt); color: var(--color-text-med); font-size: 13px; text-decoration: none; }
+.home-agent:hover { border-color: var(--color-border-hover); color: var(--color-text); }
+.home-more { font-size: 13px; color: var(--color-text-muted); align-self: center; }
+@media (max-width: 720px) {
+  .home-item { flex-direction: column; align-items: stretch; }
+  .btn.home-go, .btn.home-ask { width: 100%; justify-content: center; white-space: normal; }
+}

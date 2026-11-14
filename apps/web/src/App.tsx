@@ -18,7 +18,7 @@ import { InboxScreen } from './screens/InboxScreen.tsx';
 import { AssistantDock } from './components/AssistantDock.tsx';
 import { AttentionWatcher } from './components/AttentionWatcher.tsx';
 import { openUi, useUiEvent } from './lib/uiBus.ts';
-import { officeHome } from './lib/routes.ts';
+import { HOME } from './lib/routes.ts';
 import { OwnerDialogHost } from './components/OwnerPairing.tsx';
 // La oficina y el asistente de creación se cargan aparte (no engordan la carga del resto de pantallas).
 const Office = lazy(() => import('./screens/Office.tsx').then(m => ({ default: m.Office })));
@@ -26,6 +26,8 @@ const AgentWizard = lazy(() => import('./screens/AgentWizard.tsx').then(m => ({ 
 // Portal IA 2.0: también aparte Ajustes y la búsqueda (Ctrl+K), que se carga la primera vez que se abre.
 const Settings = lazy(() => import('./screens/Settings.tsx').then(m => ({ default: m.Settings })));
 const Studio = lazy(() => import('./screens/Studio.tsx').then(m => ({ default: m.Studio })));
+const Home = lazy(() => import('./screens/Home.tsx').then(m => ({ default: m.Home })));
+const Lab = lazy(() => import('./screens/Lab.tsx').then(m => ({ default: m.Lab })));
 const StudioEditor = lazy(() => import('./screens/StudioEditor.tsx').then(m => ({ default: m.StudioEditor })));
 const CommandPalette = lazy(() => import('./components/CommandPalette.tsx').then(m => ({ default: m.CommandPalette })));
 // Y las pantallas de detalle y las menos frecuentes: el primer pintado solo carga el marco, la Oficina y el Resumen.
@@ -180,7 +182,7 @@ export default function App() {
   const connected = providers.find(p => p.status === 'connected') ?? null;
   const ready = status.initialized && !!status.workspace;
   // La oficina es la portada: la empresa, sus departamentos y sus agentes de un vistazo (el Panel sigue en /panel).
-  const home = ready ? officeHome() : connected ? '/configuracion/inicializar' : '/configuracion/proveedor';
+  const home = ready ? HOME : connected ? '/configuracion/inicializar' : '/configuracion/proveedor';
   const guard = (el: ReactElement) => ready ? (status.project ? el : <CompanyHome />) : <Navigate to={home} replace />;
   // Oficina, Decisiones, Asistente y Ajustes son de la EMPRESA: funcionan aunque todavía no tenga proyectos.
   const company = (el: ReactElement) => ready ? el : <Navigate to={home} replace />;
@@ -197,7 +199,8 @@ export default function App() {
         <SelectionHistory sel={sel} workspaces={workspaces} select={select} />
         <Suspense fallback={<div className="app" style={{ display: 'grid', placeItems: 'center' }}><Spinner /></div>}>
         <Routes key={`${status.workspace?.slug ?? ''}:${status.project?.id ?? ''}`}>
-          <Route path="/" element={ready ? <Navigate to={officeHome()} replace /> : <Welcome />} />
+          <Route path="/" element={ready ? <Navigate to={HOME} replace /> : <Welcome />} />
+          <Route path="/inicio" element={company(<Home />)} />
           <Route path="/configuracion/proveedor" element={<ProviderSetup />} />
           <Route path="/configuracion/inicializar" element={connected ? <Initialization /> : <Navigate to="/configuracion/proveedor" replace />} />
           <Route path="/empresa/:slug/proyecto/:pid/*" element={<SelectRoute select={select} />} />
@@ -230,6 +233,7 @@ export default function App() {
           <Route path="/archivo" element={guard(<Archive />)} />
           <Route path="/autorizaciones" element={company(<InboxScreen />)} />
           <Route path="/decisiones" element={<Redirect to="/autorizaciones" />} />
+          <Route path="/oficina/analisis" element={company(<Lab />)} />
           <Route path="/estudio" element={company(<Studio />)} />
           <Route path="/estudio/:projectId" element={company(<StudioEditor />)} />
           <Route path="/ajustes" element={company(<Settings />)} />

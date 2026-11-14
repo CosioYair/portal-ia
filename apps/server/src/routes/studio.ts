@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { STUDIO_FORMATS, STUDIO_HEIGHTS, STUDIO_LIMITS, STUDIO_QUALITY, parseSrt, studioDuration, studioSrt, type StudioProject } from '@portal-ia/domain';
 import { workspacesRepo } from '../db/platform.ts';
 import { studioRepo } from '../db/studio.ts';
-import { cancelStudioRender, createStudioProject, duplicateStudioProject, importStudioAsset, mediaEngine, removeStudioAsset, restoreStudioVersion, saveStudioProject, startStudioRender, studioAssetFile, studioRenderFile } from '../services/studio.ts';
+import { cancelStudioRender, createStudioProject, duplicateStudioProject, importStudioAsset, mediaEngine, purgeStudioTrash, removeStudioAsset, restoreStudioVersion, saveStudioProject, startStudioRender, studioAssetFile, studioRenderFile, studioTrash } from '../services/studio.ts';
 import { studioProviders } from '../services/studioProviders.ts';
 import { acceptOctetStream, streamToTemp, uploadName } from './uploads.ts';
 
@@ -17,7 +17,7 @@ const fail = (reply: FastifyReply, e: any) => reply.code(e.statusCode ?? 500).se
 
 function sendFile(req: FastifyRequest, reply: FastifyReply, file: string, mime: string, download?: string) {
   const size = fs.statSync(file).size;
-  reply.header('accept-ranges', 'bytes').header('content-type', mime).header('cache-control', 'private, max-age=3600').header('x-content-type-options', 'nosniff');
+  reply.header('accept-ranges', 'bytes').header('content-type', mime).header('cache-control', 'private, max-age=3600').header('x-content-type-options', 'nosniff').header('cross-origin-resource-policy', 'same-origin');
   if (download) reply.header('content-disposition', `attachment; filename="${download.replace(/[^\w.\- ]/g, '_')}"`);
   const m = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''));
   if (m && (m[1] || m[2])) {
@@ -42,9 +42,14 @@ export async function studioRoutes(app: FastifyInstance) {
   };
   const full = (slug: string, id: string) => { const repo = studioRepo(slug); const project = repo.get(id); return project ? { project, assets: repo.assets(id), renders: repo.renders(id) } : null; };
 
-  app.get(`${W}/status`, async (req, reply) => {
-    if (!ws(req, reply)) return;
-    return { engine: await mediaEngine((req.query as any)?.fresh === '1'), limits: STUDIO_LIMITS, formats: STUDIO_FORMATS, heights: STUDIO_HEIGHTS, quality: STUDIO_QUALITY, providers: studioProviders() };
+  const statusOf = async (slug: string, fresh: boolean) => ({ engine: await mediaEngine(fresh), limits: STUDIO_LIMITS, formats: STUDIO_FORMATS, heights: STUDIO_HEIGHTS, quality: STUDIO_QUALITY, providers: studioProviders(), trash: studioTrash(slug) });
+  app.get(`${W}/status`, async (req, reply) => { const slug = ws(req, reply); if (!slug) return; return statusOf(slug, false); });
+  // Volver a comprobar el motor lanza procesos: es una acción (exige la sesión del propietario), no una lectura.
+  app.post(`${W}/status/refresh`, async (req, reply) => { const slug = ws(req, reply); if (!slug) return; return statusOf(slug, true); });
+  app.post(`${W}/trash/purge`, async (req, reply) => {
+    const slug = ws(req, reply); if (!slug) return;
+    if (!z.object({ confirm: z.literal(true) }).safeParse(req.body ?? {}).success) return reply.code(400).send({ error: 'Confirma que quieres borrar definitivamente los proyectos quitados.' });
+    return { freed: purgeStudioTrash(slug), trash: studioTrash(slug) };
   });
 
   app.get(`${W}/projects`, async (req, reply) => { const slug = ws(req, reply); if (!slug) return; return studioRepo(slug).list().map(summary); });
