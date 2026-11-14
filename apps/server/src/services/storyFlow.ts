@@ -8,12 +8,29 @@ import { runtimeVerified } from './runtimeChecks.ts';
 import { driftMessage } from './worktreeDrift.ts';
 import { staleCorrectionUnits, testRunSummary } from './failureDiagnosis.ts';
 import type { teamReadiness } from './claudeCode/backend.ts';
-import { isVisualPassedPause, isVisualPause, isVisualToolMissing } from './gauntlet.ts';
+import { isVisualPassedPause, isVisualPause, isVisualToolMissing, visualEvidencePresent } from './gauntlet.ts';
+import { isVisualEvidenceFinding } from './qaGate.ts';
 import { visualGate } from './visualCheck.ts';
 
 /** EN-027 · ¿La puerta visual (HU-207) exige evidencia que no hay? Sin IA; si no se puede leer, no se presume. */
 function visualPending(p: Process): boolean {
   try { const g = visualGate('', p); return g.required && !g.ok; } catch { return false; }
+}
+/**
+ * Portal IA 3 · ¿El trabajo está detenido SOLO porque falta la evidencia visual, que produce el Portal? (El caso de
+ * EN-029: QA no aprobó por las capturas, el hallazgo fue al Desarrollador, que no puede hacerlas, y cada reanudación
+ * repetía lo mismo.) No es un problema del sandbox ni del código: la salida es que el Portal la produzca y QA revise.
+ */
+export function visualEvidenceBlock(p: Process): boolean {
+  const pl = p.result?.pipeline; const rev = p.result?.review;
+  if (!pl || !rev?.verdict || rev.verdict === 'approved') return false;
+  // La pausa «QA no pudo verificar» ya ofrece volver a evaluar (y ahora eso hace primero las capturas): no se toca.
+  if (!['environment', 'repeated_failure', 'limit'].includes(String(pl.pauseKind))) return false;
+  // Solo si la evidencia NO existe. Si existe y trae problemas (desborde, accesibilidad), eso es código: sigue su camino.
+  let g: ReturnType<typeof visualGate>; try { g = visualGate('', p); } catch { return false; }
+  if (!g.required || visualEvidencePresent(g)) return false;
+  const f = rev.findings ?? [];
+  return (f.length > 0 && f.every(isVisualEvidenceFinding)) || isVisualEvidenceFinding({ text: String(pl.reason ?? '') });
 }
 
 /**
@@ -395,6 +412,12 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
     else if (pl.pauseKind === 'call_cap' || (pl.pauseKind === 'budget' && /llamada\(s\) a la suscripción autorizadas/.test(pl.reason ?? ''))) { const n = pl.config.maxSubscriptionCalls ?? 60; actions.push(resume(`Conceder ${n} llamadas más a la suscripción y continuar`, `El equipo retoma donde lo dejó con ${n} llamadas más a tu suscripción (no es USD de API). Lo hecho no se repite.`, ['authorization'], { addSubscriptionCalls: n })); }
     else if (pl.pauseKind === 'budget') actions.push(resume('Continuar con más presupuesto', 'El equipo retoma donde lo dejó (no repite lo hecho). Fijas el presupuesto adicional máximo; solo se gasta lo necesario.', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.5 }));
     else if (pl.pauseKind === 'network') actions.push(resume('Permitir instalar dependencias y continuar', 'Instala las dependencias en el sandbox con red temporal (solo durante la instalación) y sigue verificando. No llama a la IA.', ['authorization', 'network'], { pipeline: { allowInstall: true } }));
+    else if (visualEvidenceBlock(p)) {
+      issue = { ...issue!, cause: 'environment', title: 'Falta la comprobación visual de las pantallas, que hace el Portal (no el equipo)', responsible: [],
+        explanation: 'El criterio pide capturas de las pantallas y una comprobación de accesibilidad. Eso lo hace el Portal en tu equipo, no el equipo de agentes, y aquí no se había hecho antes de la revisión de calidad: por eso la revisión no pudo aprobar y volver a pedir correcciones no cambiaba nada. El código no tiene nada pendiente por este motivo. Al continuar, el Portal hace las capturas (sin IA) y la revisión de calidad evalúa de nuevo con ellas. Todo lo hecho se conserva.' };
+      actions.push(resume('Hacer la comprobación visual y revisar de nuevo', 'El Portal abre una vista previa del trabajo, hace las capturas a 375, 768 y 1440 px y comprueba la accesibilidad (sin IA). Después la revisión de calidad evalúa otra vez con esa evidencia (llama a la IA, dentro del presupuesto que fijes). Por las capturas no se pide nada al equipo; si la revisión encuentra algo en el código, el equipo lo corrige dentro de ese presupuesto.', ['authorization', 'ai_budget'], { primary: true, suggestedBudgetUsd: 0.5 }));
+      actions.push(act('review_diff', 'Revisar el diff', 'El código tal como está ahora, sin cambiar nada.'), ASK, act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama.'));
+    }
     else if (pl.pauseKind === 'environment' && (pl as { imageRelated?: boolean }).imageRelated) {
       // EN-024 · Pausa por la imagen del sandbox: la acción principal es reconstruirla desde la rama (autorizada, red solo en el build).
       const found = envFindings(pl);
@@ -441,7 +464,7 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
       else if (verifyOk) actions.push(act('merge', 'Integrar en main bajo tu criterio', 'La verificación automática está en verde; QA no pudo concluir. Requiere tu autorización.', ['authorization']));
       actions.push(resume('Pedir a QA que vuelva a evaluar', 'Una nueva evaluación de QA con la evidencia actual (incluidas las comprobaciones sin IA, como la equivalencia de estilos).', ['authorization', 'ai_budget'], { suggestedBudgetUsd: 0.3 }), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama.'));
     }
-    else if (pl.pauseKind === 'gauntlet' && (isVisualPause(pl.reason) || visualPending(p))) {
+    else if (pl.pauseKind === 'gauntlet' && (isVisualPause(pl.reason) || (visualPending(p) && !(isVisualPassedPause(pl.reason) && /Falta la revisión de calidad/.test(pl.reason ?? ''))))) {
       // EN-027 · Falta la evidencia visual (HU-207): no es una brecha del Evaluador. La acción principal repite la
       // verificación en el host sin IA. No se ofrece «Continuar sin más evaluación» (saltaría la verificación obligatoria).
       const gs = r.gauntlet; const done = gs?.rounds.filter(x => x.decision === 'correct').length ?? 0;
@@ -462,8 +485,10 @@ function buildStoryFlowCore(p0: Process, opts: FlowOptions = {}): StoryFlow {
     }
     else if (pl.pauseKind === 'gauntlet' && isVisualPassedPause(pl.reason)) {
       // EN-027 · La verificación visual (sin IA) pasó; la ronda del Evaluador tiene coste y se autoriza aparte, con presupuesto.
-      issue = { ...issue!, level: 'warning', cause: 'decision', title: 'Evidencia visual superada: falta la evaluación del Evaluador Gauntlet (con IA)', responsible: [] };
-      actions.push(resume('Pasar al Evaluador Gauntlet (con IA)', 'El Evaluador evalúa el commit con la evidencia visual ya guardada. Llama a la IA dentro del presupuesto que fijes y no concede correcciones nuevas: si deja brechas, se detiene y decides tú.', ['authorization', 'ai_budget'], { primary: true, pipeline: { maxCorrections: 0 }, suggestedBudgetUsd: 0.5 }));
+      const toQa = /Falta la revisión de calidad/.test(pl.reason ?? '');
+      issue = { ...issue!, level: 'warning', cause: 'decision', title: toQa ? (/con problemas/.test(pl.reason ?? '') ? 'Capturas hechas, con problemas a la vista: falta que la revisión de calidad los juzgue (con IA)' : 'Evidencia visual superada: falta la revisión de calidad con las capturas (con IA)') : 'Evidencia visual superada: falta la evaluación del Evaluador Gauntlet (con IA)', responsible: [] };
+      if (toQa) actions.push(resume('Continuar con la revisión (con IA)', 'La revisión de calidad evalúa el commit con las capturas ya guardadas y, si aprueba, sigue la evaluación independiente. Llama a la IA dentro del presupuesto que fijes.', ['authorization', 'ai_budget'], { primary: true, suggestedBudgetUsd: 0.5 }));
+      else actions.push(resume('Pasar al Evaluador Gauntlet (con IA)', 'El Evaluador evalúa el commit con la evidencia visual ya guardada. Llama a la IA dentro del presupuesto que fijes y no concede correcciones nuevas: si deja brechas, se detiene y decides tú.', ['authorization', 'ai_budget'], { primary: true, pipeline: { maxCorrections: 0 }, suggestedBudgetUsd: 0.5 }));
       actions.push(act('review_diff', 'Revisar el diff', 'El código y la evidencia guardada, sin cambiar nada.'), fix(), act('reject', 'Rechazar el diff', 'Descarta el worktree y la rama; la historia vuelve a pendiente.'));
     }
     else if (pl.pauseKind === 'gauntlet') {

@@ -7,7 +7,7 @@ import { clip } from './devOutput.ts';
 import { testsEvidence, verificationEvidence } from './qaGate.ts';
 import { sys } from './storyPrompts.ts';
 import { emit, IMAGE_MISSING, PipelinePause, pipelineOf, sinceApplied, stepCall, updateResult, type StoryRunCtx } from './storyPipeline.ts';
-import { runVisualCheck, visualGate, visualSummary, type VisualGate } from './visualCheck.ts';
+import { runVisualCheck, sameCommit, visualGate, visualSummary, type VisualGate } from './visualCheck.ts';
 import { monotonicNow } from '../clock.ts';
 import { workItemOf } from './workItems.ts';
 
@@ -279,8 +279,45 @@ export const isVisualToolMissing = (reason: string | null | undefined): boolean 
   /axe-core no (?:est[aá] instalado|disponible)|Playwright no est[aá] instalado|Chromium no disponible/i.test(String(reason ?? ''));
 /** EN-027 · Pausa tras «Repetir la verificación visual (sin IA)»: la evidencia pasó y falta la ronda del Evaluador (con IA). */
 export const VISUAL_PASSED_PREFIX = 'Evidencia visual superada en el host';
-export const isVisualPassedPause = (reason: string | null | undefined): boolean =>
-  String(reason ?? '').trimStart().toLowerCase().startsWith(VISUAL_PASSED_PREFIX.toLowerCase());
+/** Portal IA 3 · Las capturas existen pero traen problemas (desborde, accesibilidad): los juzga la revisión de calidad. */
+export const VISUAL_READY_PREFIX = 'Evidencia visual lista en el host';
+export const isVisualPassedPause = (reason: string | null | undefined): boolean => {
+  const t = String(reason ?? '').trimStart().toLowerCase();
+  return t.startsWith(VISUAL_PASSED_PREFIX.toLowerCase()) || t.startsWith(VISUAL_READY_PREFIX.toLowerCase());
+};
+
+/**
+ * Portal IA 3 · ¿Existe la evidencia visual del commit aplicado (informe y todas las capturas)? Que exista no significa
+ * que esté limpia: un desbordamiento o una violación de accesibilidad son hallazgos del CÓDIGO y los juzga QA.
+ */
+export function visualEvidencePresent(g: VisualGate): boolean {
+  if (!g.required) return false;
+  const rep = g.report as { status?: unknown; results?: unknown; commit?: unknown } | null;
+  return !!rep && Array.isArray(rep.results) && rep.status !== 'unavailable' && !g.missing.length && !!g.commit && sameCommit(rep.commit, g.commit);
+}
+
+/**
+ * Portal IA 3 · La evidencia visual se produce ANTES de la revisión de calidad (antes solo se producía después de que QA
+ * aprobara: QA no podía aprobar un criterio que pide capturas, devolvía «falta la evidencia» y ese hallazgo acababa en
+ * el Desarrollador, que no puede lanzar la comprobación del host: un bucle sin salida). La hace el Portal en el host,
+ * sin IA. Si no se puede producir (falta una herramienta, la vista previa no arranca), se pausa con la causa de siempre
+ * («Repetir la verificación visual (sin IA)») ANTES de pagar la llamada de QA. Si existe pero trae problemas reales,
+ * sigue: QA los recibe y decide.
+ */
+export async function visualBeforeQa(ctx: StoryRunCtx, proc: Process): Promise<VisualGate> {
+  let gate = visualGate(ctx.slug, proc);
+  if (!gate.required || visualEvidencePresent(gate)) return gate;
+  emit(ctx, 'gauntlet', `El cambio toca pantallas (apps/web/src): antes de la revisión de calidad, el Portal hace las capturas y la comprobación de accesibilidad del commit ${gate.commit ?? '?'} en tu equipo (375, 768 y 1440 px, sin IA).`);
+  let detail = '';
+  try { const run = await runVisualCheck(ctx.slug, ctx.processId, { pipeline: true }); detail = run.status === 'ok' ? '' : run.detail; }
+  catch (e) { detail = (e as Error).message; }
+  gate = visualGate(ctx.slug, processesRepo(ctx.slug).get(ctx.processId) ?? proc);
+  if (visualEvidencePresent(gate)) {
+    emit(ctx, 'gauntlet', gate.ok ? `Verificación visual superada en el host (commit ${gate.commit ?? '?'}): ${gate.routes.join(', ')}. La revisión de calidad la recibe como evidencia.` : `La verificación visual del commit ${gate.commit ?? '?'} encontró problemas (${clip(gate.reasons.join(' · '), 300)}): la revisión de calidad los recibe como evidencia.`);
+    return gate;
+  }
+  throw new PipelinePause('gauntlet', scrubImageWords(`${VISUAL_PAUSE_PREFIX} (commit ${gate.commit ?? '?'}): ${gate.reasons.join(' · ') || 'sin informe válido'}${detail ? ` · última ejecución: ${clip(detail, 400)}` : ''}. Acción: pulsa «Repetir la verificación visual (sin IA)». Lo hecho se conserva.`));
+}
 
 /**
  * Puerta visual obligatoria (HU-207), en TODOS los modos: si la historia toca apps/web/src exige el report.json y los PNG

@@ -66,7 +66,7 @@ export function fairClip(parts: string[], total: number): string[] {
   return out;
 }
 
-export function qaEvidencePrompt(input: { criterion: string; plan: StoryPlan | null; summary: string; changes: ProposedChange[]; verifications: VerificationRun[]; required: string[]; attempts: string[]; consultText: string; manifest?: StoryManifest | null; previousFindings?: QaFinding[]; tests?: string; checks?: DeliveryCheck[]; unchangedSinceReview?: string[]; reviewedCommit?: string | null; external?: ExternalCorrection[] }): string {
+export function qaEvidencePrompt(input: { criterion: string; plan: StoryPlan | null; summary: string; changes: ProposedChange[]; verifications: VerificationRun[]; required: string[]; attempts: string[]; consultText: string; manifest?: StoryManifest | null; previousFindings?: QaFinding[]; tests?: string; checks?: DeliveryCheck[]; unchangedSinceReview?: string[]; reviewedCommit?: string | null; external?: ExternalCorrection[]; visual?: string }): string {
   const files = input.changes.filter(c => !c.error).map(c => `${c.action} ${c.path} (${c.before}→${c.after} líneas)`).join('\n');
   // Revisión siguiente: el diff completo solo de lo que cambió desde la anterior; lo demás ya lo revisaste (se lista).
   const same = new Set(input.unchangedSinceReview ?? []);
@@ -97,13 +97,14 @@ ${input.consultText}# Archivos modificados
 ${files || '(ninguno)'}
 # Verificación automática en sandbox (sobre el worktree con los cambios aplicados)
 ${ran}
-${input.tests ? `${input.tests}\n` : ''}${checks}${manifest}${updated}${prev}${ext}${disputed}${sameList}${input.attempts.length ? `# Intentos anteriores y correcciones\n${input.attempts.map(a => `- ${a}`).join('\n')}\n` : ''}# Diff
+${input.tests ? `${input.tests}\n` : ''}${input.visual ? `# Evidencia visual en el host (la produce el Portal, no el Desarrollador; el propietario ve las imágenes en su revisión)\n${input.visual}\n` : ''}${checks}${manifest}${updated}${prev}${ext}${disputed}${sameList}${input.attempts.length ? `# Intentos anteriores y correcciones\n${input.attempts.map(a => `- ${a}`).join('\n')}\n` : ''}# Diff
 ${diffs || '(vacío)'}
 
 Reglas:
 - "approved" solo si el cambio cumple el criterio Y todas las verificaciones requeridas (${input.required.join(', ')}) están en OK. Que compile no basta: comprueba que TODA la funcionalidad del criterio está implementada y probada (pruebas nuevas para lo nuevo). Una comprobación NO DETERMINADA no es evidencia: no apruebes un criterio que dependa solo de ella.
 - "rejected" si hay errores en el código o no cumple el criterio. Cada hallazgo debe ser accionable y citar evidencia: "file" (ruta) y/o "evidence" (línea del diff o de la salida de verificación); indica también "requirement" (criterio afectado), "expected" (la corrección esperada, concreta) y "verify" (cómo se comprobará). Un hallazgo por problema y por archivo: el equipo corrige cada uno por separado, sin rehacer lo que funciona.
 - "blocked_environment" si no se pudo verificar por el entorno (sandbox, dependencias), no por el código.
+- Capturas de pantalla e informe de accesibilidad: los genera el Portal en el host, nunca el Desarrollador (no puede lanzarlos). Si arriba hay «Evidencia visual en el host», esa ES la evidencia de los criterios que piden capturas o accesibilidad: júzgalos con ella. No pidas que se generen, no lo señales como hallazgo y no devuelvas "blocked_environment" por ello. Un desbordamiento o una violación grave que figure en esa evidencia SÍ es un hallazgo de código (cita la ruta y el ancho).
 - "unable_to_verify" si con esta evidencia no puedes decidir.
 - Como máximo 8 hallazgos y 6 pruebas sugeridas, de una línea cada uno. "summary" en 2-4 frases.
 Responde SOLO con JSON: {"verdict": "approved"|"rejected"|"blocked_environment"|"unable_to_verify", "summary": string, "findings": [{"severity": "alta"|"media"|"baja", "text": string, "file": string|null, "evidence": string|null, "requirement": string|null, "expected": string|null, "verify": string|null}], "suggestedTests": string[]}`;
@@ -149,6 +150,44 @@ export function enforceQaGate(v: ReviewVerdict, required: string[], verification
   }
   if (out.verdict === 'rejected' && !actionableFindings(out).length) out = { ...out, verdict: 'unable_to_verify', overridden: (out.overridden ? `${out.overridden} ` : '') + 'QA rechazó sin hallazgos que citen archivo o evidencia: no es accionable y no se lanza una corrección a ciegas.' };
   return { ...out, approve: out.verdict === 'approved', issues: (out.findings ?? []).map(issueOf) };
+}
+
+// Portal IA 3 · «Falta la evidencia visual» tiene forma de AUSENCIA: la palabra de falta gobierna directamente a
+// «capturas / informe / evidencia». Un hallazgo que CITA la evidencia («según las capturas», «@375px», «se desborda»,
+// «contraste») es un problema del código y nunca se retira (Gauntlet M1).
+const VIS_NOUN = '(?:capturas(?: de pantalla)?|informe de (?:axe|accesibilidad)|evidencia (?:visual|de la verificaci[oó]n visual)|PNG|report\\.json)';
+const VIS_ABSENT = new RegExp(`(?:^|[^\\p{L}])(?:faltan?|no hay|sin|sigue sin haber|no existen?|no trae|no se adjuntan?|no se (?:han? )?(?:aportado|generado))\\s+(?:haber\\s+)?(?:(?:las?|los?|el|unas?|ning[uú]n[ao]?s?)\\s+)?(?:\\d+\\s+)?${VIS_NOUN}`, 'iu');
+const VIS_ABSENT_AFTER = new RegExp(`${VIS_NOUN}[^.:;]{0,50}?(?:^|[^\\p{L}])(?:no se han? (?:generado|aportado|ejecutado|lanzado)|pendientes?|no existen?)(?![\\p{L}])`, 'iu');
+const VIS_NOT_RUN = /visual-check\.mjs\)?[^.;]{0,80}(?:no se (?:ejecut[oó]|ha ejecutado|lanz[oó])|no dej[oó] evidencia|corre en el host)/i;
+const VIS_CITES = /seg[uú]n|muestran?|se ve[n ]|desbord|contraste|@\s?\d+\s?px|\d+\s?px\b[^.]{0,30}(?:se |queda|corta|rompe)/i;
+
+/** ¿Este hallazgo solo dice que FALTA la evidencia visual (capturas, informe de axe, lanzar visual-check)? No es corregible por el equipo. */
+export function isVisualEvidenceFinding(f: { text?: string | null; file?: string | null }): boolean {
+  const text = String(f.text ?? '');
+  // Un hallazgo sobre un archivo de pantalla es de código, diga lo que diga.
+  if (/(^|\/)apps\/web\/src\//.test(String(f.file ?? '').replace(/\\/g, '/'))) return false;
+  if (VIS_CITES.test(text)) return false;
+  return VIS_ABSENT.test(text) || VIS_ABSENT_AFTER.test(text) || VIS_NOT_RUN.test(text);
+}
+
+/** ¿El veredicto (no aprobado) se debe, al menos en parte, a que faltaba la evidencia visual? */
+export function verdictAboutMissingVisual(v: { findings?: { text?: string | null; file?: string | null }[] | null; summary?: string | null } | null | undefined): boolean {
+  return (v?.findings ?? []).some(isVisualEvidenceFinding) || isVisualEvidenceFinding({ text: v?.summary ?? '' });
+}
+
+/**
+ * Portal IA 3 · Con la evidencia visual ya producida por el Portal, un hallazgo que pide «generar las capturas» no tiene
+ * a quién ir: se retira (queda dicho en `overridden`). Nunca convierte un veredicto en aprobado: un rechazo que se
+ * queda sin nada corregible, o un bloqueo de entorno que solo era por esto, pasa a «no pudo verificar» y decide el
+ * propietario. Un bloqueo de entorno con OTROS motivos (la imagen del sandbox) sigue siéndolo.
+ */
+export function dropSatisfiedVisualFindings(v: ReviewVerdict): ReviewVerdict {
+  const all = v.findings ?? []; const kept = all.filter(f => !isVisualEvidenceFinding(f));
+  if (kept.length === all.length) return v;
+  const note = `${all.length - kept.length} hallazgo(s) pedían generar capturas o el informe de accesibilidad, que ya existen (los hace el Portal): no se envían al equipo.`;
+  let out: ReviewVerdict = { ...v, findings: kept, issues: kept.map(issueOf), overridden: [v.overridden, note].filter(Boolean).join(' ') };
+  if ((out.verdict === 'blocked_environment' && !kept.length) || (out.verdict === 'rejected' && !actionableFindings(out).length)) out = { ...out, verdict: 'unable_to_verify' };
+  return { ...out, approve: out.verdict === 'approved' };
 }
 
 /** Firma de un rechazo (para detectar el mismo rechazo repetido tras una corrección). */
