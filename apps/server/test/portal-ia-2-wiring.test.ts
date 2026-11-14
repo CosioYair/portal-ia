@@ -80,7 +80,7 @@ test('cada sección del menú tiene su ruta y las rutas antiguas siguen llevando
   // Portal IA 3: la sección Trabajo abre en /trabajo (historias y encargos juntos); /backlog sigue existiendo como pestaña.
   // Portal IA 4: seis destinos por objetivo, en el orden del menú; después, lo que no es destino (se llega con «Pedir»,
   // la campana, Inicio, Ajustes o Ctrl+K).
-  assert.deepEqual(paths, ['/inicio', '/trabajo', '/oficina', '/estudio', '/conocimiento', '/ajustes', '/asistente', '/autorizaciones', '/panel', '/aceptacion']);
+  assert.deepEqual(paths, ['/inicio', '/trabajo', '/oficina', '/estudio', '/conocimiento', '/ajustes', '/asistente', '/autorizaciones', '/panel', '/ediciones', '/aceptacion']);
   const inMenu = [...routes.matchAll(/\{ id: '[a-z]+', label: '([^']+)', path: '[^']+'[^\n]*/g)].filter(m => !/inMenu: false/.test(m[0])).map(m => m[1]);
   assert.deepEqual(inMenu, ['Inicio', 'Trabajo', 'Agentes', 'Estudio', 'Conocimiento', 'Ajustes'], 'el menú: seis destinos, ninguno repetido');
   assert.ok(app.includes('<Route path="/backlog" '), 'la ruta antigua /backlog sigue existiendo');

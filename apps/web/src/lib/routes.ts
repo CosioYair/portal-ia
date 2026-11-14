@@ -5,7 +5,7 @@ import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
  * pantalla «madre» del «Atrás» y adónde ir al cambiar de empresa o proyecto. Una sección nueva se añade aquí y aparece
  * en todos esos sitios a la vez.
  */
-export type SectionId = 'inicio' | 'estudio' | 'oficina' | 'decisiones' | 'asistente' | 'resumen' | 'trabajo' | 'conocimiento' | 'ajustes' | 'aceptacion';
+export type SectionId = 'inicio' | 'ediciones' | 'estudio' | 'oficina' | 'decisiones' | 'asistente' | 'resumen' | 'trabajo' | 'conocimiento' | 'ajustes' | 'aceptacion';
 export type IconName = 'building' | 'bell' | 'sparkles' | 'gauge' | 'kanban' | 'book' | 'sliders' | 'layers' | 'grid' | 'users';
 export interface Section {
   id: SectionId; label: string; path: string; icon: IconName;
@@ -33,6 +33,9 @@ export const SECTIONS: Section[] = [
   { id: 'decisiones', label: 'Decisiones', path: '/autorizaciones', icon: 'bell', group: 'main', needsProject: false, match: /^\/(autorizaciones|decisiones)(\/|$)/, hint: 'Pendientes e historial de tus decisiones (campana)', inMenu: false },
   // Conserva el repositorio del proyecto, las etapas y el mantenimiento. Se llega desde Trabajo y con Ctrl+K.
   { id: 'resumen', label: 'Proyecto y repositorio', path: '/panel', icon: 'gauge', group: 'project', needsProject: true, match: /^\/(panel|etapa|mantenimiento)(\/|$)/, hint: 'Repositorio, etapas y mantenimiento del proyecto', inMenu: false },
+  // HU-214 · Ediciones (copias distribuibles del Portal: generar, activar, desactivar y revocar). Es administración: se
+  // llega desde Ajustes y con Ctrl+K, no ocupa sitio en el menú.
+  { id: 'ediciones', label: 'Ediciones', path: '/ediciones', icon: 'book', group: 'company', needsProject: false, match: /^\/ediciones(\/|$)/, hint: 'Versiones y licencias de tus copias', inMenu: false },
   // El recorrido de aceptación del propietario (lo prueba y lo marca él). Se llega desde Inicio y desde Ajustes.
   { id: 'aceptacion', label: 'Tu prueba del Portal', path: '/aceptacion', icon: 'gauge', group: 'company', needsProject: false, match: /^\/aceptacion(\/|$)/, hint: 'Prueba tú lo que pediste y anota si funciona', inMenu: false }
 ];

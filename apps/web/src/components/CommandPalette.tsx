@@ -14,7 +14,7 @@ import { Icon } from './ui.tsx';
  */
 type Item = { id: string; group: string; label: string; hint?: string; to: string; icon: ReactNode; keywords: string };
 /** Nombres antiguos y tareas frecuentes que también llevan a cada sección. */
-const ALIASES: Record<string, string> = { decisiones: 'autorizaciones aprobar denegar pendientes bandeja', resumen: 'panel inicio proyecto', trabajo: 'backlog historias lotes ejecucion continua actividad procesos archivo', oficina: 'equipo agentes departamentos organizacion', ajustes: 'configuracion presupuestos proveedores sistema', asistente: 'pedir preguntar chat' };
+const ALIASES: Record<string, string> = { ediciones: 'edicion version licencia copias distribuible generar renovar revocar', decisiones: 'autorizaciones aprobar denegar pendientes bandeja', resumen: 'panel inicio proyecto', trabajo: 'backlog historias lotes ejecucion continua actividad procesos archivo', oficina: 'equipo agentes departamentos organizacion', ajustes: 'configuracion presupuestos proveedores sistema', asistente: 'pedir preguntar chat' };
 const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
 export function CommandPalette({ onClose }: { onClose: () => void }) {

@@ -36,6 +36,7 @@ import { settingsRoutes } from './routes/settings.ts';
 import { studioRoutes } from './routes/studio.ts';
 import { labRoutes } from './routes/lab.ts';
 import { modelRuleRoutes } from './routes/modelRule.ts';
+import { editionRoutes } from './routes/editions.ts';
 import { ownerPolicyApplies, requireOwner } from './services/ownerSession.ts';
 import { VERSION } from './services/system.ts';
 
@@ -137,6 +138,8 @@ export async function buildApp() {
   await app.register(studioRoutes);
   await app.register(labRoutes);
   await app.register(modelRuleRoutes);
+  // HU-214 · Módulo «Ediciones»: la raíz del repositorio se pasa como opción (sin REPO_ROOT en el archivo de rutas).
+  await app.register(editionRoutes, { root: REPO_ROOT });
 
   // Producción local: sirve apps/web/dist si existe (npm run build). SPA fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {

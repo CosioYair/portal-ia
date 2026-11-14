@@ -85,6 +85,12 @@ export function Settings() {
         {card(Icon.wallet(), 'Presupuestos', status.project ? `Empresa y proyecto «${status.project.name}»` : 'Empresa',
           <>Cuánto se puede gastar en la API y cuánto queda. El trabajo con tu suscripción no gasta de la API.</>,
           <Link className="btn btn-secondary btn-sm" to="/presupuestos">Abrir Presupuestos</Link>)}
+        {card(Icon.book(), 'Ediciones', 'Todo el Portal',
+          <>Copias del Portal para repartir: generar una versión, activarla, desactivarla o revocarla.</>,
+          <Link className="btn btn-secondary btn-sm" to="/ediciones">Abrir Ediciones</Link>)}
+        {card(Icon.gauge(), 'Tu prueba del Portal', 'Todo el Portal',
+          <>El recorrido en el que pruebas tú, paso a paso, que el Portal hace lo que pediste, y anotas lo que falla.</>,
+          <Link className="btn btn-secondary btn-sm" to="/aceptacion">Abrir el recorrido</Link>)}
         {card(Icon.sparkles(), 'Asistente de Empresa', 'Todo el Portal · vive en «Portal IA»',
           <>{assistant ? <>Trabaja con <strong>{assistant.harnessLabel}</strong>. Su modelo, su límite mensual y sus permisos están en su configuración.</> : 'Su modelo, su límite mensual y sus permisos están en su configuración.'}</>,
           assistant ? <Link className="btn btn-secondary btn-sm" to={`/empresa/${INTERNAL_SLUG}/oficina/agente/${encodeURIComponent(assistant.id)}/configuracion`}>Configurar</Link> : <Link className="btn btn-ghost btn-sm" to="/asistente">Abrir el Asistente</Link>)}

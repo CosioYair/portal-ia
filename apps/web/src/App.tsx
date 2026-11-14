@@ -42,6 +42,8 @@ const Archive = lazy(() => import('./screens/Archive.tsx').then(m => ({ default:
 const Batches = lazy(() => import('./screens/Batches.tsx').then(m => ({ default: m.Batches })));
 const BatchDetail = lazy(() => import('./screens/Batches.tsx').then(m => ({ default: m.BatchDetail })));
 const Maintenance = lazy(() => import('./screens/Maintenance.tsx').then(m => ({ default: m.Maintenance })));
+// HU-214 · Módulo «Ediciones» (copias distribuibles y su licencia): pantalla poco frecuente, también aparte.
+const Editions = lazy(() => import('./screens/Editions.tsx').then(m => ({ default: m.Editions })));
 
 const SEL_KEY = 'portal-ia.seleccion';
 type Selection = { ws: string; project: string | null };
@@ -237,6 +239,8 @@ export default function App() {
           <Route path="/estudio" element={company(<Studio />)} />
           <Route path="/estudio/:projectId" element={company(<StudioEditor />)} />
           <Route path="/ajustes" element={company(<Settings />)} />
+          {/* HU-214 · Ediciones: lista, genera, renueva, activa, desactiva y revoca; cada acción exige la autorización del propietario. */}
+          <Route path="/ediciones" element={company(<Editions />)} />
           <Route path="/aceptacion" element={company(<Acceptance />)} />
           <Route path="*" element={<Navigate to={home} replace />} />
         </Routes>

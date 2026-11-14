@@ -24,6 +24,7 @@ export * from './assistant-pending.ts';
 export * from './portal-seal.ts';
 export * from './agent-draft.ts';
 export * from './lessonCard.ts';
+export * from './edition-registry.ts';
 
 export const PROVIDER_META = {
   anthropic: { id: 'anthropic', name: 'Anthropic', consoleHost: 'console.anthropic.com', keyHint: 'sk-ant-…' },

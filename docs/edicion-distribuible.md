@@ -63,6 +63,29 @@ Para actualizar, descomprime la Edición nueva en una carpeta aparte. Después, 
 
 **Volver atrás.** `npm run edition:update -w @portal-ia/server -- --rollback` devuelve `apps/web/dist.prev` a `apps/web/dist`. **La vuelta atrás de la interfaz no deshace los datos.** La orden indica la carpeta de `data/backups/` más reciente: para deshacer también los datos, restaura esas bases a mano con el Portal parado. Si no hay `dist.prev`, la orden da un error y no cambia nada.
 
+## Módulo Ediciones (HU-214)
+
+La pantalla **Ediciones** (`/ediciones`) muestra las ediciones generadas, de la más reciente a la más antigua. De cada una indica la versión, el commit (7 caracteres), la licencia (identificador `LIC-…`, estado *Activa*, *Desactivada* o *Revocada*, y si está caducada), la fecha de caducidad, cuántas veces se ha renovado y la fecha de generación. Hay estados explícitos para cuando carga, cuando no hay ediciones («Aún no hay ediciones»), cuando hay un error (con «Reintentar») y cuando una acción está en curso. La licencia es local: identificador, estado, fecha de emisión, caducidad y número de renovaciones. No hay servidor de licencias.
+
+Las ediciones solo existen en el núcleo. La tabla `editions` vive en la base del espacio interno y se crea con una migración aditiva, con una copia previa `*.pre-editions.bak`. La API es `GET|POST /api/workspaces/<núcleo>/editions` y `POST …/editions/<id>/renew|activate|deactivate|revoke`. Con el slug de otro espacio responde 404 (`not_core`).
+
+| Acción | Qué hace | Cuándo se permite |
+|---|---|---|
+| Generar edición | Exige un árbol de trabajo limpio y HEAD de 40 caracteres. Llama a `buildEditionZip` con `expectedCommit = HEAD` (el mismo empaquetador que `npm run edition:build`) y guarda el ZIP en `<repo>-ediciones`. Registra la versión, el commit, el sha256, el número de entradas y el tamaño, y emite una licencia activa de 365 días. No llama a ningún modelo de IA. | Siempre, en el Estudio |
+| Renovar licencia | Amplía la caducidad 365 días, contados desde la caducidad vigente o desde ahora si ya había caducado. | Activa o desactivada |
+| Activar / Desactivar | Cambia el estado de la licencia entre *Activa* y *Desactivada*. | Desactivada / Activa |
+| Revocar | Revoca la licencia para siempre. | Activa o desactivada |
+
+**Autorización del propietario.** Cada acción abre un diálogo que explica lo que hará y la marca como autorización del propietario. En «Revocar», el diálogo avisa de que es irreversible. Al confirmar, la pantalla envía `authorized: true`. Si falta esa autorización, el servidor responde 403 y no cambia nada. Cada intento queda en `execution_history` como `policy:edition-<acción>:granted` o `policy:edition-<acción>:denied:sin_autorizacion` (por ejemplo, `policy:edition-revoke:granted`). Además, toda petición que cambia algo exige la sesión del propietario.
+
+**Límites.**
+
+- Una edición revocada no se reactiva ni se renueva. Si se intenta, la respuesta es 409 (`invalid_transition`).
+- En la edición distribuible la pantalla no muestra ninguna acción, y la API responde 403 con el código `edition_distributable`.
+- Generar falla con un motivo legible si hay cambios sin confirmar, si falta el build o es de otro commit, o si se detecta un secreto. Son las mismas comprobaciones de «Cómo se genera».
+
+**Verificación visual.** Hay que repetirla en el host sobre el commit nuevo. Se necesitan axe-core (`npm i -D axe-core` o `PORTAL_AXE`) y Chromium; sin ellos, el resultado es «unavailable». Debe hacer capturas de `/oficina`, `/panel`, `/backlog`, `/ediciones` y `/ajustes` a 375, 768 y 1440 px, sin violaciones serious ni critical. La vista previa no tiene datos sembrados, así que en `/ediciones` solo se captura el estado vacío.
+
 ## Limitaciones
 
 - No tiene automejora. Reconstruir, reiniciar y activar cambios responden 403 (HU-205). Las actualizaciones llegan como una Edición nueva generada en el Estudio y se aplican con `edition:update` (ver la sección anterior).
