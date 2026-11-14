@@ -15,6 +15,7 @@ import { Chip, Icon, KV, Notice } from '../components/ui.tsx';
 import { EmptyState, Tile, WorkTabs } from '../components/kit.tsx';
 import { Markdown } from '../components/Markdown.tsx';
 import { StoryResult } from '../components/StoryResult.tsx';
+import { StoryOverview } from '../components/StoryOverview.tsx';
 import { DelegationResultView } from '../components/DelegationResultView.tsx';
 import { StoryFlowPanel } from '../components/StoryFlowPanel.tsx';
 import { serverNow, stepDurationMs } from '../lib/liveStatus.ts';
@@ -174,7 +175,7 @@ function ProcessViewOf({ processId }: { processId: string }) {
           </div></section>}
         {proc.error && proc.status !== 'failed' && proc.status !== 'budget_exceeded' && <Notice kind="err">{proc.error}</Notice>}
         {proc.status === 'running' && <Disclosure title="Agentes activos durante el proceso"><Notice kind="info">Los agentes implicados están <strong>activos</strong> durante este proceso y volverán a estar inactivos al terminar. {proc.kind === 'story_execution' ? 'Proponen cambios; nada se escribe en el repositorio sin tu aprobación.' : proc.kind === 'delegated_task' ? 'El responsable valida el encargo, consulta a su equipo y entrega el resultado; las propuestas al backlog las aplicas tú.' : 'Solo realizan lectura y análisis; ninguna acción sobre el repositorio.'}</Notice></Disclosure>}
-        {proc.kind === 'story_execution' && !closure && proc.result && (proc.status === 'done' || proc.result.changes.length > 0) && <div id="sec-result" tabIndex={-1}><StoryResult proc={proc} onChange={setProc} /></div>}
+        {proc.kind === 'story_execution' && !closure && proc.result && (proc.status === 'done' || proc.result.changes.length > 0) && <div id="sec-result" tabIndex={-1}>{proc.status === 'done' && <StoryOverview proc={proc} onChange={setProc} onClose={async () => { if (!proc.backlogItemId) return; await api.markStoryDone(slug, proc.backlogItemId); }} />}<Disclosure id="detalle-tecnico" testId="process-detalle-tecnico" className="tech-all" title="Detalle técnico completo" hint="Plan, cambios línea a línea, verificación y repositorio. No hace falta para decidir."><StoryResult proc={proc} onChange={setProc} hideOverview /></Disclosure></div>}
         {proc.kind === 'story_execution' && proc.result?.gauntlet && <GauntletReport state={proc.result.gauntlet} implementer={proc.steps.find(s => s.role === 'implementer')?.agentName ?? null} />}
         {proc.kind === 'delegated_task' && proc.delegation && (proc.delegation.triage || proc.status !== 'running') && <DelegationResultView proc={proc} onChange={setProc} />}
 

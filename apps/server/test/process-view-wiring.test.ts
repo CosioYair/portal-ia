@@ -99,3 +99,11 @@ test('Actividad: filtro por estado con aria-pressed, contadores y mensaje sin re
   assert.match(list, /Aún no hay procesos\./, 'el estado vacío general se mantiene');
   assert.match(list, /to="\/archivo">Archivo histórico/);
 });
+
+test('Portal IA 3: en el proceso, la decisión queda a la vista y el detalle técnico va plegado (como en la historia)', () => {
+  const view = read('screens/ProcessView.tsx');
+  const at = view.indexOf('id="sec-result"'); const block = view.slice(at, view.indexOf('\n', at));
+  assert.ok(block.includes('<StoryOverview proc={proc}'), 'las acciones de decisión no se pliegan');
+  assert.match(block, /<Disclosure id="detalle-tecnico"[^>]*><StoryResult proc=\{proc\} onChange=\{setProc\} hideOverview \/>/, 'plan, diff y verificación van plegados');
+  assert.ok(view.indexOf('<ReviewSummary') < at, 'la revisión en lenguaje llano va antes que lo técnico');
+});
