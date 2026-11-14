@@ -1,70 +1,72 @@
 /* Portal IA 2.0 · «Estudio de agentes». Tokens de diseño: TODAS las hojas de estilo y los estilos en línea los consumen
    (no hay colores escritos a mano fuera de este archivo). Contrastes WCAG comprobados en test/design-tokens-*.test.ts:
    texto ≥ 4,5:1 sobre sus fondos, bordes de controles y foco ≥ 3:1. El color solo indica un estado real; el estado
-   siempre lleva también icono y texto. Los nombres anteriores se conservan (con los valores nuevos). */
+   siempre lleva también icono y texto. Los nombres anteriores se conservan (con los valores nuevos).
+   Paleta EN-029: acento índigo sobrio (#4338CA); grises, bordes y menú lateral ligeramente inclinados hacia
+   el azul del acento, con la misma luminosidad para no perder contraste. */
 :root {
-  /* Superficies y fondo */
-  --color-bg: #F5F5F8;
+  /* Superficies y fondo (neutros con un matiz índigo muy leve) */
+  --color-bg: #F4F5F9;
   --color-surface: #FFFFFF;
-  --color-surface-alt: #FAFAFC;
-  --color-surface-hover: #F3F3F8;
-  --color-surface-pressed: #E9E9F1;
-  --color-surface-nav-hover: #EEEEF5;
-  --color-surface-muted: #F0F0F5;
-  --color-surface-sunken: #F7F7FA;
+  --color-surface-alt: #F9FAFD;
+  --color-surface-hover: #F2F3F9;
+  --color-surface-pressed: #E7E9F2;
+  --color-surface-nav-hover: #EDEEF6;
+  --color-surface-muted: #EFF0F6;
+  --color-surface-sunken: #F6F7FB;
 
   /* Texto (tercer nivel nunca por debajo de 12 px) */
-  --color-text: #17182B;
-  --color-text-med: #45475E;
-  --color-text-muted: #5F6178;
-  --color-text-soft: #4E5068;
-  --color-text-faint: #6A6C84;
-  --color-placeholder: #5F6178;
+  --color-text: #151A2E;
+  --color-text-med: #43485F;
+  --color-text-muted: #5D6279;
+  --color-text-soft: #4C5169;
+  --color-text-faint: #686D86;
+  --color-placeholder: #5D6279;
   --color-on-dark: #FFFFFF;
   --color-on-dark-link: #9BD5CC;
   --color-text-alert: #7A4100;
 
   /* Bordes: decorativos (divisores, tarjetas) y de controles (≥ 3:1) */
-  --color-divider: #ECECF2;
-  --color-border: #E2E2EA;
-  --color-border-soft: #E5E5EE;
-  --color-border-strong: #C8C9D6;
-  --color-border-hover: #A9AABE;
-  --color-border-hover-strong: #6E7089;
-  --color-control-border: #8B8CA3;
+  --color-divider: #EBEDF3;
+  --color-border: #E1E3EB;
+  --color-border-soft: #E4E6EF;
+  --color-border-strong: #C6C9D7;
+  --color-border-hover: #A7AABF;
+  --color-border-hover-strong: #6C708A;
+  --color-control-border: #898CA4;
   /* HU-208 · Borde del botón terciario (.btn-ghost): ≥ 3:1 sobre surface, bg, surface-alt y surface-pressed */
-  --color-tertiary-border: #7A7B93;
-  --color-track: #E9E9F1;
-  --color-dot: #9799AE;
+  --color-tertiary-border: #787B94;
+  --color-track: #E7E9F2;
+  --color-dot: #9599AF;
   --color-step-divider: rgba(128, 128, 140, 0.25);
 
-  /* Marca y acción principal (violeta: acciones, enlaces, foco, selección) */
-  --color-brand: #2F2C63;
-  --color-brand-ring: #A78BFA;
-  --color-brand-soft: #F1ECFE;
-  --color-primary: #6D28D9;
-  --color-primary-hover: #5B21B6;
-  --color-accent: #6D28D9;
-  --color-accent-hover: #5B21B6;
-  --color-accent-soft: #F1ECFE;
-  --color-accent-bg: #F1ECFE;
-  --color-accent-border: #D9CCFB;
-  --color-accent-wash: #F8F5FF;
-  --color-ink: #17182B;
-  --color-ink-2: #2A2B45;
+  /* Marca y acción principal (índigo sobrio: acciones, enlaces, foco, selección) */
+  --color-brand: #2B2F66;
+  --color-brand-ring: #A5B4FC;
+  --color-brand-soft: #EEF0FF;
+  --color-primary: #4338CA;
+  --color-primary-hover: #3730A3;
+  --color-accent: #4338CA;
+  --color-accent-hover: #3730A3;
+  --color-accent-soft: #EEF0FF;
+  --color-accent-bg: #EEF0FF;
+  --color-accent-border: #C7CCF5;
+  --color-accent-wash: #F6F7FF;
+  --color-ink: #151A2E;
+  --color-ink-2: #282C47;
   /* «En curso» (un spinner, un paso que corre) es verde azulado: el ámbar queda solo para «te necesita» */
   --color-activity: #0F766E;
 
-  /* Menú lateral (índigo tinta) */
-  --color-side-bg: #1C1B3A;
-  --color-side-bg-2: #232149;
-  --color-side-text: #C9CAE6;
-  --color-side-label: #9C9EC8;
-  --color-side-hover: #28264F;
-  --color-side-active-bg: #2F2C63;
+  /* Menú lateral (tinta índigo azulada; indicador y foco en tonos claros del acento) */
+  --color-side-bg: #181B38;
+  --color-side-bg-2: #20244A;
+  --color-side-text: #C8CCE8;
+  --color-side-label: #9DA2CC;
+  --color-side-hover: #262B52;
+  --color-side-active-bg: #2B3168;
   --color-side-active-text: #FFFFFF;
-  --color-side-indicator: #A78BFA;
-  --color-side-focus: #C4B5FD;
+  --color-side-indicator: #A5B4FC;
+  --color-side-focus: #C7D2FE;
   --color-side-badge-bg: #FEF4DC;
   --color-side-badge-text: #7A4100;
 
@@ -83,11 +85,11 @@
   --color-blocked-bg: #FDEDEB;
   --color-blocked-border: #F0AFA7;
   --color-blocked-text: #A3231A;
-  --color-queued: #2F67DB;
-  --color-queued-bg: #EAF1FE;
-  --color-queued-soft: #EAF1FE;
-  --color-queued-border: #A9C4F5;
-  --color-queued-text: #1E4AB8;
+  --color-queued: #075985;
+  --color-queued-bg: #E6F3FA;
+  --color-queued-soft: #E6F3FA;
+  --color-queued-border: #9CCDE8;
+  --color-queued-text: #075985;
   --color-idle: #64748B;
   --color-idle-bg: #F1F3F6;
   --color-idle-border: #CCD2DB;
@@ -131,35 +133,35 @@
   --color-flow-run-mid: #8FCFC6;
   --color-flow-progress: #0F766E;
 
-  /* Azulejos de sección: monocromos (índigo); el activo, violeta */
-  --color-tile-bg: #EEEDF7;
-  --color-tile-fg: #2F2C63;
-  --color-tile-active-bg: #F1ECFE;
-  --color-tile-active-fg: #5B21B6;
+  /* Azulejos de sección: monocromos (tinta índigo); el activo, en el acento índigo */
+  --color-tile-bg: #EFF0F4;
+  --color-tile-fg: #2B2F66;
+  --color-tile-active-bg: #E0E4FF;
+  --color-tile-active-fg: #3730A3;
 
-  /* Oficina: planta lisa, mobiliario pixelado (contenido de la ilustración) */
-  --color-office-floor: #F5F5F8;
-  --color-office-tile: #F5F5F8;
-  --color-office-wall: #E2E2EA;
-  --color-office-sign: #1C1B3A;
+  /* Oficina: planta lisa (sigue al fondo y la marca), mobiliario pixelado (contenido de la ilustración) */
+  --color-office-floor: #F4F5F9;
+  --color-office-tile: #F4F5F9;
+  --color-office-wall: #E1E3EB;
+  --color-office-sign: #181B38;
   --color-office-desk: #8A6A4A;
   --color-office-desk-top: #C9A27C;
   --color-office-chair: #5B6070;
-  --color-office-screen: #2F2C63;
-  --color-office-screen-frame: #1C1B3A;
+  --color-office-screen: #2B2F66;
+  --color-office-screen-frame: #181B38;
   --color-office-screen-on: #5FD3C6;
   --color-office-screen-wait: #F2C14E;
-  --color-office-ink: #17182B;
+  --color-office-ink: #151A2E;
   --color-office-plant: #3F8F62;
 
   /* Ilustraciones (mismo lenguaje geométrico que la oficina) */
   --color-illus-shadow: rgba(23, 24, 43, 0.08);
   --color-illus-wall: #FFFFFF;
-  --color-illus-window: #F0F0F5;
+  --color-illus-window: #EFF0F6;
   --color-illus-plant: #3F8F62;
   --color-illus-desk: #C9A27C;
   --color-illus-desk-dark: #8A6A4A;
-  --color-illus-screen: #2F2C63;
+  --color-illus-screen: #2B2F66;
 
   /* Tipografías (IBM Plex: 400/500/600) y escala */
   --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
@@ -228,6 +230,6 @@
   --dur-loop: 1.4s;
 
   /* Foco: siempre con 2 px de separación (pegado a un fondo de pase del ratón no alcanzaría 3:1) */
-  --focus-ring: 2px solid #6D28D9;
-  --focus-ring-on-dark: 2px solid #C4B5FD;
+  --focus-ring: 2px solid #4338CA;
+  --focus-ring-on-dark: 2px solid #C7D2FE;
 }
