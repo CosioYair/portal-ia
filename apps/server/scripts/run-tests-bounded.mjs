@@ -60,7 +60,8 @@ function envKey() {
   return h.digest('hex').slice(0, 8);
 }
 
-const tree = treeHash();
+// --tree <id>: donde git no ve el repositorio (dentro del sandbox Docker) el arbol se indica desde fuera, para poder reanudar.
+const tree = opt('--tree', '') || treeHash();
 const runDir = path.join(outDir, `${tree.slice(0, 12)}-${envKey()}`);
 fs.mkdirSync(runDir, { recursive: true });
 const resultsFile = path.join(runDir, 'results.json');
