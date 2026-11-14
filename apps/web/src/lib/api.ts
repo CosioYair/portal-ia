@@ -1,3 +1,4 @@
+import type { AcceptanceView } from '@portal-ia/domain';
 import type { RestoreSupersededResult, StoryDecisionHistory, MaintenancePlan, MaintenanceSelection } from '@portal-ia/domain';
 import type { PipelineConfig, PhaseTransition, PhaseTransitionPreview, ProjectArchive, StoryContext, StoryMessage, StoryTask, Lesson, AgentTemplateVersion, DecisionVerdict, InboxDecisionResult, PendingDecision, PendingDecisionKind, RepoStatus, SystemStatus, Agent, AgentConfig, AgentCreateInput, AgentDraftResult, AssessmentEstimate, BacklogItem, BacklogStatus, BootstrapResult, ContextItem, FsEntry, FsListing, KnowledgeDoc, Objective, Process, Project, ProviderView, Repository, UsageToday, Workspace } from '@portal-ia/domain';
 
@@ -281,6 +282,14 @@ export const api = {
   phasePreview: (slug: string, projectId: string, name?: string) => request<PhaseTransitionPreview>(`/api/workspaces/${slug}/projects/${projectId}/phase/preview${name ? `?name=${encodeURIComponent(name)}` : ''}`),
   startPhase: (slug: string, projectId: string, name: string) => request<PhaseTransition>(`/api/workspaces/${slug}/projects/${projectId}/phase`, { method: 'POST', body: JSON.stringify({ name, authorized: true }) }),
   revertPhase: (slug: string, projectId: string, id: string, reason?: string) => request<PhaseTransition>(`/api/workspaces/${slug}/projects/${projectId}/phase/${id}/revert`, { method: 'POST', body: JSON.stringify({ authorized: true, reason }) }),
+  /** Portal IA 3: recorrido de aceptación del propietario (lo marca él; exige su sesión). */
+  acceptance: () => request<AcceptanceView>('/api/acceptance'),
+  acceptanceMark: (id: string, result: 'ok' | 'fail' | null, comment: string) => request<AcceptanceView>(`/api/acceptance/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ result, comment }) }),
+  /** Portal IA 3: la revisión de un trabajo en lenguaje llano. Solo lectura. */
+  review: (slug: string, processId: string) => request<ReviewView>(`/api/workspaces/${slug}/processes/${processId}/review`),
+  reviewShotUrl: (slug: string, processId: string, file: string) => `/api/workspaces/${slug}/processes/${processId}/review/shots/${encodeURIComponent(file)}`,
+  /** Portal IA 3: todo el trabajo pedido (historias y encargos) con su estado veraz. */
+  work: (slug: string, projectId: string) => request<WorkView>(`/api/workspaces/${slug}/projects/${projectId}/work`),
   archive: (slug: string, projectId: string) => request<ProjectArchive>(`/api/workspaces/${slug}/projects/${projectId}/archive`),
   restoreStory: (slug: string, id: string) => request<BacklogItem>(`/api/workspaces/${slug}/backlog/${id}/restore`, { method: 'POST', body: JSON.stringify({ authorized: true }) }),
   backlog: (slug: string, projectId: string) => request<BacklogItem[]>(`/api/workspaces/${slug}/projects/${projectId}/backlog`),
@@ -375,7 +384,7 @@ export const api = {
   storySetTask: (slug: string, id: string, taskId: string, status: 'open' | 'done') => request<StoryTask>(`/api/workspaces/${slug}/stories/${id}/tasks/${taskId}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
   storyDeleteTask: (slug: string, id: string, taskId: string) => request<{ ok: boolean }>(`/api/workspaces/${slug}/stories/${id}/tasks/${taskId}`, { method: 'DELETE' }),
   /** reopen: reabre una historia cerrada · discardApplied: confirma descartar el worktree y la rama de la iteración aplicada sin integrar. */
-  storyIterate: (slug: string, id: string, note?: string | null, opts: { reopen?: boolean; discardApplied?: boolean } = {}) => request<{ process: Process; context: string; actions: string[] }>(`/api/workspaces/${slug}/stories/${id}/iterate`, { method: 'POST', body: JSON.stringify({ note: note ?? null, ...opts }) }),
+  storyIterate: (slug: string, id: string, note?: string | null, opts: { reopen?: boolean; discardApplied?: boolean } = {}) => request<{ process: Process; context: string; actions: string[]; continued?: boolean }>(`/api/workspaces/${slug}/stories/${id}/iterate`, { method: 'POST', body: JSON.stringify({ note: note ?? null, ...opts }) }),
   // M4 · lecciones validadas
   lessons: (slug: string, projectId?: string | null, status?: string) => { const q = new URLSearchParams(); if (projectId) q.set('projectId', projectId); if (status) q.set('status', status); const qs = q.toString(); return request<Lesson[]>(`/api/workspaces/${slug}/lessons${qs ? `?${qs}` : ''}`); },
   createLesson: (slug: string, input: { projectId: string | null; title: string; lessonText: string; role?: string | null; tags?: string[] }) => request<Lesson>(`/api/workspaces/${slug}/lessons`, { method: 'POST', body: JSON.stringify(input) }),
@@ -524,3 +533,25 @@ export const wizardDraft = (slug: string, need: string, maxUsd: number) =>
 /** Crea el agente (sin IA) y envía también la necesidad y las habilidades (las del perfil y las añadidas a mano). */
 export const createAgentWizard = (slug: string, input: WizardCreateInput) =>
   request<import('@portal-ia/domain').Agent>(`${wsUrl(slug)}/agents/wizard`, { method: 'POST', body: JSON.stringify({ ...input, need: input.need?.trim() ? input.need.trim().slice(0, 4000) : null, skills: input.skills ?? [] }) });
+
+export type WorkSegment = 'needs_you' | 'running' | 'todo' | 'done';
+export interface WorkItem { kind: 'story' | 'assignment'; id: string; code: string; title: string; ask: string; state: { key: string; label: string; meaning: string; tone: '' | 'ok' | 'warn' | 'err'; dot: '' | 'ok' | 'pulse' | 'err'; needsOwner: boolean; open: boolean }; segment: WorkSegment; processId: string | null; conversationId: string | null; dependsOn: string | null; updatedAt: string }
+export interface WorkView { items: WorkItem[]; counts: Record<WorkSegment, number> }
+
+export interface ReviewView {
+  processId: string; code: string | null; title: string; kind: 'story' | 'assignment' | 'other';
+  state: { key: string; label: string; meaning: string; tone: '' | 'ok' | 'warn' | 'err'; needsOwner: boolean; open: boolean };
+  phase: 'ready' | 'not_ready' | 'integrated' | 'closed' | 'discarded'; headline: string;
+  ask: string; criteria: string[]; whatChanged: string | null;
+  files: { path: string; change: 'nuevo' | 'modificado' | 'eliminado'; lines: number }[];
+  checks: { key: string; label: string; status: 'ok' | 'ok_baseline' | 'fail' | 'not_run' | 'unavailable'; detail: string }[];
+  tests: { total: number; passed: number; failed: number } | null;
+  findings: { source: 'qa' | 'gauntlet'; severity: 'alta' | 'media' | 'baja'; text: string; where: string | null; blocking: boolean }[];
+  qa: { verdict: 'approved' | 'outdated' | 'rejected' | 'inconclusive' | 'none'; note: string };
+  gauntlet: { verdict: 'passed' | 'pending' | 'gaps' | 'skipped' | 'waived' | 'off'; note: string };
+  testUpdates: { path: string; reason: string; proven: boolean }[];
+  visual: { required: boolean; ok: boolean; note: string; shots: { route: string; width: number; file: string; overflow: boolean; violations: number }[] };
+  toTest: string[]; limitations: string[];
+  verdict: { ready: boolean; missing: string[] };
+  technical: { branch: string | null; commit: string | null; integratedInto: string | null; integratedCommit: string | null };
+}

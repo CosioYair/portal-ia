@@ -18,29 +18,20 @@ import { Markdown } from '../components/Markdown.tsx';
 import { SummaryCard } from '../components/SummaryCard.tsx';
 import { Disclosure } from '../components/Disclosure.tsx';
 import { officeHome } from '../lib/routes.ts';
+import { procLabel } from '../lib/processView.ts';
+import { ownerProcessState } from '@portal-ia/domain';
 
 /** HU-168 · Traduce el estado de un proceso a un estado del Portal (icono + texto), para no depender solo del color. */
-function procState(status: string): PortalState {
-  switch (status) {
-    case 'running': return 'running';
-    case 'done': return 'done';
-    case 'failed':
-    case 'budget_exceeded': return 'error';
-    case 'cancelled': return 'blocked';
-    case 'pending_authorization': return 'pending';
-    default: return 'pending';
-  }
+function procStateOf(p: Process): PortalState {
+  const tone = procLabel(p); const k = ownerProcessState(p).key;
+  if (k === 'working' || k === 'queued') return 'running';
+  if (k === 'integrated' || k === 'finished') return 'done';
+  if (k === 'cancelled' || k === 'discarded' || k === 'superseded') return 'blocked';
+  return tone.tone === 'err' ? 'error' : 'pending';
 }
 
 /** HU-168 · Texto visible de cada estado; también es el texto accesible del icono, para que lo que se oye y lo que se ve coincidan. */
-const PROC_LABEL: Record<Process['status'], string> = {
-  running: 'en ejecución',
-  done: 'completado',
-  pending_authorization: 'pendiente de autorización',
-  failed: 'con errores',
-  cancelled: 'cancelado',
-  budget_exceeded: 'presupuesto agotado',
-};
+/* Portal IA 3: el texto del estado sale de procLabel (un solo criterio en todo el Portal). */
 
 /** HU-163 · Estado de «Qué necesita tu atención»: solo hay cifra cuando los datos ya han llegado. */
 type Attention = { phase: 'loading' } | { phase: 'error'; message: string } | { phase: 'ready'; count: number };
@@ -219,7 +210,7 @@ export function Dashboard() {
               <div className="card-h"><div className="h3">Procesos</div><Chip xs dot={running.length ? 'pulse' : ''}>{running.length ? `${running.length} en ejecución` : 'ninguno en ejecución'}</Chip></div>
               <div className="card-b">
                 {procs.length === 0 && <Empty icon={Icon.activity()} title="Ningún proceso todavía" hint="Ningún agente ejecuta tareas ni consume créditos sin tu autorización." style={{ padding: '8px 0 12px' }} />}
-                {procs.slice(0, 4).map(p => <button key={p.id} className="arow" onClick={() => navigate(`/procesos/${p.id}`)}><StatusIcon state={procState(p.status)} label={PROC_LABEL[p.status] ?? p.status} showLabel={false} /><span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{p.title}</span><span className="small muted">{PROC_LABEL[p.status] ?? p.status}</span></span><span className="small mono muted">{fmtUsd(p.spentUsd)}</span></button>)}
+                {procs.slice(0, 4).map(p => <button key={p.id} className="arow" onClick={() => navigate(`/procesos/${p.id}`)}><StatusIcon state={procStateOf(p)} label={procLabel(p).label} showLabel={false} /><span style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}><span style={{ fontWeight: 500, fontSize: 13 }}>{p.title}</span><span className="small muted">{procLabel(p).label}</span></span><span className="small mono muted">{fmtUsd(p.spentUsd)}</span></button>)}
                 {procs.length > 0 && <div style={{ padding: '6px 10px 0' }}><Link className="lnk sm13" to="/actividad">Ver actividad</Link></div>}
                 <KV k="Procesos hoy"><span className="mono">{usage?.processes ?? 0}</span></KV>
                 <KV k="Tokens consumidos"><span className="mono">{usage?.tokens ?? 0}</span></KV>

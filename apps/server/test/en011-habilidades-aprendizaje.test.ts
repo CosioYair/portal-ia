@@ -192,7 +192,11 @@ test('el ZIP lleva las habilidades base y la sección «Entorno»; sin permisos,
   for (const [p, c] of Object.entries(bundle)) assert.ok(!c.includes(id), `${p}: id del agente`);
   assert.ok(D.lastExportMark(bundle['CAMBIOS.md']!), 'CAMBIOS.md lleva la marca de exportación');
   // Como agente nuevo: las habilidades base se muestran solo como información (no conceden nada).
-  const pv = previewZipImport(S, zip(bundle), 'paquete.zip');
+  // Portal IA 3: el paquete exportado vuelve a SU agente. Como agente nuevo llega donde ese agente no existe: sin el
+  // marcador de este Portal (asi lo ve otro Portal).
+  assert.equal(previewZipImport(S, zip(bundle), 'paquete.zip').mode, 'existente', 'con su marcador se reconoce como el agente que lo exporto');
+  const { 'portal-export.json': _marker, ...fresh } = bundle;
+  const pv = previewZipImport(S, zip(fresh), 'paquete.zip');
   assert.equal(pv.mode, 'nuevo');
   const b = pv.learned.skillsNew.find(s => s.slug === 'portal-verificar-sandbox')!;
   assert.equal(b.base, true); assert.match(b.note ?? '', /no concede nada/);

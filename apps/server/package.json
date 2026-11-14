@@ -10,6 +10,7 @@
     "edition:update": "tsx scripts/update-edition.ts",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node scripts/run-tests.mjs",
+    "test:bounded": "node scripts/run-tests-bounded.mjs",
     "test:hu207": "node scripts/run-tests.mjs test/hu207-verificacion-visual.test.ts"
   },
   "dependencies": {
