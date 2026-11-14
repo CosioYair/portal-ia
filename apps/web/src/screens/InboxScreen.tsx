@@ -193,9 +193,9 @@ export function InboxScreen() {
           actions={tab === 'pendientes' ? <button className="btn btn-secondary btn-sm" onClick={() => void refresh()} disabled={load.phase === 'loading'}>Actualizar</button> : undefined} />
 
         <div className="seg" role="tablist" aria-label="Decisiones">
-          <button type="button" role="tab" id="tab-pendientes" aria-selected={tab === 'pendientes'} aria-controls="panel-pendientes" tabIndex={tab === 'pendientes' ? 0 : -1} aria-pressed={tab === 'pendientes'} onClick={() => setTab('pendientes')} onKeyDown={onTabKey}>
+          <button type="button" role="tab" id="tab-pendientes" aria-selected={tab === 'pendientes'} aria-controls="panel-pendientes" tabIndex={tab === 'pendientes' ? 0 : -1} onClick={() => setTab('pendientes')} onKeyDown={onTabKey}>
             Pendientes ({pendingTotal})</button>
-          <button type="button" role="tab" id="tab-historial" aria-selected={tab === 'historial'} aria-controls="panel-historial" tabIndex={tab === 'historial' ? 0 : -1} aria-pressed={tab === 'historial'} onClick={() => setTab('historial')} onKeyDown={onTabKey}>
+          <button type="button" role="tab" id="tab-historial" aria-selected={tab === 'historial'} aria-controls="panel-historial" tabIndex={tab === 'historial' ? 0 : -1} onClick={() => setTab('historial')} onKeyDown={onTabKey}>
             Historial</button>
         </div>
 

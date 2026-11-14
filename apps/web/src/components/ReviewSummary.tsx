@@ -13,7 +13,7 @@ const CHECK_ICON: Record<ReviewView['checks'][number]['status'], { mark: string;
   ok: { mark: '✓', tone: 'ok', word: 'Pasa' }, ok_baseline: { mark: '✓', tone: 'ok', word: 'Pasa' }, fail: { mark: '✕', tone: 'err', word: 'Falla' },
   not_run: { mark: '·', tone: 'warn', word: 'Sin comprobar' }, unavailable: { mark: '!', tone: 'warn', word: 'No se pudo comprobar' }
 };
-const QA_LABEL: Record<ReviewView['qa']['verdict'], string> = { approved: 'aprobada', outdated: 'de una versión anterior', rejected: 'pidió cambios', inconclusive: 'no concluyó', none: 'sin revisar' };
+const QA_LABEL: Record<ReviewView['qa']['verdict'], string> = { approved: 'aprobada', outdated: 'de una versión anterior', rejected: 'pidió cambios', inconclusive: 'no concluyó', omitted: 'no se hizo (la omitiste)', none: 'sin revisar' };
 const G_LABEL: Record<ReviewView['gauntlet']['verdict'], string> = { passed: 'superada', pending: 'pendiente', gaps: 'con puntos abiertos', skipped: 'no se hizo', waived: 'continuaste con puntos abiertos', off: '' };
 const SEV_TONE: Record<string, 'err' | 'warn' | ''> = { alta: 'err', media: 'warn', baja: '' };
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;

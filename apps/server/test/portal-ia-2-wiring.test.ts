@@ -19,7 +19,7 @@ const calls = (src: string) => [...src.matchAll(/\b(api|osApi)\.([a-zA-Z]+)\(/g)
 // aunque el panel del Asistente esté cerrado.
 // HU-196: el historial de Decisiones (pestaña «Historial» de /autorizaciones) lee las decisiones resueltas de la empresa
 // (GET /inbox/history, solo lectura, sin IA ni costo).
-const READ_ONLY = new Set(['api.inbox', 'api.inboxAssignments', 'api.inboxHistory', 'osApi.office', 'api.backlog', 'api.usageToday', 'api.systemStatus', 'api.assistantPendingCount',
+const READ_ONLY = new Set(['api.inbox', 'api.inboxAssignments', 'api.inboxHistory', 'osApi.office', 'api.backlog', 'api.usageToday', 'api.systemStatus', 'api.assistantPendingCount',
   // Portal IA 3: api.work lee cuántos trabajos te necesitan (GET, sin efectos) para mostrarlo en el menú.
   'api.work']);
 

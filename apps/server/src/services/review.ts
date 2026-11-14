@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { gauntletReviewed, verificationPassed, verificationsForApplied, type Process } from '@portal-ia/domain';
+import { gauntletReviewed, ownerProcessState, verificationPassed, verificationsForApplied, type Process } from '@portal-ia/domain';
 import { backlogRepo } from '../db/workspace.ts';
 import { assignmentsRepo } from '../db/assignments.ts';
 import { revisionStatus } from './revision.ts';
@@ -37,7 +37,7 @@ export interface ReviewView {
   checks: ReviewCheck[];
   tests: { total: number; passed: number; failed: number } | null;
   findings: ReviewFinding[];
-  qa: { verdict: 'approved' | 'outdated' | 'rejected' | 'inconclusive' | 'none'; note: string };
+  qa: { verdict: 'approved' | 'outdated' | 'rejected' | 'inconclusive' | 'omitted' | 'none'; note: string };
   gauntlet: { verdict: 'passed' | 'pending' | 'gaps' | 'skipped' | 'waived' | 'off'; note: string };
   testUpdates: { path: string; reason: string; proven: boolean }[];
   visual: { required: boolean; ok: boolean; note: string; shots: ReviewShot[] };
@@ -57,7 +57,12 @@ export function reviewOf(slug: string, p: Process): ReviewView {
   const item = p.backlogItemId ? backlogRepo(slug).get(p.backlogItemId) : undefined;
   const asg = p.assignmentId ? assignmentsRepo(slug).get(p.assignmentId) : undefined;
   // El mismo estado que «Trabajo» (historia o encargo): nunca dos nombres para lo mismo.
-  const state = item ? storyState(item, p) : asg ? assignmentState(asg, p) : storyState({ status: 'review' }, p);
+  // Un intento descartado, sustituido o cancelado habla de sí mismo: la historia puede haberse aceptado después con otro
+  // intento, y esta tarjeta enseña los archivos de ESTE.
+  const own = ownerProcessState(p);
+  const ownClosed = own.key === 'discarded' || own.key === 'superseded' || own.key === 'cancelled';
+  const state: WorkItem['state'] = ownClosed ? { key: own.key, label: own.label, meaning: own.meaning, tone: own.tone, dot: own.dot, needsOwner: false, open: false }
+    : item ? storyState(item, p) : asg ? assignmentState(asg, p) : storyState({ status: 'review' }, p);
   const applied = r.applied?.commit ?? null;
   const commands: string[] = r.pipeline?.config?.commands ?? ['typecheck'];
   // Solo las verificaciones de la versión aplicada (por commit; las antiguas sin commit, por su hora).
@@ -78,7 +83,9 @@ export function reviewOf(slug: string, p: Process): ReviewView {
 
   // Revisión de calidad: la aprobación cuenta solo si cubre la versión actual.
   const rev = revisionStatus(p);
-  const qa: ReviewView['qa'] = !rev || rev.qa.state === 'not_run' ? { verdict: 'none', note: 'Aún no se ha revisado.' }
+  const qaOmitted = (!rev || rev.qa.state === 'not_run') && !r.review && r.pipeline?.state === 'verified';
+  const qa: ReviewView['qa'] = qaOmitted ? { verdict: 'omitted', note: 'No se hizo: elegiste ejecutar sin revisión de calidad.' }
+    : !rev || rev.qa.state === 'not_run' ? { verdict: 'none', note: 'Aún no se ha revisado.' }
     : rev.qa.state === 'approved' ? (rev.qa.coversHead ? { verdict: 'approved', note: 'Aprobada sobre la versión actual.' } : { verdict: 'outdated', note: 'Se aprobó una versión anterior; la actual tiene cambios que no se han revisado.' })
     : rev.qa.state === 'rejected' ? { verdict: 'rejected', note: 'Pidió cambios.' }
     : { verdict: 'inconclusive', note: rev.qa.state === 'blocked_environment' ? 'No pudo evaluar: el entorno de verificación no estaba disponible.' : 'No pudo concluir con la evidencia disponible.' };
@@ -114,6 +121,7 @@ export function reviewOf(slug: string, p: Process): ReviewView {
 
   const missing: string[] = [];
   const key = state.key as string;
+  const awaitingIntegration = key === 'needs_decision' && r.pipeline?.pauseKind === 'integration';
   const closed = !state.open; const integrated = !closed && (key === 'integrated_unaccepted' || !!r.merged);
   if (!closed && !integrated) {
     if (!r.applied) missing.push('Aún no hay cambios preparados.');
@@ -124,22 +132,24 @@ export function reviewOf(slug: string, p: Process): ReviewView {
       else if (qa.verdict === 'inconclusive') missing.push(`La revisión de calidad no concluyó. ${qa.note}`);
       else if (qa.verdict === 'none') missing.push('Falta la revisión de calidad.');
       if (gauntlet.verdict === 'gaps') missing.push('La evaluación independiente dejó puntos sin resolver.');
-      else if (gauntlet.verdict === 'pending' && qa.verdict === 'approved') missing.push('Falta la evaluación independiente de la versión actual.');
+      else if (gauntlet.verdict === 'pending' && (qa.verdict === 'approved' || qa.verdict === 'omitted')) missing.push('Falta la evaluación independiente de la versión actual.');
       if (visualRequired && !visualOk) missing.push(visualNote);
     }
     // El estado manda: si el trabajo no figura como «listo para revisar», no está listo aunque no falte nada de lo anterior.
-    if (!missing.length && key !== 'ready_for_review') missing.push(state.meaning);
+    // Excepción: un candidato de integración ya verificado está «en pausa» esperando solo tu decisión de integrar.
+    if (!missing.length && key !== 'ready_for_review' && !awaitingIntegration) missing.push(state.meaning);
   }
   const ready = !closed && !integrated && missing.length === 0;
   const phase: ReviewPhase = closed ? (key === 'accepted' ? 'closed' : 'discarded') : integrated ? 'integrated' : ready ? 'ready' : 'not_ready';
   const headline = phase === 'closed' ? 'Lo diste por bueno y está cerrado.'
     : phase === 'discarded' ? state.meaning
     : phase === 'integrated' ? 'Sus cambios ya están en tu proyecto. Pruébalo y acéptalo para cerrarlo.'
-    : phase === 'ready' ? 'Está hecho y comprobado sobre la versión actual. Revísalo y decide.'
+    : phase === 'ready' ? (awaitingIntegration ? 'Está hecho y comprobado sobre la versión actual, ya combinado con lo último de tu proyecto. Revísalo y decide si se integra.' : 'Está hecho y comprobado sobre la versión actual. Revísalo y decide.')
     : 'Todavía no está listo para aceptarse.';
 
   const limitations = [...(r.plan?.risks ?? []), ...(lastRound?.limitations ?? [])].map(x => clip(String(x), 300)).filter(Boolean);
   if (gauntlet.verdict === 'skipped' || gauntlet.verdict === 'waived') limitations.unshift(`Evaluación independiente: ${gauntlet.note}`);
+  if (qa.verdict === 'omitted') limitations.unshift(`Revisión de calidad: ${qa.note}`);
 
   return {
     processId: p.id, code: item?.storyId ?? asg?.code ?? null, title: item?.title ?? asg?.title ?? p.title, kind: item ? 'story' : asg ? 'assignment' : 'other',

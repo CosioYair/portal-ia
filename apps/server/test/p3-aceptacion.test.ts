@@ -12,7 +12,7 @@ import path from 'node:path';
 process.env.PORTAL_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'portal-ia-p3acc-'));
 process.env.PORTAL_MOCK_PROVIDER = '1';
 process.env.LOG_LEVEL = 'warn';
-const { ACCEPTANCE_STEPS, acceptanceView } = await import('@portal-ia/domain');
+const { ACCEPTANCE_STEPS, acceptanceView, acceptanceStepSignature } = await import('@portal-ia/domain');
 const { buildApp: plain } = await import('../src/app.ts');
 const { buildApp } = await import('./fixtures/owner-app.ts');
 const app = await buildApp();
@@ -21,10 +21,10 @@ const web = (rel: string) => fs.readFileSync(new URL(`../../web/src/${rel}`, imp
 const server = (rel: string) => fs.readFileSync(new URL(`../src/${rel}`, import.meta.url), 'utf8');
 
 test('aceptado solo cuando TODOS los pasos están correctos; un fallo o un pendiente lo impiden', () => {
-  const all = Object.fromEntries(ACCEPTANCE_STEPS.map(s => [s.id, { result: 'ok' as const, comment: '', at: 'x' }]));
+  const all = Object.fromEntries(ACCEPTANCE_STEPS.map(s => [s.id, { result: 'ok' as const, comment: '', at: 'x', sig: acceptanceStepSignature(s) }]));
   assert.equal(acceptanceView(all).summary.accepted, true);
   const first = ACCEPTANCE_STEPS[0]!.id;
-  assert.equal(acceptanceView({ ...all, [first]: { result: 'fail', comment: 'no va', at: 'x' } }).summary.accepted, false);
+  assert.equal(acceptanceView({ ...all, [first]: { result: 'fail', comment: 'no va', at: 'x', sig: acceptanceStepSignature(ACCEPTANCE_STEPS[0]!) } }).summary.accepted, false);
   const { [first]: _gone, ...missing } = all;
   const v = acceptanceView(missing);
   assert.equal(v.summary.accepted, false); assert.equal(v.summary.pending, 1);
@@ -90,4 +90,13 @@ test('(Gauntlet) el recorrido no lleva datos de una instalación concreta ni pro
   const text = JSON.stringify(ACCEPTANCE_STEPS);
   assert.doesNotMatch(text, /\b(HU|EN)-\d{2,}/, 'sin códigos de historias o encargos concretos');
   assert.doesNotMatch(text, /cinco destinos|seis destinos/);
+});
+
+test('(N5) una marca sin huella no vale; la huella cubre también a dónde lleva el paso', async () => {
+  const { acceptanceStepSignature } = await import('@portal-ia/domain');
+  const s = ACCEPTANCE_STEPS[0]!;
+  const legacy = acceptanceView({ [s.id]: { result: 'ok', comment: 'antes', at: 'x' } }).steps.find(x => x.id === s.id)!.mark;
+  assert.equal(legacy.result, null, 'sin huella no consta sobre qué texto se marcó'); assert.equal(legacy.comment, 'antes');
+  assert.notEqual(acceptanceStepSignature(s), acceptanceStepSignature({ ...s, to: '/otra' }));
+  assert.notEqual(acceptanceStepSignature(s), acceptanceStepSignature({ ...s, go: 'Otro enlace' }));
 });

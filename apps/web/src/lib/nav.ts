@@ -82,6 +82,8 @@ export function parentOf(pathname: string): { path: string; label: string } | nu
 export function screenName(path: string): string {
   const p = path.split(/[?#]/)[0];
   if (p.startsWith('/historias/')) return 'la historia';
+  if (p === '/trabajo') return 'Trabajo';
+  if (p === '/aceptacion') return 'el recorrido de aceptación';
   if (p.startsWith('/procesos/')) return 'el proceso';
   if (p.startsWith('/lotes/')) return 'el lote';
   if (p.startsWith('/oficina/agente/')) return 'el agente';

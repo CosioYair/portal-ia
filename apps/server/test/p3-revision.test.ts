@@ -125,3 +125,32 @@ test('las capturas solo salen de la carpeta de evidencia del propio proceso (nom
   for (const bad of ['../x.png', '..\\x.png', 'a/b.png', 'x.txt', '.png', 'C:x.png', '']) assert.equal(reviewShotPath(S, proc(), bad), null, bad);
   assert.equal(reviewShotPath(S, proc(), 'oficina-375.png'), null, 'sin evidencia no hay captura');
 });
+
+test('(N1) candidato de integración verificado: en pausa solo por tu decisión de integrar → listo; con QA de otra versión, no', () => {
+  const pl = { ...proc().result.pipeline, state: 'paused', pauseKind: 'integration', reason: 'Combinado con lo último; falta tu decisión.' };
+  const v = reviewOf(S, proc({ pipeline: pl }));
+  assert.equal(v.verdict.ready, true, v.verdict.missing.join(' | ')); assert.equal(v.phase, 'ready');
+  assert.match(v.headline, /decide si se integra/);
+  const stale = reviewOf(S, proc({ pipeline: { ...pl, lastQaCommit: OLD } }));
+  assert.equal(stale.verdict.ready, false); assert.equal(stale.phase, 'not_ready');
+  const otherPause = reviewOf(S, proc({ pipeline: { ...pl, pauseKind: 'limit' } }));
+  assert.equal(otherPause.verdict.ready, false, 'otra pausa no es estar listo');
+});
+
+test('(N2) QA omitida por el propietario: no figura como aprobada ni como «falta»; queda a la vista como límite', () => {
+  const v = reviewOf(S, proc({ review: undefined, pipeline: { ...proc().result.pipeline, lastQaCommit: null } }));
+  assert.equal(v.qa.verdict, 'omitted'); assert.match(v.qa.note, /elegiste ejecutar sin revisión de calidad/);
+  assert.ok(!v.verdict.missing.some(m => /Falta la revisión de calidad/.test(m)), v.verdict.missing.join(' | '));
+  assert.ok(v.limitations.some(l => /Revisión de calidad: No se hizo/.test(l)));
+  // Sin verificar todavía, una QA que no se ha hecho sigue siendo «falta».
+  const running = reviewOf(S, proc({ review: undefined, pipeline: { ...proc().result.pipeline, state: 'stopped', pauseKind: 'limit', lastQaCommit: null } }));
+  assert.equal(running.qa.verdict, 'none');
+});
+
+test('(N3) un intento sustituido o cancelado habla de sí mismo: ni listo ni con el estado de su historia', () => {
+  const sup = reviewOf(S, proc({}, { supersededBy: 'p-otro' }));
+  assert.equal(sup.state.label, 'Sustituido'); assert.equal(sup.phase, 'discarded'); assert.equal(sup.verdict.ready, false);
+  assert.match(sup.headline, /sustituyó un intento posterior/);
+  const can = reviewOf(S, proc({}, { status: 'cancelled' }));
+  assert.equal(can.state.label, 'Cancelado'); assert.equal(can.verdict.ready, false);
+});
