@@ -85,7 +85,7 @@
   --color-blocked-bg: #FDEDEB;
   --color-blocked-border: #F0AFA7;
   --color-blocked-text: #A3231A;
-  --color-queued: #0369A1;
+  --color-queued: #075985;
   --color-queued-bg: #E6F3FA;
   --color-queued-soft: #E6F3FA;
   --color-queued-border: #9CCDE8;
@@ -134,9 +134,9 @@
   --color-flow-progress: #0F766E;
 
   /* Azulejos de sección: monocromos (tinta índigo); el activo, en el acento índigo */
-  --color-tile-bg: #EDEFF8;
+  --color-tile-bg: #EFF0F4;
   --color-tile-fg: #2B2F66;
-  --color-tile-active-bg: #EEF0FF;
+  --color-tile-active-bg: #E0E4FF;
   --color-tile-active-fg: #3730A3;
 
   /* Oficina: planta lisa (sigue al fondo y la marca), mobiliario pixelado (contenido de la ilustración) */
