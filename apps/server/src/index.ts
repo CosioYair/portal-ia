@@ -29,11 +29,9 @@ try { const { recoverInterruptedOperations } = await import('./services/assistan
 // Portal IA 4 · Un trabajo ya integrado no figura como «detenido» por una iteración posterior que no tenía nada que
 // cambiar (EN-029): se corrige al arrancar y cada vez que termina un proceso. Sin IA; no acepta ni cierra nada.
 try {
-  const { reconcileDelivered } = await import('./services/deliveredReconcile.ts');
+  const { installDeliveredReconcile } = await import('./services/deliveredReconcile.ts');
   const { workspacesRepo } = await import('./db/platform.ts');
-  const { onProcessFinish } = await import('./db/workspace.ts');
-  for (const ws of workspacesRepo.list()) { try { const r = reconcileDelivered(ws.slug); if (r.length) app.log.warn({ workspace: ws.slug, restored: r }, 'trabajos ya integrados devueltos a su entrega (la iteración posterior no tenía nada que cambiar)'); } catch (e) { app.log.warn({ workspace: ws.slug, err: (e as Error).message }, 'conciliación de entregas integradas omitida en este espacio'); } }
-  onProcessFinish((slug, processId) => { setImmediate(() => { try { const r = reconcileDelivered(slug, { processId }); if (r.length) app.log.info({ workspace: slug, restored: r }, 'iteración sin código tras una integración: vuelve a ser vigente la entrega integrada'); } catch { /* se corregirá al arrancar */ } }); });
+  installDeliveredReconcile(workspacesRepo.list().map(w => w.slug), (o, m) => app.log.warn(o, m));
 } catch (e) { app.log.warn({ err: (e as Error).message }, 'conciliación de entregas integradas omitida'); }
 // Portal IA 4 · Estudio: exportaciones que un cierre dejó a medias, sus contenedores y sus carpetas temporales.
 void (async () => { try { const { recoverStudioAtStartup } = await import('./services/studio.ts'); const { workspacesRepo } = await import('./db/platform.ts'); const r = await recoverStudioAtStartup(workspacesRepo.list().map(w => w.slug)); if (r.renders || r.containers) app.log.warn(r, 'Estudio: exportaciones interrumpidas por el reinicio marcadas como no terminadas'); const { recoverLabAtStartup } = await import('./services/artifactLab.ts'); const n = await recoverLabAtStartup(workspacesRepo.list().map(w => w.slug)); if (n) app.log.warn({ interrupted: n }, 'análisis de artefactos interrumpidos por el reinicio'); } catch (e) { app.log.warn({ err: (e as Error).message }, 'Estudio: recuperación omitida'); } })();

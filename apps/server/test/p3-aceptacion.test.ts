@@ -56,7 +56,9 @@ test('cada paso lleva a una pantalla que existe y nombra controles que existen e
   const appTsx = web('App.tsx');
   const sources = [
     web('screens/Work.tsx'), web('components/PortablePackage.tsx'), web('components/ReviewSummary.tsx'), web('components/IterationComposer.tsx'), web('components/ExternalAgent.tsx'),
-    web('components/AgentPanel.tsx'), server('services/storyFlow.ts'), server('services/work.ts'), fs.readFileSync(new URL('../../../packages/domain/src/owner-state.ts', import.meta.url), 'utf8')
+    web('components/AgentPanel.tsx'), server('services/storyFlow.ts'), server('services/work.ts'),
+    // Portal IA 4: las pantallas nuevas que nombra el recorrido.
+    web('screens/Home.tsx'), web('screens/Studio.tsx'), web('screens/StudioEditor.tsx'), web('screens/Lab.tsx'), web('screens/Office.tsx'), web('screens/Settings.tsx'), web('components/LessonsPanel.tsx'), fs.readFileSync(new URL('../../../packages/domain/src/owner-state.ts', import.meta.url), 'utf8')
   ].join('\n');
   for (const s of ACCEPTANCE_STEPS) {
     const route = s.to.split('?')[0]!;

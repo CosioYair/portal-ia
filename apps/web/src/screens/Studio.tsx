@@ -38,12 +38,12 @@ export function Studio() {
   return <Shell crumb="Estudio">
     <div className="page st-home">
       <PageHeader icon={Icon.layers()} tone="work" title="Estudio" description="Monta vídeos con tus clips, imágenes, música y texto, y expórtalos en MP4. Todo se procesa en esta máquina."
-        actions={<button className="btn btn-primary" onClick={() => { setName(''); setCreating(true); }}>{Icon.plus()} Nuevo proyecto</button>} />
+        actions={<button className="btn btn-primary" onClick={() => { setName(''); setCreating(true); }}>{Icon.plus()} Nuevo vídeo</button>} />
       {err && <Notice kind="err">{err}</Notice>}
       {engine && engine.state !== 'ready' && <Notice kind="warn"><strong>El motor de vídeo no está listo.</strong> {engine.detail} Puedes preparar proyectos, pero no importar medios ni exportar hasta arreglarlo. <span className="small">{engine.state === 'no_docker' ? engine.hint : <>Hay que construir una vez la imagen de vídeo (ver <em>Ajustes › Sistema</em>): <code>{engine.hint}</code></>}</span> <button className="btn btn-secondary btn-sm" onClick={() => studioApi.status(slug, true).then(setInfo)}>Comprobar de nuevo</button></Notice>}
 
       {!list ? <Spinner /> : list.length === 0
-        ? <EmptyState title="Aún no tienes ningún vídeo" action={<button className="btn btn-primary" onClick={() => setCreating(true)}>{Icon.plus()} Crear el primero</button>}>Crea un proyecto, añade tus medios y móntalos en la línea de tiempo. Se guarda solo.</EmptyState>
+        ? <EmptyState title="Aún no tienes ningún vídeo" action={<button className="btn btn-primary" onClick={() => setCreating(true)}>{Icon.plus()} Crear el primero</button>}>Crea un vídeo, añade tus medios y móntalos en la línea de tiempo. Se guarda solo.</EmptyState>
         : <ul className="st-plain st-projects">{list.map(p => <li key={p.id} className="st-project">
           <Link className="st-project-main" to={`/estudio/${p.id}`}>
             <span className={`st-project-shape st-shape-${p.format}`} aria-hidden="true" />
@@ -65,7 +65,7 @@ export function Studio() {
       </Disclosure>}
     </div>
 
-    {creating && <Modal title="Nuevo proyecto de vídeo" onClose={() => setCreating(false)} footer={<><button className="btn btn-ghost" onClick={() => setCreating(false)}>Cancelar</button><button className="btn btn-primary" onClick={create} disabled={busy || !name.trim()}>{busy ? 'Creando…' : 'Crear y abrir'}</button></>}>
+    {creating && <Modal title="Nuevo vídeo" onClose={() => setCreating(false)} footer={<><button className="btn btn-ghost" onClick={() => setCreating(false)}>Cancelar</button><button className="btn btn-primary" onClick={create} disabled={busy || !name.trim()}>{busy ? 'Creando…' : 'Crear y abrir'}</button></>}>
       <div><label className="label" htmlFor="st-new-name">Nombre</label><input id="st-new-name" className="input" style={{ width: '100%' }} value={name} maxLength={120} onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') void create(); }} placeholder="Por ejemplo: Presentación del producto" /></div>
       <fieldset className="st-fs"><legend className="label">Formato</legend>
         <div className="st-formats">{(Object.keys(STUDIO_FORMATS) as StudioFormat[]).map(f => <label key={f} className={`st-formatopt${format === f ? ' is-on' : ''}`}><input type="radio" name="st-format" className="sr-only" checked={format === f} onChange={() => setFormat(f)} /><span className={`st-project-shape st-shape-${f}`} aria-hidden="true" /><span><strong>{STUDIO_FORMATS[f].label}</strong><br /><span className="small muted">{STUDIO_FORMATS[f].ratio}{f === 'portrait' ? ' · móvil, reels' : f === 'square' ? ' · redes' : ' · pantalla'}</span></span></label>)}</div>

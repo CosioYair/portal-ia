@@ -21,6 +21,8 @@ import { changed } from './live.ts';
  */
 export const MEDIA_IMAGE = process.env.PORTAL_MEDIA_IMAGE || 'portal-ia-media:1';
 const BUILD_HINT = `docker build -t portal-ia-media:1 -f docker/media.Dockerfile docker`;
+/** Identificador de ESTA instancia del Portal (por su carpeta de datos): etiqueta contenedores y carpetas temporales. */
+export const INSTANCE = crypto.createHash('sha1').update(path.resolve(config.dataDir)).digest('hex').slice(0, 10);
 const err = (statusCode: number, message: string, code?: string) => Object.assign(new Error(message), { statusCode, code });
 const ID = /^[A-Za-z0-9-]{1,64}$/;
 const safeId = (id: string) => { if (!ID.test(id)) throw err(400, 'Identificador no válido.'); return id; };
@@ -67,7 +69,7 @@ async function requireEngine(): Promise<void> {
   const e = await mediaEngine();
   if (e.state !== 'ready') throw err(503, `${e.detail} ${e.hint}`, `media_${e.state}`);
 }
-const baseArgs = (name: string, memory: string, cpus: string) => ['run', '--rm', '--init', '--pull', 'never', '--name', name, '--label', 'portal-ia.media=1',
+const baseArgs = (name: string, memory: string, cpus: string) => ['run', '--rm', '--init', '--pull', 'never', '--name', name, '--label', 'portal-ia.media=1', '--label', `portal-ia.instance=${INSTANCE}`,
   '--network', 'none', '--memory', memory, '--memory-swap', memory, '--cpus', cpus, '--pids-limit', '256', '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--user', '1000:1000',
   '--read-only', '--mount', dockerMountArg({ type: 'tmpfs', target: '/tmp', 'tmpfs-mode': '1777', 'tmpfs-size': '268435456' })];
 const bind = (source: string, target: string, readonly: boolean) => ['--mount', dockerMountArg({ type: 'bind', source, target, ...(readonly ? { readonly: true as const } : {}) })];
@@ -75,7 +77,7 @@ const bind = (source: string, target: string, readonly: boolean) => ['--mount', 
 /** Enlace duro (o copia, si está en otro disco) del archivo dentro de una carpeta temporal de ruta corta. */
 function shortLink(file: string): { dir: string; cleanup: () => void } {
   if (path.dirname(file).length < 80 && path.basename(file) === 'media') return { dir: path.dirname(file), cleanup: () => undefined };
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pia-pr-')); const dst = path.join(dir, 'media');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `pia-pr-${INSTANCE}-`)); const dst = path.join(dir, 'media');
   try { fs.linkSync(file, dst); } catch { fs.copyFileSync(file, dst); }
   return { dir, cleanup: () => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* temporal */ } } };
 }
@@ -245,7 +247,7 @@ async function runRender(slug: string, renderId: string, project: StudioProject)
   const container = `pia-render-${renderId.slice(0, 12)}`;
   const state = { container, cancelled: false }; active.set(key(slug, renderId), state);
   try {
-    work = fs.mkdtempSync(path.join(os.tmpdir(), 'pia-st-')); const jobDir = path.join(work, 'in'); const tmpOut = path.join(work, 'out'); fs.mkdirSync(tmpOut);
+    work = fs.mkdtempSync(path.join(os.tmpdir(), `pia-st-${INSTANCE}-`)); const jobDir = path.join(work, 'in'); const tmpOut = path.join(work, 'out'); fs.mkdirSync(tmpOut);
     const outDir = studioDir(slug, project.id, 'exports');
     const assets = assetMap(slug, project.id);
     const plan = buildRenderPlan(project, assets, { height: r.height, quality: r.quality, outFile: r.fileName });
@@ -331,13 +333,18 @@ function pruneExports(slug: string, projectId: string): void {
 
 /** Papelera: proyectos quitados de la lista, con lo que ocupan sus archivos. */
 function dirBytes(d: string): number { let n = 0; try { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); n += e.isDirectory() ? dirBytes(p) : fs.statSync(p).size; } } catch { /* no existe */ } return n; }
-export function studioTrash(slug: string): { projects: number; bytes: number } {
-  const ids = studioRepo(slug).trashedIds();
-  return { projects: ids.length, bytes: ids.reduce((n, id) => n + dirBytes(path.join(config.dataDir, 'studio', slug, id)), 0) };
+const trashCache = new Map<string, { at: number; key: string; value: { projects: number; bytes: number } }>();
+export function studioTrash(slug: string, fresh = false): { projects: number; bytes: number } {
+  const ids = studioRepo(slug).trashedIds(); const key = ids.join(',');
+  const hit = trashCache.get(slug);
+  if (!fresh && hit && hit.key === key && Date.now() - hit.at < 60_000) return hit.value;
+  const value = { projects: ids.length, bytes: ids.reduce((n, id) => n + dirBytes(path.join(config.dataDir, 'studio', slug, id)), 0) };
+  trashCache.set(slug, { at: Date.now(), key, value });
+  return value;
 }
 /** Vaciar la papelera: borra del disco los proyectos quitados (medios, exportaciones e historial). No se puede deshacer. */
 export function purgeStudioTrash(slug: string): { projects: number; bytes: number } {
-  const before = studioTrash(slug); const repo = studioRepo(slug);
+  const before = studioTrash(slug, true); const repo = studioRepo(slug);
   for (const id of repo.trashedIds()) {
     if (!ID.test(id)) continue;
     try { fs.rmSync(path.join(config.dataDir, 'studio', slug, id), { recursive: true, force: true }); } catch { /* se intentará la próxima vez */ }
@@ -353,10 +360,10 @@ export function purgeStudioTrash(slug: string): { projects: number; bytes: numbe
 export async function recoverStudioAtStartup(slugs: string[]): Promise<{ renders: number; containers: number; temp: number }> {
   let renders = 0, containers = 0, temp = 0;
   for (const s of slugs) { try { renders += recoverStudioRenders(s); } catch { /* espacio sin Estudio */ } }
-  const ps = await run('docker', ['ps', '-aq', '--filter', 'label=portal-ia.media=1'], 8000);
+  const ps = await run('docker', ['ps', '-aq', '--filter', 'label=portal-ia.media=1', '--filter', `label=portal-ia.instance=${INSTANCE}`], 8000);
   const ids = ps.code === 0 ? ps.stdout.split(/\s+/).filter(Boolean) : [];
   if (ids.length) { await run('docker', ['rm', '-f', ...ids], 20_000); containers = ids.length; }
-  try { for (const e of fs.readdirSync(os.tmpdir(), { withFileTypes: true })) if (e.isDirectory() && /^pia-(st|pr)-/.test(e.name)) { try { fs.rmSync(path.join(os.tmpdir(), e.name), { recursive: true, force: true }); temp++; } catch { /* en uso */ } } } catch { /* sin acceso */ }
+  try { for (const e of fs.readdirSync(os.tmpdir(), { withFileTypes: true })) if (e.isDirectory() && (e.name.startsWith(`pia-st-${INSTANCE}-`) || e.name.startsWith(`pia-pr-${INSTANCE}-`))) { try { fs.rmSync(path.join(os.tmpdir(), e.name), { recursive: true, force: true }); temp++; } catch { /* en uso */ } } } catch { /* sin acceso */ }
   return { renders, containers, temp };
 }
 

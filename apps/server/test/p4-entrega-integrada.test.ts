@@ -48,7 +48,9 @@ test('una pantalla se distingue de una respuesta de la API: solo la pantalla se 
 });
 
 const base = (result: any, extra: any = {}): any => ({ id: 'p-nuevo', kind: 'story_execution', status: 'done', projectId: 'p1', backlogItemId: null, assignmentId: 'a1', estimatedUsd: 0, steps: [], createdAt: '2026-11-14T18:20:11.713Z', result, ...extra });
-const noCode = () => base({ changes: [], verifications: [], applied: null, review: null, planNoCode: { summary: SUMMARY, at: '2026-11-14T18:20:46.366Z', basis: 'x' },
+// La nota REAL con la que el Portal abrió la iteración de EN-029 (no la escribió el propietario).
+const NOTA_PORTAL = 'Nota del propietario (cambios pedidos): La comprobación en ejecución falló\n- http /oficina: HTTP 200; la respuesta no contiene lo esperado.';
+const noCode = (iterationContext: string | null = NOTA_PORTAL) => base({ changes: [], verifications: [], applied: null, review: null, iterationContext, planNoCode: { summary: SUMMARY, at: '2026-11-14T18:20:46.366Z', basis: 'x' },
   pipeline: { state: 'stopped', pauseKind: 'plan', reason: `El Coordinador concluyó que esta historia no cambia ningún archivo del repositorio: «${SUMMARY}».`, config: { ...DEFAULT_PIPELINE }, failures: [], events: [], corrections: 0 } });
 const DELIVERED = { processId: 'p-integrado', commit: 'd189bb6', mergedAt: '2026-11-14T18:12:57.665Z' };
 
@@ -213,4 +215,69 @@ test('un lote con trabajo que sí avanza solo sigue bloqueando (no se pisan dos 
   assert.equal(blocksNewBatch('portal-ia', batch('paused', [bi('HU-1', 'queued')])), true, 'en pausa pero con cola: al reanudarlo trabajaría');
   assert.equal(blocksNewBatch('portal-ia', batch('paused', [bi('HU-1', 'running'), bi('HU-2', 'waiting_dependency', { dependsOn: 'HU-1' })])), true);
   assert.equal(canLaunchWork('portal-ia', batch('needs_decision', [bi('HU-1', 'waiting_dependency', { dependsOn: 'HU-2' }), bi('HU-2', 'waiting_dependency', { dependsOn: 'HU-1' })])), false, 'una dependencia circular no se cuenta como avance');
+});
+
+// ---- Ronda 2 del Gauntlet: la vuelta automática es estrecha y no pisa decisiones del propietario ----
+const { autoRestorable, installDeliveredReconcile } = await import('../src/services/deliveredReconcile.ts');
+const { backlogRepo } = await import('../src/db/workspace.ts');
+
+function family(note: string | null, o: { analysis?: boolean } = {}): { en: any; a: any; b: any } {
+  const S = INTERNAL_WORKSPACE.slug; const project = projectsRepo(S).list()[0]; const procs = processesRepo(S); const asg = assignmentsRepo(S);
+  const en = asg.create({ projectId: project.id, owner: 'owner', request: 'x', title: 'Caso', objective: '', criteria: ['c'], outOfScope: [], size: 'S', status: 'needs_owner', reason: null, conversationId: null, messageId: null, processId: null, processIds: [] } as any);
+  const a = procs.create({ projectId: project.id, kind: 'story_execution', title: 'integrada', estimatedUsd: 0, assignmentId: en.id, steps: [] });
+  procs.setResult(a.id, merged([rcResult('/api/health', 'ok')]).result); procs.finish(a.id, 'done');
+  const b = procs.create({ projectId: project.id, kind: 'story_execution', title: 'sin código', estimatedUsd: 0, assignmentId: en.id, steps: [] });
+  const r = noCode(note).result; if (o.analysis) r.planNoCode.analysisProcessId = 'proc-analisis';
+  procs.setResult(b.id, r); procs.finish(b.id, 'done'); asg.update(en.id, x => { x.processId = b.id; });
+  return { en, a, b };
+}
+
+test('si el cambio lo pidió el propietario con sus palabras, el Portal NO deshace su iteración por su cuenta', () => {
+  const S = INTERNAL_WORKSPACE.slug;
+  const { en, b } = family('Nota del propietario (cambios pedidos): quiero el botón principal más grande y en verde');
+  assert.equal(autoRestorable(S, processesRepo(S).get(b.id)!), false);
+  assert.deepEqual(reconcileDelivered(S).filter(x => x.from === b.id), []);
+  assert.equal(assignmentsRepo(S).get(en.id)!.processId, b.id, 'sigue siendo la vigente: decide él');
+  assert.equal(processesRepo(S).get(b.id)!.supersededBy, null);
+});
+
+test('si ya la convirtió en un encargo de análisis, tampoco se toca', () => {
+  const S = INTERNAL_WORKSPACE.slug; const { b } = family(NOTA_PORTAL, { analysis: true });
+  assert.deepEqual(reconcileDelivered(S).filter(x => x.from === b.id), []);
+});
+
+test('se hace UNA vez: si el propietario recupera la iteración, el Portal no vuelve a superarla', () => {
+  const S = INTERNAL_WORKSPACE.slug; const procs = processesRepo(S); const { a, b } = family(NOTA_PORTAL);
+  assert.equal(reconcileDelivered(S).filter(x => x.from === b.id).length, 1);
+  assert.ok((procs.get(b.id)!.result as any).deliveredRestore, 'queda constancia de quién y cuándo');
+  procs.restoreSuperseded(b.id);                         // el propietario la recupera desde el historial
+  assert.equal(procs.get(b.id)!.supersededBy, null);
+  assert.deepEqual(reconcileDelivered(S).filter(x => x.from === b.id), [], 'se respeta su decisión');
+  assert.equal(procs.get(a.id)!.result!.merged!.commit, 'd189bb6', 'la entrega integrada no se altera');
+});
+
+test('una HISTORIA vuelve a «en revisión» con su entrega integrada (no queda «pendiente», que la haría repetirse)', () => {
+  const S = INTERNAL_WORKSPACE.slug; const project = projectsRepo(S).list()[0]; const procs = processesRepo(S); const bl = backlogRepo(S);
+  const item = bl.add({ projectId: project.id, storyId: 'HU-900', title: 'Historia de prueba', ownerKey: null, dependsOn: null, estimate: 'S', criterion: 'c', description: '', sourceProcessId: null } as any);
+  const a = procs.create({ projectId: project.id, kind: 'story_execution', title: 'integrada', estimatedUsd: 0, backlogItemId: item.id, steps: [] });
+  procs.setResult(a.id, merged([rcResult('/api/health', 'ok')]).result); procs.finish(a.id, 'done');
+  const b = procs.create({ projectId: project.id, kind: 'story_execution', title: 'sin código', estimatedUsd: 0, backlogItemId: item.id, steps: [] });
+  procs.setResult(b.id, noCode().result); procs.finish(b.id, 'done'); bl.setStatus(item.id, 'pending', b.id);
+  assert.equal(reconcileDelivered(S).filter(x => x.from === b.id).length, 1);
+  const after = bl.get(item.id)!;
+  assert.deepEqual([after.status, after.lastProcessId], ['review', a.id]);
+});
+
+test('al terminar un proceso la corrección se hace sola (el enganche real, no solo la función)', async () => {
+  const S = INTERNAL_WORKSPACE.slug; const procs = processesRepo(S); const project = projectsRepo(S).list()[0]; const asg = assignmentsRepo(S);
+  installDeliveredReconcile([S]);
+  const en = asg.create({ projectId: project.id, owner: 'owner', request: 'x', title: 'Enganche', objective: '', criteria: ['c'], outOfScope: [], size: 'S', status: 'running', reason: null, conversationId: null, messageId: null, processId: null, processIds: [] } as any);
+  const a = procs.create({ projectId: project.id, kind: 'story_execution', title: 'integrada', estimatedUsd: 0, assignmentId: en.id, steps: [] });
+  procs.setResult(a.id, merged([rcResult('/api/health', 'ok')]).result); procs.finish(a.id, 'done');
+  const b = procs.create({ projectId: project.id, kind: 'story_execution', title: 'sin código', estimatedUsd: 0, assignmentId: en.id, steps: [] });
+  asg.update(en.id, x => { x.processId = b.id; });
+  procs.setResult(b.id, noCode().result);
+  procs.finish(b.id, 'done');                              // aquí salta el enganche
+  await new Promise(r => setTimeout(r, 60));
+  assert.equal(procs.get(b.id)!.supersededBy, a.id); assert.equal(asg.get(en.id)!.processId, a.id);
 });

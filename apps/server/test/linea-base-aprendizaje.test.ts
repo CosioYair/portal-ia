@@ -169,8 +169,8 @@ test('línea base: una sola ejecución por commit (también simultáneas), en un
 // ---------- Pipeline real (proveedor simulado) ----------
 test('HU-177 · lo que ya fallaba en main no se le cobra a la historia: sin correcciones, QA lo ve «frente a la base», se puede integrar; no deja lección', async () => {
   // Una lección validada que el implementador llevará inyectada: esta tarea posterior la DEMUESTRA si termina verificada.
-  // Portal IA 4: la lección dice a qué zona se refiere (src/); la tarea posterior entrega src/nuevo.mjs, así que la pone a prueba.
-  const lesson = createManualLesson(S, { projectId: project.id, title: 'Entregar cada archivo con su prueba', lessonText: 'MARCA_LECCION_PROBADA: entrega cada archivo nuevo con su prueba.', role: 'implementer', file: 'src/index.mjs' });
+  // Portal IA 4: la lección dice a qué archivo se refiere; la tarea posterior entrega ese mismo archivo, así que la pone a prueba.
+  const lesson = createManualLesson(S, { projectId: project.id, title: 'Entregar cada archivo con su prueba', lessonText: 'MARCA_LECCION_PROBADA: entrega cada archivo nuevo con su prueba.', role: 'implementer', file: 'src/nuevo.mjs' });
   setRules(plan([{ path: 'src/nuevo.mjs', kind: 'code' }], ['Existe src/nuevo.mjs']), [{ match: R.dev, text: resp('Entrega src/nuevo.mjs.', F('src/nuevo.mjs', 'export const nuevo = true;\n')) }]);
   const id = newRun('Nuevo módulo', 'Existe src/nuevo.mjs que exporta nuevo.');
   const p = await run(id); const pl = p.result!.pipeline!;

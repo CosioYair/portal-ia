@@ -22,6 +22,7 @@
 .home-grid { display: grid; gap: var(--space-4); grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); align-items: start; }
 .home-card { display: flex; flex-direction: column; gap: var(--space-3); align-items: flex-start; padding: var(--space-4); background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-card); box-shadow: var(--shadow-card); min-width: 0; }
 .home-card .home-sec-h { width: 100%; }
+.home-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
 .home-empty { margin: 0; font-size: 14px; line-height: 1.5; color: var(--color-text-muted); }
 .home-mini { list-style: none; margin: 0; padding: 0; width: 100%; display: flex; flex-direction: column; }
 .home-mini li { display: flex; gap: var(--space-3); align-items: baseline; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--color-divider); }

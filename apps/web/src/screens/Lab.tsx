@@ -38,8 +38,8 @@ function Finding({ f, labels, fixes = {} }: { f: LabFinding; labels: Record<stri
     <div className="lab-finding-top"><strong>{labels[f.id] ?? f.id}</strong>
       {f.status === 'exposed' ? <Chip tone={sev?.tone ?? 'warn'} xs>Confirmado{sev ? ` · ${sev.label}` : ''}</Chip> : f.status === 'unknown' ? <Chip xs>No se pudo determinar</Chip> : f.status === 'not_observed' || f.status === 'ok' ? <Chip tone="ok" xs>Sin problema</Chip> : <Chip xs>No aplica</Chip>}
     </div>
-    {f.observation && <p className="lab-obs">{f.observation}</p>}
-    {f.locations.length > 0 && f.status === 'exposed' && <p className="small muted lab-loc">Dónde: {f.locations.join(' · ')}</p>}
+    {f.locations.length > 0 && f.status === 'exposed' && <p className="lab-loc"><strong>Dónde:</strong> {f.locations.join(' · ')}</p>}
+    {f.observation && <details className="lab-raw"><summary>Detalle técnico</summary><p className="lab-obs">{f.observation}</p></details>}
     {f.remediation && f.status !== 'not_observed' && f.status !== 'not_applicable' && <p className="lab-fix"><strong>Cómo corregirlo:</strong> {fixes[f.id] ?? f.remediation}</p>}
   </li>;
 }
@@ -66,9 +66,9 @@ export function Lab() {
   const confirmed = open?.findings.filter(f => f.status === 'exposed') ?? []; const unknown = open?.findings.filter(f => f.status === 'unknown') ?? []; const rest = open?.findings.filter(f => f.status !== 'exposed' && f.status !== 'unknown') ?? [];
   const others = (reports ?? []).filter(r => open && r.id !== open.id && r.status === 'done' && r.analysis === open.analysis && r.createdAt < open.createdAt);
 
-  return <Shell crumb="Análisis de artefactos">
+  return <Shell crumb="Analizar un programa">
     <div className="page lab">
-      <PageHeader icon={Icon.shield()} tone="settings" title="Análisis de artefactos" description="Averigua qué contiene y qué deja ver una aplicación, un paquete o un ejecutable, sin ejecutarlo. Solo para software tuyo o que tengas permiso para examinar." />
+      <PageHeader icon={Icon.shield()} tone="settings" title="Analizar un programa" description="Averigua qué contiene y qué deja ver una aplicación antes de publicarla o de usarla, sin ejecutarla. Solo para programas tuyos o que tengas permiso para examinar." />
       {err && <Notice kind="err">{err} <button className="lnk" onClick={() => setErr(null)}>Entendido</button></Notice>}
       {engine && engine.state !== 'ready' && <Notice kind="warn"><strong>La herramienta de análisis no está lista.</strong> {engine.detail} <span className="small">{engine.state === 'missing_image' ? <>Hay que construir una vez su imagen aislada: <code>{engine.hint}</code></> : engine.hint}</span></Notice>}
 
@@ -77,9 +77,9 @@ export function Lab() {
         <fieldset className="lab-fs"><legend className="label">¿Qué quieres saber?</legend>
           <div className="lab-options">{(st?.analyses ?? []).map(a => <label key={a.id} className={`lab-option${analysis === a.id ? ' is-on' : ''}`}><input type="radio" name="lab-analysis" className="sr-only" checked={analysis === a.id} onChange={() => setAnalysis(a.id)} /><strong>{a.label}</strong><span className="small muted">{a.question}</span></label>)}</div>
         </fieldset>
-        <div><label className="label" htmlFor="lab-file">Artefacto</label>
+        <div><label className="label" htmlFor="lab-file">Archivo que quieres analizar</label>
           <input id="lab-file" className="lab-file" type="file" onChange={e => setFile(e.target.files?.[0] ?? null)} />
-          <p className="small muted" style={{ margin: '6px 0 0' }}>{def?.accepts}. Máximo {Math.round((st?.limits.maxUploadBytes ?? 0) / 1048576)} MB. No se ejecuta: solo se lee, en un contenedor sin red.</p></div>
+          <p className="small muted" style={{ margin: '6px 0 0' }}>{def?.accepts}. Máximo {Math.round((st?.limits.maxUploadBytes ?? 0) / 1048576)} MB. No se ejecuta: solo se lee, en un espacio aislado y sin conexión a internet.</p></div>
         <div><label className="label" htmlFor="lab-auth">¿Por qué puedes examinarlo?</label>
           <textarea id="lab-auth" className="input lab-textarea" value={statement} maxLength={1000} onChange={e => setStatement(e.target.value)} placeholder="Por ejemplo: es la versión publicada de mi propia aplicación. / Mi cliente me encargó auditarlo y tengo su permiso por escrito." />
           <p className="small muted" style={{ margin: '6px 0 0' }}>Queda guardado con el informe. Muchos programas prohíben en su licencia que se les haga ingeniería inversa: analiza solo lo que es tuyo o lo que su dueño te autorizó.</p></div>
@@ -89,7 +89,7 @@ export function Lab() {
 
       {open && <section className="lab-card" aria-labelledby="lab-report" aria-live="polite">
         <div className="lab-report-head"><h2 id="lab-report" className="lab-h2">Informe · {open.target.name}</h2><button className="btn btn-ghost btn-sm" onClick={() => { setOpen(null); setCmp(null); }}>Cerrar el informe</button></div>
-        <p className="small muted" style={{ margin: 0 }}>{st?.analyses.find(a => a.id === open.analysis)?.label} · {open.target.kind === 'folder' ? `carpeta con ${open.target.files} archivos` : 'un archivo'} · huella {open.target.sha256.slice(0, 12)}… · {new Date(open.createdAt).toLocaleString()} · REA {open.tool.version}, sin red</p>
+        <p className="small muted" style={{ margin: 0 }}>{st?.analyses.find(a => a.id === open.analysis)?.label} · {open.target.kind === 'folder' ? `carpeta con ${open.target.files} archivos` : 'un archivo'} · {new Date(open.createdAt).toLocaleString()}</p>
         {open.status === 'running' && <p><Spinner label="Analizando… (hasta 5 minutos)" /></p>}
         {open.status === 'failed' && <Notice kind="err">{open.error}</Notice>}
         {open.status === 'done' && <>
@@ -102,14 +102,14 @@ export function Lab() {
           {confirmed.length === 0 && <Notice kind="ok">El análisis no encontró ningún problema confirmado. Eso no demuestra que la aplicación sea segura: solo dice lo que este análisis estático pudo ver.</Notice>}
           {unknown.length > 0 && <Disclosure title={`No se pudo determinar (${unknown.length})`} hint="Sospechas sin confirmar: no son hallazgos"><ul className="lab-list">{unknown.map(f => <Finding key={f.id} f={f} labels={labels} />)}</ul></Disclosure>}
           {rest.length > 0 && <Disclosure title={`Sin problema o no aplica (${rest.length})`}><ul className="lab-list">{rest.map(f => <Finding key={f.id} f={f} labels={labels} />)}</ul></Disclosure>}
-          {open.limitations.length > 0 && <p className="small muted">Límites que declara la herramienta: {open.limitations.join(' ')}</p>}
+          <p className="small muted">Este informe dice lo que se pudo ver leyendo el archivo. No demuestra que el programa sea seguro.</p>
           <p className="small muted" style={{ margin: 0 }}>Autorización declarada: «{open.authorization.statement}»</p>
           {others.length > 0 && <div className="lab-compare"><label className="label" htmlFor="lab-cmp">¿Corregiste algo? Compara con un informe anterior</label>
             <select id="lab-cmp" className="input" value={cmpWith} onChange={e => void compare(e.target.value)}><option value="">Elegir el informe anterior…</option>{others.map(r => <option key={r.id} value={r.id}>{r.target.name} · {new Date(r.createdAt).toLocaleString()} · {r.summary.confirmed} confirmados</option>)}</select>
             {cmp && <div className="lab-cmp-result">
               {cmp.sameTarget && <Notice kind="warn">Es exactamente el mismo archivo que el anterior (misma huella): no hay ninguna corrección que comprobar.</Notice>}
               <p className="lab-cmp-line"><Chip tone="ok" xs>Corregido</Chip> {cmp.fixed.length ? cmp.fixed.map(i => labels[i] ?? i).join(' · ') : 'nada'}</p>
-              <p className="lab-cmp-line"><Chip tone="err" xs>Sigue igual</Chip> {cmp.stillExposed.length ? cmp.stillExposed.map(i => labels[i] ?? i).join(' · ') : 'nada'}</p>
+              <p className="lab-cmp-line"><Chip tone={cmp.stillExposed.length ? 'err' : 'ok'} xs>Sigue igual</Chip> {cmp.stillExposed.length ? cmp.stillExposed.map(i => labels[i] ?? i).join(' · ') : 'nada: todo lo que había está corregido'}</p>
               {cmp.newlyExposed.length > 0 && <p className="lab-cmp-line"><Chip tone="warn" xs>Nuevo</Chip> {cmp.newlyExposed.map(i => labels[i] ?? i).join(' · ')}</p>}
             </div>}
           </div>}
@@ -120,7 +120,7 @@ export function Lab() {
         <h2 id="lab-past" className="lab-h2">Informes anteriores</h2>
         {!reports ? <Spinner /> : reports.length === 0 ? <p className="small muted" style={{ margin: 0 }}>Aún no has analizado nada.</p> : <ul className="lab-past">{reports.map(r => <li key={r.id}>
           <button className="lab-past-btn" onClick={() => { setOpen(r); setCmp(null); setCmpWith(''); }}><span><strong>{r.target.name}</strong><br /><span className="small muted">{st?.analyses.find(a => a.id === r.analysis)?.label} · {new Date(r.createdAt).toLocaleString()}</span></span>
-            {r.status === 'running' ? <Chip tone="working" xs>Analizando</Chip> : r.status === 'failed' ? <Chip tone="err" xs>No terminó</Chip> : <Chip tone={r.summary.confirmed ? 'warn' : 'ok'} xs>{r.summary.confirmed} confirmados</Chip>}</button>
+            {r.status === 'running' ? <Chip tone="working" xs>Analizando</Chip> : r.status === 'failed' ? <Chip tone="err" xs>No terminó</Chip> : <Chip tone={r.summary.high ? 'err' : r.summary.confirmed ? 'warn' : 'ok'} xs>{r.summary.confirmed} {r.summary.confirmed === 1 ? 'confirmado' : 'confirmados'}</Chip>}</button>
         </li>)}</ul>}
       </section>
 

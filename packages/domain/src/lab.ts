@@ -19,9 +19,9 @@ export type LabAnalysisId = 'exposure' | 'hardening' | 'inventory';
 export interface LabAnalysisDef { id: LabAnalysisId; label: string; question: string; accepts: string; command: string; needsFile?: boolean }
 /** Lista CERRADA de análisis: solo órdenes estáticas de REA, con argumentos fijos. Nada que ejecute o se conecte. */
 export const LAB_ANALYSES: LabAnalysisDef[] = [
-  { id: 'exposure', label: 'Qué deja ver lo que publicas', question: '¿Qué puede recuperar un tercero de este paquete: código fuente, credenciales, rutas internas?', accepts: 'La carpeta publicada de una aplicación (en .zip), un .asar o un ejecutable', command: 'audit-release-exposure' },
-  { id: 'hardening', label: 'Protecciones de un ejecutable', question: '¿Este binario lleva las protecciones habituales (ASLR, DEP/NX, control de flujo…)?', accepts: 'Un ejecutable o biblioteca: .exe, .dll, ELF o Mach-O', command: 'inspect-binary-hardening', needsFile: true },
-  { id: 'inventory', label: 'Qué es y qué contiene', question: '¿Qué es este archivo, con qué está hecho y qué lleva dentro?', accepts: 'Cualquier aplicación, paquete o ejecutable (o su carpeta en .zip)', command: 'inspect-artifact' }
+  { id: 'exposure', label: 'Qué deja ver lo que publicas', question: '¿Qué puede recuperar un tercero de este paquete: código fuente, credenciales, rutas internas?', accepts: 'La carpeta que publicas de una aplicación, comprimida en .zip, o el programa instalable', command: 'audit-release-exposure' },
+  { id: 'hardening', label: 'Protecciones de un ejecutable', question: '¿Este programa lleva activadas las protecciones habituales contra ataques?', accepts: 'Un programa o biblioteca de Windows, Linux o macOS (.exe, .dll…)', command: 'inspect-binary-hardening', needsFile: true },
+  { id: 'inventory', label: 'Qué es y qué contiene', question: '¿Qué es este archivo, con qué está hecho y qué lleva dentro?', accepts: 'Cualquier aplicación o programa (o su carpeta comprimida en .zip)', command: 'inspect-artifact' }
 ];
 
 export type LabSeverity = 'high' | 'medium' | 'low' | null;

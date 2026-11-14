@@ -81,3 +81,12 @@ test('un trabajo que no aportó commits propios, o cuyo commit no está en main,
   assert.deepEqual(await reconcileIntegrated(S), []);
   assert.equal(procs.get(other.processId)!.result!.merged, undefined); assert.equal(procs.get(empty.id)!.result!.merged, undefined);
 });
+
+test('(ronda 2) «solo registrar» nunca crea un merge: si el commit no está en main, falla', async () => {
+  const { mergeStory } = await import('../src/services/storyMerge.ts');
+  const w = stoppedWork('No integrado', 'portal-ia/en-903', 'tres.txt');
+  const merges = Number(g('rev-list --count --merges main'));
+  await assert.rejects(() => mergeStory(S, w.processId, { registerOnly: true }), /no está en la rama principal|worktree|Primero/);
+  assert.equal(Number(g('rev-list --count --merges main')), merges);
+  assert.equal(processesRepo(S).get(w.processId)!.result!.merged, undefined);
+});

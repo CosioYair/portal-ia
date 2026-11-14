@@ -74,7 +74,7 @@ export function Home() {
         <ul className="home-list">{running.slice(0, 3).map(i => <Item key={`${i.kind}:${i.id}`} i={i} />)}</ul>
       </section>}
 
-      {calm && running.length === 0 && <section className="home-calm"><p>{project ? 'Nadie espera una decisión tuya y el equipo no tiene nada en marcha.' : 'Esta empresa aún no tiene un proyecto.'} Cuéntale al equipo qué necesitas con «Pedir algo al equipo».</p></section>}
+      {calm && running.length === 0 && <section className="home-calm"><p>{project ? 'Nadie espera una decisión tuya y el equipo no tiene nada en marcha.' : 'Esta empresa aún no tiene un proyecto.'} Portal IA es tu equipo de agentes de IA: tú pides un resultado con tus palabras, ellos lo hacen y tú lo revisas y lo aceptas. Empieza con «Pedir algo al equipo».</p></section>}
 
       <div className="home-grid">
         <section className="home-card" aria-labelledby="home-done">
@@ -88,7 +88,7 @@ export function Home() {
             <p className="home-big"><strong>{agents.length}</strong> {agents.length === 1 ? 'agente' : 'agentes'}</p>
             <ul className="home-chips">{agents.slice(0, 6).map(a => <li key={a.id}><Link className="home-agent" to={`/oficina/agente/${a.id}`}>{a.config.name}</Link></li>)}{agents.length > 6 && <li className="home-more">y {agents.length - 6} más</li>}</ul>
           </>}
-          <Link className="btn btn-ghost btn-sm" to="/oficina/nuevo-agente">{Icon.plus()} Crear un agente</Link>
+          <div className="home-actions"><Link className="btn btn-ghost btn-sm" to="/oficina/nuevo-agente">{Icon.plus()} Crear un agente</Link><Link className="btn btn-ghost btn-sm" to="/oficina/analisis">{Icon.shield()} Analizar un programa</Link></div>
         </section>
 
         <section className="home-card" aria-labelledby="home-studio">

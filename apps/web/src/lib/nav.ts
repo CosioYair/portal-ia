@@ -63,18 +63,21 @@ export function useEntryState<T>(name: string, initial: T): [T, (v: T | ((p: T) 
 
 /** Pantalla «madre» de una ruta (para entrar por un enlace directo y volver sin salir del Portal). */
 export function parentOf(pathname: string): { path: string; label: string } | null {
-  if (/^\/historias\//.test(pathname)) return { path: '/backlog', label: 'Backlog' };
+  if (/^\/historias\//.test(pathname)) return { path: '/trabajo', label: 'Trabajo' };
   if (/^\/(mantenimiento|etapa)(\/|$)/.test(pathname)) return { path: '/panel', label: 'Proyecto' };
-  if (/^\/procesos\//.test(pathname)) return { path: '/actividad', label: 'Actividad' };
+  if (/^\/procesos\//.test(pathname)) return { path: '/trabajo', label: 'Trabajo' };
   if (/^\/lotes\/[^/]+/.test(pathname)) return { path: '/lotes', label: 'Lotes' };
   if (/^\/equipo\/.+/.test(pathname)) return { path: '/oficina/organizacion', label: 'Organización' };
-  if (/^\/oficina\/.+/.test(pathname)) return { path: '/oficina', label: 'Oficina' };
+  if (/^\/oficina\/.+/.test(pathname)) return { path: '/oficina', label: 'Agentes' };
+  if (/^\/estudio\/.+/.test(pathname)) return { path: '/estudio', label: 'Estudio' };
+  if (/^\/ediciones(\/|$)/.test(pathname)) return { path: '/ajustes', label: 'Ajustes' };
   if (/^\/(presupuestos|configuracion)(\/|$)/.test(pathname)) return { path: '/ajustes', label: 'Ajustes' };
-  if (pathname === '/' || pathname === '/oficina' || pathname === '/trabajo') return null;
+  if (pathname === '/' || pathname === '/inicio') return null;
+  if (pathname === '/oficina' || pathname === '/trabajo' || pathname === '/estudio' || pathname === '/conocimiento') return { path: '/inicio', label: 'Inicio' };
   // Portal IA 3: «Resumen» ya no está en el menú; la portada del proyecto es Trabajo.
   if (pathname === '/panel') return { path: '/trabajo', label: 'Trabajo' };
   // Secciones que no dependen de un proyecto vuelven a la Oficina (la portada); las del proyecto, a su Resumen.
-  if (/^\/(autorizaciones|decisiones|asistente|ajustes|aceptacion)(\/|$)/.test(pathname)) return { path: '/oficina', label: 'Oficina' };
+  if (/^\/(autorizaciones|decisiones|asistente|ajustes|aceptacion)(\/|$)/.test(pathname)) return { path: '/inicio', label: 'Inicio' };
   return { path: '/trabajo', label: 'Trabajo' };
 }
 
@@ -90,7 +93,7 @@ export function screenName(path: string): string {
   if (p === '/oficina/nuevo-agente') return 'Nuevo agente';
   if (p.startsWith('/equipo/')) return 'la configuración del agente';
   if (p.startsWith('/mantenimiento')) return 'la revisión del proyecto';
-  const names: Record<string, string> = { '/backlog': 'Backlog', '/lotes': 'Lotes', '/actividad': 'Actividad', '/panel': 'Resumen', '/oficina': 'Oficina', '/oficina/organizacion': 'Organización', '/oficina/departamentos': 'Departamentos', '/oficina/lista': 'la lista de agentes', '/asistente': 'Asistente', '/autorizaciones': 'Decisiones', '/conocimiento': 'Conocimiento', '/presupuestos': 'Presupuestos', '/ajustes': 'Ajustes', '/archivo': 'Archivo', '/etapa': 'Nueva etapa', '/configuracion/proveedor': 'Proveedores' };
+  const names: Record<string, string> = { '/backlog': 'Backlog', '/lotes': 'Lotes', '/actividad': 'Actividad', '/panel': 'Resumen', '/oficina': 'Agentes', '/inicio': 'Inicio', '/estudio': 'Estudio', '/oficina/analisis': 'Analizar un programa', '/oficina/organizacion': 'Organización', '/oficina/departamentos': 'Departamentos', '/oficina/lista': 'la lista de agentes', '/asistente': 'Asistente', '/autorizaciones': 'Decisiones', '/conocimiento': 'Conocimiento', '/presupuestos': 'Presupuestos', '/ajustes': 'Ajustes', '/archivo': 'Archivo', '/etapa': 'Nueva etapa', '/configuracion/proveedor': 'Proveedores' };
   return names[p] ?? 'la pantalla anterior';
 }
 

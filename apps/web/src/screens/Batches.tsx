@@ -204,7 +204,7 @@ function BatchWizard({ onClose, onCreated }: { onClose: () => void; onCreated: (
 
             <div className="bw-section" data-testid="batch-sources">
               <div className="eyebrow">2 · Equipo y orígenes de ejecución</div>
-              <div className="small muted">El origen es de cada agente (se cambia en el panel de cada agente, en la <Link className="lnk" to={officeHome()}>Oficina</Link>). Aquí autorizas qué orígenes puede usar este lote; nunca cambia de origen por su cuenta.</div>
+              <div className="small muted">El origen es de cada agente (se cambia en el panel de cada agente, en la <Link className="lnk" to={officeHome()}>pantalla de Agentes</Link>). Aquí autorizas qué orígenes puede usar este lote; nunca cambia de origen por su cuenta.</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {(['claude_code', 'api'] as const).map(b => <label key={b} className="ck"><input className="cb" type="checkbox" checked={req.backends!.includes(b)} onChange={e => set({ backends: e.target.checked ? [...req.backends!, b] : req.backends!.filter(x => x !== b), ...(b === 'api' && !e.target.checked ? { apiFallback: false } : {}) })} />
                   <span><strong>{b === 'api' ? 'API del proveedor (facturable, en USD)' : 'Claude Code (tu suscripción)'}</strong>{preview ? <span className="muted"> · {usedBy(b).length ? `lo usan: ${usedBy(b).join(', ')}` : 'ningún agente del lote lo usa'}</span> : null}</span></label>)}

@@ -2,6 +2,9 @@ import type { Process } from '@portal-ia/domain';
 import { processesRepo, workspaceDb } from '../db/workspace.ts';
 import { assignmentsRepo } from '../db/assignments.ts';
 import { isNewerThan, latestMerged } from './storyClosure.ts';
+import { backlogRepo } from '../db/workspace.ts';
+import { batchesRepo } from '../db/batches.ts';
+import { onProcessFinish } from '../db/workspace.ts';
 
 /**
  * Portal IA 4 · un trabajo ya integrado no deja de estarlo.
@@ -25,19 +28,43 @@ export function deliveredFor(slug: string, p: Process): Delivered | null {
   return m && isNewerThan(p, m) ? { processId: m.id, commit: m.result!.merged!.commit, mergedAt: m.result!.merged!.mergedAt } : null;
 }
 
+/**
+ * Notas con las que el PORTAL (no el propietario) abre una iteración sobre algo ya integrado: el aviso de una
+ * comprobación en ejecución fallida, o el título de la propia pausa «sin código». Solo esas iteraciones se deshacen
+ * solas. Si la nota es del propietario (pidió un cambio de verdad), decide él con el botón de la tarjeta.
+ */
+const PORTAL_NOTE = /^Nota del propietario \(cambios pedidos\): (La comprobación en ejecución falló|Una comprobación automática no pasó|La historia no pide cambios de código|Lo que pediste ya está entregado)/;
+
+/** ¿Puede el Portal volver por su cuenta a la entrega integrada? (El propietario siempre puede, con su botón.) */
+export function autoRestorable(slug: string, p: Process): boolean {
+  const r = p.result as any;
+  if (!r?.planNoCode || r.planNoCode.analysisProcessId) return false;       // ya la convirtió en análisis: es su decisión
+  if (r.deliveredRestore) return false;                                      // ya se hizo una vez; si la recuperó él, se respeta
+  if (!PORTAL_NOTE.test(String(r.iterationContext ?? ''))) return false;     // la pidió él con sus palabras
+  // Las historias de un lote en seguimiento las lleva el coordinador del lote.
+  if (p.backlogItemId && batchesRepo(slug).followed().some(b => b.items.some(i => i.itemId === p.backlogItemId))) return false;
+  return true;
+}
+
 /** Deja como vigente la entrega integrada. Devuelve el proceso integrado, o null si no había a dónde volver. */
 export function restoreDelivered(slug: string, p: Process, by: 'owner' | 'portal'): Process | null {
   if (p.status === 'running' || p.status === 'pending_authorization') return null;
+  if (by === 'portal' && !autoRestorable(slug, p)) return null;
   const d = deliveredFor(slug, p); if (!d) return null;
   const repo = processesRepo(slug);
+  // Marca en la iteración que cede el sitio: queda constancia y el Portal no lo repite si el propietario la recupera.
+  repo.setResult(p.id, { ...(p.result as any), deliveredRestore: { at: new Date().toISOString(), by, to: d.processId } });
   repo.makeCurrentDelivered(d.processId);
+  // Historia del backlog: vuelve a «en revisión» con la entrega integrada como último proceso (no queda «pendiente»,
+  // que la haría elegible para ejecutarse otra vez).
+  if (p.backlogItemId) { const it = backlogRepo(slug).get(p.backlogItemId); if (it && it.status !== 'done' && it.status !== 'discarded') backlogRepo(slug).setStatus(it.id, 'review', d.processId); }
   if (p.assignmentId) {
     const asg = assignmentsRepo(slug);
     const a = asg.get(p.assignmentId);
     if (a && a.processId !== d.processId) asg.update(p.assignmentId, x => {
       x.processId = d.processId;
       // El encargo ya está integrado: lo que falta es la prueba y la aceptación del propietario, no otra iteración.
-      if (x.status === 'changes_requested' || x.status === 'needs_owner' || x.status === 'failed' || x.status === 'running') { x.status = 'ready_for_review'; x.iterationNote = null as any; }
+      if (x.status === 'changes_requested' || x.status === 'needs_owner' || x.status === 'failed' || x.status === 'running') { x.status = 'ready_for_review'; x.iterationNote = null; }
       x.events.push({ at: new Date().toISOString(), kind: 'status', processId: d.processId, message: by === 'owner'
         ? `Se volvió a la entrega integrada (${d.commit}): la revisión posterior concluyó que no queda código que cambiar.`
         : `El Portal volvió a la entrega integrada (${d.commit}): la iteración posterior concluyó que no queda código que cambiar. Falta tu prueba y tu aceptación.` });
@@ -59,6 +86,21 @@ export function reconcileDelivered(slug: string, only?: { processId?: string }):
     const p = repo.get(row.id); if (!p) continue;
     const back = restoreDelivered(slug, p, 'portal');
     if (back) out.push({ restored: back.id, from: p.id });
+  }
+  return out;
+}
+
+/**
+ * Engancha la corrección al final de cada proceso (y la hace al arrancar). Va aquí, y no en el arranque del servidor,
+ * para poder probarla. Devuelve lo corregido en la pasada inicial.
+ */
+let hooked = false;
+export function installDeliveredReconcile(slugs: string[], log: (o: any, m: string) => void = () => undefined): { restored: string; from: string }[] {
+  const out: { restored: string; from: string }[] = [];
+  for (const slug of slugs) { try { const r = reconcileDelivered(slug); if (r.length) log({ workspace: slug, restored: r }, 'trabajos ya integrados devueltos a su entrega (la iteración posterior no tenía nada que cambiar)'); out.push(...r); } catch (e) { log({ workspace: slug, err: (e as Error).message }, 'conciliación de entregas integradas omitida en este espacio'); } }
+  if (!hooked) {
+    hooked = true;
+    onProcessFinish((slug, processId) => { setImmediate(() => { try { const r = reconcileDelivered(slug, { processId }); if (r.length) log({ workspace: slug, restored: r }, 'iteración sin código tras una integración: vuelve a ser vigente la entrega integrada'); } catch { /* se corregirá al arrancar */ } }); });
   }
   return out;
 }
@@ -88,7 +130,7 @@ export async function reconcileIntegrated(slug: string, log: (o: any, m: string)
       if (Number(await git('rev-list', '--count', `${base}..${commit}`)) < 1) continue;
       const main = await mainBranch(root, branch);
       try { await git('merge-base', '--is-ancestor', commit, main); } catch { continue; }
-      const done = await mergeStory(slug, p.id, {}, log);
+      const done = await mergeStory(slug, p.id, { registerOnly: true }, log);
       if (done.result?.merged) out.push(p.id);
     } catch (e) { log({ processId: row.id, err: (e as Error).message }, 'conciliación con git: este trabajo se deja como está'); }
   }

@@ -49,11 +49,16 @@ function laterTask(lessonId: string, files: string[], o: { fails?: string; state
   return p.id;
 }
 
-test('qué cuenta como «tocar la misma zona»: el mismo archivo o su misma carpeta; nada más', () => {
+test('qué cuenta como «tocar la misma zona»: el mismo archivo o su prueba; nada más', () => {
   const l = { evidence: { file: 'src/calculo/suma.ts' } } as any;
   assert.equal(lessonExposure(l, ['src/calculo/suma.ts']), true);
-  assert.equal(lessonExposure(l, ['src/calculo/resta.ts']), true, 'otro archivo de la misma carpeta');
-  assert.equal(lessonExposure(l, ['src/calculo/interno/x.ts']), false, 'una subcarpeta es otra zona');
+  assert.equal(lessonExposure(l, ['SRC\\Calculo\\Suma.ts']), true, 'da igual la barra y las mayúsculas');
+  assert.equal(lessonExposure(l, ['src/calculo/suma.test.ts']), true, 'su prueba');
+  assert.equal(lessonExposure(l, ['test/suma.test.ts']), true, 'su prueba en la carpeta de pruebas');
+  assert.equal(lessonExposure(l, ['src/calculo/resta.ts']), false, 'otro archivo de la misma carpeta NO: en carpetas con cientos de archivos todo contaría');
+  assert.equal(lessonExposure(l, ['src/otra/suma.ts']), false, 'el mismo nombre en otra parte del proyecto no es la misma zona');
+  assert.equal(lessonExposure({ evidence: { file: 'apps/server/test/suma.test.ts' } } as any, ['apps/server/src/services/suma.ts']), true, 'la lección nació en la prueba y la tarea tocó lo que prueba');
+  assert.equal(lessonExposure(l, ['src/calculo/interno/x.ts']), false);
   assert.equal(lessonExposure(l, ['src/otra/cosa.ts', 'docs/leeme.md']), false);
   assert.equal(lessonExposure({ evidence: { file: null } } as any, ['src/calculo/suma.ts']), false, 'una lección sin archivo no se puede demostrar');
   assert.equal(lessonExposure({ evidence: { file: 'README.md' } } as any, ['docs/x.md']), false);

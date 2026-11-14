@@ -12,7 +12,7 @@ marcado con «(R-n)» y figura en `HALLAZGOS.md`.
 | Que un encargo no se quede atascado ni «no haga nada» al pedir cambios | mal implementado | Un trabajo integrado no se convierte en análisis; su estado se corrige solo | C1, C2 |
 | Que el estado diga la verdad: lo integrado no figura como «detenido» | mal implementado | El estado sale de los hechos (integrado, activo), no de la última iteración | C2 |
 | Que un lote atascado no impida crear otro | mal implementado | Solo bloquea el lote que puede avanzar por sí mismo | C3 |
-| Que los agentes aprendan y no repitan errores | mal implementado (se cuenta «usada», no «evitó el fallo») | Lección verificada = firma del fallo + repetición con y sin la lección | C4 (pendiente) |
+| Que los agentes aprendan y no repitan errores | mal implementado (se cuenta «usada», no «evitó el fallo») | Una lección solo es «Aprendida» si evitó su error en una tarea que tocaba el mismo archivo | C4 |
 | Sin información repetida ni pantallas parecidas; menos texto | parcial | Seis destinos por objetivo; una acción por tarjeta; detalle técnico plegado | D |
 | Estudio de vídeo | no existía | Editor real con exportación a MP4 comprobada | E |
 | Especialista en ingeniería inversa y seguridad | no existía | Perfil de agente + análisis de artefactos aislado | F |

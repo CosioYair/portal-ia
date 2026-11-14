@@ -6,6 +6,7 @@ import { useLive } from '../lib/live.ts';
 import { Shell } from '../components/Shell.tsx';
 import { Chip, Icon, Notice, Spinner } from '../components/ui.tsx';
 import { EmptyState, PageHeader, WorkTabs } from '../components/kit.tsx';
+import { Disclosure } from '../components/Disclosure.tsx';
 import '../work.css';
 
 /**
@@ -65,7 +66,7 @@ export function Work() {
         <PageHeader icon={Icon.kanban(22)} tone="work" eyebrow="Trabajo" title="Todo lo que has pedido"
           description="Historias y encargos en un solo lugar, con su estado real. Empieza por lo que te necesita."
           actions={<Link className="btn btn-ghost btn-sm" to="/panel">Proyecto y repositorio</Link>}>
-          <WorkTabs />
+          {/* Portal IA 4: una lista con filtros. Las vistas antiguas siguen existiendo, plegadas al final de la pantalla. */}
         </PageHeader>
 
         <div className="work-bar" role="group" aria-label="Qué ver">
@@ -107,6 +108,7 @@ export function Work() {
             </section>
           );
         })}
+        <Disclosure title="Otras vistas del trabajo" hint="Backlog, lotes, actividad y archivo"><WorkTabs /></Disclosure>
       </main>
     </Shell>
   );

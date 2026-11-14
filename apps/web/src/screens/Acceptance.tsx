@@ -28,7 +28,7 @@ export function Acceptance() {
   return (
     <Shell crumb="Recorrido de aceptación">
       <main className="page acc-page">
-        <PageHeader icon={Icon.gauge(22)} tone="work" eyebrow="Portal IA 3" title="Recorrido de aceptación"
+        <PageHeader icon={Icon.gauge(22)} tone="work" eyebrow="Portal IA 4" title="Recorrido de aceptación"
           description="Prueba tú mismo lo que pediste, en las pantallas reales, y anota si funciona. Nada se marca solo." />
         {error && <Notice kind="err">{error}</Notice>}
         {!v && !error && <Spinner label="Cargando el recorrido…" />}

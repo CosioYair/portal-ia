@@ -58,10 +58,51 @@ Verificación: recorrido en navegador real, 41 comprobaciones a 1440, 1024, 768,
 | R-2 | mayor | Dos listas de «Te necesitan» | corregido | Una sola (Trabajo); Inicio enseña las primeras y enlaza |
 | R-3 | mayor | Un trabajo ya integrado no debe mostrarse «Detenido» | corregido | `deliveredReconcile.ts`: automático al arrancar y al terminar un proceso; también desde los hechos de git. Pruebas `p4-entrega-integrada` y `p4-conciliacion-git` |
 | R-4 | mayor | Un lote en pausa bloquea crear otro | corregido | `canLaunchWork` / `blocksNewBatch`; pruebas con el caso real |
-| R-5 | mayor | «Aprendizaje verificado» no era comprobable | abierto | Criterio definido (firma del fallo + repetición con y sin la lección). **No implementado** |
+| R-5 | mayor | «Aprendizaje verificado» no era comprobable | corregido | Una lección solo es «Aprendida» si una tarea posterior que tocó el mismo archivo (o su prueba) terminó bien sin repetir el error. `p4-aprendizaje-verificado.test.ts`. No hace una repetición «con y sin la lección»: mide exposición real |
 | R-6 | mayor | Herramientas del anfitrión que los agentes no pueden lanzar | parcial | La evidencia visual la produce el Portal antes de QA. Aprovisionar herramientas que falten sigue pendiente |
 | R-7 | media | «Estudio» chocaba con el subtítulo de marca | corregido | Subtítulo «Tu equipo de IA» |
 | R-8 | media | Faltaban en el documento Estudio, REA y conciliación | corregido | `estudio.md`, `especialista-rea.md`, punto de control |
 | R-9 | media | El Asistente «que lo arregle él»: qué puede cambiar directamente | abierto | No abordado |
 | R-10 | media | Lista cerrada de decisiones que solo son del propietario | corregido | `DISENO.md` §3 |
 | R-11 | media | Historias y encargos siguen siendo dos entidades; nueve etapas | abierto | Reconocido en `DISENO.md` §2 |
+
+## Ronda 2 · Regresión y arquitectura
+
+Sin bloqueantes. Comprobado como correcto por el revisor: `makeCurrentDelivered` es transaccional y no entra en bucle;
+la precedencia de «integrado» sobre un flujo en pausa; el registro de rutas y las exportaciones del dominio; todas las
+pantallas anteriores siguen alcanzables.
+
+| Id | Gravedad | Hallazgo | Estado | Corrección y verificación |
+|---|---|---|---|---|
+| G2-1 | mayor | La vuelta automática a la entrega integrada podía pasar por encima de un cambio pedido de verdad por el propietario; no respetaba una conversión a análisis ni una recuperación manual | corregido | `autoRestorable`: solo iteraciones abiertas por un aviso del Portal, nunca con nota suya ni convertidas en análisis, y una sola vez (marca `deliveredRestore`). Cuatro pruebas en `p4-entrega-integrada.test.ts` |
+| G2-2 | mayor | En historias, la tarjeta del backlog quedaba «pendiente» (podía volver a ejecutarse) | corregido | Vuelve a «en revisión» con la entrega integrada como último proceso; prueba |
+| G2-3 | mayor | Los elementos de un lote seguían apuntando al proceso superado | corregido | La vuelta automática no toca historias de un lote en seguimiento: las lleva el coordinador del lote |
+| G2-4 | mayor | Al desbloquear dependientes, un segundo lote podía ponerse a trabajar a la vez | corregido | Si otro lote del proyecto está activo, espera con su cola |
+| G2-5 | mayor | La limpieza al arrancar no distinguía instancias: unas pruebas podían borrar contenedores y carpetas del Portal en marcha | corregido | Etiqueta y prefijo por instancia (huella de la carpeta de datos) en Estudio y análisis |
+| G2-6 | mayor | Registrar una integración ya existente dependía de una comprobación previa | corregido | `mergeStory(…, { registerOnly: true })` falla si el commit no está en main; prueba |
+| G2-7 | menor | «Atrás» desde Inicio, Estudio y Ediciones | corregido | `nav.ts` |
+| G2-8 | menor | La vista de lotes calculaba el bloqueo con la regla antigua | corregido | Usa `blocksNewBatch` |
+| G2-9 | menor | «Misma carpeta» era demasiado amplio para dar una lección por demostrada | corregido | Mismo archivo o su prueba/implementación; una tarea no expuesta no limpia la racha de reincidencias. Efecto al actualizar: las lecciones que figuraban «Aprendida» pasan a «pendiente de demostrar» hasta que una tarea las ponga a prueba |
+| G2-10 | menor | E/S síncrona en `GET /studio/status`; descompresión síncrona en la subida | parcial | El tamaño de la papelera se calcula como mucho una vez por minuto. La descompresión sigue siendo síncrona (acotada a 600 MB) |
+| G2-11 | menor | Informes de análisis sin poda ni índice | corregido | Se conservan 200; índice por fecha |
+| G2-12 | menor | El enganche de fin de proceso no tenía prueba | corregido | `installDeliveredReconcile` y su prueba |
+
+## Ronda 2 · Recorrido de usuario (evaluador sin contexto, no técnico)
+
+**Veredicto del evaluador: es el producto anterior con una portada nueva, un menú recortado y dos módulos añadidos; no
+es todavía un rediseño.** Se acepta el veredicto. Lo que se corrigió y lo que sigue abierto:
+
+| Id | Hallazgo | Estado | Nota |
+|---|---|---|---|
+| J-1 | Dos pantallas distintas para lo mismo (historia y encargo); «proceso» e «iteración» a la vista | abierto | El mayor pendiente de la interfaz |
+| J-2 | Trabajo con pestañas Backlog / Lotes / Actividad / Archivo | parcial | En Trabajo ya no van al frente (plegadas en «Otras vistas del trabajo»); las pantallas existen |
+| J-3 | Unos veinte términos técnicos en pausas, errores y el Asistente | abierto | |
+| J-4 | Tres recuentos distintos (Inicio, Trabajo, campana) | abierto | Miden cosas distintas: trabajos frente a decisiones |
+| J-5 | El análisis no se encontraba desde el menú | corregido | «Analizar un programa» en Inicio y en Agentes |
+| J-6 | Informe de análisis con jerga, inglés y salida cruda | corregido | Texto llano en español; el detalle técnico, plegado |
+| J-7 | Sin acciones visibles de «Habilidades», «Exportar» y «Traer de vuelta» en el agente | abierto | |
+| J-8 | El recorrido de aceptación describía el menú anterior | corregido | Recorrido 4.0, con nueve pasos nuevos |
+| J-9 | «Oficina» junto a «Agentes» | corregido | En textos a la vista; las direcciones conservan `/oficina` |
+| J-10 | Inicio no explicaba qué es el Portal | corregido | Una frase cuando no hay nada pendiente |
+| J-11 | Conocimiento abre en Documentos; lo aprendido está en otra pestaña y en la memoria de cada agente | abierto | |
+| J-12 | Estudio: «proyecto» chocaba con el selector de Proyecto; ningún agente participa | parcial | Ahora «vídeo». Los agentes creativos existen como perfiles, pero no actúan dentro del editor |

@@ -1386,6 +1386,9 @@ export async function syncFromBacklog(slug: string, id: string): Promise<void> {
   if (!unlocked.length && !queued.length) return;
   const why = authorizationStop(slug, b, queued);
   if (why) { setStatus(slug, id, 'paused', why, 'budget'); return; }
+  // Portal IA 4: dos lotes del mismo proyecto no trabajan a la vez. Si otro está activo, este espera con su cola.
+  const other = batchesRepo(slug).followed().find(x => x.id !== id && x.projectId === b.projectId && blocksNewBatch(slug, x));
+  if (other) return;
   setStatus(slug, id, 'running', `${unlocked.map(i => i.storyId).join(', ') || 'Historias en cola'}: su dependencia se completó; el lote sigue solo dentro de la autorización vigente.`, 'resume');
 }
 
@@ -2059,5 +2062,5 @@ export function batchView(slug: string, b: Batch) {
       process: p ? { id: p.id, status: p.status, spentUsd: p.spentUsd, unconfirmedUsd: p.unconfirmedUsd ?? 0, budgetUsd: p.budgetUsd, pipeline: r?.pipeline ? { state: r.pipeline.state, phase: r.pipeline.phase, pauseKind: r.pipeline.pauseKind, reason: r.pipeline.reason, corrections: r.pipeline.corrections } : null, gauntlet: r?.gauntlet ? { mode: r.gauntlet.mode, status: r.gauntlet.status, rounds: r.gauntlet.rounds.length, reason: r.gauntlet.reason } : null, review: r?.review?.verdict ?? null, merged: r?.merged ?? null, manualTest: r?.manualTest ? { steps: r.manualTest.steps, checks: r.manualTest.checks } : null, userFacing: r?.userFacing ?? null, implementer: p.steps.find(s => s.role === 'implementer')?.agentName ?? null, evaluator: p.steps.find(s => s.role === 'evaluator' && s.status !== 'skipped')?.agentName ?? null } : null
     };
   });
-  return { ...b, items, summary: batchSummary(b.items), lifecycle: batchLifecycle(b.items, integrationPolicy(b.auth), b.integrationPlan?.order ?? []), budget: budgetOf(slug, b), subscriptionCalls: subscriptionCalls(slug, b), blocksNewBatch: b.status === 'running' || b.status === 'paused' || (b.status === 'needs_decision' && canLaunchWork(slug, b)) };
+  return { ...b, items, summary: batchSummary(b.items), lifecycle: batchLifecycle(b.items, integrationPolicy(b.auth), b.integrationPlan?.order ?? []), budget: budgetOf(slug, b), subscriptionCalls: subscriptionCalls(slug, b), blocksNewBatch: blocksNewBatch(slug, b) };
 }

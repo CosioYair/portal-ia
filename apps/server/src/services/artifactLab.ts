@@ -7,6 +7,7 @@ import type { LabAnalysisId, LabReport, ReaUpdateCheck } from '@portal-ia/domain
 import { LAB_ANALYSES, LAB_LIMITS, REA_PIN, compareLabReports, labSummary, parseReaOutput } from '@portal-ia/domain';
 import { workspaceDb } from '../db/workspace.ts';
 import { dockerCliEnv, dockerMountArg } from './sandbox.ts';
+import { INSTANCE } from './studio.ts';
 import { entryProblem, listZip, readZipEntry, sha256FileAsync } from './zipFile.ts';
 
 /**
@@ -22,7 +23,7 @@ const err = (statusCode: number, message: string, code?: string) => Object.assig
 const ready = new Set<string>();
 function db(slug: string) {
   const d = workspaceDb(slug);
-  if (!ready.has(slug)) { d.exec(`CREATE TABLE IF NOT EXISTS lab_reports (id TEXT PRIMARY KEY, status TEXT NOT NULL, doc_json TEXT NOT NULL, created_at TEXT NOT NULL)`); ready.add(slug); }
+  if (!ready.has(slug)) { d.exec(`CREATE TABLE IF NOT EXISTS lab_reports (id TEXT PRIMARY KEY, status TEXT NOT NULL, doc_json TEXT NOT NULL, created_at TEXT NOT NULL); CREATE INDEX IF NOT EXISTS lab_reports_created ON lab_reports(created_at);`); ready.add(slug); }
   return d;
 }
 export const labRepo = (slug: string) => {
@@ -30,6 +31,7 @@ export const labRepo = (slug: string) => {
   return {
     list(): LabReport[] { return (d.prepare(`SELECT doc_json FROM lab_reports ORDER BY created_at DESC LIMIT 50`).all() as any[]).map(r => JSON.parse(r.doc_json)); },
     get(id: string): LabReport | null { const r = d.prepare(`SELECT doc_json FROM lab_reports WHERE id = ?`).get(id) as any; return r ? JSON.parse(r.doc_json) : null; },
+    prune(): void { d.prepare(`DELETE FROM lab_reports WHERE status <> 'running' AND id NOT IN (SELECT id FROM lab_reports ORDER BY created_at DESC LIMIT 200)`).run(); },
     put(r: LabReport): LabReport { d.prepare(`INSERT INTO lab_reports (id, status, doc_json, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, doc_json = excluded.doc_json`).run(r.id, r.status, JSON.stringify(r), r.createdAt); return r; },
     unfinished(): LabReport[] { return (d.prepare(`SELECT doc_json FROM lab_reports WHERE status = 'running'`).all() as any[]).map(r => JSON.parse(r.doc_json)); }
   };
@@ -99,7 +101,7 @@ export async function startLabAnalysis(slug: string, input: { analysis: LabAnaly
   const eng = await labEngine(); if (eng.state !== 'ready') throw err(503, `${eng.detail} ${eng.hint}`, `lab_${eng.state}`);
   const sha256 = await sha256FileAsync(input.tempFile);
   // Carpeta de trabajo corta en el temporal del sistema (Docker en Windows falla al montar rutas largas).
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'pia-lab-')); const target = path.join(work, 'target'); fs.mkdirSync(target);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), `pia-lab-${INSTANCE}-`)); const target = path.join(work, 'target'); fs.mkdirSync(target);
   let kind: 'file' | 'folder' = 'file', files = 1, inner = SAFE_NAME(input.name);
   try {
     if (isZip(input.tempFile) && !def.needsFile && /\.zip$/i.test(input.name)) { files = extractZipSafely(input.tempFile, target).files; kind = 'folder'; inner = ''; }
@@ -121,7 +123,7 @@ async function runAnalysis(slug: string, id: string, command: string, work: stri
   const name = `pia-lab-${id.slice(0, 12)}`;
   const finish = (patch: Partial<LabReport>) => repo.put({ ...r, ...patch, finishedAt: new Date().toISOString() });
   try {
-    const args = ['run', '--rm', '--init', '--pull', 'never', '--name', name, '--label', 'portal-ia.lab=1', '--network', 'none', '--memory', '2g', '--memory-swap', '2g', '--cpus', '2', '--pids-limit', '256',
+    const args = ['run', '--rm', '--init', '--pull', 'never', '--name', name, '--label', 'portal-ia.lab=1', '--label', `portal-ia.instance=${INSTANCE}`, '--network', 'none', '--memory', '2g', '--memory-swap', '2g', '--cpus', '2', '--pids-limit', '256',
       '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--user', '1000:1000', '--read-only',
       '--mount', dockerMountArg({ type: 'tmpfs', target: '/tmp', 'tmpfs-mode': '1777', 'tmpfs-size': '536870912' }), '--env', 'HOME=/tmp',
       '--mount', dockerMountArg({ type: 'tmpfs', target: '/evidence', 'tmpfs-mode': '1777', 'tmpfs-size': '268435456' }),
@@ -133,6 +135,7 @@ async function runAnalysis(slug: string, id: string, command: string, work: stri
     const out = parseReaOutput(parsed);
     if (!out.recognized) { finish({ status: 'failed', error: `La herramienta no pudo analizar este artefacto${res.stderr.trim() ? `: ${res.stderr.trim().split('\n').slice(-2).join(' ').replace(/[\u0000-\u001f]/g, ' ').slice(0, 300)}` : '.'}` }); return; }
     finish({ status: 'done', findings: out.findings, limitations: out.limitations, summary: labSummary(out.findings) });
+    repo.prune();
   } catch (e: any) { finish({ status: 'failed', error: String(e?.message ?? e).slice(0, 400) }); }
   finally { active.delete(id); try { fs.rmSync(work, { recursive: true, force: true }); } catch { /* temporal */ } }
 }
@@ -149,9 +152,9 @@ export function compareLab(slug: string, beforeId: string, afterId: string) {
 export async function recoverLabAtStartup(slugs: string[]): Promise<number> {
   let n = 0;
   for (const s of slugs) { try { for (const r of labRepo(s).unfinished()) { if (active.has(r.id)) continue; labRepo(s).put({ ...r, status: 'failed', error: 'El Portal se reinició durante el análisis. Vuelve a lanzarlo.', finishedAt: new Date().toISOString() }); n++; } } catch { /* espacio sin laboratorio */ } }
-  const ps = await run(['ps', '-aq', '--filter', 'label=portal-ia.lab=1'], 8000);
+  const ps = await run(['ps', '-aq', '--filter', 'label=portal-ia.lab=1', '--filter', `label=portal-ia.instance=${INSTANCE}`], 8000);
   const ids = ps.code === 0 ? ps.stdout.split(/\s+/).filter(Boolean) : []; if (ids.length) await run(['rm', '-f', ...ids], 20_000);
-  try { for (const e of fs.readdirSync(os.tmpdir(), { withFileTypes: true })) if (e.isDirectory() && /^pia-lab-/.test(e.name)) fs.rmSync(path.join(os.tmpdir(), e.name), { recursive: true, force: true }); } catch { /* sin acceso */ }
+  try { for (const e of fs.readdirSync(os.tmpdir(), { withFileTypes: true })) if (e.isDirectory() && e.name.startsWith(`pia-lab-${INSTANCE}-`)) fs.rmSync(path.join(os.tmpdir(), e.name), { recursive: true, force: true }); } catch { /* sin acceso */ }
   return n;
 }
 

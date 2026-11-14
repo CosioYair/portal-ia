@@ -171,13 +171,19 @@ export function lessonsRepo(slug: string) {
 
 /**
  * Portal IA 4 · ¿Una tarea que cambió `touched` estuvo expuesta al error de la lección? Sí, si cambió el archivo donde
- * ocurrió o algo de su misma carpeta. Una lección sin archivo (genérica: «QA no aprobó el diff») no tiene dónde
+ * ocurrió, o su prueba/implementación (misma raíz de nombre). Una lección sin archivo (genérica: «QA no aprobó el diff») no tiene dónde
  * repetirse de forma comprobable, así que ninguna tarea la demuestra.
  */
 export function lessonExposure(l: Pick<Lesson, 'evidence'>, touched: string[]): boolean {
-  const file = (l.evidence?.file ?? '').replace(/\\/g, '/').trim(); if (!file) return false;
-  const dir = file.includes('/') ? file.slice(0, file.lastIndexOf('/')) : '';
-  return touched.some(p => p === file || (!!dir && p.startsWith(dir + '/') && !p.slice(dir.length + 1).includes('/')));
+  const norm = (p: string) => p.replace(/\\/g, '/').trim().toLowerCase();
+  const file = norm(l.evidence?.file ?? ''); if (!file) return false;
+  // «Raíz» de un archivo: su nombre sin extensión ni sufijo de prueba (suma.ts, suma.test.ts y suma.spec.tsx → «suma»).
+  const stem = (p: string) => p.slice(p.lastIndexOf('/') + 1).replace(/\.(test|spec)(?=\.)/, '').replace(/\.[a-z0-9]+$/, '');
+  const dir = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
+  const fs0 = stem(file); const fd = dir(file);
+  return touched.map(norm).some(p => p === file || p.endsWith('/' + file) || file.endsWith('/' + p)
+    // su prueba o su implementación: misma raíz, en la misma carpeta o en la carpeta de pruebas hermana
+    || (fs0.length > 2 && stem(p) === fs0 && (dir(p) === fd || /(^|\/)(test|tests|__tests__)$/.test(dir(p)) || /(^|\/)(test|tests|__tests__)$/.test(fd))));
 }
 
 // ---------- 1 · Detección determinista ----------
@@ -354,7 +360,7 @@ export function recordLessonOutcomes(slug: string, processId: string, repoPath: 
     const after = repo.addProof(id, { processId, processTitle: proc.title, result: recurred ? 'recurred' : 'held', exposed, detail: recurred ? `El mismo error («${l.detector}») volvió a ocurrir con la lección inyectada.` : exposed ? 'Tocó la misma zona donde ocurrió el error y terminó verificada sin repetirlo.' : 'Terminó verificada, pero no tocó la zona donde ocurrió el error: no demuestra que la lección funcione.', at: now() });
     if (!after) continue;
     (recurred ? out.recurred : out.held).push(id);
-    const tail: LessonProof[] = []; for (const x of [...(after.proof ?? [])].reverse()) { if (x.result === 'held') break; tail.push(x); }
+    const tail: LessonProof[] = []; for (const x of [...(after.proof ?? [])].reverse()) { if (x.result === 'held' && x.exposed !== false) break; if (x.result === 'recurred') tail.push(x); }
     if (recurred && tail.length >= REFUTE_AFTER) { repo.update(id, { status: 'refuted' }); out.refuted.push(id); }
   }
   if (out.refuted.length) syncLessonPracticesSafe(slug); // la refutada sale de la plantilla

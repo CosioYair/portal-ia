@@ -24,7 +24,7 @@ const fail = (statusCode: number, message: string, code?: string, extra: Record<
  * que la línea base dejó pasar (ver mergeAcknowledgements); `requireAck` (integración manual) la exige. Los lotes lo muestran en su revisión y su aceptación
  * es la confirmación.
  */
-export type MergeOpts = { into?: string; skipVerification?: boolean; guard?: () => string | null; expectedCommit?: string | null; acknowledge?: { preexisting?: boolean; testUpdates?: boolean }; requireAck?: boolean };
+export type MergeOpts = { /** Portal IA 4 · Solo registra una integración que YA existe en git; si no está, falla (nunca crea un merge). */ registerOnly?: boolean; into?: string; skipVerification?: boolean; guard?: () => string | null; expectedCommit?: string | null; acknowledge?: { preexisting?: boolean; testUpdates?: boolean }; requireAck?: boolean };
 
 /** Ver mergeAcknowledgementsOf (dominio): lo mismo que muestra la interfaz. */
 export const mergeAcknowledgements = (p: Process) => mergeAcknowledgementsOf(p);
@@ -67,6 +67,7 @@ async function mergeStoryLocked(slug: string, id: string, opts: MergeOpts, log: 
       return procs.get(id)!;
     }
   }
+  if (opts.registerOnly) throw fail(409, 'El commit verificado no está en la rama principal: no hay ninguna integración que registrar.', 'not_in_main');
   // Orden de cierre: no se integra sin que typecheck haya pasado en esta rama (salvo que el propietario lo fuerce a sabiendas).
   // Evidencia de ESTA versión del código (por el commit verificado; la hora solo en registros antiguos sin commit).
   const fresh = verificationsForApplied(proc.result, 1000);

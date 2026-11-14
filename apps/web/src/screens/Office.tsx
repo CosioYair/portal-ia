@@ -261,7 +261,7 @@ function NewAgentMenu({ disabled }: { disabled?: boolean }) {
       <Link role="menuitem" className="menu-item" to="/oficina/nuevo-agente">Crear un agente<span>Describe lo que necesitas; te propone su perfil</span></Link>
       <Link role="menuitem" className="menu-item" to="/oficina/nuevo-agente?importar=portable">Importar carpeta portable<span>Un agente exportado de otro Portal o empresa</span></Link>
       <Link role="menuitem" className="menu-item" to="/oficina/nuevo-agente?importar=externo">Integrar agente existente<span>Uno que ya trabaja en su carpeta (AGENTS.md…)</span></Link>
-      <Link role="menuitem" className="menu-item" to="/oficina/analisis">Analizar un artefacto<span>Qué contiene y qué deja ver una aplicación o un ejecutable</span></Link>
+      <Link role="menuitem" className="menu-item" to="/oficina/analisis">Analizar un programa<span>Qué contiene y qué deja ver una aplicación, sin ejecutarla</span></Link>
     </div>}
   </div>;
 }

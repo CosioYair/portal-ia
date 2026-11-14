@@ -157,7 +157,7 @@ export function AgentWizard() {
   return (
     <Shell crumb="Nuevo agente">
       <main className="page wizard">
-        <div><div className="eyebrow">Oficina</div><h1 className="h1" style={{ fontSize: 26, margin: '4px 0 0' }}>Nuevo agente</h1><DraftNote status={draft.status} onDiscard={() => { draft.clear(); setStep(0); }} /></div>
+        <div><div className="eyebrow">Agentes</div><h1 className="h1" style={{ fontSize: 26, margin: '4px 0 0' }}>Nuevo agente</h1><DraftNote status={draft.status} onDiscard={() => { draft.clear(); setStep(0); }} /></div>
         <ol className="wizard-steps" aria-label="Pasos">{STEPS.map((s, i) => <li key={s} aria-current={i === step ? 'step' : undefined} className={i < step ? 'done' : ''}>{i < step ? Icon.check(12) : <span className="mono">{i + 1}</span>} {s}</li>)}</ol>
         {error && <Notice kind="err">{error}</Notice>}
 
@@ -277,7 +277,7 @@ export function AgentWizard() {
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button className="btn btn-primary" onClick={() => { sessionStorage.setItem(`portal-ia.chat.prefill.${created.id}`, created.firstTask); navigate(`/oficina/agente/${created.id}/chat`); }}>Abrir su chat con esta pregunta</button>
             <Link className="btn btn-secondary" to={`/oficina/agente/${created.id}/archivos`}>Ver sus archivos</Link>
-            <Link className="btn btn-ghost" to={officeHome()}>Volver a la oficina</Link>
+            <Link className="btn btn-ghost" to={officeHome()}>Volver a Agentes</Link>
           </div>
         </section>}
 

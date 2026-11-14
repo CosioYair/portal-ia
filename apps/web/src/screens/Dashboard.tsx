@@ -200,7 +200,7 @@ export function Dashboard() {
 
           <aside style={{ flex: '1 1 320px', maxWidth: 400, display: 'flex', flexDirection: 'column', gap: 20 }} aria-label="Equipo, procesos y proveedores">
             <section className="card">
-              <div className="card-h"><div className="h3">Equipo del proyecto</div><Link className="lnk sm13" to={officeHome()}>Ver la Oficina</Link></div>
+              <div className="card-h"><div className="h3">Equipo del proyecto</div><Link className="lnk sm13" to={officeHome()}>Ver los agentes</Link></div>
               {team === null && <div className="card-b"><span className="small muted">Cargando el equipo…</span></div>}
               {team && <div className="card-b" style={{ padding: 8, display: 'flex', flexDirection: 'column', gap: 1 }}>{projectTeam.length ? projectTeam.map(member) : <span className="small muted" style={{ padding: 8 }}>Este proyecto aún no tiene agentes propios.</span>}</div>}
               {companyTeam.length > 0 && <><div className="side-sec" style={{ paddingTop: 6 }}>Agentes de la empresa</div>
