@@ -41,7 +41,7 @@ export function CreateDialog({ kind, onClose }: { kind: 'company' | 'project'; o
 }
 
 const usageCache = new Map<string, UsageToday>();
-const ICONS: Record<IconName, () => ReactNode> = { building: () => Icon.building(), bell: () => Icon.bell(), sparkles: () => Icon.sparkles(), gauge: () => Icon.gauge(), kanban: () => Icon.kanban(), book: () => Icon.book(), sliders: () => Icon.sliders() };
+const ICONS: Record<IconName, () => ReactNode> = { building: () => Icon.building(), bell: () => Icon.bell(), sparkles: () => Icon.sparkles(), gauge: () => Icon.gauge(), kanban: () => Icon.kanban(), book: () => Icon.book(), sliders: () => Icon.sliders(), layers: () => Icon.layers() };
 export const sectionIcon = (s: Section) => ICONS[s.icon]();
 
 /**

@@ -25,6 +25,8 @@ const Office = lazy(() => import('./screens/Office.tsx').then(m => ({ default: m
 const AgentWizard = lazy(() => import('./screens/AgentWizard.tsx').then(m => ({ default: m.AgentWizard })));
 // Portal IA 2.0: también aparte Ajustes y la búsqueda (Ctrl+K), que se carga la primera vez que se abre.
 const Settings = lazy(() => import('./screens/Settings.tsx').then(m => ({ default: m.Settings })));
+const Studio = lazy(() => import('./screens/Studio.tsx').then(m => ({ default: m.Studio })));
+const StudioEditor = lazy(() => import('./screens/StudioEditor.tsx').then(m => ({ default: m.StudioEditor })));
 const CommandPalette = lazy(() => import('./components/CommandPalette.tsx').then(m => ({ default: m.CommandPalette })));
 // Y las pantallas de detalle y las menos frecuentes: el primer pintado solo carga el marco, la Oficina y el Resumen.
 const Initialization = lazy(() => import('./screens/Initialization.tsx').then(m => ({ default: m.Initialization })));
@@ -228,6 +230,8 @@ export default function App() {
           <Route path="/archivo" element={guard(<Archive />)} />
           <Route path="/autorizaciones" element={company(<InboxScreen />)} />
           <Route path="/decisiones" element={<Redirect to="/autorizaciones" />} />
+          <Route path="/estudio" element={company(<Studio />)} />
+          <Route path="/estudio/:projectId" element={company(<StudioEditor />)} />
           <Route path="/ajustes" element={company(<Settings />)} />
           <Route path="/aceptacion" element={company(<Acceptance />)} />
           <Route path="*" element={<Navigate to={home} replace />} />

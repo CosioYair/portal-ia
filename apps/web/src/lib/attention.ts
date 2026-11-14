@@ -2,7 +2,7 @@
  * Tipos y filtros de los avisos en vivo SIN dependencias del navegador (ni EventSource ni document), para que también
  * los puedan importar las pruebas del servidor. lib/live.ts los vuelve a exportar.
  */
-export interface LiveChange { ws: string | null; entity: 'process' | 'backlog' | 'batch' | 'assignment' | 'assistant' | 'system' | 'knowledge' | 'agent' | 'story' | 'usage' | 'department' | 'agent_chat'; id: string | null; projectId?: string | null; itemId?: string | null; kind?: 'state' | 'progress' }
+export interface LiveChange { ws: string | null; entity: 'process' | 'backlog' | 'batch' | 'assignment' | 'assistant' | 'system' | 'knowledge' | 'agent' | 'story' | 'usage' | 'department' | 'agent_chat' | 'studio'; id: string | null; projectId?: string | null; itemId?: string | null; kind?: 'state' | 'progress' }
 
 /** Entidades cuyos avisos pueden crear o cerrar algo que espera al propietario en una empresa. */
 const ATTENTION_ENTITIES: ReadonlySet<LiveChange['entity']> = new Set<LiveChange['entity']>(['process', 'assignment', 'batch', 'agent', 'agent_chat', 'backlog', 'assistant']);

@@ -33,6 +33,7 @@ import { externalAgentsRoutes } from './routes/externalAgents.ts';
 import { agentFilesRoutes } from './routes/agentFiles.ts';
 import { ownerRoutes } from './routes/owner.ts';
 import { settingsRoutes } from './routes/settings.ts';
+import { studioRoutes } from './routes/studio.ts';
 import { ownerPolicyApplies, requireOwner } from './services/ownerSession.ts';
 import { VERSION } from './services/system.ts';
 
@@ -131,6 +132,7 @@ export async function buildApp() {
   await app.register(externalAgentsRoutes);
   await app.register(agentFilesRoutes);
   await app.register(settingsRoutes);
+  await app.register(studioRoutes);
 
   // Producción local: sirve apps/web/dist si existe (npm run build). SPA fallback.
   if (fs.existsSync(path.join(config.webDist, 'index.html'))) {

@@ -78,7 +78,8 @@ test('cada sección del menú tiene su ruta y las rutas antiguas siguen llevando
   const app = read('App.tsx'); const routes = read('lib/routes.ts');
   const paths = [...routes.matchAll(/\{ id: '[a-z]+', label: '[^']+', path: '([^']+)'/g)].map(m => m[1]);
   // Portal IA 3: la sección Trabajo abre en /trabajo (historias y encargos juntos); /backlog sigue existiendo como pestaña.
-  assert.deepEqual(paths, ['/oficina', '/autorizaciones', '/asistente', '/panel', '/trabajo', '/conocimiento', '/ajustes', '/aceptacion']);
+  // Portal IA 4: se añade el Estudio (vídeo), que es de la empresa.
+  assert.deepEqual(paths, ['/oficina', '/autorizaciones', '/asistente', '/panel', '/trabajo', '/estudio', '/conocimiento', '/ajustes', '/aceptacion']);
   assert.ok(app.includes('<Route path="/backlog" '), 'la ruta antigua /backlog sigue existiendo');
   for (const p of paths) assert.ok(app.includes(`<Route path="${p}" `), `falta la ruta ${p}`);
   assert.match(app, /<Route path="\/equipo" element=\{<Redirect to="\/oficina\/organizacion" \/>\} \/>/);

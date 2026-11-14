@@ -5,8 +5,8 @@ import { INTERNAL_WORKSPACE } from '@portal-ia/domain';
  * pantalla «madre» del «Atrás» y adónde ir al cambiar de empresa o proyecto. Una sección nueva se añade aquí y aparece
  * en todos esos sitios a la vez.
  */
-export type SectionId = 'oficina' | 'decisiones' | 'asistente' | 'resumen' | 'trabajo' | 'conocimiento' | 'ajustes' | 'aceptacion';
-export type IconName = 'building' | 'bell' | 'sparkles' | 'gauge' | 'kanban' | 'book' | 'sliders';
+export type SectionId = 'estudio' | 'oficina' | 'decisiones' | 'asistente' | 'resumen' | 'trabajo' | 'conocimiento' | 'ajustes' | 'aceptacion';
+export type IconName = 'building' | 'bell' | 'sparkles' | 'gauge' | 'kanban' | 'book' | 'sliders' | 'layers';
 export interface Section {
   id: SectionId; label: string; path: string; icon: IconName;
   /** Grupo del menú: principal, del proyecto seleccionado o de la empresa. */
@@ -29,6 +29,8 @@ export const SECTIONS: Section[] = [
     // Oficina (el equipo) y en Ajustes (repositorio y gasto). Sigue existiendo en su ruta y en la búsqueda (Ctrl+K).
     inMenu: false },
   { id: 'trabajo', label: 'Trabajo', path: '/trabajo', icon: 'kanban', group: 'project', needsProject: true, match: /^\/(trabajo|backlog|historias|lotes|actividad|procesos|archivo)(\/|$)/, hint: 'Todo lo que has pedido: historias, encargos, lotes y archivo' },
+  // Portal IA 4: el Estudio de vídeo es de la empresa (no necesita un proyecto de software).
+  { id: 'estudio', label: 'Estudio', path: '/estudio', icon: 'layers', group: 'main', needsProject: false, match: /^\/estudio(\/|$)/, hint: 'Crea y edita vídeos con tus medios; expórtalos en MP4' },
   { id: 'conocimiento', label: 'Conocimiento', path: '/conocimiento', icon: 'book', group: 'project', needsProject: true, match: /^\/conocimiento(\/|$)/, hint: 'Documentos y lecciones del proyecto' },
   { id: 'ajustes', label: 'Ajustes', path: '/ajustes', icon: 'sliders', group: 'company', needsProject: false, match: /^\/(ajustes|presupuestos|configuracion)(\/|$)/, hint: 'Motores de IA, presupuestos, empresas y sistema' },
   // Portal IA 3: el recorrido de aceptación del propietario (lo prueba y lo marca él, dentro del Portal).
